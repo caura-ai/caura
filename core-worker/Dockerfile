@@ -10,7 +10,7 @@ WORKDIR /app
 COPY core-worker/pyproject.toml core-worker/README.md* ./core-worker/
 # Dummy src so setuptools find_packages doesn't fail
 RUN mkdir -p core-worker/src/core_worker && touch core-worker/src/core_worker/__init__.py
-RUN pip install --no-cache-dir './core-worker[pubsub]'
+RUN pip install --no-cache-dir './core-worker[pubsub,vertex]'
 
 # Copy actual source
 COPY common/ /app/common/

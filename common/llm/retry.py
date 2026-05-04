@@ -66,11 +66,12 @@ async def call_with_retry(
             if attempt < max_attempts - 1:
                 delay = base_delay * (attempt + 1)
                 logger.warning(
-                    "%s attempt %d/%d failed (%s), retrying in %.1fs",
+                    "%s attempt %d/%d failed (%s: %s), retrying in %.1fs",
                     label,
                     attempt + 1,
                     max_attempts,
                     type(exc).__name__,
+                    exc,
                     delay,
                 )
                 await asyncio.sleep(delay)

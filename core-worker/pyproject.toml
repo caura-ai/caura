@@ -36,7 +36,7 @@ dependencies = [
 # Standalone OSS installs use the in-process bus (no Pub/Sub at all —
 # core-api dispatches directly to the consumer in the same process).
 pubsub = ["google-cloud-pubsub>=2.23,<3"]
-vertex = ["google-cloud-aiplatform>=1.71,<2"]
+vertex = ["google-cloud-aiplatform>=1.71,<2", "vertexai>=1.60,<2"]
 local = ["sentence-transformers>=3.0,<4"]
 dev = [
     "core-worker[test,pubsub]",
