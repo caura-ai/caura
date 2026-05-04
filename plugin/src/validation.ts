@@ -63,9 +63,35 @@ export function isContainedPath(child: string, parent: string): boolean {
 
 const COMMAND_SIGNATURE_MAX_AGE_MS = 120_000; // 2 minutes
 
+let _unsignedWarned = false;
+
+/**
+ * Verify (or accept) a fleet command's HMAC signature.
+ *
+ * The OSS server doesn't sign commands — signing is reserved for
+ * enterprise gateways that proxy commands through a signing layer.
+ * Defaulting to "fail closed when MEMCLAW_API_KEY is set" (the prior
+ * behavior) silently broke every fleet command (educate / deploy /
+ * install_skill / uninstall_skill) on every OSS install with auth on,
+ * because the secret used for tenant auth is not a command-signing
+ * secret.
+ *
+ * Three modes, in priority order:
+ *
+ * 1. **Tampered**: a signature IS present but doesn't verify against
+ *    ``secretKey`` → reject. This is always-on; it catches the case
+ *    where someone hand-crafts a command with a bogus signature.
+ * 2. **Strict** (``requireSigned=true``): missing/invalid signatures
+ *    fail closed. Use when running behind an enterprise signing
+ *    gateway that always signs commands.
+ * 3. **Permissive** (``requireSigned=false``, default): accept
+ *    unsigned commands; warn once per process so operators notice;
+ *    still verify any signature that happens to be present.
+ */
 export function verifyCommandSignature(
   cmd: { id: string; command: string; payload?: Record<string, unknown>; timestamp?: string; signature?: string },
   secretKey: string,
+  requireSigned: boolean = false,
 ): { valid: boolean; reason?: string } {
   if (!secretKey) {
     // No key configured — development/keyless mode.
@@ -74,14 +100,31 @@ export function verifyCommandSignature(
     if (cmd.signature) {
       return { valid: false, reason: "no_secret_configured_but_signature_present" };
     }
-    console.warn(
-      `[memclaw] WARNING: accepting unsigned command "${cmd.command}" — set MEMCLAW_API_KEY to enable signature verification.`,
-    );
+    if (!_unsignedWarned) {
+      console.warn(
+        `[memclaw] accepting unsigned commands (no MEMCLAW_API_KEY); set the key to enable verification.`,
+      );
+      _unsignedWarned = true;
+    }
     return { valid: true, reason: "no_secret_configured" };
   }
 
   if (!cmd.signature) {
-    return { valid: false, reason: "missing_signature" };
+    if (requireSigned) {
+      return { valid: false, reason: "missing_signature" };
+    }
+    // Permissive (default): server-side command-signing is opt-in
+    // infra; reject only when the operator has explicitly demanded it
+    // via MEMCLAW_REQUIRE_SIGNED_COMMANDS=true. Warn once so the gap
+    // is visible without flooding logs every 60s heartbeat.
+    if (!_unsignedWarned) {
+      console.warn(
+        `[memclaw] accepting unsigned command "${cmd.command}" — server is not signing commands. ` +
+          `Set MEMCLAW_REQUIRE_SIGNED_COMMANDS=true to fail closed once your gateway signs.`,
+      );
+      _unsignedWarned = true;
+    }
+    return { valid: true, reason: "unsigned_accepted_permissive" };
   }
 
   if (!cmd.timestamp) {

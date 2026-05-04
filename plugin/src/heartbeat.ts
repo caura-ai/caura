@@ -23,8 +23,10 @@ import {
   MEMCLAW_TENANT_ID,
   MEMCLAW_NODE_NAME,
   MEMCLAW_FLEET_ID,
+  MEMCLAW_REQUIRE_SIGNED_COMMANDS,
   BUILD_TIMEOUT_MS,
   MAX_SOURCE_SIZE,
+  ensureTenantId,
 } from "./env.js";
 import { PLUGIN_VERSION } from "./version.js";
 import { MEMCLAW_TOOLS } from "./tools.js";
@@ -333,7 +335,11 @@ async function processCommand(cmd: {
   signature?: string;
 }): Promise<void> {
   // Verify command signature (HMAC-SHA256)
-  const sigResult = verifyCommandSignature(cmd, MEMCLAW_API_KEY);
+  const sigResult = verifyCommandSignature(
+    cmd,
+    MEMCLAW_API_KEY,
+    MEMCLAW_REQUIRE_SIGNED_COMMANDS,
+  );
   if (!sigResult.valid) {
     console.warn(
       `[memclaw] Rejected command ${cmd.command} (${cmd.id}): ${sigResult.reason}`,
@@ -546,12 +552,24 @@ async function processCommand(cmd: {
         result = { error: `install_skill rejected unsafe name: ${rawName}` };
       } else {
         try {
+          // Server route is ``GET /documents/{doc_id}?tenant_id=&collection=``
+          // where doc_id is the human-readable skill ``name`` (the upsert
+          // key on the documents row), NOT the row's UUID. ``skill_doc_id``
+          // in the payload is the UUID — kept for forensics / future API
+          // shapes but unused here. Also: ``tenant_id`` is required by the
+          // route's Pydantic validation even though X-API-Key already
+          // resolves the tenant server-side; resolve it from env or via
+          // the cached ensureTenantId() promise.
+          const tenantId = MEMCLAW_TENANT_ID || (await ensureTenantId());
           const doc = await apiCall(
             "GET",
-            `/documents/${encodeURIComponent(skillDocId)}`,
+            `/documents/${encodeURIComponent(rawName)}`,
             undefined,
-            { collection: "skills" },
+            { tenant_id: tenantId, collection: "skills" },
           );
+          // skill_doc_id is currently unused on the plugin side — referenced
+          // here so the linter doesn't flag the destructured payload field.
+          void skillDocId;
           const data = (doc as { data?: Record<string, unknown> })?.data || {};
           const content = data.content as string | undefined;
           if (!content) {

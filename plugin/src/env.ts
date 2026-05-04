@@ -61,6 +61,22 @@ export const MEMCLAW_AGENT_ID = process.env.MEMCLAW_AGENT_ID || "";
 export const MEMCLAW_AUTO_WRITE_TURNS =
   process.env.MEMCLAW_AUTO_WRITE_TURNS !== "false";
 
+// HMAC signature enforcement on incoming fleet commands. Default is
+// **opt-in** because the OSS server doesn't sign commands at all (the
+// signing infra is reserved for enterprise gateways that proxy commands
+// through a signing layer). Setting MEMCLAW_API_KEY for tenant auth
+// shouldn't auto-trigger strict signature requirements that the server
+// can't satisfy — that would silently break educate / deploy /
+// install_skill / uninstall_skill on every OSS install with auth on.
+//
+// When this flag is **false** (default): unsigned commands are accepted
+// but logged with a one-time warning per process, and any command that
+// DOES carry a signature is still verified end-to-end (so a tampered
+// signature still fails). When **true**: missing-or-invalid signatures
+// fail closed (the original strict behavior).
+export const MEMCLAW_REQUIRE_SIGNED_COMMANDS =
+  process.env.MEMCLAW_REQUIRE_SIGNED_COMMANDS === "true";
+
 // Warn at import time if API key is set but URL is HTTP
 warnIfInsecureUrl(MEMCLAW_API_URL, MEMCLAW_API_KEY);
 

@@ -163,6 +163,28 @@ describe("createToolFromSpec factory", () => {
     assert.ok(share.properties.target_fleet_id);
   });
 
+  test("openclaw.plugin.json contracts.tools matches MEMCLAW_TOOLS exactly", () => {
+    // OpenClaw runtime requires plugins to declare ``contracts.tools``
+    // before it accepts ``api.registerTool`` calls. The list MUST match
+    // ``MEMCLAW_TOOLS`` — drift here means OpenClaw silently rejects
+    // tool registration at boot ("plugin must declare contracts.tools
+    // before registering agent tools" in the gateway log) and every
+    // agent loses access to the tool.
+    const manifestPath = join(
+      import.meta.dirname,
+      "..",
+      "openclaw.plugin.json",
+    );
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    const declared = manifest.contracts?.tools as string[] | undefined;
+    assert.ok(Array.isArray(declared), "manifest must declare contracts.tools");
+    assert.deepEqual(
+      [...declared].sort(),
+      [...MEMCLAW_TOOLS].sort(),
+      "contracts.tools in openclaw.plugin.json must match MEMCLAW_TOOLS",
+    );
+  });
+
   test("description falls back to tools.json value when no live override", () => {
     // `getToolDescription` reads from the shared cache in env.ts. On a
     // fresh import (no /tool-descriptions fetch yet), the fallback should
