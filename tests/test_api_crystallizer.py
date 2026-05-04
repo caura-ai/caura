@@ -1,7 +1,5 @@
 """E2E crystallizer (memory analysis) tests through HTTP API."""
 
-import pytest
-
 from tests.conftest import get_test_auth, get_admin_headers, uid as _uid
 
 
@@ -165,6 +163,36 @@ async def test_get_report_not_found(client):
         headers=headers,
     )
     assert resp.status_code == 404
+
+
+async def test_get_latest_report_empty_returns_200_null(client):
+    """GET /api/crystallize/latest returns 200 with body ``null`` when the
+    tenant has no completed reports — empty state, not a missing resource.
+
+    Regression for CAURA-646: previously returned 404 + ``NOT_FOUND``,
+    forcing every client to special-case 404 as "actually empty". The
+    URL itself ("the tenant's latest report") is well-defined; only the
+    optional value behind it is unset, so 200 + ``null`` is the correct
+    contract. The sibling ``/reports/{report_id}`` (above) still 404s
+    because that endpoint genuinely points at an opaque id.
+    """
+    # Use a unique per-test tenant id — ``get_test_auth()`` returns
+    # the shared ``"default"`` tenant, which is contaminated with
+    # completed reports from earlier tests in this file. The admin
+    # API key bypasses ``enforce_tenant``, so an arbitrary tenant_id
+    # routes through cleanly without auth wiring.
+    fresh_tenant = f"caura-646-empty-{_uid()}"
+    _, headers = get_test_auth()
+    resp = await client.get(
+        f"/api/v1/crystallize/latest?tenant_id={fresh_tenant}",
+        headers=headers,
+    )
+    assert resp.status_code == 200, (
+        f"Expected 200 (empty state) but got {resp.status_code}: {resp.text}"
+    )
+    assert resp.json() is None, (
+        f"Expected null body for empty state, got {resp.json()!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

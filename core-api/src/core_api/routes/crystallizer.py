@@ -155,12 +155,27 @@ async def get_latest_report(
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Get the most recent completed crystallization report for a tenant."""
+    """Get the most recent completed crystallization report for a tenant.
+
+    Returns ``200`` with the report body when a completed report exists;
+    returns ``200`` with body ``null`` when the tenant has none yet. The
+    URL itself is the well-defined "give me my latest report" resource —
+    the fact that no completed report exists yet is *empty state*, not a
+    missing resource. ``404`` would conflate the two and force every
+    client to special-case it as "actually empty"; see CAURA-646. The
+    sibling ``/crystallize/reports/{report_id}`` keeps its 404 because
+    *that* endpoint genuinely points at an opaque id that may not exist.
+    """
     auth.enforce_tenant(tenant_id)
     sc = get_storage_client()
     report = await sc.get_latest_report(tenant_id)
-    if not report:
-        raise HTTPException(status_code=404, detail="No completed reports found")
+    # Identity check, not truthiness — the storage client's contract is
+    # ``dict | None``. ``not {}`` would also be True, which would
+    # silently null-return an empty (but otherwise valid) report dict
+    # if storage ever changed to return ``{}`` instead of ``None`` on a
+    # miss. ``is None`` is the precise guard the contract supports.
+    if report is None:
+        return None
     return {
         "id": str(report.get("id", "")),
         "tenant_id": report.get("tenant_id"),
