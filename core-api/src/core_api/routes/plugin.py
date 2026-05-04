@@ -48,9 +48,18 @@ _plugin_files = [
 # - tools.json: tool SoT, loaded by tool-specs.ts.
 # - skills/memclaw/SKILL.md: shared plugin skill, discovered by OpenClaw
 #   via openclaw.plugin.json:skills (one copy per node).
+# - openclaw.plugin.json: plugin manifest. Must be served (not baked into
+#   the install script as a HEREDOC) because the manifest changes
+#   periodically as OpenClaw evolves its plugin contract — e.g. the
+#   ``contracts.tools`` field became strictly enforced upstream on
+#   2026-05-01 (openclaw/openclaw@7641783d), and any user installing
+#   from a stale baked HEREDOC silently lost their entire MemClaw tool
+#   surface. Serving from disk keeps the manifest in lockstep with
+#   ``plugin/openclaw.plugin.json`` so the installer never falls behind.
 _plugin_root_files = {
     "tools.json",
     "skills/memclaw/SKILL.md",
+    "openclaw.plugin.json",
 }
 
 # Direct-MCP skill adapter. Lives under the repo-root ``static/`` tree
@@ -205,25 +214,19 @@ cat > "$PLUGIN_DIR/tsconfig.json" << 'TSCONFIG_EOF'
 }}
 TSCONFIG_EOF
 
-# 4. Write plugin manifest
-echo "[4/7] Writing openclaw.plugin.json..."
-cat > "$PLUGIN_DIR/openclaw.plugin.json" << MANIFEST_EOF
-{{
-  "id": "memclaw",
-  "name": "MemClaw",
-  "kind": "memory",
-  "type": "memory",
-  "version": "$MEMCLAW_VERSION",
-  "description": "Central persistent memory for OpenClaw agents — write, search, and entity lookup tools.",
-  "entry": "dist/index.js",
-  "skills": ["skills"],
-  "configSchema": {{
-    "type": "object",
-    "properties": {{}},
-    "required": []
-  }}
+# 4. Fetch plugin manifest from the server (single source of truth).
+# Previously this was a baked HEREDOC, which caused silent drift
+# whenever the canonical ``plugin/openclaw.plugin.json`` gained new
+# fields (notably ``contracts.tools``, required by OpenClaw upstream
+# from 2026-05-01) — the on-disk file in the repo had the field, but
+# the HEREDOC the installer wrote to fresh installs did not, so every
+# fresh install silently lost the tool surface. Fetching from
+# ``/plugin-source`` keeps the canonical file the only source.
+echo "[4/7] Fetching plugin manifest from $MEMCLAW_API_URL..."
+curl $CURL_INSECURE -sf "$MEMCLAW_API_URL/api/plugin-source?file=openclaw.plugin.json" > "$PLUGIN_DIR/openclaw.plugin.json" || {{
+  echo "ERROR: Could not fetch openclaw.plugin.json from $MEMCLAW_API_URL/api/plugin-source?file=openclaw.plugin.json"
+  exit 1
 }}
-MANIFEST_EOF
 
 # 5. Fetch latest plugin source from MemClaw server
 echo "[5/7] Fetching latest plugin source from $MEMCLAW_API_URL..."
