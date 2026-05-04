@@ -34,6 +34,7 @@ except ImportError:
         pass  # type: ignore[misc]
 
 
+from common.constants import VECTOR_DIM
 from common.embedding import get_embedding, get_embeddings_batch, get_query_embedding
 from common.events import publish_memory_embed_request, publish_memory_enrich_request
 from core_api.constants import (
@@ -2569,15 +2570,27 @@ def _normalize_query_for_cache(query: str) -> str:
 
 
 async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
-    """Get embedding from cache or generate it."""
+    """Get embedding from cache or generate it.
+
+    The cache key includes ``VECTOR_DIM`` so that a schema-dimension
+    migration doesn't surface stale cached embeddings to the new schema;
+    old entries with a mismatched dim become unreachable under the new
+    key and expire naturally via ``EMBEDDING_CACHE_TTL``.
+    """
     from core_api.cache import cache_get, cache_set
 
     _model = (
         getattr(tenant_config, "embedding_model", None) if tenant_config is not None else None
     ) or OPENAI_EMBEDDING_MODEL
     _normalized = _normalize_query_for_cache(query)
-    _qhash = hashlib.sha256(f"{_model}:{tenant_id}:{_normalized}".encode()).hexdigest()
-    _cache_key = f"qemb2:{_qhash}"
+    _qhash = hashlib.sha256(f"{_model}:{VECTOR_DIM}:{tenant_id}:{_normalized}".encode()).hexdigest()
+    # Prefix bumped from ``qemb2:`` → ``qemb3:`` because the hash input
+    # changed (added ``VECTOR_DIM``). The bump makes the
+    # cache-generation boundary explicit in Redis key stats so an
+    # operator can see the cold-start at deploy time and confirm the
+    # embedding provider can absorb the working-set re-fetch. Old
+    # ``qemb2:*`` entries expire naturally via ``EMBEDDING_CACHE_TTL``.
+    _cache_key = f"qemb3:{_qhash}"
     _cached_raw = await cache_get(_cache_key)
     if _cached_raw is not None:
         try:
