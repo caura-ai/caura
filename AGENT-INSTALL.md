@@ -193,8 +193,11 @@ Once connected via MCP or the OpenClaw plugin, you have these tools:
 | `memclaw_tune` | Adjust per-agent search parameters (top_k, min_similarity, graph hops, blend weights) |
 | `memclaw_insights` | Analyze the store; focus: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. Persists findings as `insight` memories |
 | `memclaw_evolve` | Report a real-world outcome (success/failure/partial) against recalled memories — adjusts weights, auto-generates preventive rules (Karpathy Loop) |
+| `memclaw_stats` | Aggregate counts: total + breakdowns by `type`, `agent`, `status`. Read-only |
+| `memclaw_share_skill` | Share a SKILL.md with the fleet. Default publishes to the catalog (semantic-searchable); `install_on_fleet=true` also auto-installs on every fleet node |
+| `memclaw_unshare_skill` | Remove a shared skill. Default removes from catalog only; `unshare_from_fleet=true` also rms the local SKILL.md on fleet nodes |
 
-The plugin surfaces all 9 tools; MCP exposes the same set.
+The plugin surfaces all 12 tools; MCP exposes the same set.
 
 ## Enable Real LLM Enrichment (optional)
 
@@ -214,7 +217,7 @@ Then restart the server (`docker compose restart app` or re-run uvicorn).
 
 - A local MemClaw server with full API + MCP
 - A single-tenant standalone setup (or admin-keyed multi-tenant, depending on which path you picked)
-- 9 tools ready to use (6 memory ops + 1 document store op + 2 Karpathy Loop ops)
+- 12 tools ready to use (6 memory ops + 1 document store op + 2 Karpathy Loop ops + stats + skill share/unshare)
 - PostgreSQL with pgvector for semantic search
 - No external dependencies (fake providers, no API keys needed)
 - Full read/write access to your own memory store

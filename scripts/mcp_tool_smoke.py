@@ -2,9 +2,9 @@
 """End-to-end smoke for every MCP tool against a live enterprise stack.
 
 Complements trust_matrix_e2e.py: that one proves trust gating, this one
-proves each of the nine plugin-exposed tools actually performs its
-advertised operation with realistic arguments. Reports per-tool PASS /
-FAIL / SKIP with a one-line reason each.
+proves each plugin-exposed tool actually performs its advertised
+operation with realistic arguments. Reports per-tool PASS / FAIL / SKIP
+with a one-line reason each.
 
 Expects /tmp/e2e.env (written by the E2E register step) containing::
 
@@ -12,6 +12,7 @@ Expects /tmp/e2e.env (written by the E2E register step) containing::
     KEY=...
     JWT=...
 """
+
 from __future__ import annotations
 
 import json
@@ -39,8 +40,8 @@ TENANT = ENV["TENANT_ID"]
 KEY = ENV["KEY"]
 FLEET = "smoke-fleet"
 
-GATEWAY = "http://localhost"         # nginx
-CORE_API = "http://localhost:8000"   # direct core-api (MCP lives here)
+GATEWAY = "http://localhost"  # nginx
+CORE_API = "http://localhost:8000"  # direct core-api (MCP lives here)
 
 
 def http(method: str, url: str, body=None, headers=None):
@@ -220,7 +221,12 @@ def main():
         ),
         (
             "memclaw_insights",
-            {"agent_id": agent, "fleet_id": FLEET, "focus": "patterns", "scope": "agent"},
+            {
+                "agent_id": agent,
+                "fleet_id": FLEET,
+                "focus": "patterns",
+                "scope": "agent",
+            },
         ),
         (
             "memclaw_evolve",
@@ -230,6 +236,24 @@ def main():
                 "outcome": "Smoke test confirmed the tool flow is reachable.",
                 "outcome_type": "success",
             },
+        ),
+        (
+            "memclaw_stats",
+            {"agent_id": agent, "fleet_id": FLEET, "scope": "agent"},
+        ),
+        (
+            "memclaw_share_skill",
+            {
+                "agent_id": agent,
+                "name": "smoke-skill",
+                "description": "Smoke-test skill — auto-published, not installed.",
+                "content": "# smoke-skill\n\nProbe content.\n",
+                "target_fleet_id": FLEET,
+            },
+        ),
+        (
+            "memclaw_unshare_skill",
+            {"agent_id": agent, "name": "smoke-skill"},
         ),
     ]
 
@@ -241,7 +265,9 @@ def main():
         passed += int(ok)
         failed += int(not ok)
         snippet = detail.replace("\n", " ")[:110]
-        print(f"  {'PASS' if ok else 'FAIL':4s}  {tool:<{width}} {verdict:<12} {snippet}")
+        print(
+            f"  {'PASS' if ok else 'FAIL':4s}  {tool:<{width}} {verdict:<12} {snippet}"
+        )
 
     print()
     print(f"Summary: {passed}/{len(tests)} tools passed, {failed} failed.")

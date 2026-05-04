@@ -20,9 +20,8 @@ tiktoken = pytest.importorskip("tiktoken")
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
-# Current measured count is 4462 tokens (11 tools, post-share_skill).
-# Ceiling gives ~12% headroom for 1-2 more tools or description tweaks
-# before the gate trips. Raise intentionally when the surface grows.
+# Current measured count is 4796 tokens (12 tools, post-unshare_skill).
+# Ceiling gives ~4% headroom — raise intentionally when the surface grows.
 CEILING_TOKENS = 5000
 
 

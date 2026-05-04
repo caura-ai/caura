@@ -43,9 +43,12 @@ Tool descriptions are derived from the tool registry (`core-api/src/core_api/too
 | `memclaw_tune` | Yes | Yes | Tune per-agent retrieval parameters (top_k, min_similarity, fts_weight, freshness, recall boost, graph hops, similarity blend) |
 | `memclaw_insights` | Yes | Yes | Analyze the memory store. `focus`: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. `scope`: `agent`, `fleet`, `all`. Findings persist as `insight`-type memories (Karpathy Loop reflection step) |
 | `memclaw_evolve` | Yes | Yes | Record a real-world outcome (`success` / `failure` / `partial`) against recalled memories — adjusts weights, auto-generates preventive rules on failure (Karpathy Loop feedback edge) |
+| `memclaw_stats` | Yes | Yes | Aggregate counts of memories: total + breakdowns by `type`, `agent`, `status`. Read-only — useful for dashboards (REST) and agent self-introspection (MCP) |
+| `memclaw_share_skill` | Yes | Yes | Share a `SKILL.md` artifact with the fleet. Default publishes to the catalog (semantic-searchable via `GET /skills?query=`); `install_on_fleet=true` also queues `install_skill` fleet commands so every node materialises the skill locally for OpenClaw discovery |
+| `memclaw_unshare_skill` | Yes | Yes | Remove a shared skill. Default removes from the catalog only; `unshare_from_fleet=true` also queues `uninstall_skill` per fleet node so plugins delete the local `SKILL.md` |
 
-- **MCP (9 tools):** Full surface. Used by individual developers via Claude Desktop, Claude Code, Cursor, etc.
-- **OpenClaw plugin (9 tools):** Same set. Claims the exclusive `memory` slot, replacing `memory-core`. Includes ContextEngine lifecycle, heartbeat, and auto-education.
+- **MCP (12 tools):** Full surface. Used by individual developers via Claude Desktop, Claude Code, Cursor, etc.
+- **OpenClaw plugin (12 tools):** Same set. Claims the exclusive `memory` slot, replacing `memory-core`. Includes ContextEngine lifecycle, heartbeat, and auto-education.
 
 ---
 
@@ -119,19 +122,22 @@ in the first place.
 
 ### Available tools
 
-The MCP server exposes 9 tools that clients discover automatically. Descriptions are canonical — served from `GET /api/tool-descriptions`, derived from the tool registry (`core-api/src/core_api/tools/_registry.py`).
+The MCP server exposes 12 tools that clients discover automatically. Descriptions are canonical — served from `GET /api/tool-descriptions`, derived from the tool registry (`core-api/src/core_api/tools/_registry.py`).
 
 | Tool | Purpose |
 |---|---|
 | `memclaw_write` | Store a memory. Single write (`content`) or batch (`items` ≤100). LLM auto-infers type, title, summary, tags, embedding. Long content auto-chunked |
 | `memclaw_recall` | Hybrid semantic + keyword search with graph-enhanced retrieval. `include_brief=true` returns an LLM-summarized context paragraph. Supports `fleet_ids` |
-| `memclaw_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete`. Re-embeds on content updates |
+| `memclaw_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete`, `bulk_delete`, `lineage`. Re-embeds on content updates |
 | `memclaw_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate (trust ≥ 2) |
-| `memclaw_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete` on named JSON collections |
+| `memclaw_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
 | `memclaw_entity_get` | Look up an entity by UUID — returns linked memories and relationships |
 | `memclaw_tune` | Tune per-agent retrieval parameters (top_k, min_similarity, fts_weight, freshness, recall boost, graph hops, similarity blend) |
 | `memclaw_insights` | Analyze the store. Focus: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. Persists findings as `insight` memories |
 | `memclaw_evolve` | Report an outcome (success/failure/partial) against recalled memories — adjusts weights, generates preventive rules on failure |
+| `memclaw_stats` | Aggregate counts: total + breakdowns by `type`, `agent`, `status`. Read-only |
+| `memclaw_share_skill` | Share a `SKILL.md` with the fleet. Default publishes to the catalog (semantic-searchable); `install_on_fleet=true` also auto-installs on every fleet node |
+| `memclaw_unshare_skill` | Remove a shared skill. Default removes from catalog only; `unshare_from_fleet=true` also rms the local `SKILL.md` on fleet nodes |
 
 ### Auth
 
@@ -271,7 +277,7 @@ The node will appear in the Fleet page (`/ui/fleet.html`) within 60 seconds.
 
 ### Plugin internals
 
-The plugin registers 9 tools and runs several lifecycle systems:
+The plugin registers 12 tools and runs several lifecycle systems:
 
 - **ContextEngine** — 7 lifecycle hooks: `bootstrap` (smoke test), `ingest` (message buffering + persistence), `assemble` (token-budget-aware recall injection), `compact` (persist summaries), `afterTurn` (auto-write turn summaries), `prepareSubagentSpawn`, `onSubagentEnded`
 - **Memory runtime** — API-backed `search()` and `get()` replacing file-based `memory-core`
