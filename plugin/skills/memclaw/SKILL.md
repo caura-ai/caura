@@ -217,7 +217,7 @@ usually right.
 Non-semantic enumeration. Cursor pagination requires
 `sort=created_at order=desc`. `scope="fleet"` / `"all"` → trust 2.
 
-**`memclaw_doc(op, collection, doc_id=?, data=?, where=?, order_by=?, limit=20, offset=0)`** — op ∈ {write, read, query, delete}
+**`memclaw_doc(op, collection=?, doc_id=?, data=?, where=?, order_by=?, limit=20, offset=0, embed_field=?, query=?)`** — op ∈ {write, read, query, delete, list_collections, search}
 Structured records by `collection + doc_id`. `write` upserts.
 
 **`memclaw_entity_get(entity_id)`**

@@ -187,8 +187,8 @@ Once connected via MCP or the OpenClaw plugin, you have these tools:
 | `memclaw_write` | Store a memory — send `content` (single) or `items` (batch ≤100). Everything else is auto-inferred |
 | `memclaw_recall` | Hybrid semantic + keyword search. Set `include_brief=true` for an LLM-summarized context paragraph |
 | `memclaw_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete` |
-| `memclaw_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate (trust ≥ 2) |
-| `memclaw_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete` on named JSON collections |
+| `memclaw_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2 |
+| `memclaw_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
 | `memclaw_entity_get` | Look up an entity with linked memories and relations |
 | `memclaw_tune` | Adjust per-agent search parameters (top_k, min_similarity, graph hops, blend weights) |
 | `memclaw_insights` | Analyze the store; focus: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. Persists findings as `insight` memories |
