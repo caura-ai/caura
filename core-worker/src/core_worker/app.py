@@ -5,9 +5,17 @@ Consumer-only service — no business HTTP routes, just ``/healthz`` +
 
 Lifespan ordering:
 1. ``configure_logging`` reads env BEFORE any module that emits log records.
-2. ``init_platform_embedding`` materialises the platform-tier provider
-   singleton from ``PLATFORM_EMBEDDING_*`` env vars. Done eagerly so a
-   bad config fails the readiness probe instead of nacking every event.
+2. ``init_platform_providers`` materialises BOTH platform-tier singletons:
+   the embedding provider from ``PLATFORM_EMBEDDING_*`` and the LLM
+   provider from ``PLATFORM_LLM_*``. Done eagerly so a bad config fails
+   the readiness probe instead of nacking every event. Both are needed:
+   ``handle_embed_request`` consults the embedding singleton;
+   ``handle_enrich_request`` falls through to the LLM singleton when the
+   request payload has no tenant-key for the resolved provider (CAURA-647
+   — pre-fix, the worker only inited embedding, so any payload that
+   resolved to ``ProviderName.OPENAI`` without a tenant openai key fell
+   straight through to FakeLLMProvider, silently corrupting the
+   re-enrichment path).
 3. ``register_consumers`` wires ``handle_embed_request`` against
    ``Topics.Memory.EMBED_REQUESTED``.
 4. ``bus.start()`` spawns Pub/Sub pull loops (no-op for inprocess bus).
@@ -24,9 +32,9 @@ from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException
 
-from common.embedding import init_platform_embedding
 from common.events.base import EventBus
 from common.events.factory import get_event_bus
+from common.llm import init_platform_providers
 from common.structlog_config import configure_logging
 from core_worker.clients.storage_client import close_storage_client, get_storage_client
 from core_worker.config import Settings
@@ -66,10 +74,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     logger.info("Starting core-worker", extra={"environment": settings.environment})
 
-    # Eager platform-embedding init so a bad PLATFORM_EMBEDDING_* config
-    # fails the readiness probe (handle_embed_request returns early when
-    # the singleton is None — CAURA-594 worker is platform-only by design).
-    init_platform_embedding()
+    # Eager platform-provider init: builds BOTH the embedding and LLM
+    # singletons from ``PLATFORM_EMBEDDING_*`` / ``PLATFORM_LLM_*``. The
+    # LLM half is what ``handle_enrich_request`` falls through to when
+    # a request payload's resolved provider has no tenant key — without
+    # it the enrichment path silently drops to ``FakeLLMProvider``
+    # (CAURA-647). A bad PLATFORM_* config fails the readiness probe
+    # rather than nacking every event.
+    init_platform_providers()
 
     # Bind the consumer to its dependencies before subscribing — the
     # subscribe must happen BEFORE bus.start() because the Pub/Sub
