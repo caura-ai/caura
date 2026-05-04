@@ -235,7 +235,7 @@ curl -sf -H "X-API-Key: $MEMCLAW_KEY" \
 openclaw gateway restart
 ```
 
-The plugin claims the OpenClaw `memory` slot (replacing `memory-core`) and exposes the same 9 MCP tools. Full setup, agent prompts, and trust levels: [static/docs/integration-guide.md](static/docs/integration-guide.md).
+The plugin claims the OpenClaw `memory` slot (replacing `memory-core`) and exposes the same 12 MCP tools. Full setup, agent prompts, and trust levels: [static/docs/integration-guide.md](static/docs/integration-guide.md).
 
 ---
 

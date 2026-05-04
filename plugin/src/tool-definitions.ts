@@ -1,5 +1,5 @@
 /**
- * MemClaw tool definitions — v1.0 consolidated surface (7 tools).
+ * MemClaw tool definitions — current surface (12 tools).
  *
  * One `createToolFromSpec(name)` factory wires together three sources:
  *

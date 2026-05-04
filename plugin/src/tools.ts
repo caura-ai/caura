@@ -7,9 +7,9 @@
  * MemClaw tools: …" line in the prompt section, and any downstream UI
  * that renders tools in discovery order.
  *
- * v1.0 surface: 7 tools (5 consolidated LTM + entity_get + tune).
- * Placeholders (share/insights/evolve) and STM tools are not exposed
- * via the plugin.
+ * Current surface: 12 tools — LTM (write/recall/list/manage), doc,
+ * entity_get, tune, insights, evolve, stats, share_skill, unshare_skill.
+ * STM tools are not exposed via the plugin.
  *
  * A boot-time drift check throws if this list and tools.json disagree.
  */
