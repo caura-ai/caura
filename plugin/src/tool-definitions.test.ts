@@ -147,6 +147,22 @@ describe("createToolFromSpec factory", () => {
     assert.ok(list.properties.include_deleted);
   });
 
+  test("memclaw_share_skill does NOT require target_fleet_id (auto-filled by enrichBody)", () => {
+    // The plugin auto-fills ``target_fleet_id`` from MEMCLAW_FLEET_ID
+    // when the agent omits it (the common case for single-fleet
+    // installs). Making the field required would force every share to
+    // repeat the local fleet name and produce "I guessed wrong" bugs
+    // when the agent doesn't know its own fleet — silently storing
+    // the skill under the wrong fleet, invisible to teammates.
+    const share = createToolFromSpec("memclaw_share_skill").parameters as any;
+    assert.ok(
+      !share.required.includes("target_fleet_id"),
+      "target_fleet_id must NOT be in required (auto-filled by enrichBody)",
+    );
+    assert.deepEqual(share.required, ["name", "description", "content"]);
+    assert.ok(share.properties.target_fleet_id);
+  });
+
   test("description falls back to tools.json value when no live override", () => {
     // `getToolDescription` reads from the shared cache in env.ts. On a
     // fresh import (no /tool-descriptions fetch yet), the fallback should

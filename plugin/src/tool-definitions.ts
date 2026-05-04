@@ -55,6 +55,14 @@ async function enrichBody(
   if (!body.tenant_id) body.tenant_id = await ensureTenantId();
   if (!body.agent_id && MEMCLAW_AGENT_ID) body.agent_id = MEMCLAW_AGENT_ID;
   if (!body.fleet_id && MEMCLAW_FLEET_ID) body.fleet_id = MEMCLAW_FLEET_ID;
+  // ``target_fleet_id`` is the routing key for skill-sharing tools
+  // (memclaw_share_skill / memclaw_unshare_skill). Auto-fill from the
+  // plugin's local fleet config when the agent omits it — agents on a
+  // single fleet shouldn't have to repeat it on every share, and
+  // making them guess produces silent visibility bugs (skill stored
+  // under the wrong fleet, invisible to teammates' queries). Explicit
+  // values (intentional cross-fleet shares) are respected.
+  if (!body.target_fleet_id && MEMCLAW_FLEET_ID) body.target_fleet_id = MEMCLAW_FLEET_ID;
   return body;
 }
 
@@ -270,12 +278,12 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
 
   memclaw_share_skill: {
     type: "object",
-    required: ["name", "description", "content", "target_fleet_id"],
+    required: ["name", "description", "content"],
     properties: {
       name: { type: "string", description: "Skill name (lowercase, [a-z0-9._-], 1-100 chars). Doubles as on-disk directory name and the upsert key." },
       description: { type: "string", description: "One-line summary used for browse/search (1-500 chars)." },
       content: { type: "string", description: "Full SKILL.md markdown body." },
-      target_fleet_id: { type: "string", description: "Fleet the skill is scoped to (catalog tag and, if install_on_fleet=true, the install target)." },
+      target_fleet_id: { type: "string", description: "Fleet the skill is scoped to. Auto-filled from your local fleet config when omitted; specify explicitly only for cross-fleet shares." },
       install_on_fleet: { type: "boolean", description: "False (default): publish to catalog only. True: also auto-install on every node in target_fleet_id." },
       agent_id: { type: "string", description: "Author agent (recorded on the doc)." },
       target_agent_ids: { type: "array", items: { type: "string" }, description: "Optional list of recipient agent_ids — informational only in v1." },
@@ -289,7 +297,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     properties: {
       name: { type: "string", description: "Skill name (must match the share)." },
       unshare_from_fleet: { type: "boolean", description: "False (default): catalog-only removal. True: also rm SKILL.md on every fleet node (requires target_fleet_id)." },
-      target_fleet_id: { type: "string", description: "Required when unshare_from_fleet=true." },
+      target_fleet_id: { type: "string", description: "Required when unshare_from_fleet=true. Auto-filled from your local fleet config when omitted." },
       agent_id: { type: "string", description: "Caller agent." },
     },
   },
