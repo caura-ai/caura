@@ -1,35 +1,27 @@
-"""Fix #10: Lifecycle automation — scheduled archival of expired/stale memories.
+"""Lifecycle automation — settings + the surviving crystallize+entity-link
+service entry point.
 
-Unit tests validate:
-- Lifecycle constants
-- Tenant setting defaults and overrides
-- Archive logic contracts
+Pre-CAURA-655 this file also asserted the in-process scheduler interval
+constant; the scheduler moved to core-operations and the constant is
+no longer load-bearing on core-api. Cron cadence now lives on
+``core_operations.config.Settings.lifecycle_archive_interval_seconds``.
 """
 
 import pytest
 
 from core_api.constants import (
     LIFECYCLE_BATCH_SIZE,
-    LIFECYCLE_INTERVAL_HOURS,
     LIFECYCLE_STALE_ARCHIVE_WEIGHT,
 )
 
 
 @pytest.mark.unit
 class TestLifecycleConstants:
-    """Verify lifecycle constant values."""
-
-    def test_interval_hours(self):
-        assert LIFECYCLE_INTERVAL_HOURS == 24
-
     def test_batch_size(self):
         assert LIFECYCLE_BATCH_SIZE == 500
 
     def test_stale_archive_weight(self):
         assert LIFECYCLE_STALE_ARCHIVE_WEIGHT == 0.3
-
-    def test_interval_reasonable(self):
-        assert 1 <= LIFECYCLE_INTERVAL_HOURS <= 168  # 1h to 1 week
 
     def test_batch_size_reasonable(self):
         assert 50 <= LIFECYCLE_BATCH_SIZE <= 5000
@@ -37,40 +29,66 @@ class TestLifecycleConstants:
 
 @pytest.mark.unit
 class TestLifecycleTenantSettings:
-    """Verify lifecycle tenant setting integration."""
-
     def test_enabled_by_default(self):
         from core_api.services.organization_settings import ResolvedConfig
+
         config = ResolvedConfig({})
         assert config.lifecycle_automation_enabled is True
 
     def test_can_be_disabled(self):
         from core_api.services.organization_settings import ResolvedConfig
+
         config = ResolvedConfig({"lifecycle": {"lifecycle_automation_enabled": False}})
         assert config.lifecycle_automation_enabled is False
 
-    def test_explicitly_enabled(self):
-        from core_api.services.organization_settings import ResolvedConfig
-        config = ResolvedConfig({"lifecycle": {"lifecycle_automation_enabled": True}})
-        assert config.lifecycle_automation_enabled is True
-
     def test_default_settings_has_lifecycle_section(self):
         from core_api.services.organization_settings import DEFAULT_SETTINGS
+
         assert "lifecycle" in DEFAULT_SETTINGS
         assert "lifecycle_automation_enabled" in DEFAULT_SETTINGS["lifecycle"]
 
 
 @pytest.mark.unit
 class TestLifecycleServiceImports:
-    """Verify lifecycle service module is importable and has expected functions."""
-
     def test_module_importable(self):
         from core_api.services import lifecycle_service  # noqa: F401
 
-    def test_has_scheduler(self):
-        from core_api.services.lifecycle_service import lifecycle_scheduler
-        assert callable(lifecycle_scheduler)
-
     def test_has_run_for_tenant(self):
         from core_api.services.lifecycle_service import run_lifecycle_for_tenant
+
         assert callable(run_lifecycle_for_tenant)
+
+    def test_scheduler_is_gone(self):
+        # Guard against the loop sneaking back in. The
+        # core-operations service owns the cron now; resurrecting the
+        # in-process loop here would re-create the double-scheduling
+        # situation CAURA-655 set out to remove.
+        from core_api.services import lifecycle_service
+
+        assert not hasattr(lifecycle_service, "lifecycle_scheduler")
+
+
+@pytest.mark.unit
+class TestLifecycleTopics:
+    def test_topic_strings(self):
+        from common.events.topics import Topics
+
+        assert (
+            Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED
+            == "memclaw.lifecycle.archive-expired-requested"
+        )
+        assert (
+            Topics.Lifecycle.ARCHIVE_STALE_REQUESTED
+            == "memclaw.lifecycle.archive-stale-requested"
+        )
+
+    def test_topic_strenum_format(self):
+        from common.events.topics import Topics
+
+        # ``StrEnum`` so f-strings see the literal value, not the
+        # ``Lifecycle.ARCHIVE_EXPIRED_REQUESTED`` repr — same invariant
+        # the embed/enrich topics rely on for Pub/Sub's ``topic_path``.
+        assert (
+            f"{Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED}"
+            == "memclaw.lifecycle.archive-expired-requested"
+        )

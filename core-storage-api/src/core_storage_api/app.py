@@ -33,6 +33,7 @@ from core_storage_api.routers import (
     fleet_router,
     health_router,
     idempotency_router,
+    lifecycle_audit_router,
     memories_router,
     reports_router,
     tasks_router,
@@ -115,6 +116,7 @@ def create_app() -> FastAPI:
     app.include_router(reports_router, prefix=prefix)
     app.include_router(tasks_router, prefix=prefix)
     app.include_router(idempotency_router, prefix=prefix)
+    app.include_router(lifecycle_audit_router, prefix=prefix)
 
     return app
 

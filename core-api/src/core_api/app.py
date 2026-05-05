@@ -50,6 +50,7 @@ from core_api.routes.evolve import router as evolve_router
 from core_api.routes.fleet import router as fleet_router
 from core_api.routes.health import router as health_router
 from core_api.routes.insights import router as insights_router
+from core_api.routes.lifecycle import router as lifecycle_router
 from core_api.routes.memories import admin_memories_router
 from core_api.routes.memories import router as memories_router
 from core_api.routes.plugin import plugin_bootstrap_router
@@ -366,11 +367,7 @@ async def lifespan(app):
             set_audit_queue(audit_queue)
             await audit_queue.start()
 
-        # Start lifecycle automation scheduler
-        from core_api.services.lifecycle_service import lifecycle_scheduler
-        from core_api.tasks import cancel_all_tasks, track_task
-
-        track_task(lifecycle_scheduler())
+        from core_api.tasks import cancel_all_tasks
 
         # ``register_consumers`` must run before ``bus.start`` — the
         # Pub/Sub backend spawns pull loops from the handler registry
@@ -379,7 +376,25 @@ async def lifespan(app):
         # standalone) makes ``start`` a no-op so this wiring is
         # harmless there.
         register_consumers()
+
         event_bus = get_event_bus()
+
+        # CAURA-655: lifecycle archive consumers run in core-worker on
+        # SaaS, but in OSS standalone there is no separate worker
+        # process — the in-process bus dispatches to whoever subscribes
+        # in this same Python process. Register here only when the
+        # backend is in-process so SaaS doesn't end up with both
+        # core-api AND core-worker running each archive twice.
+        from common.events.inprocess import InProcessEventBus
+
+        if isinstance(event_bus, InProcessEventBus):
+            from common.events.lifecycle_handlers import (
+                register_consumers as register_lifecycle_consumers,
+            )
+            from core_api.services.lifecycle_audit import make_storage_adapter
+
+            register_lifecycle_consumers(make_storage_adapter(get_storage_client()))
+
         await event_bus.start()
 
         yield
@@ -570,6 +585,7 @@ app.include_router(stm_router, prefix="/api/v1")
 app.include_router(insights_router, prefix="/api/v1")
 app.include_router(evolve_router, prefix="/api/v1")
 app.include_router(skills_router, prefix="/api/v1")
+app.include_router(lifecycle_router, prefix="/api/v1")
 
 # Test-only endpoints (time-warp, etc.) — only registered when TESTING=1
 if _os.getenv("TESTING") == "1":

@@ -30,6 +30,7 @@ from uuid import UUID
 
 import httpx
 
+from common.constants import LIFECYCLE_STALE_ARCHIVE_WEIGHT
 from core_worker.clients.identity_token import evict as _evict_id_token
 from core_worker.clients.identity_token import fetch_auth_header
 
@@ -314,6 +315,89 @@ async def get_memory(
     )
     resp.raise_for_status()
     return resp.json()
+
+
+async def archive_expired(
+    client: httpx.AsyncClient,
+    *,
+    tenant_id: str,
+    fleet_id: str | None,
+) -> int:
+    """Run the storage-side ``memory_archive_expired`` SQL primitive.
+
+    Returns the row count flipped from ``active`` to ``outdated``;
+    surfaced as ``stats.archived`` on the lifecycle_audit row.
+    """
+    body: dict[str, Any] = {"tenant_id": tenant_id}
+    if fleet_id is not None:
+        body["fleet_id"] = fleet_id
+    resp = await _signed_call(
+        client.post,
+        f"{_PREFIX}/memories/archive-expired",
+        json=body,
+    )
+    resp.raise_for_status()
+    return resp.json().get("count", 0)
+
+
+async def archive_stale(
+    client: httpx.AsyncClient,
+    *,
+    tenant_id: str,
+    fleet_id: str | None,
+) -> int:
+    """Run the storage-side ``memory_archive_stale`` SQL primitive.
+
+    ``max_weight`` is sent explicitly so the cron-driven worker path
+    matches the synchronous code path's threshold rather than relying
+    on the storage server's default to stay aligned. The shared
+    constant lives in :mod:`common.constants` so core-api's adapter
+    and this worker can't silently diverge.
+    """
+    body: dict[str, Any] = {
+        "tenant_id": tenant_id,
+        "max_weight": LIFECYCLE_STALE_ARCHIVE_WEIGHT,
+    }
+    if fleet_id is not None:
+        body["fleet_id"] = fleet_id
+    resp = await _signed_call(
+        client.post,
+        f"{_PREFIX}/memories/archive-stale",
+        json=body,
+    )
+    resp.raise_for_status()
+    return resp.json().get("count", 0)
+
+
+async def update_lifecycle_audit_row(
+    client: httpx.AsyncClient,
+    audit_id: int,
+    *,
+    status: str,
+    stats: dict | None = None,
+    error_message: str | None = None,
+) -> None:
+    """PATCH the lifecycle_audit row created by core-api fanout."""
+    body: dict[str, Any] = {"status": status}
+    if stats is not None:
+        body["stats"] = stats
+    if error_message is not None:
+        body["error_message"] = error_message
+    resp = await _signed_call(
+        client.patch,
+        f"{_PREFIX}/lifecycle-audit/{audit_id}",
+        json=body,
+    )
+    if resp.status_code == 404:
+        # Audit row pruned or never created. The shared handler decides
+        # whether to log + continue (in_progress) or surface (final).
+        logger.warning(
+            "lifecycle_audit %s not found on PATCH (status=%s)",
+            audit_id,
+            status,
+        )
+        return
+    resp.raise_for_status()
 
 
 async def update_memory_enrichment(

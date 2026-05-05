@@ -1,71 +1,64 @@
-"""Lifecycle automation — periodic archival of expired and stale memories."""
+"""Crystallize + entity-link execution for one tenant.
 
-import asyncio
+Pre-CAURA-655 this module also held the periodic scheduler loop and
+the SQL-only archive-expired / archive-stale primitives. Both moved
+out:
+
+* The scheduler is gone — ``core-operations`` fires the operations on
+  cron, fanning out per-org Pub/Sub messages via core-api's
+  ``/admin/lifecycle/fanout/<action>`` endpoints (CAURA-655).
+* ``archive-expired`` and ``archive-stale`` are now their own per-org
+  messages consumed in core-worker via
+  ``common.events.lifecycle_handlers``.
+
+What's left here is the LLM-heavy half — crystallize and entity-link —
+that still needs core-api's pipeline machinery. CAURA-657 will lift
+this onto its own Pub/Sub topics; until then ``run_lifecycle_for_tenant``
+remains the single entry point for that work.
+
+Note on import shape: ``get_storage_client`` is imported at the top of
+this module so unit tests can patch
+``core_api.services.lifecycle_service.get_storage_client`` directly.
+``resolve_config`` and ``async_session`` are imported lazily inside the
+function body so the same tests can patch them at their *source*
+namespaces — the existing test convention this module pre-dates.
+"""
+
+from __future__ import annotations
+
 import logging
 
 from core_api.clients.storage_client import get_storage_client
-from core_api.constants import (
-    LIFECYCLE_INTERVAL_HOURS,
-    LIFECYCLE_STALE_ARCHIVE_WEIGHT,
-)
 
 logger = logging.getLogger(__name__)
-
-
-async def lifecycle_scheduler() -> None:
-    """Background scheduler: runs lifecycle automation on an interval."""
-    logger.info("Lifecycle scheduler started (interval=%dh)", LIFECYCLE_INTERVAL_HOURS)
-    while True:
-        await asyncio.sleep(LIFECYCLE_INTERVAL_HOURS * 3600)
-        try:
-            await _run_lifecycle_cycle()
-        except Exception:
-            logger.exception("Lifecycle cycle failed")
-
-
-async def _run_lifecycle_cycle() -> None:
-    """Run lifecycle automation for all tenants."""
-    from core_api.services.organization_settings import resolve_config
-    from core_api.standalone import get_standalone_tenant_id
-
-    tenant_ids = [get_standalone_tenant_id()]
-
-    for tid in tenant_ids:
-        try:
-            config = await resolve_config(None, tid)
-            if not config.lifecycle_automation_enabled:
-                continue
-            stats = await run_lifecycle_for_tenant(tid)
-            if stats["expired_archived"] or stats["stale_archived"] or stats.get("entity_linking"):
-                logger.info("Lifecycle for tenant=%s: %s", tid, stats)
-        except Exception:
-            logger.exception("Lifecycle failed for tenant %s", tid)
 
 
 async def run_lifecycle_for_tenant(
     tenant_id: str,
     fleet_id: str | None = None,
-    # Legacy db param kept for call-site compat — unused, storage client handles DB.
+    # Legacy db param kept for call-site compat — unused, the pipeline
+    # opens its own session.
     db=None,
 ) -> dict:
-    """Execute lifecycle transitions for a tenant. Returns stats."""
-    expired_count = await _archive_expired_memories(tenant_id, fleet_id)
-    stale_count = await _archive_stale_memories(tenant_id, fleet_id)
+    """Run the LLM-heavy lifecycle steps for one tenant.
 
-    crystal_triggered = False
+    Returns a stats dict with ``crystallization_triggered`` and
+    ``entity_linking`` keys; the SQL-only archive counts that used to
+    live here moved to the consumer-side audit row's ``stats`` field.
+    """
     from core_api.services.organization_settings import resolve_config
 
     config = await resolve_config(None, tenant_id)
 
+    crystal_triggered = False
     if config.auto_crystallize_enabled:
-        total = await _count_active_memories(tenant_id, fleet_id)
-        if total > 1000:
-            from core_api.services.crystallizer_service import run_crystallization
+        from core_api.services.crystallizer_service import run_crystallization
 
+        total = await get_storage_client().count_active(tenant_id, fleet_id)
+        if total > 1000:
             await run_crystallization(None, tenant_id, fleet_id, trigger="lifecycle")
             crystal_triggered = True
 
-    # Entity linking — discover cross-links for under-connected memories
     entity_linking_stats: dict = {}
     if config.auto_entity_linking_enabled:
         try:
@@ -98,26 +91,6 @@ async def run_lifecycle_for_tenant(
             )
 
     return {
-        "expired_archived": expired_count,
-        "stale_archived": stale_count,
         "crystallization_triggered": crystal_triggered,
         "entity_linking": entity_linking_stats,
     }
-
-
-async def _archive_expired_memories(tenant_id: str, fleet_id: str | None = None) -> int:
-    """Transition expired-but-active memories to 'outdated'."""
-    sc = get_storage_client()
-    return await sc.archive_expired(tenant_id, fleet_id)
-
-
-async def _archive_stale_memories(tenant_id: str, fleet_id: str | None = None) -> int:
-    """Archive old, never-recalled, low-weight memories."""
-    sc = get_storage_client()
-    return await sc.archive_stale(tenant_id, fleet_id, max_weight=LIFECYCLE_STALE_ARCHIVE_WEIGHT)
-
-
-async def _count_active_memories(tenant_id: str, fleet_id: str | None = None) -> int:
-    """Count active non-deleted memories for a tenant."""
-    sc = get_storage_client()
-    return await sc.count_active(tenant_id, fleet_id)

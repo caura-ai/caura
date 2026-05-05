@@ -169,7 +169,12 @@ class StorageBackend(Protocol):
 
 @runtime_checkable
 class JobQueue(Protocol):
-    """Pluggable async job/task queue (Redis, Cloud Tasks, in-memory, etc.)."""
+    """Pluggable async job/task queue (Redis, Cloud Tasks, in-memory, etc.).
+
+    Cron-style scheduling moved to the dedicated ``core-operations``
+    service in CAURA-655 — the queue is now purely a fire-and-forget
+    primitive.
+    """
 
     async def enqueue(
         self,
@@ -182,20 +187,6 @@ class JobQueue(Protocol):
         *func* is an async callable. The queue implementation decides
         whether to run it in-process (``asyncio.create_task``) or
         serialize and dispatch to a worker (arq, Cloud Tasks, etc.).
-        """
-        ...
-
-    async def schedule(
-        self,
-        func: Any,
-        *,
-        cron: str,
-    ) -> None:
-        """Register a callable to run on a cron schedule.
-
-        The cron expression follows standard 5-field format.
-        In-process implementations may use ``asyncio.sleep`` loops;
-        distributed implementations may delegate to arq or APScheduler.
         """
         ...
 

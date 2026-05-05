@@ -30,5 +30,18 @@ class Settings(BaseSettings):
 
     storage_http_timeout_s: float = 30.0
 
+    # CAURA-655: core-operations doesn't talk to the DB directly — its
+    # cron ticks POST to core-api's ``/admin/lifecycle/fanout/<action>``
+    # endpoints, which do the org enumeration and Pub/Sub publish.
+    core_api_url: str = "http://oss-core-api:8000"
+    core_api_admin_api_key: str = ""
+
+    # Daily cadence for the SQL-only archive operations. Per-org
+    # scheduling isn't supported here (single global tick fans out to
+    # every active org); enterprise's per-org configurable cadences
+    # — e.g. ``security_audit.schedule_cron`` — still live on the
+    # enterprise scheduler.
+    lifecycle_archive_interval_seconds: float = 24 * 3600
+
 
 settings = Settings()  # type: ignore[call-arg]

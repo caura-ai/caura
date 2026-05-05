@@ -933,6 +933,44 @@ class CoreStorageClient:
         return await self._get_list("/audit-logs", **params)
 
     # =====================================================================
+    # Lifecycle audit (CAURA-655)
+    # =====================================================================
+
+    async def create_lifecycle_audit_row(
+        self,
+        *,
+        org_id: str,
+        action: str,
+        triggered_by: str,
+    ) -> int:
+        """Pre-publish a ``pending`` audit row for one Pub/Sub message.
+
+        The fanout endpoint calls this immediately before each per-org
+        publish so the consumer has a stable id to finalise.
+        """
+        result = await self._post(
+            "/lifecycle-audit",
+            {"org_id": org_id, "action": action, "triggered_by": triggered_by},
+        )
+        return result["audit_id"]  # type: ignore[index]
+
+    async def update_lifecycle_audit_row(
+        self,
+        audit_id: int,
+        *,
+        status: str,
+        stats: dict | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """Flip the row to ``in_progress``, ``success``, or ``failure``."""
+        body: dict[str, Any] = {"status": status}
+        if stats is not None:
+            body["stats"] = stats
+        if error_message is not None:
+            body["error_message"] = error_message
+        await self._patch(f"/lifecycle-audit/{audit_id}", body)
+
+    # =====================================================================
     # Reports
     # =====================================================================
 

@@ -361,3 +361,12 @@ SINGLE_VALUE_PREDICATES: frozenset[str] = frozenset(
         "office",
     }
 )
+
+# ── Lifecycle automation (CAURA-655) ──
+# Weight threshold for archive-stale: memories below this with zero
+# recalls are eligible for archival. Lives in common/ so the threshold
+# is shared between core-api's adapter (synchronous OSS standalone path)
+# and core-worker's storage helper (SaaS Pub/Sub consumer path).
+# Diverging values would silently produce different archive footprints
+# across the two deployment modes.
+LIFECYCLE_STALE_ARCHIVE_WEIGHT: float = 0.3

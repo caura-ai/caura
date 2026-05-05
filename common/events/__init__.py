@@ -19,6 +19,10 @@ from common.events.base import (
 )
 from common.events.factory import get_event_bus
 from common.events.inprocess import InProcessEventBus
+from common.events.lifecycle_publishers import (
+    publish_archive_expired_request,
+    publish_archive_stale_request,
+)
 from common.events.memory_embed_publisher import publish_memory_embed_request
 from common.events.memory_enrich_publisher import publish_memory_enrich_request
 from common.events.memory_enriched_publisher import publish_memory_enriched
@@ -38,6 +42,8 @@ __all__ = [
     "PubSubEventBus",
     "Topics",
     "get_event_bus",
+    "publish_archive_expired_request",
+    "publish_archive_stale_request",
     "publish_memory_embed_request",
     "publish_memory_enrich_request",
     "publish_memory_enriched",

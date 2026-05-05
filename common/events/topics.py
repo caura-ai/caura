@@ -34,6 +34,15 @@ class Pipeline(enum.StrEnum):
     ENTITY_EXTRACTED = "memclaw.pipeline.entity-extracted"
 
 
+class Lifecycle(enum.StrEnum):
+    # One topic per action — matches the `memclaw.memory.embed-requested`
+    # vs `memclaw.memory.enrich-requested` convention. Keeping each
+    # operation on its own topic gives clean per-subscription filtering
+    # and lets each action evolve its payload independently.
+    ARCHIVE_EXPIRED_REQUESTED = "memclaw.lifecycle.archive-expired-requested"
+    ARCHIVE_STALE_REQUESTED = "memclaw.lifecycle.archive-stale-requested"
+
+
 class Topics:
     """Namespaced facade so call sites keep the ergonomic form
     `Topics.Memory.CREATED` instead of importing each inner enum."""
@@ -41,3 +50,4 @@ class Topics:
     Memory = Memory
     Audit = Audit
     Pipeline = Pipeline
+    Lifecycle = Lifecycle

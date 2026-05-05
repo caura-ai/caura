@@ -47,6 +47,7 @@ from common.models import (
     FleetCommand,
     FleetNode,
     IdempotencyResponse,
+    LifecycleAudit,
     Memory,
     MemoryEntityLink,
     Relation,
@@ -3117,6 +3118,103 @@ class PostgresService:
                 q = q.where(AuditLog.created_at > since)
             result = await session.execute(q)
             return list(result.scalars().all())
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  LIFECYCLE AUDIT (CAURA-655)
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def lifecycle_audit_create(
+        self,
+        *,
+        org_id: str,
+        action: str,
+        triggered_by: str,
+    ) -> int:
+        """Insert a ``status='pending'`` row and return its id.
+
+        Called by the core-api fanout endpoint just before publishing
+        each per-org Pub/Sub message — the id rides along in the
+        envelope so the consumer can finalise the same row on
+        completion.
+        """
+        async with get_session() as session:
+            row = LifecycleAudit(
+                org_id=org_id,
+                action=action,
+                triggered_by=triggered_by,
+            )
+            session.add(row)
+            await session.flush()
+            return row.id
+
+    async def lifecycle_audit_finalize(
+        self,
+        audit_id: int,
+        *,
+        status: str,
+        stats: dict | None = None,
+        error_message: str | None = None,
+    ) -> bool | None:
+        """Set terminal-or-progress state on the row.
+
+        Tri-state return distinguishes the two ``rowcount==0`` cases:
+        * ``True``  — row updated.
+        * ``None``  — row exists but is already at ``status='success'``
+          (the sticky-success gate skipped the UPDATE). A no-op, NOT
+          an error — typically a Pub/Sub redelivery of an already-
+          acked successful message.
+        * ``False`` — row not found at all (pruned, or a buggy
+          publisher invented an id).
+
+        ``finished_at`` is only stamped on terminal status values so the
+        ``in_progress`` transition leaves the row addressable for a
+        later success/failure update.
+        """
+        values: dict = {"status": status}
+        if status in ("success", "failure"):
+            values["finished_at"] = func.now()
+        elif status == "in_progress":
+            # Pub/Sub redelivery after a prior ``failure`` re-enters this
+            # method with status="in_progress"; without the explicit NULL
+            # the row would carry the previous attempt's ``finished_at``,
+            # and any query using ``finished_at IS NOT NULL`` to find
+            # completed rows would misclassify the retrying row.
+            values["finished_at"] = None
+        if stats is not None:
+            values["stats"] = stats
+        if error_message is not None:
+            values["error_message"] = error_message
+        if status == "success":
+            # A redelivery that recovered from a prior ``failure`` must
+            # not leave the failure's ``error_message`` lingering on a
+            # now-successful row.
+            values["error_message"] = None
+        async with get_session() as session:
+            # ``success`` is sticky — once a row reaches it, no
+            # subsequent transition (Pub/Sub redelivery of an already-
+            # acked-but-late-acked message) can downgrade or overwrite
+            # it. Without this, a redelivery would re-enter as
+            # ``in_progress`` → re-run the (idempotent) archive
+            # primitive that returns 0 → clobber the original
+            # ``stats.archived`` count with 0. Failure recovery
+            # (failure → in_progress → success) still works because
+            # ``failure`` is NOT gated.
+            stmt = (
+                sql_update(LifecycleAudit)
+                .where(LifecycleAudit.id == audit_id)
+                .where(LifecycleAudit.status != "success")
+                .values(**values)
+            )
+            result = await session.execute(stmt)
+            if result.rowcount > 0:  # type: ignore[attr-defined]
+                return True
+            # rowcount==0 has two causes — disambiguate so the router
+            # can return 200 for the no-op (already-success) path
+            # instead of a misleading 404 that would surface as a
+            # spurious "audit row not found" warning on every Pub/Sub
+            # redelivery of an acked-but-late-acked successful message.
+            exists = await session.scalar(select(LifecycleAudit.id).where(LifecycleAudit.id == audit_id))
+            return None if exists else False
 
     # ══════════════════════════════════════════════════════════════════════
     #  REPORTS (CrystallizationReport)

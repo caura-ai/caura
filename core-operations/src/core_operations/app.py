@@ -27,14 +27,25 @@ from fastapi import FastAPI, HTTPException
 from common.structlog_config import configure_logging
 from core_operations.config import settings
 from core_operations.scheduler import scheduler
+from core_operations.tasks import run_archive_expired_tick, run_archive_stale_tick
 
 logger = logging.getLogger(__name__)
 
 
 def _register_scheduled_tasks() -> None:
-    # CAURA-655: scheduler.register("lifecycle", LIFECYCLE_INTERVAL_S, run_lifecycle_tick)
-    # CAURA-656: scheduler.register("memory_retention", 24*3600, run_memory_retention_tick)
-    pass
+    # CAURA-655: each archival op gets its own registration so an
+    # outage on one can't silently mask the other; their audit rows
+    # stay independent. CAURA-656 will add ``purge-soft-deleted`` here.
+    scheduler.register(
+        "lifecycle-archive-expired",
+        settings.lifecycle_archive_interval_seconds,
+        run_archive_expired_tick,
+    )
+    scheduler.register(
+        "lifecycle-archive-stale",
+        settings.lifecycle_archive_interval_seconds,
+        run_archive_stale_tick,
+    )
 
 
 @contextlib.asynccontextmanager
@@ -65,6 +76,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
         logger.info("Shutting down core-operations (standalone)")
         return
+
+    if not settings.core_api_admin_api_key:
+        # Surface the misconfig at startup so operators see it
+        # immediately, not after the first cron tick fires and 401s
+        # against core-api hours later.
+        logger.warning(
+            "CORE_API_ADMIN_API_KEY is unset; every fanout POST will be "
+            "unauthorised. Set the env var before the next cron interval.",
+        )
 
     _register_scheduled_tasks()
     await scheduler.start()

@@ -34,12 +34,16 @@ from fastapi import FastAPI, HTTPException
 
 from common.events.base import EventBus
 from common.events.factory import get_event_bus
+from common.events.lifecycle_handlers import (
+    register_consumers as register_lifecycle_consumers,
+)
 from common.llm import init_platform_providers
 from common.structlog_config import configure_logging
 from core_worker.clients.storage_client import close_storage_client, get_storage_client
 from core_worker.config import Settings
 from core_worker.consumer import configure as configure_consumer
 from core_worker.consumer import register_consumers
+from core_worker.lifecycle import make_storage_adapter as make_lifecycle_adapter
 
 settings = Settings()  # type: ignore[call-arg]
 
@@ -88,6 +92,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # backend spawns pull loops based on the current handler registry.
     configure_consumer(get_storage_client)
     register_consumers()
+
+    # CAURA-655: lifecycle archive consumers share the same Pub/Sub
+    # transport. Adapter wraps the worker's httpx storage client into
+    # the shape the shared handler expects.
+    register_lifecycle_consumers(make_lifecycle_adapter())
 
     _event_bus = get_event_bus()
     await _event_bus.start()

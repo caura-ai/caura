@@ -11,6 +11,7 @@ from common.constants import (  # noqa: F401
     ENTITY_RESOLUTION_CANDIDATE_LIMIT,
     GRAPH_MAX_EXPANDED_ENTITIES,
     GRAPH_MAX_HOPS,
+    LIFECYCLE_STALE_ARCHIVE_WEIGHT,
     RECALL_BOOST_SCALE,
     RELATION_TYPE_WEIGHTS,
     SEMANTIC_DEDUP_CANDIDATE_LIMIT,
@@ -565,7 +566,10 @@ BULK_EMBEDDING_TIMEOUT_SECONDS = 30.0
 # ── Lifecycle automation ──
 LIFECYCLE_INTERVAL_HOURS = 24  # run lifecycle cycle every N hours
 LIFECYCLE_BATCH_SIZE = 500  # max memories per status transition batch
-LIFECYCLE_STALE_ARCHIVE_WEIGHT = 0.3  # weight threshold for stale archival
+# ``LIFECYCLE_STALE_ARCHIVE_WEIGHT`` is re-exported from
+# ``common.constants`` (see top of this file) — canonical location is
+# ``common`` so core-worker can read the same value without depending
+# on core-api.
 
 # ── Entity extraction quality filter ──
 MIN_ENTITY_NAME_LENGTH = 2  # single-char "entities" are never meaningful

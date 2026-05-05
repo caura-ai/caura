@@ -399,9 +399,6 @@ class _FakeJobQueue:
     async def enqueue(self, func, *args, **kwargs):
         return "job-1"
 
-    async def schedule(self, func, *, cron):
-        pass
-
 
 class _FakeIdentityResolver:
     async def resolve(self, context):

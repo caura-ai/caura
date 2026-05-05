@@ -64,6 +64,7 @@ from core_api.services.memory_service import (
     soft_delete_memory,
     update_memory,
 )
+from core_api.services.tenants import list_active_tenant_ids
 from core_api.services.usage_service import bulk_check_and_increment, check_and_increment
 
 logger = logging.getLogger(__name__)
@@ -1442,8 +1443,7 @@ async def admin_list_tenants(
 ):
     """Admin: list all tenant IDs that have memories."""
     auth.enforce_admin()
-    result = await db.execute(select(Memory.tenant_id).where(Memory.deleted_at.is_(None)).distinct())
-    return sorted([row[0] for row in result.all()])
+    return await list_active_tenant_ids(db)
 
 
 @admin_memories_router.get("/admin/fleets")
