@@ -32,6 +32,22 @@ from common.llm.constants import (
 logger = logging.getLogger(__name__)
 
 
+# CAURA-651: same hazard as VertexResponseShapeError /
+# GeminiResponseShapeError — OpenAI's structured-output mode doesn't
+# universally constrain the top-level shape (especially via
+# OpenAI-compatible endpoints), so a list (or other non-dict) can
+# leak through and cause downstream ``.get(...)`` to raise bare
+# AttributeError.
+class OpenAIResponseShapeError(ValueError):
+    def __init__(self, content: str, parsed_type: str) -> None:
+        self.content = content[:1024]
+        self.parsed_type = parsed_type
+        super().__init__(
+            f"OpenAI returned a JSON {parsed_type} where a dict was expected. "
+            f"Truncated response content: {self.content!r}"
+        )
+
+
 class OpenAILLMProvider:
     """LLM provider using the OpenAI chat completions API.
 
@@ -119,7 +135,10 @@ class OpenAILLMProvider:
         content = response.choices[0].message.content
         if not content:
             raise ValueError(f"OpenAI returned empty content for model {self._model}")
-        return json.loads(content)
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            raise OpenAIResponseShapeError(content, type(parsed).__name__)
+        return parsed
 
     async def complete_text(
         self,

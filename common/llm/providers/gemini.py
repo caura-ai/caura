@@ -21,6 +21,20 @@ from common.provider_names import ProviderName
 logger = logging.getLogger(__name__)
 
 
+# CAURA-651: same hazard as VertexResponseShapeError — Gemini's
+# ``response_mime_type='application/json'`` doesn't fully constrain
+# the top-level shape, so a list (or other non-dict) can leak through
+# and cause downstream ``.get(...)`` to raise bare AttributeError.
+class GeminiResponseShapeError(ValueError):
+    def __init__(self, content: str, parsed_type: str) -> None:
+        self.content = content[:1024]
+        self.parsed_type = parsed_type
+        super().__init__(
+            f"Gemini returned a JSON {parsed_type} where a dict was expected. "
+            f"Truncated response content: {self.content!r}"
+        )
+
+
 class GeminiLLMProvider:
     """LLM provider using the Gemini Developer API with an API key."""
 
@@ -75,7 +89,10 @@ class GeminiLLMProvider:
             ) from exc
         if not text:
             raise ValueError(f"Gemini returned empty content for model {self._model}")
-        return json.loads(text)
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            raise GeminiResponseShapeError(text, type(parsed).__name__)
+        return parsed
 
     def _complete_text_sync(
         self,

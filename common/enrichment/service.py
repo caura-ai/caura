@@ -80,6 +80,20 @@ def _parse_temporal(val: str) -> datetime | None:
 
 def _validate_enrichment(raw: dict, llm_ms: int) -> EnrichmentResult:
     """Validate and sanitize raw LLM enrichment output."""
+    # CAURA-651: defense-in-depth against an LLM provider returning a
+    # JSON list (or any non-dict shape) when the schema asks for an
+    # object. Vertex / Gemini / OpenAI all raise their own
+    # ``*ResponseShapeError(ValueError)`` at the JSON parse boundary;
+    # this guard is the catch-all in case a future provider misses
+    # that pattern. ``ValueError`` rather than ``TypeError`` because
+    # this is bad data from an external system, not a programmer's
+    # type-mismatch bug, and it stays consistent with the
+    # ``ResponseShapeError(ValueError)`` hierarchy so a single
+    # ``except ValueError`` catches both layers.
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"enrichment LLM returned a JSON {type(raw).__name__} where a dict was expected"
+        )
     if raw.get("memory_type") not in MEMORY_TYPES:
         raw["memory_type"] = "fact"
     if raw.get("status") not in MEMORY_STATUSES:
