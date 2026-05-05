@@ -1,0 +1,41 @@
+# Dockerfile for core-operations
+# Single-purpose service that hosts cron/scheduled background jobs.
+# Minimal HTTP surface (only /healthz) — Cloud Run probes hit it.
+
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+
+COPY core-operations/pyproject.toml ./core-operations/
+RUN mkdir -p core-operations/src/core_operations && touch core-operations/src/core_operations/__init__.py
+RUN pip install --no-cache-dir './core-operations[pubsub]'
+
+COPY common/ /app/common/
+COPY core-operations/src/ /app/core-operations/src/
+
+
+FROM python:3.12-slim AS runtime
+
+RUN useradd --create-home --shell /usr/sbin/nologin appuser
+
+WORKDIR /app
+
+# Copy the entire /usr/local from builder so future Python-base bumps
+# (3.13, etc.) don't silently miss site-packages by hardcoded path.
+COPY --from=builder /usr/local /usr/local
+COPY --from=builder --chown=appuser:appuser /app /app
+
+ENV PYTHONPATH="/app/core-operations/src:/app"
+ENV PYTHONUNBUFFERED=1
+
+USER appuser
+
+EXPOSE 8080
+
+# `sh -c "exec …"` so PID 1 ends up as uvicorn (not dash). Without
+# `exec` the shell stays as PID 1 and Debian's dash does NOT forward
+# SIGTERM to its child — Cloud Run's grace period would then expire
+# without scheduler.stop() running, and the container would be
+# force-killed. The shell wrapper is still needed to expand $PORT
+# (Cloud Run injects it) before the exec.
+CMD ["sh", "-c", "exec uvicorn core_operations.app:app --host 0.0.0.0 --port ${PORT:-8080}"]
