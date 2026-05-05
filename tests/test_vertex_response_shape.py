@@ -73,6 +73,12 @@ class TestProviderResponseShape:
         with pytest.raises(error_cls) as exc:
             _shape_check(error_cls, long)
         assert len(exc.value.content) <= 1024
+        # Truncation must also apply to ``self.args`` — not just to
+        # the display attribute — so a megabyte-scale aberrant
+        # response can't be retained for the exception's lifetime nor
+        # serialised across pytest-xdist / multiprocessing pickle
+        # boundaries in full.
+        assert len(exc.value.args[1]) <= 1024
 
     def test_subclasses_value_error(self, error_cls, provider_name):
         """A single ``except ValueError`` should catch all provider
@@ -83,6 +89,38 @@ class TestProviderResponseShape:
         """Monitoring code should catch all three with one
         ``except ProviderResponseShapeError`` clause."""
         assert issubclass(error_cls, ProviderResponseShapeError)
+
+    def test_pickle_preserves_truncated_label(self, error_cls, provider_name):
+        """A ``_was_truncated`` flag would not survive pickle (the
+        receiving worker re-runs ``__init__`` on the already-clipped
+        1 KiB slice, recomputing the flag as False). Detection from
+        ``len(self.content)`` survives — verify the round-trip still
+        renders ``(truncated)``."""
+        import pickle
+
+        long = '"' + "x" * 5000 + '"'
+        with pytest.raises(error_cls) as exc:
+            _shape_check(error_cls, long)
+        assert "(truncated)" in str(exc.value)
+        restored = pickle.loads(pickle.dumps(exc.value))
+        assert "(truncated)" in str(restored)
+
+    def test_pickle_round_trip(self, error_cls, provider_name):
+        """pytest-xdist + any multiprocessing pool serialise exception
+        results across process boundaries. Without the ``__reduce__``
+        overrides, default reconstruction calls ``cls(*self.args)`` —
+        wrong arity for both the 3-arg base and the 2-arg subclasses
+        — and the test/worker run crashes with TypeError instead of a
+        clean failure report."""
+        import pickle
+
+        with pytest.raises(error_cls) as exc:
+            _shape_check(error_cls, '["x"]')
+        restored = pickle.loads(pickle.dumps(exc.value))
+        assert isinstance(restored, error_cls)
+        assert restored.provider == provider_name
+        assert restored.parsed_type == "list"
+        assert restored.content == '["x"]'
 
     def test_label_says_truncated_only_when_actually_truncated(
         self, error_cls, provider_name

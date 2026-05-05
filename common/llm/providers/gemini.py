@@ -30,6 +30,10 @@ class GeminiResponseShapeError(ProviderResponseShapeError):
     def __init__(self, content: str, parsed_type: str) -> None:
         super().__init__("Gemini", content, parsed_type)
 
+    def __reduce__(self) -> tuple:
+        # See VertexResponseShapeError.__reduce__ for rationale.
+        return (type(self), (self.args[1], self.args[2]))
+
 
 class GeminiLLMProvider:
     """LLM provider using the Gemini Developer API with an API key."""

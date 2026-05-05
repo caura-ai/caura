@@ -43,6 +43,10 @@ class OpenAIResponseShapeError(ProviderResponseShapeError):
     def __init__(self, content: str, parsed_type: str) -> None:
         super().__init__("OpenAI", content, parsed_type)
 
+    def __reduce__(self) -> tuple:
+        # See VertexResponseShapeError.__reduce__ for rationale.
+        return (type(self), (self.args[1], self.args[2]))
+
 
 class OpenAILLMProvider:
     """LLM provider using the OpenAI chat completions API.
