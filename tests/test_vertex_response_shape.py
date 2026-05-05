@@ -17,6 +17,7 @@ import json
 import pytest
 
 from common.enrichment.service import _validate_enrichment
+from common.llm.providers._shape_error import ProviderResponseShapeError
 from common.llm.providers.gemini import GeminiResponseShapeError
 from common.llm.providers.openai import OpenAIResponseShapeError
 from common.llm.providers.vertex import VertexResponseShapeError
@@ -63,6 +64,9 @@ class TestProviderResponseShape:
             _shape_check(error_cls, "[1, 2, 3]")
         assert exc.value.parsed_type == "list"
         assert exc.value.content == "[1, 2, 3]"
+        # ``provider`` is what monitoring / fallback code reads to tag
+        # metrics or route alerts without scraping the message string.
+        assert exc.value.provider == provider_name
 
     def test_content_truncated_to_1kib(self, error_cls, provider_name):
         long = '"' + "x" * 5000 + '"'
@@ -74,6 +78,36 @@ class TestProviderResponseShape:
         """A single ``except ValueError`` should catch all provider
         shape errors, matching the ``_validate_enrichment`` fallback."""
         assert issubclass(error_cls, ValueError)
+
+    def test_subclasses_provider_response_shape_error(self, error_cls, provider_name):
+        """Monitoring code should catch all three with one
+        ``except ProviderResponseShapeError`` clause."""
+        assert issubclass(error_cls, ProviderResponseShapeError)
+
+    def test_label_says_truncated_only_when_actually_truncated(
+        self, error_cls, provider_name
+    ):
+        # Short content (well under 1 KiB cap) — label must NOT say
+        # truncated.
+        with pytest.raises(error_cls) as short_exc:
+            _shape_check(error_cls, '"short"')
+        assert "(truncated)" not in str(short_exc.value)
+        # Long content (over the 1 KiB cap) — label must say truncated.
+        long = '"' + "x" * 5000 + '"'
+        with pytest.raises(error_cls) as long_exc:
+            _shape_check(error_cls, long)
+        assert "(truncated)" in str(long_exc.value)
+
+
+@pytest.mark.unit
+def test_shape_error_publicly_re_exported():
+    """``ProviderResponseShapeError`` lives in a private impl module
+    but should be importable from the package root so monitoring code
+    doesn't have to couple to the internal path."""
+    from common.llm.providers import ProviderResponseShapeError as Public
+    from common.llm.providers._shape_error import ProviderResponseShapeError as Private
+
+    assert Public is Private
 
 
 @pytest.mark.unit

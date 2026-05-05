@@ -28,6 +28,7 @@ from common.llm.constants import (
     OPENAI_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
     OPENAI_REQUEST_TIMEOUT_SECONDS,
 )
+from common.llm.providers._shape_error import ProviderResponseShapeError
 
 logger = logging.getLogger(__name__)
 
@@ -38,14 +39,9 @@ logger = logging.getLogger(__name__)
 # OpenAI-compatible endpoints), so a list (or other non-dict) can
 # leak through and cause downstream ``.get(...)`` to raise bare
 # AttributeError.
-class OpenAIResponseShapeError(ValueError):
+class OpenAIResponseShapeError(ProviderResponseShapeError):
     def __init__(self, content: str, parsed_type: str) -> None:
-        self.content = content[:1024]
-        self.parsed_type = parsed_type
-        super().__init__(
-            f"OpenAI returned a JSON {parsed_type} where a dict was expected. "
-            f"Truncated response content: {self.content!r}"
-        )
+        super().__init__("OpenAI", content, parsed_type)
 
 
 class OpenAILLMProvider:

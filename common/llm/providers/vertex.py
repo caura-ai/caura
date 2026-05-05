@@ -16,31 +16,22 @@ import json
 import logging
 import time
 
+from common.llm.providers._shape_error import ProviderResponseShapeError
+
 logger = logging.getLogger(__name__)
 
 
-# CAURA-651: Gemini occasionally returns a JSON array at the top level
-# even with ``response_mime_type="application/json"`` set — typically
-# on prompts that ask for "a list of" something where the model
-# misinterprets the schema. Downstream consumers expect a dict and
-# call ``.get(...)``, raising bare ``AttributeError: 'list' object
+# CAURA-651: Gemini (via Vertex) occasionally returns a JSON array at
+# the top level even with ``response_mime_type="application/json"`` set
+# — typically on prompts that ask for "a list of" something where the
+# model misinterprets the schema. Downstream consumers expect a dict
+# and call ``.get(...)``, raising bare ``AttributeError: 'list' object
 # has no attribute 'get'`` and silently falling through to the FakeLLM
 # fallback. Surface this as a typed error with the actual response
 # captured so log-based forensics can identify the schema-miss class.
-class VertexResponseShapeError(ValueError):
+class VertexResponseShapeError(ProviderResponseShapeError):
     def __init__(self, content: str, parsed_type: str) -> None:
-        # Cap captured content at 1 KiB so a megabyte-scale aberrant
-        # response doesn't bloat the log line. The first 1 KiB is more
-        # than enough to identify the schema-miss class. Stored as
-        # instance attributes (json.JSONDecodeError convention) so
-        # monitoring code can read structured fields without parsing
-        # the message string.
-        self.content = content[:1024]
-        self.parsed_type = parsed_type
-        super().__init__(
-            f"Vertex returned a JSON {parsed_type} where a dict was expected. "
-            f"Truncated response content: {self.content!r}"
-        )
+        super().__init__("Vertex", content, parsed_type)
 
 
 class VertexLLMProvider:
@@ -94,7 +85,9 @@ class VertexLLMProvider:
         parsed = json.loads(response.text)
         if not isinstance(parsed, dict):
             # CAURA-651: see ``VertexResponseShapeError`` above.
-            raise VertexResponseShapeError(response.text or "", type(parsed).__name__)
+            # ``json.loads`` succeeded on ``response.text`` already,
+            # so it is guaranteed non-empty here — no ``or ""`` guard.
+            raise VertexResponseShapeError(response.text, type(parsed).__name__)
         return parsed
 
     def _complete_text_sync(

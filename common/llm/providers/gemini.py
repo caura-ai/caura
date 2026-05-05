@@ -16,6 +16,7 @@ import json
 import logging
 import time
 
+from common.llm.providers._shape_error import ProviderResponseShapeError
 from common.provider_names import ProviderName
 
 logger = logging.getLogger(__name__)
@@ -25,14 +26,9 @@ logger = logging.getLogger(__name__)
 # ``response_mime_type='application/json'`` doesn't fully constrain
 # the top-level shape, so a list (or other non-dict) can leak through
 # and cause downstream ``.get(...)`` to raise bare AttributeError.
-class GeminiResponseShapeError(ValueError):
+class GeminiResponseShapeError(ProviderResponseShapeError):
     def __init__(self, content: str, parsed_type: str) -> None:
-        self.content = content[:1024]
-        self.parsed_type = parsed_type
-        super().__init__(
-            f"Gemini returned a JSON {parsed_type} where a dict was expected. "
-            f"Truncated response content: {self.content!r}"
-        )
+        super().__init__("Gemini", content, parsed_type)
 
 
 class GeminiLLMProvider:
