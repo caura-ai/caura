@@ -147,41 +147,26 @@ class TestInitPlatformProviders:
         assert get_platform_embedding() is None
         assert "Unknown PLATFORM_EMBEDDING_PROVIDER" in caplog.text
 
-    def test_vertex_embedding_uses_own_gcp_config(self, monkeypatch):
+    def test_vertex_embedding_is_rejected(self, monkeypatch, caplog):
+        """CAURA-333: Vertex embeddings were removed. The provider key must
+        no longer build a singleton, and the operator must see a warning —
+        but the result must NOT add to _platform_init_errors, since that
+        flips /status to health="degraded" and blocks blue-green gates for
+        operators whose stale env still says vertex."""
         monkeypatch.setenv("PLATFORM_EMBEDDING_PROVIDER", "vertex")
-        monkeypatch.setenv("PLATFORM_EMBEDDING_GCP_PROJECT_ID", "emb-proj")
-        monkeypatch.setenv("PLATFORM_EMBEDDING_GCP_LOCATION", "europe-west1")
-        monkeypatch.setenv("PLATFORM_LLM_GCP_PROJECT_ID", "llm-proj")
+        monkeypatch.setenv("PLATFORM_LLM_GCP_PROJECT_ID", "any-proj")
         self._reinit_settings(monkeypatch)
 
+        from common.embedding._platform import get_platform_init_errors
         from core_api.providers._platform import (
             get_platform_embedding,
             init_platform_providers,
         )
-        from common.embedding.providers.vertex import VertexEmbeddingProvider
 
         init_platform_providers()
-        emb = get_platform_embedding()
-        assert isinstance(emb, VertexEmbeddingProvider)
-        assert emb._project_id == "emb-proj"
-
-    def test_vertex_embedding_falls_back_to_llm_gcp_config(self, monkeypatch):
-        monkeypatch.setenv("PLATFORM_EMBEDDING_PROVIDER", "vertex")
-        monkeypatch.setenv("PLATFORM_EMBEDDING_GCP_PROJECT_ID", "")
-        monkeypatch.setenv("PLATFORM_LLM_GCP_PROJECT_ID", "shared-proj")
-        monkeypatch.setenv("PLATFORM_LLM_GCP_LOCATION", "us-east1")
-        self._reinit_settings(monkeypatch)
-
-        from core_api.providers._platform import (
-            get_platform_embedding,
-            init_platform_providers,
-        )
-        from common.embedding.providers.vertex import VertexEmbeddingProvider
-
-        init_platform_providers()
-        emb = get_platform_embedding()
-        assert isinstance(emb, VertexEmbeddingProvider)
-        assert emb._project_id == "shared-proj"
+        assert get_platform_embedding() is None
+        assert "no longer supported" in caplog.text
+        assert get_platform_init_errors() == []
 
     def test_init_openai_llm(self, monkeypatch):
         monkeypatch.setenv("PLATFORM_LLM_PROVIDER", "openai")

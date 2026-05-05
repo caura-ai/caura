@@ -24,9 +24,6 @@ import os
 OPENAI_EMBEDDING_MODEL: str = os.environ.get(
     "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
 )
-VERTEX_EMBEDDING_MODEL: str = os.environ.get(
-    "VERTEX_EMBEDDING_MODEL", "text-embedding-005"
-)
 
 # Per-call OpenAI timeout. Caps a single embed/embed_batch round trip
 # (TLS handshake + request + retry-with-backoff inside the SDK). Same

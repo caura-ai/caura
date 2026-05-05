@@ -36,7 +36,6 @@ from core_api.providers import (
     get_storage_backend,
 )
 from common.embedding.providers.openai import OpenAIEmbeddingProvider
-from common.embedding.providers.vertex import VertexEmbeddingProvider
 from core_api.providers._retry import call_with_fallback, call_with_retry
 from core_api.providers.fake_provider import FakeLLMProvider
 from core_api.providers.openai_provider import OpenAILLMProvider
@@ -70,10 +69,6 @@ class TestProtocolConformance:
             project_id="proj", location="us-central1", model="gemini-2.0-flash"
         )
         assert isinstance(p, LLMProvider)
-
-    def test_vertex_embedding_satisfies_protocol(self):
-        p = VertexEmbeddingProvider(project_id="proj", location="us-central1")
-        assert isinstance(p, EmbeddingProvider)
 
 
 # ---------------------------------------------------------------------------

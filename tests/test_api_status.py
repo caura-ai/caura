@@ -113,8 +113,8 @@ async def test_status_provider_fields_when_configured(client, monkeypatch):
         model = "gpt-4o-mini"
 
     class _StubEmbedding:
-        provider_name = "vertex"
-        model = "text-embedding-004"
+        provider_name = "openai"
+        model = "text-embedding-3-small"
 
     # Patch the symbols at the location where /status looks them up
     # (core_api.routes.health imports `get_platform_llm` /
@@ -135,8 +135,8 @@ async def test_status_provider_fields_when_configured(client, monkeypatch):
     assert data["llm"]["model"] == "gpt-4o-mini"
     assert data["llm"]["configured"] is True
 
-    assert data["embedding"]["provider"] == "vertex"
-    assert data["embedding"]["model"] == "text-embedding-004"
+    assert data["embedding"]["provider"] == "openai"
+    assert data["embedding"]["model"] == "text-embedding-3-small"
     assert data["embedding"]["configured"] is True
 
 

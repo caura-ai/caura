@@ -18,10 +18,9 @@ from __future__ import annotations
 import logging
 import os
 
-from common.embedding.constants import OPENAI_EMBEDDING_MODEL, VERTEX_EMBEDDING_MODEL
+from common.embedding.constants import OPENAI_EMBEDDING_MODEL
 from common.embedding.protocols import EmbeddingProvider
 from common.embedding.providers.openai import OpenAIEmbeddingProvider
-from common.embedding.providers.vertex import VertexEmbeddingProvider
 from common.provider_names import ProviderName
 
 logger = logging.getLogger(__name__)
@@ -68,38 +67,20 @@ def init_platform_embedding() -> None:
         return
 
     if provider == ProviderName.VERTEX:
-        # Allow falling back to PLATFORM_LLM_GCP_* for project + location.
-        project_id = os.environ.get(
-            "PLATFORM_EMBEDDING_GCP_PROJECT_ID"
-        ) or os.environ.get("PLATFORM_LLM_GCP_PROJECT_ID", "")
-        if not project_id:
-            logger.warning(
-                "PLATFORM_EMBEDDING_PROVIDER=vertex but no "
-                "PLATFORM_EMBEDDING_GCP_PROJECT_ID or PLATFORM_LLM_GCP_PROJECT_ID"
-            )
-            _platform_init_errors.append("vertex-embedding-config")
-            return
-        try:
-            location = (
-                os.environ.get("PLATFORM_EMBEDDING_GCP_LOCATION")
-                or os.environ.get("PLATFORM_LLM_GCP_LOCATION")
-                or "us-central1"
-            )
-            embed_model = (
-                os.environ.get("PLATFORM_EMBEDDING_MODEL") or VERTEX_EMBEDDING_MODEL
-            )
-            _platform_embedding = VertexEmbeddingProvider(
-                project_id=project_id, location=location, model=embed_model
-            )
-            logger.info(
-                "Platform embedding: vertex/%s (%s/%s)",
-                embed_model,
-                project_id,
-                location,
-            )
-        except Exception:
-            logger.exception("Failed to initialize platform Vertex embedding provider")
-            _platform_init_errors.append("vertex-embedding")
+        # Vertex embeddings were removed (CAURA-333): the SDK call never passed
+        # ``output_dimensionality`` so every write 4xx'd against pgvector's
+        # 1024-dim column. OSS users wanting non-OpenAI embeddings can implement
+        # their own ``EmbeddingProvider`` subclass at their own risk; the schema
+        # constraint (``VECTOR(VECTOR_DIM)``) still applies.
+        # NOT appended to _platform_init_errors: that list surfaces as
+        # health="degraded" on /status, and we don't want to block blue-green
+        # health gates for operators whose stale env still says vertex. The
+        # warning log + None singleton (== unconfigured) is the safe outcome.
+        logger.warning(
+            "PLATFORM_EMBEDDING_PROVIDER=vertex is no longer supported. "
+            "Use PLATFORM_EMBEDDING_PROVIDER=openai, or supply your own "
+            "EmbeddingProvider implementation."
+        )
         return
 
     logger.warning(

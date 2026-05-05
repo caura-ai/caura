@@ -276,15 +276,9 @@ class Settings(BaseSettings):
     platform_llm_api_key: SecretStr = SecretStr("")  # OpenAI LLM: API key
     platform_llm_gcp_project_id: str = ""  # Vertex: GCP project
     platform_llm_gcp_location: str = ""  # Vertex: region
-    platform_embedding_provider: str = ""  # "openai" | "vertex" | "" (disabled)
+    platform_embedding_provider: str = ""  # "openai" | "" (disabled)
     platform_embedding_api_key: SecretStr = SecretStr("")  # OpenAI: API key for embeddings
     platform_embedding_model: str = ""  # e.g. "text-embedding-3-small"
-    platform_embedding_gcp_project_id: str = (
-        ""  # Vertex embedding: GCP project (falls back to platform_llm_gcp_project_id)
-    )
-    platform_embedding_gcp_location: str = (
-        ""  # Vertex embedding: region (falls back to platform_llm_gcp_location)
-    )
 
     # Security audit — scheduler + threshold alerts. Enterprise-only feature;
     # OSS standalone deployments can leave these at defaults (all off).
@@ -415,9 +409,9 @@ class Settings(BaseSettings):
         """
         if self.embedding_provider == "vertex":
             logger.warning(
-                "EMBEDDING_PROVIDER=vertex is no longer supported as a tenant-facing "
-                "provider. Remapping to 'openai'. Configure platform-tier Vertex via "
-                "PLATFORM_EMBEDDING_PROVIDER instead."
+                "EMBEDDING_PROVIDER=vertex is no longer supported (CAURA-333: "
+                "Vertex embeddings never passed output_dimensionality and were "
+                "rejected by pgvector's 1024-dim column). Remapping to 'openai'."
             )
             object.__setattr__(self, "embedding_provider", "openai")
             # A user coming from Vertex likely has no OPENAI_API_KEY — without a
@@ -429,7 +423,7 @@ class Settings(BaseSettings):
                     "OPENAI_API_KEY is unset and PLATFORM_EMBEDDING_PROVIDER is not "
                     "configured. Semantic search will use FakeEmbeddingProvider and "
                     "produce zero-vectors. Set OPENAI_API_KEY or configure "
-                    "PLATFORM_EMBEDDING_PROVIDER to restore embeddings."
+                    "PLATFORM_EMBEDDING_PROVIDER=openai to restore embeddings."
                 )
         if self.entity_extraction_provider == "vertex":
             logger.warning(

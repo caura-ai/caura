@@ -60,7 +60,6 @@ def is_mcp_path(path: str) -> bool:
 # ── Version ──
 # core-api/src/core_api/constants.py → repo root (4 levels up)
 VERSION = (Path(__file__).resolve().parent.parent.parent.parent / "VERSION").read_text().strip()
-VERTEX_EMBEDDING_MODEL = os.environ.get("VERTEX_EMBEDDING_MODEL", "text-embedding-005")
 OPENAI_EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDING_RETRY_ATTEMPTS = 2
 EMBEDDING_RETRY_DELAY_S = 1.0

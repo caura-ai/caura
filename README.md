@@ -711,11 +711,9 @@ All configuration is via environment variables or `.env`. See `.env.example` for
 | `PLATFORM_LLM_API_KEY` | — | OpenAI API key for the platform LLM singleton |
 | `PLATFORM_LLM_GCP_PROJECT_ID` | — | GCP project for platform Vertex LLM |
 | `PLATFORM_LLM_GCP_LOCATION` | `us-central1` | GCP region for platform Vertex LLM |
-| `PLATFORM_EMBEDDING_PROVIDER` | *(empty)* | Platform-default embeddings: `openai`, `vertex`, or empty to disable |
+| `PLATFORM_EMBEDDING_PROVIDER` | *(empty)* | Platform-default embeddings: `openai` or empty to disable |
 | `PLATFORM_EMBEDDING_MODEL` | *(empty)* | Embedding model override (e.g. `text-embedding-3-small`) |
 | `PLATFORM_EMBEDDING_API_KEY` | — | OpenAI API key for platform embeddings |
-| `PLATFORM_EMBEDDING_GCP_PROJECT_ID` | — | Falls back to `PLATFORM_LLM_GCP_PROJECT_ID` |
-| `PLATFORM_EMBEDDING_GCP_LOCATION` | — | Falls back to `PLATFORM_LLM_GCP_LOCATION` |
 
 </details>
 

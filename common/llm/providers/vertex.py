@@ -4,9 +4,9 @@ Wraps the Google Cloud Vertex AI SDK. Since the SDK is synchronous,
 all calls are wrapped in ``asyncio.to_thread()`` to avoid blocking
 the event loop.
 
-CAURA-594: ``VertexEmbeddingProvider`` moved to
-``common.embedding.providers.vertex`` so that ``core-worker`` can
-import it without depending on ``core-api``.
+CAURA-333: ``VertexEmbeddingProvider`` was removed (broken — never passed
+``output_dimensionality`` to the SDK, so writes failed against pgvector's
+1024-dim column). Only the LLM-side provider remains.
 """
 
 from __future__ import annotations
