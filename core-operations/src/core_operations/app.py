@@ -30,6 +30,8 @@ from core_operations.scheduler import scheduler
 from core_operations.tasks import (
     run_archive_expired_tick,
     run_archive_stale_tick,
+    run_crystallize_tick,
+    run_entity_link_tick,
     run_purge_soft_deleted_tick,
 )
 
@@ -54,6 +56,16 @@ def _register_scheduled_tasks() -> None:
         "lifecycle-purge-soft-deleted",
         settings.lifecycle_purge_interval_seconds,
         run_purge_soft_deleted_tick,
+    )
+    scheduler.register(
+        "lifecycle-crystallize",
+        settings.lifecycle_pipeline_interval_seconds,
+        run_crystallize_tick,
+    )
+    scheduler.register(
+        "lifecycle-entity-link",
+        settings.lifecycle_pipeline_interval_seconds,
+        run_entity_link_tick,
     )
 
 

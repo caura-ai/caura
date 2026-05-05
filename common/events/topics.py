@@ -42,6 +42,12 @@ class Lifecycle(enum.StrEnum):
     ARCHIVE_EXPIRED_REQUESTED = "memclaw.lifecycle.archive-expired-requested"
     ARCHIVE_STALE_REQUESTED = "memclaw.lifecycle.archive-stale-requested"
     PURGE_SOFT_DELETED_REQUESTED = "memclaw.lifecycle.purge-soft-deleted-requested"
+    # CAURA-657: pipeline ops. Subscriber is core-api (NOT core-worker)
+    # because the consumer needs core-api's pipeline machinery —
+    # ``run_crystallization`` and ``build_full_entity_linking_pipeline``
+    # both live there and have transitive deps the worker doesn't carry.
+    CRYSTALLIZE_REQUESTED = "memclaw.lifecycle.crystallize-requested"
+    ENTITY_LINK_REQUESTED = "memclaw.lifecycle.entity-link-requested"
 
 
 class Topics:

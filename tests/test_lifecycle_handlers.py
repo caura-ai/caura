@@ -1,10 +1,11 @@
-"""Unit tests for the shared lifecycle action consumers (CAURA-655 + CAURA-656).
+"""Unit tests for the shared lifecycle action consumers (CAURA-655 +
+CAURA-656 + CAURA-657).
 
 The handlers live in ``common/events/lifecycle_handlers.py`` so both
-core-api (OSS standalone) and core-worker (SaaS) register the same
-code. These tests exercise the full success/failure paths against an
-in-memory fake adapter — the real adapters are thin httpx wrappers
-covered by integration tests elsewhere.
+core-api (always, for pipeline ops) and core-worker (SaaS, for
+archive ops) register the same code. These tests exercise the full
+success / failure / dedup paths against an in-memory fake adapter —
+the real adapters are thin wrappers covered by integration tests.
 """
 
 from __future__ import annotations
@@ -27,14 +28,23 @@ class _FakeAdapter:
         expired_count: int = 7,
         stale_count: int = 4,
         purged_count: int = 5,
+        crystallized_count: int = 1,
+        entity_linked_count: int = 12,
         raise_on_op: Exception | None = None,
+        has_recent_success: bool = False,
+        raise_on_dedup_check: Exception | None = None,
     ):
         self.expired_count = expired_count
         self.stale_count = stale_count
         self.purged_count = purged_count
+        self.crystallized_count = crystallized_count
+        self.entity_linked_count = entity_linked_count
         self.raise_on_op = raise_on_op
+        self.has_recent_success_value = has_recent_success
+        self.raise_on_dedup_check = raise_on_dedup_check
         self.archive_calls: list[tuple[str, str, str | None, int | None]] = []
         self.audit_calls: list[tuple[int, str, dict | None, str | None]] = []
+        self.dedup_calls: list[tuple[str, str, int]] = []
 
     async def archive_expired(self, *, org_id: str, fleet_id: str | None) -> int:
         self.archive_calls.append(("expired", org_id, fleet_id, None))
@@ -55,6 +65,26 @@ class _FakeAdapter:
         if self.raise_on_op is not None:
             raise self.raise_on_op
         return self.purged_count
+
+    async def crystallize(self, *, org_id: str, fleet_id: str | None) -> int:
+        self.archive_calls.append(("crystallize", org_id, fleet_id, None))
+        if self.raise_on_op is not None:
+            raise self.raise_on_op
+        return self.crystallized_count
+
+    async def entity_link(self, *, org_id: str, fleet_id: str | None) -> int:
+        self.archive_calls.append(("entity-link", org_id, fleet_id, None))
+        if self.raise_on_op is not None:
+            raise self.raise_on_op
+        return self.entity_linked_count
+
+    async def has_recent_lifecycle_success(
+        self, *, org_id: str, action: str, since_hours: int
+    ) -> bool:
+        self.dedup_calls.append((org_id, action, since_hours))
+        if self.raise_on_dedup_check is not None:
+            raise self.raise_on_dedup_check
+        return self.has_recent_success_value
 
     async def update_lifecycle_audit_row(
         self,
@@ -103,11 +133,11 @@ def _purge_event(
     )
 
 
-def _bind(adapter: _FakeAdapter, *, action: str):
-    """Mirror what ``register_consumers`` does at app startup — bind
-    the adapter and the per-action archive callable into the dispatch
-    via :func:`functools.partial`. Single helper so adding a new
-    action only requires extending the lookup table.
+def _bind(adapter: _FakeAdapter, *, action: str, dedup_window_hours: int | None = None):
+    """Mirror what ``register_*_consumers`` do at app startup — bind
+    the adapter and the per-action callable into the dispatch via
+    :func:`functools.partial`. Pipeline ops set ``dedup_window_hours``
+    so the handler exercises the gate.
     """
     if action == "archive-expired":
 
@@ -136,6 +166,20 @@ def _bind(adapter: _FakeAdapter, *, action: str):
 
         payload_cls = LifecyclePurgeRequest
         stats_key = "deleted"
+    elif action == "crystallize":
+
+        async def _op(req: LifecycleArchiveRequest) -> int:
+            return await adapter.crystallize(org_id=req.org_id, fleet_id=req.fleet_id)
+
+        payload_cls = LifecycleArchiveRequest
+        stats_key = "links_or_clusters"
+    elif action == "entity-link":
+
+        async def _op(req: LifecycleArchiveRequest) -> int:
+            return await adapter.entity_link(org_id=req.org_id, fleet_id=req.fleet_id)
+
+        payload_cls = LifecycleArchiveRequest
+        stats_key = "links_created"
     else:
         raise ValueError(f"unknown action {action!r}")
 
@@ -146,6 +190,7 @@ def _bind(adapter: _FakeAdapter, *, action: str):
         run_op=_op,
         stats_key=stats_key,
         action=action,
+        dedup_window_hours=dedup_window_hours,
     )
 
 
@@ -277,3 +322,77 @@ async def test_malformed_purge_payload_is_acked_dropped():
     await handler(out_of_range)
     assert adapter.archive_calls == []
     assert adapter.audit_calls == []
+
+
+# ── CAURA-657: pipeline ops + dedup gate ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_crystallize_runs_when_no_recent_success():
+    adapter = _FakeAdapter(crystallized_count=1, has_recent_success=False)
+    handler = _bind(adapter, action="crystallize", dedup_window_hours=23)
+    await handler(_archive_event(Topics.Lifecycle.CRYSTALLIZE_REQUESTED))
+    assert adapter.dedup_calls == [("tenant-x", "crystallize", 23)]
+    assert adapter.archive_calls == [("crystallize", "tenant-x", None, None)]
+    statuses = [c[1] for c in adapter.audit_calls]
+    assert statuses == ["in_progress", "success"]
+    assert adapter.audit_calls[-1][2] == {"links_or_clusters": 1}
+
+
+@pytest.mark.asyncio
+async def test_entity_link_runs_when_no_recent_success():
+    adapter = _FakeAdapter(entity_linked_count=42)
+    handler = _bind(adapter, action="entity-link", dedup_window_hours=23)
+    await handler(_archive_event(Topics.Lifecycle.ENTITY_LINK_REQUESTED))
+    assert adapter.archive_calls == [("entity-link", "tenant-x", None, None)]
+    assert adapter.audit_calls[-1][2] == {"links_created": 42}
+
+
+@pytest.mark.asyncio
+async def test_pipeline_dedup_gate_skips_when_recent_success_exists():
+    """Dedup gate: when has_recent_lifecycle_success returns True, the
+    handler must NOT call the primitive and must mark the audit row
+    success with stats={skipped: True}.
+    """
+    adapter = _FakeAdapter(has_recent_success=True)
+    handler = _bind(adapter, action="crystallize", dedup_window_hours=23)
+    await handler(_archive_event(Topics.Lifecycle.CRYSTALLIZE_REQUESTED))
+    # Primitive never invoked.
+    assert adapter.archive_calls == []
+    # Audit row marked success with skipped flag — no in_progress
+    # flicker (gate runs before in_progress).
+    assert len(adapter.audit_calls) == 1
+    audit_id, status, stats, error = adapter.audit_calls[0]
+    assert status == "success"
+    assert stats == {"skipped": True, "reason": "recent_success"}
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_dedup_check_failure_falls_through_to_run_op():
+    """If the dedup gate itself fails (storage flake), proceed with
+    the op — better to run twice than skip a legitimate request
+    because the gate endpoint flaked.
+    """
+    adapter = _FakeAdapter(
+        crystallized_count=3,
+        raise_on_dedup_check=RuntimeError("storage 503"),
+    )
+    handler = _bind(adapter, action="crystallize", dedup_window_hours=23)
+    await handler(_archive_event(Topics.Lifecycle.CRYSTALLIZE_REQUESTED))
+    # Primitive ran despite the gate failure.
+    assert adapter.archive_calls == [("crystallize", "tenant-x", None, None)]
+    statuses = [c[1] for c in adapter.audit_calls]
+    assert statuses == ["in_progress", "success"]
+
+
+@pytest.mark.asyncio
+async def test_archive_op_does_not_invoke_dedup_gate():
+    """Archive ops are naturally idempotent (SQL primitive returns 0
+    if there's nothing to do); skipping the dedup gate avoids a
+    pointless storage round-trip on every redelivery.
+    """
+    adapter = _FakeAdapter(expired_count=11)
+    handler = _bind(adapter, action="archive-expired")  # no dedup_window
+    await handler(_archive_event(Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED))
+    assert adapter.dedup_calls == []

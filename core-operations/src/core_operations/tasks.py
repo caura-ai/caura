@@ -83,3 +83,19 @@ async def run_purge_soft_deleted_tick() -> None:
     core-operations stays oblivious of org concepts.
     """
     await _fire_fanout("purge-soft-deleted")
+
+
+async def run_crystallize_tick() -> None:
+    """CAURA-657: trigger crystallization per active org. Consumer
+    side runs in core-api (pipeline machinery isn't reachable from
+    core-worker); a 23-hour dedup gate inside the consumer skips orgs
+    that succeeded within the window.
+    """
+    await _fire_fanout("crystallize")
+
+
+async def run_entity_link_tick() -> None:
+    """CAURA-657: trigger entity-link discovery per active org. Same
+    consumer-side dedup window as crystallize.
+    """
+    await _fire_fanout("entity-link")

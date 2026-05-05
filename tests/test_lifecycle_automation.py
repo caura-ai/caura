@@ -49,23 +49,17 @@ class TestLifecycleTenantSettings:
 
 
 @pytest.mark.unit
-class TestLifecycleServiceImports:
-    def test_module_importable(self):
-        from core_api.services import lifecycle_service  # noqa: F401
-
-    def test_has_run_for_tenant(self):
-        from core_api.services.lifecycle_service import run_lifecycle_for_tenant
-
-        assert callable(run_lifecycle_for_tenant)
-
-    def test_scheduler_is_gone(self):
-        # Guard against the loop sneaking back in. The
-        # core-operations service owns the cron now; resurrecting the
-        # in-process loop here would re-create the double-scheduling
-        # situation CAURA-655 set out to remove.
-        from core_api.services import lifecycle_service
-
-        assert not hasattr(lifecycle_service, "lifecycle_scheduler")
+class TestLifecycleServiceRetired:
+    def test_module_is_gone(self):
+        # CAURA-657: ``lifecycle_service.run_lifecycle_for_tenant``
+        # was the in-process daily-cron entry point for crystallize +
+        # entity-link. Both moved to Pub/Sub topics consumed in
+        # core-api itself; the service module is dead. Guard against
+        # the module being resurrected — its existence implies the
+        # in-process loop is back, double-scheduling alongside the
+        # Pub/Sub consumer.
+        with pytest.raises(ImportError):
+            import core_api.services.lifecycle_service  # noqa: F401
 
 
 @pytest.mark.unit
@@ -84,6 +78,14 @@ class TestLifecycleTopics:
         assert (
             Topics.Lifecycle.PURGE_SOFT_DELETED_REQUESTED
             == "memclaw.lifecycle.purge-soft-deleted-requested"
+        )
+        assert (
+            Topics.Lifecycle.CRYSTALLIZE_REQUESTED
+            == "memclaw.lifecycle.crystallize-requested"
+        )
+        assert (
+            Topics.Lifecycle.ENTITY_LINK_REQUESTED
+            == "memclaw.lifecycle.entity-link-requested"
         )
 
     def test_topic_strenum_format(self):

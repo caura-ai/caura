@@ -42,6 +42,27 @@ async def create_lifecycle_audit(request: Request) -> dict:
     return {"audit_id": audit_id}
 
 
+@router.get("/has-recent-success")
+async def has_recent_success(org_id: str, action: str, since_hours: int) -> dict:
+    """Dedup gate for CAURA-657 pipeline ops. Returns whether the
+    given org+action has a successful audit row within
+    ``since_hours``; the consumer skips its run when this is True.
+
+    Range-checks ``since_hours`` to keep the SQL interval bounded — an
+    operator passing 0 would short-circuit every check (always False),
+    and a runaway negative value would scan effectively all rows.
+    """
+    if since_hours < 1 or since_hours > 168:
+        raise HTTPException(
+            status_code=422,
+            detail="'since_hours' must be in [1, 168] (hours)",
+        )
+    found = await _svc.lifecycle_audit_has_recent_success(
+        org_id=org_id, action=action, since_hours=since_hours
+    )
+    return {"has_recent_success": found}
+
+
 @router.patch("/{audit_id}")
 async def update_lifecycle_audit(audit_id: int, request: Request) -> dict:
     """Update status (+ optional stats / error_message). Body:

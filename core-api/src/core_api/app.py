@@ -378,21 +378,25 @@ async def lifespan(app):
 
         event_bus = get_event_bus()
 
-        # CAURA-655: lifecycle archive consumers run in core-worker on
-        # SaaS, but in OSS standalone there is no separate worker
-        # process — the in-process bus dispatches to whoever subscribes
-        # in this same Python process. Register here only when the
-        # backend is in-process so SaaS doesn't end up with both
-        # core-api AND core-worker running each archive twice.
+        # Lifecycle Pub/Sub consumers split into two groups by where
+        # they need to run:
+        #   * Archive + purge (CAURA-655 / -656) — SQL-only. Subscribed
+        #     by core-worker on SaaS; only registered here in OSS
+        #     standalone where there's no separate worker process.
+        #   * Crystallize + entity-link (CAURA-657) — pipeline-machinery
+        #     consumers. ALWAYS registered here because the pipeline
+        #     code lives in core-api and isn't reachable from worker.
         from common.events.inprocess import InProcessEventBus
+        from common.events.lifecycle_handlers import (
+            register_archive_consumers,
+            register_pipeline_consumers,
+        )
+        from core_api.services.lifecycle_audit import make_storage_adapter
 
+        lifecycle_adapter = make_storage_adapter(get_storage_client())
+        register_pipeline_consumers(lifecycle_adapter)
         if isinstance(event_bus, InProcessEventBus):
-            from common.events.lifecycle_handlers import (
-                register_consumers as register_lifecycle_consumers,
-            )
-            from core_api.services.lifecycle_audit import make_storage_adapter
-
-            register_lifecycle_consumers(make_storage_adapter(get_storage_client()))
+            register_archive_consumers(lifecycle_adapter)
 
         await event_bus.start()
 

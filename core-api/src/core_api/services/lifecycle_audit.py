@@ -17,10 +17,20 @@ Three helpers:
 
 from __future__ import annotations
 
-from common.events.lifecycle_handlers import LifecycleStorageAdapter
+import logging
+
 from core_api.clients.storage_client import CoreStorageClient
 from core_api.constants import LIFECYCLE_STALE_ARCHIVE_WEIGHT
 from core_api.services.organization_settings import resolve_config
+
+# Org needs at least this many active memories before lifecycle
+# crystallization runs — below that the corpus is too small for the
+# auto-curate step to produce useful clusters, and the report row +
+# hygiene checks would be wasted compute. Matches the threshold in
+# the deleted core_api.services.lifecycle_service.
+_CRYSTALLIZE_MIN_ACTIVE_MEMORIES = 1000
+
+logger = logging.getLogger(__name__)
 
 
 async def audit_begin(
@@ -55,6 +65,75 @@ class _CoreApiLifecycleAdapter:
     async def purge_soft_deleted(self, *, org_id: str, fleet_id: str | None, retention_days: int) -> int:
         return await self._storage.purge_soft_deleted(org_id, fleet_id, retention_days=retention_days)
 
+    async def crystallize(self, *, org_id: str, fleet_id: str | None) -> int:
+        """CAURA-657: trigger crystallization for one org.
+
+        Returns 1 for "ran and produced a report", 0 for any of the
+        skip paths: org has ``auto_crystallize_enabled=False``, or
+        active-memory count is below the auto-curate threshold. The
+        actual crystallization metrics live on the report row whose
+        UUID ``run_crystallization`` returns.
+
+        Honors the same gates the deleted ``lifecycle_service`` had —
+        the flag and the count threshold — so disabled orgs and
+        small corpora don't pay for the report row plus the
+        hygiene/health checks that ``run_crystallization`` runs even
+        when its own ``auto_crystallize`` parameter is False.
+        """
+        config = await resolve_config(None, org_id)
+        if not config.auto_crystallize_enabled:
+            return 0
+        active = await self._storage.count_active(org_id, fleet_id)
+        if active <= _CRYSTALLIZE_MIN_ACTIVE_MEMORIES:
+            return 0
+        # Lazy import: the crystallizer service has heavy transitive
+        # deps (LLM clients, pipeline steps) we don't want loading at
+        # core-api startup just for the lifecycle adapter wiring.
+        from core_api.services.crystallizer_service import run_crystallization
+
+        report_id = await run_crystallization(None, org_id, fleet_id, trigger="lifecycle")
+        return 1 if report_id is not None else 0
+
+    async def entity_link(self, *, org_id: str, fleet_id: str | None) -> int:
+        """CAURA-657: run the entity-linking pipeline for one org.
+
+        Returns ``links_created`` from the pipeline context — directly
+        usable as the audit row's ``stats.links_created`` count.
+        Falls back to 0 if the pipeline failed mid-run; the row will
+        be marked failure by the caller, not success.
+
+        Honors ``auto_entity_linking_enabled`` — orgs with the flag
+        off return 0 without running the LLM pipeline.
+        """
+        config = await resolve_config(None, org_id)
+        if not config.auto_entity_linking_enabled:
+            return 0
+        # Lazy imports — same rationale as crystallize above.
+        from core_api.db.session import async_session
+        from core_api.pipeline.compositions.entity_linking import (
+            build_full_entity_linking_pipeline,
+        )
+        from core_api.pipeline.context import PipelineContext
+
+        async with async_session() as db:
+            ctx = PipelineContext(
+                db=db,
+                data={
+                    "tenant_id": org_id,
+                    **({"fleet_id": fleet_id} if fleet_id else {}),
+                },
+            )
+            pipeline = build_full_entity_linking_pipeline()
+            await pipeline.run(ctx)
+            await db.commit()
+            links_created = ctx.data.get("links_created", 0)
+        return int(links_created)
+
+    async def has_recent_lifecycle_success(self, *, org_id: str, action: str, since_hours: int) -> bool:
+        return await self._storage.has_recent_lifecycle_success(
+            org_id=org_id, action=action, since_hours=since_hours
+        )
+
     async def update_lifecycle_audit_row(
         self,
         audit_id: int,
@@ -68,7 +147,14 @@ class _CoreApiLifecycleAdapter:
         )
 
 
-def make_storage_adapter(storage: CoreStorageClient) -> LifecycleStorageAdapter:
+def make_storage_adapter(storage: CoreStorageClient) -> _CoreApiLifecycleAdapter:
+    """One adapter, both protocols. core-api needs the union of
+    archive + pipeline methods because in OSS standalone it subscribes
+    to both groups; in SaaS it only subscribes to the pipeline group
+    but the archive methods stay implemented and unused (they're
+    cheap and let the same adapter wire either consumer set without a
+    second factory).
+    """
     return _CoreApiLifecycleAdapter(storage)
 
 

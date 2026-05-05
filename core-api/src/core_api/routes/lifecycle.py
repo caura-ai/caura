@@ -27,6 +27,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from common.events import (
     publish_archive_expired_request,
     publish_archive_stale_request,
+    publish_crystallize_request,
+    publish_entity_link_request,
     publish_purge_soft_deleted_request,
 )
 from common.events.lifecycle_purge_request import (
@@ -39,7 +41,7 @@ from core_api.db.session import async_session
 from core_api.services.lifecycle_audit import audit_begin, resolve_publisher_kwargs
 from core_api.services.tenants import (
     list_active_tenant_ids,
-    list_tenants_with_any_memory,
+    list_tenants_with_purgeable_memories,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,9 @@ _ACTION_PUBLISHERS: dict[str, _PublisherFn] = {
     "archive-expired": publish_archive_expired_request,
     "archive-stale": publish_archive_stale_request,
     "purge-soft-deleted": publish_purge_soft_deleted_request,
+    # CAURA-657: pipeline ops — consumer is core-api itself.
+    "crystallize": publish_crystallize_request,
+    "entity-link": publish_entity_link_request,
 }
 
 # Cap on concurrent per-org ``audit_begin + publish`` pairs in the
@@ -65,13 +70,15 @@ _FANOUT_CONCURRENCY = 50
 
 async def _list_tenants_for_action(action: str, db) -> list[str]:
     """Discovery query for the fanout — purge is the odd action here:
-    its target is orgs with SOFT-DELETED memories, so the
-    deleted_at-IS-NULL filter that archive uses would silently drop
-    the orgs we most need to run against (an org that 100%-soft-
-    deleted its memories).
+    its target is orgs whose soft-deleted rows have aged past the
+    retention window. The archive ``deleted_at IS NULL`` filter would
+    silently drop the orgs we most need to run against (e.g. an org
+    that 100%-soft-deleted its memories), so purge gets its own
+    helper bounded to soft-deleted rows older than
+    ``MEMORY_RETENTION_MAX_DAYS``.
     """
     if action == "purge-soft-deleted":
-        return await list_tenants_with_any_memory(db)
+        return await list_tenants_with_purgeable_memories(db)
     return await list_active_tenant_ids(db)
 
 

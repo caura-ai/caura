@@ -1,4 +1,8 @@
-"""Integration wiring tests: entity-linking is triggered from lifecycle and extraction."""
+"""Integration wiring tests for entity-linking on the synchronous
+write path (CAURA-657 removed the lifecycle-side wiring; the daily
+fanout for crystallize + entity-link now lives on its own Pub/Sub
+topics tested in test_lifecycle_handlers.py).
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core_api.services.lifecycle_service import run_lifecycle_for_tenant
 from core_api.services.entity_extraction_worker import (
     process_entity_extraction,
 )
@@ -19,8 +22,6 @@ from core_api.services.entity_extraction_worker import (
 def _fake_config(**overrides):
     """Return a mock ResolvedConfig with sensible defaults."""
     cfg = MagicMock()
-    cfg.lifecycle_automation_enabled = True
-    cfg.auto_crystallize_enabled = False
     cfg.auto_entity_linking_enabled = True
     cfg.entity_blocklist = frozenset()
     cfg.entity_extraction_provider = "openai"
@@ -28,70 +29,6 @@ def _fake_config(**overrides):
     for k, v in overrides.items():
         setattr(cfg, k, v)
     return cfg
-
-
-# ── lifecycle_service ────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-@patch("core_api.services.lifecycle_service.get_storage_client")
-@patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
-async def test_lifecycle_runs_entity_linking_when_enabled(
-    mock_resolve,
-    mock_sc_factory,
-):
-    """run_lifecycle_for_tenant should run the entity-linking pipeline when enabled."""
-    mock_resolve.return_value = _fake_config(auto_entity_linking_enabled=True)
-
-    sc = AsyncMock()
-    sc.archive_expired = AsyncMock(return_value=0)
-    sc.archive_stale = AsyncMock(return_value=0)
-    sc.count_active = AsyncMock(return_value=10)
-    mock_sc_factory.return_value = sc
-
-    mock_pipeline_result = MagicMock()
-    mock_pipeline_result.step_count = 4
-
-    mock_pipeline = MagicMock()
-    mock_pipeline.run = AsyncMock(return_value=mock_pipeline_result)
-
-    with (
-        patch(
-            "core_api.pipeline.compositions.entity_linking.build_full_entity_linking_pipeline",
-            return_value=mock_pipeline,
-        ),
-        patch(
-            "core_api.db.session.async_session",
-        ) as mock_session_maker,
-    ):
-        mock_db = AsyncMock()
-        mock_session_maker.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_maker.return_value.__aexit__ = AsyncMock(return_value=False)
-
-        stats = await run_lifecycle_for_tenant("test-tenant")
-
-    assert "entity_linking" in stats
-    mock_pipeline.run.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-@patch("core_api.services.lifecycle_service.get_storage_client")
-@patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
-async def test_lifecycle_skips_entity_linking_when_disabled(
-    mock_resolve,
-    mock_sc_factory,
-):
-    """Entity linking section should be skipped when auto_entity_linking_enabled=False."""
-    mock_resolve.return_value = _fake_config(auto_entity_linking_enabled=False)
-
-    sc = AsyncMock()
-    sc.archive_expired = AsyncMock(return_value=0)
-    sc.archive_stale = AsyncMock(return_value=0)
-    mock_sc_factory.return_value = sc
-
-    stats = await run_lifecycle_for_tenant("test-tenant")
-
-    assert stats["entity_linking"] == {}
 
 
 # ── entity_extraction_worker ─────────────────────────────────────────

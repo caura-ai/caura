@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from datetime import timedelta
+
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.models.memory import Memory
 
 
@@ -19,15 +22,27 @@ async def list_active_tenant_ids(db: AsyncSession) -> list[str]:
     return sorted([row[0] for row in result.all()])
 
 
-async def list_tenants_with_any_memory(db: AsyncSession) -> list[str]:
-    """Distinct ``tenant_id`` from EVERY memory row, including
-    soft-deleted ones (CAURA-656 purge fanout target).
+async def list_tenants_with_purgeable_memories(db: AsyncSession) -> list[str]:
+    """Distinct ``tenant_id`` from soft-deleted memories old enough to
+    be eligible for hard-deletion under any org's retention window
+    (CAURA-656 purge fanout target).
 
-    The narrower :func:`list_active_tenant_ids` filters
-    ``deleted_at IS NULL`` and would silently skip an org whose
-    memories are 100% soft-deleted — exactly the population the purge
-    op needs to run against, so the daily cron would never reclaim
-    their storage.
+    Orgs whose soft-deleted rows are all newer than the maximum
+    retention window (``MEMORY_RETENTION_MAX_DAYS``) are guaranteed
+    no-ops on the purge primitive, so excluding them from the fanout
+    keeps the discovery scan bounded as ``memories`` grows. Per-org
+    retention may be tighter than the max — the storage primitive
+    still no-ops for rows inside the org's specific window.
+
+    Uses ``func.now()`` (DB clock) rather than the Python clock to
+    match the storage-side primitive's cutoff and avoid client-clock
+    drift across the fanout / consume boundary.
     """
-    result = await db.execute(select(Memory.tenant_id).distinct())
+    cutoff = func.now() - timedelta(days=MEMORY_RETENTION_MAX_DAYS)
+    result = await db.execute(
+        select(Memory.tenant_id)
+        .where(Memory.deleted_at.is_not(None))
+        .where(Memory.deleted_at < cutoff)
+        .distinct()
+    )
     return sorted([row[0] for row in result.all()])

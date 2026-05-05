@@ -3260,6 +3260,35 @@ class PostgresService:
             exists = await session.scalar(select(LifecycleAudit.id).where(LifecycleAudit.id == audit_id))
             return None if exists else False
 
+    async def lifecycle_audit_has_recent_success(
+        self,
+        *,
+        org_id: str,
+        action: str,
+        since_hours: int,
+    ) -> bool:
+        """CAURA-657 dedup gate: did this org+action succeed within the
+        last ``since_hours``? Used by the pipeline-op consumers to
+        skip a redundant run when the cron tick double-fires (deploy
+        + immediate redeploy, manual re-trigger after a recent
+        successful run, etc.).
+
+        Filters on ``finished_at`` rather than ``started_at`` so an
+        in-progress row from the current attempt — pre-published by
+        the fanout endpoint just moments ago — is naturally excluded
+        (its ``finished_at`` is still NULL).
+        """
+        async with get_read_session() as session:
+            row = await session.execute(
+                select(LifecycleAudit.id)
+                .where(LifecycleAudit.org_id == org_id)
+                .where(LifecycleAudit.action == action)
+                .where(LifecycleAudit.status == "success")
+                .where(LifecycleAudit.finished_at > func.now() - timedelta(hours=since_hours))
+                .limit(1)
+            )
+            return row.scalar_one_or_none() is not None
+
     # ══════════════════════════════════════════════════════════════════════
     #  REPORTS (CrystallizationReport)
     # ══════════════════════════════════════════════════════════════════════

@@ -983,6 +983,26 @@ class CoreStorageClient:
             body["error_message"] = error_message
         await self._patch(f"/lifecycle-audit/{audit_id}", body)
 
+    async def has_recent_lifecycle_success(
+        self,
+        *,
+        org_id: str,
+        action: str,
+        since_hours: int,
+    ) -> bool:
+        """CAURA-657 dedup gate. The pipeline-op consumers (crystallize,
+        entity-link) check this before invoking the primitive — skip the
+        run when a recent successful audit row exists for the same
+        org+action.
+        """
+        result = await self._get(
+            "/lifecycle-audit/has-recent-success",
+            org_id=org_id,
+            action=action,
+            since_hours=since_hours,
+        )
+        return bool((result or {}).get("has_recent_success"))
+
     # =====================================================================
     # Reports
     # =====================================================================

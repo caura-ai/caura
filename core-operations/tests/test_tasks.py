@@ -131,3 +131,27 @@ async def test_tick_swallows_network_error(monkeypatch: pytest.MonkeyPatch):
 
     async with _patch_client(monkeypatch, raise_on_post=httpx.ConnectError("offline")):
         await tasks.run_archive_expired_tick()  # no raise
+
+
+@pytest.mark.asyncio
+async def test_crystallize_tick_hits_correct_path(monkeypatch: pytest.MonkeyPatch):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    response = _StubResponse(200, {"action": "crystallize", "published": 1, "failed": 0})
+    async with _patch_client(monkeypatch, response=response) as stub:
+        await tasks.run_crystallize_tick()
+
+    assert stub.calls[0][0].endswith("/admin/lifecycle/fanout/crystallize")
+
+
+@pytest.mark.asyncio
+async def test_entity_link_tick_hits_correct_path(monkeypatch: pytest.MonkeyPatch):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    response = _StubResponse(200, {"action": "entity-link", "published": 2, "failed": 0})
+    async with _patch_client(monkeypatch, response=response) as stub:
+        await tasks.run_entity_link_tick()
+
+    assert stub.calls[0][0].endswith("/admin/lifecycle/fanout/entity-link")

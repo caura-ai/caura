@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     # operator can dial purge less frequently or to a different cycle
     # without touching archive. Default matches archive (daily).
     lifecycle_purge_interval_seconds: float = 24 * 3600
+    # Cadence for the pipeline ops (crystallize + entity-link).
+    # Independent because these are LLM-heavy and may want a longer
+    # cycle (cost) or different schedule (off-peak). Default daily;
+    # the consumer-side dedup gate filters double-fires within 23h.
+    lifecycle_pipeline_interval_seconds: float = 24 * 3600
 
 
 settings = Settings()  # type: ignore[call-arg]

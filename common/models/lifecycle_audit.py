@@ -30,6 +30,17 @@ class LifecycleAudit(Base):
             "action",
             text("started_at DESC"),
         ),
+        # Partial index for the CAURA-657 dedup-gate query. Only
+        # successful rows are indexed (status='success' partial),
+        # keeping the index small while matching the dedup query
+        # ordering exactly.
+        Index(
+            "idx_lifecycle_audit_dedup_gate",
+            "org_id",
+            "action",
+            text("finished_at DESC"),
+            postgresql_where=text("status = 'success'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)

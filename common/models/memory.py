@@ -122,4 +122,15 @@ class Memory(Base):
             id.desc(),
             postgresql_where=text("deleted_at IS NULL"),
         ),
+        # Backs the CAURA-656 purge-fanout discovery query
+        # (``list_tenants_with_purgeable_memories``). Every other
+        # partial index on this table is keyed on
+        # ``deleted_at IS NULL`` (active path); without this
+        # complement the soft-deleted-side discovery falls back to a
+        # full scan.
+        Index(
+            "ix_memories_purgeable",
+            "tenant_id",
+            postgresql_where=text("deleted_at IS NOT NULL"),
+        ),
     )
