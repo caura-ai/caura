@@ -36,6 +36,11 @@ from common.events.lifecycle_purge_request import (
 )
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.provider_names import ProviderName
+from common.security import (
+    SESSION_IDLE_TIMEOUT_DEFAULT_MINUTES,
+    SESSION_IDLE_TIMEOUT_MAX_MINUTES,
+    SESSION_IDLE_TIMEOUT_MIN_MINUTES,
+)
 from core_api.config import settings as global_settings
 
 logger = logging.getLogger(__name__)
@@ -107,6 +112,15 @@ DEFAULT_SETTINGS: dict = {
         "alert_score_below": None,
         "alert_critical_findings_min": None,
         "alert_score_drop_delta": None,
+    },
+    "security": {
+        # Minutes of inactivity before the enterprise app auto-logs the
+        # session out and redirects to /login (CAURA-652). ``None`` means
+        # "use the global default" (see ResolvedConfig). Range
+        # constrained to 5-120 by the validator below; the UI numeric
+        # input mirrors that range. OSS itself never enforces this —
+        # the consumer is platform-auth-api on the enterprise side.
+        "session_idle_timeout_minutes": None,
     },
     "entity_blocklist": [
         "team",
@@ -288,6 +302,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "dedup.semantic_dedup_enabled": bool,
     "lifecycle.lifecycle_automation_enabled": bool,
     "lifecycle.memory_retention_days": int,
+    "security.session_idle_timeout_minutes": int,
     "entity_linking.auto_entity_linking_enabled": bool,
     "chunking.auto_chunk_enabled": bool,
     "agents.require_agent_approval": bool,
@@ -304,6 +319,10 @@ _LEAF_RANGES: dict[str, tuple[int, int]] = {
         MEMORY_RETENTION_MIN_DAYS,
         MEMORY_RETENTION_MAX_DAYS,
     ),
+    "security.session_idle_timeout_minutes": (
+        SESSION_IDLE_TIMEOUT_MIN_MINUTES,
+        SESSION_IDLE_TIMEOUT_MAX_MINUTES,
+    ),
 }
 
 
@@ -317,7 +336,16 @@ def _validate_leaf_types(payload: dict, prefix: str = "") -> None:
             _validate_leaf_types(v, prefix=f"{path}.")
         elif v is not None and path in _LEAF_TYPES:
             expected = _LEAF_TYPES[path]
-            if not isinstance(v, expected):
+            # Python's ``bool`` is a subclass of ``int``, so a payload
+            # like ``{"session_idle_timeout_minutes": true}`` silently
+            # passes the isinstance check on int-typed fields and then
+            # falls through to the range check with a confusing
+            # "must be in [5, 120], got True" message. Treat bool as a
+            # type mismatch unless the field's declared type explicitly
+            # includes bool.
+            expected_types = expected if isinstance(expected, tuple) else (expected,)
+            wrong_bool = isinstance(v, bool) and bool not in expected_types
+            if wrong_bool or not isinstance(v, expected_types):
                 type_name = (
                     expected.__name__
                     if isinstance(expected, type)
@@ -492,6 +520,18 @@ class ResolvedConfig:
         """
         val = self._ts.get("lifecycle", {}).get("memory_retention_days")
         return val if val is not None else 30
+
+    # Security
+    @property
+    def session_idle_timeout_minutes(self) -> int:
+        """Minutes of inactivity before the enterprise app idle-logs
+        the user out (CAURA-652). Default 30 matches OWASP guidance
+        for medium-sensitivity admin consoles. The validator on
+        settings PUT constrains the override to [5, 120]. OSS doesn't
+        consume this directly; the enterprise auth middleware does.
+        """
+        val = self._ts.get("security", {}).get("session_idle_timeout_minutes")
+        return val if val is not None else SESSION_IDLE_TIMEOUT_DEFAULT_MINUTES
 
     # Entity linking
     @property
