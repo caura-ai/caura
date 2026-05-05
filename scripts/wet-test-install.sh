@@ -168,7 +168,7 @@ if [[ -f "$OPENCLAW_CONFIG" ]]; then
     const tools = [
       'memclaw_recall','memclaw_write','memclaw_manage','memclaw_doc',
       'memclaw_list','memclaw_entity_get','memclaw_tune','memclaw_insights',
-      'memclaw_evolve','memclaw_stats','memclaw_share_skill','memclaw_unshare_skill'
+      'memclaw_evolve','memclaw_stats'
     ];
     for (const t of tools) {
       if (!config.tools.alsoAllow.includes(t)) config.tools.alsoAllow.push(t);
