@@ -74,3 +74,12 @@ async def run_archive_expired_tick() -> None:
 
 async def run_archive_stale_tick() -> None:
     await _fire_fanout("archive-stale")
+
+
+async def run_purge_soft_deleted_tick() -> None:
+    """Hard-delete soft-deleted memories older than each org's
+    ``lifecycle.memory_retention_days`` setting. The per-org settings
+    snapshot happens inside the core-api fanout endpoint, not here —
+    core-operations stays oblivious of org concepts.
+    """
+    await _fire_fanout("purge-soft-deleted")

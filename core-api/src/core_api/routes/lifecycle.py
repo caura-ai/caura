@@ -27,23 +27,30 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from common.events import (
     publish_archive_expired_request,
     publish_archive_stale_request,
+    publish_purge_soft_deleted_request,
+)
+from common.events.lifecycle_purge_request import (
+    MEMORY_RETENTION_MAX_DAYS,
+    MEMORY_RETENTION_MIN_DAYS,
 )
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.db.session import async_session
-from core_api.services.lifecycle_audit import audit_begin
-from core_api.services.tenants import list_active_tenant_ids
+from core_api.services.lifecycle_audit import audit_begin, resolve_publisher_kwargs
+from core_api.services.tenants import (
+    list_active_tenant_ids,
+    list_tenants_with_any_memory,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Admin", "Lifecycle"])
 
-# Whitelist of action names → publisher.  CAURA-657 will extend with
-# ``crystallize`` and ``entity-link`` once their consumers exist.
 _PublisherFn = Callable[..., Awaitable[None]]
 _ACTION_PUBLISHERS: dict[str, _PublisherFn] = {
     "archive-expired": publish_archive_expired_request,
     "archive-stale": publish_archive_stale_request,
+    "purge-soft-deleted": publish_purge_soft_deleted_request,
 }
 
 # Cap on concurrent per-org ``audit_begin + publish`` pairs in the
@@ -54,6 +61,18 @@ _ACTION_PUBLISHERS: dict[str, _PublisherFn] = {
 # enough that the storage-writer pool is never saturated by fanout
 # traffic alone (the same pool serves the live request path).
 _FANOUT_CONCURRENCY = 50
+
+
+async def _list_tenants_for_action(action: str, db) -> list[str]:
+    """Discovery query for the fanout — purge is the odd action here:
+    its target is orgs with SOFT-DELETED memories, so the
+    deleted_at-IS-NULL filter that archive uses would silently drop
+    the orgs we most need to run against (an org that 100%-soft-
+    deleted its memories).
+    """
+    if action == "purge-soft-deleted":
+        return await list_tenants_with_any_memory(db)
+    return await list_active_tenant_ids(db)
 
 
 def _resolve_publisher(action: str) -> _PublisherFn:
@@ -73,6 +92,7 @@ async def _trigger_one(
     triggered_by: str,
     publisher: _PublisherFn,
     fleet_id: str | None = None,
+    extra_kwargs: dict | None = None,
 ) -> int:
     """Pre-publish the audit row, then publish the per-org Pub/Sub
     message. Returns the new audit_id.
@@ -81,6 +101,11 @@ async def _trigger_one(
     ``pending`` row pointing at the operator's request — observable as
     a row that never advances. Reverse ordering would let the consumer
     receive a message referencing an id that doesn't exist.
+
+    ``extra_kwargs`` carries action-specific publisher kwargs (e.g.
+    ``retention_days`` for purge). The publisher's Pydantic payload
+    enforces ``extra='forbid'`` so a wrong-action kwarg fails fast at
+    publish rather than producing a silent no-op message.
     """
     storage = get_storage_client()
     audit_id = await audit_begin(
@@ -94,6 +119,7 @@ async def _trigger_one(
         org_id=org_id,
         triggered_by=triggered_by,
         fleet_id=fleet_id,
+        **(extra_kwargs or {}),
     )
     return audit_id
 
@@ -118,25 +144,23 @@ async def fanout_lifecycle_action(
     publisher = _resolve_publisher(action)
 
     async with async_session() as db:
-        org_ids = await list_active_tenant_ids(db)
+        org_ids = await _list_tenants_for_action(action, db)
 
     # Fan out concurrently with a semaphore cap (see _FANOUT_CONCURRENCY)
     # so a deployment with N orgs doesn't fire N simultaneous storage
     # round-trips. ``return_exceptions=True`` keeps the
-    # one-bad-org-must-not-abort-the-rest invariant: per-iteration try/
-    # except in a serial loop did the same job, but the cron tick used
-    # to scale O(N) in wall time * per-org publish latency. The cron
-    # re-runs on the configured cadence so a partial failure here is
-    # always recoverable on the next tick.
+    # one-bad-org-must-not-abort-the-rest invariant.
     sem = asyncio.Semaphore(_FANOUT_CONCURRENCY)
 
     async def _bounded_trigger(org_id: str) -> int:
         async with sem:
+            extra = await resolve_publisher_kwargs(action, org_id)
             return await _trigger_one(
                 action=action,
                 org_id=org_id,
                 triggered_by="core-operations",
                 publisher=publisher,
+                extra_kwargs=extra or None,
             )
 
     results = await asyncio.gather(
@@ -209,6 +233,47 @@ async def trigger_lifecycle_action(
             detail="'fleet_id' must be a string when provided",
         )
 
+    # Manual route lets the operator override per-org settings via
+    # body keys (dry-running a different ``retention_days`` without
+    # touching the persisted setting). Without an override, fall back
+    # to the same per-action resolver the cron path uses. Range
+    # validation is delegated to the publisher's Pydantic payload —
+    # single source of truth with the storage-side primitive.
+    extra_kwargs = await resolve_publisher_kwargs(action, org_id)
+    body_retention = body.get("retention_days")
+    if body_retention is not None:
+        # Gate on action FIRST: archive-expired / archive-stale
+        # publishers don't accept ``retention_days``, so an unfiltered
+        # body kwarg would propagate through ``extra_kwargs`` and cause
+        # a TypeError → 500 inside ``publisher(**extra_kwargs)``. Worse,
+        # ``audit_begin`` runs before that splat, so each such request
+        # would also leave a ``pending`` audit row that never advances.
+        # Fail at the route boundary with a 422 before ``audit_begin``.
+        if action != "purge-soft-deleted":
+            raise HTTPException(
+                status_code=422,
+                detail="'retention_days' is only valid for the 'purge-soft-deleted' action",
+            )
+        # ``isinstance(True, int)`` is True; carve bools out so a body
+        # of ``{"retention_days": true}`` is rejected loudly.
+        if not isinstance(body_retention, int) or isinstance(body_retention, bool):
+            raise HTTPException(
+                status_code=422,
+                detail="'retention_days' must be an integer when provided",
+            )
+        # Range-check at the route boundary — without it, an out-of-
+        # range value reaches the publisher's Pydantic payload and
+        # raises ValidationError, which the global catch-all maps to
+        # 500 instead of the 422 the caller would expect.
+        if not (MEMORY_RETENTION_MIN_DAYS <= body_retention <= MEMORY_RETENTION_MAX_DAYS):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"'retention_days' must be in [{MEMORY_RETENTION_MIN_DAYS}, {MEMORY_RETENTION_MAX_DAYS}]"
+                ),
+            )
+        extra_kwargs["retention_days"] = body_retention
+
     triggered_by = f"manual:{auth.user_id}" if auth.user_id else "manual:admin-key"
     audit_id = await _trigger_one(
         action=action,
@@ -216,5 +281,6 @@ async def trigger_lifecycle_action(
         triggered_by=triggered_by,
         publisher=publisher,
         fleet_id=fleet_id,
+        extra_kwargs=extra_kwargs or None,
     )
     return {"action": action, "org_id": org_id, "audit_id": audit_id}

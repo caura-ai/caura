@@ -81,6 +81,10 @@ class TestLifecycleTopics:
             Topics.Lifecycle.ARCHIVE_STALE_REQUESTED
             == "memclaw.lifecycle.archive-stale-requested"
         )
+        assert (
+            Topics.Lifecycle.PURGE_SOFT_DELETED_REQUESTED
+            == "memclaw.lifecycle.purge-soft-deleted-requested"
+        )
 
     def test_topic_strenum_format(self):
         from common.events.topics import Topics
@@ -92,3 +96,51 @@ class TestLifecycleTopics:
             f"{Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED}"
             == "memclaw.lifecycle.archive-expired-requested"
         )
+
+
+@pytest.mark.unit
+class TestMemoryRetentionSettings:
+    """CAURA-656: org-level memory_retention_days setting + validator."""
+
+    def test_default_is_30(self):
+        from core_api.services.organization_settings import ResolvedConfig
+
+        config = ResolvedConfig({})
+        assert config.memory_retention_days == 30
+
+    def test_override_within_range(self):
+        from core_api.services.organization_settings import ResolvedConfig
+
+        config = ResolvedConfig({"lifecycle": {"memory_retention_days": 7}})
+        assert config.memory_retention_days == 7
+
+    def test_default_settings_has_retention_key(self):
+        from core_api.services.organization_settings import DEFAULT_SETTINGS
+
+        assert "memory_retention_days" in DEFAULT_SETTINGS["lifecycle"]
+
+    def test_validator_rejects_out_of_range_low(self):
+        from core_api.services.organization_settings import _validate_leaf_types
+
+        with pytest.raises(ValueError, match=r"\[1, 30\]"):
+            _validate_leaf_types({"lifecycle": {"memory_retention_days": 0}})
+
+    def test_validator_rejects_out_of_range_high(self):
+        from core_api.services.organization_settings import _validate_leaf_types
+
+        with pytest.raises(ValueError, match=r"\[1, 30\]"):
+            _validate_leaf_types({"lifecycle": {"memory_retention_days": 31}})
+
+    def test_validator_rejects_non_int(self):
+        from core_api.services.organization_settings import _validate_leaf_types
+
+        with pytest.raises(ValueError, match="must be int"):
+            _validate_leaf_types({"lifecycle": {"memory_retention_days": "30"}})
+
+    def test_validator_accepts_in_range(self):
+        from core_api.services.organization_settings import _validate_leaf_types
+
+        # Should not raise.
+        _validate_leaf_types({"lifecycle": {"memory_retention_days": 1}})
+        _validate_leaf_types({"lifecycle": {"memory_retention_days": 30}})
+        _validate_leaf_types({"lifecycle": {"memory_retention_days": 15}})

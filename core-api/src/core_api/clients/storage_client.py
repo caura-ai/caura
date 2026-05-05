@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from core_api.clients.identity_token import evict as _evict_id_token
 from core_api.clients.identity_token import fetch_auth_header
 from core_api.config import settings
@@ -378,6 +379,18 @@ class CoreStorageClient:
             data["fleet_id"] = fleet_id
         result = await self._post("/memories/archive-stale", data)
         return result.get("count", 0)  # type: ignore[union-attr]
+
+    async def purge_soft_deleted(
+        self,
+        tenant_id: str,
+        fleet_id: str | None = None,
+        retention_days: int = MEMORY_RETENTION_MAX_DAYS,
+    ) -> int:
+        data: dict[str, Any] = {"tenant_id": tenant_id, "retention_days": retention_days}
+        if fleet_id is not None:
+            data["fleet_id"] = fleet_id
+        result = await self._post("/memories/purge-soft-deleted", data)
+        return result.get("deleted", 0)  # type: ignore[union-attr]
 
     async def count_active(self, tenant_id: str, fleet_id: str | None = None) -> int:
         params: dict[str, Any] = {"tenant_id": tenant_id}

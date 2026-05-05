@@ -41,6 +41,7 @@ class Lifecycle(enum.StrEnum):
     # and lets each action evolve its payload independently.
     ARCHIVE_EXPIRED_REQUESTED = "memclaw.lifecycle.archive-expired-requested"
     ARCHIVE_STALE_REQUESTED = "memclaw.lifecycle.archive-stale-requested"
+    PURGE_SOFT_DELETED_REQUESTED = "memclaw.lifecycle.purge-soft-deleted-requested"
 
 
 class Topics:

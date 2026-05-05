@@ -369,6 +369,32 @@ async def archive_stale(
     return resp.json().get("count", 0)
 
 
+async def purge_soft_deleted(
+    client: httpx.AsyncClient,
+    *,
+    tenant_id: str,
+    fleet_id: str | None,
+    retention_days: int,
+) -> int:
+    """Run the storage-side ``memory_purge_soft_deleted`` SQL primitive.
+
+    ``retention_days`` is REQUIRED — it rides along in the Pub/Sub
+    payload, snapshot at fanout time from the org's
+    ``lifecycle.memory_retention_days`` setting. Defaulting it on this
+    side would mask a publisher bug that forgot to bake the value in.
+    """
+    body: dict[str, Any] = {"tenant_id": tenant_id, "retention_days": retention_days}
+    if fleet_id is not None:
+        body["fleet_id"] = fleet_id
+    resp = await _signed_call(
+        client.post,
+        f"{_PREFIX}/memories/purge-soft-deleted",
+        json=body,
+    )
+    resp.raise_for_status()
+    return resp.json().get("deleted", 0)
+
+
 async def update_lifecycle_audit_row(
     client: httpx.AsyncClient,
     audit_id: int,

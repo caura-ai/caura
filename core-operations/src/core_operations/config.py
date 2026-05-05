@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     # — e.g. ``security_audit.schedule_cron`` — still live on the
     # enterprise scheduler.
     lifecycle_archive_interval_seconds: float = 24 * 3600
+    # Separate cadence for purge — operationally a different concern
+    # (compliance-driven retention vs. staleness archival), so an
+    # operator can dial purge less frequently or to a different cycle
+    # without touching archive. Default matches archive (daily).
+    lifecycle_purge_interval_seconds: float = 24 * 3600
 
 
 settings = Settings()  # type: ignore[call-arg]

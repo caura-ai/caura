@@ -8,6 +8,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 
+from common.events.lifecycle_purge_request import (
+    MEMORY_RETENTION_MAX_DAYS,
+    MEMORY_RETENTION_MIN_DAYS,
+)
 from core_storage_api.observability import bind_timer, log_request
 from core_storage_api.schemas import MEMORY_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import PostgresService
@@ -409,6 +413,53 @@ async def archive_stale_low_weight(request: Request) -> dict:
         batch_size=body.get("batch_size", 500),
     )
     return {"count": count}
+
+
+@router.post("/purge-soft-deleted")
+async def purge_soft_deleted(request: Request) -> dict:
+    """Hard-delete soft-deleted memories older than ``retention_days``
+    (CAURA-656). The retention window is policy, not state — the caller
+    decides how long ``deleted_at IS NOT NULL`` rows stick around for
+    undo / forensics. ``retention_days`` defaults to 30 to match the
+    organization-settings default.
+    """
+    body: dict = await request.json()
+    # Validate the inputs that drive the SQL primitive's WHERE clause.
+    # ``tenant_id`` missing would 500 on a KeyError; ``retention_days=0``
+    # produces ``deleted_at < NOW()`` (matches every soft-deleted row,
+    # nullifying the retention window); ``batch_size`` 0 silently
+    # no-ops every tick (Postgres LIMIT 0) and -1 unbounds the
+    # delete. Each failure mode would be a real outage from the
+    # consumer's perspective; surface as 422 at the boundary.
+    tenant_id = body.get("tenant_id")
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise HTTPException(
+            status_code=422,
+            detail="'tenant_id' is required and must be a non-empty string",
+        )
+    batch_size = body.get("batch_size", 500)
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+        raise HTTPException(
+            status_code=422,
+            detail="'batch_size' must be a positive integer",
+        )
+    retention_days = body.get("retention_days", MEMORY_RETENTION_MAX_DAYS)
+    if (
+        not isinstance(retention_days, int)
+        or isinstance(retention_days, bool)
+        or not (MEMORY_RETENTION_MIN_DAYS <= retention_days <= MEMORY_RETENTION_MAX_DAYS)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=f"'retention_days' must be in [{MEMORY_RETENTION_MIN_DAYS}, {MEMORY_RETENTION_MAX_DAYS}]",
+        )
+    count = await _svc.memory_purge_soft_deleted(
+        tenant_id=tenant_id,
+        fleet_id=body.get("fleet_id"),
+        retention_days=retention_days,
+        batch_size=batch_size,
+    )
+    return {"deleted": count}
 
 
 # ------------------------------------------------------------------

@@ -27,15 +27,19 @@ from fastapi import FastAPI, HTTPException
 from common.structlog_config import configure_logging
 from core_operations.config import settings
 from core_operations.scheduler import scheduler
-from core_operations.tasks import run_archive_expired_tick, run_archive_stale_tick
+from core_operations.tasks import (
+    run_archive_expired_tick,
+    run_archive_stale_tick,
+    run_purge_soft_deleted_tick,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _register_scheduled_tasks() -> None:
-    # CAURA-655: each archival op gets its own registration so an
-    # outage on one can't silently mask the other; their audit rows
-    # stay independent. CAURA-656 will add ``purge-soft-deleted`` here.
+    # Each lifecycle op gets its own registration so an outage on one
+    # can't silently mask the others; their audit rows stay
+    # independent.
     scheduler.register(
         "lifecycle-archive-expired",
         settings.lifecycle_archive_interval_seconds,
@@ -45,6 +49,11 @@ def _register_scheduled_tasks() -> None:
         "lifecycle-archive-stale",
         settings.lifecycle_archive_interval_seconds,
         run_archive_stale_tick,
+    )
+    scheduler.register(
+        "lifecycle-purge-soft-deleted",
+        settings.lifecycle_purge_interval_seconds,
+        run_purge_soft_deleted_tick,
     )
 
 

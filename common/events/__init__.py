@@ -22,6 +22,7 @@ from common.events.inprocess import InProcessEventBus
 from common.events.lifecycle_publishers import (
     publish_archive_expired_request,
     publish_archive_stale_request,
+    publish_purge_soft_deleted_request,
 )
 from common.events.memory_embed_publisher import publish_memory_embed_request
 from common.events.memory_enrich_publisher import publish_memory_enrich_request
@@ -44,6 +45,7 @@ __all__ = [
     "get_event_bus",
     "publish_archive_expired_request",
     "publish_archive_stale_request",
+    "publish_purge_soft_deleted_request",
     "publish_memory_embed_request",
     "publish_memory_enrich_request",
     "publish_memory_enriched",

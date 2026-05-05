@@ -99,6 +99,18 @@ async def test_archive_stale_tick_hits_correct_path(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
+async def test_purge_soft_deleted_tick_hits_correct_path(monkeypatch: pytest.MonkeyPatch):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    response = _StubResponse(200, {"action": "purge-soft-deleted", "published": 2, "failed": 0})
+    async with _patch_client(monkeypatch, response=response) as stub:
+        await tasks.run_purge_soft_deleted_tick()
+
+    assert stub.calls[0][0].endswith("/admin/lifecycle/fanout/purge-soft-deleted")
+
+
+@pytest.mark.asyncio
 async def test_tick_swallows_non_2xx(monkeypatch: pytest.MonkeyPatch):
     """A non-2xx response must not raise — the scheduler retries on the
     next tick anyway, and re-raising would just produce duplicate

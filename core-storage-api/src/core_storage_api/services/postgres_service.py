@@ -37,6 +37,7 @@ from common.constants import (
     SEMANTIC_DEDUP_THRESHOLD,
     TYPE_DECAY_DAYS,
 )
+from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.models import (
     Agent,
     AuditLog,
@@ -1226,6 +1227,49 @@ class PostgresService:
                       AND weight < :max_weight
                       AND status = 'active'
                       AND deleted_at IS NULL
+                    LIMIT :batch_size
+                )
+                RETURNING id
+            """),
+                params,
+            )
+            return len(result.all())
+
+    async def memory_purge_soft_deleted(
+        self,
+        tenant_id: str,
+        fleet_id: str | None = None,
+        retention_days: int = MEMORY_RETENTION_MAX_DAYS,
+        batch_size: int = 500,
+    ) -> int:
+        """Hard-delete soft-deleted memories whose ``deleted_at`` is older
+        than ``retention_days``. Soft-deletes (CAURA-656) keeps rows
+        addressable for a grace period before they're physically removed,
+        so a misclick or buggy client can be undone for ``retention_days``
+        days. After that window the row is gone for good — including its
+        embedding, entity links, and idempotency response cache lines
+        (cascaded by their FKs to ``memories.id``).
+        """
+        async with get_session() as session:
+            params: dict = {
+                "tenant_id": tenant_id,
+                "retention_days": retention_days,
+                "batch_size": batch_size,
+            }
+            fleet_clause = ""
+            if fleet_id:
+                fleet_clause = "AND fleet_id = :fleet_id"
+                params["fleet_id"] = fleet_id
+
+            result = await session.execute(
+                text(f"""
+                DELETE FROM memories
+                WHERE id IN (
+                    SELECT id FROM memories
+                    WHERE tenant_id = :tenant_id
+                      {fleet_clause}
+                      AND deleted_at IS NOT NULL
+                      AND deleted_at < NOW() - INTERVAL '1 day' * :retention_days
                     LIMIT :batch_size
                 )
                 RETURNING id

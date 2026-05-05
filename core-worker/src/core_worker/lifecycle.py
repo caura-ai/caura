@@ -14,6 +14,7 @@ from core_worker.clients.storage_client import (
     archive_expired,
     archive_stale,
     get_storage_client,
+    purge_soft_deleted,
     update_lifecycle_audit_row,
 )
 
@@ -24,6 +25,14 @@ class _CoreWorkerLifecycleAdapter:
 
     async def archive_stale(self, *, org_id: str, fleet_id: str | None) -> int:
         return await archive_stale(get_storage_client(), tenant_id=org_id, fleet_id=fleet_id)
+
+    async def purge_soft_deleted(self, *, org_id: str, fleet_id: str | None, retention_days: int) -> int:
+        return await purge_soft_deleted(
+            get_storage_client(),
+            tenant_id=org_id,
+            fleet_id=fleet_id,
+            retention_days=retention_days,
+        )
 
     async def update_lifecycle_audit_row(
         self,

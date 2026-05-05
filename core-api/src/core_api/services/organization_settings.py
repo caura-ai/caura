@@ -30,6 +30,10 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from common.events.lifecycle_purge_request import (
+    MEMORY_RETENTION_MAX_DAYS,
+    MEMORY_RETENTION_MIN_DAYS,
+)
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.provider_names import ProviderName
 from core_api.config import settings as global_settings
@@ -75,6 +79,13 @@ DEFAULT_SETTINGS: dict = {
     },
     "lifecycle": {
         "lifecycle_automation_enabled": None,
+        # Days to keep soft-deleted memories before they're physically
+        # purged (CAURA-656). Daily cron reads this per-org and runs
+        # ``purge-soft-deleted``. ``None`` means "use the global
+        # default" (30 — see ResolvedConfig.memory_retention_days).
+        # Range constrained to 1-30 by the validator below; the UI
+        # numeric input mirrors that range.
+        "memory_retention_days": None,
     },
     "entity_linking": {
         "auto_entity_linking_enabled": None,
@@ -276,15 +287,30 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "crystallizer.auto_crystallize": bool,
     "dedup.semantic_dedup_enabled": bool,
     "lifecycle.lifecycle_automation_enabled": bool,
+    "lifecycle.memory_retention_days": int,
     "entity_linking.auto_entity_linking_enabled": bool,
     "chunking.auto_chunk_enabled": bool,
     "agents.require_agent_approval": bool,
     "entity_blocklist": list,
 }
 
+# Inclusive range constraints applied AFTER type validation. Listed
+# separately rather than encoded in ``_LEAF_TYPES`` so types stay
+# Python-class types (cleanly testable with ``isinstance``). Range
+# constants are imported from the publisher-side payload so a future
+# widening only needs to touch one source of truth.
+_LEAF_RANGES: dict[str, tuple[int, int]] = {
+    "lifecycle.memory_retention_days": (
+        MEMORY_RETENTION_MIN_DAYS,
+        MEMORY_RETENTION_MAX_DAYS,
+    ),
+}
+
 
 def _validate_leaf_types(payload: dict, prefix: str = "") -> None:
-    """Raise ``ValueError`` if any leaf value has the wrong Python type."""
+    """Raise ``ValueError`` if any leaf value has the wrong Python type
+    or falls outside its declared inclusive range.
+    """
     for k, v in payload.items():
         path = f"{prefix}{k}"
         if isinstance(v, dict):
@@ -298,6 +324,10 @@ def _validate_leaf_types(payload: dict, prefix: str = "") -> None:
                     else " or ".join(t.__name__ for t in expected)
                 )
                 raise ValueError(f"Settings key {path!r} must be {type_name}, got {type(v).__name__}")
+            if path in _LEAF_RANGES:
+                lo, hi = _LEAF_RANGES[path]
+                if not (lo <= v <= hi):
+                    raise ValueError(f"Settings key {path!r} must be in [{lo}, {hi}], got {v!r}")
 
 
 class ResolvedConfig:
@@ -450,6 +480,18 @@ class ResolvedConfig:
     def lifecycle_automation_enabled(self) -> bool:
         val = self._ts.get("lifecycle", {}).get("lifecycle_automation_enabled")
         return val if val is not None else True
+
+    @property
+    def memory_retention_days(self) -> int:
+        """Days to keep soft-deleted memories before they're purged
+        (CAURA-656). Default 30 matches the UI numeric input's upper
+        bound — generous on the safe side; an org tightens it down to
+        as low as 1 day if their compliance posture demands it. The
+        validator on settings PUT already constrains the override to
+        [1, 30].
+        """
+        val = self._ts.get("lifecycle", {}).get("memory_retention_days")
+        return val if val is not None else 30
 
     # Entity linking
     @property
