@@ -229,24 +229,24 @@ class TestTenantSettingsKeys:
     """Verify ResolvedConfig has anthropic/openrouter key properties."""
 
     def test_anthropic_key_from_settings(self):
-        from core_api.services.tenant_settings import ResolvedConfig
+        from core_api.services.organization_settings import ResolvedConfig
 
         config = ResolvedConfig({"api_keys": {}})
         # Falls back to global (None or empty string)
         assert not config.anthropic_api_key
 
     def test_openrouter_key_from_settings(self):
-        from core_api.services.tenant_settings import ResolvedConfig
+        from core_api.services.organization_settings import ResolvedConfig
 
         config = ResolvedConfig({"api_keys": {}})
         assert config.openrouter_api_key is None
 
     def test_has_anthropic_property(self):
-        from core_api.services.tenant_settings import ResolvedConfig
+        from core_api.services.organization_settings import ResolvedConfig
 
         assert hasattr(ResolvedConfig, "anthropic_api_key")
 
     def test_has_openrouter_property(self):
-        from core_api.services.tenant_settings import ResolvedConfig
+        from core_api.services.organization_settings import ResolvedConfig
 
         assert hasattr(ResolvedConfig, "openrouter_api_key")

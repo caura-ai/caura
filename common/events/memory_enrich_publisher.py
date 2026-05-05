@@ -38,7 +38,7 @@ async def publish_memory_enrich_request(
     ``tenant_config`` is a ``ResolvedConfig``-shaped object (or ``None``).
     The publisher reads the enrichment-relevant attributes off it and
     packs them into the payload so the worker doesn't need to import
-    ``core_api.services.tenant_settings``.
+    ``core_api.services.organization_settings``.
 
     ``agent_provided_fields`` lists the row's columns the agent set
     explicitly at write time. The worker uses it to skip overwriting

@@ -1,16 +1,22 @@
-"""Per-tenant settings — storage + resolution.
+"""Per-organization settings — storage + resolution.
 
-Settings are stored as a JSONB blob in ``tenant_settings`` (one row per tenant,
-overrides only). Every update additionally writes a flat diff to
-``tenant_settings_audit`` for attribution and history.
+Settings are stored as a JSONB blob in ``organization_settings`` (one row
+per organization, overrides only). Every update additionally writes a flat
+diff to ``organization_settings_audit`` for attribution and history.
 
 Resolution order for any value:
-    tenant override (cached) → global env default (``core_api.config.Settings``)
+    org override (cached) → global env default (``core_api.config.Settings``)
     → hardcoded Pydantic default
 
-Reads go through a per-process ``TTLCache`` (5-min TTL). Writes invalidate the
-local cache entry immediately; other workers catch up on TTL expiry. Cross-worker
-invalidation is tracked as a follow-up (see CAURA-571).
+The function parameters here are still named ``tenant_id`` for call-site
+back-compat (CAURA-654) — the value is treated as the org-key internally.
+In OSS-standalone the tenant_id IS the org_id (single implicit org per
+tenant); in enterprise callers should pass the actual org_id (parameter
+rename to ``org_id`` is a follow-up that will touch ~20 call sites).
+
+Reads go through a per-process ``TTLCache`` (5-min TTL). Writes invalidate
+the local cache entry immediately; other workers catch up on TTL expiry.
+Cross-worker invalidation is tracked as a follow-up (see CAURA-571).
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from common.models.tenant_settings import TenantSettings, TenantSettingsAudit
+from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.provider_names import ProviderName
 from core_api.config import settings as global_settings
 
@@ -178,7 +184,7 @@ def _remap_vertex(provider: str) -> str:
     return provider
 
 
-# ── TTL cache: tenant_id → settings dict ──
+# ── TTL cache: org_id → settings dict ──
 #
 # Per-process cache; each uvicorn worker has its own. Staleness across workers
 # is bounded by the TTL (5 min). Writes on the current worker invalidate
@@ -295,10 +301,19 @@ def _validate_leaf_types(payload: dict, prefix: str = "") -> None:
 
 
 class ResolvedConfig:
-    """Resolves LLM/feature config from tenant overrides + global fallbacks."""
+    """Resolves LLM/feature config from organization overrides + global fallbacks."""
 
-    def __init__(self, tenant_settings: dict | None = None):
-        self._ts = tenant_settings or {}
+    def __init__(
+        self,
+        org_settings: dict | None = None,
+        tenant_settings: dict | None = None,
+    ):
+        # ``tenant_settings`` is a back-compat alias for callers that
+        # still pass the pre-CAURA-654 keyword. Silently absorbs them
+        # rather than raising TypeError; consistent with the module
+        # docstring's promise to keep call-site signatures stable until
+        # the parameter rename follow-up lands.
+        self._ts = org_settings or tenant_settings or {}
 
     # Enrichment
     @property
@@ -588,7 +603,7 @@ def validate_search_profile(profile: dict) -> dict:
 def invalidate_cache(tenant_id: str) -> None:
     """Evict a tenant's cached settings. Exposed for tests + future NOTIFY hook."""
     _settings_cache.pop(tenant_id, None)
-    logger.info("tenant_settings cache invalidated for %s", tenant_id)
+    logger.info("organization_settings cache invalidated for %s", tenant_id)
 
 
 async def resolve_config(db: AsyncSession | None, tenant_id: str) -> ResolvedConfig:
@@ -620,7 +635,7 @@ async def get_raw_settings(db: AsyncSession | None, tenant_id: str) -> dict:
     """
     cached = _settings_cache.get(tenant_id)
     if cached is not None:
-        logger.debug("tenant_settings cache hit for %s", tenant_id)
+        logger.debug("organization_settings cache hit for %s", tenant_id)
         return cached
 
     if db is None:
@@ -637,11 +652,13 @@ async def get_raw_settings(db: AsyncSession | None, tenant_id: str) -> dict:
 
 
 async def _load_and_cache(db: AsyncSession, tenant_id: str) -> dict:
-    result = await db.execute(select(TenantSettings.settings).where(TenantSettings.tenant_id == tenant_id))
+    result = await db.execute(
+        select(OrganizationSettings.settings).where(OrganizationSettings.org_id == tenant_id)
+    )
     row = result.scalar_one_or_none()
     resolved = row if isinstance(row, dict) else {}
     _settings_cache[tenant_id] = resolved
-    logger.info("tenant_settings cache miss for %s; loaded from DB and cached", tenant_id)
+    logger.info("organization_settings cache miss for %s; loaded from DB and cached", tenant_id)
     return resolved
 
 
@@ -674,7 +691,9 @@ async def update_settings(
     # stale cache entry, and this path is rare compared to reads.
     # FOR UPDATE prevents lost-update races under concurrent writes for the same tenant.
     result = await db.execute(
-        select(TenantSettings.settings).where(TenantSettings.tenant_id == tenant_id).with_for_update()
+        select(OrganizationSettings.settings)
+        .where(OrganizationSettings.org_id == tenant_id)
+        .with_for_update()
     )
     current_row = result.scalar_one_or_none()
     current: dict = current_row if isinstance(current_row, dict) else {}
@@ -690,18 +709,18 @@ async def update_settings(
     # inserts (no row yet) use JSONB || to merge at the DB level so two racing
     # inserts don't silently overwrite each other. The shallow || merge is safe
     # because top-level schema keys (enrichment, recall, …) are independent.
-    upsert = pg_insert(TenantSettings).values(tenant_id=tenant_id, settings=merged)
+    upsert = pg_insert(OrganizationSettings).values(org_id=tenant_id, settings=merged)
     await db.execute(
         upsert.on_conflict_do_update(
-            index_elements=["tenant_id"],
+            index_elements=["org_id"],
             set_={
-                "settings": text("tenant_settings.settings || EXCLUDED.settings"),
+                "settings": text("organization_settings.settings || EXCLUDED.settings"),
                 "updated_at": func.now(),
             },
         )
     )
     await db.execute(
-        pg_insert(TenantSettingsAudit).values(tenant_id=tenant_id, changed_by=changed_by, diff=diff)
+        pg_insert(OrganizationSettingsAudit).values(org_id=tenant_id, changed_by=changed_by, diff=diff)
     )
     await db.commit()
 

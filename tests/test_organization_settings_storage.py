@@ -1,12 +1,12 @@
-"""Storage, cache, and ResolvedConfig tests for tenant_settings service."""
+"""Storage, cache, and ResolvedConfig tests for organization_settings service."""
 
 import uuid
 
 import pytest
 from sqlalchemy import text
 
-from core_api.services import tenant_settings as ts_svc
-from core_api.services.tenant_settings import (
+from core_api.services import organization_settings as ts_svc
+from core_api.services.organization_settings import (
     DEFAULT_SETTINGS,
     ResolvedConfig,
     _deep_merge,
@@ -181,8 +181,8 @@ async def test_audit_row_written_on_change(db):
 
     result = await db.execute(
         text(
-            "SELECT changed_by, diff FROM tenant_settings_audit "
-            "WHERE tenant_id = :tid ORDER BY created_at DESC LIMIT 1"
+            "SELECT changed_by, diff FROM organization_settings_audit "
+            "WHERE org_id = :tid ORDER BY created_at DESC LIMIT 1"
         ),
         {"tid": tid},
     )
@@ -198,7 +198,7 @@ async def test_audit_no_row_on_noop(db):
     await update_settings(db, tid, {"enrichment": {"provider": "vertex"}})
 
     before = await db.execute(
-        text("SELECT count(*) FROM tenant_settings_audit WHERE tenant_id = :tid"),
+        text("SELECT count(*) FROM organization_settings_audit WHERE org_id = :tid"),
         {"tid": tid},
     )
     before_count = before.scalar() or 0
@@ -207,7 +207,7 @@ async def test_audit_no_row_on_noop(db):
     await update_settings(db, tid, {"enrichment": {"provider": "vertex"}})
 
     after = await db.execute(
-        text("SELECT count(*) FROM tenant_settings_audit WHERE tenant_id = :tid"),
+        text("SELECT count(*) FROM organization_settings_audit WHERE org_id = :tid"),
         {"tid": tid},
     )
     after_count = after.scalar() or 0

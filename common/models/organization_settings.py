@@ -1,4 +1,11 @@
-"""Per-tenant settings storage: live overrides + append-only audit trail."""
+"""Per-organization settings storage: live overrides + append-only audit trail.
+
+Renamed from ``tenant_settings`` in CAURA-654. The keying column is
+``org_id`` (text); semantically the value is the organization
+identifier in enterprise deployments and the tenant identifier
+acting as an implicit single-org key in OSS-standalone deployments
+(no ``organizations`` table in pure OSS).
+"""
 
 from datetime import datetime
 
@@ -9,12 +16,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 from common.models.base import Base
 
 
-class TenantSettings(Base):
-    """Live tenant overrides — one row per tenant, JSONB holds only overrides."""
+class OrganizationSettings(Base):
+    """Live organization overrides — one row per org, JSONB holds only overrides."""
 
-    __tablename__ = "tenant_settings"
+    __tablename__ = "organization_settings"
 
-    tenant_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    org_id: Mapped[str] = mapped_column(Text, primary_key=True)
     settings: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
@@ -26,20 +33,20 @@ class TenantSettings(Base):
     )
 
 
-class TenantSettingsAudit(Base):
+class OrganizationSettingsAudit(Base):
     """Append-only per-change audit trail. One row per PUT /settings that changes a value."""
 
-    __tablename__ = "tenant_settings_audit"
+    __tablename__ = "organization_settings_audit"
     __table_args__ = (
         Index(
-            "idx_tenant_settings_audit_tenant_created",
-            "tenant_id",
+            "idx_organization_settings_audit_org_created",
+            "org_id",
             text("created_at DESC"),
         ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    org_id: Mapped[str] = mapped_column(Text, nullable=False)
     changed_by: Mapped[str | None] = mapped_column(Text)
     diff: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

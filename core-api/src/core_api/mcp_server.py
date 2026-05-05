@@ -253,7 +253,7 @@ async def memclaw_recall(
         try:
             await check_and_increment(db, tenant_id, "search")
             from core_api.repositories import agent_repo
-            from core_api.services.tenant_settings import resolve_config
+            from core_api.services.organization_settings import resolve_config
 
             config = await resolve_config(db, tenant_id)
             _ag = await agent_repo.get_by_id(db, agent_id, tenant_id)
@@ -726,7 +726,7 @@ async def memclaw_tune(
             current = (agent.get("search_profile") if isinstance(agent, dict) else agent.search_profile) or {}
             if updates:
                 current.update(updates)
-                from core_api.services.tenant_settings import validate_search_profile
+                from core_api.services.organization_settings import validate_search_profile
 
                 current = validate_search_profile(current)
                 await agent_repo.update_search_profile(db, agent.id, current)

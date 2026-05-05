@@ -919,7 +919,7 @@ async def generate_insights(
         }
 
     # 2. Resolve tenant config for LLM provider
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     config = await resolve_config(db, tenant_id)
 

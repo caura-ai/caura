@@ -40,7 +40,7 @@ async def test_recall_happy_path(mcp_env, monkeypatch):
 
     # Patch the late-imported config/profile dependencies.
     monkeypatch.setattr(
-        "core_api.services.tenant_settings.resolve_config",
+        "core_api.services.organization_settings.resolve_config",
         _fake_resolve_config,
     )
     monkeypatch.setattr("core_api.repositories.agent_repo.get_by_id", _async_none)
@@ -60,7 +60,7 @@ async def test_recall_with_include_brief(mcp_env, monkeypatch):
     brief_mock = _fake_async_return({"summary": "alice onboarded last quarter"})
     monkeypatch.setattr("core_api.services.recall_service.recall", brief_mock)
     monkeypatch.setattr(
-        "core_api.services.tenant_settings.resolve_config", _fake_resolve_config
+        "core_api.services.organization_settings.resolve_config", _fake_resolve_config
     )
     monkeypatch.setattr("core_api.repositories.agent_repo.get_by_id", _async_none)
 
@@ -75,7 +75,7 @@ async def test_recall_with_include_brief(mcp_env, monkeypatch):
 async def test_recall_empty_results(mcp_env, monkeypatch):
     mcp_env["service"]("search_memories").return_value = []
     monkeypatch.setattr(
-        "core_api.services.tenant_settings.resolve_config", _fake_resolve_config
+        "core_api.services.organization_settings.resolve_config", _fake_resolve_config
     )
     monkeypatch.setattr("core_api.repositories.agent_repo.get_by_id", _async_none)
 
@@ -103,7 +103,7 @@ async def test_recall_top_k_is_capped(mcp_env, monkeypatch):
     search_mock = mcp_env["service"]("search_memories")
     search_mock.return_value = []
     monkeypatch.setattr(
-        "core_api.services.tenant_settings.resolve_config", _fake_resolve_config
+        "core_api.services.organization_settings.resolve_config", _fake_resolve_config
     )
     monkeypatch.setattr("core_api.repositories.agent_repo.get_by_id", _async_none)
 
@@ -118,7 +118,7 @@ async def test_recall_http_exception_becomes_error_envelope(mcp_env, monkeypatch
         status_code=429, detail="rate limited"
     )
     monkeypatch.setattr(
-        "core_api.services.tenant_settings.resolve_config", _fake_resolve_config
+        "core_api.services.organization_settings.resolve_config", _fake_resolve_config
     )
     monkeypatch.setattr("core_api.repositories.agent_repo.get_by_id", _async_none)
 

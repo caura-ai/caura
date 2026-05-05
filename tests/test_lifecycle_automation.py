@@ -40,22 +40,22 @@ class TestLifecycleTenantSettings:
     """Verify lifecycle tenant setting integration."""
 
     def test_enabled_by_default(self):
-        from core_api.services.tenant_settings import ResolvedConfig
+        from core_api.services.organization_settings import ResolvedConfig
         config = ResolvedConfig({})
         assert config.lifecycle_automation_enabled is True
 
     def test_can_be_disabled(self):
-        from core_api.services.tenant_settings import ResolvedConfig
+        from core_api.services.organization_settings import ResolvedConfig
         config = ResolvedConfig({"lifecycle": {"lifecycle_automation_enabled": False}})
         assert config.lifecycle_automation_enabled is False
 
     def test_explicitly_enabled(self):
-        from core_api.services.tenant_settings import ResolvedConfig
+        from core_api.services.organization_settings import ResolvedConfig
         config = ResolvedConfig({"lifecycle": {"lifecycle_automation_enabled": True}})
         assert config.lifecycle_automation_enabled is True
 
     def test_default_settings_has_lifecycle_section(self):
-        from core_api.services.tenant_settings import DEFAULT_SETTINGS
+        from core_api.services.organization_settings import DEFAULT_SETTINGS
         assert "lifecycle" in DEFAULT_SETTINGS
         assert "lifecycle_automation_enabled" in DEFAULT_SETTINGS["lifecycle"]
 

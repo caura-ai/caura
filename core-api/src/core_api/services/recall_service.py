@@ -85,7 +85,7 @@ async def recall(
     t0 = time.perf_counter()
 
     # Search for relevant memories
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     config = await resolve_config(db, tenant_id)
     diagnostic_ctx: dict = {} if diagnostic else {}

@@ -86,7 +86,7 @@ async def detect_contradictions_async(
     so a soft-delete that landed AFTER the caller's fetch but BEFORE
     detection runs cleanly aborts.
     """
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     try:
         if new_memory is None:
@@ -390,7 +390,7 @@ async def detect_contradictions_by_entities_async(
     contradictions via LLM -- catches by-the-way updates that embedding
     similarity misses.
     """
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     try:
         sc = get_storage_client()

@@ -22,7 +22,7 @@ class ResolveSearchProfile:
         return "resolve_search_profile"
 
     async def execute(self, ctx: PipelineContext) -> StepResult | None:
-        from core_api.services.tenant_settings import validate_search_profile
+        from core_api.services.organization_settings import validate_search_profile
 
         search_profile = ctx.data.get("search_profile")
         sp = validate_search_profile(search_profile) if search_profile else {}

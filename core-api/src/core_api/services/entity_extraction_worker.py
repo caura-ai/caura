@@ -76,7 +76,7 @@ async def process_entity_extraction(
 
         try:
             # Resolve tenant config for per-tenant blocklist
-            from core_api.services.tenant_settings import resolve_config
+            from core_api.services.organization_settings import resolve_config
 
             tenant_cfg = await resolve_config(None, tenant_id)
             blocklist = tenant_cfg.entity_blocklist

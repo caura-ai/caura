@@ -288,7 +288,7 @@ class Settings(BaseSettings):
 
     # Security audit — scheduler + threshold alerts. Enterprise-only feature;
     # OSS standalone deployments can leave these at defaults (all off).
-    # Per-tenant overrides live in tenant_settings.security_audit.
+    # Per-org overrides live in organization_settings.security_audit.
     security_audit_schedule_enabled: bool = False
     security_audit_schedule_cron: str = "0 2 * * *"  # daily 02:00 by default
     security_audit_alerts_enabled: bool = False

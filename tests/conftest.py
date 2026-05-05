@@ -95,7 +95,7 @@ def _import_all_models():
     import common.models.fleet  # noqa: F401
     import common.models.document  # noqa: F401
     import common.models.background_task  # noqa: F401
-    import common.models.tenant_settings  # noqa: F401
+    import common.models.organization_settings  # noqa: F401
 
 
 @pytest.fixture(scope="session")

@@ -154,17 +154,17 @@ class TestSemanticDedupToggle:
     """Verify per-tenant toggle via ResolvedConfig."""
 
     def test_default_enabled(self):
-        from core_api.services.tenant_settings import ResolvedConfig
+        from core_api.services.organization_settings import ResolvedConfig
         cfg = ResolvedConfig({})
         assert cfg.semantic_dedup_enabled is True
 
     def test_explicitly_disabled(self):
-        from core_api.services.tenant_settings import ResolvedConfig
+        from core_api.services.organization_settings import ResolvedConfig
         cfg = ResolvedConfig({"dedup": {"semantic_dedup_enabled": False}})
         assert cfg.semantic_dedup_enabled is False
 
     def test_explicitly_enabled(self):
-        from core_api.services.tenant_settings import ResolvedConfig
+        from core_api.services.organization_settings import ResolvedConfig
         cfg = ResolvedConfig({"dedup": {"semantic_dedup_enabled": True}})
         assert cfg.semantic_dedup_enabled is True
 

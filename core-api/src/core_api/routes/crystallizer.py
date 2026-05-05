@@ -54,7 +54,7 @@ async def trigger_crystallization(
 ):
     """Trigger crystallization for a tenant (analysis + auto-curate)."""
     auth.enforce_tenant(body.tenant_id)
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     config = await resolve_config(db, body.tenant_id)
     report_id = await run_crystallization(
@@ -80,7 +80,7 @@ async def trigger_crystallization_all(
     tenant_ids = [get_standalone_tenant_id()]
     reports = []
     for tid in tenant_ids:
-        from core_api.services.tenant_settings import resolve_config
+        from core_api.services.organization_settings import resolve_config
 
         config = await resolve_config(db, tid)
         report_id = await run_crystallization(

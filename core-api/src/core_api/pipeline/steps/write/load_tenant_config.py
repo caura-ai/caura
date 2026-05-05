@@ -12,7 +12,7 @@ class LoadTenantConfig:
         return "load_tenant_config"
 
     async def execute(self, ctx: PipelineContext) -> StepResult | None:
-        from core_api.services.tenant_settings import resolve_config
+        from core_api.services.organization_settings import resolve_config
 
         data = ctx.data["input"]
         tenant_config = await resolve_config(ctx.require_db, data.tenant_id)

@@ -777,7 +777,7 @@ async def _write_memory_inner(
     db: AsyncSession,
     idem: IdempotencyGuard | None,
 ):
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     write_config = await resolve_config(db, body.tenant_id)
     agent = await get_or_create_agent(
@@ -1198,7 +1198,7 @@ async def _search_inner(
     if usage:
         response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
         response.headers["X-RateLimit-Remaining"] = str(usage.get("remaining", "unlimited"))
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     t_start = time.perf_counter()
     success = True

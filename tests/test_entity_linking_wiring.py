@@ -35,7 +35,7 @@ def _fake_config(**overrides):
 
 @pytest.mark.asyncio
 @patch("core_api.services.lifecycle_service.get_storage_client")
-@patch("core_api.services.tenant_settings.resolve_config", new_callable=AsyncMock)
+@patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
 async def test_lifecycle_runs_entity_linking_when_enabled(
     mock_resolve,
     mock_sc_factory,
@@ -76,7 +76,7 @@ async def test_lifecycle_runs_entity_linking_when_enabled(
 
 @pytest.mark.asyncio
 @patch("core_api.services.lifecycle_service.get_storage_client")
-@patch("core_api.services.tenant_settings.resolve_config", new_callable=AsyncMock)
+@patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
 async def test_lifecycle_skips_entity_linking_when_disabled(
     mock_resolve,
     mock_sc_factory,
@@ -117,7 +117,7 @@ async def test_lifecycle_skips_entity_linking_when_disabled(
     "core_api.services.entity_extraction_worker.extract_entities_from_content",
     new_callable=AsyncMock,
 )
-@patch("core_api.services.tenant_settings.resolve_config", new_callable=AsyncMock)
+@patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
 async def test_extraction_triggers_cross_links_when_enabled(
     mock_resolve,
     mock_extract,
@@ -187,7 +187,7 @@ async def test_extraction_triggers_cross_links_when_enabled(
     "core_api.services.entity_extraction_worker.extract_entities_from_content",
     new_callable=AsyncMock,
 )
-@patch("core_api.services.tenant_settings.resolve_config", new_callable=AsyncMock)
+@patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
 async def test_extraction_skips_cross_links_when_disabled(
     mock_resolve,
     mock_extract,
@@ -256,7 +256,7 @@ async def test_extraction_skips_cross_links_when_disabled(
     "core_api.services.entity_extraction_worker.extract_entities_from_content",
     new_callable=AsyncMock,
 )
-@patch("core_api.services.tenant_settings.resolve_config", new_callable=AsyncMock)
+@patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
 async def test_extraction_cross_link_failure_is_nonfatal(
     mock_resolve,
     mock_extract,

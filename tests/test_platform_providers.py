@@ -502,7 +502,7 @@ class TestPlatformSecurity:
         monkeypatch.setattr(cfg, "settings", cfg.Settings())
         monkeypatch.setattr(cfg.settings, "openai_api_key", None)
 
-        from core_api.services.tenant_settings import ResolvedConfig
+        from core_api.services.organization_settings import ResolvedConfig
 
         config = ResolvedConfig({})
         # ResolvedConfig.openai_api_key reads tenant settings then global settings

@@ -25,7 +25,7 @@ async def lifecycle_scheduler() -> None:
 
 async def _run_lifecycle_cycle() -> None:
     """Run lifecycle automation for all tenants."""
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
     from core_api.standalone import get_standalone_tenant_id
 
     tenant_ids = [get_standalone_tenant_id()]
@@ -53,7 +53,7 @@ async def run_lifecycle_for_tenant(
     stale_count = await _archive_stale_memories(tenant_id, fleet_id)
 
     crystal_triggered = False
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     config = await resolve_config(None, tenant_id)
 

@@ -267,7 +267,7 @@ async def _run_crystallization(
     hygiene: dict,
 ) -> dict:
     """Identify clusters of noisy/redundant memories and crystallize them via LLM."""
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     config = await resolve_config(db, tenant_id)
 

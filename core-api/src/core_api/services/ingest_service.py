@@ -111,7 +111,7 @@ async def _fetch_url_text(url: str) -> str:
 
 async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
     """Preview mode: extract facts from URL or text without writing anything."""
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     tenant_config = await resolve_config(db, request.tenant_id)
 

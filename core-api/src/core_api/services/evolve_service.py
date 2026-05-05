@@ -339,7 +339,7 @@ async def _generate_rule(
     """
     from core_api.clients.storage_client import get_storage_client
     from core_api.providers._retry import call_with_fallback
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     sc = get_storage_client()
     config = await resolve_config(db, tenant_id)

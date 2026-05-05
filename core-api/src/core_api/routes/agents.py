@@ -7,7 +7,7 @@ from core_api.db.session import get_db
 from core_api.schemas import AgentOut, AgentTrustUpdate, SearchProfileUpdate
 from core_api.services.agent_service import update_trust_level
 from core_api.services.audit_service import log_action
-from core_api.services.tenant_settings import validate_search_profile
+from core_api.services.organization_settings import validate_search_profile
 
 router = APIRouter(tags=["Admin"])
 

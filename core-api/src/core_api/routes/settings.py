@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.db.session import get_db
-from core_api.services.tenant_settings import (
+from core_api.services.organization_settings import (
     PROVIDER_OPTIONS,
     get_settings_for_display,
     update_settings,

@@ -235,7 +235,7 @@ async def _create_memory_pipeline(db: AsyncSession, data: MemoryCreate) -> Memor
         build_strong_write_pipeline,
     )
     from core_api.pipeline.context import PipelineContext
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     # STM branch: bypass tenant config resolution and LTM pipelines entirely
     if data.write_mode == "stm":
@@ -498,7 +498,7 @@ async def _create_memory_legacy(db: AsyncSession, data: MemoryCreate) -> MemoryO
     sc = get_storage_client()
     t0 = time.perf_counter()
     # -- Resolve per-tenant LLM config (falls back to global) --
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     tenant_config = await resolve_config(db, data.tenant_id)
 
@@ -969,7 +969,7 @@ async def create_memories_bulk(
     }
 
     # -- Resolve per-tenant config once --
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     tenant_config = await resolve_config(db, data.tenant_id)
 
@@ -1635,7 +1635,7 @@ async def _reembed_memory(
     delay — thundering herd.
     """
     from core_api.constants import EMBEDDING_REEMBED_DELAY_S
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     if settings.embed_on_hot_path or is_failure_fallback:
         # Two paths land here: pre-offload legacy behaviour (flag on,
@@ -1743,7 +1743,7 @@ async def _reembed_memories_bulk(
     some rows without embeddings forever.
     """
     from core_api.services.contradiction_detector import detect_contradictions_async
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     if not items:
         return
@@ -1939,8 +1939,8 @@ async def _enrich_memory_background(
     as sub-tasks.
     """
     from core_api.services.memory_enrichment import enrich_memory
+    from core_api.services.organization_settings import resolve_config
     from core_api.services.task_tracker import tracked_task
-    from core_api.services.tenant_settings import resolve_config
 
     try:
         tenant_config = await resolve_config(None, tenant_id)
@@ -2252,7 +2252,7 @@ async def update_memory(
     agent_id: str | None = None,
 ) -> MemoryOut:
     """Update a memory. Re-embeds and re-extracts entities if content changes."""
-    from core_api.services.tenant_settings import resolve_config
+    from core_api.services.organization_settings import resolve_config
 
     sc = get_storage_client()
     mem = await sc.get_memory_for_tenant(tenant_id, str(memory_id))
@@ -3000,7 +3000,7 @@ async def _search_memories_legacy(
     sc = get_storage_client()
 
     # Resolve per-agent search profile with fallback to constants
-    from core_api.services.tenant_settings import validate_search_profile
+    from core_api.services.organization_settings import validate_search_profile
 
     sp = validate_search_profile(search_profile) if search_profile else {}
     _top_k = sp.get("top_k", top_k)

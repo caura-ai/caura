@@ -18,7 +18,7 @@ import pytest
     "module_path",
     [
         # Home of the cachetools.TTLCache import that got broken.
-        "core_api.services.tenant_settings",
+        "core_api.services.organization_settings",
         # App bootstrap — imports most routers transitively.
         "core_api.app",
         # MCP server — registers every tool spec at import time, any
