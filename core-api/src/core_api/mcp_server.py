@@ -11,6 +11,7 @@ import contextvars
 import hmac as _hmac
 import json
 import logging
+import re
 import time
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -186,7 +187,7 @@ mcp = FastMCP(
         "Just provide the content — MemClaw handles the rest. "
         "First-time setup: install the 'memclaw' usage skill via this server's "
         "/api/v1/install-skill endpoint (see README § 'Install the skill'). The "
-        "skill teaches agents when and how to use these 12 tools."
+        "skill teaches agents when and how to use these 10 tools."
     ),
     stateless_http=True,
     json_response=True,
@@ -742,6 +743,16 @@ async def memclaw_tune(
 # ---------------------------------------------------------------------------
 
 
+# The ``skills`` collection backs the agent-to-agent skill catalog (formerly
+# served by the dropped memclaw_share_skill / memclaw_unshare_skill tools).
+# Slugs become directory names on plugin-side reconciliation
+# (``plugin/skills/<slug>/SKILL.md``), so doc_id is constrained to a
+# filesystem-safe identifier — same regex the old skill_service used so
+# pre-migration uploads remain valid.
+SKILLS_COLLECTION = "skills"
+_SKILL_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
+
+
 async def memclaw_doc(
     op: Annotated[str, Field(description="write|read|query|delete|list_collections|search.")],
     collection: Annotated[
@@ -826,6 +837,24 @@ async def memclaw_doc(
                     return _with_latency(
                         _error_response("INVALID_ARGUMENTS", "op=write requires 'data'."), t0
                     )
+                # Skills collection has two extra rules — slugs become
+                # directory names on the plugin side, and discoverability
+                # depends on the description being indexed for semantic
+                # search. Auto-defaulting embed_field lets agents share a
+                # skill with a single call.
+                if collection == SKILLS_COLLECTION:
+                    if not _SKILL_SLUG_RE.fullmatch(doc_id):
+                        return _with_latency(
+                            _error_response(
+                                "INVALID_ARGUMENTS",
+                                f"collection='skills' requires doc_id matching "
+                                f"{_SKILL_SLUG_RE.pattern} — got {doc_id!r}. "
+                                "Slugs become directory names on each plugin node.",
+                            ),
+                            t0,
+                        )
+                    if embed_field is None:
+                        embed_field = "description"
                 # Optional semantic indexing: embed data[embed_field] so the
                 # doc participates in op=search. Missing/empty source field is
                 # a caller mistake — fail loud rather than silently skip.
@@ -1213,110 +1242,6 @@ async def memclaw_stats(
         except Exception as e:
             logger.exception("Unhandled error in memclaw_stats")
             return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
-
-
-async def memclaw_share_skill(
-    name: Annotated[
-        str, Field(description="Slug: [a-z0-9._-], 1-100 chars. Used as upsert key + directory.")
-    ],
-    description: Annotated[str, Field(description="One-line summary (1-500 chars).")],
-    content: Annotated[str, Field(description="Full SKILL.md markdown.")],
-    target_fleet_id: Annotated[str, Field(description="Fleet the skill is scoped to.")],
-    install_on_fleet: Annotated[
-        bool,
-        Field(
-            description="False (default): publish to catalog only. True: also push to every node in target_fleet_id (auto-install)."
-        ),
-    ] = False,
-    agent_id: Annotated[str, Field(description="Author agent.")] = "mcp-agent",
-    target_agent_ids: Annotated[
-        list[str] | None, Field(description="Recipient agent_ids (informational).")
-    ] = None,
-    version: Annotated[int, Field(description="Version (default 1).")] = 1,
-) -> str:
-    """Share a SKILL.md. Default publishes to catalog (recipients pull on demand);
-    set install_on_fleet=true to auto-install on every fleet node. Trust ≥ 1."""
-    t0 = time.perf_counter()
-    if err := _check_auth():
-        return err
-
-    tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
-
-    async with _mcp_session() as db:
-        trust, _, terr = await _require_trust(db, tenant_id, agent_id, min_level=1)
-        if terr:
-            return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
-
-        from core_api.services.skill_service import share_skill
-
-        try:
-            result = await share_skill(
-                db=db,
-                tenant_id=tenant_id,
-                name=name,
-                description=description,
-                content=content,
-                target_fleet_id=target_fleet_id,
-                install_on_fleet=install_on_fleet,
-                author_agent_id=agent_id,
-                target_agent_ids=target_agent_ids,
-                version=version,
-            )
-        except ValueError as e:
-            return _with_latency(_error_response("INVALID_ARGUMENTS", str(e)), t0)
-        except Exception as e:
-            logger.exception("Unhandled error in memclaw_share_skill")
-            return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
-
-        return _with_latency(json.dumps(result, default=str), t0)
-
-
-async def memclaw_unshare_skill(
-    name: Annotated[str, Field(description="Skill name (slug, must match the share).")],
-    unshare_from_fleet: Annotated[
-        bool,
-        Field(
-            description="False (default): remove from catalog only. True: also rm SKILL.md on every fleet node (requires target_fleet_id)."
-        ),
-    ] = False,
-    target_fleet_id: Annotated[
-        str | None,
-        Field(description="Required when unshare_from_fleet=true."),
-    ] = None,
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
-) -> str:
-    """Remove a shared skill. Default removes from catalog only;
-    set unshare_from_fleet=true to also delete from every fleet node. Trust ≥ 1."""
-    t0 = time.perf_counter()
-    if err := _check_auth():
-        return err
-
-    tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
-
-    async with _mcp_session() as db:
-        trust, _, terr = await _require_trust(db, tenant_id, agent_id, min_level=1)
-        if terr:
-            return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
-
-        from core_api.services.skill_service import unshare_skill
-
-        try:
-            result = await unshare_skill(
-                db=db,
-                tenant_id=tenant_id,
-                name=name,
-                unshare_from_fleet=unshare_from_fleet,
-                target_fleet_id=target_fleet_id,
-            )
-        except ValueError as e:
-            return _with_latency(_error_response("INVALID_ARGUMENTS", str(e)), t0)
-        except Exception as e:
-            logger.exception("Unhandled error in memclaw_unshare_skill")
-            return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
-
-        return _with_latency(json.dumps(result, default=str), t0)
 
 
 # ---------------------------------------------------------------------------

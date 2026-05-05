@@ -361,8 +361,6 @@ decision guidance, constraints, and error codes, read
 | \`memclaw_insights\`   | Reflect: contradictions / failures / patterns / …   | stored as \`insight\` memories |
 | \`memclaw_evolve\`     | Report outcome after acting on recalled memories    | weight updates; may create rules |
 | \`memclaw_stats\`      | Aggregate counts: total + by type/agent/status      | \`{total, by_type, by_agent, by_status, scope}\` |
-| \`memclaw_share_skill\`| Share a SKILL.md with a fleet                        | \`{skill_id, queued_nodes, node_ids}\` |
-| \`memclaw_unshare_skill\`| Remove a shared skill                              | \`{deleted, queued_nodes, node_ids}\` |
 
 ### Vocabulary
 
@@ -409,10 +407,9 @@ outcome MUST produce a write. No write = not done. Checkpoint every
 blocker · commitment · config change · error pattern · skill created
 or updated. If in doubt: write.
 
-**Skills.** Check the shared catalog before improvising
-(\`memclaw_doc op=query collection=skills\`). After creating a skill,
-share via \`memclaw_share_skill\` or document why you're keeping it
-local — never just forget to share.
+**Skills.** Check the catalog (\`memclaw_doc op=query collection=skills\`)
+before improvising. Share back via \`memclaw_doc op=write collection=skills
+doc_id=<slug>\` — never just forget to share.
 
 Before your first MemClaw call this session, read
 \`skills/memclaw/SKILL.md\` for tool signatures, capture cadences

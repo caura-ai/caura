@@ -8,7 +8,7 @@
  * - Workspace path stripping from telemetry (hash instead)
  */
 
-import { readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, mkdirSync, rmdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import { createHash } from "crypto";
 import { execSync } from "child_process";
@@ -26,7 +26,6 @@ import {
   MEMCLAW_REQUIRE_SIGNED_COMMANDS,
   BUILD_TIMEOUT_MS,
   MAX_SOURCE_SIZE,
-  ensureTenantId,
 } from "./env.js";
 import { PLUGIN_VERSION } from "./version.js";
 import { MEMCLAW_TOOLS } from "./tools.js";
@@ -55,14 +54,6 @@ import { getDisplayName } from "./identity.js";
 
 let heartbeatCount = 0;
 let bakCleanupDone = false;
-
-// Skill names double as on-disk directory segments — keep them
-// filesystem-safe. Mirrors core_api.services.skill_service._NAME_RE.
-const SAFE_SKILL_NAME = /^[a-z0-9][a-z0-9._-]{0,99}$/;
-
-function isSafeSkillName(name: unknown): name is string {
-  return typeof name === "string" && SAFE_SKILL_NAME.test(name);
-}
 
 function cleanupStaleBackups(): void {
   if (bakCleanupDone) return;
@@ -532,121 +523,6 @@ async function processCommand(cmd: {
               agents_updated: filesResult.agentsUpdated,
             },
           };
-        }
-      }
-    } else if (cmd.command === "install_skill") {
-      // Materialise a shared skill into plugin/skills/<name>/SKILL.md so
-      // OpenClaw's native skill discovery picks it up at next workspace
-      // open. Server-side flow (POST /skills/share) upserts the skill
-      // doc and queues this command per fleet node; we just fetch + write.
-      const payload = cmd.payload || {};
-      const skillDocId = payload.skill_doc_id as string | undefined;
-      const rawName = payload.name as string | undefined;
-      if (!skillDocId || !rawName) {
-        status = "failed";
-        result = { error: "install_skill payload missing skill_doc_id or name" };
-      } else if (!isSafeSkillName(rawName)) {
-        // Defense in depth — server validates, but enforce here too
-        // because the name is interpolated into a filesystem path.
-        status = "failed";
-        result = { error: `install_skill rejected unsafe name: ${rawName}` };
-      } else {
-        try {
-          // Server route is ``GET /documents/{doc_id}?tenant_id=&collection=``
-          // where doc_id is the human-readable skill ``name`` (the upsert
-          // key on the documents row), NOT the row's UUID. ``skill_doc_id``
-          // in the payload is the UUID — kept for forensics / future API
-          // shapes but unused here. Also: ``tenant_id`` is required by the
-          // route's Pydantic validation even though X-API-Key already
-          // resolves the tenant server-side; resolve it from env or via
-          // the cached ensureTenantId() promise.
-          const tenantId = MEMCLAW_TENANT_ID || (await ensureTenantId());
-          const doc = await apiCall(
-            "GET",
-            `/documents/${encodeURIComponent(rawName)}`,
-            undefined,
-            { tenant_id: tenantId, collection: "skills" },
-          );
-          // skill_doc_id is currently unused on the plugin side — referenced
-          // here so the linter doesn't flag the destructured payload field.
-          void skillDocId;
-          const data = (doc as { data?: Record<string, unknown> })?.data || {};
-          const content = data.content as string | undefined;
-          if (!content) {
-            status = "failed";
-            result = { error: "install_skill: doc has no content" };
-          } else {
-            const skillsRoot = join(getPluginDir(), "skills");
-            const skillDir = join(skillsRoot, rawName);
-            mkdirSync(skillDir, { recursive: true });
-            writeFileSync(join(skillDir, "SKILL.md"), content, "utf-8");
-            // Operator-visible notification — agents won't see this
-            // until next workspace open (when OpenClaw re-scans skill
-            // dirs), but at least the install is in the gateway log.
-            console.log(
-              `[memclaw] Installed skill: ${rawName} (v${data.version ?? 1}) → skills/${rawName}/SKILL.md`,
-            );
-            result = {
-              ok: true,
-              installed: rawName,
-              path: `skills/${rawName}/SKILL.md`,
-              version: data.version ?? 1,
-            };
-          }
-        } catch (e: unknown) {
-          status = "failed";
-          const msg = logError(`install_skill ${rawName} failed`, e);
-          result = { error: msg };
-        }
-      }
-    } else if (cmd.command === "uninstall_skill") {
-      // Mirror of install_skill — rm the local SKILL.md so OpenClaw
-      // stops surfacing it. Idempotent: a missing file is success
-      // (the end state is "skill not present"), so re-runs and
-      // out-of-order arrivals all converge.
-      const payload = cmd.payload || {};
-      const rawName = payload.name as string | undefined;
-      if (!rawName) {
-        status = "failed";
-        result = { error: "uninstall_skill payload missing name" };
-      } else if (!isSafeSkillName(rawName)) {
-        status = "failed";
-        result = { error: `uninstall_skill rejected unsafe name: ${rawName}` };
-      } else {
-        try {
-          const skillsRoot = join(getPluginDir(), "skills");
-          const skillDir = join(skillsRoot, rawName);
-          const skillMd = join(skillDir, "SKILL.md");
-          let removed = false;
-          if (existsSync(skillMd)) {
-            unlinkSync(skillMd);
-            removed = true;
-          }
-          // Best-effort dir cleanup — silently leave the directory if
-          // it has unrelated files (we shouldn't, but don't risk
-          // surprising the operator with extra rm semantics).
-          if (existsSync(skillDir)) {
-            try {
-              const remaining = readdirSync(skillDir);
-              if (remaining.length === 0) {
-                rmdirSync(skillDir);
-              }
-            } catch {
-              // Non-fatal — skill file is already gone.
-            }
-          }
-          if (removed) {
-            console.log(`[memclaw] Uninstalled skill: ${rawName}`);
-          }
-          result = {
-            ok: true,
-            uninstalled: rawName,
-            removed,
-          };
-        } catch (e: unknown) {
-          status = "failed";
-          const msg = logError(`uninstall_skill ${rawName} failed`, e);
-          result = { error: msg };
         }
       }
     } else if (cmd.command === "ping") {

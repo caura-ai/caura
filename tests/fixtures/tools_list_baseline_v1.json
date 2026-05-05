@@ -2,7 +2,7 @@
   {
     "name": "memclaw_doc",
     "title": null,
-    "description": "Structured-document CRUD in named collections. op: write|read|query|delete|list_collections|search. write upserts by collection+doc_id (pass embed_field to index a text field for semantic search); query filters by where dict; list_collections enumerates every collection this tenant has (with counts); search runs semantic retrieval over docs indexed via embed_field on write — pass collection to scope to one (narrow strategy), or omit collection to span every collection in the tenant (broad strategy). Use for structured records (customers, config). For memories use memclaw_write.",
+    "description": "Structured-document CRUD in named collections. op: write|read|query|delete|list_collections|search. write upserts by collection+doc_id (pass embed_field to index a text field for semantic search); query filters by where dict; list_collections enumerates every collection this tenant has (with counts); search runs semantic retrieval over docs indexed via embed_field on write \u2014 pass collection to scope to one (narrow strategy), or omit collection to span every collection in the tenant (broad strategy). Use for structured records (customers, config). For memories use memclaw_write.",
     "inputSchema": {
       "properties": {
         "op": {
@@ -210,7 +210,7 @@
   {
     "name": "memclaw_evolve",
     "title": null,
-    "description": "Report what happened after acting on memories. outcome_type: success|failure|partial. related_ids = the memory UUIDs that influenced the action (use IDs from your most recent memclaw_recall). scope: agent (default, trust ≥ 1)|fleet|all (trust ≥ 2; fleet_id required when scope='fleet'). Weight adjustments and rule generation are scoped — agents can only evolve memories they own (scope=agent), their fleet (scope=fleet), or any (scope=all).",
+    "description": "Report what happened after acting on memories. outcome_type: success|failure|partial. related_ids = the memory UUIDs that influenced the action (use IDs from your most recent memclaw_recall). scope: agent (default, trust \u2265 1)|fleet|all (trust \u2265 2; fleet_id required when scope='fleet'). Weight adjustments and rule generation are scoped \u2014 agents can only evolve memories they own (scope=agent), their fleet (scope=fleet), or any (scope=all).",
     "inputSchema": {
       "properties": {
         "outcome": {
@@ -293,7 +293,7 @@
   {
     "name": "memclaw_insights",
     "title": null,
-    "description": "Reflect over your memory store. focus: contradictions|failures|stale|divergence|patterns|discover. scope: agent (default, trust ≥ 1)|fleet|all (trust ≥ 2; divergence requires fleet/all). Findings are saved as insight-type memories for future runs to build on.",
+    "description": "Reflect over your memory store. focus: contradictions|failures|stale|divergence|patterns|discover. scope: agent (default, trust \u2265 1)|fleet|all (trust \u2265 2; divergence requires fleet/all). Findings are saved as insight-type memories for future runs to build on.",
     "inputSchema": {
       "properties": {
         "focus": {
@@ -354,7 +354,7 @@
   {
     "name": "memclaw_list",
     "title": null,
-    "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' (default) lists your memories at trust ≥ 1; scope='fleet'/'all' requires trust ≥ 2. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use memclaw_recall.",
+    "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' (default) lists your memories at trust \u2265 1; scope='fleet'/'all' requires trust \u2265 2. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use memclaw_recall.",
     "inputSchema": {
       "properties": {
         "agent_id": {
@@ -365,7 +365,7 @@
         },
         "scope": {
           "default": "agent",
-          "description": "agent|fleet|all. 'agent' (default) = your memories only (trust ≥ 1). 'fleet'/'all' = cross-agent (trust ≥ 2).",
+          "description": "agent|fleet|all. 'agent' (default) = your memories only (trust \u2265 1). 'fleet'/'all' = cross-agent (trust \u2265 2).",
           "title": "Scope",
           "type": "string"
         },
@@ -798,102 +798,14 @@
     "execution": null
   },
   {
-    "name": "memclaw_share_skill",
-    "title": null,
-    "description": "Share a SKILL.md with the fleet. Default publishes to the catalog (memclaw_doc op=query collection=skills); pass install_on_fleet=true to also auto-install on every node in target_fleet_id. Trust ≥ 1.",
-    "inputSchema": {
-      "properties": {
-        "name": {
-          "description": "Slug: [a-z0-9._-], 1-100 chars. Used as upsert key + directory.",
-          "title": "Name",
-          "type": "string"
-        },
-        "description": {
-          "description": "One-line summary (1-500 chars).",
-          "title": "Description",
-          "type": "string"
-        },
-        "content": {
-          "description": "Full SKILL.md markdown.",
-          "title": "Content",
-          "type": "string"
-        },
-        "target_fleet_id": {
-          "description": "Fleet the skill is scoped to.",
-          "title": "Target Fleet Id",
-          "type": "string"
-        },
-        "install_on_fleet": {
-          "default": false,
-          "description": "False (default): publish to catalog only. True: also push to every node in target_fleet_id (auto-install).",
-          "title": "Install On Fleet",
-          "type": "boolean"
-        },
-        "agent_id": {
-          "default": "mcp-agent",
-          "description": "Author agent.",
-          "title": "Agent Id",
-          "type": "string"
-        },
-        "target_agent_ids": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Recipient agent_ids (informational).",
-          "title": "Target Agent Ids"
-        },
-        "version": {
-          "default": 1,
-          "description": "Version (default 1).",
-          "title": "Version",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "name",
-        "description",
-        "content",
-        "target_fleet_id"
-      ],
-      "title": "memclaw_share_skillArguments",
-      "type": "object"
-    },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "string"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "memclaw_share_skillOutput",
-      "type": "object"
-    },
-    "icons": null,
-    "annotations": null,
-    "meta": null,
-    "execution": null
-  },
-  {
     "name": "memclaw_stats",
     "title": null,
-    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' (default) counts only memories visible to YOU (trust ≥ 1); scope='fleet'/'all' aggregates across agents (trust ≥ 2). Read-only — useful for self-introspection and dashboard-style summaries.",
+    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' (default) counts only memories visible to YOU (trust \u2265 1); scope='fleet'/'all' aggregates across agents (trust \u2265 2). Read-only \u2014 useful for self-introspection and dashboard-style summaries.",
     "inputSchema": {
       "properties": {
         "scope": {
           "default": "agent",
-          "description": "agent|fleet|all. 'agent' (default) = your memories only (trust ≥ 1). 'fleet'/'all' = aggregate across agents (trust ≥ 2).",
+          "description": "agent|fleet|all. 'agent' (default) = your memories only (trust \u2265 1). 'fleet'/'all' = aggregate across agents (trust \u2265 2).",
           "title": "Scope",
           "type": "string"
         },
@@ -967,7 +879,7 @@
   {
     "name": "memclaw_tune",
     "title": null,
-    "description": "Tune YOUR retrieval parameters for memclaw_recall (top_k, min_similarity, fts_weight, graph_max_hops, freshness, recall_boost). Only provide fields to change; no fields → returns current profile.",
+    "description": "Tune YOUR retrieval parameters for memclaw_recall (top_k, min_similarity, fts_weight, graph_max_hops, freshness, recall_boost). Only provide fields to change; no fields \u2192 returns current profile.",
     "inputSchema": {
       "properties": {
         "agent_id": {
@@ -1116,70 +1028,9 @@
     "execution": null
   },
   {
-    "name": "memclaw_unshare_skill",
-    "title": null,
-    "description": "Remove a shared skill from the catalog. Default removes from catalog only; pass unshare_from_fleet=true (with target_fleet_id) to also delete the SKILL.md on every fleet node. Trust ≥ 1.",
-    "inputSchema": {
-      "properties": {
-        "name": {
-          "description": "Skill name (slug, must match the share).",
-          "title": "Name",
-          "type": "string"
-        },
-        "unshare_from_fleet": {
-          "default": false,
-          "description": "False (default): remove from catalog only. True: also rm SKILL.md on every fleet node (requires target_fleet_id).",
-          "title": "Unshare From Fleet",
-          "type": "boolean"
-        },
-        "target_fleet_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Required when unshare_from_fleet=true.",
-          "title": "Target Fleet Id"
-        },
-        "agent_id": {
-          "default": "mcp-agent",
-          "description": "Caller agent.",
-          "title": "Agent Id",
-          "type": "string"
-        }
-      },
-      "required": [
-        "name"
-      ],
-      "title": "memclaw_unshare_skillArguments",
-      "type": "object"
-    },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "string"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "memclaw_unshare_skillOutput",
-      "type": "object"
-    },
-    "icons": null,
-    "annotations": null,
-    "meta": null,
-    "execution": null
-  },
-  {
     "name": "memclaw_write",
     "title": null,
-    "description": "Store NEW memories. Provide exactly one of {content, items} (batch ≤100). System auto-classifies type, importance, title, tags, dates. visibility: scope_team (default) / scope_org / scope_agent. Prefer team/org for sharing.",
+    "description": "Store NEW memories. Provide exactly one of {content, items} (batch \u2264100). System auto-classifies type, importance, title, tags, dates. visibility: scope_team (default) / scope_org / scope_agent. Prefer team/org for sharing.",
     "inputSchema": {
       "properties": {
         "content": {
@@ -1209,7 +1060,7 @@
             }
           ],
           "default": null,
-          "description": "Batch of objects, ≤100; each needs 'content'.",
+          "description": "Batch of objects, \u2264100; each needs 'content'.",
           "title": "Items"
         },
         "agent_id": {

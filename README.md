@@ -304,7 +304,7 @@ Add MemClaw to any MCP client with one config block.
 - **Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows)
 - **Cursor** — Settings > MCP Servers > Add Server
 
-The client discovers 12 tools automatically:
+The client discovers 10 tools automatically:
 
 | Tool | Purpose |
 |---|---|
@@ -318,13 +318,13 @@ The client discovers 12 tools automatically:
 | `memclaw_insights` | Analyze the memory store across 6 focus modes. Findings persist as `insight` memories |
 | `memclaw_evolve` | Report outcomes against recalled memories — adjusts weights, generates rules (Karpathy Loop) |
 | `memclaw_stats` | Aggregate counts: total + breakdowns by type, agent, status. Read-only |
-| `memclaw_share_skill` | Share a SKILL.md with the fleet. Default publishes to the catalog; `install_on_fleet=true` also auto-installs on every fleet node |
-| `memclaw_unshare_skill` | Remove a shared skill. Default removes from catalog only; `unshare_from_fleet=true` also rms the local SKILL.md on fleet nodes |
+
+> **Skill sharing** is now done via `memclaw_doc` — agents share a `SKILL.md` by upserting a document into the `skills` collection (`memclaw_doc op=write collection=skills doc_id=<slug> data={...}`). The server auto-indexes the description for semantic search. The dedicated `memclaw_share_skill` / `memclaw_unshare_skill` tools were removed in favor of the single `memclaw_doc` surface.
 
 ### Install the skill (Claude Code & Codex)
 
 Install MemClaw's usage guide as a **skill** so your agent knows *when* and
-*how* to use the 12 tools — the memory/doc mental model, the three rules
+*how* to use the 10 tools — the memory/doc mental model, the three rules
 (recall, write, supersede), trust levels, common patterns, and
 anti-patterns. The skill is loaded on-demand (not per-turn), so it costs
 nothing until the agent reaches for MemClaw.
@@ -727,7 +727,7 @@ memclaw/
 ├── core-api/                      # Main FastAPI service
 │   └── src/core_api/
 │       ├── app.py                 # FastAPI app, lifespan, middleware
-│       ├── mcp_server.py          # MCP server (Streamable HTTP, 12 tools)
+│       ├── mcp_server.py          # MCP server (Streamable HTTP, 10 tools)
 │       ├── constants.py           # Tool descriptions, limits, ranking params
 │       ├── config.py              # Settings (env vars)
 │       ├── auth.py                # API key + JWT auth, tenant enforcement
@@ -804,8 +804,8 @@ The MCP server is mounted at `/mcp`. Tool names, parameter names, and the docume
 | `memclaw_insights` | Karpathy-Loop reflection: contradictions, failures, stale, divergence, patterns, discover. |
 | `memclaw_evolve` | Karpathy-Loop feedback: record an outcome (`success` \| `failure` \| `partial`) against memories. |
 | `memclaw_stats` | Aggregate counts: total + breakdowns by `type` / `agent` / `status`. Read-only. |
-| `memclaw_share_skill` | Share a SKILL.md with the fleet. Default publishes to the catalog (semantic-searchable); `install_on_fleet=true` also auto-installs on every fleet node. |
-| `memclaw_unshare_skill` | Remove a shared skill. Default removes from catalog only; `unshare_from_fleet=true` also rms the local SKILL.md on fleet nodes. |
+
+> Skill sharing uses the generic `memclaw_doc` surface — write/read/query/search/delete on `collection="skills"`. The server validates the slug and auto-embeds the `description` field for semantic discovery.
 
 #### REST endpoints
 

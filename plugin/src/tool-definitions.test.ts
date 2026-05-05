@@ -59,8 +59,6 @@ describe("MEMCLAW_TOOLS surface", () => {
       "memclaw_insights",
       "memclaw_evolve",
       "memclaw_stats",
-      "memclaw_share_skill",
-      "memclaw_unshare_skill",
     ]);
   });
 
@@ -126,9 +124,13 @@ describe("createToolFromSpec factory", () => {
     ]);
 
     const doc = createToolFromSpec("memclaw_doc").parameters as any;
-    assert.deepEqual(doc.required, ["op", "collection"]);
+    // ``collection`` is required for write/read/query/delete but optional
+    // for search (omit → search across all collections) and list_collections,
+    // so the schema gates only ``op``; the server enforces collection
+    // per-op.
+    assert.deepEqual(doc.required, ["op"]);
     assert.deepEqual(doc.properties.op.enum, [
-      "write", "read", "query", "delete",
+      "write", "read", "query", "delete", "search", "list_collections",
     ]);
   });
 
@@ -145,22 +147,6 @@ describe("createToolFromSpec factory", () => {
     assert.deepEqual(list.required, []);
     assert.ok(list.properties.cursor);
     assert.ok(list.properties.include_deleted);
-  });
-
-  test("memclaw_share_skill does NOT require target_fleet_id (auto-filled by enrichBody)", () => {
-    // The plugin auto-fills ``target_fleet_id`` from MEMCLAW_FLEET_ID
-    // when the agent omits it (the common case for single-fleet
-    // installs). Making the field required would force every share to
-    // repeat the local fleet name and produce "I guessed wrong" bugs
-    // when the agent doesn't know its own fleet — silently storing
-    // the skill under the wrong fleet, invisible to teammates.
-    const share = createToolFromSpec("memclaw_share_skill").parameters as any;
-    assert.ok(
-      !share.required.includes("target_fleet_id"),
-      "target_fleet_id must NOT be in required (auto-filled by enrichBody)",
-    );
-    assert.deepEqual(share.required, ["name", "description", "content"]);
-    assert.ok(share.properties.target_fleet_id);
   });
 
   test("openclaw.plugin.json contracts.tools matches MEMCLAW_TOOLS exactly", () => {

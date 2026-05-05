@@ -44,11 +44,11 @@ Tool descriptions are derived from the tool registry (`core-api/src/core_api/too
 | `memclaw_insights` | Yes | Yes | Analyze the memory store. `focus`: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. `scope`: `agent`, `fleet`, `all`. Findings persist as `insight`-type memories (Karpathy Loop reflection step) |
 | `memclaw_evolve` | Yes | Yes | Record a real-world outcome (`success` / `failure` / `partial`) against recalled memories — adjusts weights, auto-generates preventive rules on failure (Karpathy Loop feedback edge) |
 | `memclaw_stats` | Yes | Yes | Aggregate counts of memories: total + breakdowns by `type`, `agent`, `status`. Read-only — useful for dashboards (REST) and agent self-introspection (MCP) |
-| `memclaw_share_skill` | Yes | Yes | Share a `SKILL.md` artifact with the fleet. Default publishes to the catalog (semantic-searchable via `GET /skills?query=`); `install_on_fleet=true` also queues `install_skill` fleet commands so every node materialises the skill locally for OpenClaw discovery |
-| `memclaw_unshare_skill` | Yes | Yes | Remove a shared skill. Default removes from the catalog only; `unshare_from_fleet=true` also queues `uninstall_skill` per fleet node so plugins delete the local `SKILL.md` |
 
-- **MCP (12 tools):** Full surface. Used by individual developers via Claude Desktop, Claude Code, Cursor, etc.
-- **OpenClaw plugin (12 tools):** Same set. Claims the exclusive `memory` slot, replacing `memory-core`. Includes ContextEngine lifecycle, heartbeat, and auto-education.
+> Skill sharing rides the generic `memclaw_doc` surface: `op=write collection=skills doc_id=<slug>` to share, `op=delete` to remove, `op=search`/`op=query` to discover. Slugs are validated against `^[a-z0-9][a-z0-9._-]{0,99}$`; the description is auto-embedded for semantic search.
+
+- **MCP (10 tools):** Full surface. Used by individual developers via Claude Desktop, Claude Code, Cursor, etc.
+- **OpenClaw plugin (10 tools):** Same set. Claims the exclusive `memory` slot, replacing `memory-core`. Includes ContextEngine lifecycle, heartbeat, and auto-education.
 
 ---
 
@@ -122,7 +122,7 @@ in the first place.
 
 ### Available tools
 
-The MCP server exposes 12 tools that clients discover automatically. Descriptions are canonical — served from `GET /api/tool-descriptions`, derived from the tool registry (`core-api/src/core_api/tools/_registry.py`).
+The MCP server exposes 10 tools that clients discover automatically. Descriptions are canonical — served from `GET /api/tool-descriptions`, derived from the tool registry (`core-api/src/core_api/tools/_registry.py`).
 
 | Tool | Purpose |
 |---|---|
@@ -136,8 +136,8 @@ The MCP server exposes 12 tools that clients discover automatically. Description
 | `memclaw_insights` | Analyze the store. Focus: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. Persists findings as `insight` memories |
 | `memclaw_evolve` | Report an outcome (success/failure/partial) against recalled memories — adjusts weights, generates preventive rules on failure |
 | `memclaw_stats` | Aggregate counts: total + breakdowns by `type`, `agent`, `status`. Read-only |
-| `memclaw_share_skill` | Share a `SKILL.md` with the fleet. Default publishes to the catalog (semantic-searchable); `install_on_fleet=true` also auto-installs on every fleet node |
-| `memclaw_unshare_skill` | Remove a shared skill. Default removes from catalog only; `unshare_from_fleet=true` also rms the local `SKILL.md` on fleet nodes |
+
+> Skill sharing uses the generic `memclaw_doc` surface (`collection="skills"`). The server validates the slug and auto-embeds the `description` field; agents discover via `op=search`/`op=query` and pull individual skills via `op=read`.
 
 ### Auth
 
@@ -277,7 +277,7 @@ The node will appear in the Fleet page (`/ui/fleet.html`) within 60 seconds.
 
 ### Plugin internals
 
-The plugin registers 12 tools and runs several lifecycle systems:
+The plugin registers 10 tools and runs several lifecycle systems:
 
 - **ContextEngine** — 7 lifecycle hooks: `bootstrap` (smoke test), `ingest` (message buffering + persistence), `assemble` (token-budget-aware recall injection), `compact` (persist summaries), `afterTurn` (auto-write turn summaries), `prepareSubagentSpawn`, `onSubagentEnded`
 - **Memory runtime** — API-backed `search()` and `get()` replacing file-based `memory-core`

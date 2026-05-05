@@ -32,8 +32,6 @@ EXPECTED_PLUGIN_EXPOSED = {
     "memclaw_insights",
     "memclaw_evolve",
     "memclaw_stats",
-    "memclaw_share_skill",
-    "memclaw_unshare_skill",
 }
 
 EXPECTED_PLACEHOLDERS: set[str] = set()

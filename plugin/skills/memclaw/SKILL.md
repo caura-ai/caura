@@ -147,37 +147,40 @@ Single-agent runtimes ignore this section.
   orchestrator can decide whether to escalate.
 - NEVER substitute local files or scratchpads for MemClaw writes.
 
-## Discovering shared skills
+## Sharing skills
 
 Skills are SKILL.md artifacts that agents share across the fleet —
-debugging recipes, ops runbooks, refactor playbooks. Before improvising
-a non-trivial workflow, check the catalog:
+debugging recipes, ops runbooks, refactor playbooks. They live as
+documents in the `skills` collection: discovery and sharing both use
+`memclaw_doc`.
 
 ```
-GET /skills?query=<natural language>      # semantic search by description
-memclaw_doc op=query collection=skills    # browse by recency / fleet
-memclaw_doc op=read collection=skills doc_id=<name>   # full body
+# Discover
+memclaw_doc op=search collection=skills query=<natural language>
+memclaw_doc op=query  collection=skills              # browse by recency
+memclaw_doc op=read   collection=skills doc_id=<slug>  # full body
+
+# Share — slug is `[a-z0-9][a-z0-9._-]{0,99}` (filesystem-safe)
+memclaw_doc op=write collection=skills doc_id=<slug> \
+  data={ "name": "<slug>", "description": "<one-liner>", "content": "<full SKILL.md>" } \
+  embed_field=description
+
+# Remove
+memclaw_doc op=delete collection=skills doc_id=<slug>
 ```
 
-Skill descriptions are auto-embedded so semantic search ("how do I
-research scientific papers?") returns the right skill even when names
-don't match.
+Setting `embed_field=description` indexes the description for semantic
+search so other agents can find the skill by meaning ("how do I
+research scientific papers?") even when names don't match. The server
+auto-defaults `embed_field=description` when `collection=skills`, but
+passing it explicitly is harmless.
 
-Sharing has two modes:
+Visibility follows the document — share at `fleet_id` scope so the
+catalog row is visible to every agent on that fleet. Re-uploading the
+same `doc_id` overwrites; this is how you publish a new version.
 
-- **Publish-only** (default, `install_on_fleet=false`) — the skill
-  lands in the `skills` catalog and teammates discover it via the
-  query above. Recommended for most shares: low-friction, doesn't
-  touch teammates' filesystems.
-- **Install on fleet** (`install_on_fleet=true`) — also queues an
-  install command per node in `target_fleet_id`; OpenClaw discovers
-  the skill in its palette automatically on next workspace open. Use
-  this only when every agent on the fleet genuinely needs the skill
-  installed (operational runbooks, mandatory workflows).
-
-Built something reusable? Share it back with `memclaw_share_skill` —
-default to publish-only and only set `install_on_fleet=true` when
-mandatory.
+Built something reusable? Upsert it. Only mark a skill local (and
+document why) when it genuinely shouldn't be shared.
 
 ## Session loop
 
@@ -245,23 +248,6 @@ Read-only — safe as a heartbeat readiness probe and for dashboard-style
 summaries. Never use a write+delete pattern for health checks; use this.
 `scope="fleet"` / `"all"` → trust 2.
 
-**`memclaw_share_skill(name, description, content, target_fleet_id, install_on_fleet=false, version=1)`**
-Share a SKILL.md. `name` is a slug (`[a-z0-9._-]`, 1-100 chars) used
-as the upsert key and on-disk directory. The `description` field is
-auto-embedded so the skill is discoverable via semantic search.
-Default (`install_on_fleet=false`) publishes to the catalog only —
-recipients discover via `memclaw_doc op=query collection=skills` or
-`GET /skills?query=...`. With `install_on_fleet=true`, also queues
-install commands so every node in `target_fleet_id` materialises the
-skill and OpenClaw picks it up at next workspace open. Trust 1.
-
-**`memclaw_unshare_skill(name, unshare_from_fleet=false, target_fleet_id=?)`**
-Remove a shared skill. Default removes from the catalog only —
-already-installed nodes keep their local copy. With
-`unshare_from_fleet=true` (and a `target_fleet_id`), also queues
-`uninstall_skill` commands per node so plugins delete the local
-SKILL.md (idempotent). Trust 1.
-
 ### Which tool, when
 
 - Might have seen before → `memclaw_recall`
@@ -274,9 +260,9 @@ SKILL.md (idempotent). Trust 1.
 - Recall quality off across queries → `memclaw_tune` (once, sticky)
 - Session boundary / orchestrator sweep → `memclaw_insights`
 - Heartbeat readiness probe / counts dashboard → `memclaw_stats`
-- Stuck on a non-trivial workflow → search by meaning (`GET /skills?query=...`) or browse (`memclaw_doc op=query collection=skills`) before improvising
-- Built a reusable workflow → `memclaw_share_skill` to teach the fleet
-- Skill is wrong / superseded → `memclaw_unshare_skill` to remove it
+- Stuck on a non-trivial workflow → search by meaning (`memclaw_doc op=search collection=skills query=...`) or browse (`memclaw_doc op=query collection=skills`) before improvising
+- Built a reusable workflow → `memclaw_doc op=write collection=skills doc_id=<slug> embed_field=description` to teach the fleet
+- Skill is wrong / superseded → `memclaw_doc op=delete collection=skills doc_id=<slug>` to remove it
 
 ### Constraints that matter
 

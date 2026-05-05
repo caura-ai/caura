@@ -1127,13 +1127,12 @@ describe("shared SKILL.md (plugin/skills/memclaw/SKILL.md)", () => {
     assert.ok(skill.includes("### Error codes"), "missing ### Error codes");
   });
 
-  test("all 12 tool cards are present in SKILL.md", () => {
+  test("all 10 tool cards are present in SKILL.md", () => {
     const skill = readSharedSkill();
     for (const tool of [
       "memclaw_recall", "memclaw_write", "memclaw_manage", "memclaw_list",
       "memclaw_doc", "memclaw_entity_get", "memclaw_tune",
-      "memclaw_insights", "memclaw_evolve",
-      "memclaw_stats", "memclaw_share_skill", "memclaw_unshare_skill",
+      "memclaw_insights", "memclaw_evolve", "memclaw_stats",
     ]) {
       assert.ok(
         skill.includes(`**\`${tool}(`) || skill.includes(`\`${tool}(`),
@@ -1168,8 +1167,6 @@ describe("buildToolsMd", () => {
     "memclaw_insights",
     "memclaw_evolve",
     "memclaw_stats",
-    "memclaw_share_skill",
-    "memclaw_unshare_skill",
   ];
 
   test("lists every plugin-exposed tool", () => {

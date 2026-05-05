@@ -572,69 +572,6 @@
     "trust_required": 0
   },
   {
-    "description": "Share a SKILL.md with the fleet. Default publishes to the catalog (memclaw_doc op=query collection=skills); pass install_on_fleet=true to also auto-install on every node in target_fleet_id. Trust \u2265 1.",
-    "error_codes": [],
-    "impl_status": "live",
-    "name": "memclaw_share_skill",
-    "ops": [],
-    "params": [
-      {
-        "description": "Slug: [a-z0-9._-], 1-100 chars. Used as upsert key + directory.",
-        "name": "name",
-        "required": true,
-        "type": "str"
-      },
-      {
-        "description": "One-line summary (1-500 chars).",
-        "name": "description",
-        "required": true,
-        "type": "str"
-      },
-      {
-        "description": "Full SKILL.md markdown.",
-        "name": "content",
-        "required": true,
-        "type": "str"
-      },
-      {
-        "description": "Fleet the skill is scoped to.",
-        "name": "target_fleet_id",
-        "required": true,
-        "type": "str"
-      },
-      {
-        "default": false,
-        "description": "False (default): publish to catalog only. True: also push to every node in target_fleet_id (auto-install).",
-        "name": "install_on_fleet",
-        "required": false,
-        "type": "bool"
-      },
-      {
-        "default": "mcp-agent",
-        "description": "Author agent.",
-        "name": "agent_id",
-        "required": false,
-        "type": "str"
-      },
-      {
-        "default": null,
-        "description": "Recipient agent_ids (informational).",
-        "name": "target_agent_ids",
-        "required": false,
-        "type": "list[str] | None"
-      },
-      {
-        "default": 1,
-        "description": "Version (default 1).",
-        "name": "version",
-        "required": false,
-        "type": "int"
-      }
-    ],
-    "plugin_exposed": true,
-    "trust_required": 1
-  },
-  {
     "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' (default) counts only memories visible to YOU (trust \u2265 1); scope='fleet'/'all' aggregates across agents (trust \u2265 2). Read-only \u2014 useful for self-introspection and dashboard-style summaries.",
     "error_codes": [],
     "impl_status": "live",
@@ -760,44 +697,6 @@
     ],
     "plugin_exposed": true,
     "trust_required": 0
-  },
-  {
-    "description": "Remove a shared skill from the catalog. Default removes from catalog only; pass unshare_from_fleet=true (with target_fleet_id) to also delete the SKILL.md on every fleet node. Trust \u2265 1.",
-    "error_codes": [],
-    "impl_status": "live",
-    "name": "memclaw_unshare_skill",
-    "ops": [],
-    "params": [
-      {
-        "description": "Skill name (slug, must match the share).",
-        "name": "name",
-        "required": true,
-        "type": "str"
-      },
-      {
-        "default": false,
-        "description": "False (default): remove from catalog only. True: also rm SKILL.md on every fleet node (requires target_fleet_id).",
-        "name": "unshare_from_fleet",
-        "required": false,
-        "type": "bool"
-      },
-      {
-        "default": null,
-        "description": "Required when unshare_from_fleet=true.",
-        "name": "target_fleet_id",
-        "required": false,
-        "type": "str | None"
-      },
-      {
-        "default": "mcp-agent",
-        "description": "Caller agent.",
-        "name": "agent_id",
-        "required": false,
-        "type": "str"
-      }
-    ],
-    "plugin_exposed": true,
-    "trust_required": 1
   },
   {
     "description": "Store NEW memories. Provide exactly one of {content, items} (batch \u2264100). System auto-classifies type, importance, title, tags, dates. visibility: scope_team (default) / scope_org / scope_agent. Prefer team/org for sharing.",

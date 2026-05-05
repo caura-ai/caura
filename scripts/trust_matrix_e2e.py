@@ -136,22 +136,11 @@ TESTS = [
     ("memclaw_evolve", {"op": "analyze"}, 2),
     ("memclaw_stats", {"scope": "agent"}, 1),
     ("memclaw_stats", {"scope": "fleet"}, 2),
-    (
-        "memclaw_share_skill",
-        {
-            "name": "trust-matrix-probe",
-            "description": "trust matrix probe",
-            "content": "# probe\n",
-            "target_fleet_id": "trust-fleet",
-        },
-        1,
-    ),
-    ("memclaw_unshare_skill", {"name": "trust-matrix-probe"}, 1),
 ]
 
 
 def run_matrix():
-    print("\n=== Trust Matrix (12 tools × 3 trust levels) ===")
+    print("\n=== Trust Matrix (10 tools × 3 trust levels) ===")
     print(f"{'tool':25s} {'args':40s} {'T1':10s} {'T2':10s} {'T3':10s}")
     print("-" * 100)
     for tool, args, min_trust in TESTS:

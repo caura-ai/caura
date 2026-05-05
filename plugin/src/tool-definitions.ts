@@ -1,5 +1,5 @@
 /**
- * MemClaw tool definitions — current surface (12 tools).
+ * MemClaw tool definitions — current surface (10 tools).
  *
  * One `createToolFromSpec(name)` factory wires together three sources:
  *
@@ -55,14 +55,6 @@ async function enrichBody(
   if (!body.tenant_id) body.tenant_id = await ensureTenantId();
   if (!body.agent_id && MEMCLAW_AGENT_ID) body.agent_id = MEMCLAW_AGENT_ID;
   if (!body.fleet_id && MEMCLAW_FLEET_ID) body.fleet_id = MEMCLAW_FLEET_ID;
-  // ``target_fleet_id`` is the routing key for skill-sharing tools
-  // (memclaw_share_skill / memclaw_unshare_skill). Auto-fill from the
-  // plugin's local fleet config when the agent omits it — agents on a
-  // single fleet shouldn't have to repeat it on every share, and
-  // making them guess produces silent visibility bugs (skill stored
-  // under the wrong fleet, invisible to teammates' queries). Explicit
-  // values (intentional cross-fleet shares) are respected.
-  if (!body.target_fleet_id && MEMCLAW_FLEET_ID) body.target_fleet_id = MEMCLAW_FLEET_ID;
   return body;
 }
 
@@ -170,10 +162,18 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
 
   memclaw_doc: {
     type: "object",
-    required: ["op", "collection"],
+    required: ["op"],
     properties: {
-      op: { type: "string", enum: ["write", "read", "query", "delete"] },
-      collection: { type: "string", description: "Collection name (table)" },
+      op: {
+        type: "string",
+        enum: ["write", "read", "query", "delete", "search", "list_collections"],
+      },
+      collection: {
+        type: "string",
+        description:
+          "Collection (table). Required for write|read|query|delete; " +
+          "optional for search (omit to search every collection in the tenant) and list_collections.",
+      },
       doc_id: { type: "string", description: "Required for op=write|read|delete" },
       data: { type: "object", description: "Required for op=write" },
       where: { type: "object", description: "For op=query — field equality filters" },
@@ -183,6 +183,14 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       offset: { type: "integer", description: "For op=query" },
       agent_id: { type: "string" },
       fleet_id: { type: "string", description: "For op=write" },
+      embed_field: {
+        type: "string",
+        description:
+          "op=write: JSON key in data whose text is embedded for semantic search via op=search. " +
+          "Auto-defaults to 'description' when collection='skills'.",
+      },
+      query: { type: "string", description: "op=search: natural-language query." },
+      top_k: { type: "integer", description: "op=search: max results (1-50)." },
     },
   },
 
@@ -276,31 +284,6 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     },
   },
 
-  memclaw_share_skill: {
-    type: "object",
-    required: ["name", "description", "content"],
-    properties: {
-      name: { type: "string", description: "Skill name (lowercase, [a-z0-9._-], 1-100 chars). Doubles as on-disk directory name and the upsert key." },
-      description: { type: "string", description: "One-line summary used for browse/search (1-500 chars)." },
-      content: { type: "string", description: "Full SKILL.md markdown body." },
-      target_fleet_id: { type: "string", description: "Fleet the skill is scoped to. Auto-filled from your local fleet config when omitted; specify explicitly only for cross-fleet shares." },
-      install_on_fleet: { type: "boolean", description: "False (default): publish to catalog only. True: also auto-install on every node in target_fleet_id." },
-      agent_id: { type: "string", description: "Author agent (recorded on the doc)." },
-      target_agent_ids: { type: "array", items: { type: "string" }, description: "Optional list of recipient agent_ids — informational only in v1." },
-      version: { type: "integer", description: "Skill version (default 1). Re-shares overwrite by name." },
-    },
-  },
-
-  memclaw_unshare_skill: {
-    type: "object",
-    required: ["name"],
-    properties: {
-      name: { type: "string", description: "Skill name (must match the share)." },
-      unshare_from_fleet: { type: "boolean", description: "False (default): catalog-only removal. True: also rm SKILL.md on every fleet node (requires target_fleet_id)." },
-      target_fleet_id: { type: "string", description: "Required when unshare_from_fleet=true. Auto-filled from your local fleet config when omitted." },
-      agent_id: { type: "string", description: "Caller agent." },
-    },
-  },
 };
 
 // --- HTTP dispatch ---
@@ -384,7 +367,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   memclaw_doc: async (params, signal) => {
     const enriched = await enrichBody(params);
     const op = enriched.op as string;
-    const collection = enriched.collection as string;
+    const collection = enriched.collection as string | undefined;
     const tenant_id = enriched.tenant_id as string;
     if (op === "write") {
       return apiCall("POST", "/documents", {
@@ -394,6 +377,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
         data: enriched.data,
         fleet_id: enriched.fleet_id,
         agent_id: enriched.agent_id,
+        embed_field: enriched.embed_field,
       }, undefined, signal);
     }
     if (op === "read") {
@@ -401,7 +385,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
         "GET",
         `/documents/${encodeURIComponent(enriched.doc_id as string)}`,
         undefined,
-        { tenant_id, collection },
+        { tenant_id, collection: collection as string },
         signal,
       );
     }
@@ -418,12 +402,27 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
       };
       return apiCall("POST", "/documents/query", body, undefined, signal);
     }
+    if (op === "search") {
+      const body: Record<string, unknown> = {
+        tenant_id,
+        collection,
+        query: enriched.query,
+        top_k: enriched.top_k ?? 5,
+        fleet_id: enriched.fleet_id,
+      };
+      return apiCall("POST", "/documents/search", body, undefined, signal);
+    }
+    if (op === "list_collections") {
+      const query: Record<string, string> = { tenant_id };
+      if (enriched.fleet_id) query.fleet_id = String(enriched.fleet_id);
+      return apiCall("GET", "/documents/collections", undefined, query, signal);
+    }
     // op === "delete"
     return apiCall(
       "DELETE",
       `/documents/${encodeURIComponent(enriched.doc_id as string)}`,
       undefined,
-      { tenant_id, collection },
+      { tenant_id, collection: collection as string },
       signal,
     );
   },
@@ -491,41 +490,6 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     return apiCall("GET", "/memories/stats", undefined, query, signal);
   },
 
-  memclaw_share_skill: async (params, signal) => {
-    const enriched = await enrichBody(params);
-    const body: Record<string, unknown> = {
-      tenant_id: enriched.tenant_id,
-      name: enriched.name,
-      description: enriched.description,
-      content: enriched.content,
-      target_fleet_id: enriched.target_fleet_id,
-      install_on_fleet: enriched.install_on_fleet ?? false,
-      author_agent_id: enriched.agent_id ?? enriched.author_agent_id,
-      target_agent_ids: enriched.target_agent_ids,
-      version: enriched.version ?? 1,
-    };
-    return apiCall("POST", "/skills/share", body, undefined, signal);
-  },
-
-  memclaw_unshare_skill: async (params, signal) => {
-    const enriched = await enrichBody(params);
-    const name = enriched.name as string;
-    assertSafePathSegment(name, "name");
-    const query: Record<string, string> = {
-      tenant_id: enriched.tenant_id as string,
-      unshare_from_fleet: String(enriched.unshare_from_fleet ?? false),
-    };
-    if (enriched.target_fleet_id) {
-      query.target_fleet_id = String(enriched.target_fleet_id);
-    }
-    return apiCall(
-      "DELETE",
-      `/skills/${encodeURIComponent(name)}`,
-      undefined,
-      query,
-      signal,
-    );
-  },
 };
 
 // --- Factory ---

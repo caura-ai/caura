@@ -1,6 +1,7 @@
 """Document Store — structured JSONB records for agents."""
 
 import logging
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -20,6 +21,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Document Store"])
 
+
+# ``skills`` is the agent-to-agent skill catalog (replaces the dropped
+# memclaw_share_skill / memclaw_unshare_skill MCP tools). Slugs become
+# directory names on plugin-side reconciliation, so doc_id is constrained
+# to a filesystem-safe identifier; description is auto-embedded so other
+# agents can semantic-search the catalog.
+SKILLS_COLLECTION = "skills"
+_SKILL_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
+
+
 # ── Schemas ──
 
 
@@ -29,6 +40,14 @@ class DocWriteRequest(BaseModel):
     collection: str = Field(min_length=1, max_length=200)
     doc_id: str = Field(min_length=1, max_length=500)
     data: dict
+    embed_field: str | None = Field(
+        default=None,
+        description=(
+            "JSON key in ``data`` whose text value is embedded for "
+            "semantic search via /documents/search. Auto-defaults to "
+            "'description' when collection='skills'."
+        ),
+    )
 
 
 class DocQueryRequest(BaseModel):
@@ -106,19 +125,89 @@ async def upsert_document(
     if _idem and (_replay := _idem.cached_replay):
         _body, _status = _replay
         return JSONResponse(content=_body, status_code=_status)
+
+    # Skills collection has two extra rules — slugs become directory
+    # names on plugin-side reconciliation, and discoverability requires
+    # the description to be indexed for semantic search.
+    embed_field = body.embed_field
+    if body.collection == SKILLS_COLLECTION:
+        if not _SKILL_SLUG_RE.fullmatch(body.doc_id):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"collection='skills' requires doc_id matching "
+                    f"{_SKILL_SLUG_RE.pattern} — got {body.doc_id!r}. "
+                    "Slugs become directory names on each plugin node."
+                ),
+            )
+        if embed_field is None:
+            embed_field = "description"
+
     if auth.tenant_id:
         await check_and_increment(db, body.tenant_id, "write")
 
-    sc = get_storage_client()
-    doc = await sc.upsert_document(
-        {
-            "tenant_id": body.tenant_id,
-            "fleet_id": body.fleet_id,
-            "collection": body.collection,
-            "doc_id": body.doc_id,
-            "data": body.data,
-        }
-    )
+    # Embed the requested field for semantic-search indexing. Use the
+    # repository's upsert path (which writes the embedding column)
+    # whenever embed_field resolves; otherwise fall back to the
+    # storage-client path (no embedding).
+    embedding: list[float] | None = None
+    if embed_field:
+        source = body.data.get(embed_field)
+        if not isinstance(source, str) or not source.strip():
+            raise HTTPException(
+                status_code=422,
+                detail=(f"embed_field '{embed_field}' not found in data or not a non-empty string."),
+            )
+        from common.embedding import get_embedding
+
+        embedding = await get_embedding(source)
+        if embedding is None:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Embedding provider returned no vector (check provider config / quota). Write aborted."
+                ),
+            )
+
+    if embedding is not None:
+        from core_api.repositories import document_repo
+
+        row = await document_repo.upsert_returning_xmax(
+            db,
+            tenant_id=body.tenant_id,
+            fleet_id=body.fleet_id,
+            collection=body.collection,
+            doc_id=body.doc_id,
+            data=body.data,
+            embedding=embedding,
+        )
+        if row is None:
+            raise HTTPException(status_code=500, detail="Document upsert returned no rows")
+        # Commit so the storage-api process (which reads from the same
+        # Postgres but holds its own connections) sees the row when we
+        # re-fetch below. ``log_action`` further down also requires an
+        # explicit commit, so we'll commit again at the end — that's
+        # fine, the second commit is a no-op for the doc row.
+        await db.commit()
+        # Re-fetch to build the response shape (upsert_returning_xmax
+        # returns a tuple, not a full doc dict).
+        sc = get_storage_client()
+        doc = await sc.get_document(
+            tenant_id=body.tenant_id,
+            collection=body.collection,
+            doc_id=body.doc_id,
+        )
+    else:
+        sc = get_storage_client()
+        doc = await sc.upsert_document(
+            {
+                "tenant_id": body.tenant_id,
+                "fleet_id": body.fleet_id,
+                "collection": body.collection,
+                "doc_id": body.doc_id,
+                "data": body.data,
+            }
+        )
     if doc is None:
         raise HTTPException(status_code=500, detail="Document upsert returned no rows")
     await log_action(
@@ -127,7 +216,11 @@ async def upsert_document(
         action="doc_upsert",
         resource_type="document",
         resource_id=doc.get("id"),
-        detail={"collection": body.collection, "doc_id": body.doc_id},
+        detail={
+            "collection": body.collection,
+            "doc_id": body.doc_id,
+            "embed_field": embed_field,
+        },
     )
     await db.commit()
     out = _dict_to_out(doc)

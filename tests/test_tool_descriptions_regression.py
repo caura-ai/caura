@@ -17,7 +17,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 FIXTURES = Path(__file__).parent / "fixtures"
-EXPECTED_TOOL_COUNT = 12
+EXPECTED_TOOL_COUNT = 10
 
 
 @pytest.mark.asyncio
@@ -46,7 +46,7 @@ async def test_tool_descriptions_enriched_matches_baseline():
 
 
 def test_registry_has_v1_spec_count():
-    """v1.0 surface registers exactly 13 specs."""
+    """Surface registers exactly the expected number of specs."""
     from core_api.tools import REGISTRY
 
     assert len(REGISTRY) == EXPECTED_TOOL_COUNT

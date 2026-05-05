@@ -242,18 +242,31 @@ def main():
             {"agent_id": agent, "fleet_id": FLEET, "scope": "agent"},
         ),
         (
-            "memclaw_share_skill",
+            # Skills now live in the generic ``skills`` document collection.
+            # Upsert via memclaw_doc op=write, then delete via op=delete.
+            "memclaw_doc",
             {
                 "agent_id": agent,
-                "name": "smoke-skill",
-                "description": "Smoke-test skill — auto-published, not installed.",
-                "content": "# smoke-skill\n\nProbe content.\n",
-                "target_fleet_id": FLEET,
+                "fleet_id": FLEET,
+                "op": "write",
+                "collection": "skills",
+                "doc_id": "smoke-skill",
+                "data": {
+                    "name": "smoke-skill",
+                    "description": "Smoke-test skill — published via memclaw_doc.",
+                    "content": "# smoke-skill\n\nProbe content.\n",
+                },
+                "embed_field": "description",
             },
         ),
         (
-            "memclaw_unshare_skill",
-            {"agent_id": agent, "name": "smoke-skill"},
+            "memclaw_doc",
+            {
+                "agent_id": agent,
+                "op": "delete",
+                "collection": "skills",
+                "doc_id": "smoke-skill",
+            },
         ),
     ]
 

@@ -297,8 +297,6 @@ class SmokeTest:
             "memclaw_insights",
             "memclaw_evolve",
             "memclaw_stats",
-            "memclaw_share_skill",
-            "memclaw_unshare_skill",
         }
         self.check(
             "Tool descriptions: 200", r.status_code == 200, f"status={r.status_code}"

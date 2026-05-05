@@ -20,8 +20,10 @@ tiktoken = pytest.importorskip("tiktoken")
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
-# Current measured count is 4796 tokens (12 tools, post-unshare_skill).
-# Ceiling gives ~4% headroom — raise intentionally when the surface grows.
+# Measured count after dropping memclaw_share_skill / memclaw_unshare_skill
+# (10 tools, Phase B of skills-as-documents migration). Was 4796 with 12.
+# Ceiling kept at 5000 — gives clear headroom and avoids tightening the
+# budget in lockstep with a one-off shrink.
 CEILING_TOKENS = 5000
 
 

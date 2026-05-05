@@ -343,12 +343,10 @@ class GatewayIntegrationTest:
             "memclaw_insights",
             "memclaw_evolve",
             "memclaw_stats",
-            "memclaw_share_skill",
-            "memclaw_unshare_skill",
         ]
         missing = [t for t in expected_tools if t not in also_allow]
         self.check(
-            "OpenClaw config: all 12 tools allowed",
+            "OpenClaw config: all 10 tools allowed",
             len(missing) == 0,
             f"missing={missing}" if missing else "",
         )
