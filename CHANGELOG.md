@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.3.0](https://github.com/caura-ai/caura-memclaw/compare/v2.2.0...v2.3.0) (2026-05-06)
+
+
+### Features
+
+* **plugin:** synthesize skill frontmatter + anchor catalog discovery ([#99](https://github.com/caura-ai/caura-memclaw/issues/99)) ([54f2eb4](https://github.com/caura-ai/caura-memclaw/commit/54f2eb43982de6cea6b28f746711169be3903177))
+
 ## [2.2.0](https://github.com/caura-ai/caura-memclaw/compare/v2.1.0...v2.2.0) (2026-05-06)
 
 
