@@ -107,7 +107,6 @@ services:
       - ./migrations:/app/migrations
       - ./plugin:/app/plugin
       - ./static:/app/static
-      - ./VERSION:/app/VERSION:ro
     environment:
       PYTHONPATH: /app/core-api/src:/app
       POSTGRES_HOST: db

@@ -15,7 +15,6 @@
       "package-name": "caura-memclaw",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "VERSION",
         {
           "type": "toml",
           "path": "core-api/pyproject.toml",

@@ -24,7 +24,6 @@ RUN pip install --no-cache-dir './core-api[pubsub]'
 # Copy actual source
 COPY common/ /app/common/
 COPY core-api/src/ /app/core-api/src/
-COPY VERSION /app/
 COPY plugin/ /app/plugin/
 COPY static/ /app/static/
 

@@ -1,7 +1,7 @@
 """Centralised constants for the MemClaw API."""
 
+import importlib.metadata
 import os
-from pathlib import Path
 
 # Re-export DB-query constants from common (shared with core-storage-api).
 from common.constants import (  # noqa: F401
@@ -58,8 +58,12 @@ def is_mcp_path(path: str) -> bool:
 
 
 # ── Version ──
-# core-api/src/core_api/constants.py → repo root (4 levels up)
-VERSION = (Path(__file__).resolve().parent.parent.parent.parent / "VERSION").read_text().strip()
+# Source-only dev (PYTHONPATH set but no `pip install -e`) has no
+# package metadata; fall back to "dev" rather than crashing import.
+try:
+    VERSION = importlib.metadata.version("core-api")
+except importlib.metadata.PackageNotFoundError:
+    VERSION = "dev"
 OPENAI_EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDING_RETRY_ATTEMPTS = 2
 EMBEDDING_RETRY_DELAY_S = 1.0

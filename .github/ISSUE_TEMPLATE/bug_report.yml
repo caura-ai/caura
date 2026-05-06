@@ -13,8 +13,8 @@ body:
     id: version
     attributes:
       label: MemClaw version
-      description: Contents of the `VERSION` file, or `git rev-parse HEAD` if running from source.
-      placeholder: 1.0.0
+      description: Output of `curl http://localhost:8000/api/v1/version`, or `git rev-parse HEAD` if running from source.
+      placeholder: 2.1.0
     validations:
       required: true
   - type: dropdown
