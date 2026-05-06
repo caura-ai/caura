@@ -175,7 +175,20 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
           "optional for search (omit to search every collection in the tenant) and list_collections.",
       },
       doc_id: { type: "string", description: "Required for op=write|read|delete" },
-      data: { type: "object", description: "Required for op=write" },
+      data: {
+        type: "object",
+        description:
+          "Required for op=write. JSON object with the document body — agent-defined keys " +
+          "(e.g. {name, description, content} for skills, or any shape for custom collections).",
+        // ``additionalProperties: true`` is JSON Schema's default but OpenClaw's
+        // gateway-side AJV validator runs in strict mode (which silently flips
+        // it to false for any object schema lacking explicit ``properties``).
+        // Without this, every plugin-routed ``memclaw_doc op=write`` call from
+        // an agent fails with "data: must not have additional properties" —
+        // surfaced wet-testing the Phase B skill-share flow on memclaw.dev
+        // (2026-05-06).
+        additionalProperties: true,
+      },
       where: { type: "object", description: "For op=query — field equality filters" },
       order_by: { type: "string", description: "For op=query" },
       order: { type: "string", enum: ["asc", "desc"], description: "For op=query" },

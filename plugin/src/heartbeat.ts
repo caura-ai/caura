@@ -51,6 +51,7 @@ import {
 import { logError } from "./logger.js";
 import { getInstallId } from "./install-id.js";
 import { getDisplayName } from "./identity.js";
+import { reconcileSkills } from "./reconcile-skills.js";
 
 let heartbeatCount = 0;
 let bakCleanupDone = false;
@@ -78,6 +79,15 @@ function cleanupStaleBackups(): void {
 export async function sendHeartbeat(): Promise<void> {
   cleanupStaleBackups();
   if (!MEMCLAW_TENANT_ID || !MEMCLAW_NODE_NAME) return;
+
+  // Skill reconciler — converge plugin/skills/ with the catalog before
+  // anything else. Failures are non-fatal (best-effort distribution).
+  // Replaces the dropped install_skill / uninstall_skill push commands.
+  try {
+    await reconcileSkills();
+  } catch (e: unknown) {
+    logError("reconcileSkills failed", e);
+  }
 
   const pluginDir = getPluginDir();
 
