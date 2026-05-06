@@ -110,7 +110,7 @@ Options:
 
 Restart your agent after installing — skills are loaded at startup.
 
-Why this matters: without the skill, an agent can discover the 12 tool
+Why this matters: without the skill, an agent can discover the 10 tool
 names and their arg schemas via MCP `tools/list`, but it has no
 mental model for the two-store design (memory vs doc), the trust
 levels, or which op to reach for in an ambiguous situation. With the
