@@ -41,6 +41,7 @@ _plugin_files = [
     "health.ts",
     "install-id.ts",
     "identity.ts",
+    "reconcile-skills.ts",
 ]
 
 
@@ -230,7 +231,7 @@ curl $CURL_INSECURE -sf "$MEMCLAW_API_URL/api/plugin-source?file=openclaw.plugin
 
 # 5. Fetch latest plugin source from MemClaw server
 echo "[5/7] Fetching latest plugin source from $MEMCLAW_API_URL..."
-for srcfile in index.ts prompt-section.ts tools.ts tool-specs.ts version.ts env.ts transport.ts validation.ts config.ts paths.ts logger.ts resolve-agent.ts tool-definitions.ts deploy.ts heartbeat.ts educate.ts context-engine.ts agent-auth.ts health.ts install-id.ts identity.ts; do
+for srcfile in index.ts prompt-section.ts tools.ts tool-specs.ts version.ts env.ts transport.ts validation.ts config.ts paths.ts logger.ts resolve-agent.ts tool-definitions.ts deploy.ts heartbeat.ts educate.ts context-engine.ts agent-auth.ts health.ts install-id.ts identity.ts reconcile-skills.ts; do
   curl $CURL_INSECURE -sf "$MEMCLAW_API_URL/api/plugin-source?file=$srcfile" > "$PLUGIN_DIR/src/$srcfile" || {{
     echo "ERROR: Could not fetch $srcfile from $MEMCLAW_API_URL/api/plugin-source?file=$srcfile"
     exit 1

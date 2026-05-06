@@ -407,9 +407,10 @@ outcome MUST produce a write. No write = not done. Checkpoint every
 blocker · commitment · config change · error pattern · skill created
 or updated. If in doubt: write.
 
-**Skills.** Check the catalog (\`memclaw_doc op=query collection=skills\`)
-before improvising. Share back via \`memclaw_doc op=write collection=skills
-doc_id=<slug>\` — never just forget to share.
+**Skills** (reusable team knowledge: runbooks, recipes, playbooks).
+Catalog is \`collection=skills\` — never \`runbooks\` etc. Check
+(\`memclaw_doc op=query collection=skills\`); share back
+(\`op=write collection=skills doc_id=<slug>\`).
 
 Before your first MemClaw call this session, read
 \`skills/memclaw/SKILL.md\` for tool signatures, capture cadences
