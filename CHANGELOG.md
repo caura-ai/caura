@@ -6,6 +6,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.1.0](https://github.com/caura-ai/caura-memclaw/compare/v2.0.0...v2.1.0) (2026-05-06)
+
+
+### Features
+
+* add security.session_idle_timeout_minutes org setting (CAURA-652) ([#89](https://github.com/caura-ai/caura-memclaw/issues/89)) ([d264cfe](https://github.com/caura-ai/caura-memclaw/commit/d264cfec2067befc1e014f8e31ddddd5476df9ab))
+* **core-operations:** scaffold OSS service for cron/scheduled jobs (CAURA-653) ([#82](https://github.com/caura-ai/caura-memclaw/issues/82)) ([838a54d](https://github.com/caura-ai/caura-memclaw/commit/838a54d4225d03bb618abded8f5bfb33ded8a4c9))
+* crystallize + entity-link Pub/Sub fanout (CAURA-657) ([#87](https://github.com/caura-ai/caura-memclaw/issues/87)) ([966f1a5](https://github.com/caura-ai/caura-memclaw/commit/966f1a54091f15f1267ecf25ee6206db6cd73232))
+* lifecycle ops Pub/Sub fanout via core-operations (CAURA-655) ([#84](https://github.com/caura-ai/caura-memclaw/issues/84)) ([193b0a7](https://github.com/caura-ai/caura-memclaw/commit/193b0a7e178ac478d01e1667d7a0d3e31b3ce9f5))
+* **mcp:** add memclaw_stats — aggregate memory counts on MCP ([#64](https://github.com/caura-ai/caura-memclaw/issues/64)) ([cb6d29a](https://github.com/caura-ai/caura-memclaw/commit/cb6d29a6149e689097b88af34ff495e6ba4edf3a))
+* memory retention purge on top of lifecycle Pub/Sub fanout (CAURA-656) ([#86](https://github.com/caura-ai/caura-memclaw/issues/86)) ([7e05ee4](https://github.com/caura-ai/caura-memclaw/commit/7e05ee426b8c5b8cf0b6f1df6b882f1607c88253))
+* skills as documents (Phase B) — drop dedicated tools/routes ([#85](https://github.com/caura-ai/caura-memclaw/issues/85)) ([d2bdf3b](https://github.com/caura-ai/caura-memclaw/commit/d2bdf3b3a3aa206e8975bbade45d965dab88f75d))
+* **skills:** agent-to-agent skill sharing across the fleet ([#68](https://github.com/caura-ai/caura-memclaw/issues/68)) ([e95b1d0](https://github.com/caura-ai/caura-memclaw/commit/e95b1d091808b1f221dab747b8893ff8cdc9229d))
+
+
+### Bug Fixes
+
+* **core-worker:** bundle Vertex SDK + improve retry log (CAURA-648) ([#78](https://github.com/caura-ai/caura-memclaw/issues/78)) ([85e54af](https://github.com/caura-ai/caura-memclaw/commit/85e54af22eb67861f34b12ba1ad3f1f69e9943d8))
+* **core-worker:** init platform LLM singleton on lifespan startup (CAURA-647) ([#74](https://github.com/caura-ai/caura-memclaw/issues/74)) ([8cc74dd](https://github.com/caura-ai/caura-memclaw/commit/8cc74dd99924cf8de53233e4fcbc49787241a598))
+* **crystallizer:** /latest 404→200 null on empty (CAURA-646) ([#71](https://github.com/caura-ai/caura-memclaw/issues/71)) ([a8a63c9](https://github.com/caura-ai/caura-memclaw/commit/a8a63c9787bd00a49181d0c252e7e55a71066d99))
+* **deps:** bump google-cloud-aiplatform&gt;=1.80, drop standalone vertexai (CAURA-650) ([#80](https://github.com/caura-ai/caura-memclaw/issues/80)) ([74c2092](https://github.com/caura-ai/caura-memclaw/commit/74c209240e4a12b8d58eaee2df5fb501685f7e5e))
+* **plugin-install:** fetch openclaw.plugin.json instead of baking a HEREDOC ([#81](https://github.com/caura-ai/caura-memclaw/issues/81)) ([aedbd47](https://github.com/caura-ai/caura-memclaw/commit/aedbd474e8fd4795d001be1a79c7ef9104fdd17d))
+* **plugin:** auto-fill target_fleet_id on skill share/unshare ([#72](https://github.com/caura-ai/caura-memclaw/issues/72)) ([35d7202](https://github.com/caura-ai/caura-memclaw/commit/35d7202c4026f63ca29a5119a5cd6c7230803d88))
+* **plugin:** make install_on_fleet skill flow actually work end-to-end ([#77](https://github.com/caura-ai/caura-memclaw/issues/77)) ([97da9fa](https://github.com/caura-ai/caura-memclaw/commit/97da9fafaa12d389969ea71fbc8de9ae4adce2ce))
+* **scripts:** backfill_embeddings — str-cast + add openai to core-storage-api deps ([#65](https://github.com/caura-ai/caura-memclaw/issues/65)) ([e77a256](https://github.com/caura-ai/caura-memclaw/commit/e77a2560bff363481727ca7c635b33a8d3f9e29e))
+* **vertex:** raise typed error on non-dict JSON response (CAURA-651) ([#90](https://github.com/caura-ai/caura-memclaw/issues/90)) ([ece0081](https://github.com/caura-ai/caura-memclaw/commit/ece00819d209e62ab7cd49cbba2da21aeb6b418c))
+
+
+### Reverts
+
+* remove security.session_idle_timeout_minutes from OSS organization_settings (CAURA-660) ([#91](https://github.com/caura-ai/caura-memclaw/issues/91)) ([094d785](https://github.com/caura-ai/caura-memclaw/commit/094d785410857961295e383e54413340bae4cfb0))
+
+
+### Documentation
+
+* complete local-embedder coverage (P0 fixes, GPU, README integration) ([#70](https://github.com/caura-ai/caura-memclaw/issues/70)) ([80fadf2](https://github.com/caura-ai/caura-memclaw/commit/80fadf20d8ff125e88161542521978a0407c3e7f))
+
+
+### Code Refactoring
+
+* rename tenant_settings → organization_settings (CAURA-654) ([#83](https://github.com/caura-ai/caura-memclaw/issues/83)) ([9494a53](https://github.com/caura-ai/caura-memclaw/commit/9494a53819eae6fc6b45fec9308facfdd192fb9a))
+
 ## [2.0.0](https://github.com/caura-ai/caura-memclaw/compare/v1.0.1...v2.0.0) (2026-05-03)
 
 > ⚠️ **BREAKING CHANGE — local embedder + 1024-dim schema migration.**
