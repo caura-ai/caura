@@ -43,7 +43,21 @@ const { reconcileSkills, PROTECTED_SKILLS } = await import("./reconcile-skills.j
 const SKILLS_ROOT = join(tmpHome, ".openclaw", "plugins", "memclaw", "skills");
 
 let originalFetch: typeof fetch;
-let mockCatalog: Array<{ doc_id: string; data: { content: string } }>;
+type MockCatalogEntry = {
+  doc_id: string;
+  data: { name?: string; description?: string; content: string };
+};
+let mockCatalog: MockCatalogEntry[];
+
+/**
+ * Wrap a content body with the same frontmatter the reconciler would
+ * synthesise. Used by tests that need disk state to *exactly match*
+ * what the reconciler will write (so convergence tests don't see a
+ * spurious update on every tick).
+ */
+function withSynthFrontmatter(name: string, description: string, body: string): string {
+  return `---\nname: ${name}\ndescription: "${description}"\n---\n\n${body}`;
+}
 
 function installMockFetch(): void {
   originalFetch = globalThis.fetch;
@@ -116,9 +130,9 @@ describe("reconcileSkills", () => {
   test("invariant 2: cold start pulls every catalog skill", async () => {
     plantOnDisk("memclaw"); // only the bundled skill
     mockCatalog = [
-      { doc_id: "git-rebase-safety", data: { content: "# rebase safely\n" } },
-      { doc_id: "deploy-runbook",    data: { content: "# deploy steps\n" } },
-      { doc_id: "incident-triage",   data: { content: "# triage\n" } },
+      { doc_id: "git-rebase-safety", data: { name: "git-rebase-safety", description: "rebase steps",   content: "# rebase safely\n" } },
+      { doc_id: "deploy-runbook",    data: { name: "deploy-runbook",    description: "deploy steps",   content: "# deploy steps\n" } },
+      { doc_id: "incident-triage",   data: { name: "incident-triage",   description: "triage steps",   content: "# triage\n" } },
     ];
 
     const summary = await reconcileSkills();
@@ -128,16 +142,20 @@ describe("reconcileSkills", () => {
     ]);
     assert.deepEqual(summary.added.sort(), ["deploy-runbook", "git-rebase-safety", "incident-triage"]);
     assert.deepEqual(summary.removed, []);
-    assert.equal(readSkill("git-rebase-safety"), "# rebase safely\n");
+    // Frontmatter synthesised from data.{name, description}; body preserved.
+    const written = readSkill("git-rebase-safety");
+    assert.match(written, /^---\nname: git-rebase-safety\ndescription: "rebase steps"\n---\n\n# rebase safely\n$/);
   });
 
   test("invariant 3: convergence — adds B, removes C, in one tick", async () => {
     plantOnDisk("memclaw");
-    plantOnDisk("skill-a", "# A from catalog\n");
+    // Plant skill-a with the EXACT content the reconciler would write,
+    // so the no-op-on-match path stays quiet for it.
+    plantOnDisk("skill-a", withSynthFrontmatter("skill-a", "alpha", "# A from catalog\n"));
     plantOnDisk("skill-c", "# C — orphan\n");
     mockCatalog = [
-      { doc_id: "skill-a", data: { content: "# A from catalog\n" } },
-      { doc_id: "skill-b", data: { content: "# B — newly shared\n" } },
+      { doc_id: "skill-a", data: { name: "skill-a", description: "alpha", content: "# A from catalog\n" } },
+      { doc_id: "skill-b", data: { name: "skill-b", description: "bravo — newly shared", content: "# B — newly shared\n" } },
     ];
 
     const summary = await reconcileSkills();
@@ -150,7 +168,7 @@ describe("reconcileSkills", () => {
   test("invariant 4: re-running with no changes is a no-op", async () => {
     plantOnDisk("memclaw");
     mockCatalog = [
-      { doc_id: "skill-a", data: { content: "# A\n" } },
+      { doc_id: "skill-a", data: { name: "skill-a", description: "alpha", content: "# A\n" } },
     ];
 
     const first = await reconcileSkills();
@@ -160,15 +178,15 @@ describe("reconcileSkills", () => {
     assert.deepEqual(second.added, []);
     assert.deepEqual(second.removed, []);
     // The skill on disk hasn't been overwritten (same content → skipped)
-    assert.equal(readSkill("skill-a"), "# A\n");
+    assert.equal(readSkill("skill-a"), withSynthFrontmatter("skill-a", "alpha", "# A\n"));
   });
 
   test("invariant 5: unsafe slug from catalog is skipped, never lands on disk", async () => {
     plantOnDisk("memclaw");
     mockCatalog = [
-      { doc_id: "../etc/passwd", data: { content: "exploit\n" } },
-      { doc_id: "Capitalized",   data: { content: "uppercase rejected\n" } },
-      { doc_id: "valid-slug",    data: { content: "# valid\n" } },
+      { doc_id: "../etc/passwd", data: { name: "x", description: "exploit",     content: "exploit\n" } },
+      { doc_id: "Capitalized",   data: { name: "x", description: "uppercase",   content: "rejected\n" } },
+      { doc_id: "valid-slug",    data: { name: "valid-slug", description: "ok", content: "# valid\n" } },
     ];
 
     const summary = await reconcileSkills();
@@ -180,18 +198,65 @@ describe("reconcileSkills", () => {
     assert.ok(!existsSync(join(tmpHome, "etc", "passwd")));
   });
 
-  test("catalog returns missing/empty content → row skipped, others applied", async () => {
+  test("catalog returns missing content/description → row skipped, others applied", async () => {
     plantOnDisk("memclaw");
     mockCatalog = [
-      { doc_id: "no-content", data: {} as { content: string } }, // explicitly empty
-      { doc_id: "good",       data: { content: "# good\n" } },
+      { doc_id: "no-content",     data: { name: "x", description: "ok" } as MockCatalogEntry["data"] },
+      { doc_id: "no-description", data: { name: "x",                       content: "# body\n" } as MockCatalogEntry["data"] },
+      { doc_id: "good",           data: { name: "good", description: "ok", content: "# good\n" } },
     ];
 
     const summary = await reconcileSkills();
 
     assert.deepEqual(listSkillDirs(), ["good", "memclaw"]);
     assert.deepEqual(summary.added, ["good"]);
-    assert.equal(summary.skipped.length, 1);
+    assert.equal(summary.skipped.length, 2);
+  });
+
+  test("frontmatter synthesis: plain markdown gets name+description prepended for OpenClaw discovery", async () => {
+    plantOnDisk("memclaw");
+    mockCatalog = [
+      {
+        doc_id: "git-rebase-safety",
+        data: {
+          name: "git-rebase-safety",
+          description: "Safely rebase a feature branch — quotes \"and\" backslashes \\ get escaped",
+          content: "# Body\n\nStep 1.\n",
+        },
+      },
+    ];
+
+    await reconcileSkills();
+
+    const written = readSkill("git-rebase-safety");
+    // YAML frontmatter present; description double-quoted with escapes intact.
+    assert.match(
+      written,
+      /^---\nname: git-rebase-safety\ndescription: "Safely rebase a feature branch — quotes \\"and\\" backslashes \\\\ get escaped"\n---\n\n/,
+    );
+    // Original body preserved after the fence
+    assert.ok(written.endsWith("# Body\n\nStep 1.\n"));
+  });
+
+  test("frontmatter passthrough: skill content that already starts with --- is left untouched", async () => {
+    plantOnDisk("memclaw");
+    const authorContent =
+      "---\nname: my-skill\ndescription: hand-authored\nuser-invocable: true\n---\n\n# Body\n";
+    mockCatalog = [
+      {
+        doc_id: "authored",
+        data: {
+          name: "should-be-ignored",
+          description: "should-be-ignored",
+          content: authorContent,
+        },
+      },
+    ];
+
+    await reconcileSkills();
+
+    // Author's frontmatter wins — reconciler doesn't double-prepend.
+    assert.equal(readSkill("authored"), authorContent);
   });
 
   test("catalog query failure → fail open: existing skills preserved", async () => {
@@ -215,12 +280,12 @@ describe("reconcileSkills", () => {
     plantOnDisk("memclaw");
     plantOnDisk("skill-a", "# stale local edits\n");
     mockCatalog = [
-      { doc_id: "skill-a", data: { content: "# canonical from catalog\n" } },
+      { doc_id: "skill-a", data: { name: "skill-a", description: "alpha", content: "# canonical from catalog\n" } },
     ];
 
     await reconcileSkills();
 
-    assert.equal(readSkill("skill-a"), "# canonical from catalog\n");
+    assert.equal(readSkill("skill-a"), withSynthFrontmatter("skill-a", "alpha", "# canonical from catalog\n"));
   });
 });
 

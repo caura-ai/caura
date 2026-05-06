@@ -107,18 +107,37 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   //    Phase B ``memclaw_doc op=write collection=skills`` rule, so
   //    every doc_id we see here should already be safe — but defense
   //    in depth: re-validate before touching the filesystem.
+  //
+  //    OpenClaw's skill loader rejects any SKILL.md without YAML
+  //    frontmatter declaring ``name`` and ``description`` (it returns
+  //    null in ``loadSingleSkillDirectory`` when either is missing,
+  //    silently filtering the skill out of the agent's tool palette).
+  //    Skills uploaded via ``memclaw_doc op=write collection=skills``
+  //    typically supply ``data.{name, description, content}`` as
+  //    separate fields with the content being plain markdown — so the
+  //    reconciler synthesises frontmatter from ``data.name`` and
+  //    ``data.description`` before writing, unless the content already
+  //    starts with a ``---`` fence (in which case the author's own
+  //    frontmatter is preserved).
   const desired = new Map<string, string>();
   for (const doc of catalog) {
     const slug = typeof doc.doc_id === "string" ? doc.doc_id : "";
-    const content =
-      doc.data && typeof doc.data["content"] === "string"
-        ? (doc.data["content"] as string)
+    const data = doc.data ?? {};
+    const rawContent =
+      typeof data["content"] === "string" ? (data["content"] as string) : "";
+    const description =
+      typeof data["description"] === "string"
+        ? (data["description"] as string).trim()
         : "";
-    if (!slug || !isSafeSlug(slug) || !content) {
+    const name =
+      typeof data["name"] === "string" && (data["name"] as string).trim()
+        ? (data["name"] as string).trim()
+        : slug;
+    if (!slug || !isSafeSlug(slug) || !rawContent || !description) {
       summary.skipped.push(slug || "<missing>");
       continue;
     }
-    desired.set(slug, content);
+    desired.set(slug, ensureFrontmatter(rawContent, name, description));
   }
 
   // 3. Read disk. Skip non-directories so a stray file in
@@ -197,4 +216,44 @@ const SAFE_SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,99}$/;
 
 function isSafeSlug(s: string): boolean {
   return SAFE_SLUG_RE.test(s);
+}
+
+const FRONTMATTER_FENCE_RE = /^---\r?\n/;
+
+/**
+ * Synthesise YAML frontmatter from the catalog row when the body
+ * doesn't already include it. OpenClaw's skill loader silently filters
+ * any SKILL.md whose frontmatter is missing ``name`` or ``description``
+ * (see ``plugin-sdk/src/agents/skills/...loadSingleSkillDirectory``),
+ * so a reconciled skill without frontmatter would land on disk yet
+ * never appear in the agent's tool palette.
+ *
+ * Authors who upload skills with their own frontmatter in
+ * ``data.content`` get pass-through (we detect the leading ``---``
+ * fence and don't touch the body). Authors who upload plain markdown
+ * (the common case for ``memclaw_doc op=write collection=skills``) get
+ * frontmatter prepended from ``data.name`` and ``data.description``.
+ *
+ * Description is YAML-escaped — wrapped in double quotes with embedded
+ * quotes/backslashes escaped — so a multi-word description with
+ * punctuation can't trip the YAML parser.
+ */
+function ensureFrontmatter(
+  rawContent: string,
+  name: string,
+  description: string,
+): string {
+  if (FRONTMATTER_FENCE_RE.test(rawContent)) return rawContent;
+  const escapedDescription = description
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"');
+  // Single-line YAML strings — safe across the slug + description
+  // shapes the server already enforces (description ≤ 500 chars per
+  // skill_service validation, no newlines accepted).
+  const fm =
+    "---\n" +
+    `name: ${name}\n` +
+    `description: "${escapedDescription}"\n` +
+    "---\n\n";
+  return fm + rawContent;
 }
