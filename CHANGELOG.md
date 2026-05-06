@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.2.0](https://github.com/caura-ai/caura-memclaw/compare/v2.1.0...v2.2.0) (2026-05-06)
+
+
+### Features
+
+* skills as documents (Phase A) — plugin reconciler ([#94](https://github.com/caura-ai/caura-memclaw/issues/94)) ([7789091](https://github.com/caura-ai/caura-memclaw/commit/778909185b544d44b88bb390868a25965e1b2e54))
+
+
+### Bug Fixes
+
+* **core-api:** read version from installed package metadata ([#96](https://github.com/caura-ai/caura-memclaw/issues/96)) ([1add99e](https://github.com/caura-ai/caura-memclaw/commit/1add99ebf525ba9abfcecca7fe83424fdad2e4ae))
+
+
+### Documentation
+
+* align tool count to 10 in README and integration guide ([#98](https://github.com/caura-ai/caura-memclaw/issues/98)) ([fba2903](https://github.com/caura-ai/caura-memclaw/commit/fba290356f4467ffae75951a6e95b8ac829f70e6))
+
 ## [2.1.0](https://github.com/caura-ai/caura-memclaw/compare/v2.0.0...v2.1.0) (2026-05-06)
 
 
