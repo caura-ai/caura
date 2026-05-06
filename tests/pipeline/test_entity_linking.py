@@ -158,9 +158,11 @@ async def test_discover_with_target_memory_ids():
     assert result.outcome == StepOutcome.SUCCESS
     assert ctx.data["links_created"] == 1
 
-    # Verify the first SQL call uses ANY(:memory_ids) not HAVING/LIMIT
+    # Targeted mode binds :memory_ids; ``::uuid[]`` form mis-parsed as a second
+    # bind in production (CAURA-675), so guard against its reintroduction.
     first_sql = str(db.execute.call_args_list[0][0][0].text)
-    assert "ANY(:memory_ids" in first_sql
+    assert ":memory_ids" in first_sql
+    assert "::uuid[]" not in first_sql
     assert "HAVING" not in first_sql
     assert "LIMIT" not in first_sql
 

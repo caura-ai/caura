@@ -85,7 +85,7 @@ class InferRelations:
                     FROM relations
                     WHERE tenant_id = :tenant_id
                       AND relation_type = 'related_to'
-                      AND (from_entity_id = ANY(:ids::uuid[]) OR to_entity_id = ANY(:ids::uuid[]))
+                      AND (from_entity_id = ANY(CAST(:ids AS uuid[])) OR to_entity_id = ANY(CAST(:ids AS uuid[])))
                 """),
                 {
                     "tenant_id": tenant_id,

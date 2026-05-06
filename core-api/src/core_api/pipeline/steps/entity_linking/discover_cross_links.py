@@ -41,7 +41,7 @@ class DiscoverCrossLinks:
                     text(f"""
                         SELECT m.id, m.content, m.embedding
                         FROM memories m
-                        WHERE m.id = ANY(:memory_ids::uuid[])
+                        WHERE m.id = ANY(CAST(:memory_ids AS uuid[]))
                           AND m.tenant_id = :tenant_id
                           AND m.deleted_at IS NULL
                           AND m.status = 'active'
@@ -93,7 +93,7 @@ class DiscoverCrossLinks:
             SELECT m.id AS memory_id,
                    e.id AS entity_id, e.canonical_name, e.attributes, e.sim
             FROM (SELECT id, embedding FROM memories
-                  WHERE id = ANY(:memory_ids::uuid[]) AND tenant_id = :tenant_id) m
+                  WHERE id = ANY(CAST(:memory_ids AS uuid[])) AND tenant_id = :tenant_id) m
             JOIN LATERAL (
                 SELECT e.id, e.canonical_name, e.attributes,
                        1 - (e.name_embedding <=> m.embedding) AS sim
