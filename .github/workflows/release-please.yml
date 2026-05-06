@@ -20,16 +20,24 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      # Mint an installation token from the org's deploy GitHub App.
+      # The default GITHUB_TOKEN can't trigger downstream workflows
+      # on PRs it creates (GitHub's anti-loop guard), so PRs opened
+      # by release-please with the default token never run CI / dco —
+      # branch protection sees zero required-checks history and the
+      # merge gate stays BLOCKED forever even after approval. An
+      # App-minted token is treated as an external user → triggers
+      # workflows as expected.
+      - name: Mint App token
+        id: app-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+
       - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         id: release
         with:
-          # GITHUB_TOKEN is sufficient for opening release PRs and
-          # cutting GitHub Releases. Note: tags created via this token
-          # do NOT trigger downstream `on: release` or `on: push: tags`
-          # workflows (GitHub's loop prevention). When/if we add an
-          # auto-publish-to-npm or auto-publish-to-PyPI flow that must
-          # fire on release, swap this for a PAT or App token stored
-          # as secrets.RELEASE_PLEASE_TOKEN.
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
