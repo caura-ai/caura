@@ -1991,8 +1991,8 @@ async def _enrich_memory_background(
             if enrichment.pii_types:
                 meta["pii_types"] = enrichment.pii_types
         if enrichment.retrieval_hint:
-            # Persisted for debugging / auditability; not used at query time
-            # (the hint already shaped the embedding).
+            # Persisted for debugging / auditability only; no longer used
+            # to shape the embedding (see CAURA-222).
             meta["retrieval_hint"] = enrichment.retrieval_hint
         # Temporal resolution
         if mem.get("ts_valid_start") is None and enrichment.ts_valid_start:
@@ -2020,93 +2020,33 @@ async def _enrich_memory_background(
                 await sc.update_memory_status(str(memory_id), status_val)
 
         embedding = mem.get("embedding")
-        pre_hint_embedding = embedding  # snapshot for the contradiction race-check below
         memory_type = patch.get("memory_type") or mem.get("memory_type")
 
-        # Re-embed with the enricher's retrieval_hint (if any) so the final
-        # embedding captures the memory's semantic essence in query-aligned
-        # vocabulary, not just the raw content surface.  No-op when the
-        # enricher returned an empty hint.
-        hint = getattr(enrichment, "retrieval_hint", "") or ""
-        if hint:
-            from core_api.services.memory_enrichment import compose_embedding_text
-
-            composed = compose_embedding_text(content, hint)
-            try:
-                new_embedding = await get_embedding(composed, tenant_config=tenant_config)
-            except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
-                new_embedding = None
-                logger.warning(
-                    "hint re-embed failed for memory %s, keeping content-only embedding",
-                    memory_id,
-                    exc_info=True,
-                )
-            if new_embedding is not None:
-                try:
-                    await sc.update_embedding(str(memory_id), new_embedding)
-                    embedding = new_embedding
-                    logger.info("Background hint re-embed succeeded for memory %s", memory_id)
-                    # Contradiction coverage for the hint-enhanced embedding.
-                    # This branch is the SaaS-mode (embed_on_hot_path=False)
-                    # half of a flag-mutually-exclusive pair — the OSS-mode
-                    # half lives at the bottom of this function and fires
-                    # whenever ``embedding is not None and embed_on_hot_path``.
-                    # Splitting on the flag avoids a double-fire when both
-                    # branches would otherwise run on the same hint-enhanced
-                    # vector.
-                    #
-                    # SaaS-mode shape: ``core-worker`` may have already PATCH-ed
-                    # an embedding before enrich's hint-reembed lands. The
-                    # worker does NOT fire contradiction detection (CAURA-594
-                    # follow-up gap), so when ``pre_hint_embedding is not None``
-                    # — meaning the worker beat enrich to the row — the
-                    # hint-enhanced overwrite is the only chance to attach
-                    # contradiction coverage at all. When pre_hint_embedding
-                    # is None, the worker hasn't won the race yet; firing
-                    # here would still help, but the worker's eventual PATCH
-                    # would silently overwrite our hint-enhanced vector
-                    # without re-firing contradiction — that's the documented
-                    # SaaS-mode coverage gap.
-                    if not settings.embed_on_hot_path and pre_hint_embedding is not None:
-                        from core_api.services.contradiction_detector import (
-                            detect_contradictions_async,
-                        )
-
-                        track_task(
-                            tracked_task(
-                                detect_contradictions_async(
-                                    memory_id,
-                                    tenant_id,
-                                    fleet_id,
-                                    content,
-                                    new_embedding,
-                                ),
-                                "contradiction_detection_post_enrich",
-                                memory_id,
-                                tenant_id,
-                            )
-                        )
-                except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
-                    logger.exception("Background hint re-embed update failed for memory %s", memory_id)
+        # Hint-based re-embed removed (CAURA-222): the hot path embeds raw
+        # ``content`` and the search side embeds raw query, so the stored
+        # vector is already on the correct surface by the time enrichment
+        # finishes. Re-embedding ``content`` here would just produce an
+        # identical vector — wasted provider call and DB write. The
+        # SaaS-mode contradiction-coverage branch that lived inside this
+        # block is gone with it; OSS-mode contradiction detection still
+        # fires below on the stored embedding.
 
         # Atomic-fact fan-out: if the enricher detected 2+ independent claims in
         # this turn, create a child memory for each so queries targeting a
-        # specific fact retrieve it directly.  Each child gets its own
-        # hint-enriched embedding.  Failures here are non-fatal to the parent.
+        # specific fact retrieve it directly. Children embed raw
+        # ``fact_content`` (not hint-prefixed) to keep the same write/query
+        # surface as the search side — see CAURA-222. Failures here are
+        # non-fatal to the parent.
         atomic_facts = getattr(enrichment, "atomic_facts", None) or []
         if len(atomic_facts) >= 1:
-            from core_api.services.memory_enrichment import compose_embedding_text
-
             parent_ts_start = mem.get("ts_valid_start")
             parent_visibility = mem.get("visibility") or "scope_team"
             parent_weight = patch.get("weight") or mem.get("weight") or 0.5
             fanout_created = 0
             for fact in atomic_facts:
                 fact_content = fact.content
-                fact_hint = fact.retrieval_hint or ""
-                fact_embed_text = compose_embedding_text(fact_content, fact_hint)
                 try:
-                    child_embedding = await get_embedding(fact_embed_text, tenant_config=tenant_config)
+                    child_embedding = await get_embedding(fact_content, tenant_config=tenant_config)
                 except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
                     logger.warning(
                         "atomic-fact embed failed for memory %s (skipping this fact)",
@@ -2120,7 +2060,7 @@ async def _enrich_memory_background(
                 child_meta = {
                     "parent_memory_id": str(memory_id),
                     "source": "atomic_fact_fanout",
-                    "retrieval_hint": fact_hint,
+                    "retrieval_hint": fact.retrieval_hint or "",
                 }
                 # Intentionally NOT wrapped in ``per_tenant_storage_slot``
                 # (CAURA-602 follow-up): this site runs inside
@@ -2183,23 +2123,31 @@ async def _enrich_memory_background(
                     tenant_id,
                 )
             )
-        # OSS-mode (embed_on_hot_path=True) half of the flag-mutually-
-        # exclusive contradiction-coverage pair (the SaaS-mode half is
-        # the ``not embed_on_hot_path and pre_hint_embedding is not None``
-        # branch inside the hint-reembed block above). In OSS mode the
-        # inline write path already fired contradiction once on the
-        # pre-hint embedding via ScheduleBackgroundTasks — this fire
-        # covers the post-hint-reembed final value. On the inline-failure
-        # path, _reembed_memory's race guard handles its own
-        # contradiction call, so we don't double-fire.
+        # SaaS-mode contradiction detection. Only fires when
+        # ``embed_on_hot_path=False``: in OSS mode the hot path already
+        # fired ``contradiction_detection`` via ScheduleBackgroundTasks
+        # on the same embedding (post-CAURA-222 there's no hint re-embed
+        # generating a different vector here, so re-firing would just
+        # duplicate the LLM check work — state is idempotent because the
+        # detector only writes via ``update_memory_status``).
         #
-        # CAURA-594 gap (SaaS, embed_on_hot_path=False): when enrich
-        # beats core-worker (pre_hint_embedding is None, but worker
-        # eventually overwrites with raw-content), neither branch
-        # fires. Tracked as a follow-up — adding a
-        # ``Topics.Memory.EMBEDDED`` consumer back in core-api (or
-        # running contradiction detection inside the worker) closes it.
-        if embedding is not None and settings.embed_on_hot_path:
+        # On the OSS inline-embed-failure path, ``_reembed_memory``'s
+        # race guard fires its own contradiction call when the retry
+        # succeeds, so the OSS-mode coverage hole is also closed there.
+        #
+        # In SaaS mode, ``handle_memory_embedded`` and
+        # ``handle_memory_enriched`` consumers also fire contradiction
+        # when their respective worker PATCHes land. This in-process
+        # branch covers the case where ``enrich_on_hot_path=True`` AND
+        # ``embed_on_hot_path=False`` AND the embed worker has already
+        # PATCH-ed the row by the time we reach this point.
+        #
+        # CAURA-594 remaining gap (full SaaS, both flags off): when
+        # enrich runs before core-worker's embed PATCH lands, the
+        # ``embedding is not None`` guard skips this branch and the
+        # ``handle_memory_embedded`` consumer takes over when the
+        # worker's later EMBEDDED publish fires.
+        if embedding is not None and not settings.embed_on_hot_path:
             from core_api.services.contradiction_detector import detect_contradictions_async
 
             track_task(
@@ -2211,7 +2159,7 @@ async def _enrich_memory_background(
                         content,
                         embedding,
                     ),
-                    "contradiction_detection",
+                    "contradiction_detection_saas",
                     memory_id,
                     tenant_id,
                 )

@@ -82,10 +82,6 @@ class Settings(BaseSettings):
     # breaching the 45s outer request budget. Must stay below
     # ``request_timeout_seconds`` so this fires first.
     enrichment_inline_timeout_seconds: float = 35.0
-    # Inner timeout for the optional hint-based re-embed roundtrip after
-    # enrichment lands a retrieval_hint. Pure quality-vs-latency knob;
-    # only fires when ``embed_on_hot_path`` is True.
-    enrichment_hint_reembed_timeout_seconds: float = 10.0
     # Per-call timeout passed to the AsyncOpenAI client (covers both LLM
     # enrichment and embedding providers). Without an explicit value the
     # SDK rides httpx's default — long enough that a single hung upstream

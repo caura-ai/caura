@@ -8,8 +8,6 @@ hot path (CAURA-594) and enrichment LLM became the sole occupant.
 Verifies:
   - ``settings.enrichment_inline_timeout_seconds`` is the value passed
     to ``asyncio.wait_for`` (no longer the hardcoded 20.0).
-  - ``settings.enrichment_hint_reembed_timeout_seconds`` is the value
-    passed to the hint re-embed wait_for.
   - The Settings model validator rejects ordering inversions that would
     let the inner cap miss the outer request budget.
 """

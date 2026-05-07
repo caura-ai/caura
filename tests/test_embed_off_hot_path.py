@@ -398,15 +398,26 @@ async def test_bulk_reembed_preserves_batching() -> None:
     assert names == ["contradiction_detection_post_reembed"] * 5
 
 
-async def test_enrich_fires_contradiction_when_overwriting_existing_embedding() -> None:
-    """Flow B2: _reembed_memory wrote raw embedding first and fired
-    contradiction on it. _enrich_memory_background overwrites with the
-    hint-enhanced vector — the stored (final) embedding would be
-    uncovered unless we fire contradiction detection post-enrich too."""
+async def test_enrich_fires_contradiction_on_existing_embedding_in_saas_mode() -> None:
+    """SaaS-mode (embed_on_hot_path=False) contradiction coverage.
+
+    Pre-CAURA-222 this path did a hint re-embed and fired
+    ``contradiction_detection_post_enrich`` on the hint-enhanced vector.
+    The hint re-embed is gone (caused write/query surface asymmetry —
+    see CAURA-222), but SaaS-mode contradiction coverage was preserved
+    by adding a dedicated ``contradiction_detection_saas`` branch at
+    the bottom of ``_enrich_memory_background``.
+
+    Expected behavior now:
+      - No ``update_embedding`` call from this function (worker owns
+        the stored vector).
+      - Contradiction detection fires once with task name
+        ``contradiction_detection_saas`` against the embedding read
+        from storage at the top of the function.
+    """
     from core_api.services import memory_service
 
-    raw_existing = [0.1] * VECTOR_DIM      # already written by _reembed
-    hint_enhanced = [0.9] * VECTOR_DIM     # enrich computes + overwrites with this
+    raw_existing = [0.1] * VECTOR_DIM  # already written by core-worker
 
     mem_row = {
         "id": "m1",
@@ -456,21 +467,11 @@ async def test_enrich_fires_contradiction_when_overwriting_existing_embedding() 
         coro.close()
         return None
 
-    # _enrich_memory_background calls get_embedding(composed_content, ...)
-    # for the hint re-embed.
-    async def _embed(*_a, **_k):
-        return hint_enhanced
-
     with (
         patch.object(memory_service.settings, "embed_on_hot_path", False),
-        patch.object(memory_service, "get_embedding", new=AsyncMock(side_effect=_embed)),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch("core_api.services.contradiction_detector.detect_contradictions_async", new=_fake_detect),
         patch("core_api.services.memory_enrichment.enrich_memory", new=AsyncMock(return_value=enrichment)),
-        patch(
-            "core_api.services.memory_enrichment.compose_embedding_text",
-            side_effect=lambda content, hint: f"{content} [hint: {hint}]",
-        ),
         patch.object(memory_service, "track_task"),
         # NB: patch the SOURCE (task_tracker.tracked_task) rather than
         # memory_service.tracked_task — _enrich_memory_background does a
@@ -495,16 +496,16 @@ async def test_enrich_fires_contradiction_when_overwriting_existing_embedding() 
             uuid.uuid4(), "hello", TENANT_ID, "f1", "a"
         )
 
-    # The hint-enhanced embedding was written to the row.
-    sc.update_embedding.assert_awaited_once()
-    assert sc.update_embedding.await_args.args[1] == hint_enhanced
-    # Contradiction detection fires on the hint-enhanced embedding
-    # (otherwise the stored vector would be uncovered).
+    # No hint re-embed roundtrip → no update_embedding call from enrich
+    # (the worker owns the stored vector under embed_on_hot_path=False).
+    sc.update_embedding.assert_not_awaited()
+    # SaaS-mode contradiction detection fires on the embedding read
+    # from storage at the top of the function.
     names = [call.args[1] for call in tracked.call_args_list]
-    assert "contradiction_detection_post_enrich" in names
-    # And the detection target was the HINT-ENHANCED embedding, not the
-    # stale raw one — arg[4] in detect_contradictions_async.
-    assert any(call[4] == hint_enhanced for call in detect_calls)
+    assert "contradiction_detection_saas" in names
+    assert "contradiction_detection_post_enrich" not in names
+    # arg[4] in detect_contradictions_async is the embedding.
+    assert any(call[4] == raw_existing for call in detect_calls)
 
 
 async def test_enrich_no_contradiction_when_no_prior_embedding() -> None:
