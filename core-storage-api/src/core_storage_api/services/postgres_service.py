@@ -893,6 +893,17 @@ class PostgresService:
             scored_stmt = scored_stmt.where(Memory.memory_type == memory_type_filter)
         if status_filter:
             scored_stmt = scored_stmt.where(Memory.status == status_filter)
+        else:
+            # Exclude superseded memories from default search results. The
+            # contradiction detector marks the older row ``outdated`` (RDF
+            # path) or ``conflicted`` (semantic path) and points the newer
+            # one at it via ``supersedes_id``. Surfacing both would dilute
+            # ranking with stale claims agents shouldn't act on. Callers
+            # that need to inspect superseded rows pass an explicit
+            # ``status_filter`` to override.
+            scored_stmt = scored_stmt.where(
+                Memory.status.notin_(("outdated", "conflicted"))
+            )
         if valid_at:
             from datetime import date as _date_type
 

@@ -203,7 +203,10 @@ your first MemClaw call in a session.
 **`memclaw_recall(query, top_k=5, include_brief=false, memory_type=?, status=?, filter_agent_id=?, fleet_ids=?)`**
 Hybrid semantic+keyword search. For metadata browse → `memclaw_list`;
 for a known id → `memclaw_manage(op="read")`. `include_brief=true` adds
-an LLM-summarized paragraph.
+an LLM-summarized paragraph. Superseded memories (`status` ∈
+{outdated, conflicted}) are excluded by default — pass `status` explicitly
+(e.g. `status="conflicted"`) to inspect the chain; the pipeline then also
+auto-injects the winning successor.
 
 **`memclaw_write(content=? | items=?, visibility="scope_team", memory_type=?, weight=?, metadata=?, write_mode="auto", source_uri=?, run_id=?)`**
 Provide exactly one of `content` / `items`. Server auto-classifies.
