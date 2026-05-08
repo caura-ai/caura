@@ -205,8 +205,7 @@ Hybrid semantic+keyword search. For metadata browse → `memclaw_list`;
 for a known id → `memclaw_manage(op="read")`. `include_brief=true` adds
 an LLM-summarized paragraph. Superseded memories (`status` ∈
 {outdated, conflicted}) are excluded by default — pass `status` explicitly
-(e.g. `status="conflicted"`) to inspect the chain; the pipeline then also
-auto-injects the winning successor.
+(e.g. `status="conflicted"`) to inspect the chain.
 
 **`memclaw_write(content=? | items=?, visibility="scope_team", memory_type=?, weight=?, metadata=?, write_mode="auto", source_uri=?, run_id=?)`**
 Provide exactly one of `content` / `items`. Server auto-classifies.
