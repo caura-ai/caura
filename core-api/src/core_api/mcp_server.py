@@ -1234,6 +1234,7 @@ async def memclaw_stats(
         # scope='fleet'/'all' drops the per-caller filter so cross-agent
         # aggregates surface — fleet_id (if supplied) still narrows the pool.
         effective_agent_id = agent_id if scope == "agent" else None
+        effective_include_deleted = include_deleted and trust >= 3
 
         from core_api.services.memory_stats import compute_memory_stats
 
@@ -1245,7 +1246,7 @@ async def memclaw_stats(
                 agent_id=effective_agent_id,
                 memory_type=memory_type,
                 status=status,
-                include_deleted=include_deleted,
+                include_deleted=effective_include_deleted,
             )
             return _with_latency(json.dumps({**stats, "scope": scope}, default=str), t0)
         except Exception as e:
