@@ -2805,15 +2805,25 @@ class PostgresService:
                     }
                 )
 
-            # Memories in last 24h
-            result24 = await session.execute(
+            # Memory totals + status breakdown (single query, one table scan).
+            # ``deleted_at IS NULL`` keeps live rows separate from soft-deleted
+            # rows; the soft-deleted count is computed on its own below.
+            result_totals = await session.execute(
                 text(f"""
-                SELECT COUNT(m.id) FROM memories m
-                WHERE {scope} AND m.deleted_at IS NULL AND m.created_at > :day_ago
+                SELECT
+                    COUNT(*) FILTER (WHERE m.deleted_at IS NULL)                                      AS total_memories,
+                    COUNT(*) FILTER (WHERE m.deleted_at IS NULL AND m.status = 'conflicted')          AS conflicted_memories,
+                    COUNT(*) FILTER (WHERE m.deleted_at IS NULL AND m.status = 'outdated')            AS outdated_memories,
+                    COUNT(*) FILTER (WHERE m.deleted_at IS NOT NULL)                                  AS deleted_memories,
+                    COUNT(*) FILTER (WHERE m.deleted_at IS NULL AND m.created_at > :day_ago)          AS memories_24h,
+                    COUNT(*) FILTER (WHERE m.deleted_at IS NULL AND m.last_recalled_at > :day_ago)    AS recalled_memories_24h
+                FROM memories m
+                WHERE {scope}
             """),
                 {**params, "day_ago": day_ago},
             )
-            memories_24h = result24.scalar() or 0
+            totals = result_totals.one()
+            memories_24h = int(totals.memories_24h or 0)
 
             # Agents from fleet nodes (may have agents with no memories)
             node_scope, node_params = _scope_sql(tenant_id, fleet_id, table="fn")
@@ -2851,6 +2861,11 @@ class PostgresService:
                     "active_agents_24h": len(active_24h),
                     "memories_24h": memories_24h,
                     "stale_agents": sum(1 for a in agents if a["stale"]),
+                    "total_memories": int(totals.total_memories or 0),
+                    "conflicted_memories": int(totals.conflicted_memories or 0),
+                    "outdated_memories": int(totals.outdated_memories or 0),
+                    "deleted_memories": int(totals.deleted_memories or 0),
+                    "recalled_memories_24h": int(totals.recalled_memories_24h or 0),
                 },
             }
 
