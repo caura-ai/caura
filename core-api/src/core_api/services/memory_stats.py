@@ -30,6 +30,7 @@ async def compute_memory_stats(
     agent_id: str | None = None,
     memory_type: str | None = None,
     status: str | None = None,
+    include_deleted: bool = False,
 ) -> dict:
     """Return ``{total, by_type, by_agent, by_status}`` for the given filters.
 
@@ -37,15 +38,25 @@ async def compute_memory_stats(
     the author filter (matches the REST handler and ``list_by_filters``).
     When omitted, ``scope_agent`` rows are excluded so totals never include
     memories that ``/memories`` would never return for the same caller.
+
+    ``total`` and the breakdowns always exclude soft-deleted rows
+    (``deleted_at IS NULL``) so they stay aligned with what ``/memories``
+    would return. When ``include_deleted=True`` the result additionally
+    carries ``deleted`` (count of soft-deleted rows matching the same
+    scoping filters) and ``total_including_deleted`` (= ``total +
+    deleted``). The breakdown dicts deliberately stay non-deleted only —
+    they should match ``total``, not ``total_including_deleted``.
     """
-    filters = [Memory.deleted_at.is_(None)]
+    # Scope filters apply equally to live and soft-deleted rows; only the
+    # ``deleted_at`` predicate flips between the two counts.
+    scope_filters = []
     if tenant_id:
-        filters.append(Memory.tenant_id == tenant_id)
+        scope_filters.append(Memory.tenant_id == tenant_id)
     if fleet_id:
-        filters.append(Memory.fleet_id == fleet_id)
+        scope_filters.append(Memory.fleet_id == fleet_id)
     if agent_id:
-        filters.append(Memory.agent_id == agent_id)
-        filters.append(
+        scope_filters.append(Memory.agent_id == agent_id)
+        scope_filters.append(
             or_(
                 Memory.visibility == MEMORY_VISIBILITY_SCOPE_ORG,
                 Memory.visibility == MEMORY_VISIBILITY_SCOPE_TEAM,
@@ -56,12 +67,13 @@ async def compute_memory_stats(
             )
         )
     else:
-        filters.append(Memory.visibility != MEMORY_VISIBILITY_SCOPE_AGENT)
+        scope_filters.append(Memory.visibility != MEMORY_VISIBILITY_SCOPE_AGENT)
     if memory_type:
-        filters.append(Memory.memory_type == memory_type)
+        scope_filters.append(Memory.memory_type == memory_type)
     if status:
-        filters.append(Memory.status == status)
+        scope_filters.append(Memory.status == status)
 
+    filters = [Memory.deleted_at.is_(None), *scope_filters]
     base = select(Memory).where(*filters)
     total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar()
     by_type = dict(
@@ -79,9 +91,19 @@ async def compute_memory_stats(
     by_status = dict(
         (await db.execute(select(Memory.status, func.count()).where(*filters).group_by(Memory.status))).all()
     )
-    return {
+    result = {
         "total": total,
         "by_type": by_type,
         "by_agent": by_agent,
         "by_status": by_status,
     }
+    if include_deleted:
+        deleted_filters = [Memory.deleted_at.is_not(None), *scope_filters]
+        deleted = (
+            await db.execute(
+                select(func.count()).select_from(select(Memory).where(*deleted_filters).subquery())
+            )
+        ).scalar()
+        result["deleted"] = deleted
+        result["total_including_deleted"] = total + deleted
+    return result

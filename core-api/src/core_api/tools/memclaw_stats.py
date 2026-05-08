@@ -15,6 +15,8 @@ _DESCRIPTION = (
     "Aggregate counts of memories: total + breakdowns by type, agent, status. "
     "scope='agent' (default) counts only memories visible to YOU (trust ≥ 1); "
     "scope='fleet'/'all' aggregates across agents (trust ≥ 2). "
+    "Counts exclude soft-deleted memories by default; set include_deleted=true "
+    "for additional 'deleted' and 'total_including_deleted' fields. "
     "Read-only — useful for self-introspection and dashboard-style summaries."
 )
 
