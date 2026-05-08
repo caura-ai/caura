@@ -242,11 +242,13 @@ Close the loop. `outcome_type` ∈ {success, failure, partial}.
 `related_ids` = the recall IDs you acted on. Success reinforces weights;
 failure auto-creates `rule` memories. Trust 2.
 
-**`memclaw_stats(scope="agent", fleet_id=?, memory_type=?, status=?)`**
-Aggregate counts: `{total, by_type, by_agent, by_status, scope}`.
-Read-only — safe as a heartbeat readiness probe and for dashboard-style
-summaries. Never use a write+delete pattern for health checks; use this.
-`scope="fleet"` / `"all"` → trust 2.
+**`memclaw_stats(scope="agent", fleet_id=?, memory_type=?, status=?, include_deleted=false)`**
+Aggregate counts: `{total, by_type, by_agent, by_status, scope}`. Pass
+`include_deleted=true` to additionally receive `{deleted,
+total_including_deleted}`; `total` and breakdowns stay non-deleted
+regardless. Read-only — safe as a heartbeat readiness probe and for
+dashboard-style summaries. Never use a write+delete pattern for health
+checks; use this. `scope="fleet"` / `"all"` → trust 2.
 
 ### Which tool, when
 
