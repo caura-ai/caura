@@ -901,9 +901,7 @@ class PostgresService:
             # ranking with stale claims agents shouldn't act on. Callers
             # that need to inspect superseded rows pass an explicit
             # ``status_filter`` to override.
-            scored_stmt = scored_stmt.where(
-                Memory.status.notin_(("outdated", "conflicted"))
-            )
+            scored_stmt = scored_stmt.where(Memory.status.notin_(("outdated", "conflicted")))
         if valid_at:
             from datetime import date as _date_type
 
