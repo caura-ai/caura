@@ -125,6 +125,43 @@ def test_plugin_root_files_includes_manifest():
     )
 
 
+async def test_plugin_manifest_endpoint_shape_and_contents(client):
+    """``/api/v1/plugin-manifest`` is the single source of truth for upgrades.
+
+    The plugin's deploy command (``heartbeat.ts:processCommand``) used to
+    carry its own hardcoded srcFiles array (CAURA-444 drift 1). Centralising
+    the answer here means the plugin queries one endpoint and trusts it.
+    Anyone changing the response shape will silently break every fleet
+    that has already upgraded — so this test pins the contract.
+    """
+    resp = await client.get("/api/v1/plugin-manifest")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    # Locked contract — adding fields is OK, removing or renaming is not.
+    assert "version" in data and isinstance(data["version"], str) and data["version"]
+    assert "src_files" in data and isinstance(data["src_files"], list)
+    assert "root_files" in data and isinstance(data["root_files"], list)
+    assert (
+        "content_hash" in data
+        and isinstance(data["content_hash"], str)
+        and len(data["content_hash"]) == 64  # sha256 hex
+    )
+
+    # The src_files list MUST equal the in-process list — that's the
+    # whole point of having a manifest endpoint. If they drift we
+    # introduce a NEW class of drift bugs, defeating the purpose.
+    assert data["src_files"] == list(plugin_mod._plugin_files)
+    assert set(data["root_files"]) == plugin_mod._plugin_root_files
+
+    # Sanity: hash should match the existing /plugin-source-hash output
+    # so old clients (still using -hash) and new ones (using manifest)
+    # see the same fingerprint.
+    hash_resp = await client.get("/api/v1/plugin-source-hash")
+    assert hash_resp.status_code == 200
+    assert data["content_hash"] == hash_resp.text.strip()
+
+
 def test_served_manifest_declares_contracts_tools():
     """The on-disk manifest must declare ``contracts.tools``.
 

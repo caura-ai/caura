@@ -87,6 +87,60 @@ async def plugin_source(file: str = Query(default="index.ts")):
     return PlainTextResponse("Plugin source not found", status_code=404)
 
 
+@router.get("/plugin-manifest")
+async def plugin_manifest():
+    """Single source of truth for what a plugin should fetch on update.
+
+    Returns the canonical version string, the list of source files
+    (``plugin/src/*.ts``) and root files (``tools.json``,
+    ``skills/memclaw/SKILL.md``, ``openclaw.plugin.json``) the plugin
+    must download to materialise a fresh install or upgrade, plus the
+    combined content hash so callers can short-circuit when they're
+    already current.
+
+    Why a manifest instead of two separate hardcoded lists (Python here
+    + bash in the install script + TypeScript in
+    ``plugin/src/heartbeat.ts``): drift. A 2026-04-16 refactor added
+    ``paths.ts`` and ``logger.ts`` to ``plugin/src`` and forgot the
+    bash list, breaking every fresh install for three days. Today the
+    plugin's deploy command (``heartbeat.ts:processCommand``) carries
+    its OWN hardcoded array of 15 files — drifting from this module's
+    22-entry ``_plugin_files`` — so a plugin upgrade silently leaves
+    six files stale on disk. Centralising the answer here lets the
+    plugin pull the live list and removes one drift class entirely.
+
+    Response shape (stable contract; see CAURA-444):
+        {
+            "version":      "<server VERSION>",
+            "src_files":    ["index.ts", ...],
+            "root_files":   ["openclaw.plugin.json", ...],
+            "content_hash": "<sha256 over all served files>"
+        }
+
+    Auth: unauthenticated (mirrors ``/plugin-source`` and
+    ``/plugin-source-hash``); the plugin uses this on the update path
+    before its API key may have been issued for the new install.
+    """
+    combined = ""
+    for fname in _plugin_files:
+        path = _plugin_dir / fname
+        if path.is_file():
+            combined += path.read_text(encoding="utf-8")
+    for fname in sorted(_plugin_root_files):
+        path = _plugin_dir.parent / fname
+        if path.is_file():
+            combined += path.read_text(encoding="utf-8")
+    content_hash = (
+        hashlib.sha256(combined.encode("utf-8")).hexdigest() if combined else ""
+    )
+    return {
+        "version": VERSION,
+        "src_files": list(_plugin_files),
+        "root_files": sorted(_plugin_root_files),
+        "content_hash": content_hash,
+    }
+
+
 @router.get("/plugin-source-hash", response_class=PlainTextResponse)
 async def plugin_source_hash():
     """SHA-256 hash of all plugin source files (for update checks).
