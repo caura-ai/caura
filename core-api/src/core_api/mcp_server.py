@@ -1183,11 +1183,19 @@ async def memclaw_stats(
     agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
     memory_type: Annotated[str | None, Field(description="Filter by type.")] = None,
     status: Annotated[str | None, Field(description="Filter by status.")] = None,
+    include_deleted: Annotated[
+        bool,
+        Field(
+            description="When true, also return 'deleted' (soft-deleted count) and 'total_including_deleted'. 'total' and breakdowns stay non-deleted regardless."
+        ),
+    ] = False,
 ) -> str:
     """Aggregate counts: total plus breakdowns by type, agent, status.
     scope='agent' (default) requires trust ≥ 1; scope='fleet'/'all' requires
     trust ≥ 2. scope='agent' counts only memories visible to the caller (mirrors
-    memclaw_list visibility scoping); broader scopes drop the per-caller filter."""
+    memclaw_list visibility scoping); broader scopes drop the per-caller filter.
+    Counts exclude soft-deleted memories by default; pass include_deleted=true
+    for additional 'deleted' and 'total_including_deleted' fields."""
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
@@ -1226,6 +1234,7 @@ async def memclaw_stats(
         # scope='fleet'/'all' drops the per-caller filter so cross-agent
         # aggregates surface — fleet_id (if supplied) still narrows the pool.
         effective_agent_id = agent_id if scope == "agent" else None
+        effective_include_deleted = include_deleted and trust >= 3
 
         from core_api.services.memory_stats import compute_memory_stats
 
@@ -1237,6 +1246,7 @@ async def memclaw_stats(
                 agent_id=effective_agent_id,
                 memory_type=memory_type,
                 status=status,
+                include_deleted=effective_include_deleted,
             )
             return _with_latency(json.dumps({**stats, "scope": scope}, default=str), t0)
         except Exception as e:

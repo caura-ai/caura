@@ -41,9 +41,9 @@ class MemoryEnriched(BaseModel):
 
     memory_id: UUID
     tenant_id: str
-    # Carried so the re-embed consumer doesn't need a storage GET round
-    # trip just to feed ``compose_embedding_text``. Same trade we made
-    # for ``MemoryEmbedRequest.content``.
+    # Carried so the back-channel consumer doesn't need a storage GET
+    # round trip just to dispatch contradiction detection. Same trade
+    # we made for ``MemoryEmbedRequest.content``.
     content: str = Field(min_length=1)
     # Empty string when the enricher produced no useful hint —
     # back-channel consumers should short-circuit on falsy.

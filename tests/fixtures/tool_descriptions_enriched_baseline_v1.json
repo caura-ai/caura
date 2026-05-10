@@ -28,7 +28,7 @@
     "stm_only": false
   },
   "memclaw_stats": {
-    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' (default) counts only memories visible to YOU (trust \u2265 1); scope='fleet'/'all' aggregates across agents (trust \u2265 2). Read-only \u2014 useful for self-introspection and dashboard-style summaries.",
+    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' (default) counts only memories visible to YOU (trust \u2265 1); scope='fleet'/'all' aggregates across agents (trust \u2265 2). Counts exclude soft-deleted memories by default; set include_deleted=true for additional 'deleted' and 'total_including_deleted' fields. Read-only \u2014 useful for self-introspection and dashboard-style summaries.",
     "stm_only": false
   },
   "memclaw_tune": {

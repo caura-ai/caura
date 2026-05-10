@@ -800,7 +800,7 @@
   {
     "name": "memclaw_stats",
     "title": null,
-    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' (default) counts only memories visible to YOU (trust \u2265 1); scope='fleet'/'all' aggregates across agents (trust \u2265 2). Read-only \u2014 useful for self-introspection and dashboard-style summaries.",
+    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' (default) counts only memories visible to YOU (trust \u2265 1); scope='fleet'/'all' aggregates across agents (trust \u2265 2). Counts exclude soft-deleted memories by default; set include_deleted=true for additional 'deleted' and 'total_including_deleted' fields. Read-only \u2014 useful for self-introspection and dashboard-style summaries.",
     "inputSchema": {
       "properties": {
         "scope": {
@@ -853,6 +853,12 @@
           "default": null,
           "description": "Filter by status.",
           "title": "Status"
+        },
+        "include_deleted": {
+          "default": false,
+          "description": "When true, also return 'deleted' (soft-deleted count) and 'total_including_deleted'. 'total' and breakdowns stay non-deleted regardless.",
+          "title": "Include Deleted",
+          "type": "boolean"
         }
       },
       "title": "memclaw_statsArguments",

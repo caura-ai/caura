@@ -43,7 +43,7 @@ Tool descriptions are derived from the tool registry (`core-api/src/core_api/too
 | `memclaw_tune` | Yes | Yes | Tune per-agent retrieval parameters (top_k, min_similarity, fts_weight, freshness, recall boost, graph hops, similarity blend) |
 | `memclaw_insights` | Yes | Yes | Analyze the memory store. `focus`: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. `scope`: `agent`, `fleet`, `all`. Findings persist as `insight`-type memories (Karpathy Loop reflection step) |
 | `memclaw_evolve` | Yes | Yes | Record a real-world outcome (`success` / `failure` / `partial`) against recalled memories — adjusts weights, auto-generates preventive rules on failure (Karpathy Loop feedback edge) |
-| `memclaw_stats` | Yes | Yes | Aggregate counts of memories: total + breakdowns by `type`, `agent`, `status`. Read-only — useful for dashboards (REST) and agent self-introspection (MCP) |
+| `memclaw_stats` | Yes | Yes | Aggregate counts of memories: total + breakdowns by `type`, `agent`, `status`. Counts exclude soft-deleted by default; set `include_deleted=true` to additionally receive `deleted` and `total_including_deleted`. Read-only — useful for dashboards (REST) and agent self-introspection (MCP) |
 
 > Skill sharing rides the generic `memclaw_doc` surface: `op=write collection=skills doc_id=<slug>` to share, `op=delete` to remove, `op=search`/`op=query` to discover. Slugs are validated against `^[a-z0-9][a-z0-9._-]{0,99}$`; the description is auto-embedded for semantic search.
 

@@ -21,7 +21,6 @@ from common.enrichment.schema import AtomicFact
 from common.enrichment.schema import EnrichmentResult as MemoryEnrichment
 from common.enrichment.service import (
     _validate_enrichment,  # noqa: F401  # re-export for legacy tests; not in __all__
-    compose_embedding_text,
     enrich_memory,
 )
 from common.enrichment.service import (
@@ -37,6 +36,5 @@ __all__ = [
     "_call_with_retry",
     "_fake_enrich",
     "call_with_fallback",
-    "compose_embedding_text",
     "enrich_memory",
 ]

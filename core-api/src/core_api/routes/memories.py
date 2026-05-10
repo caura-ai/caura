@@ -279,6 +279,7 @@ async def memory_stats(
     agent_id: str | None = Query(default=None),
     memory_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    include_deleted: bool = Query(default=False),
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
@@ -299,6 +300,7 @@ async def memory_stats(
             agent_id=agent_id,
             memory_type=memory_type,
             status=status,
+            include_deleted=include_deleted,
         )
     except (OperationalError, SQLATimeoutError):
         # Connection pool exhaustion / connection drop / per-query timeout
@@ -308,10 +310,11 @@ async def memory_stats(
         # so a sustained pool-exhaustion event doesn't flood logs with
         # full tracebacks at ERROR; ``exc_info=True`` keeps the traceback
         # for diagnosis. Fallback can only honour tenant_id+fleet_id (the
-        # filters storage-api accepts); if the caller asked for an
-        # agent_id/memory_type/status subset, returning unfiltered
-        # tenant-wide stats would lie to them — re-raise instead.
-        if not tenant_id or agent_id or memory_type or status:
+        # filters storage-api accepts) and never returns the soft-deleted
+        # count; if the caller asked for an agent_id/memory_type/status
+        # subset or include_deleted=True, returning a degraded answer
+        # would lie to them — re-raise instead.
+        if not tenant_id or agent_id or memory_type or status or include_deleted:
             # ``OperationalError`` / ``SQLATimeoutError`` are transient
             # pool-exhaustion / connection-drop / per-query timeout
             # conditions — surface as 503 so load balancers and clients

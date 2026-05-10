@@ -12,10 +12,13 @@ enrichment call too. The strong-write pipeline persists the row with
 agent-provided values + schema defaults for the LLM-derived columns
 (``memory_type`` / ``weight`` / ``status``); ``ScheduleBackgroundTasks``
 publishes ``Topics.Memory.ENRICH_REQUESTED`` and ``core-worker``
-PATCHes the enrichment fields back. Hint-based re-embed is also
-deferred — when both flags are off, we accept the small recall hit on
-the initial embed and let the back-channel ENRICHED consumer trigger
-a follow-up re-embed if the hint is high-value.
+PATCHes the enrichment fields back. Hint-based re-embed is DISABLED
+(CAURA-222): writes used to embed
+``compose_embedding_text(content, retrieval_hint)`` while queries embed
+raw text, producing a write/query surface asymmetry that capped recall
+across dedup, entity-lookup, and search ranking. Until a symmetric
+reintroduction lands, both the hot-path here and the background
+re-embed in ``_enrich_memory_background`` embed raw ``content``.
 """
 
 from __future__ import annotations
@@ -102,29 +105,16 @@ class ParallelEmbedEnrich:
         embedding = next(result_iter) if embedding_task is not None else None
         enrichment = next(result_iter) if enrichment_task is not None else None
 
-        # Hint re-embed uses enrichment output to improve retrieval
-        # quality (e.g. "business milestone" query vs "signed first
-        # client" content) via a second embed call. Pointless when
-        # we're already deferring the first one — accept the small
-        # quality regression for the latency win.
-        if (
-            not defer_embedding
-            and cached_embedding is None
-            and enrichment is not None
-            and getattr(enrichment, "retrieval_hint", "")
-        ):
-            from core_api.services.memory_enrichment import compose_embedding_text
-
-            composed = compose_embedding_text(data.content, enrichment.retrieval_hint)
-            try:
-                hint_embedding = await asyncio.wait_for(
-                    get_embedding(composed, tenant_config),
-                    timeout=settings.enrichment_hint_reembed_timeout_seconds,
-                )
-                if hint_embedding is not None:
-                    embedding = hint_embedding
-            except TimeoutError:
-                logger.warning("hint re-embed timed out; keeping content-only embedding")
+        # Hint re-embed disabled (CAURA-222): writes embedded
+        # `compose_embedding_text(content, retrieval_hint)` —
+        # "[Retrieval hint]: ...\n\n<content>" — while queries embed raw
+        # text. Identical content↔query produced cosine ~0.69 instead of
+        # ~1.0, capping recall across dedup, entity_lookup, and search
+        # ranking. The background hint re-embed in
+        # `_enrich_memory_background` (memory_service._enrich_memory_background)
+        # required the same fix; it now also embeds raw `content`. Both
+        # sides — hot path and background — embed raw `content` to match
+        # the search surface (raw query through `get_query_embedding`).
 
         ctx.data["embedding"] = embedding
         ctx.data["enrichment"] = enrichment
