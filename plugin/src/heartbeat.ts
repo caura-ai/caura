@@ -8,7 +8,14 @@
  * - Workspace path stripping from telemetry (hash instead)
  */
 
-import { readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from "fs";
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  readdirSync,
+  unlinkSync,
+  mkdirSync,
+} from "fs";
 import { join } from "path";
 import { createHash } from "crypto";
 import { execSync } from "child_process";
@@ -43,6 +50,7 @@ import {
   buildToolsMd,
   buildAgentsMd,
 } from "./educate.js";
+import { getRecallMetrics } from "./context-engine.js";
 import {
   verifyCommandSignature,
   assertSafePathSegment,
@@ -55,6 +63,171 @@ import { reconcileSkills } from "./reconcile-skills.js";
 
 let heartbeatCount = 0;
 let bakCleanupDone = false;
+let postRestartCheckDone = false;
+
+// --- Deploy cooldown / post-restart verification (CAURA-444) ---
+//
+// On deploy success the plugin writes ``.deploy-pending.json`` BEFORE
+// triggering the restart. The new process checks this on first
+// heartbeat: if PLUGIN_VERSION matches the stamped target, the deploy
+// succeeded and the marker is cleared. If it doesn't match (something
+// rolled back, prebuild failed silently and version.ts wasn't updated,
+// the gateway never restarted, etc.), we record a failure into
+// ``.deploy-cooldown.json`` and refuse further deploys for that
+// version for ``MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS``.
+//
+// The plugin also surfaces ``deploy_blocked_until`` in its heartbeat
+// payload so the backend's auto-upgrade trigger can skip queueing
+// commands during the cooldown window.
+
+const DEPLOY_PENDING_FILE = ".deploy-pending.json";
+const DEPLOY_COOLDOWN_FILE = ".deploy-cooldown.json";
+
+function _failureCooldownHours(): number {
+  const raw = parseInt(
+    process.env.MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS || "",
+    10,
+  );
+  return Number.isFinite(raw) && raw > 0 ? raw : 24;
+}
+
+// Exported for tests. Public surface is intentionally small.
+export const __DEPLOY_INTERNALS__ = {
+  get DEPLOY_PENDING_FILE() { return DEPLOY_PENDING_FILE; },
+  get DEPLOY_COOLDOWN_FILE() { return DEPLOY_COOLDOWN_FILE; },
+  failureCooldownHours: _failureCooldownHours,
+  readCooldown: () => readDeployCooldown(),
+  writeCooldown: (v: string, r: string) => writeDeployCooldown(v, r),
+  clearCooldown: () => clearDeployCooldown(),
+  readPending: () => readDeployPending(),
+  writePending: (v: string) => writeDeployPending(v),
+  clearPending: () => clearDeployPending(),
+  isBlocked: (v: string) => isDeployBlocked(v),
+  resetPostRestartCheck: () => { postRestartCheckDone = false; },
+  verifyPostRestart: () => verifyDeployPostRestart(),
+};
+
+function readDeployCooldown(): { failed_version?: string; blocked_until?: number } {
+  try {
+    const path = join(getPluginDir(), DEPLOY_COOLDOWN_FILE);
+    if (!existsSync(path)) return {};
+    const data = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    return {
+      failed_version:
+        typeof data.failed_version === "string" ? data.failed_version : undefined,
+      blocked_until:
+        typeof data.blocked_until === "number" ? data.blocked_until : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function writeDeployCooldown(failed_version: string, reason: string): void {
+  try {
+    const path = join(getPluginDir(), DEPLOY_COOLDOWN_FILE);
+    const blocked_until = Date.now() + _failureCooldownHours() * 3600_000;
+    writeFileSync(
+      path,
+      JSON.stringify({
+        failed_version,
+        reason,
+        ts: new Date().toISOString(),
+        blocked_until,
+      }) + "\n",
+      "utf-8",
+    );
+    console.warn(
+      `[memclaw] deploy cooldown engaged: failed_version=${failed_version} ` +
+        `reason=${reason} blocked_until=${new Date(blocked_until).toISOString()}`,
+    );
+  } catch (e: unknown) {
+    logError("Failed to write deploy cooldown", e);
+  }
+}
+
+function clearDeployCooldown(): void {
+  try {
+    const path = join(getPluginDir(), DEPLOY_COOLDOWN_FILE);
+    if (existsSync(path)) unlinkSync(path);
+  } catch {
+    // Best-effort
+  }
+}
+
+function readDeployPending(): { target_version?: string; ts?: string } {
+  try {
+    const path = join(getPluginDir(), DEPLOY_PENDING_FILE);
+    if (!existsSync(path)) return {};
+    return JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+function clearDeployPending(): void {
+  try {
+    const path = join(getPluginDir(), DEPLOY_PENDING_FILE);
+    if (existsSync(path)) unlinkSync(path);
+  } catch {
+    // Best-effort
+  }
+}
+
+function writeDeployPending(target_version: string): void {
+  try {
+    const path = join(getPluginDir(), DEPLOY_PENDING_FILE);
+    writeFileSync(
+      path,
+      JSON.stringify({ target_version, ts: new Date().toISOString() }) + "\n",
+      "utf-8",
+    );
+  } catch (e: unknown) {
+    logError("Failed to write deploy-pending marker", e);
+  }
+}
+
+/**
+ * On first heartbeat after process start, check whether a deploy was
+ * pending. If yes and we're on the target version → success, clear the
+ * marker. If yes and we're NOT on the target → failure, write cooldown.
+ */
+function verifyDeployPostRestart(): void {
+  if (postRestartCheckDone) return;
+  postRestartCheckDone = true;
+  const pending = readDeployPending();
+  if (!pending.target_version) return;
+  if (pending.target_version === PLUGIN_VERSION) {
+    console.log(
+      `[memclaw] deploy verified post-restart: now running v${PLUGIN_VERSION}`,
+    );
+    clearDeployPending();
+    clearDeployCooldown();
+  } else {
+    console.error(
+      `[memclaw] DEPLOY VERIFICATION FAILED: target=${pending.target_version} ` +
+        `actual=${PLUGIN_VERSION} — engaging cooldown`,
+    );
+    writeDeployCooldown(
+      pending.target_version,
+      "post-restart-version-mismatch",
+    );
+    clearDeployPending();
+  }
+}
+
+/** Should we accept a fresh deploy command for this target version? */
+function isDeployBlocked(target_version: string): { blocked: boolean; until?: number } {
+  const cd = readDeployCooldown();
+  if (
+    cd.failed_version === target_version &&
+    cd.blocked_until &&
+    cd.blocked_until > Date.now()
+  ) {
+    return { blocked: true, until: cd.blocked_until };
+  }
+  return { blocked: false };
+}
 
 function cleanupStaleBackups(): void {
   if (bakCleanupDone) return;
@@ -78,6 +251,7 @@ function cleanupStaleBackups(): void {
 
 export async function sendHeartbeat(): Promise<void> {
   cleanupStaleBackups();
+  verifyDeployPostRestart();
   if (!MEMCLAW_TENANT_ID || !MEMCLAW_NODE_NAME) return;
 
   // Skill reconciler — converge plugin/skills/ with the catalog before
@@ -274,6 +448,12 @@ export async function sendHeartbeat(): Promise<void> {
     // setup_status build failed
   }
 
+  // Deploy-cooldown surfaced to the backend so its auto-upgrade trigger
+  // (CAURA-444 commit #4) can skip queueing during the cooldown window.
+  // Always reflects the latest cooldown file; reset on successful verify.
+  const cooldown = readDeployCooldown();
+  const deploy_blocked_until = cooldown.blocked_until || undefined;
+
   const body: Record<string, unknown> = {
     tenant_id: MEMCLAW_TENANT_ID,
     node_name: MEMCLAW_NODE_NAME,
@@ -288,6 +468,13 @@ export async function sendHeartbeat(): Promise<void> {
     agents,
     tools: MEMCLAW_TOOLS,
     metadata: setupStatus ? { setup_status: setupStatus } : undefined,
+    // CAURA-444: rolling counters reset on plugin restart. Backend
+    // stores latest snapshot per node; aggregated via the existing
+    // /fleet/nodes endpoint.
+    recall_metrics: getRecallMetrics(),
+    // Cooldown signal: when set, the backend's auto-upgrade trigger
+    // refuses to queue further deploy commands until this timestamp.
+    deploy_blocked_until,
   };
 
   try {
@@ -376,96 +563,217 @@ async function processCommand(cmd: {
       let sourceCode = source;
 
       if (!sourceCode && MEMCLAW_API_URL) {
-        const srcFiles = [
-          "index.ts", "prompt-section.ts", "tools.ts", "version.ts",
-          "env.ts", "transport.ts", "validation.ts", "config.ts",
-          "resolve-agent.ts", "tool-definitions.ts", "deploy.ts",
-          "heartbeat.ts", "educate.ts", "context-engine.ts", "health.ts",
+        // Fetch the canonical file list from /plugin-manifest. Falls
+        // back to a built-in default array when the backend doesn't
+        // expose the endpoint yet (back-compat with pre-CAURA-444
+        // backends). The default list MUST stay aligned with the
+        // backend's _plugin_files for OLD plugin->NEW backend; this
+        // is asserted by the Python test_plugin_source_manifest tests.
+        const FALLBACK_SRC_FILES = [
+          "index.ts", "prompt-section.ts", "tools.ts", "tool-specs.ts",
+          "version.ts", "env.ts", "transport.ts", "validation.ts",
+          "config.ts", "paths.ts", "logger.ts", "resolve-agent.ts",
+          "tool-definitions.ts", "deploy.ts", "heartbeat.ts",
+          "educate.ts", "context-engine.ts", "agent-auth.ts",
+          "health.ts", "install-id.ts", "identity.ts",
+          "reconcile-skills.ts",
         ];
+        const FALLBACK_ROOT_FILES = [
+          "openclaw.plugin.json", "tools.json", "skills/memclaw/SKILL.md",
+        ];
+
+        let srcFiles: string[] = FALLBACK_SRC_FILES;
+        let rootFiles: string[] = FALLBACK_ROOT_FILES;
+        let manifestVersion: string | undefined;
+        try {
+          const mUrl = new URL(
+            `${MEMCLAW_API_PREFIX}/plugin-manifest`,
+            MEMCLAW_API_URL,
+          ).toString();
+          const mRes = await fetch(mUrl, {
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (mRes.ok) {
+            const m = await mRes.json() as {
+              version?: string;
+              src_files?: string[];
+              root_files?: string[];
+            };
+            if (Array.isArray(m.src_files) && m.src_files.length > 0) {
+              srcFiles = m.src_files;
+            }
+            if (Array.isArray(m.root_files)) {
+              rootFiles = m.root_files;
+            }
+            if (typeof m.version === "string" && m.version) {
+              manifestVersion = m.version;
+            }
+            console.log(
+              `[memclaw] manifest fetched: target=v${manifestVersion || "?"} ` +
+                `src=${srcFiles.length} root=${rootFiles.length}`,
+            );
+          } else if (mRes.status !== 404) {
+            console.warn(
+              `[memclaw] /plugin-manifest returned ${mRes.status}; using fallback file list`,
+            );
+          }
+        } catch (e: unknown) {
+          console.warn(
+            `[memclaw] /plugin-manifest fetch failed (back-compat fallback): ${(e as Error).message}`,
+          );
+        }
+
+        // Cooldown gate — refuse deploys for a previously-failed version.
+        if (manifestVersion) {
+          const blocked = isDeployBlocked(manifestVersion);
+          if (blocked.blocked) {
+            status = "failed";
+            result = {
+              error: "deploy blocked by cooldown",
+              failed_version: manifestVersion,
+              blocked_until: blocked.until,
+            };
+            // Skip the rest of this branch.
+            srcFiles = [];
+            rootFiles = [];
+          }
+        }
+
         const pluginDir = getPluginDir();
         const srcDir = join(pluginDir, "src");
 
-        // Snapshot existing files for rollback on failure
-        const backups = new Map<string, string>();
-        for (const f of srcFiles) {
-          const p = join(srcDir, f);
-          if (existsSync(p)) backups.set(f, readFileSync(p, "utf-8"));
-        }
+        if (srcFiles.length > 0) {
+          // Snapshot existing files for rollback on failure (src + root)
+          const backups = new Map<string, string>();
+          for (const f of srcFiles) {
+            const p = join(srcDir, f);
+            if (existsSync(p)) backups.set("src/" + f, readFileSync(p, "utf-8"));
+          }
+          for (const f of rootFiles) {
+            const p = join(pluginDir, f);
+            if (existsSync(p)) backups.set(f, readFileSync(p, "utf-8"));
+          }
 
-        // Fetch all files into memory first — don't touch disk until all succeed
-        const fetched = new Map<string, string>();
-        let fetchOk = true;
-        for (const f of srcFiles) {
-          const fetchController = new AbortController();
-          const fetchTimeout = setTimeout(() => fetchController.abort(), 30_000);
-          try {
-            const url = new URL(
-              `${MEMCLAW_API_PREFIX}/plugin-source?file=${encodeURIComponent(f)}`,
-              MEMCLAW_API_URL,
-            ).toString();
-            const res = await fetch(url, { signal: fetchController.signal });
-            if (res.ok) {
-              const text = await res.text();
-              if (text.length > 0 && text.length <= MAX_SOURCE_SIZE) {
-                fetched.set(f, text);
+          // Fetch all files into memory first — don't touch disk until all succeed
+          const fetched = new Map<string, string>();
+          let fetchOk = true;
+          const allFiles: Array<{ name: string; isRoot: boolean }> = [
+            ...srcFiles.map((f) => ({ name: f, isRoot: false })),
+            ...rootFiles.map((f) => ({ name: f, isRoot: true })),
+          ];
+          for (const { name, isRoot } of allFiles) {
+            const fetchController = new AbortController();
+            const fetchTimeout = setTimeout(() => fetchController.abort(), 30_000);
+            try {
+              const url = new URL(
+                `${MEMCLAW_API_PREFIX}/plugin-source?file=${encodeURIComponent(name)}`,
+                MEMCLAW_API_URL,
+              ).toString();
+              const res = await fetch(url, { signal: fetchController.signal });
+              if (res.ok) {
+                const text = await res.text();
+                if (text.length > 0 && text.length <= MAX_SOURCE_SIZE) {
+                  fetched.set((isRoot ? "" : "src/") + name, text);
+                } else {
+                  fetchOk = false;
+                  if (text.length > MAX_SOURCE_SIZE) {
+                    console.warn(`[memclaw] Fetched file ${name} exceeds MAX_SOURCE_SIZE`);
+                  } else {
+                    console.warn(`[memclaw] Fetched file ${name} returned empty body`);
+                  }
+                }
               } else {
                 fetchOk = false;
-                if (text.length > MAX_SOURCE_SIZE) {
-                  console.warn(`[memclaw] Fetched file ${f} exceeds MAX_SOURCE_SIZE`);
-                } else {
-                  console.warn(`[memclaw] Fetched file ${f} returned empty body`);
+              }
+            } catch {
+              fetchOk = false;
+            } finally {
+              clearTimeout(fetchTimeout);
+            }
+          }
+          if (fetchOk) {
+            try {
+              // Write all fetched files to disk (creating subdirs as needed)
+              for (const [relPath, text] of fetched) {
+                const target = join(pluginDir, relPath);
+                const dir = target.substring(0, target.lastIndexOf("/"));
+                if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
+                writeFileSync(target, text, "utf-8");
+              }
+              // Stamp version.ts from the manifest's version BEFORE
+              // building. This is the fix for drift 2 — the prebuild
+              // step references a monorepo path that doesn't exist on
+              // a flat install, so without this stamp version.ts
+              // retains its prior value and the new build reports the
+              // OLD plugin_version after restart.
+              if (manifestVersion) {
+                const versionTs =
+                  "// Auto-generated by deploy command from /plugin-manifest — do not edit\n" +
+                  `export const PLUGIN_VERSION = "${manifestVersion}";\n`;
+                writeFileSync(join(srcDir, "version.ts"), versionTs, "utf-8");
+                // Also update package.json to keep `npm view` honest.
+                try {
+                  const pkgPath = join(pluginDir, "package.json");
+                  if (existsSync(pkgPath)) {
+                    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+                    pkg.version = manifestVersion;
+                    writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n", "utf-8");
+                  }
+                } catch (e: unknown) {
+                  logError("Failed to update package.json version", e);
+                }
+                // Mark deploy as pending so the next-boot post-restart
+                // verifier can confirm the new build actually picked up
+                // the new version.
+                writeDeployPending(manifestVersion);
+              }
+              const buildOutput = execSync("npm run build 2>&1", {
+                cwd: pluginDir,
+                encoding: "utf-8",
+                timeout: BUILD_TIMEOUT_MS,
+              });
+              result = {
+                ok: true,
+                target_version: manifestVersion,
+                buildOutput: buildOutput.slice(-2000),
+                restarting: true,
+              };
+              setTimeout(() => {
+                try {
+                  execSync("systemctl --user restart openclaw-gateway 2>&1", {
+                    encoding: "utf-8",
+                    timeout: 10_000,
+                  });
+                } catch {
+                  process.exit(0);
+                }
+              }, 2000);
+            } catch (e: unknown) {
+              // Write or build failed — restore backups (both src + root)
+              for (const [relPath, content] of backups) {
+                try {
+                  writeFileSync(join(pluginDir, relPath), content, "utf-8");
+                } catch {
+                  // Restore failed for this file
                 }
               }
-            } else {
-              fetchOk = false;
-            }
-          } catch {
-            fetchOk = false;
-          } finally {
-            clearTimeout(fetchTimeout);
-          }
-        }
-        if (fetchOk) {
-          try {
-            // Write all fetched files to disk
-            for (const [f, text] of fetched) {
-              writeFileSync(join(srcDir, f), text, "utf-8");
-            }
-            const buildOutput = execSync("npm run build 2>&1", {
-              cwd: pluginDir,
-              encoding: "utf-8",
-              timeout: BUILD_TIMEOUT_MS,
-            });
-            result = { ok: true, buildOutput: buildOutput.slice(-2000), restarting: true };
-            setTimeout(() => {
-              try {
-                execSync("systemctl --user restart openclaw-gateway 2>&1", {
-                  encoding: "utf-8",
-                  timeout: 10_000,
-                });
-              } catch {
-                process.exit(0);
+              // Cooldown the failed version so the backend stops
+              // re-queuing for it.
+              if (manifestVersion) {
+                writeDeployCooldown(manifestVersion, "build-failed");
               }
-            }, 2000);
-          } catch (e: unknown) {
-            // Write or build failed — restore backups
-            for (const [f, content] of backups) {
-              try {
-                writeFileSync(join(srcDir, f), content, "utf-8");
-              } catch {
-                // Restore failed for this file
-              }
+              clearDeployPending();
+              status = "failed";
+              const err = e as Error & { stdout?: string; stderr?: string };
+              result = {
+                error: "Deploy failed: " + (err.message || ""),
+                buildOutput: (err.stdout || err.stderr || "").slice(-2000),
+              };
             }
+          } else {
             status = "failed";
-            const err = e as Error & { stdout?: string; stderr?: string };
-            result = {
-              error: "Deploy failed: " + (err.message || ""),
-              buildOutput: (err.stdout || err.stderr || "").slice(-2000),
-            };
+            result = { error: "Failed to fetch plugin source files" };
           }
-        } else {
-          status = "failed";
-          result = { error: "Failed to fetch plugin source files" };
         }
       } else if (sourceCode) {
         const deployResult = await deployPlugin(sourceCode, env_vars);
