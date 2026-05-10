@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
-from core_api.constants import NODE_OFFLINE_SECONDS, NODE_STALE_SECONDS
+from core_api.constants import NODE_OFFLINE_SECONDS, NODE_STALE_SECONDS, VERSION
 from core_api.db.session import get_db
 from core_api.services.audit_service import log_action
 
@@ -67,6 +67,15 @@ class HeartbeatIn(BaseModel):
     # without an ``install_id`` and recreating the very collision
     # this feature exists to fix. Reject at the API boundary instead.
     install_id: str | None = Field(None, max_length=32)
+    # CAURA-444: rolling counters from the plugin's recall-policy gate
+    # (context-engine.ts:getRecallMetrics). Reset on plugin restart;
+    # latest snapshot is stored on the node row for SQL aggregation.
+    recall_metrics: dict | None = None
+    # CAURA-444: epoch-ms cooldown signal. When set and in the future,
+    # the auto-upgrade trigger SKIPS queueing further deploy commands
+    # for this node — the plugin is signalling it knows it's in a
+    # broken-deploy state and another deploy would just loop.
+    deploy_blocked_until: int | None = None
 
 
 class CommandIn(BaseModel):
@@ -186,6 +195,143 @@ async def delete_fleet(
 # ── Heartbeat ──
 
 
+# CAURA-444 — plugin auto-upgrade. Versions whose deploy machinery is
+# itself broken; we never queue auto-deploy for these because the plugin
+# would loop. Each entry comes off the list once every node in the wild
+# has been manually upgraded past it.
+#
+# 2.3.0: hardcoded srcFiles list drifted from backend (15 vs 22 files);
+#        prebuild references a monorepo path missing on flat installs,
+#        so version.ts is never refreshed and PLUGIN_VERSION reports
+#        stale. Fixed structurally in 2.4.0 (manifest fetch + version
+#        stamp). Operators must manually upgrade 2.3.0 nodes once;
+#        auto-upgrade resumes from 2.4.0.
+KNOWN_BROKEN_DEPLOY_VERSIONS: frozenset[str] = frozenset({"2.3.0"})
+
+
+def _semver_lt(a: str | None, b: str | None) -> bool:
+    """``a < b`` for plain dotted-int versions. Returns False if either
+    side is unparseable so we never queue a deploy on a version we
+    don't understand.
+    """
+    if not a or not b:
+        return False
+    try:
+        a_parts = [int(x) for x in a.split(".") if x]
+        b_parts = [int(x) for x in b.split(".") if x]
+        # Pad to the same length with zeros so "2.4" < "2.4.1".
+        n = max(len(a_parts), len(b_parts))
+        a_parts += [0] * (n - len(a_parts))
+        b_parts += [0] * (n - len(b_parts))
+        return a_parts < b_parts
+    except ValueError:
+        return False
+
+
+async def _auto_upgrade_enabled_for_tenant(
+    db: AsyncSession, tenant_id: str
+) -> bool:
+    """Default true; per-tenant flip via
+    ``organization_settings.memclaw.auto_upgrade_enabled = false``.
+    """
+    try:
+        from core_api.services.organization_settings import get_raw_settings
+
+        raw = await get_raw_settings(db, tenant_id)
+        flag = raw.get("memclaw", {}).get("auto_upgrade_enabled")
+        # None (no override) → use the global default (true).
+        return flag is not False
+    except Exception:
+        # Fail-open on settings-resolve errors so a misconfigured tenant
+        # doesn't permanently lose auto-upgrade. The cooldown machinery
+        # on the plugin side prevents loops in the worst case.
+        return True
+
+
+async def _has_recent_deploy_command(
+    sc, tenant_id: str, node_name: str
+) -> bool:
+    """True if a ``deploy`` command for this node is pending or was
+    queued within the cooldown window. Prevents the heartbeat from
+    queueing a second deploy on top of an in-flight one.
+    """
+    try:
+        # Storage layer's get_pending_commands returns unacked commands.
+        # That covers the in-flight case; for the recent-failed case the
+        # plugin's own ``deploy_blocked_until`` does the heavy lifting.
+        pending = await sc.get_pending_commands(tenant_id, node_name)
+        return any((c or {}).get("command") == "deploy" for c in pending or [])
+    except Exception:
+        # If we can't tell, assume yes — better to skip a queue than to
+        # double-queue.
+        return True
+
+
+async def _maybe_queue_auto_upgrade(
+    *,
+    db: AsyncSession,
+    sc,
+    body: "HeartbeatIn",
+) -> None:
+    """If the node is on an older plugin version and the tenant has
+    auto-upgrade enabled, queue a ``deploy`` command. Multiple skip
+    conditions for safety:
+
+    - missing or unparseable plugin_version
+    - plugin_version >= server VERSION (no upgrade needed)
+    - plugin_version is in KNOWN_BROKEN_DEPLOY_VERSIONS
+    - node has signalled cooldown via ``deploy_blocked_until``
+    - tenant has explicitly disabled auto-upgrade
+    - a deploy command is already pending for this node
+    """
+    if not body.plugin_version:
+        return
+    if not _semver_lt(body.plugin_version, VERSION):
+        return
+    if body.plugin_version in KNOWN_BROKEN_DEPLOY_VERSIONS:
+        logger.info(
+            "fleet.heartbeat: skipping auto-upgrade for node=%s on "
+            "broken-deploy version %s (manual re-install required)",
+            body.node_name,
+            body.plugin_version,
+        )
+        return
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    if body.deploy_blocked_until and body.deploy_blocked_until > now_ms:
+        return
+    if not await _auto_upgrade_enabled_for_tenant(db, body.tenant_id):
+        return
+    if await _has_recent_deploy_command(sc, body.tenant_id, body.node_name):
+        return
+
+    try:
+        await sc.create_command(
+            {
+                "tenant_id": body.tenant_id,
+                "node_name": body.node_name,
+                "command": "deploy",
+                # Plugin re-fetches the canonical file list via
+                # /plugin-manifest; payload only carries the target
+                # version for logging / cooldown bookkeeping.
+                "payload": {"target_version": VERSION},
+            }
+        )
+        logger.info(
+            "fleet.heartbeat: auto-upgrade queued for node=%s tenant=%s "
+            "(%s -> %s)",
+            body.node_name,
+            body.tenant_id,
+            body.plugin_version,
+            VERSION,
+        )
+    except Exception as e:
+        logger.warning(
+            "fleet.heartbeat: failed to queue auto-upgrade for node=%s: %s",
+            body.node_name,
+            e,
+        )
+
+
 @router.post("/fleet/heartbeat")
 async def heartbeat(
     body: HeartbeatIn,
@@ -197,6 +343,20 @@ async def heartbeat(
 
     now = datetime.now(UTC)
     sc = get_storage_client()
+
+    # Merge CAURA-444 metrics (recall counters + cooldown signal) into
+    # the existing metadata JSONB blob rather than introducing new
+    # columns. This keeps the storage schema unchanged while still
+    # exposing the data via the existing /fleet/nodes endpoint and
+    # ad-hoc SQL on `nodes.metadata`.
+    merged_metadata: dict | None = body.metadata or None
+    if body.recall_metrics is not None or body.deploy_blocked_until is not None:
+        merged_metadata = dict(merged_metadata or {})
+        if body.recall_metrics is not None:
+            merged_metadata["recall_metrics"] = body.recall_metrics
+        if body.deploy_blocked_until is not None:
+            merged_metadata["deploy_blocked_until"] = body.deploy_blocked_until
+
     node = await sc.upsert_node(
         {
             "tenant_id": body.tenant_id,
@@ -211,7 +371,7 @@ async def heartbeat(
             "agents_json": body.agents,
             "tools_json": body.tools,
             "channels_json": body.channels,
-            "metadata": body.metadata,
+            "metadata": merged_metadata,
             "last_heartbeat": now.isoformat(),
         }
     )
@@ -318,6 +478,12 @@ async def heartbeat(
 
     node_id = node.get("id", "")
     node_name = node.get("node_name", body.node_name)
+
+    # CAURA-444: opportunistic auto-upgrade. Compares incoming
+    # plugin_version to the server's VERSION and queues a deploy
+    # command when behind. Multiple guards inside the helper —
+    # see _maybe_queue_auto_upgrade docstring.
+    await _maybe_queue_auto_upgrade(db=db, sc=sc, body=body)
 
     # Fetch pending commands and mark as acked
     commands = await sc.get_pending_commands(body.tenant_id, node_name)
