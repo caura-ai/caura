@@ -147,6 +147,45 @@ Single-agent runtimes ignore this section.
   orchestrator can decide whether to escalate.
 - NEVER substitute local files or scratchpads for MemClaw writes.
 
+## Recall policy (auto-gating)
+
+The plugin's context engine runs `assemble()` before every model call
+and, by default, decides whether to issue a recall against MemClaw
+based on the turn's content. This stops every trivial ping ("hi", "ok",
+"thanks", `/help`, single-emoji acks) from hitting the backend and
+paying input tokens for unhelpful recall blocks.
+
+**Default policy** (`MEMCLAW_RECALL_POLICY=auto`): recall on
+substantive turns, skip on:
+- prompts under 14 chars (no useful query) unless an explicit recall
+  keyword is present;
+- trivial pings: greetings, acks, single-emoji turns;
+- short slash commands (`/help`, `/clear`, `/foo bar`);
+- empty `prompt` with no buffered user message.
+
+**Recall keywords always force recall** even on otherwise-skip prompts.
+Defaults: `memclaw`, `LTM`, `long term`, `long-term`, `remember`,
+`recall`, `what did`, `earlier`, `previously`, `last time`, `before`,
+`we discussed`, `you said`, `i told`, `history`, `memory`, `lookup`.
+Override via `MEMCLAW_RECALL_TRIGGER_KEYWORDS=...` (comma-separated).
+
+**Other policies**: `always` (recall every turn — pre-CAURA-444
+behaviour), `never` (education block only; agents can still call
+`memclaw_recall` explicitly), `keywords` (recall only when an explicit
+trigger fires).
+
+**Important**: the auto-gate only suppresses the *plugin-driven*
+recall. Agents can always call `memclaw_recall` directly when they
+judge that a short turn needs LTM — the gate never blocks the tool
+call itself. Use this knob when a short message would benefit from
+context the gate can't infer.
+
+**Operational visibility**: rolling skip counters
+(`recall_metrics: {calls_total, skipped_total, skipped_by_reason}`)
+are sent in every heartbeat and persisted on the node row. SQL on
+`nodes.metadata->'recall_metrics'` answers "how often is the gate
+firing per fleet, by reason."
+
 ## Sharing skills
 
 Skills are SKILL.md artifacts that agents share across the fleet —

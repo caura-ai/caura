@@ -1297,14 +1297,21 @@ describe("buildAgentsMd", () => {
     }
   });
 
-  test("is slim: under 1500 chars (deep content lives in SKILL.md)", () => {
+  test("is slim: under 1700 chars (deep content lives in SKILL.md)", () => {
     // Post-slim contract: per-turn injection cost should be small. The
     // pre-slim version was ~3.4 KB. If this grows back, ask whether
     // the new content really has to be every-turn and not on-demand.
+    //
+    // Limit history:
+    //  - 1500 (original A3 slim)
+    //  - 1700 (CAURA-444: add Skills paragraph + recall-auto-gate cue)
+    //
+    // Bump deliberately when adding a new genuinely-must-be-every-turn
+    // cue; never to absorb verbose content that belongs in SKILL.md.
     const agents = buildAgentsMd();
     assert.ok(
-      agents.length < 1500,
-      `buildAgentsMd is ${agents.length} chars; should be < 1500. Move deep content to SKILL.md.`,
+      agents.length < 1700,
+      `buildAgentsMd is ${agents.length} chars; should be < 1700. Move deep content to SKILL.md.`,
     );
   });
 

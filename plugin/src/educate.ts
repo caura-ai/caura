@@ -407,16 +407,17 @@ outcome MUST produce a write. No write = not done. Checkpoint every
 blocker · commitment · config change · error pattern · skill created
 or updated. If in doubt: write.
 
-**Skills** (team knowledge: runbooks, recipes, playbooks). Catalog
-is \`collection=skills\`. Search first
-(\`memclaw_doc op=search collection=skills\`) — \`memclaw_recall\`
-is for YOUR memories, not shared. Share via \`op=write
-collection=skills doc_id=<slug>\`.
+**Skills.** Team-knowledge catalog at \`collection=skills\`. Search via
+\`memclaw_doc op=search collection=skills\` (\`memclaw_recall\` is YOUR
+memories, not shared); share via \`op=write doc_id=<slug>\`.
+
+**Recall auto-gated** on trivial turns; call \`memclaw_recall\`
+directly when a short message needs LTM.
 
 Before your first MemClaw call this session, read
-\`skills/memclaw/SKILL.md\` for tool signatures, capture cadences
-(L1/L2/L3), quality, prohibitions, and skill sharing. \`TOOLS.md\`
-carries the at-a-glance tool list and enum vocabulary every turn.
+\`skills/memclaw/SKILL.md\` for signatures, cadences, quality,
+prohibitions, recall policy, and sharing. \`TOOLS.md\` carries the
+at-a-glance tool list and enum vocabulary every turn.
 `;
 }
 
