@@ -208,6 +208,30 @@ MEMCLAW_VERSION={safe_version}
 echo "=== MemClaw Plugin Installer ==="
 echo ""
 
+# Preflight: warn (don't fail) if the local OpenClaw runtime is older
+# than the minimum the plugin's APIs require. Reasons we don't hard-fail:
+# (1) operators sometimes run patched older builds; (2) OpenClaw versions
+# below the minimum still load the plugin partially (legacy
+# before_prompt_build path), so install proceeds and the operator decides.
+# See plugin/openclaw.plugin.json + AGENT-INSTALL.md for the rationale.
+MIN_OPENCLAW_VERSION="2026.3.22"
+INSTALLED_OPENCLAW_VERSION="$(openclaw --version 2>/dev/null | awk '{{print $2}}' || true)"
+if [ -z "$INSTALLED_OPENCLAW_VERSION" ]; then
+  echo "WARNING: openclaw CLI not found in PATH or returned no version."
+  echo "         Plugin v$MEMCLAW_VERSION targets OpenClaw >= $MIN_OPENCLAW_VERSION."
+elif [ "$(printf '%s\n%s\n' "$MIN_OPENCLAW_VERSION" "$INSTALLED_OPENCLAW_VERSION" | sort -V | head -1)" != "$MIN_OPENCLAW_VERSION" ]; then
+  echo "WARNING: OpenClaw $INSTALLED_OPENCLAW_VERSION is older than the recommended"
+  echo "         minimum $MIN_OPENCLAW_VERSION for MemClaw plugin v$MEMCLAW_VERSION."
+  echo "         The recall-policy gate (assemble({{prompt}}) param) and"
+  echo "         registerContextEngine slot landed in OpenClaw v$MIN_OPENCLAW_VERSION;"
+  echo "         on older runtimes the plugin falls back to before_prompt_build but"
+  echo "         loses per-turn message context. Continuing install — upgrade OpenClaw"
+  echo "         when convenient."
+else
+  echo "OpenClaw $INSTALLED_OPENCLAW_VERSION (>= $MIN_OPENCLAW_VERSION) — OK."
+fi
+echo ""
+
 PLUGIN_DIR="$HOME/.openclaw/plugins/memclaw"
 CONFIG_PATH="$HOME/.openclaw/openclaw.json"
 
