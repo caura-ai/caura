@@ -18,7 +18,7 @@
     "test": "tsc && node --test dist/educate.test.js dist/tool-definitions.test.js dist/env.test.js dist/transport.test.js dist/health.test.js dist/config.test.js dist/runtime-contract.test.js dist/identity.test.js dist/install-id.test.js dist/validation.test.js dist/reconcile-skills.test.js"
   },
   "devDependencies": {
-    "@types/node": "^25.4.0",
+    "@types/node": "^25.6.2",
     "typescript": "^5.4"
   }
 }
