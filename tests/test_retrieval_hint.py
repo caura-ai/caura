@@ -1,10 +1,12 @@
-"""Tests for the retrieval_hint feature in memory_enrichment.
+"""Tests for the retrieval_hint metadata field.
 
 Covers:
   - Validator round-trips retrieval_hint; trims whitespace; caps length.
-  - Prompt contains the new retrieval_hint rule + concrete examples.
-  - compose_embedding_text appends hint when present, returns content
-    unchanged when empty/missing.
+  - Prompt contains the retrieval_hint rule + concrete examples.
+
+The hint is persisted in metadata (debugging / auditability) but no
+longer participates in embedding composition — see CAURA-222 and the
+follow-up that removed ``compose_embedding_text`` entirely.
 """
 
 from __future__ import annotations
@@ -12,7 +14,6 @@ from __future__ import annotations
 from core_api.services.memory_enrichment import (
     ENRICHMENT_PROMPT,
     _validate_enrichment,
-    compose_embedding_text,
 )
 
 
@@ -91,30 +92,3 @@ class TestPromptContainsHintRule:
     def test_prompt_includes_business_milestone_example(self):
         # This is the example modeled after the eac54add failure case.
         assert "business milestone" in ENRICHMENT_PROMPT
-
-
-# ---------------------------------------------------------------------------
-# compose_embedding_text
-# ---------------------------------------------------------------------------
-
-
-class TestComposeEmbeddingText:
-    def test_with_hint_appends_marker(self):
-        out = compose_embedding_text(
-            content="I signed a contract with my first client today.",
-            retrieval_hint="business milestone: signed first client",
-        )
-        assert "I signed a contract" in out
-        assert "[Retrieval hint]: business milestone: signed first client" in out
-
-    def test_empty_hint_returns_content_unchanged(self):
-        content = "Some memory content."
-        assert compose_embedding_text(content, "") == content
-
-    def test_none_hint_returns_content_unchanged(self):
-        content = "Some memory content."
-        assert compose_embedding_text(content, None) == content
-
-    def test_whitespace_only_hint_returns_content_unchanged(self):
-        content = "Some memory content."
-        assert compose_embedding_text(content, "   ") == content

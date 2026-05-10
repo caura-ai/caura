@@ -556,10 +556,6 @@ async def test_enrich_no_contradiction_when_no_prior_embedding() -> None:
         patch.object(memory_service, "get_embedding", new=AsyncMock(return_value=hint_enhanced)),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch("core_api.services.memory_enrichment.enrich_memory", new=AsyncMock(return_value=enrichment)),
-        patch(
-            "core_api.services.memory_enrichment.compose_embedding_text",
-            side_effect=lambda content, hint: content,
-        ),
         patch.object(memory_service, "track_task"),
         patch(
             "core_api.services.task_tracker.tracked_task",

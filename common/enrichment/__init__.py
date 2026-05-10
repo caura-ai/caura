@@ -7,9 +7,6 @@ Public surface:
 * :func:`enrich_memory` — async entrypoint with 3-tier fallback.
 * :func:`fake_enrich` — keyword heuristic fallback used as the
   ``"fake"`` provider and last-resort safety net.
-* :func:`compose_embedding_text` — content + retrieval hint composer
-  used by both the write-path embedding call and the post-enrichment
-  re-embedding step.
 * Constants: :data:`MEMORY_TYPES`, :data:`MEMORY_STATUSES`,
   :data:`DEFAULT_MEMORY_TYPE`, :data:`DEFAULT_MEMORY_WEIGHT`.
 
@@ -35,7 +32,6 @@ from common.enrichment.constants import (
 )
 from common.enrichment.schema import AtomicFact, EnrichmentResult
 from common.enrichment.service import (
-    compose_embedding_text,
     enrich_memory,
     fake_enrich,
 )
@@ -47,7 +43,6 @@ __all__ = [
     "MEMORY_TYPES",
     "AtomicFact",
     "EnrichmentResult",
-    "compose_embedding_text",
     "enrich_memory",
     "fake_enrich",
 ]

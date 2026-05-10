@@ -4,9 +4,6 @@
 Public surface:
 
 * :func:`enrich_memory` — async entrypoint with 3-tier fallback.
-* :func:`compose_embedding_text` — helper used both pre- and post-
-  enrichment to assemble the text fed to the embedding model
-  (content + retrieval hint).
 * :func:`fake_enrich` — keyword-heuristic fallback used both as the
   ``"fake"`` provider and as the last-resort safety net.
 
@@ -34,30 +31,6 @@ from common.llm.retry import call_with_fallback
 from common.provider_names import ProviderName
 
 logger = logging.getLogger(__name__)
-
-
-def compose_embedding_text(content: str, retrieval_hint: str | None) -> str:
-    """Build the text fed to the embedding model.
-
-    Combines the raw memory content with the enricher-produced retrieval
-    hint (a short phrase capturing the memory's semantic essence in
-    query-aligned vocabulary). The hint attacks the semantic-gap failure
-    mode — the common case where a memory's content uses surface
-    vocabulary ("I signed a contract with my first client") but users
-    look it up via significance vocabulary ("business milestone").
-
-    If the hint is empty or missing, returns the content unchanged so
-    existing memories without hints embed exactly as before.
-    """
-    if retrieval_hint:
-        hint = retrieval_hint.strip()
-        if hint:
-            # Prefix the hint so it gets higher positional salience in the
-            # embedding model than a trailing footer would. Empirically,
-            # trailing hints on long content get diluted by token-count
-            # dominance of the body.
-            return f"[Retrieval hint]: {hint}\n\n{content}"
-    return content
 
 
 def _parse_temporal(val: str) -> datetime | None:

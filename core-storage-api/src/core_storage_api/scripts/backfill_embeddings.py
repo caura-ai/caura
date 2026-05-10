@@ -59,6 +59,12 @@ Usage:
     # Per-tenant phasing for prod cutover safety:
     python -m core_storage_api.scripts.backfill_embeddings --tenant-id tenant-abc
 
+    # CAURA-222 recovery: re-embed memories whose stored vector was
+    # produced under the old hint-prefixed write path. Targets rows
+    # with non-empty ``metadata.retrieval_hint``; entities are skipped.
+    python -m core_storage_api.scripts.backfill_embeddings \\
+        --rewrite-hint-prefixed --tenant-id tenant-abc --dry-run
+
 Scope:
 - ``memories.embedding`` — re-embedded from ``memories.content``.
 - ``entities.name_embedding`` — re-embedded from ``entities.canonical_name``.
@@ -111,6 +117,12 @@ class _TableSpec:
     # backfill task uses. ``entities`` does not have a ``deleted_at``
     # column.
     has_deleted_at: bool = False
+    # JSONB metadata column used by the ``rewrite_hint_prefixed`` scan
+    # to filter on ``->>'retrieval_hint'``. ``None`` for tables that
+    # don't carry hint metadata (entities) — the hint-rewrite call site
+    # asserts this is set so a misconfigured spec fails loudly rather
+    # than emitting SQL against a nonexistent column.
+    metadata_column: str | None = None
 
 
 _TARGETS: tuple[_TableSpec, ...] = (
@@ -119,6 +131,7 @@ _TARGETS: tuple[_TableSpec, ...] = (
         embedding_column="embedding",
         content_column="content",
         has_deleted_at=True,
+        metadata_column="metadata_",
     ),
     _TableSpec(
         table="entities",
@@ -138,26 +151,59 @@ class BackfillReport:
     elapsed_s: float
 
 
-async def _iter_null_rows(
+async def _iter_rows(
     engine,
     spec: _TableSpec,
     *,
     tenant_id: str | None,
     batch_size: int,
+    rewrite_hint_prefixed: bool,
 ) -> AsyncIterator[list[tuple[uuid.UUID, str]]]:
-    """Yield batches of (id, content) for rows where the embedding is NULL.
+    """Yield batches of (id, content) for rows that need (re-)embedding.
+
+    Two scan modes:
+      - Default: rows where the embedding is NULL (post-12 backfill,
+        also covers any other source of missing vectors).
+      - ``rewrite_hint_prefixed=True``: rows whose stored vector was
+        produced under the pre-CAURA-222 hint-prefixed write path
+        (``"[Retrieval hint]: <hint>\\n\\n<content>"``). Selector is
+        ``embedding IS NOT NULL AND metadata_->>'retrieval_hint'`` is
+        non-empty. Only ``memories`` carries hint metadata; the
+        ``entities`` table is skipped at the call site.
 
     Cursor-style pagination on ``id`` for stable resumability — the
-    consumer's writes flip ``embedding`` from NULL to non-NULL, so on a
-    re-run the same page-after-id may yield fewer rows but never
-    duplicates.
+    consumer's writes flip the row's match condition (NULL → non-NULL,
+    or rewrite the embedding while metadata stays put), so on a re-run
+    the same page-after-id may yield fewer rows but never duplicates.
+    Hint-prefixed mode is the exception: a re-run after a successful
+    rewrite would re-match the same rows, since metadata.retrieval_hint
+    is intentionally preserved for auditability. The recommended
+    operational pattern is a single forward pass per tenant followed
+    by the embed-stability probe to verify; see PR description.
     """
     from sqlalchemy import text
 
     after: uuid.UUID | None = None
     while True:
         params: dict = {"limit": batch_size}
-        sql = f"SELECT id, {spec.content_column} FROM {spec.table} WHERE {spec.embedding_column} IS NULL "
+        sql = f"SELECT id, {spec.content_column} FROM {spec.table} WHERE "
+        if rewrite_hint_prefixed:
+            # Rewrite mode: target rows that were embedded with the
+            # pre-CAURA-222 hint prefix. The metadata key is preserved
+            # as auditability ground truth — we use it as the selector
+            # for which rows need rewriting.
+            if spec.metadata_column is None:
+                raise ValueError(
+                    f"rewrite_hint_prefixed scan requires a metadata column on "
+                    f"_TableSpec.table={spec.table!r}; got metadata_column=None"
+                )
+            sql += (
+                f"{spec.embedding_column} IS NOT NULL "
+                f"AND {spec.metadata_column} ? 'retrieval_hint' "
+                f"AND COALESCE({spec.metadata_column}->>'retrieval_hint', '') <> '' "
+            )
+        else:
+            sql += f"{spec.embedding_column} IS NULL "
         # Skip soft-deleted rows on tables that have ``deleted_at`` —
         # consistent with ``memory_list_null_embedding_rows`` and the
         # event-driven backfill task; otherwise we'd burn provider
@@ -188,6 +234,7 @@ async def _backfill_one_table(
     batch_size: int,
     max_inflight: int,
     dry_run: bool,
+    rewrite_hint_prefixed: bool,
 ) -> BackfillReport:
     from sqlalchemy import text
 
@@ -256,7 +303,13 @@ async def _backfill_one_table(
                 await conn.commit()
             embedded += 1
 
-    async for batch in _iter_null_rows(engine, spec, tenant_id=tenant_id, batch_size=batch_size):
+    async for batch in _iter_rows(
+        engine,
+        spec,
+        tenant_id=tenant_id,
+        batch_size=batch_size,
+        rewrite_hint_prefixed=rewrite_hint_prefixed,
+    ):
         scanned += len(batch)
         await asyncio.gather(*(_embed_and_write(rid, c) for rid, c in batch))
         logger.info(
@@ -285,8 +338,26 @@ async def run_backfill(
     max_inflight: int,
     dry_run: bool,
     only_table: str | None = None,
+    rewrite_hint_prefixed: bool = False,
 ) -> list[BackfillReport]:
-    """Walk every NULL-embedding row in the targeted tables and re-embed.
+    """Walk targeted rows and (re-)embed them according to the selected scan mode.
+
+    Two modes:
+
+    - Default (``rewrite_hint_prefixed=False``): scan rows where
+      ``embedding IS NULL`` and embed them from ``content`` /
+      ``canonical_name``. This is the post-migration-012 recovery
+      path for OSS docker-compose users, and also covers any other
+      source of missing vectors (failed inline embeds, etc.).
+
+    - Hint-prefixed rewrite (``rewrite_hint_prefixed=True``): scan
+      rows where ``embedding IS NOT NULL`` AND
+      ``metadata.retrieval_hint`` is non-empty — rows written under
+      the pre-CAURA-222 hint-prefixed write path — and re-embed them
+      from raw ``content`` to align with the search-side surface.
+      One-off recall recovery after CAURA-222 has deployed; new
+      writes already land on the raw-content surface. Entities are
+      skipped in this mode (no hint metadata exists there).
 
     Returns one ``BackfillReport`` per table processed.
 
@@ -304,13 +375,22 @@ async def run_backfill(
     for spec in _TARGETS:
         if only_table is not None and spec.table != only_table:
             continue
+        if rewrite_hint_prefixed and spec.table != "memories":
+            # Only memories carry ``metadata.retrieval_hint``; skip
+            # other tables silently to keep the CLI a single command.
+            logger.info(
+                "backfill[%s] skipped under --rewrite-hint-prefixed (no hint metadata on this table)",
+                spec.table,
+            )
+            continue
         logger.info(
-            "backfill[%s] starting (tenant=%s, batch=%d, max_inflight=%d, dry_run=%s)",
+            "backfill[%s] starting (tenant=%s, batch=%d, max_inflight=%d, dry_run=%s, mode=%s)",
             spec.table,
             tenant_id,
             batch_size,
             max_inflight,
             dry_run,
+            "rewrite-hint-prefixed" if rewrite_hint_prefixed else "null-embedding",
         )
         report = await _backfill_one_table(
             engine,
@@ -319,6 +399,7 @@ async def run_backfill(
             batch_size=batch_size,
             max_inflight=max_inflight,
             dry_run=dry_run,
+            rewrite_hint_prefixed=rewrite_hint_prefixed,
         )
         reports.append(report)
         logger.info(
@@ -365,6 +446,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Count rows that would be re-embedded; don't call the embedding provider or write to the DB.",
     )
     p.add_argument(
+        "--rewrite-hint-prefixed",
+        action="store_true",
+        help=(
+            "Re-embed memories rows that were written under the pre-CAURA-222 "
+            "hint-prefixed write path (selector: embedding IS NOT NULL AND "
+            "metadata.retrieval_hint is non-empty). Only the ``memories`` "
+            "table is processed in this mode; entities are skipped. Use after "
+            "the CAURA-222 fix has deployed to recover recall on existing "
+            "rows. Combine with --tenant-id and --dry-run for a phased "
+            "rollout."
+        ),
+    )
+    p.add_argument(
         "--only-table",
         choices=[s.table for s in _TARGETS],
         default=None,
@@ -393,6 +487,30 @@ async def _amain(argv: list[str]) -> int:
         )
         return 1
 
+    # --rewrite-hint-prefixed is intentionally non-idempotent: the
+    # selector keys on metadata.retrieval_hint, which the rewrite
+    # preserves for auditability, so every re-run will re-match (and
+    # re-embed) the same rows. Surface this loudly before a live run
+    # so an operator who re-invokes the command doesn't silently burn
+    # provider quota on a no-op rewrite. Dry-run is fine — no provider
+    # call, no DB write.
+    if args.rewrite_hint_prefixed and not args.dry_run:
+        print(
+            "WARNING: --rewrite-hint-prefixed is NOT idempotent. "
+            "metadata.retrieval_hint is preserved as auditability ground "
+            "truth, so every re-run will re-match and re-embed the same "
+            "rows — burning provider quota on no-op rewrites. Intended "
+            "as a single forward pass per tenant; verify scope with "
+            "--dry-run first.",
+            file=sys.stderr,
+        )
+        print("Starting in 5 s — press Ctrl-C to abort.", file=sys.stderr)
+        # ``await asyncio.sleep`` rather than ``time.sleep`` so we don't
+        # block the event loop. Functionally equivalent for the 5s
+        # operator grace window — Ctrl-C cancels the sleep on either
+        # path and the script exits before any provider call.
+        await asyncio.sleep(5)
+
     try:
         reports = await run_backfill(
             tenant_id=args.tenant_id,
@@ -400,6 +518,7 @@ async def _amain(argv: list[str]) -> int:
             max_inflight=args.max_inflight,
             dry_run=args.dry_run,
             only_table=args.only_table,
+            rewrite_hint_prefixed=args.rewrite_hint_prefixed,
         )
     except RuntimeError as e:
         # Reserved for the "degraded provider" abort path (20 consecutive

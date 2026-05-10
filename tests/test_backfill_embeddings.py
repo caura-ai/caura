@@ -291,3 +291,285 @@ async def test_amain_returns_1_on_unexpected_exception(
         "configuration or unexpected error" in rec.getMessage()
         for rec in caplog.records
     ), "expected an ERROR log naming the broader error class"
+
+
+# ---------------------------------------------------------------------------
+# CAURA-222: --rewrite-hint-prefixed mode
+# ---------------------------------------------------------------------------
+
+
+def _capturing_engine(
+    rows_by_query: dict[str, list[tuple]],
+) -> tuple[MagicMock, list[str]]:
+    """Like ``_fake_engine`` but also records every SQL string executed,
+    so tests can assert on the WHERE clause shape under different modes."""
+    captured_sql: list[str] = []
+    served: dict[str, bool] = {}
+
+    async def _execute(statement, params=None):
+        sql = str(statement)
+        captured_sql.append(sql)
+        sql_lower = sql.lower()
+        if sql_lower.startswith("update"):
+            return MagicMock()
+        for key, rows in rows_by_query.items():
+            if key in sql_lower and not served.get(key):
+                served[key] = True
+                result = MagicMock()
+                result.all = MagicMock(return_value=rows)
+                return result
+        empty = MagicMock()
+        empty.all = MagicMock(return_value=[])
+        return empty
+
+    conn = MagicMock()
+    conn.execute = AsyncMock(side_effect=_execute)
+    conn.commit = AsyncMock()
+
+    @asynccontextmanager
+    async def _connect():
+        yield conn
+
+    engine = MagicMock()
+    engine.connect = _connect
+    return engine, captured_sql
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_rewrite_hint_prefixed_targets_memories_with_hint_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--rewrite-hint-prefixed scans rows where embedding IS NOT NULL
+    and metadata.retrieval_hint is non-empty. The default mode's
+    embedding-IS-NULL filter must NOT appear in this scan."""
+    from core_storage_api.scripts.backfill_embeddings import run_backfill
+
+    rows = {
+        "from memories": [
+            (uuid.uuid4(), "memory previously embedded with a hint prefix"),
+        ],
+    }
+    engine, captured_sql = _capturing_engine(rows)
+    monkeypatch.setattr("core_storage_api.database.init.get_engine", lambda: engine)
+    embed = AsyncMock(return_value=[0.4] * 1024)
+    monkeypatch.setattr("common.embedding.get_embedding", embed)
+
+    reports = await run_backfill(
+        tenant_id=None,
+        batch_size=500,
+        max_inflight=10,
+        dry_run=False,
+        rewrite_hint_prefixed=True,
+    )
+
+    by_table = {r.table: r for r in reports}
+    assert "memories" in by_table
+    assert by_table["memories"].scanned == 1
+    assert by_table["memories"].embedded == 1
+    assert embed.await_count == 1
+
+    # Verify the SQL filter shape on the SELECT against memories.
+    select_against_memories = [
+        s
+        for s in captured_sql
+        if "select" in s.lower() and "from memories" in s.lower()
+    ]
+    assert select_against_memories, "no SELECT against memories was emitted"
+    sql = select_against_memories[0].lower()
+    assert "embedding is not null" in sql
+    assert "metadata_ ? 'retrieval_hint'" in sql
+    assert "metadata_->>'retrieval_hint'" in sql
+    # Default-mode selector must NOT be present.
+    assert "embedding is null" not in sql
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_rewrite_hint_prefixed_skips_entities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Entities don't carry retrieval_hint metadata, so the hint-rewrite
+    mode skips them — even if rows exist on that table, they shouldn't
+    produce a report or burn embed calls."""
+    from core_storage_api.scripts.backfill_embeddings import run_backfill
+
+    rows = {
+        "from memories": [(uuid.uuid4(), "memory with hint")],
+        "from entities": [(uuid.uuid4(), "Acme Corp")],
+    }
+    engine, captured_sql = _capturing_engine(rows)
+    monkeypatch.setattr("core_storage_api.database.init.get_engine", lambda: engine)
+    embed = AsyncMock(return_value=[0.5] * 1024)
+    monkeypatch.setattr("common.embedding.get_embedding", embed)
+
+    reports = await run_backfill(
+        tenant_id=None,
+        batch_size=500,
+        max_inflight=10,
+        dry_run=False,
+        rewrite_hint_prefixed=True,
+    )
+
+    by_table = {r.table: r for r in reports}
+    assert set(by_table.keys()) == {"memories"}
+    # The entities table should not have been queried at all in this mode.
+    assert not any("from entities" in s.lower() for s in captured_sql)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_default_mode_uses_null_embedding_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Belt-and-braces: the existing IS-NULL scan path is unchanged when
+    --rewrite-hint-prefixed is not set. Pinned here so the new mode's
+    branching can't silently break the default."""
+    from core_storage_api.scripts.backfill_embeddings import run_backfill
+
+    rows = {
+        "from memories": [(uuid.uuid4(), "x")],
+        "from entities": [],
+    }
+    engine, captured_sql = _capturing_engine(rows)
+    monkeypatch.setattr("core_storage_api.database.init.get_engine", lambda: engine)
+    monkeypatch.setattr(
+        "common.embedding.get_embedding", AsyncMock(return_value=[0.1] * 1024)
+    )
+
+    await run_backfill(
+        tenant_id=None,
+        batch_size=500,
+        max_inflight=10,
+        dry_run=False,
+    )
+
+    select_against_memories = [
+        s
+        for s in captured_sql
+        if "select" in s.lower() and "from memories" in s.lower()
+    ]
+    assert select_against_memories
+    sql = select_against_memories[0].lower()
+    assert "embedding is null" in sql
+    # Hint-rewrite mode markers must be absent.
+    assert "retrieval_hint" not in sql
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_amain_warns_on_non_idempotent_rewrite(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Live --rewrite-hint-prefixed runs must surface the non-idempotent
+    nature loudly on stderr AND give the operator a 5s grace window to
+    Ctrl-C before the run starts. retrieval_hint metadata is preserved
+    by the rewrite, so every re-run re-matches and re-embeds the same
+    rows — silent on that fact would let an operator burn provider
+    quota on no-op repeats."""
+    from core_storage_api.scripts.backfill_embeddings import _amain
+
+    async def _noop_run(**_kw):
+        return []
+
+    monkeypatch.setattr(
+        "core_storage_api.scripts.backfill_embeddings.run_backfill", _noop_run
+    )
+    # Mock the grace-period sleep so the test doesn't actually wait 5s.
+    sleeps: list[float] = []
+
+    async def _record_sleep(secs: float) -> None:
+        sleeps.append(secs)
+
+    monkeypatch.setattr(
+        "core_storage_api.scripts.backfill_embeddings.asyncio.sleep",
+        _record_sleep,
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    code = await _amain(["--rewrite-hint-prefixed"])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "NOT idempotent" in captured.err
+    assert "metadata.retrieval_hint" in captured.err
+    # Operator grace window: warning fires, then a 5s pause before
+    # any provider call, so a fat-fingered re-invocation can be
+    # caught with Ctrl-C.
+    assert "Starting in 5 s" in captured.err
+    assert sleeps == [5]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_amain_no_warning_on_dry_run_rewrite(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--dry-run + --rewrite-hint-prefixed does not call the provider
+    or write anything, so the non-idempotency warning + grace pause
+    would just be noise — suppress both for the scope-estimation use
+    case."""
+    from core_storage_api.scripts.backfill_embeddings import _amain
+
+    async def _noop_run(**_kw):
+        return []
+
+    monkeypatch.setattr(
+        "core_storage_api.scripts.backfill_embeddings.run_backfill", _noop_run
+    )
+    sleeps: list[float] = []
+
+    async def _record_sleep(secs: float) -> None:
+        sleeps.append(secs)
+
+    monkeypatch.setattr(
+        "core_storage_api.scripts.backfill_embeddings.asyncio.sleep",
+        _record_sleep,
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    code = await _amain(["--rewrite-hint-prefixed", "--dry-run"])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "NOT idempotent" not in captured.err
+    assert "Starting in 5 s" not in captured.err
+    assert sleeps == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_amain_no_warning_on_default_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Default null-embedding scan IS idempotent (writes flip rows from
+    NULL to non-NULL, so re-runs see strictly fewer rows). The warning
+    and the grace pause must be scoped to --rewrite-hint-prefixed only."""
+    from core_storage_api.scripts.backfill_embeddings import _amain
+
+    async def _noop_run(**_kw):
+        return []
+
+    monkeypatch.setattr(
+        "core_storage_api.scripts.backfill_embeddings.run_backfill", _noop_run
+    )
+    sleeps: list[float] = []
+
+    async def _record_sleep(secs: float) -> None:
+        sleeps.append(secs)
+
+    monkeypatch.setattr(
+        "core_storage_api.scripts.backfill_embeddings.asyncio.sleep",
+        _record_sleep,
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    code = await _amain([])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "NOT idempotent" not in captured.err
+    assert sleeps == []
