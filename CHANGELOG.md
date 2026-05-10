@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.4.0](https://github.com/caura-ai/caura-memclaw/compare/v2.3.0...v2.4.0) (2026-05-10)
+
+
+### Features
+
+* **fleet-stats:** add memory-status totals to fleet_summary ([#107](https://github.com/caura-ai/caura-memclaw/issues/107)) ([866c5ac](https://github.com/caura-ai/caura-memclaw/commit/866c5ac298a48affc4476b9853bb3474b8cc159a))
+* **recall:** exclude superseded memories from default search results ([#106](https://github.com/caura-ai/caura-memclaw/issues/106)) ([dc03047](https://github.com/caura-ai/caura-memclaw/commit/dc030472e630ba9149636125e5c883dde75cef54))
+* **stats:** add include_deleted option to memclaw_stats / /memories/stats ([#105](https://github.com/caura-ai/caura-memclaw/issues/105)) ([d8121f6](https://github.com/caura-ai/caura-memclaw/commit/d8121f64c67d8293681b397e1caa9c6ba2b10ece))
+
+
+### Bug Fixes
+
+* **cache:** include VECTOR_DIM in qemb query-embedding cache key (CAURA-644) ([#69](https://github.com/caura-ai/caura-memclaw/issues/69)) ([761161c](https://github.com/caura-ai/caura-memclaw/commit/761161cac54155926f0a73b500435f9702609551))
+* **core-api:** align write/query embedding surface (CAURA-222) ([#104](https://github.com/caura-ai/caura-memclaw/issues/104)) ([9ff97cd](https://github.com/caura-ai/caura-memclaw/commit/9ff97cd63ead521c37a435baf32cd6f6ced9905e))
+* **release-please:** add signoff so release PRs pass DCO ([#101](https://github.com/caura-ai/caura-memclaw/issues/101)) ([50369b0](https://github.com/caura-ai/caura-memclaw/commit/50369b006c8a55d81f392257d9acdb9742ec41a7))
+
 ## [2.3.0](https://github.com/caura-ai/caura-memclaw/compare/v2.2.0...v2.3.0) (2026-05-06)
 
 
