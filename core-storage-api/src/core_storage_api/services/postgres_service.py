@@ -2601,8 +2601,18 @@ class PostgresService:
         doc_id: str,
         data: dict,
         fleet_id: str | None = None,
+        system: bool = False,
     ) -> Document:
-        """INSERT ... ON CONFLICT DO UPDATE. Returns the upserted Document."""
+        """INSERT ... ON CONFLICT DO UPDATE. Returns the upserted Document.
+
+        Collections whose name starts with ``_`` are system-managed
+        (e.g. ``_keystones``); writes to them must pass ``system=True``.
+        Public ``/documents`` endpoint never sets the flag, so callers
+        that accidentally target a system collection get a clear
+        ``ValueError`` instead of polluting governance state.
+        """
+        if collection.startswith("_") and not system:
+            raise ValueError(f"Collection '{collection}' is system-managed; use the dedicated endpoint.")
         async with get_session() as session:
             stmt = (
                 pg_insert(Document)
@@ -2736,8 +2746,15 @@ class PostgresService:
         tenant_id: str,
         collection: str,
         doc_id: str,
+        system: bool = False,
     ) -> UUID | None:
-        """Delete by (tenant_id, collection, doc_id). Returns the deleted id or None."""
+        """Delete by (tenant_id, collection, doc_id). Returns the deleted id or None.
+
+        Mirrors the ``system`` guard on ``document_upsert`` — deletes against
+        system-managed collections (``_``-prefixed) require ``system=True``.
+        """
+        if collection.startswith("_") and not system:
+            raise ValueError(f"Collection '{collection}' is system-managed; use the dedicated endpoint.")
         async with get_session() as session:
             stmt = (
                 delete(Document)

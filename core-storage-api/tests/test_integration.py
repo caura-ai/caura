@@ -1287,3 +1287,285 @@ class TestFleet:
         pending = resp.json()
         assert isinstance(pending, list)
         assert len(pending) >= 2
+
+
+# =====================================================================
+# Keystones (CAURA-000)
+# =====================================================================
+
+
+class TestKeystones:
+    """Keystones live in collection ``_keystones``. Trust is enforced
+    upstream in core-api; storage tests just exercise the contract:
+    validation, scope union, system-collection guard, audit emission.
+    """
+
+    @staticmethod
+    def _payload(
+        *,
+        doc_id: str,
+        scope: str,
+        fleet_id: str | None = None,
+        agent_id: str | None = None,
+        weight: str = "med",
+        title: str = "rule",
+        content: str = "do the thing",
+    ) -> dict:
+        body: dict = {
+            "doc_id": doc_id,
+            "title": title,
+            "content": content,
+            "weight": weight,
+            "scope": scope,
+        }
+        if fleet_id is not None:
+            body["fleet_id"] = fleet_id
+        if agent_id is not None:
+            body["agent_id"] = agent_id
+        return body
+
+    async def test_upsert_tenant_scope_and_list(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        doc_id = f"ks-tenant-{_uid()}"
+        payload = {
+            "tenant_id": tenant_id,
+            **self._payload(doc_id=doc_id, scope="tenant", weight="high"),
+        }
+        resp = await client.post(f"{PREFIX}/keystones", json=payload)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["doc_id"] == doc_id
+        assert body["collection"] == "_keystones"
+        assert body["data"]["weight"] == 100  # 'high' bucket → 100
+        assert body["fleet_id"] is None
+
+        # Listing without fleet_id still returns tenant-scope rule.
+        resp2 = await client.get(
+            f"{PREFIX}/keystones",
+            params={"tenant_id": tenant_id},
+        )
+        assert resp2.status_code == 200
+        rules = resp2.json()
+        assert any(r["doc_id"] == doc_id for r in rules)
+
+    async def test_scope_union(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        # Use a per-test fleet so this test's rules don't collide with
+        # leftovers from other tests in the same tenant.
+        fleet_id = f"fleet-union-{_uid()}"
+        agent_id = f"agent-{_uid()}"
+        created_doc_ids: list[str] = []
+        # Seed one rule per scope.
+        for scope, suffix, fid, aid, weight in [
+            ("tenant", "t", None, None, "low"),
+            ("fleet", "f", fleet_id, None, "med"),
+            ("agent", "a", fleet_id, agent_id, "high"),
+        ]:
+            doc_id = f"ks-{suffix}-{_uid()}"
+            payload = {
+                "tenant_id": tenant_id,
+                **self._payload(
+                    doc_id=doc_id,
+                    scope=scope,
+                    fleet_id=fid,
+                    agent_id=aid,
+                    weight=weight,
+                ),
+            }
+            resp = await client.post(f"{PREFIX}/keystones", json=payload)
+            assert resp.status_code == 200, resp.text
+            created_doc_ids.append(doc_id)
+
+        # Full scope set (tenant + fleet + agent) should return our 3,
+        # ordered by weight DESC: agent(100) > fleet(50) > tenant(25).
+        # Filter to doc_ids we just created so leftover tenant-scope
+        # rules from earlier tests in the same tenant don't mask order.
+        resp = await client.get(
+            f"{PREFIX}/keystones",
+            params={
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": agent_id,
+            },
+        )
+        assert resp.status_code == 200
+        rules_ours = [r for r in resp.json() if r["doc_id"] in created_doc_ids]
+        assert len(rules_ours) == 3, f"expected 3 of ours, got {rules_ours}"
+        scopes_in_order = [r["data"]["scope"] for r in rules_ours]
+        assert scopes_in_order == ["agent", "fleet", "tenant"]
+
+        # Without agent_id → no agent rules.
+        resp2 = await client.get(
+            f"{PREFIX}/keystones",
+            params={"tenant_id": tenant_id, "fleet_id": fleet_id},
+        )
+        assert resp2.status_code == 200
+        scopes_no_agent = {
+            r["data"]["scope"] for r in resp2.json() if r["doc_id"] in created_doc_ids
+        }
+        assert "agent" not in scopes_no_agent
+
+    async def test_validation_rejects_bad_scope(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        resp = await client.post(
+            f"{PREFIX}/keystones",
+            json={
+                "tenant_id": tenant_id,
+                "doc_id": f"ks-bad-{_uid()}",
+                "title": "x",
+                "content": "y",
+                "scope": "global",  # not in {tenant, fleet, agent}
+            },
+        )
+        assert resp.status_code == 422
+
+    async def test_validation_agent_scope_requires_agent_id(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        resp = await client.post(
+            f"{PREFIX}/keystones",
+            json={
+                "tenant_id": tenant_id,
+                "doc_id": f"ks-bad-{_uid()}",
+                "title": "x",
+                "content": "y",
+                "scope": "agent",
+                "fleet_id": fleet_id,
+                # no agent_id
+            },
+        )
+        assert resp.status_code == 422
+
+    async def test_validation_tenant_scope_rejects_fleet(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        resp = await client.post(
+            f"{PREFIX}/keystones",
+            json={
+                "tenant_id": tenant_id,
+                "doc_id": f"ks-bad-{_uid()}",
+                "title": "x",
+                "content": "y",
+                "scope": "tenant",
+                "fleet_id": fleet_id,  # disallowed for tenant scope
+            },
+        )
+        assert resp.status_code == 422
+
+    async def test_validation_rejects_unknown_weight(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        resp = await client.post(
+            f"{PREFIX}/keystones",
+            json={
+                "tenant_id": tenant_id,
+                "doc_id": f"ks-bad-{_uid()}",
+                "title": "x",
+                "content": "y",
+                "scope": "tenant",
+                "weight": 99,  # not a bucket label
+            },
+        )
+        assert resp.status_code == 422
+
+    async def test_system_collection_guard_on_documents_endpoint(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        """Public /documents endpoint must reject _keystones writes.
+
+        Authoring goes through /keystones; bypassing it would skip
+        validation and audit.
+        """
+        resp = await client.post(
+            f"{PREFIX}/documents",
+            json={
+                "tenant_id": tenant_id,
+                "collection": "_keystones",
+                "doc_id": f"ks-bypass-{_uid()}",
+                "data": {"hi": "there"},
+            },
+        )
+        assert resp.status_code == 400
+        assert "system-managed" in resp.json()["detail"]
+
+    async def test_delete_keystone(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        doc_id = f"ks-del-{_uid()}"
+        await client.post(
+            f"{PREFIX}/keystones",
+            json={
+                "tenant_id": tenant_id,
+                **self._payload(doc_id=doc_id, scope="tenant"),
+            },
+        )
+        resp = await client.delete(
+            f"{PREFIX}/keystones/{doc_id}",
+            params={"tenant_id": tenant_id},
+        )
+        assert resp.status_code == 200
+        assert "deleted_id" in resp.json()
+
+        # Idempotency: second delete is 404, not 500.
+        resp2 = await client.delete(
+            f"{PREFIX}/keystones/{doc_id}",
+            params={"tenant_id": tenant_id},
+        )
+        assert resp2.status_code == 404
+
+    async def test_get_rejects_agent_without_fleet(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        """agent_id without fleet_id can't resolve agent-scope rows; the
+        endpoint must surface this as 422 rather than silently degrading
+        to fleet/tenant scope."""
+        resp = await client.get(
+            f"{PREFIX}/keystones",
+            params={
+                "tenant_id": tenant_id,
+                "agent_id": f"agent-{_uid()}",
+            },
+        )
+        assert resp.status_code == 422
+
+    async def test_upsert_replaces_existing(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        doc_id = f"ks-upsert-{_uid()}"
+        base = {
+            "tenant_id": tenant_id,
+            **self._payload(doc_id=doc_id, scope="tenant", weight="low"),
+        }
+        await client.post(f"{PREFIX}/keystones", json=base)
+        resp = await client.post(
+            f"{PREFIX}/keystones",
+            json={**base, "weight": "high", "content": "updated"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["data"]["weight"] == 100
+        assert resp.json()["data"]["content"] == "updated"
