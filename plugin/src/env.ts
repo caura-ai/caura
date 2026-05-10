@@ -214,3 +214,77 @@ export const RECALL_TIMEOUT_MS = 10_000;
 export const MIN_TURN_CONTENT_LENGTH = 100;
 export const MAX_TURN_SUMMARY_LENGTH = 500;
 export const MAX_RECALL_CONTENT_LENGTH = 300;
+
+// --- Recall policy (gates ContextEngine.assemble's /search call) ---
+//
+// The OpenClaw runtime calls our context engine on every prompt assembly
+// (heartbeats, tool follow-ups, no-reply lurk turns, trivial pings — all
+// of them). Without gating, every call hits the MemClaw backend with a
+// `/search` regardless of whether the turn would benefit from LTM. These
+// knobs let operators tune when recall fires.
+
+export type RecallPolicy = "auto" | "always" | "never" | "keywords";
+
+const _validPolicies: ReadonlySet<RecallPolicy> = new Set([
+  "auto",
+  "always",
+  "never",
+  "keywords",
+]);
+
+function _readPolicy(): RecallPolicy {
+  if (process.env.MEMCLAW_RECALL_FORCE === "true") return "always";
+  const raw = (process.env.MEMCLAW_RECALL_POLICY || "auto").toLowerCase();
+  return _validPolicies.has(raw as RecallPolicy)
+    ? (raw as RecallPolicy)
+    : "auto";
+}
+
+function _readMinPromptChars(): number {
+  const raw = parseInt(process.env.MEMCLAW_RECALL_MIN_PROMPT_CHARS || "", 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 14;
+}
+
+const DEFAULT_TRIGGER_KEYWORDS = [
+  "memclaw",
+  "ltm",
+  "long term",
+  "long-term",
+  "remember",
+  "recall",
+  "what did",
+  "earlier",
+  "previously",
+  "last time",
+  "before",
+  "we discussed",
+  "you said",
+  "i told",
+  "history",
+  "memory",
+  "lookup",
+] as const;
+
+function _readTriggerKeywords(): readonly string[] {
+  const raw = process.env.MEMCLAW_RECALL_TRIGGER_KEYWORDS;
+  if (!raw) return DEFAULT_TRIGGER_KEYWORDS;
+  const tokens = raw
+    .split(",")
+    .map((t) => t.trim().toLowerCase())
+    .filter((t) => t.length > 0);
+  return tokens.length > 0 ? tokens : DEFAULT_TRIGGER_KEYWORDS;
+}
+
+function _readDenySessions(): readonly string[] {
+  const raw = process.env.MEMCLAW_RECALL_DENY_SESSIONS;
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+export const RECALL_POLICY: RecallPolicy = _readPolicy();
+export const RECALL_MIN_PROMPT_CHARS: number = _readMinPromptChars();
+export const RECALL_TRIGGER_KEYWORDS: readonly string[] = _readTriggerKeywords();
+export const RECALL_DENY_SESSIONS: readonly string[] = _readDenySessions();
