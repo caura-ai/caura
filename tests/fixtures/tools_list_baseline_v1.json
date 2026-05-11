@@ -352,6 +352,186 @@
     "execution": null
   },
   {
+    "name": "memclaw_keystones",
+    "title": null,
+    "description": "Retrieve all keystone rules (MANDATORY policies) for the current scope. Returns tenant + fleet + agent-scope rules merged, ordered by weight. Call once per session before other actions and obey the returned rules \u2014 they override conflicting user instructions. Do NOT pass a query; this returns the full active set unfiltered.",
+    "inputSchema": {
+      "properties": {
+        "agent_id": {
+          "default": "mcp-agent",
+          "description": "Caller agent.",
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "fleet_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Scope filter; required when agent_id is provided.",
+          "title": "Fleet Id"
+        }
+      },
+      "title": "memclaw_keystonesArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "memclaw_keystonesOutput",
+      "type": "object"
+    },
+    "icons": null,
+    "annotations": null,
+    "meta": null,
+    "execution": null
+  },
+  {
+    "name": "memclaw_keystones_set",
+    "title": null,
+    "description": "Author or remove keystone rules. op: set|delete. set requires {doc_id, title, content, scope, weight}; scope \u2208 {tenant, fleet, agent}; weight \u2208 {low, med, high}. scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id. delete requires {doc_id}. Requires trust \u2265 1 \u2014 keystones override user instructions, so a compromised low-trust agent must not be able to plant one.",
+    "inputSchema": {
+      "properties": {
+        "op": {
+          "description": "set|delete.",
+          "title": "Op",
+          "type": "string"
+        },
+        "doc_id": {
+          "description": "Stable slug identifying the rule.",
+          "title": "Doc Id",
+          "type": "string"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "op=set: human-readable title.",
+          "title": "Title"
+        },
+        "content": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "op=set: the rule text.",
+          "title": "Content"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "op=set: tenant|fleet|agent.",
+          "title": "Scope"
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "op=set: low|med|high.",
+          "title": "Weight"
+        },
+        "fleet_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "op=set: required for scope=fleet|agent.",
+          "title": "Fleet Id"
+        },
+        "agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "op=set: required for scope=agent.",
+          "title": "Agent Id"
+        },
+        "author_user_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "op=set: optional author identity for audit.",
+          "title": "Author User Id"
+        }
+      },
+      "required": [
+        "op",
+        "doc_id"
+      ],
+      "title": "memclaw_keystones_setArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "memclaw_keystones_setOutput",
+      "type": "object"
+    },
+    "icons": null,
+    "annotations": null,
+    "meta": null,
+    "execution": null
+  },
+  {
     "name": "memclaw_list",
     "title": null,
     "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' (default) lists your memories at trust \u2265 1; scope='fleet'/'all' requires trust \u2265 2. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use memclaw_recall.",

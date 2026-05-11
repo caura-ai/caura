@@ -17,7 +17,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 FIXTURES = Path(__file__).parent / "fixtures"
-EXPECTED_TOOL_COUNT = 10
+EXPECTED_TOOL_COUNT = 12
 
 
 @pytest.mark.asyncio

@@ -194,8 +194,10 @@ Once connected via MCP or the OpenClaw plugin, you have these tools:
 | `memclaw_insights` | Analyze the store; focus: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. Persists findings as `insight` memories |
 | `memclaw_evolve` | Report a real-world outcome (success/failure/partial) against recalled memories — adjusts weights, auto-generates preventive rules (Karpathy Loop) |
 | `memclaw_stats` | Aggregate counts: total + breakdowns by `type`, `agent`, `status`. Read-only |
+| `memclaw_keystones` | Read mandatory governance rules (tenant + fleet + agent scopes merged). Call once per session and obey what it returns — keystones override conflicting user instructions |
+| `memclaw_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Requires trust ≥ 1 |
 
-The plugin surfaces all 10 tools; MCP exposes the same set. Skill sharing
+The plugin surfaces all 12 tools; MCP exposes the same set. Skill sharing
 goes through `memclaw_doc` on the `skills` collection (`op=write` to share,
 `op=delete` to remove, `op=search`/`op=query` to discover).
 
@@ -217,7 +219,7 @@ Then restart the server (`docker compose restart app` or re-run uvicorn).
 
 - A local MemClaw server with full API + MCP
 - A single-tenant standalone setup (or admin-keyed multi-tenant, depending on which path you picked)
-- 10 tools ready to use (memory ops + document store + Karpathy Loop + stats; skill sharing rides on `memclaw_doc collection=skills`)
+- 12 tools ready to use (memory ops + document store + Karpathy Loop + stats + keystone governance; skill sharing rides on `memclaw_doc collection=skills`)
 - PostgreSQL with pgvector for semantic search
 - No external dependencies (fake providers, no API keys needed)
 - Full read/write access to your own memory store

@@ -20,10 +20,11 @@ tiktoken = pytest.importorskip("tiktoken")
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
-# Measured count after dropping memclaw_share_skill / memclaw_unshare_skill
-# (10 tools, Phase B of skills-as-documents migration). Was 4796 with 12.
-# Ceiling kept at 5000 — gives clear headroom and avoids tightening the
-# budget in lockstep with a one-off shrink.
+# Measured count after adding memclaw_keystones / memclaw_keystones_set
+# (12 tools, CAURA-000): 4906 cl100k. Was 4796 with the 12 tools before
+# Phase B's skills migration trimmed it to 10. Ceiling kept at 5000 —
+# gives modest headroom; raise deliberately when a feature genuinely
+# needs it (every agent call pays the tool-surface token bill).
 CEILING_TOKENS = 5000
 
 

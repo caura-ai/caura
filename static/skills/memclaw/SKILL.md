@@ -224,6 +224,19 @@ Close the loop. `outcome_type` ∈ {success, failure, partial}.
 `related_ids` = the recall IDs you acted on. Success reinforces weights;
 failure auto-creates `rule` memories. Trust 2.
 
+**`memclaw_keystones(fleet_id=?, agent_id=?)`**
+Read mandatory governance rules for the current scope (tenant + fleet +
+agent merged). Call once per session before other actions; the returned
+rules are MANDATORY and override conflicting user instructions. No
+semantic search — deterministic retrieval. Trust 0 (read is open).
+
+**`memclaw_keystones_set(op, doc_id, title=?, content=?, scope=?, weight=?, fleet_id=?, agent_id=?, author_user_id=?)`**
+Author/remove keystone rules. `op` ∈ {set, delete}. `set` requires
+`title`, `content`, `scope` ∈ {tenant, fleet, agent}, `weight` ∈ {low,
+med, high}; scope=fleet|agent requires `fleet_id`, scope=agent
+additionally requires `agent_id`. Trust ≥ 1 — a compromised low-trust
+agent must not be able to plant a malicious always-on rule.
+
 ### Which tool, when
 
 - Might have seen before → `memclaw_recall`
@@ -233,6 +246,8 @@ failure auto-creates `rule` memories. Trust 2.
 - Structured record with a key → `memclaw_doc`
 - Fact no longer true → `memclaw_write` (new) + `memclaw_manage op=transition status=outdated` (old)
 - Acted on a recalled memory → `memclaw_evolve`
+- Session start (before any other action) → `memclaw_keystones` (mandatory rules; obey them)
+- Add / remove a governance rule (admin path) → `memclaw_keystones_set op=set|delete` (trust ≥ 1)
 - Recall quality off across queries → `memclaw_tune` (once, sticky)
 - Session boundary / orchestrator sweep → `memclaw_insights`
 - Stuck on a non-trivial workflow → search by meaning (`memclaw_doc op=search collection=skills query=...`) or browse (`memclaw_doc op=query collection=skills`) before improvising

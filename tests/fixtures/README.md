@@ -10,7 +10,7 @@ Fixtures that lock the current MCP tool surface against silent regressions.
 
 ## Token-budget gate
 
-The `tools/list` MCP response must encode to ≤ **4250 cl100k tokens** (see
+The `tools/list` MCP response must encode to ≤ **5000 cl100k tokens** (see
 `CEILING_TOKENS` in `test_mcp_token_budget.py`). Tool-surface tokens are
 paid on every agent call, so raise the ceiling only when a feature
 genuinely needs it.

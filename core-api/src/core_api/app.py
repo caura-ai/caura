@@ -50,6 +50,7 @@ from core_api.routes.evolve import router as evolve_router
 from core_api.routes.fleet import router as fleet_router
 from core_api.routes.health import router as health_router
 from core_api.routes.insights import router as insights_router
+from core_api.routes.keystones import router as keystones_router
 from core_api.routes.lifecycle import router as lifecycle_router
 from core_api.routes.memories import admin_memories_router
 from core_api.routes.memories import router as memories_router
@@ -579,6 +580,7 @@ app.include_router(settings_router, prefix="/api/v1")
 app.include_router(agents_router, prefix="/api/v1")
 app.include_router(fleet_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")
+app.include_router(keystones_router, prefix="/api/v1")
 app.include_router(crystallizer_router, prefix="/api/v1")
 app.include_router(plugin_router, prefix="/api/v1")
 # Bootstrap aliases — see plugin.py:plugin_bootstrap_router for rationale.

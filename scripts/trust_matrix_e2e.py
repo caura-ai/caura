@@ -6,8 +6,6 @@ expected-pass vs expected-deny per the declared trust gates.
 """
 
 import json
-import os
-import sys
 import urllib.request
 import urllib.error
 
@@ -140,7 +138,7 @@ TESTS = [
 
 
 def run_matrix():
-    print("\n=== Trust Matrix (10 tools × 3 trust levels) ===")
+    print("\n=== Trust Matrix (12 tools × 3 trust levels) ===")
     print(f"{'tool':25s} {'args':40s} {'T1':10s} {'T2':10s} {'T3':10s}")
     print("-" * 100)
     for tool, args, min_trust in TESTS:
@@ -160,7 +158,7 @@ def run_matrix():
                 return "ok" if actual == "OK" else actual[:6]
             else:
                 return (
-                    "deny" if actual in ("DENIED", "ERROR") else f"PERM!"
+                    "deny" if actual in ("DENIED", "ERROR") else "PERM!"
                 )  # unexpected allow
 
         flags = f"{ok(t1, 1):10s} {ok(t2, 2):10s} {ok(t3, 3):10s}"

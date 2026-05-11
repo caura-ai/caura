@@ -325,7 +325,7 @@ class GatewayIntegrationTest:
         )
 
     def test_openclaw_config_tools(self):
-        """Verify all 9 memclaw tools are in tools.alsoAllow."""
+        """Verify all memclaw tools are in tools.alsoAllow."""
         config_path = Path(self.openclaw_dir) / "openclaw.json"
         if not config_path.exists():
             self.skip("OpenClaw config: tools", "openclaw.json not found")
@@ -343,10 +343,12 @@ class GatewayIntegrationTest:
             "memclaw_insights",
             "memclaw_evolve",
             "memclaw_stats",
+            "memclaw_keystones",
+            "memclaw_keystones_set",
         ]
         missing = [t for t in expected_tools if t not in also_allow]
         self.check(
-            "OpenClaw config: all 10 tools allowed",
+            f"OpenClaw config: all {len(expected_tools)} tools allowed",
             len(missing) == 0,
             f"missing={missing}" if missing else "",
         )
@@ -1033,7 +1035,7 @@ class GatewayIntegrationTest:
     # ═══════════════════════════════════════════════════════════
 
     def test_tool_descriptions_count(self):
-        """Verify the backend serves all 10 tool descriptions."""
+        """Verify the backend serves all 12 tool descriptions."""
         r = self.client.get(
             f"{self.api}/tool-descriptions", params={"tenant_id": self.tenant_id}
         )
@@ -1044,8 +1046,8 @@ class GatewayIntegrationTest:
             data = r.json()
             keys = set(data.keys()) if isinstance(data, dict) else set()
             self.check(
-                "Tool descriptions: 10 tools",
-                len(keys) >= 10,
+                "Tool descriptions: 12 tools",
+                len(keys) >= 12,
                 f"count={len(keys)}, keys={keys}",
             )
 

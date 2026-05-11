@@ -738,6 +738,43 @@ class CoreStorageClient:
         )
 
     # =====================================================================
+    # Keystones (CAURA-000)
+    # =====================================================================
+    #
+    # Thin proxies over the core-storage ``/keystones`` endpoints. The
+    # GET path returns a ``(rows, truncated)`` tuple so the upstream
+    # caller can surface the ``X-Truncated`` header to MCP/REST clients
+    # — silent truncation hides governance gaps.
+
+    async def list_keystones(
+        self,
+        tenant_id: str,
+        fleet_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> tuple[list[dict], bool]:
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if fleet_id is not None:
+            params["fleet_id"] = fleet_id
+        if agent_id is not None:
+            params["agent_id"] = agent_id
+        headers = await self._auth_headers(read=True)
+        resp = await self._read_http.get(
+            f"{self._read_prefix}/keystones",
+            params=params,
+            headers=headers,
+        )
+        self._maybe_evict_on_auth_error(resp, read=True)
+        resp.raise_for_status()
+        truncated = resp.headers.get("X-Truncated", "").lower() == "true"
+        return resp.json(), truncated
+
+    async def upsert_keystone(self, data: dict) -> dict:
+        return await self._post("/keystones", data)  # type: ignore[return-value]
+
+    async def delete_keystone(self, tenant_id: str, doc_id: str) -> bool:
+        return await self._delete(f"/keystones/{doc_id}", tenant_id=tenant_id)
+
+    # =====================================================================
     # Fleet
     # =====================================================================
 

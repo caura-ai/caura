@@ -32,6 +32,18 @@ EXPECTED_PLUGIN_EXPOSED = {
     "memclaw_insights",
     "memclaw_evolve",
     "memclaw_stats",
+    # Read tool is plugin-exposed so the plugin can auto-inject keystone
+    # rules at session start (CAURA-000). The write tool
+    # (``memclaw_keystones_set``) is MCP-only — authoring is an
+    # admin/governance path, not an agent path.
+    "memclaw_keystones",
+}
+
+# MCP-only tools — not surfaced through the plugin. ``memclaw_keystones_set``
+# is the write half of the keystone pair; admins/governance use it from
+# REST/MCP, agents do not.
+EXPECTED_MCP_ONLY = {
+    "memclaw_keystones_set",
 }
 
 EXPECTED_PLACEHOLDERS: set[str] = set()
@@ -166,10 +178,26 @@ def test_descriptions_no_leftover_tool_descriptions_import():
 
 
 def test_registry_size_matches_expected_surface():
-    """Registry size must match the expected plugin-exposed + placeholder sets."""
+    """Registry size must match the expected plugin-exposed + MCP-only +
+    placeholder sets — the three disjoint categories that span the surface."""
     from core_api.tools import REGISTRY
 
-    assert len(REGISTRY) == len(EXPECTED_PLUGIN_EXPOSED | EXPECTED_PLACEHOLDERS)
+    assert len(REGISTRY) == len(
+        EXPECTED_PLUGIN_EXPOSED | EXPECTED_MCP_ONLY | EXPECTED_PLACEHOLDERS
+    )
+
+
+def test_mcp_only_tools_are_not_plugin_exposed():
+    """Tools in EXPECTED_MCP_ONLY are present in the registry and stay off
+    the plugin surface — locks the boundary between agent-facing and
+    admin/governance tools."""
+    from core_api.tools import REGISTRY
+
+    for name in EXPECTED_MCP_ONLY:
+        assert name in REGISTRY, f"{name}: expected MCP-only tool missing from REGISTRY"
+        assert REGISTRY[name].plugin_exposed is False, (
+            f"{name}: MCP-only tools must not be plugin-exposed"
+        )
 
 
 def test_every_spec_renders_to_descriptor_json():

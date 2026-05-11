@@ -392,7 +392,7 @@ echo '  macOS:  launchctl kickstart -k "gui/$(id -u)/ai.openclaw.gateway"'
 echo ""
 echo "After restart, MemClaw will:"
 echo "  1. Claim the memory slot (replacing memory-core)"
-echo "  2. Load the plugin and register 10 tools"
+echo "  2. Load the plugin and register 12 tools"
 echo "  3. Auto-educate your agents (SKILL.md, TOOLS.md, AGENTS.md, HEARTBEAT.md)"
 echo "  4. Start heartbeating to the MemClaw API"
 echo ""
