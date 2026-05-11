@@ -1,7 +1,7 @@
 """E2E REST tests for the keystones surface (CAURA-000).
 
 The keystone REST API on core-api proxies to core-storage's
-``/api/v1/storage/keystones`` and adds trust enforcement (≥1 to author)
+``/api/v1/storage/keystones`` and adds trust enforcement (≥2 to author)
 plus audit. Storage-level shape validation is tested in PR1; this file
 focuses on the core-api wrapper: trust gate, scope-merge passthrough,
 audit emission, and the X-Truncated header.
@@ -22,12 +22,12 @@ pytestmark = pytest.mark.asyncio
 
 
 async def _seed_trusted_agent(client, tenant_id, headers, agent_id, fleet_id):
-    """Auto-create an agent with the default trust_level=1.
+    """Auto-create an agent and promote it to trust_level=2.
 
-    Trust is required to author keystones; the storage layer assumes
-    core-api has already gated. We rely on the existing "agent appears
-    on first memory write" behaviour so this test doesn't depend on a
-    private trust-bump API.
+    Writing a memory auto-creates the agent at the default trust
+    (=1). Keystone authoring requires trust ≥ 2, so this helper
+    follows up with a PATCH to lift the agent to the elevated tier —
+    same pattern callers in test_api_agents.py exercise.
     """
     resp = await client.post(
         "/api/v1/memories",
@@ -41,6 +41,12 @@ async def _seed_trusted_agent(client, tenant_id, headers, agent_id, fleet_id):
         headers=headers,
     )
     assert resp.status_code == 201, resp.text
+    bump = await client.patch(
+        f"/api/v1/agents/{agent_id}?tenant_id={tenant_id}",
+        json={"trust_level": 2},
+        headers=headers,
+    )
+    assert bump.status_code == 200, bump.text
 
 
 def _author_headers(headers: dict, agent_id: str) -> dict:
@@ -99,8 +105,39 @@ async def test_set_rejected_when_agent_unknown(client):
     assert resp.status_code == 403, resp.text
 
 
+async def test_set_rejected_for_default_trust_agent(client):
+    """An agent registered at the default trust level (=1) must NOT be
+    able to author a keystone. Keystones override user instructions
+    across the tenant; the gate is trust ≥ 2 (elevated tier)."""
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    agent_id = f"default-trust-{tag}"
+    # Seed the agent via the auto-create-on-first-write path — leaves
+    # trust at the default 1 (no follow-up PATCH).
+    seed = await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "fleet_id": f"fleet-{tag}",
+            "memory_type": "fact",
+            "content": f"seed for {agent_id}",
+        },
+        headers=headers,
+    )
+    assert seed.status_code == 201, seed.text
+
+    resp = await _set_keystone(
+        client,
+        _author_headers(headers, agent_id),
+        tenant_id,
+        doc_id=f"ks-{tag}",
+    )
+    assert resp.status_code == 403, resp.text
+
+
 async def test_set_allowed_for_trusted_agent(client):
-    """A seeded agent (trust_level=1 by default) can author a keystone."""
+    """A seeded agent promoted to trust_level=2 can author a keystone."""
     tenant_id, headers = get_test_auth()
     tag = _uid()
     agent_id = f"author-{tag}"

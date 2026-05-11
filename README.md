@@ -319,7 +319,7 @@ The client discovers 12 tools automatically:
 | `memclaw_evolve` | Report outcomes against recalled memories — adjusts weights, generates rules (Karpathy Loop) |
 | `memclaw_stats` | Aggregate counts: total + breakdowns by type, agent, status. Read-only |
 | `memclaw_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
-| `memclaw_keystones_set` | Author or remove keystone rules (`op=set\|delete`). Requires trust ≥ 1 |
+| `memclaw_keystones_set` | Author or remove keystone rules (`op=set\|delete`). Requires trust ≥ 2 |
 
 > **Skill sharing** is now done via `memclaw_doc` — agents share a `SKILL.md` by upserting a document into the `skills` collection (`memclaw_doc op=write collection=skills doc_id=<slug> data={...}`). The server auto-indexes the description for semantic search. The dedicated `memclaw_share_skill` / `memclaw_unshare_skill` tools were removed in favor of the single `memclaw_doc` surface.
 
@@ -805,7 +805,7 @@ The MCP server is mounted at `/mcp`. Tool names, parameter names, and the docume
 | `memclaw_evolve` | Karpathy-Loop feedback: record an outcome (`success` \| `failure` \| `partial`) against memories. |
 | `memclaw_stats` | Aggregate counts: total + breakdowns by `type` / `agent` / `status`. Read-only. |
 | `memclaw_keystones` | Read mandatory governance rules for the current scope (tenant + fleet + agent merged). Call once per session. |
-| `memclaw_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Requires trust ≥ 1. |
+| `memclaw_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Requires trust ≥ 2. |
 
 > Skill sharing uses the generic `memclaw_doc` surface — write/read/query/search/delete on `collection="skills"`. The server validates the slug and auto-embeds the `description` field for semantic discovery.
 

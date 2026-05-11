@@ -3,7 +3,7 @@
 Keystones are policies an agent MUST obey. They live in core-storage's
 ``_keystones`` collection (PR1) and are fetched deterministically — no
 semantic search, no recall gating. This tool is the agent-facing read
-surface; authoring goes through ``memclaw_keystones_set`` (trust ≥ 1).
+surface; authoring goes through ``memclaw_keystones_set`` (trust ≥ 2).
 """
 
 from core_api import mcp_server

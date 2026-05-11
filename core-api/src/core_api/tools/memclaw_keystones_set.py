@@ -1,8 +1,10 @@
 """ToolSpec for memclaw_keystones_set — author/remove governance rules.
 
-Trust ≥ 1 required: keystones override user instructions, so a
-prompt-injected low-trust agent must not be able to plant one. Reads
-go through ``memclaw_keystones`` (open).
+Trust ≥ 2 required: keystones override user instructions across the
+tenant, so a freshly-registered default-trust (=1) agent must not be
+able to plant one. The bar matches the elevated tier used for other
+cross-agent operations (``memclaw_list/stats/evolve/insights`` with
+``scope=fleet|all``). Reads go through ``memclaw_keystones`` (open).
 
 Op-dispatched in one tool (set|delete) rather than two named tools so
 the write surface lives in a single, clearly admin-flavoured place.
@@ -20,8 +22,8 @@ _DESCRIPTION = (
     "scope ∈ {tenant, fleet, agent}; weight ∈ {low, med, high}. "
     "scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id. "
     "delete requires {doc_id}. "
-    "Requires trust ≥ 1 — keystones override user instructions, so a "
-    "compromised low-trust agent must not be able to plant one."
+    "Requires trust ≥ 2 — keystones override user instructions across "
+    "the tenant, so a default-trust (=1) agent must not be able to plant one."
 )
 
 _SPEC = ToolSpec(
@@ -29,7 +31,7 @@ _SPEC = ToolSpec(
     description=_DESCRIPTION,
     handler=mcp_server.memclaw_keystones_set,
     plugin_exposed=False,
-    trust_required=1,
+    trust_required=2,
     ops=(
         OpSpec(
             name="set",
@@ -42,7 +44,7 @@ _SPEC = ToolSpec(
             required_params=("doc_id",),
         ),
     ),
-    error_codes=("INVALID_ARGUMENTS", "FORBIDDEN", "NOT_FOUND"),
+    error_codes=("INVALID_ARGUMENTS", "FORBIDDEN", "NOT_FOUND", "INTERNAL_ERROR"),
 )
 register(_SPEC)
 mcp_register(mcp_server.mcp, _SPEC)

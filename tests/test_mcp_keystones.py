@@ -34,9 +34,10 @@ def _stub_storage_client(monkeypatch, **method_returns):
     def _factory():
         return sc
 
-    # The handler does ``from core_api.clients.storage_client import
-    # get_storage_client`` at call time, so patch the module path directly.
-    monkeypatch.setattr("core_api.clients.storage_client.get_storage_client", _factory)
+    # The handler binds ``get_storage_client`` at module import time, so
+    # the test must patch the alias on ``mcp_server`` (where Python
+    # resolves it at call time) — not the original module path.
+    monkeypatch.setattr("core_api.mcp_server.get_storage_client", _factory)
     return sc
 
 

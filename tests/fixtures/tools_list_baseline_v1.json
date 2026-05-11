@@ -373,7 +373,7 @@
             }
           ],
           "default": null,
-          "description": "Scope filter; required when agent_id is provided.",
+          "description": "Scope filter; supply to include fleet- and agent-scoped rules.",
           "title": "Fleet Id"
         }
       },
@@ -401,7 +401,7 @@
   {
     "name": "memclaw_keystones_set",
     "title": null,
-    "description": "Author or remove keystone rules. op: set|delete. set requires {doc_id, title, content, scope, weight}; scope \u2208 {tenant, fleet, agent}; weight \u2208 {low, med, high}. scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id. delete requires {doc_id}. Requires trust \u2265 1 \u2014 keystones override user instructions, so a compromised low-trust agent must not be able to plant one.",
+    "description": "Author or remove keystone rules. op: set|delete. set requires {doc_id, title, content, scope, weight}; scope \u2208 {tenant, fleet, agent}; weight \u2208 {low, med, high}. scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id. delete requires {doc_id}. Requires trust \u2265 2 \u2014 keystones override user instructions across the tenant, so a default-trust (=1) agent must not be able to plant one.",
     "inputSchema": {
       "properties": {
         "op": {

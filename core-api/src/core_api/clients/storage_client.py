@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal, NotRequired, TypedDict
 
 import httpx
 
@@ -13,6 +13,28 @@ from core_api.clients.identity_token import fetch_auth_header
 from core_api.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+class KeystoneUpsertPayload(TypedDict):
+    """Shape of the body POSTed to ``/keystones`` on core-storage.
+
+    Required fields match the storage-side validator's required set
+    (storage 422s on any missing one). Optional fields use
+    ``NotRequired`` so callers can omit them — both surfaces strip
+    ``None`` before posting because storage distinguishes a present
+    ``"fleet_id": null`` from an absent key.
+    """
+
+    tenant_id: str
+    doc_id: str
+    title: str
+    content: str
+    scope: Literal["tenant", "fleet", "agent"]
+    weight: Literal["low", "med", "high"]
+    fleet_id: NotRequired[str]
+    agent_id: NotRequired[str]
+    author_user_id: NotRequired[str]
+
 
 _client: CoreStorageClient | None = None
 
@@ -768,7 +790,7 @@ class CoreStorageClient:
         truncated = resp.headers.get("X-Truncated", "").lower() == "true"
         return resp.json(), truncated
 
-    async def upsert_keystone(self, data: dict) -> dict:
+    async def upsert_keystone(self, data: KeystoneUpsertPayload) -> dict:
         return await self._post("/keystones", data)  # type: ignore[return-value]
 
     async def delete_keystone(self, tenant_id: str, doc_id: str) -> bool:

@@ -7,8 +7,8 @@ storage layer can stay a dumb CRUD service.
 
 Endpoints (under ``/api/v1``):
 * ``GET    /memclaw/keystones`` — list scope-merged rules
-* ``POST   /memclaw/keystones`` — upsert a rule (trust ≥ 1)
-* ``DELETE /memclaw/keystones/{doc_id}`` — remove a rule (trust ≥ 1)
+* ``POST   /memclaw/keystones`` — upsert a rule (trust ≥ 2)
+* ``DELETE /memclaw/keystones/{doc_id}`` — remove a rule (trust ≥ 2)
 
 Surface the ``X-Truncated`` header from core-storage so callers can warn
 operators when rules are being silently dropped.
@@ -20,12 +20,12 @@ import logging
 from typing import Literal
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.auth import AuthContext, get_auth_context
-from core_api.clients.storage_client import get_storage_client
+from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.db.session import get_db
 from core_api.services.audit_service import log_action
 from core_api.services.trust_service import parse_trust_error
@@ -49,8 +49,10 @@ class KeystoneSetRequest(BaseModel):
     agent_id: str | None = None
     # Slug shape mirrors ``memclaw_doc`` collection=skills (filesystem-safe
     # identifier) so keystone ``doc_id`` values stay greppable in audit
-    # logs and safe to render in dashboards.
-    doc_id: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9._-]{0,99}$")
+    # logs and safe to render in dashboards. The pattern already pins
+    # length (1 leading char + up to 99 trailing), so explicit ``min_length``
+    # / ``max_length`` would be redundant.
+    doc_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,99}$")
     title: str = Field(min_length=1)
     content: str = Field(min_length=1)
     scope: Literal["tenant", "fleet", "agent"]
@@ -66,13 +68,15 @@ async def _enforce_author_trust(
     tenant_id: str,
     agent_id: str,
     *,
-    min_level: int = 1,
+    min_level: int = 2,
 ) -> None:
     """Block keystone writes from low-trust principals.
 
-    Trust ≥ 1 is the gate: keystones override user instructions, so a
-    prompt-injection-driven write would otherwise plant a malicious rule
-    that auto-injects into every future session.
+    Trust ≥ 2 is the gate. Keystones override user instructions across
+    the tenant, so a freshly-registered default-trust (=1) agent must
+    not be able to plant one — the same elevated tier used elsewhere
+    for cross-agent operations (``memclaw_list/stats/evolve/insights``
+    with ``scope=fleet|all``).
 
     ``require_trust`` soft-passes when no agent row exists AND
     ``min_level <= DEFAULT_TRUST_LEVEL`` — that's wrong here. Identity
@@ -80,6 +84,24 @@ async def _enforce_author_trust(
     fabricated ``agent_id`` would corrupt the audit trail. So we check
     ``not_found`` independently (the documented write-path pattern,
     matches ``routes/evolve.py``).
+
+    **Cross-fleet authoring is intentionally allowed at this layer.**
+    A trust ≥ 2 agent in tenant T can write a ``scope=fleet`` or
+    ``scope=agent`` rule for any fleet within T — there is no check
+    that ``body.fleet_id`` matches the caller's pinned fleet. Rationale:
+
+      * Governance / org-admin workflows legitimately need to set
+        fleet-scope rules for fleets the caller doesn't run agents in.
+      * Tenant isolation (RLS + ``tenant_id`` filters) already prevents
+        cross-tenant writes — the remaining surface is intra-tenant.
+      * A finer-grained scope-authority model (per-agent fleet pinning,
+        admin/org-owner role, ``scope=tenant`` from fleet-pinned agents)
+        needs deliberate design across several edge cases — out of scope
+        for the keystone surface PR.
+
+    Tracked as a follow-up: tighten so non-admin agents can only author
+    keystones for their own fleet (or ``scope=tenant`` with an admin
+    role). Until then, trust ≥ 2 is the single gate.
     """
     _trust, not_found, terr = await _require_trust(db, tenant_id, agent_id, min_level=min_level)
     if not_found:
@@ -136,7 +158,18 @@ async def list_keystones(
     safe and the plugin needs this on every session start."""
     auth.enforce_tenant(tenant_id)
     sc = get_storage_client()
-    rows, truncated = await sc.list_keystones(tenant_id=tenant_id, fleet_id=fleet_id, agent_id=agent_id)
+    # Drop ``agent_id`` when there's no ``fleet_id`` — agent-scope rows
+    # are keyed on the (fleet_id, agent_id) pair, so an agent-only filter
+    # can't resolve them. Mirrors the MCP handler's guard so both
+    # surfaces return identical results for the same input.
+    try:
+        rows, truncated = await sc.list_keystones(
+            tenant_id=tenant_id,
+            fleet_id=fleet_id,
+            agent_id=agent_id if fleet_id else None,
+        )
+    except httpx.HTTPStatusError as exc:
+        raise _surface_storage_error(exc) from exc
     if truncated:
         response.headers["X-Truncated"] = "true"
     return rows
@@ -149,9 +182,13 @@ async def upsert_keystone(
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    """Upsert a keystone rule. Requires trust ≥ 1."""
+    """Upsert a keystone rule. Requires trust ≥ 2."""
     auth.enforce_tenant(body.tenant_id)
+    # ``enforce_read_only`` gates demo sandboxes; ``enforce_usage_limits``
+    # gates plan-exceeded orgs. Write routes must call both — delete
+    # routes only the former (see usage_service docstring).
     auth.enforce_read_only()
+    auth.enforce_usage_limits()
     caller_agent_id = _author_agent_id(auth, x_agent_id)
     await _enforce_author_trust(db, body.tenant_id, caller_agent_id)
 
@@ -159,14 +196,35 @@ async def upsert_keystone(
     # Pass-through to storage — it owns scope/weight/agent_id shape
     # validation; surface its 422 directly so the caller sees a single
     # canonical error list.
+    # Build the TypedDict explicitly so mypy catches missing required
+    # fields here, not at the network boundary. Storage treats a present
+    # ``"fleet_id": None`` differently from an absent key (scope=tenant
+    # must not include fleet_id), so optional fields are added only when
+    # set rather than included as None.
+    payload: KeystoneUpsertPayload = {
+        "tenant_id": body.tenant_id,
+        "doc_id": body.doc_id,
+        "title": body.title,
+        "content": body.content,
+        "scope": body.scope,
+        "weight": body.weight,
+    }
+    if body.fleet_id is not None:
+        payload["fleet_id"] = body.fleet_id
+    if body.agent_id is not None:
+        payload["agent_id"] = body.agent_id
+    if body.author_user_id is not None:
+        payload["author_user_id"] = body.author_user_id
+
     try:
-        doc = await sc.upsert_keystone(body.model_dump(exclude_none=False))
+        doc = await sc.upsert_keystone(payload)
     except httpx.HTTPStatusError as exc:
         raise _surface_storage_error(exc) from exc
 
     await log_action(
         db,
         tenant_id=body.tenant_id,
+        agent_id=caller_agent_id,
         action="keystone.set",
         resource_type="keystone",
         resource_id=doc.get("id"),
@@ -186,25 +244,34 @@ async def upsert_keystone(
 
 @router.delete("/{doc_id}")
 async def delete_keystone(
-    doc_id: str,
+    # Enforce the slug shape at the path-parameter layer — without this
+    # an unvalidated ``doc_id`` flows straight into ``storage_client``'s
+    # f-string URL construction, where ``..`` would resolve to the
+    # storage parent path. Matches ``KeystoneSetRequest.doc_id``'s
+    # Pydantic ``pattern``.
+    doc_id: str = Path(..., pattern=r"^[a-z0-9][a-z0-9._-]{0,99}$"),
     tenant_id: str = Query(...),
     x_agent_id: str | None = Header(default=None, alias="X-Agent-ID"),
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    """Remove a keystone rule. Requires trust ≥ 1."""
+    """Remove a keystone rule. Requires trust ≥ 2."""
     auth.enforce_tenant(tenant_id)
     auth.enforce_read_only()
     await _enforce_author_trust(db, tenant_id, _author_agent_id(auth, x_agent_id))
 
     sc = get_storage_client()
-    deleted = await sc.delete_keystone(tenant_id=tenant_id, doc_id=doc_id)
+    try:
+        deleted = await sc.delete_keystone(tenant_id=tenant_id, doc_id=doc_id)
+    except httpx.HTTPStatusError as exc:
+        raise _surface_storage_error(exc) from exc
     if not deleted:
         raise HTTPException(status_code=404, detail="Keystone not found")
 
     await log_action(
         db,
         tenant_id=tenant_id,
+        agent_id=_author_agent_id(auth, x_agent_id),
         action="keystone.delete",
         resource_type="keystone",
         resource_id=None,
