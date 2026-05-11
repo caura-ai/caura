@@ -1,10 +1,14 @@
 """Document/URL ingestion: extract atomic facts via LLM, preview, and commit as memories."""
 
+import ipaddress
 import logging
 import re
+import socket
 import time
 import uuid
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +19,30 @@ from core_api.schemas import IngestCommitRequest, IngestRequest, MemoryCreate
 from core_api.services.memory_service import create_memory
 
 logger = logging.getLogger(__name__)
+
+# Allowed MIME types for URL ingest. Binary formats (PDF, DOCX, etc.) are
+# rejected here; the optional Kreuzberg integration (PR #8) will add a
+# separate path for them.
+ALLOWED_INGEST_MIME_TYPES = frozenset(
+    {
+        "text/html",
+        "text/plain",
+        "text/markdown",
+        "text/x-markdown",
+        "application/xhtml+xml",
+    }
+)
+
+# Hard cap on fetched-body size (post-decompression). Defends against
+# gzip-bomb URLs that claim Content-Length: 50KB but expand to gigabytes.
+MAX_INGEST_CONTENT_BYTES = 200_000
+
+# Explicit deny-list for cloud-metadata service IPs that aren't always
+# caught by ipaddress.is_link_local (AWS 169.254.169.254 IS link-local;
+# GCP metadata at metadata.google.internal resolves to 169.254.169.254 too;
+# Azure uses the same IP). Listed defensively even though is_link_local
+# covers them.
+_CLOUD_METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254"})
 
 CHUNKING_PROMPT = """\
 Extract discrete, atomic facts from the following content.
@@ -89,21 +117,128 @@ async def _chunk_content(
     return facts
 
 
+def _is_blocked_ip(addr: str) -> bool:
+    """Return True if the address falls in a range we must not fetch from.
+
+    Covers RFC1918 private ranges, loopback, link-local (incl. AWS/GCP/Azure
+    metadata IPs), multicast, and reserved. IPv6 unique-local fc00::/7 is
+    classified as private by the ipaddress module.
+    """
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _check_hostname_safe(url: str) -> None:
+    """Resolve the URL's hostname and reject if it points at private infra.
+
+    Light-weight SSRF defense. Does NOT handle DNS rebinding between this
+    resolution and the actual TCP connect — that's a Tier 3 hardening item.
+    Covers the accidental-misuse case (localhost, RFC1918, cloud metadata).
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        raise HTTPException(status_code=400, detail=f"Invalid URL: no hostname in {url!r}")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as e:
+        raise HTTPException(status_code=400, detail=f"DNS resolution failed for {host}: {e}")
+    for family, _, _, _, sockaddr in infos:
+        addr = str(sockaddr[0])
+        if _is_blocked_ip(addr) or addr in _CLOUD_METADATA_IPS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Blocked: {host} resolves to {addr} (private/loopback/link-local/metadata)",
+            )
+
+
 async def _fetch_url_text(url: str) -> str:
-    """Fetch URL and strip HTML to plain text."""
-    import httpx
+    """Fetch URL, validate MIME + size, decode safely, and strip HTML.
+
+    Raises ``HTTPException`` for:
+    - 400: invalid URL, DNS failure, hostname resolves to a blocked IP range
+    - 413: fetched body exceeds ``MAX_INGEST_CONTENT_BYTES``
+    - 422: response Content-Type isn't in the text allowlist
+    - 4xx/5xx: passed through from the upstream server
+    """
+    _check_hostname_safe(url)
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
+        async with client.stream("GET", url) as resp:
+            resp.raise_for_status()
 
-    html = resp.text
+            # Re-validate the FINAL host post-redirect (the upstream may
+            # have redirected us to a private host). httpx exposes the
+            # ultimate URL via resp.url; ``follow_redirects=True`` already
+            # walked the chain.
+            _check_hostname_safe(str(resp.url))
 
-    # Strip HTML tags to get plain text
+            # MIME allowlist on the final response, not the initial request.
+            content_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+            if content_type and content_type not in ALLOWED_INGEST_MIME_TYPES:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Unsupported content type: {content_type}. "
+                        f"Allowed: {sorted(ALLOWED_INGEST_MIME_TYPES)}"
+                    ),
+                )
+
+            # Pre-check Content-Length if the server bothered to send it.
+            # Saves us from downloading anything when the server is honest.
+            cl_header = resp.headers.get("content-length")
+            if cl_header:
+                try:
+                    if int(cl_header) > MAX_INGEST_CONTENT_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=(f"Content too large: {cl_header} bytes (max {MAX_INGEST_CONTENT_BYTES})"),
+                        )
+                except ValueError:
+                    # Malformed Content-Length — fall through to streaming.
+                    pass
+
+            # Stream the body, abort if it exceeds the cap after
+            # decompression. httpx transparently decompresses gzip/br
+            # within ``aiter_bytes`` so this measures decompressed bytes
+            # (gzip-bomb guard).
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in resp.aiter_bytes():
+                total += len(chunk)
+                if total > MAX_INGEST_CONTENT_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"Content too large: exceeded {MAX_INGEST_CONTENT_BYTES} bytes "
+                            f"after decompression"
+                        ),
+                    )
+                chunks.append(chunk)
+            body = b"".join(chunks)
+
+            # Decode using the response's declared charset, falling back
+            # to UTF-8. httpx's default is ISO-8859-1 when no charset is
+            # advertised, which mojibakes any UTF-8 page that omits a
+            # charset declaration.
+            encoding = resp.charset_encoding or "utf-8"
+            html = body.decode(encoding, errors="replace")
+
+    # Strip HTML tags to get plain text. (BeautifulSoup-based extraction
+    # ships in a later PR; this regex is the same as before.)
     text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
-    # Collapse whitespace
     text = re.sub(r"\s+", " ", text).strip()
 
     return text
@@ -120,6 +255,10 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
     if url:
         try:
             content = await _fetch_url_text(url)
+        except HTTPException:
+            # Preserve the specific 400/413/422 from _fetch_url_text — these
+            # carry meaningful status codes the caller needs to see.
+            raise
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {e}")
     elif request.content:
