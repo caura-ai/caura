@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.5.0](https://github.com/caura-ai/caura-memclaw/compare/v2.4.0...v2.5.0) (2026-05-11)
+
+
+### Features
+
+* **core-storage:** keystone-rule CRUD on _keystones collection (CAURA-000) ([#109](https://github.com/caura-ai/caura-memclaw/issues/109)) ([bd94a9e](https://github.com/caura-ai/caura-memclaw/commit/bd94a9e13fe9e2e99151766a583a4a0fddfc9e15))
+* **fleet-stats:** include agent trust_level in per-agent records ([#116](https://github.com/caura-ai/caura-memclaw/issues/116)) ([1c0e6e7](https://github.com/caura-ai/caura-memclaw/commit/1c0e6e75d8f3cd8e624a0ec1c225cb50c4cc488b))
+
+
+### Bug Fixes
+
+* **ingest:** harden URL fetch (Content-Type allowlist + size cap + SS… ([#115](https://github.com/caura-ai/caura-memclaw/issues/115)) ([9a36656](https://github.com/caura-ai/caura-memclaw/commit/9a36656ddb335956a78537eecdec2ec668eacee7))
+* **ingest:** strong-mode writes + pre-loop dedup + parallel commit (P… ([#117](https://github.com/caura-ai/caura-memclaw/issues/117)) ([8359df1](https://github.com/caura-ai/caura-memclaw/commit/8359df1fd608f891a8a795da6e093c74e705536c))
+
 ## [2.4.0](https://github.com/caura-ai/caura-memclaw/compare/v2.3.0...v2.4.0) (2026-05-10)
 
 
