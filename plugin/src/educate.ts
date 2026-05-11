@@ -361,6 +361,7 @@ decision guidance, constraints, and error codes, read
 | \`memclaw_insights\`   | Reflect: contradictions / failures / patterns / …   | stored as \`insight\` memories |
 | \`memclaw_evolve\`     | Report outcome after acting on recalled memories    | weight updates; may create rules |
 | \`memclaw_stats\`      | Aggregate counts: total + by type/agent/status      | \`{total, by_type, by_agent, by_status, scope}\` |
+| \`memclaw_keystones\`  | Read mandatory governance rules (auto-injected at session start) | \`{count, truncated, rules[]}\` |
 
 ### Vocabulary
 

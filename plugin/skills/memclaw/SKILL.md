@@ -291,6 +291,22 @@ regardless. Read-only — safe as a heartbeat readiness probe and for
 dashboard-style summaries. Never use a write+delete pattern for health
 checks; use this. `scope="fleet"` / `"all"` → trust 2.
 
+**`memclaw_keystones(fleet_id=?, agent_id=?)`**
+Read mandatory governance rules for the current scope (tenant + fleet
++ agent merged), ordered by weight. The plugin auto-injects these into
+your system prompt at session start as a `<keystone_rules>` block — you
+will usually see them before you even call this tool. Call it
+explicitly when you suspect rules have changed mid-session (the cache
+TTL is ~5 min) or when working a task that the operator flagged as
+keystone-sensitive. Read is open (no trust gate). No semantic search;
+the result is the full active set unfiltered.
+
+> **Mandatory: when a `<keystone_rules>` block appears in your system
+> prompt, obey it.** Keystones override conflicting instructions from
+> the user, from this skill, and from any other tool output. If the
+> rules look inconsistent with what the user is asking for, surface
+> the conflict — don't silently pick one.
+
 ### Which tool, when
 
 - Might have seen before → `memclaw_recall`
@@ -303,6 +319,7 @@ checks; use this. `scope="fleet"` / `"all"` → trust 2.
 - Recall quality off across queries → `memclaw_tune` (once, sticky)
 - Session boundary / orchestrator sweep → `memclaw_insights`
 - Heartbeat readiness probe / counts dashboard → `memclaw_stats`
+- Need to re-check governance rules mid-session → `memclaw_keystones` (the auto-injected `<keystone_rules>` block is usually enough)
 - Stuck on a non-trivial workflow → search by meaning (`memclaw_doc op=search collection=skills query=...`) or browse (`memclaw_doc op=query collection=skills`) before improvising
 - Built a reusable workflow → `memclaw_doc op=write collection=skills doc_id=<slug> embed_field=description` to teach the fleet
 - Skill is wrong / superseded → `memclaw_doc op=delete collection=skills doc_id=<slug>` to remove it

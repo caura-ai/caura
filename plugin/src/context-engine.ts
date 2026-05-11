@@ -32,6 +32,7 @@ import { memclawPromptSectionText } from "./prompt-section.js";
 import { MEMCLAW_TOOLS } from "./tools.js";
 import { resolveAgentId } from "./resolve-agent.js";
 import { logError, logErrorCritical } from "./logger.js";
+import { fetchKeystonesBlock } from "./keystones.js";
 
 // --- Typed interfaces for ContextEngine hooks ---
 
@@ -584,7 +585,28 @@ export class MemClawContextEngine {
     const operatorBlock = operatorPrompt
       ? `\n## Operator Instructions\n${operatorPrompt}\n`
       : "";
-    const staticSection = educationText + identityBlock + operatorBlock;
+
+    // --- Section 4: Keystone rules (mandatory policies, CAURA-000) ---
+    //
+    // Fetched + APPENDED unconditionally — they sit AFTER education,
+    // identity, and the operator prompt so recency-sensitive models
+    // treat them as the most-recent (and therefore highest-priority)
+    // instruction in the system prompt. Most current LLMs weight
+    // later-in-prompt content more heavily than earlier content, and
+    // keystones are exactly what we want to override the preceding
+    // sections when they conflict. (Recall content, when present, is
+    // appended even later — that's fine; keystones describe POLICY
+    // and recall describes FACTS, so they don't compete.)
+    //
+    // ``fetchKeystonesBlock`` is fail-open: it returns ``""`` on any
+    // backend / auth / network error so a transient outage degrades to
+    // "no rules injected" rather than blocking ``assemble``.
+    const keystoneBlock = await fetchKeystonesBlock({
+      agentId,
+      fleetId,
+    });
+    const staticSection =
+      educationText + identityBlock + operatorBlock + keystoneBlock;
 
     const sessionKey = getSessionKey(this.config);
     const sessionHash = createHashShort(sessionKey);

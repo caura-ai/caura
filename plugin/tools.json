@@ -267,6 +267,131 @@
     "trust_required": 1
   },
   {
+    "description": "Retrieve all keystone rules (MANDATORY policies) for the current scope. Returns tenant + fleet + agent-scope rules merged, ordered by weight. Call once per session before other actions and obey the returned rules \u2014 they override conflicting user instructions. Do NOT pass a query; this returns the full active set unfiltered.",
+    "error_codes": [
+      "INTERNAL_ERROR"
+    ],
+    "impl_status": "live",
+    "name": "memclaw_keystones",
+    "ops": [],
+    "params": [
+      {
+        "default": "mcp-agent",
+        "description": "Caller agent.",
+        "name": "agent_id",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "Scope filter; supply to include fleet- and agent-scoped rules.",
+        "name": "fleet_id",
+        "required": false,
+        "type": "str | None"
+      }
+    ],
+    "plugin_exposed": true,
+    "trust_required": 0
+  },
+  {
+    "description": "Author or remove keystone rules. op: set|delete. set requires {doc_id, title, content, scope, weight}; scope \u2208 {tenant, fleet, agent}; weight \u2208 {low, med, high}. scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id. delete requires {doc_id}. Requires trust \u2265 2 \u2014 keystones override user instructions across the tenant, so a default-trust (=1) agent must not be able to plant one.",
+    "error_codes": [
+      "INVALID_ARGUMENTS",
+      "FORBIDDEN",
+      "NOT_FOUND",
+      "INTERNAL_ERROR"
+    ],
+    "impl_status": "live",
+    "name": "memclaw_keystones_set",
+    "ops": [
+      {
+        "description": "Upsert a keystone rule by doc_id.",
+        "name": "set",
+        "required_params": [
+          "doc_id",
+          "title",
+          "content",
+          "scope",
+          "weight"
+        ],
+        "trust_required": 2
+      },
+      {
+        "description": "Remove a keystone rule by doc_id.",
+        "name": "delete",
+        "required_params": [
+          "doc_id"
+        ],
+        "trust_required": 2
+      }
+    ],
+    "params": [
+      {
+        "description": "set|delete.",
+        "name": "op",
+        "required": true,
+        "type": "str"
+      },
+      {
+        "description": "Stable slug identifying the rule.",
+        "name": "doc_id",
+        "required": true,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "op=set: human-readable title.",
+        "name": "title",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=set: the rule text.",
+        "name": "content",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=set: tenant|fleet|agent.",
+        "name": "scope",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=set: low|med|high.",
+        "name": "weight",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=set: required for scope=fleet|agent.",
+        "name": "fleet_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=set: required for scope=agent.",
+        "name": "agent_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=set: optional author identity for audit.",
+        "name": "author_user_id",
+        "required": false,
+        "type": "str | None"
+      }
+    ],
+    "plugin_exposed": false,
+    "trust_required": 2
+  },
+  {
     "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' (default) lists your memories at trust \u2265 1; scope='fleet'/'all' requires trust \u2265 2. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use memclaw_recall.",
     "error_codes": [],
     "impl_status": "live",

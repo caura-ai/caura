@@ -215,6 +215,57 @@ export const MIN_TURN_CONTENT_LENGTH = 100;
 export const MAX_TURN_SUMMARY_LENGTH = 500;
 export const MAX_RECALL_CONTENT_LENGTH = 300;
 
+// --- Keystones (CAURA-000): mandatory governance rules auto-injected ---
+//
+// The ContextEngine fetches keystones from ``/memclaw/keystones`` and
+// prepends them to every system prompt. Operators get three knobs:
+//
+// - ``MEMCLAW_KEYSTONES_ENABLED`` (default ``"true"``) — kill switch so
+//   ops can disable the auto-inject without redeploying if something
+//   misfires. Set to ``"false"`` to turn it off.
+// - ``MEMCLAW_KEYSTONES_TOKEN_CAP`` (default 500 tokens, ~2000 chars)
+//   — hard ceiling on the injected block. Lowest-weight rules are
+//   dropped first when the cap is hit so a runaway rule set can't crowd
+//   out recall or the operator prompt.
+// - ``MEMCLAW_KEYSTONES_CACHE_TTL_MS`` (default 5 minutes) — per-identity
+//   cache TTL. ``memclaw_keystones_set`` invocations bust the cache for
+//   the current session so a freshly authored rule takes effect on the
+//   next turn.
+function _readBoolEnv(name: string, defaultValue: boolean): boolean {
+  const v = process.env[name];
+  if (v === undefined) return defaultValue;
+  // Treat the standard set of "off" idioms as off: ``"false"``, ``"0"``,
+  // and the empty string. Anything else (including ``"true"``, ``"1"``,
+  // ``"yes"``, or unrecognised values) is treated as on so operators can
+  // opt-in with whatever convention their shell uses. The empty-string
+  // case matters because ``KEY=`` in an ``.env`` file is the natural way
+  // to "blank out" a previously-set value.
+  const lower = v.toLowerCase();
+  return lower !== "false" && lower !== "0" && lower !== "";
+}
+function _readIntEnv(name: string, defaultValue: number, min: number): number {
+  const raw = process.env[name];
+  if (!raw) return defaultValue;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < min) return defaultValue;
+  return n;
+}
+export const MEMCLAW_KEYSTONES_ENABLED: boolean = _readBoolEnv(
+  "MEMCLAW_KEYSTONES_ENABLED",
+  true,
+);
+export const MEMCLAW_KEYSTONES_TOKEN_CAP: number = _readIntEnv(
+  "MEMCLAW_KEYSTONES_TOKEN_CAP",
+  500,
+  1,
+);
+export const MEMCLAW_KEYSTONES_CACHE_TTL_MS: number = _readIntEnv(
+  "MEMCLAW_KEYSTONES_CACHE_TTL_MS",
+  300_000,
+  1_000,
+);
+export const KEYSTONES_TIMEOUT_MS = 5_000;
+
 // --- Recall policy (gates ContextEngine.assemble's /search call) ---
 //
 // The OpenClaw runtime calls our context engine on every prompt assembly
