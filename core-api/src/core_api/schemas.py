@@ -357,6 +357,13 @@ class IngestRequest(BaseModel):
 class IngestFact(BaseModel):
     content: str
     suggested_type: str = DEFAULT_MEMORY_TYPE
+    # Provenance: ``ingest_preview`` stamps this on every fact it returns
+    # (the URL it fetched from, or "text-input" for a pasted body). When
+    # the caller round-trips the preview output straight to commit without
+    # explicitly re-passing ``url``, this is the only thing that lets us
+    # persist the right ``source_uri``. ``IngestCommitRequest.url`` still
+    # wins if provided (dashboard back-compat).
+    source_uri: str | None = None
 
 
 class IngestCommitRequest(BaseModel):

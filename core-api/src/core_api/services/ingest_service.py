@@ -53,6 +53,34 @@ _CLOUD_METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254"})
 # Bounded to avoid hammering the LLM provider with rate-limit failures.
 _COMMIT_CONCURRENCY = 4
 
+# Maximum content length the LLM sees. Inputs longer than this get
+# truncated; ``ingest_preview`` reports the post-truncate length as
+# ``content_length`` and sets ``truncated: true`` + ``original_length``
+# so callers know the input was clipped. (Previously ``content_length``
+# returned the pre-truncate length, lying about what the LLM actually
+# processed.)
+_INGEST_MAX_CONTENT_CHARS = 50_000
+
+# Minimum content length before we'll even call the LLM. Whitespace-only
+# inputs and trivially short ones ("hi") used to burn a real LLM call
+# producing useless meta-facts ("The content begins with the greeting
+# 'hi'"). We short-circuit instead and return ``skipped_reason``.
+_INGEST_MIN_CONTENT_CHARS = 20
+
+# Drop facts that describe the input itself rather than extracting from it.
+# These show up when the LLM has nothing real to chunk — typical on short
+# inputs that slipped past ``_INGEST_MIN_CONTENT_CHARS``. Belt-and-braces
+# with the prompt guidance below.
+_META_FACT_RE = re.compile(
+    r"^\s*(?:"
+    r"the\s+(?:provided|user|input)\s+(?:content|text|document)"  # "the provided content"
+    r"|this\s+(?:content|text|document)"  # "this document describes"
+    r"|the\s+content\s+(?:begins|starts|consists|is)"  # "the content begins"
+    r"|the\s+(?:document|text)\s+(?:provided|given|describes|is)"  # "the document describes"
+    r")",
+    re.IGNORECASE,
+)
+
 CHUNKING_PROMPT = """\
 Extract discrete, atomic facts from the following content.
 Each fact should be a single claim that can stand alone as a memory.
@@ -62,6 +90,7 @@ Guidelines:
 - Be specific: include names, numbers, dates, decisions
 - Each fact: one claim, not a paragraph
 - Suggest a memory_type for each: fact, decision, preference, task, plan, episode, semantic, intention, commitment, action, outcome, cancellation
+- Do NOT produce meta-facts that describe the input itself. Avoid claims like "The content begins with...", "The provided text says...", "This document is about...". Extract facts FROM the content, not facts ABOUT the content.
 {focus_instruction}
 
 Content:
@@ -83,7 +112,13 @@ async def _chunk_content(
     focus: str | None = None,
     tenant_config=None,
 ) -> list[dict]:
-    """Extract atomic facts from text via LLM."""
+    """Extract atomic facts from text via LLM.
+
+    Caller is responsible for truncation before calling — see
+    ``_INGEST_MAX_CONTENT_CHARS`` and ``ingest_preview``. This function
+    just builds the prompt, calls the LLM, validates the JSON shape,
+    and drops meta-facts (P2.4).
+    """
     provider_name = (
         tenant_config.enrichment_provider if tenant_config else None
     ) or settings.entity_extraction_provider
@@ -92,9 +127,7 @@ async def _chunk_content(
     if focus:
         focus_instruction = f"Focus on facts relevant to {focus}. Deprioritize unrelated details."
 
-    # Truncate very long content to avoid token limits
-    content = text[:50_000]
-    prompt = CHUNKING_PROMPT.format(content=content, focus_instruction=focus_instruction)
+    prompt = CHUNKING_PROMPT.format(content=text, focus_instruction=focus_instruction)
 
     async def _do_chunk(llm):
         return await llm.complete_json(prompt)
@@ -108,20 +141,31 @@ async def _chunk_content(
     )
 
     # Validate: must be a list of objects with "content"
-    facts = []
+    facts: list[dict] = []
     if isinstance(raw, dict):
         # Handle {"facts": [...]} wrapper
         for v in raw.values():
             if isinstance(v, list):
                 raw = v
                 break
+    dropped_meta = 0
     for item in raw:
         if not isinstance(item, dict) or not item.get("content"):
+            continue
+        body = str(item["content"]).strip()
+        if _META_FACT_RE.search(body):
+            # P2.4: drop facts that describe the input rather than extract
+            # from it. Prompt forbids them but the LLM still produces them
+            # occasionally — especially on short/trivial input.
+            dropped_meta += 1
             continue
         st = item.get("suggested_type", "fact")
         if st not in MEMORY_TYPES:
             st = "fact"
-        facts.append({"content": str(item["content"]).strip(), "suggested_type": st})
+        facts.append({"content": body, "suggested_type": st})
+
+    if dropped_meta:
+        logger.info("ingest: dropped %d meta-fact(s) from extraction output", dropped_meta)
 
     return facts
 
@@ -254,9 +298,18 @@ async def _fetch_url_text(url: str) -> str:
 
 
 async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
-    """Preview mode: extract facts from URL or text without writing anything."""
-    from core_api.services.organization_settings import resolve_config
+    """Preview mode: extract facts from URL or text without writing anything.
 
+    Response fields:
+      url             — echoed from the request (None when content was pasted)
+      content_length  — length of the string the LLM actually saw (post-truncate, P2.1)
+      truncated       — True iff input exceeded _INGEST_MAX_CONTENT_CHARS (P2.1)
+      original_length — pre-truncate length, only present when truncated=True (P2.1)
+      facts           — list of {content, suggested_type, source_uri}
+      chunk_ms        — LLM round-trip duration; 0 when short-circuited
+      skipped_reason  — only present when no LLM call happened
+                        ("content_too_short" today; future reasons may surface)
+    """
     tenant_config = await resolve_config(db, request.tenant_id)
 
     # Get content
@@ -275,6 +328,34 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
     else:
         raise HTTPException(status_code=400, detail="Either url or content is required")
 
+    # ---- P2.1: honest truncation reporting ----
+    original_length = len(content)
+    truncated = original_length > _INGEST_MAX_CONTENT_CHARS
+    if truncated:
+        content = content[:_INGEST_MAX_CONTENT_CHARS]
+
+    # ---- P2.3: whitespace / too-short short-circuit ----
+    # Avoid burning an LLM call on input that can't produce meaningful
+    # facts. The cap is generous (20 chars after strip()) so any
+    # legitimate ingest still hits the LLM.
+    source_uri_default = url or "text-input"
+    if len(content.strip()) < _INGEST_MIN_CONTENT_CHARS:
+        logger.info(
+            "ingest_preview: short-circuited (content too short: %d chars stripped)",
+            len(content.strip()),
+        )
+        response: dict = {
+            "url": url,
+            "content_length": len(content),
+            "facts": [],
+            "chunk_ms": 0,
+            "skipped_reason": "content_too_short",
+        }
+        if truncated:
+            response["truncated"] = True
+            response["original_length"] = original_length
+        return response
+
     # Extract facts via LLM
     t0 = time.perf_counter()
     try:
@@ -284,12 +365,21 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
         raise HTTPException(status_code=500, detail=f"Fact extraction failed: {e}")
     chunk_ms = int((time.perf_counter() - t0) * 1000)
 
-    return {
+    # P1.2: stamp source_uri on every fact so the commit path doesn't need
+    # the caller to re-pass ``url``. Callers can still override per-fact.
+    for f in facts:
+        f.setdefault("source_uri", source_uri_default)
+
+    response = {
         "url": url,
         "content_length": len(content),
         "facts": facts,
         "chunk_ms": chunk_ms,
     }
+    if truncated:
+        response["truncated"] = True
+        response["original_length"] = original_length
+    return response
 
 
 async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
@@ -320,8 +410,25 @@ async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
        on the shared session.
     """
     run_id = request.run_id or str(uuid.uuid4())
-    source_uri = request.url or "text-input"
+    # Caller-supplied url wins (dashboard back-compat). When the caller
+    # round-trips preview output without re-passing url, each fact carries
+    # its own source_uri (P1.2 — stamped by ingest_preview).
+    request_url_override = request.url
     facts = list(request.facts)
+
+    # ---- P1.E: validate suggested_type before any work ----
+    # Without this, a forged/malformed suggested_type leaks all the way to
+    # MemoryCreate and surfaces as a Pydantic ValidationError → 500. Catch
+    # it here with a clean 422 listing the offending values.
+    bad = [(i, f.suggested_type) for i, f in enumerate(facts) if f.suggested_type not in MEMORY_TYPES]
+    if bad:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Invalid suggested_type on facts {[i for i, _ in bad]}: "
+                f"{[t for _, t in bad]}. Allowed: {sorted(MEMORY_TYPES)}"
+            ),
+        )
 
     t0 = time.perf_counter()
 
@@ -376,19 +483,23 @@ async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
         ``asyncio.gather`` and abort the batch. Tier-1 P1.C-lite (next
         PR) softens that to per-fact warn-and-continue.
         """
+        # P1.2: provenance precedence — caller-supplied request.url wins
+        # (dashboard back-compat), else use the fact's own source_uri
+        # (stamped by preview), else fall back to "text-input".
+        effective_source = request_url_override or fact.source_uri or "text-input"
         mem_data = MemoryCreate(
             tenant_id=request.tenant_id,
             fleet_id=request.fleet_id,
             agent_id=request.agent_id,
             memory_type=fact.suggested_type,
             content=fact.content,
-            source_uri=source_uri,
+            source_uri=effective_source,
             run_id=run_id,
             write_mode="strong",
             metadata={
                 "source": "ingest",
                 "ingest_run_id": run_id,
-                "ingest_url": request.url or None,
+                "ingest_url": request_url_override or fact.source_uri or None,
             },
         )
         async with sem:

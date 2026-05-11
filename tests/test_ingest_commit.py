@@ -265,14 +265,131 @@ async def test_in_loop_409_still_counts_as_skipped(captured):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_url_provenance_passes_into_metadata(captured):
-    """If commit body carries url, source_uri + metadata.ingest_url use it.
-
-    (PR #3 will switch to per-fact source_uri; PR #2 keeps the request-level
-    field. This test pins current behavior so PR #3's change is intentional.)
-    """
+async def test_url_provenance_request_level_wins(captured):
+    """Caller-supplied request.url wins for back-compat with the dashboard."""
     req = _request("t1", "f1", url="https://example.com/doc.md")
     await ingest_service.ingest_commit(db=None, request=req)
 
     assert captured.writes[0].source_uri == "https://example.com/doc.md"
     assert captured.writes[0].metadata["ingest_url"] == "https://example.com/doc.md"
+
+
+# ---------------------------------------------------------------------------
+# PR #3 — P1.2 per-fact source_uri precedence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_per_fact_source_uri_used_when_no_request_url(captured):
+    """If the caller round-trips preview output without re-passing url, each
+    fact's own ``source_uri`` (stamped by preview) is honored."""
+    from core_api.schemas import IngestCommitRequest, IngestFact
+
+    req = IngestCommitRequest(
+        tenant_id="t1",
+        facts=[
+            IngestFact(
+                content="Fact A from URL",
+                suggested_type="fact",
+                source_uri="https://example.com/doc1",
+            ),
+            IngestFact(
+                content="Fact B from URL",
+                suggested_type="fact",
+                source_uri="https://example.com/doc1",
+            ),
+        ],
+    )
+    await ingest_service.ingest_commit(db=None, request=req)
+
+    for w in captured.writes:
+        assert w.source_uri == "https://example.com/doc1"
+        assert w.metadata["ingest_url"] == "https://example.com/doc1"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_request_url_overrides_fact_source_uri(captured):
+    """If both request.url and fact.source_uri are set, request.url wins
+    (dashboard back-compat — the form's url state is authoritative)."""
+    from core_api.schemas import IngestCommitRequest, IngestFact
+
+    req = IngestCommitRequest(
+        tenant_id="t1",
+        url="https://override.example/canonical",
+        facts=[
+            IngestFact(
+                content="Fact",
+                suggested_type="fact",
+                source_uri="https://stamped-by-preview/old",
+            ),
+        ],
+    )
+    await ingest_service.ingest_commit(db=None, request=req)
+
+    assert captured.writes[0].source_uri == "https://override.example/canonical"
+    assert (
+        captured.writes[0].metadata["ingest_url"]
+        == "https://override.example/canonical"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_text_input_fallback_when_neither_set(captured):
+    """Neither request.url nor fact.source_uri → 'text-input'."""
+    req = _request("t1", "plain content fact")  # _request doesn't set source_uri
+    await ingest_service.ingest_commit(db=None, request=req)
+
+    assert captured.writes[0].source_uri == "text-input"
+    assert captured.writes[0].metadata["ingest_url"] is None
+
+
+# ---------------------------------------------------------------------------
+# PR #3 — P1.E suggested_type validation at commit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_invalid_suggested_type_raises_422_before_any_work(captured):
+    """A forged or garbage suggested_type → 422 with the offending value, BEFORE
+    we touch the dedup query or create_memory. Pre-PR #3 this leaked all the
+    way to MemoryCreate's enum validation and surfaced as a 500."""
+    from fastapi import HTTPException
+
+    from core_api.schemas import IngestCommitRequest, IngestFact
+
+    req = IngestCommitRequest(
+        tenant_id="t1",
+        facts=[
+            IngestFact(content="Real fact 1", suggested_type="fact"),
+            IngestFact(content="Garbage", suggested_type="🦀garbage"),
+            IngestFact(content="Real fact 2", suggested_type="decision"),
+        ],
+    )
+    with pytest.raises(HTTPException) as exc:
+        await ingest_service.ingest_commit(db=None, request=req)
+
+    assert exc.value.status_code == 422
+    assert "🦀garbage" in exc.value.detail
+    assert "[1]" in exc.value.detail  # index 1 is the bad one
+    # No writes happened
+    assert captured.writes == []
+    assert captured.bulk_find_calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_valid_suggested_types_pass_through(captured):
+    """All known MEMORY_TYPES pass the gate."""
+    from core_api.constants import MEMORY_TYPES
+    from core_api.schemas import IngestCommitRequest, IngestFact
+
+    req = IngestCommitRequest(
+        tenant_id="t1",
+        facts=[IngestFact(content=f"Fact {t}", suggested_type=t) for t in MEMORY_TYPES],
+    )
+    result = await ingest_service.ingest_commit(db=None, request=req)
+    assert result["memories_created"] == len(MEMORY_TYPES)
