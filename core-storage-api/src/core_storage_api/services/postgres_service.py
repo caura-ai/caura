@@ -2782,6 +2782,12 @@ class PostgresService:
             )
             agent_rows = result.all()
 
+            trust_result = await session.execute(
+                text("SELECT agent_id, trust_level FROM agents WHERE tenant_id = :tenant_id"),
+                {"tenant_id": tenant_id},
+            )
+            trust_by_id: dict[str, int] = {row.agent_id: row.trust_level for row in trust_result.all()}
+
             now = datetime.now(UTC)
             day_ago = now - timedelta(days=1)
             week_ago = now - timedelta(days=7)
@@ -2796,6 +2802,7 @@ class PostgresService:
                 agents.append(
                     {
                         "agent_id": r.agent_id,
+                        "trust_level": trust_by_id.get(r.agent_id, 1),
                         "total_memories": r.total_memories,
                         "last_write_at": last_write.isoformat() if last_write else None,
                         "total_recalls": int(r.total_recalls),
@@ -2845,6 +2852,7 @@ class PostgresService:
                         agents.append(
                             {
                                 "agent_id": aid,
+                                "trust_level": trust_by_id.get(aid, 1),
                                 "total_memories": 0,
                                 "last_write_at": None,
                                 "total_recalls": 0,
