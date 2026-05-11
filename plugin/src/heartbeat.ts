@@ -654,9 +654,19 @@ async function processCommand(cmd: {
             if (existsSync(p)) backups.set(f, readFileSync(p, "utf-8"));
           }
 
-          // Fetch all files into memory first — don't touch disk until all succeed
+          // Fetch all files into memory first — don't touch disk until all succeed.
+          //
+          // Back-compat note: 404 is treated as NON-FATAL. The plugin's
+          // fallback srcFiles list mirrors current main; older backends
+          // (built before some file was added to their `_plugin_files`
+          // allowlist) will 404 on those specific names. The local copy
+          // from the previous install is still on disk and the build can
+          // proceed without an update for that file. Only NON-404 errors
+          // (network failures, 500s, empty/oversize bodies) make the
+          // overall fetch fail.
           const fetched = new Map<string, string>();
           let fetchOk = true;
+          const skipped404: string[] = [];
           const allFiles: Array<{ name: string; isRoot: boolean }> = [
             ...srcFiles.map((f) => ({ name: f, isRoot: false })),
             ...rootFiles.map((f) => ({ name: f, isRoot: true })),
@@ -682,14 +692,28 @@ async function processCommand(cmd: {
                     console.warn(`[memclaw] Fetched file ${name} returned empty body`);
                   }
                 }
+              } else if (res.status === 404) {
+                // Backend doesn't expose this file — older than the
+                // plugin's fallback list. Keep the local copy.
+                skipped404.push(name);
               } else {
                 fetchOk = false;
+                console.warn(`[memclaw] Fetched file ${name} returned HTTP ${res.status}`);
               }
-            } catch {
+            } catch (e: unknown) {
               fetchOk = false;
+              console.warn(
+                `[memclaw] Fetched file ${name} threw: ${(e as Error).message}`,
+              );
             } finally {
               clearTimeout(fetchTimeout);
             }
+          }
+          if (skipped404.length > 0) {
+            console.warn(
+              `[memclaw] /plugin-source 404 on ${skipped404.length} files (older backend?), ` +
+                `keeping local copies: ${skipped404.join(", ")}`,
+            );
           }
           if (fetchOk) {
             try {
@@ -700,6 +724,7 @@ async function processCommand(cmd: {
                 if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
                 writeFileSync(target, text, "utf-8");
               }
+              console.log(`[memclaw] deploy: wrote ${fetched.size} files`);
               // Stamp version.ts from the manifest's version BEFORE
               // building. This is the fix for drift 2 — the prebuild
               // step references a monorepo path that doesn't exist on
@@ -727,11 +752,20 @@ async function processCommand(cmd: {
                 // the new version.
                 writeDeployPending(manifestVersion);
               }
-              const buildOutput = execSync("npm run build 2>&1", {
+              // Build with `npx tsc` directly, NOT `npm run build`.
+              // The latter triggers package.json's `prebuild` hook which
+              // calls `bash ../scripts/gen-version.sh` — a monorepo path
+              // that doesn't exist on a flat install. We already stamp
+              // version.ts directly above when manifestVersion is set,
+              // so the prebuild step is redundant AND fatal here. Going
+              // straight through tsc keeps the build hermetic.
+              console.log(`[memclaw] deploy: invoking npx tsc (timeout=${BUILD_TIMEOUT_MS}ms)`);
+              const buildOutput = execSync("npx tsc 2>&1", {
                 cwd: pluginDir,
                 encoding: "utf-8",
                 timeout: BUILD_TIMEOUT_MS,
               });
+              console.log(`[memclaw] deploy: build succeeded, scheduling restart`);
               result = {
                 ok: true,
                 target_version: manifestVersion,
@@ -749,6 +783,8 @@ async function processCommand(cmd: {
                 }
               }, 2000);
             } catch (e: unknown) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              console.warn(`[memclaw] deploy: build failed — ${errMsg.slice(0, 200)}`);
               // Write or build failed — restore backups (both src + root)
               for (const [relPath, content] of backups) {
                 try {
@@ -757,6 +793,7 @@ async function processCommand(cmd: {
                   // Restore failed for this file
                 }
               }
+              console.log(`[memclaw] deploy: backups restored (${backups.size} files), status=failed`);
               // Cooldown the failed version so the backend stops
               // re-queuing for it.
               if (manifestVersion) {
@@ -874,13 +911,20 @@ async function processCommand(cmd: {
     result = { error: msg };
   }
 
-  // Report result — cmd.id already validated at function entry
+  // Report result — cmd.id already validated at function entry.
+  // We log the POST attempt + outcome so a stuck "acked" command in
+  // the backend is immediately attributable (plugin didn't POST vs
+  // backend ack'd-but-didn't-update). This saved an hour of wet-test
+  // debugging on the CAURA-444 v2.3.0->v2.4.0 transition path.
   try {
     await apiCall("POST", `/fleet/commands/${encodeURIComponent(cmd.id)}/result`, {
       status,
       result,
     });
-  } catch {
-    // Report failed
+    console.log(`[memclaw] command ${cmd.command} reported: status=${status}`);
+  } catch (re: unknown) {
+    console.warn(
+      `[memclaw] command ${cmd.command} result POST failed: ${(re as Error).message}`,
+    );
   }
 }
