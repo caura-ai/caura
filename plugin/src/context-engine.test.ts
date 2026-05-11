@@ -106,6 +106,72 @@ describe("shouldRecall — policy=keywords", () => {
   });
 });
 
+describe("_hasTriggerKeyword boundary (intentional lenient one-sided match)", () => {
+  // The boundary check is deliberately lenient: it fails only when the
+  // keyword is EMBEDDED inside another word (letters on BOTH sides).
+  // One-sided matches (suffix like "remembered", prefix like
+  // "preremember") DO trigger.
+  //
+  // Rationale (locked here so a future "stricter is safer" refactor
+  // has to explicitly change these assertions): morphological variants
+  // are common in real prompts ("remembered yesterday's deploy?",
+  // "recalling the API change"). The cost of a false positive is one
+  // extra /search; the cost of a false negative on a short prompt is
+  // a missed recall + below-threshold skip → no LTM context.
+
+  test("morphological variants trigger (one-sided)", () => {
+    for (const p of [
+      "remembered yesterday's deploy?",
+      "do you recall anything?",
+      "recalling the API change",
+      "what i told you previously",
+    ]) {
+      const r = shouldRecall(input({ policy: "keywords", prompt: p }));
+      assert.equal(r.recall, true, `expected trigger match for: ${p}`);
+      assert.equal(r.reason, "explicit-recall-trigger");
+    }
+  });
+
+  test("end-of-string is treated as non-letter (matches a trailing keyword)", () => {
+    const r = shouldRecall(
+      input({ policy: "keywords", prompt: "what about before" }),
+    );
+    assert.equal(r.recall, true);
+  });
+
+  test("start-of-string is treated as non-letter (matches a leading keyword)", () => {
+    const r = shouldRecall(
+      input({ policy: "keywords", prompt: "memory leak yesterday?" }),
+    );
+    assert.equal(r.recall, true);
+  });
+
+  test("known minor false positive: 'memorylane' triggers (acceptable)", () => {
+    // Lock this so future readers don't 'fix' it without re-thinking.
+    // Switching to strict word-boundary would also lose
+    // "remembered" etc. above; the trade-off is documented in
+    // context-engine.ts.
+    const r = shouldRecall(
+      input({ policy: "keywords", prompt: "down memory lane yesterday" }),
+    );
+    assert.equal(r.recall, true);
+  });
+
+  test("embedded substrings (letters on BOTH sides) do NOT trigger", () => {
+    for (const p of [
+      "preremembered everything",  // letters both sides of "remember"
+      "unbeforehand",              // letters both sides of "before"
+      "premembering the past",     // letters both sides of "remember"
+    ]) {
+      const r = shouldRecall(input({ policy: "keywords", prompt: p }));
+      // Under "keywords" policy, no trigger match → skip with the
+      // policy-keywords-no-trigger reason.
+      assert.equal(r.recall, false, `expected NO trigger match for: ${p}`);
+      assert.equal(r.reason, "policy-keywords-no-trigger");
+    }
+  });
+});
+
 describe("shouldRecall — policy=auto (the default)", () => {
   test("recalls a substantive prompt", () => {
     const r = shouldRecall(

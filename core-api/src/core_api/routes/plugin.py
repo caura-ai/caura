@@ -1,6 +1,7 @@
 """Plugin source, hash, and install script endpoints."""
 
 import hashlib
+import logging
 import shlex
 from pathlib import Path
 
@@ -9,6 +10,8 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from core_api.constants import VERSION
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["System"])
 
@@ -126,13 +129,26 @@ async def plugin_manifest():
         path = _plugin_dir / fname
         if path.is_file():
             combined += path.read_text(encoding="utf-8")
+        else:
+            # An entry in `_plugin_files` is the canonical list of source
+            # files the plugin should fetch. A missing file means either
+            # the deployment dropped a file or the list drifted from
+            # disk — either is a real bug and should be visible in logs
+            # rather than silently producing a partial-content hash.
+            logger.warning(
+                "plugin_manifest: expected plugin file missing on disk: %s",
+                path,
+            )
     for fname in sorted(_plugin_root_files):
         path = _plugin_dir.parent / fname
         if path.is_file():
             combined += path.read_text(encoding="utf-8")
-    content_hash = (
-        hashlib.sha256(combined.encode("utf-8")).hexdigest() if combined else ""
-    )
+        else:
+            logger.warning(
+                "plugin_manifest: expected plugin root file missing on disk: %s",
+                path,
+            )
+    content_hash = hashlib.sha256(combined.encode("utf-8")).hexdigest() if combined else ""
     return {
         "version": VERSION,
         "src_files": list(_plugin_files),
@@ -161,10 +177,22 @@ async def plugin_source_hash():
         path = _plugin_dir / fname
         if path.is_file():
             combined += path.read_text(encoding="utf-8")
+        else:
+            # Mirror plugin_manifest — a missing file produces a
+            # partial-content hash silently. Log it.
+            logger.warning(
+                "plugin_source_hash: expected plugin file missing on disk: %s",
+                path,
+            )
     for fname in sorted(_plugin_root_files):
         path = _plugin_dir.parent / fname
         if path.is_file():
             combined += path.read_text(encoding="utf-8")
+        else:
+            logger.warning(
+                "plugin_source_hash: expected plugin root file missing on disk: %s",
+                path,
+            )
     if not combined:
         return PlainTextResponse("Plugin source not found", status_code=404)
     return hashlib.sha256(combined.encode("utf-8")).hexdigest()

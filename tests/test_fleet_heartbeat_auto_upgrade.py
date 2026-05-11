@@ -34,6 +34,14 @@ from core_api.routes import fleet as fleet_mod
         ("2.4.0", None, False),
         ("dev", "2.4.0", False),
         ("not.a.version", "2.4.0", False),
+        # Pure-separator strings with no digits filter to an empty list
+        # via `[int(x) for x in s.split(".") if x]`. Without the
+        # empty-list guard they'd zero-pad to [0,0,0] and falsely
+        # compare as older than any real version, triggering a spurious
+        # auto-upgrade. Locked here.
+        ("...", "2.4.0", False),
+        (".", "2.4.0", False),
+        ("....", "2.4.0", False),
     ],
 )
 def test_semver_lt(a, b, expected):
@@ -209,11 +217,39 @@ async def test_maybe_queue_auto_upgrade_skips_when_blocked(monkeypatch):
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    future_ms = 99999999999999  # year 5138
+    # 1 hour in the future — well within the 7-day MAX_BLOCK_MS cap.
+    from datetime import UTC, datetime
+    near_future_ms = int(datetime.now(UTC).timestamp() * 1000) + 3600_000
     await fleet_mod._maybe_queue_auto_upgrade(
-        db=None, sc=sc, body=_body("2.4.1", deploy_blocked_until=future_ms)
+        db=None, sc=sc, body=_body("2.3.5", deploy_blocked_until=near_future_ms)
     )
     assert sc.created_commands == []
+
+
+@pytest.mark.asyncio
+async def test_maybe_queue_auto_upgrade_ignores_absurd_block_cap(monkeypatch):
+    """deploy_blocked_until > MAX_BLOCK_MS (7 days) is NOT honored.
+
+    A misbehaving / malicious plugin could pin
+    deploy_blocked_until = Number.MAX_SAFE_INTEGER to DoS its own
+    upgrade path. The cap forces such absurd values to fall through
+    to the normal "queue deploy" branch so the next heartbeat retries
+    the upgrade.
+    """
+    monkeypatch.setattr(fleet_mod, "VERSION", "2.4.0")
+
+    async def _enabled(_db, _tid):
+        return True
+
+    monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
+    sc = _FakeStorage()
+    absurd_future_ms = 99999999999999  # year 5138
+    await fleet_mod._maybe_queue_auto_upgrade(
+        db=None, sc=sc, body=_body("2.3.5", deploy_blocked_until=absurd_future_ms)
+    )
+    # Absurd value ignored → deploy IS queued (normal path).
+    assert len(sc.created_commands) == 1
+    assert sc.created_commands[0]["command"] == "deploy"
 
 
 @pytest.mark.asyncio
@@ -279,3 +315,51 @@ async def test_maybe_queue_auto_upgrade_skips_when_plugin_version_missing(monkey
         body=fleet_mod.HeartbeatIn(tenant_id="tenant-1", node_name="node-a"),
     )
     assert sc.created_commands == []
+
+
+# ---------------------------------------------------------------------------
+# HeartbeatIn.recall_metrics size cap
+# ---------------------------------------------------------------------------
+
+
+def test_recall_metrics_under_cap_accepted():
+    """Normal-sized blob from the plugin passes through unchanged."""
+    body = fleet_mod.HeartbeatIn(
+        tenant_id="tenant-1",
+        node_name="node-a",
+        recall_metrics={
+            "calls_total": 142,
+            "skipped_total": 89,
+            "skipped_by_reason": {
+                "trivial-ping": 41,
+                "below-threshold": 33,
+                "slash-command": 8,
+                "explicit-recall-trigger": 7,
+            },
+        },
+    )
+    assert body.recall_metrics is not None
+    assert body.recall_metrics["calls_total"] == 142
+
+
+def test_recall_metrics_over_cap_rejected():
+    """A misbehaving plugin sending a huge counter blob is rejected at
+    the API boundary — protects nodes.metadata from unbounded growth.
+    """
+    import pytest as _pt
+    from pydantic import ValidationError
+
+    huge = {"calls_total": 1, "skipped_by_reason": {f"reason-{i}": i for i in range(500)}}
+    # 500 keys × ~20 bytes ≈ 10 KB → well over the 4 KB cap.
+    with _pt.raises(ValidationError, match="exceeds 4 KB limit"):
+        fleet_mod.HeartbeatIn(
+            tenant_id="tenant-1",
+            node_name="node-a",
+            recall_metrics=huge,
+        )
+
+
+def test_recall_metrics_none_accepted():
+    """Omitted field is fine (back-compat with older plugins)."""
+    body = fleet_mod.HeartbeatIn(tenant_id="tenant-1", node_name="node-a")
+    assert body.recall_metrics is None

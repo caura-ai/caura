@@ -1,11 +1,12 @@
 """Fleet heartbeat and command channel — replaces WebSocket/SSH gateway model."""
 
+import json
 import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,17 @@ class HeartbeatIn(BaseModel):
     # for this node — the plugin is signalling it knows it's in a
     # broken-deploy state and another deploy would just loop.
     deploy_blocked_until: int | None = None
+
+    @field_validator("recall_metrics")
+    @classmethod
+    def _cap_recall_metrics(cls, v: dict | None) -> dict | None:
+        # Cap incoming counter blob to keep a misbehaving / malicious
+        # plugin from ballooning `nodes.metadata` rows. The plugin's
+        # actual `getRecallMetrics()` payload is well under 1 KB even
+        # with every reason populated; 4 KB is a comfortable headroom.
+        if v is not None and len(json.dumps(v)) > 4096:
+            raise ValueError("recall_metrics exceeds 4 KB limit")
+        return v
 
 
 class CommandIn(BaseModel):
@@ -219,6 +231,12 @@ def _semver_lt(a: str | None, b: str | None) -> bool:
     try:
         a_parts = [int(x) for x in a.split(".") if x]
         b_parts = [int(x) for x in b.split(".") if x]
+        # Pure-separator strings like "..." filter to an empty list. After
+        # zero-padding they would look like [0, 0, 0] and falsely test
+        # "older than" any real version — triggering a spurious auto-upgrade.
+        # Treat any side with no numeric components as "unknown", not "0".
+        if not a_parts or not b_parts:
+            return False
         # Pad to the same length with zeros so "2.4" < "2.4.1".
         n = max(len(a_parts), len(b_parts))
         a_parts += [0] * (n - len(a_parts))
@@ -228,9 +246,7 @@ def _semver_lt(a: str | None, b: str | None) -> bool:
         return False
 
 
-async def _auto_upgrade_enabled_for_tenant(
-    db: AsyncSession, tenant_id: str
-) -> bool:
+async def _auto_upgrade_enabled_for_tenant(db: AsyncSession, tenant_id: str) -> bool:
     """Default true; per-tenant flip via
     ``organization_settings.memclaw.auto_upgrade_enabled = false``.
     """
@@ -245,12 +261,17 @@ async def _auto_upgrade_enabled_for_tenant(
         # Fail-open on settings-resolve errors so a misconfigured tenant
         # doesn't permanently lose auto-upgrade. The cooldown machinery
         # on the plugin side prevents loops in the worst case.
+        # Log the failure so chronic settings-resolve breakage is
+        # observable rather than silently masked.
+        logger.warning(
+            "fleet.heartbeat: failed to resolve auto_upgrade_enabled for tenant=%s",
+            tenant_id,
+            exc_info=True,
+        )
         return True
 
 
-async def _has_recent_deploy_command(
-    sc, tenant_id: str, node_name: str
-) -> bool:
+async def _has_recent_deploy_command(sc, tenant_id: str, node_name: str) -> bool:
     """True if a ``deploy`` command for this node is pending or was
     queued within the cooldown window. Prevents the heartbeat from
     queueing a second deploy on top of an in-flight one.
@@ -263,7 +284,14 @@ async def _has_recent_deploy_command(
         return any((c or {}).get("command") == "deploy" for c in pending or [])
     except Exception:
         # If we can't tell, assume yes — better to skip a queue than to
-        # double-queue.
+        # double-queue. Log the failure so a chronic storage outage on
+        # this path doesn't silently mask auto-upgrade entirely.
+        logger.warning(
+            "fleet.heartbeat: failed to check pending deploy commands node=%s tenant=%s",
+            node_name,
+            tenant_id,
+            exc_info=True,
+        )
         return True
 
 
@@ -297,7 +325,17 @@ async def _maybe_queue_auto_upgrade(
         )
         return
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
-    if body.deploy_blocked_until and body.deploy_blocked_until > now_ms:
+    # Cap how far into the future a node can defer its own auto-upgrade.
+    # Pre-cap a misbehaving / malicious plugin could send
+    # ``deploy_blocked_until = Number.MAX_SAFE_INTEGER`` and DoS its own
+    # upgrade path indefinitely. 7 days is comfortably above the longest
+    # ``MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS`` an operator would set.
+    MAX_BLOCK_MS = 7 * 24 * 3600 * 1000
+    if (
+        body.deploy_blocked_until
+        and body.deploy_blocked_until > now_ms
+        and body.deploy_blocked_until < now_ms + MAX_BLOCK_MS
+    ):
         return
     if not await _auto_upgrade_enabled_for_tenant(db, body.tenant_id):
         return
@@ -317,8 +355,7 @@ async def _maybe_queue_auto_upgrade(
             }
         )
         logger.info(
-            "fleet.heartbeat: auto-upgrade queued for node=%s tenant=%s "
-            "(%s -> %s)",
+            "fleet.heartbeat: auto-upgrade queued for node=%s tenant=%s (%s -> %s)",
             body.node_name,
             body.tenant_id,
             body.plugin_version,
@@ -349,7 +386,7 @@ async def heartbeat(
     # columns. This keeps the storage schema unchanged while still
     # exposing the data via the existing /fleet/nodes endpoint and
     # ad-hoc SQL on `nodes.metadata`.
-    merged_metadata: dict | None = body.metadata or None
+    merged_metadata: dict | None = body.metadata
     if body.recall_metrics is not None or body.deploy_blocked_until is not None:
         merged_metadata = dict(merged_metadata or {})
         if body.recall_metrics is not None:

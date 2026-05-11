@@ -201,17 +201,33 @@ function _hasTriggerKeyword(
   return keywords.some((kw) => {
     const k = kw.toLowerCase();
     if (!k) return false;
-    // Substring with word-ish boundary so "before" matches "before lunch"
-    // but doesn't match "unbefore". Multi-word keywords ("long term")
-    // skip the boundary check on whitespace.
+    // Substring with **lenient one-sided** word boundary. The keyword
+    // matches if AT LEAST ONE side is a non-letter (or end-of-string).
+    // The match fails only when the keyword is embedded INSIDE another
+    // word (letters on both sides).
+    //
+    // Examples:
+    //   "remember the deadline"   ✓ (both sides whitespace)
+    //   "remembered yesterday"    ✓ (after='e' is letter, before=' ' is not — one-sided OK)
+    //   "preremember"             ✓ (before='r' is letter, after=end — one-sided OK)
+    //   "preremembered"           ✗ (both sides letters — embedded)
+    //   "memorylane"              ✓ (one-sided — known minor false-positive)
+    //
+    // This is INTENTIONAL: for a recall-gate heuristic, catching
+    // morphological variants ("remembered", "remembering", "recalling")
+    // matters more than excluding rare embedded-substring false
+    // positives. The cost of a false positive is one extra /search;
+    // the cost of a false negative is a missed-context turn.
+    // See context-engine.test.ts "_hasTriggerKeyword boundary"
+    // for the pinned cases. Do NOT switch to strict word-boundary
+    // (`return !(isLetterBefore || isLetterAfter)`) without updating
+    // those tests and reconsidering the trade-off.
     const idx = lc.indexOf(k);
     if (idx < 0) return false;
     const before = idx === 0 ? "" : lc[idx - 1];
     const after = idx + k.length >= lc.length ? "" : lc[idx + k.length];
     const isLetterBefore = /[a-z0-9]/.test(before);
     const isLetterAfter = /[a-z0-9]/.test(after);
-    // Only fail when BOTH sides bleed into other word-chars (e.g. "umemoryx").
-    // One-sided letter is OK ("memorylane" still matches our intent).
     return !(isLetterBefore && isLetterAfter);
   });
 }
@@ -306,6 +322,19 @@ function _recordDecision(decision: ShouldRecallResult, sessionHash: string): voi
           `policy=${RECALL_POLICY} session=${sessionHash}`,
       );
       _lastLoggedAt.set(k, Date.now());
+      // Bounded cleanup so the map doesn't grow indefinitely across
+      // sessions. Triggered only after we'd exceed 1000 distinct
+      // (reason, session-hash) pairs — orders of magnitude above any
+      // real fleet's per-process churn. Cutoff at 10× the log
+      // interval (10 min) so entries that haven't been touched in
+      // that long are pruned; entries within the rate-limit window
+      // stay.
+      if (_lastLoggedAt.size > 1000) {
+        const cutoff = Date.now() - _SKIP_LOG_INTERVAL_MS * 10;
+        for (const [key, ts] of _lastLoggedAt) {
+          if (ts < cutoff) _lastLoggedAt.delete(key);
+        }
+      }
     }
   }
 }
@@ -532,8 +561,10 @@ export class MemClawContextEngine {
     // Two call shapes supported:
     //   - Modern OpenClaw (>= v2026.4.5): assemble({sessionId, messages, prompt, ...})
     //   - Legacy:                          assemble(budget, prompt)
-    // Auto-detect via the absence of `messages`.
-    const isLegacy = !params || !("messages" in params);
+    // Both flow through the same optional-chaining reads below
+    // (`params?.tokenBudget`, `params?.messages`, `params?.prompt`)
+    // and the legacy second-arg `legacyPrompt` fallback; no explicit
+    // branch is needed.
     const tokenBudget = params?.tokenBudget || 0;
     const incomingMessages: Array<{ role: string; content: unknown }> =
       (params?.messages as Array<{ role: string; content: unknown }>) || [];
