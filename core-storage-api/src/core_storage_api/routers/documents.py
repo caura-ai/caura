@@ -14,13 +14,16 @@ _svc = PostgresService()
 @router.post("")
 async def upsert_document(request: Request) -> dict:
     body: dict = await request.json()
-    doc = await _svc.document_upsert(
-        tenant_id=body["tenant_id"],
-        collection=body["collection"],
-        doc_id=body["doc_id"],
-        data=body["data"],
-        fleet_id=body.get("fleet_id"),
-    )
+    try:
+        doc = await _svc.document_upsert(
+            tenant_id=body["tenant_id"],
+            collection=body["collection"],
+            doc_id=body["doc_id"],
+            data=body["data"],
+            fleet_id=body.get("fleet_id"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return orm_to_dict(doc, DOCUMENT_FIELDS)
 
 
@@ -80,11 +83,14 @@ async def delete_document(
     doc_id: str,
     tenant_id: str,
 ) -> dict:
-    deleted_id = await _svc.document_delete_by_doc_id(
-        tenant_id=tenant_id,
-        collection=collection,
-        doc_id=doc_id,
-    )
+    try:
+        deleted_id = await _svc.document_delete_by_doc_id(
+            tenant_id=tenant_id,
+            collection=collection,
+            doc_id=doc_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if deleted_id is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return {"deleted_id": str(deleted_id)}
