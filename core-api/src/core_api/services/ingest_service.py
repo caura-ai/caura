@@ -1,5 +1,6 @@
 """Document/URL ingestion: extract atomic facts via LLM, preview, and commit as memories."""
 
+import asyncio
 import ipaddress
 import logging
 import re
@@ -12,11 +13,13 @@ import httpx
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.constants import MEMORY_TYPES
 from core_api.providers._retry import call_with_fallback
 from core_api.schemas import IngestCommitRequest, IngestRequest, MemoryCreate
-from core_api.services.memory_service import create_memory
+from core_api.services.memory_service import _content_hash, create_memory
+from core_api.services.organization_settings import resolve_config
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +46,12 @@ MAX_INGEST_CONTENT_BYTES = 200_000
 # Azure uses the same IP). Listed defensively even though is_link_local
 # covers them.
 _CLOUD_METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254"})
+
+# Max concurrent ``create_memory`` calls during commit. Strong-mode write
+# runs sync enrichment per fact (a real LLM round-trip), so without
+# parallelism a 10-fact batch is ~20s+. With Semaphore(4) it's ~5s.
+# Bounded to avoid hammering the LLM provider with rate-limit failures.
+_COMMIT_CONCURRENCY = 4
 
 CHUNKING_PROMPT = """\
 Extract discrete, atomic facts from the following content.
@@ -284,15 +293,89 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
 
 
 async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
-    """Commit mode: write previewed facts as memories."""
+    """Commit mode: write previewed facts as memories.
+
+    Three correctness/quality moves over the original loop:
+
+    1. **Strong write_mode** (P1.3). Each ``MemoryCreate`` carries
+       ``write_mode="strong"``, forcing the inline enrichment path so
+       title/tags/weight are populated synchronously. Previously these
+       went out via the fast path's deferred-enrichment queue, which
+       isn't consumed in some deployments — leaving memories with
+       ``title=null`` indefinitely.
+
+    2. **Pre-loop content-hash dedup** (P1.4). Before any enrichment
+       LLM call, batch-query existing content hashes for this tenant.
+       Facts whose hash already exists short-circuit straight into
+       ``skipped_duplicates``. Without this gate, every duplicate
+       paid a full strong-mode LLM round-trip before being rejected
+       with a 409 inside ``create_memory`` — pure waste on overlap-
+       heavy batches (the common re-ingest case).
+
+    3. **Bounded-parallel writes** (P1.3). Survivors go through
+       ``create_memory`` concurrently with ``Semaphore(_COMMIT_CONCURRENCY)``
+       Strong-mode runs a real OpenAI enrichment per fact (~2s); without
+       parallelism, 10 facts is 20s+. ``tenant_config`` is pre-warmed
+       once so the per-fact pipeline reuses the cache instead of racing
+       on the shared session.
+    """
     run_id = request.run_id or str(uuid.uuid4())
     source_uri = request.url or "text-input"
-
-    created = 0
-    skipped = 0
+    facts = list(request.facts)
 
     t0 = time.perf_counter()
-    for fact in request.facts:
+
+    # Pre-warm the tenant-config cache. The first cached lookup is the
+    # only one that may touch ``db``; afterwards every per-fact pipeline
+    # hits the in-process TTLCache. Avoids racing on the shared session
+    # when the concurrent writes fan out below.
+    await resolve_config(db, request.tenant_id)
+
+    # ----- P1.4: pre-loop dedup -----
+    # Compute the same content-hash the write pipeline uses for its 409
+    # gate. Then batch-query for which hashes already exist. Hits get
+    # filtered out here so they never reach enrichment.
+    hashes = [_content_hash(request.tenant_id, request.fleet_id, fact.content) for fact in facts]
+    pre_dedup_skipped = 0
+    if hashes:
+        try:
+            sc = get_storage_client()
+            existing = await sc.bulk_find_by_content_hashes(request.tenant_id, hashes)
+        except Exception:
+            # Fail-open: if the dedup query fails, fall through to the
+            # per-fact path. ``create_memory`` still 409s exact dups, so
+            # correctness is unchanged — we just lose the cost optimization.
+            logger.warning(
+                "ingest_commit: bulk dedup query failed; falling through to per-fact", exc_info=True
+            )
+            existing = {}
+    else:
+        existing = {}
+
+    survivors: list = []
+    for fact, h in zip(facts, hashes):
+        if h in existing:
+            pre_dedup_skipped += 1
+        else:
+            survivors.append(fact)
+
+    if pre_dedup_skipped:
+        logger.info(
+            "ingest_commit: pre-loop dedup eliminated %d/%d facts before enrichment",
+            pre_dedup_skipped,
+            len(facts),
+        )
+
+    # ----- P1.3: parallel strong-mode writes -----
+    sem = asyncio.Semaphore(_COMMIT_CONCURRENCY)
+
+    async def _write_one(fact) -> int:
+        """Return 1 on create, 0 on 409, raise on other failures.
+
+        Errors from ``create_memory`` that aren't 409 propagate out of
+        ``asyncio.gather`` and abort the batch. Tier-1 P1.C-lite (next
+        PR) softens that to per-fact warn-and-continue.
+        """
         mem_data = MemoryCreate(
             tenant_id=request.tenant_id,
             fleet_id=request.fleet_id,
@@ -301,25 +384,42 @@ async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
             content=fact.content,
             source_uri=source_uri,
             run_id=run_id,
+            write_mode="strong",
             metadata={
                 "source": "ingest",
                 "ingest_run_id": run_id,
                 "ingest_url": request.url or None,
             },
         )
-        try:
-            await create_memory(db, mem_data)
-            created += 1
-        except HTTPException as e:
-            if e.status_code == 409:
-                skipped += 1
-            else:
+        async with sem:
+            try:
+                await create_memory(db, mem_data)
+                return 1
+            except HTTPException as e:
+                if e.status_code == 409:
+                    return 0
                 raise
+
+    results = await asyncio.gather(*(_write_one(f) for f in survivors))
+    created = sum(results)
+    skipped_in_loop = len(survivors) - created
+    skipped = pre_dedup_skipped + skipped_in_loop
     ingest_ms = int((time.perf_counter() - t0) * 1000)
+
+    logger.info(
+        "ingest_commit: run_id=%s facts=%d created=%d skipped=%d (pre_dedup=%d, 409=%d) in %dms",
+        run_id,
+        len(facts),
+        created,
+        skipped,
+        pre_dedup_skipped,
+        skipped_in_loop,
+        ingest_ms,
+    )
 
     return {
         "url": request.url,
-        "facts_extracted": len(request.facts),
+        "facts_extracted": len(facts),
         "memories_created": created,
         "skipped_duplicates": skipped,
         "run_id": run_id,

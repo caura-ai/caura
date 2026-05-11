@@ -56,6 +56,7 @@ from core_api.services.agent_service import (
     lookup_agent,
 )
 from core_api.services.audit_service import log_action
+from core_api.services.ingest_service import ingest_commit, ingest_preview
 from core_api.services.memory_service import (
     _memory_to_out,
     create_memories_bulk,
@@ -1258,8 +1259,6 @@ async def ingest_preview_endpoint(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
-    from core_api.services.ingest_service import ingest_preview
-
     return await ingest_preview(db, body)
 
 
@@ -1277,8 +1276,6 @@ async def ingest_commit_endpoint(
     auth.enforce_tenant(body.tenant_id)
     if auth.tenant_id:  # skip for admin
         await check_and_increment(db, body.tenant_id, "write")
-    from core_api.services.ingest_service import ingest_commit
-
     return await ingest_commit(db, body)
 
 
