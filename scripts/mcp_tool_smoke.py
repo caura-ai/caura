@@ -253,10 +253,9 @@ def main():
                 "doc_id": "smoke-skill",
                 "data": {
                     "name": "smoke-skill",
-                    "description": "Smoke-test skill — published via memclaw_doc.",
+                    "summary": "Smoke-test skill — published via memclaw_doc.",
                     "content": "# smoke-skill\n\nProbe content.\n",
                 },
-                "embed_field": "description",
             },
         ),
         (

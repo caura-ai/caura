@@ -13,10 +13,11 @@ from ._types import OpSpec, ToolSpec
 _DESCRIPTION = (
     "Structured-document CRUD in named collections. "
     "op: write|read|query|delete|list_collections|search. "
-    "write upserts by collection+doc_id (pass embed_field to index a text "
-    "field for semantic search); query filters by where dict; "
+    "write upserts by collection+doc_id — include data['summary'] (1-3 dense "
+    "sentences, intent-focused) to make the doc semantically searchable; "
+    "omit it to store without indexing. query filters by where dict; "
     "list_collections enumerates every collection this tenant has (with counts); "
-    "search runs semantic retrieval over docs indexed via embed_field on write — "
+    "search runs semantic retrieval over data['summary'] vectors — "
     "pass collection to scope to one (narrow strategy), or omit collection to "
     "span every collection in the tenant (broad strategy). "
     "Use for structured records (customers, config). For memories use memclaw_write."
@@ -32,9 +33,16 @@ _SPEC = ToolSpec(
         OpSpec(
             name="write",
             description=(
-                "Upsert a document by collection+doc_id. Pass optional "
-                "embed_field=<json key> to index that field's text for "
-                "semantic search."
+                "Upsert a document by collection+doc_id. Set data['summary'] "
+                "to a short (1-3 sentence) intent-focused description to "
+                "make the doc semantically searchable — that string (and "
+                "only that string) is what gets embedded. The full body "
+                "lives wherever the caller puts it (e.g. data['content']) "
+                "and is returned in read/search results but is NOT indexed. "
+                "Good: 'Postgres tuning runbook: vacuum, autovacuum, work_mem.' "
+                "Bad: '<the first 200 chars of the body>' (truncation is not "
+                "summarization). "
+                "Omit summary to store the doc without indexing."
             ),
             required_params=("collection", "doc_id", "data"),
         ),
@@ -67,7 +75,8 @@ _SPEC = ToolSpec(
             description=(
                 "Semantic search. Pass collection to scope to one (narrow); "
                 "omit collection to search every collection in the tenant "
-                "(broad). Only docs written with embed_field appear. Returns "
+                "(broad). Only docs written with a data['summary'] appear "
+                "(no summary → no embedding → invisible to search). Returns "
                 "up to top_k results ordered by cosine similarity (1.0 = "
                 "identical). Each row includes its own collection so the "
                 "caller can follow up with op=read."

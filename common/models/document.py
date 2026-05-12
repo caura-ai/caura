@@ -13,7 +13,12 @@ from common.models.base import Base
 class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "collection", "doc_id", name="uq_documents_tenant_collection_doc"),
+        UniqueConstraint(
+            "tenant_id",
+            "collection",
+            "doc_id",
+            name="uq_documents_tenant_collection_doc",
+        ),
         Index("ix_documents_tenant_collection", "tenant_id", "collection"),
         Index("ix_documents_data", "data", postgresql_using="gin"),
     )
@@ -25,9 +30,12 @@ class Document(Base):
     fleet_id: Mapped[str | None] = mapped_column(Text)
     collection: Mapped[str] = mapped_column(Text, nullable=False)
     doc_id: Mapped[str] = mapped_column(Text, nullable=False)
-    data: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
-    # Optional embedding populated when op=write is called with embed_field.
-    # NULL = not indexed for semantic search (the default).
+    data: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    # Optional embedding populated when op=write resolves a string to embed
+    # from data["summary"] (or data["description"] for the skills collection
+    # back-compat path). NULL = not indexed for semantic search.
     embedding = mapped_column(Vector(VECTOR_DIM), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")

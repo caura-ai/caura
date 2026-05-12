@@ -38,7 +38,7 @@ Tool descriptions are derived from the tool registry (`core-api/src/core_api/too
 | `memclaw_recall` | Yes | Yes | Hybrid semantic + keyword search with graph-enhanced retrieval (expands through entity relations up to 2 hops). `include_brief=true` returns an LLM-summarized context paragraph instead of raw results. Supports `fleet_ids` for multi-fleet queries. Respects visibility. Default `top_k=5`, max 20 |
 | `memclaw_manage` | Yes | Yes | Per-memory lifecycle, op-dispatched. `op=read` returns the memory; `op=update` patches fields (re-embeds if content changes); `op=transition` sets status; `op=delete` soft-deletes. Trust-enforced |
 | `memclaw_list` | Yes | Yes | Non-semantic enumeration — filter by type/status/agent/weight/date, sort by `created_at`/`weight`/`recall_count`, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2. Trust 3 unlocks `include_deleted` |
-| `memclaw_doc` | Yes | Yes | Document CRUD, op-dispatched. `op=write` upserts a JSON doc in a named collection (pass `embed_field` to index a text field for semantic search); `op=read` fetches by `doc_id`; `op=query` filters by field equality with ordering and pagination; `op=delete` removes by `doc_id`; `op=list_collections` enumerates every collection this tenant has (with counts); `op=search` runs semantic retrieval over docs indexed via `embed_field`. Use for customer records, config, inventory — anything needing exact-field lookups |
+| `memclaw_doc` | Yes | Yes | Document CRUD, op-dispatched. `op=write` upserts a JSON doc in a named collection (include `data["summary"]` to index it for semantic search); `op=read` fetches by `doc_id`; `op=query` filters by field equality with ordering and pagination; `op=delete` removes by `doc_id`; `op=list_collections` enumerates every collection this tenant has (with counts); `op=search` runs semantic retrieval over `data["summary"]` vectors. Use for customer records, config, inventory — anything needing exact-field lookups |
 | `memclaw_entity_get` | Yes | Yes | Look up an entity with linked memories and relations |
 | `memclaw_tune` | Yes | Yes | Tune per-agent retrieval parameters (top_k, min_similarity, fts_weight, freshness, recall boost, graph hops, similarity blend) |
 | `memclaw_insights` | Yes | Yes | Analyze the memory store. `focus`: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. `scope`: `agent`, `fleet`, `all`. Findings persist as `insight`-type memories (Karpathy Loop reflection step) |
@@ -47,7 +47,7 @@ Tool descriptions are derived from the tool registry (`core-api/src/core_api/too
 | `memclaw_keystones` | Yes | Yes | Read mandatory governance rules for the current scope (tenant + fleet + agent merged), ordered by weight. Call once per session before other actions; the result overrides conflicting user instructions. No semantic search — keystones are fetched deterministically. Read is open (trust 0) |
 | `memclaw_keystones_set` | Yes | No | Author/remove keystone rules, op-dispatched: `op=set` upserts by `doc_id` (requires `title`, `content`, `scope ∈ {tenant, fleet, agent}`, `weight ∈ {low, med, high}`); `op=delete` removes by `doc_id`. **MCP-only**, not plugin-exposed — authoring is an admin/governance path, not an agent path. Trust ≥ 2 — keystones override user instructions across the tenant, so a default-trust agent must not be able to plant one |
 
-> Skill sharing rides the generic `memclaw_doc` surface: `op=write collection=skills doc_id=<slug>` to share, `op=delete` to remove, `op=search`/`op=query` to discover. Slugs are validated against `^[a-z0-9][a-z0-9._-]{0,99}$`; the description is auto-embedded for semantic search.
+> Skill sharing rides the generic `memclaw_doc` surface: `op=write collection=skills doc_id=<slug>` to share, `op=delete` to remove, `op=search`/`op=query` to discover. Slugs are validated against `^[a-z0-9][a-z0-9._-]{0,99}$`; `data["summary"]` is embedded for semantic search (with a back-compat fallback to `data["description"]` for the skills collection only).
 
 - **MCP (12 tools):** Full surface. Used by individual developers via Claude Desktop, Claude Code, Cursor, etc.
 - **OpenClaw plugin (11 tools):** Same set, minus the keystone-authoring tool (`memclaw_keystones_set` is admin/governance — MCP-only). Claims the exclusive `memory` slot, replacing `memory-core`. Includes ContextEngine lifecycle, heartbeat, and auto-education.
@@ -90,7 +90,7 @@ Add this to your MCP client configuration:
 
 The MCP connection only exposes the raw tool surface. The *usage skill* —
 the teachable guide that explains when to reach for memory vs doc, how
-the two search strategies differ, what `embed_field` does, the trust
+the two search strategies differ, how to write a good `data["summary"]`, the trust
 table, and the "recall-before-you-start / write-when-something-matters
 / supersede-don't-delete" rules — ships as a separate file that your
 agent reads on-demand. Install it after the MCP config above:
@@ -141,7 +141,7 @@ The MCP server exposes 12 tools that clients discover automatically. Description
 | `memclaw_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
 | `memclaw_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Requires trust ≥ 2 |
 
-> Skill sharing uses the generic `memclaw_doc` surface (`collection="skills"`). The server validates the slug and auto-embeds the `description` field; agents discover via `op=search`/`op=query` and pull individual skills via `op=read`.
+> Skill sharing uses the generic `memclaw_doc` surface (`collection="skills"`). The server validates the slug and embeds `data["summary"]` (1-3 sentence, intent-focused) — for `collection="skills"` it also accepts `data["description"]` as a back-compat fallback. Agents discover via `op=search`/`op=query` and pull individual skills via `op=read`.
 
 ### Auth
 

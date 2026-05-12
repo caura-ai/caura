@@ -111,18 +111,18 @@ memclaw_doc op=read   collection=skills doc_id=<slug>  # full body
 
 # Share — slug is `[a-z0-9][a-z0-9._-]{0,99}` (filesystem-safe)
 memclaw_doc op=write collection=skills doc_id=<slug> \
-  data={ "name": "<slug>", "description": "<one-liner>", "content": "<full SKILL.md>" } \
-  embed_field=description
+  data={ "name": "<slug>", "summary": "<one-liner>", "content": "<full SKILL.md>" }
 
 # Remove
 memclaw_doc op=delete collection=skills doc_id=<slug>
 ```
 
-`embed_field=description` indexes the description for semantic search so
-other agents can find the skill by meaning even when names don't match.
-The server auto-defaults this when `collection=skills`; passing it
-explicitly is harmless. Re-uploading the same `doc_id` overwrites — that
-is how you publish a new version.
+The `data["summary"]` string (1-3 sentences, intent-focused) is what
+gets embedded — that's what makes the skill discoverable by meaning,
+even when names don't match. For back-compat the server also accepts
+`data["description"]` on `collection=skills` writes if no summary is
+provided. Re-uploading the same `doc_id` overwrites — that is how you
+publish a new version.
 
 Direct-MCP clients (Claude Code, Codex) consume skills via
 `memclaw_doc op=read collection=skills doc_id=<slug>` — no filesystem
@@ -176,7 +176,7 @@ Same rule applies to `memclaw_doc op=write`.
 Non-semantic enumeration. Cursor pagination requires
 `sort=created_at order=desc`. `scope="fleet"` / `"all"` → trust 2.
 
-**`memclaw_doc(op, collection=?, doc_id=?, data=?, where=?, order_by=?, limit=20, offset=0, embed_field=?, query=?, top_k=5)`** — op ∈ {write, read, query, delete, list_collections, search}
+**`memclaw_doc(op, collection=?, doc_id=?, data=?, where=?, order_by=?, limit=20, offset=0, query=?, top_k=5)`** — op ∈ {write, read, query, delete, list_collections, search}
 Structured records by `collection + doc_id`. `write` upserts. `where` is
 scalar exact-match only — does not descend into arrays; filter by scalar
 fields, or fetch by `doc_id` when you have it. When you don't know which
@@ -186,10 +186,11 @@ every collection name with per-collection document counts
 ops except `list_collections`.
 
 **Semantic search for docs** — opt in at write time, retrieve at read time.
-To make a doc findable by meaning (not just by known `doc_id`), pass
-`embed_field="<json-key>"` on write — the server embeds `data[embed_field]`
-and stores the vector. Docs written without `embed_field` are invisible to
-`op=search` — re-write them with the field set to index retroactively.
+To make a doc findable by meaning (not just by known `doc_id`), include
+`data["summary"]` on write — a short (1-3 sentence) intent-focused
+description. The server embeds that exact string and only that string.
+Docs without a summary are invisible to `op=search` — re-write them with
+a summary to index retroactively.
 
 Two search strategies the agent should know:
 - **Narrow (collection-scoped).** Use when you either know the collection
@@ -253,7 +254,7 @@ able to plant one.
 - Recall quality off across queries → `memclaw_tune` (once, sticky)
 - Session boundary / orchestrator sweep → `memclaw_insights`
 - Stuck on a non-trivial workflow → search by meaning (`memclaw_doc op=search collection=skills query=...`) or browse (`memclaw_doc op=query collection=skills`) before improvising
-- Built a reusable workflow → `memclaw_doc op=write collection=skills doc_id=<slug> embed_field=description` to teach the fleet
+- Built a reusable workflow → `memclaw_doc op=write collection=skills doc_id=<slug> data={"summary": "<one-liner>", ...}` to teach the fleet
 - Skill is wrong / superseded → `memclaw_doc op=delete collection=skills doc_id=<slug>` to remove it
 
 ### Anti-patterns

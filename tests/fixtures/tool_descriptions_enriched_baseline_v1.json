@@ -1,6 +1,6 @@
 {
   "memclaw_doc": {
-    "description": "Structured-document CRUD in named collections. op: write|read|query|delete|list_collections|search. write upserts by collection+doc_id (pass embed_field to index a text field for semantic search); query filters by where dict; list_collections enumerates every collection this tenant has (with counts); search runs semantic retrieval over docs indexed via embed_field on write \u2014 pass collection to scope to one (narrow strategy), or omit collection to span every collection in the tenant (broad strategy). Use for structured records (customers, config). For memories use memclaw_write.",
+    "description": "Structured-document CRUD in named collections. op: write|read|query|delete|list_collections|search. write upserts by collection+doc_id \u2014 include data['summary'] (1-3 dense sentences, intent-focused) to make the doc semantically searchable; omit it to store without indexing. query filters by where dict; list_collections enumerates every collection this tenant has (with counts); search runs semantic retrieval over data['summary'] vectors \u2014 pass collection to scope to one (narrow strategy), or omit collection to span every collection in the tenant (broad strategy). Use for structured records (customers, config). For memories use memclaw_write.",
     "stm_only": false
   },
   "memclaw_entity_get": {

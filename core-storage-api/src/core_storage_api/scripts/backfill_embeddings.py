@@ -69,10 +69,11 @@ Scope:
 - ``memories.embedding`` — re-embedded from ``memories.content``.
 - ``entities.name_embedding`` — re-embedded from ``entities.canonical_name``.
 - ``documents.embedding`` — NOT handled. Documents store opaque JSON and
-  the original embed source is the user-configured ``embed_field``; the
-  per-doc ``embed_field`` isn't recorded in the row. Treat documents as
-  lazy (re-write the doc with the same ``embed_field`` to re-embed) or
-  use a custom script.
+  the embed source is fixed to ``data["summary"]`` (with a back-compat
+  fallback to ``data["description"]`` for ``collection="skills"``).
+  Treat documents as lazy: re-write the doc (no schema change needed —
+  the existing ``data["summary"]`` re-embeds on upsert) or use a custom
+  script that loads the row's ``data`` and POSTs it back.
 
 Exit codes:
     0  Backfill completed (or dry-run completed).

@@ -136,12 +136,12 @@ def test_contains_direct_mcp_specific_content_additions() -> None:
         "Rule 3 — Supersede, don't delete",
         "Auto-registered at trust 1 on your first write",
         # Direct-MCP-specific additions
-        "Cross-store discovery",       # hybrid-pattern for doc discoverability
-        'op="list_collections"',       # real op for enumerating collections
-        'op="search"',                 # semantic search over docs
-        "embed_field",                 # opt-in semantic indexing on write
-        "scalar exact-match only",     # memclaw_doc where-filter gotcha
-        "### Anti-patterns",           # explicit don't-do-this subsection
+        "Cross-store discovery",  # hybrid-pattern for doc discoverability
+        'op="list_collections"',  # real op for enumerating collections
+        'op="search"',  # semantic search over docs
+        'data["summary"]',  # opt-in semantic indexing on write
+        "scalar exact-match only",  # memclaw_doc where-filter gotcha
+        "### Anti-patterns",  # explicit don't-do-this subsection
     ]
     for phrase in must_contain:
         assert phrase in skill, f"adapter missing {phrase!r}"

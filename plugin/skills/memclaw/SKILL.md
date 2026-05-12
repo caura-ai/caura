@@ -162,18 +162,17 @@ memclaw_doc op=read   collection=skills doc_id=<slug>  # full body
 
 # Share — slug is `[a-z0-9][a-z0-9._-]{0,99}` (filesystem-safe)
 memclaw_doc op=write collection=skills doc_id=<slug> \
-  data={ "name": "<slug>", "description": "<one-liner>", "content": "<full SKILL.md>" } \
-  embed_field=description
+  data={ "name": "<slug>", "summary": "<one-liner>", "content": "<full SKILL.md>" }
 
 # Remove
 memclaw_doc op=delete collection=skills doc_id=<slug>
 ```
 
-Setting `embed_field=description` indexes the description for semantic
-search so other agents can find the skill by meaning ("how do I
-research scientific papers?") even when names don't match. The server
-auto-defaults `embed_field=description` when `collection=skills`, but
-passing it explicitly is harmless.
+The `data["summary"]` string is what gets embedded — that's what makes
+the skill discoverable by meaning ("how do I research scientific
+papers?") even when names don't match. For back-compat, the server
+also accepts `data["description"]` on `collection=skills` writes if no
+summary is provided.
 
 Visibility follows the document — share at `fleet_id` scope so the
 catalog row is visible to every agent on that fleet. Re-uploading the
@@ -222,8 +221,10 @@ usually right.
 Non-semantic enumeration. Cursor pagination requires
 `sort=created_at order=desc`. `scope="fleet"` / `"all"` → trust 2.
 
-**`memclaw_doc(op, collection=?, doc_id=?, data=?, where=?, order_by=?, limit=20, offset=0, embed_field=?, query=?)`** — op ∈ {write, read, query, delete, list_collections, search}
-Structured records by `collection + doc_id`. `write` upserts.
+**`memclaw_doc(op, collection=?, doc_id=?, data=?, where=?, order_by=?, limit=20, offset=0, query=?)`** — op ∈ {write, read, query, delete, list_collections, search}
+Structured records by `collection + doc_id`. `write` upserts; include
+`data["summary"]` (1-3 sentences, intent-focused) to make the doc
+semantically searchable — that's the only field that gets embedded.
 
 **`memclaw_entity_get(entity_id)`**
 UUID from a prior call — never fabricate.
@@ -265,7 +266,7 @@ checks; use this. `scope="fleet"` / `"all"` → trust 2.
 - Session boundary / orchestrator sweep → `memclaw_insights`
 - Heartbeat readiness probe / counts dashboard → `memclaw_stats`
 - Stuck on a non-trivial workflow → search by meaning (`memclaw_doc op=search collection=skills query=...`) or browse (`memclaw_doc op=query collection=skills`) before improvising
-- Built a reusable workflow → `memclaw_doc op=write collection=skills doc_id=<slug> embed_field=description` to teach the fleet
+- Built a reusable workflow → `memclaw_doc op=write collection=skills doc_id=<slug> data={"summary": "<one-liner>", ...}` to teach the fleet
 - Skill is wrong / superseded → `memclaw_doc op=delete collection=skills doc_id=<slug>` to remove it
 
 ### Constraints that matter

@@ -321,7 +321,7 @@ The client discovers 12 tools automatically:
 | `memclaw_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
 | `memclaw_keystones_set` | Author or remove keystone rules (`op=set\|delete`). Requires trust ≥ 2 |
 
-> **Skill sharing** is now done via `memclaw_doc` — agents share a `SKILL.md` by upserting a document into the `skills` collection (`memclaw_doc op=write collection=skills doc_id=<slug> data={...}`). The server auto-indexes the description for semantic search. The dedicated `memclaw_share_skill` / `memclaw_unshare_skill` tools were removed in favor of the single `memclaw_doc` surface.
+> **Skill sharing** is now done via `memclaw_doc` — agents share a `SKILL.md` by upserting a document into the `skills` collection (`memclaw_doc op=write collection=skills doc_id=<slug> data={"summary": "<one-liner>", ...}`). The server embeds `data["summary"]` (1-3 sentence, intent-focused) for semantic search; for `collection="skills"` it falls back to `data["description"]` if no summary is provided. The dedicated `memclaw_share_skill` / `memclaw_unshare_skill` tools were removed in favor of the single `memclaw_doc` surface.
 
 ### Install the skill (Claude Code & Codex)
 
@@ -807,7 +807,7 @@ The MCP server is mounted at `/mcp`. Tool names, parameter names, and the docume
 | `memclaw_keystones` | Read mandatory governance rules for the current scope (tenant + fleet + agent merged). Call once per session. |
 | `memclaw_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Requires trust ≥ 2. |
 
-> Skill sharing uses the generic `memclaw_doc` surface — write/read/query/search/delete on `collection="skills"`. The server validates the slug and auto-embeds the `description` field for semantic discovery.
+> Skill sharing uses the generic `memclaw_doc` surface — write/read/query/search/delete on `collection="skills"`. The server validates the slug and embeds `data["summary"]` for semantic discovery (with a back-compat fallback to `data["description"]` for skills).
 
 #### REST endpoints
 

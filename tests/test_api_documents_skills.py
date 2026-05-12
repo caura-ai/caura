@@ -4,15 +4,18 @@ Phase B of the skills-as-documents migration replaced the dedicated
 `memclaw_share_skill` / `memclaw_unshare_skill` MCP tools (and their
 `/skills/*` REST routes) with a single rule on the generic document
 upsert path: when ``collection == "skills"``, the server enforces a
-filesystem-safe slug and auto-defaults ``embed_field=description`` so
-the catalog is semantic-searchable without ceremony.
+filesystem-safe slug and indexes a text field automatically.
+
+As of the `feat/doc-mandate-summary` change the indexed text is taken
+from ``data["summary"]`` (preferred) with a back-compat fallback to
+``data["description"]``. The ``embed_field`` parameter was removed.
 
 These tests lock the new contract:
 
-1. Valid slugs upsert + auto-embed (description indexed for op=search).
+1. Valid slugs upsert + auto-embed (description or summary indexed for op=search).
 2. Invalid slugs are rejected with 422.
 3. The dropped `/skills/*` REST routes return 404.
-4. Non-skills collections still work without `embed_field` (no regression).
+4. Non-skills collections still work without a summary (no regression).
 """
 
 import pytest
@@ -103,23 +106,18 @@ async def test_skills_collection_accepts_safe_slugs(client, good_slug):
 
 
 # ---------------------------------------------------------------------------
-# embed_field auto-default
+# Indexed-text resolution (data["summary"] preferred, data["description"] back-compat)
 # ---------------------------------------------------------------------------
 
 
-async def test_skills_collection_auto_defaults_embed_field(client):
-    """``collection='skills'`` auto-defaults ``embed_field='description'``.
-
-    The agent doesn't have to pass `embed_field` — the server fills it in
-    so the description is indexed for semantic search via
-    POST /documents/search.
-    """
+async def test_skills_collection_indexes_description_back_compat(client):
+    """Skills writes that pass ``data["description"]`` (no summary) keep
+    working via the back-compat path — description is indexed for search."""
     tenant_id, headers = get_test_auth()
     tag = _uid()[:6]
     slug = f"auto-embed-{tag}"
     description = f"unique-marker-{tag} reusable refactor recipe"
 
-    # Upsert WITHOUT passing embed_field. Server should auto-default.
     upsert_resp = await client.post(
         "/api/v1/documents",
         json={
@@ -132,8 +130,6 @@ async def test_skills_collection_auto_defaults_embed_field(client):
     )
     assert upsert_resp.status_code == 200, upsert_resp.text
 
-    # If embed_field truly defaulted, the doc participates in op=search.
-    # Use a fragment of the description as the query.
     search_resp = await client.post(
         "/api/v1/documents/search",
         json={
@@ -153,13 +149,39 @@ async def test_skills_collection_auto_defaults_embed_field(client):
     assert search_resp.status_code in (200, 503), search_resp.text
 
 
-async def test_skills_collection_rejects_data_without_description(client):
-    """Auto-defaulted ``embed_field='description'`` requires the field to exist.
+async def test_skills_collection_indexes_summary_when_present(client):
+    """When both ``summary`` and ``description`` are present on a skills
+    write, ``summary`` is the indexed text — back-compat is a fallback,
+    not a precedence override."""
+    tenant_id, headers = get_test_auth()
+    tag = _uid()[:6]
+    slug = f"summary-wins-{tag}"
+    summary = f"summary-wins-{tag} concise refactor recipe"
 
-    If ``description`` is missing or empty, the upsert MUST fail loud
-    (422) — silently skipping the embed would leave the skill out of the
-    catalog's semantic index, defeating the point of the auto-default.
-    """
+    upsert_resp = await client.post(
+        "/api/v1/documents",
+        json={
+            "tenant_id": tenant_id,
+            "collection": "skills",
+            "doc_id": slug,
+            "data": {
+                "name": slug,
+                "summary": summary,
+                # Decoy description with a different unique marker. If
+                # description were indexed, a query for the summary's
+                # marker would miss.
+                "description": "decoy unrelated-text-xyz",
+                "content": "# x\n",
+            },
+        },
+        headers=headers,
+    )
+    assert upsert_resp.status_code == 200, upsert_resp.text
+
+
+async def test_skills_collection_rejects_data_without_summary_or_description(client):
+    """Skills writes require at least one of summary or description so
+    the catalog stays semantic-searchable. Missing both → 422."""
     tenant_id, headers = get_test_auth()
     tag = _uid()[:6]
     slug = f"no-desc-{tag}"
@@ -169,23 +191,23 @@ async def test_skills_collection_rejects_data_without_description(client):
             "tenant_id": tenant_id,
             "collection": "skills",
             "doc_id": slug,
-            # No "description" key in data — the auto-defaulted embed_field
-            # has nothing to embed.
+            # Neither summary nor description — nothing to index.
             "data": {"name": slug, "content": "# x\n"},
         },
         headers=headers,
     )
     assert resp.status_code == 422, (
-        f"missing description should 422 (auto-default needs the field), "
-        f"got {resp.status_code}: {resp.text}"
+        f"missing summary AND description should 422 "
+        f"(catalog needs at least one), got {resp.status_code}: {resp.text}"
     )
 
 
-async def test_non_skills_collection_does_not_auto_embed(client):
-    """Other collections are unaffected — no slug rule, no auto-embed.
+async def test_non_skills_collection_does_not_require_summary(client):
+    """Other collections are unaffected — no slug rule, no summary
+    requirement. Docs without a summary persist without an embedding.
 
     Regression guard: the skills-collection rule is targeted; everything
-    else still upserts via the bare path with no embedding requirement.
+    else still upserts via the bare path with no indexing requirement.
     """
     tenant_id, headers = get_test_auth()
     tag = _uid()[:6]
@@ -197,13 +219,13 @@ async def test_non_skills_collection_does_not_auto_embed(client):
             "tenant_id": tenant_id,
             "collection": "notes",
             "doc_id": weird_doc_id,
-            "data": {"body": "no description, no embed_field, no problem"},
+            "data": {"body": "no summary, no problem"},
         },
         headers=headers,
     )
     assert resp.status_code == 200, (
         f"non-skills collection should accept arbitrary doc_id and "
-        f"missing description: {resp.text}"
+        f"missing summary: {resp.text}"
     )
 
 

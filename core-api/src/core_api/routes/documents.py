@@ -25,8 +25,10 @@ router = APIRouter(tags=["Document Store"])
 # ``skills`` is the agent-to-agent skill catalog (replaces the dropped
 # memclaw_share_skill / memclaw_unshare_skill MCP tools). Slugs become
 # directory names on plugin-side reconciliation, so doc_id is constrained
-# to a filesystem-safe identifier; description is auto-embedded so other
-# agents can semantic-search the catalog.
+# to a filesystem-safe identifier; data["summary"] is embedded so other
+# agents can semantic-search the catalog (with a back-compat fallback to
+# data["description"] for the skills collection only — see
+# core_api.services.doc_indexing).
 SKILLS_COLLECTION = "skills"
 _SKILL_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 
@@ -40,14 +42,9 @@ class DocWriteRequest(BaseModel):
     collection: str = Field(min_length=1, max_length=200)
     doc_id: str = Field(min_length=1, max_length=500)
     data: dict
-    embed_field: str | None = Field(
-        default=None,
-        description=(
-            "JSON key in ``data`` whose text value is embedded for "
-            "semantic search via /documents/search. Auto-defaults to "
-            "'description' when collection='skills'."
-        ),
-    )
+    # Embed source is no longer caller-chosen. Server reads data["summary"]
+    # (and, for collection="skills", falls back to data["description"] for
+    # back-compat). See core_api.services.doc_indexing.
 
 
 class DocQueryRequest(BaseModel):
@@ -67,8 +64,8 @@ class DocSearchRequest(BaseModel):
     Mirrors MCP ``memclaw_doc op=search``: when ``collection`` is omitted,
     search spans every collection in the tenant (broad strategy); when
     supplied, search is restricted to that collection (narrow strategy).
-    Only documents written with an ``embed_field`` (i.e. with a non-NULL
-    embedding column) are considered.
+    Only documents written with a ``data["summary"]`` (i.e. with a
+    non-NULL embedding column) are considered.
     """
 
     tenant_id: str
@@ -126,38 +123,36 @@ async def upsert_document(
         _body, _status = _replay
         return JSONResponse(content=_body, status_code=_status)
 
-    # Skills collection has two extra rules — slugs become directory
-    # names on plugin-side reconciliation, and discoverability requires
-    # the description to be indexed for semantic search.
-    embed_field = body.embed_field
-    if body.collection == SKILLS_COLLECTION:
-        if not _SKILL_SLUG_RE.fullmatch(body.doc_id):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"collection='skills' requires doc_id matching "
-                    f"{_SKILL_SLUG_RE.pattern} — got {body.doc_id!r}. "
-                    "Slugs become directory names on each plugin node."
-                ),
-            )
-        if embed_field is None:
-            embed_field = "description"
+    # Skills slug rule — doc_id becomes a directory name on plugin-side
+    # reconciliation, so it must be filesystem-safe.
+    if body.collection == SKILLS_COLLECTION and not _SKILL_SLUG_RE.fullmatch(body.doc_id):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"collection='skills' requires doc_id matching "
+                f"{_SKILL_SLUG_RE.pattern} — got {body.doc_id!r}. "
+                "Slugs become directory names on each plugin node."
+            ),
+        )
 
     if auth.tenant_id:
         await check_and_increment(db, body.tenant_id, "write")
 
-    # Embed the requested field for semantic-search indexing. Use the
-    # repository's upsert path (which writes the embedding column)
-    # whenever embed_field resolves; otherwise fall back to the
-    # storage-client path (no embedding).
+    # Resolve which string in `data` gets embedded. Only data["summary"]
+    # is embeddable; skills writes also accept data["description"] for
+    # back-compat. See core_api.services.doc_indexing for the contract.
+    from core_api.services.doc_indexing import (
+        InvalidDocIndexingError,
+        resolve_embed_source,
+    )
+
+    try:
+        source = resolve_embed_source(body.collection, body.data)
+    except InvalidDocIndexingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     embedding: list[float] | None = None
-    if embed_field:
-        source = body.data.get(embed_field)
-        if not isinstance(source, str) or not source.strip():
-            raise HTTPException(
-                status_code=422,
-                detail=(f"embed_field '{embed_field}' not found in data or not a non-empty string."),
-            )
+    if source is not None:
         from common.embedding import get_embedding
 
         embedding = await get_embedding(source)
@@ -219,7 +214,7 @@ async def upsert_document(
         detail={
             "collection": body.collection,
             "doc_id": body.doc_id,
-            "embed_field": embed_field,
+            "indexed": embedding is not None,
         },
     )
     await db.commit()

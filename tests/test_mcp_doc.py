@@ -7,6 +7,7 @@ Covers:
 - ``op=read`` not-found → "Not found:" text.
 - ``op=delete`` not-found → structured error envelope.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -33,6 +34,7 @@ class _UpsertRow:
     """Stand-in for the unlabeled Row returned by upsert_returning_xmax.
     xmax sits at index 3 (id=0, created_at=1, updated_at=2, xmax=3).
     """
+
     def __init__(self, xmax: int):
         self._data = (None, None, None, xmax)
 
@@ -78,7 +80,7 @@ async def test_doc_write_happy_path_new(mcp_env, monkeypatch):
     assert payload["action"] == "created"
     assert payload["collection"] == "customers"
     assert payload["doc_id"] == "acme"
-    assert payload["indexed"] is False  # no embed_field → not indexed
+    assert payload["indexed"] is False  # no data["summary"] → not indexed
 
 
 async def test_doc_write_happy_path_updated(mcp_env, monkeypatch):
@@ -103,7 +105,9 @@ async def test_doc_read_not_found(mcp_env, monkeypatch):
     monkeypatch.setattr(
         "core_api.repositories.document_repo.get_by_doc_id", _async_return(None)
     )
-    out = await mcp_server.memclaw_doc(op="read", collection="customers", doc_id="ghost")
+    out = await mcp_server.memclaw_doc(
+        op="read", collection="customers", doc_id="ghost"
+    )
     assert "Not found: customers/ghost" in strip_latency(out)
 
 
@@ -264,12 +268,12 @@ async def test_doc_query_requires_collection(mcp_env):
 
 
 # ---------------------------------------------------------------------------
-# op=write with embed_field (opt-in semantic indexing)
+# op=write semantic indexing: only data["summary"] is ever embedded
 # ---------------------------------------------------------------------------
 
 
-async def test_doc_write_with_embed_field_embeds_and_forwards(mcp_env, monkeypatch):
-    """When embed_field is set, the server embeds data[embed_field] and
+async def test_doc_write_summary_embeds_and_forwards(mcp_env, monkeypatch):
+    """When data["summary"] is present, the server embeds that string and
     forwards the vector to the repo. Response reports indexed=True."""
     captured: dict = {}
 
@@ -290,40 +294,48 @@ async def test_doc_write_with_embed_field_embeds_and_forwards(mcp_env, monkeypat
         op="write",
         collection="onboarding_guides",
         doc_id="claude-code-setup",
-        data={"title": "Setup", "content": "Some markdown body"},
-        embed_field="content",
+        data={
+            "summary": "Claude Code setup runbook",
+            "content": "Some 5KB markdown body that must NOT be embedded",
+        },
     )
     payload = parse_envelope(out)
     assert payload["ok"] is True
     assert payload["indexed"] is True
-    assert captured["embed_text"] == "Some markdown body"
+    # Only the summary is embedded — the body is stored but not indexed.
+    assert captured["embed_text"] == "Claude Code setup runbook"
     assert len(captured["embedding"]) == VECTOR_DIM
 
 
-async def test_doc_write_embed_field_missing_from_data(mcp_env, monkeypatch):
-    """Caller mistake: embed_field names a key that isn't in data → 422."""
-    # Embedding should never be called; monkeypatch ensures regression is obvious.
+async def test_doc_write_no_summary_stores_unindexed(mcp_env, monkeypatch):
+    """Non-skills writes without data["summary"] persist without an
+    embedding — the "I don't need semantic search" path stays open."""
     called = {"hit": False}
 
     async def should_not_embed(text):  # noqa: ARG001
         called["hit"] = True
         return [0.0] * VECTOR_DIM
 
+    monkeypatch.setattr(
+        "core_api.repositories.document_repo.upsert_returning_xmax",
+        _async_return(_UpsertRow(xmax=0)),
+    )
     monkeypatch.setattr("common.embedding.get_embedding", should_not_embed)
 
     out = await mcp_server.memclaw_doc(
         op="write",
-        collection="c",
-        doc_id="d",
-        data={"title": "hi"},
-        embed_field="content",  # data has no 'content' field
+        collection="customers",
+        doc_id="acme",
+        data={"plan": "enterprise"},
     )
-    assert "embed_field 'content' not found" in strip_latency(out)
+    payload = parse_envelope(out)
+    assert payload["ok"] is True
+    assert payload["indexed"] is False
     assert called["hit"] is False
 
 
-async def test_doc_write_embed_field_empty_string_is_rejected(mcp_env, monkeypatch):
-    """Empty-string source is treated as missing (embedding would be noise)."""
+async def test_doc_write_summary_empty_string_is_rejected(mcp_env, monkeypatch):
+    """When summary is provided but blank, embedding would be noise — reject."""
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.0] * VECTOR_DIM)
     )
@@ -331,24 +343,20 @@ async def test_doc_write_embed_field_empty_string_is_rejected(mcp_env, monkeypat
         op="write",
         collection="c",
         doc_id="d",
-        data={"content": "   "},
-        embed_field="content",
+        data={"summary": "   "},
     )
-    assert "not a non-empty string" in strip_latency(out)
+    assert "non-empty string" in strip_latency(out)
 
 
 async def test_doc_write_embedding_provider_failure_aborts(mcp_env, monkeypatch):
     """If the embedding provider returns None, the write is aborted —
     better than silently persisting the doc without an index."""
-    monkeypatch.setattr(
-        "common.embedding.get_embedding", _async_return(None)
-    )
+    monkeypatch.setattr("common.embedding.get_embedding", _async_return(None))
     out = await mcp_server.memclaw_doc(
         op="write",
         collection="c",
         doc_id="d",
-        data={"content": "text"},
-        embed_field="content",
+        data={"summary": "valid summary string"},
     )
     assert "embedding provider returned no vector" in strip_latency(out)
 
@@ -380,7 +388,9 @@ async def test_doc_search_without_collection_spans_all(mcp_env, monkeypatch):
     assert captured["collection"] is None
 
 
-async def test_doc_search_broad_results_include_per_row_collection(mcp_env, monkeypatch):
+async def test_doc_search_broad_results_include_per_row_collection(
+    mcp_env, monkeypatch
+):
     """Each result row must include its own `collection` so the caller can
     follow up with op=read across mixed collections."""
     monkeypatch.setattr(
@@ -438,9 +448,7 @@ async def test_doc_search_empty_results(mcp_env, monkeypatch):
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.search", _async_return([])
-    )
+    monkeypatch.setattr("core_api.repositories.document_repo.search", _async_return([]))
     out = await mcp_server.memclaw_doc(op="search", collection="c", query="anything")
     payload = parse_envelope(out)
     assert payload["count"] == 0
@@ -460,20 +468,14 @@ async def test_doc_search_top_k_capped_at_50(mcp_env, monkeypatch):
     )
     monkeypatch.setattr("core_api.repositories.document_repo.search", fake_search)
 
-    await mcp_server.memclaw_doc(
-        op="search", collection="c", query="q", top_k=9999
-    )
+    await mcp_server.memclaw_doc(op="search", collection="c", query="q", top_k=9999)
     assert captured["top_k"] == 50
 
 
 async def test_doc_search_embedding_provider_failure_aborts(mcp_env, monkeypatch):
     """Provider failure → no search attempt, caller sees a clear error."""
-    monkeypatch.setattr(
-        "common.embedding.get_embedding", _async_return(None)
-    )
-    out = await mcp_server.memclaw_doc(
-        op="search", collection="c", query="anything"
-    )
+    monkeypatch.setattr("common.embedding.get_embedding", _async_return(None))
+    out = await mcp_server.memclaw_doc(op="search", collection="c", query="anything")
     assert "embedding provider returned no vector" in strip_latency(out)
 
 

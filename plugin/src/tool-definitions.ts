@@ -196,12 +196,6 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       offset: { type: "integer", description: "For op=query" },
       agent_id: { type: "string" },
       fleet_id: { type: "string", description: "For op=write" },
-      embed_field: {
-        type: "string",
-        description:
-          "op=write: JSON key in data whose text is embedded for semantic search via op=search. " +
-          "Auto-defaults to 'description' when collection='skills'.",
-      },
       query: { type: "string", description: "op=search: natural-language query." },
       top_k: { type: "integer", description: "op=search: max results (1-50)." },
     },
@@ -390,7 +384,6 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
         data: enriched.data,
         fleet_id: enriched.fleet_id,
         agent_id: enriched.agent_id,
-        embed_field: enriched.embed_field,
       }, undefined, signal);
     }
     if (op === "read") {

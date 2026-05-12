@@ -210,7 +210,7 @@ class DocumentRepository:
         collection (narrow / strategy 1). If ``collection`` is ``None``,
         search spans every collection in the tenant (broad / strategy 2).
         Only rows with ``embedding IS NOT NULL`` are considered — a doc
-        written without ``embed_field`` is invisible either way.
+        written without ``data["summary"]`` is invisible either way.
 
         Orders by cosine distance against ``query_embedding`` using the
         partial HNSW index from migration 003. Returns ``(Document,

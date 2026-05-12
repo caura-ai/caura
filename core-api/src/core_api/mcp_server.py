@@ -779,15 +779,6 @@ async def memclaw_doc(
         str | None,
         Field(description="op=write; optional scoping filter for op=list_collections|search."),
     ] = None,
-    embed_field: Annotated[
-        str | None,
-        Field(
-            description=(
-                "op=write: JSON field in `data` whose text value should be embedded "
-                "for semantic search. Omit to skip indexing (doc won't appear in op=search)."
-            ),
-        ),
-    ] = None,
     query: Annotated[str | None, Field(description="op=search: natural-language query.")] = None,
     top_k: Annotated[int, Field(description="op=search: max results (1-50).")] = 5,
 ) -> str:
@@ -843,39 +834,34 @@ async def memclaw_doc(
                     return _with_latency(
                         _error_response("INVALID_ARGUMENTS", "op=write requires 'data'."), t0
                     )
-                # Skills collection has two extra rules — slugs become
-                # directory names on the plugin side, and discoverability
-                # depends on the description being indexed for semantic
-                # search. Auto-defaulting embed_field lets agents share a
-                # skill with a single call.
-                if collection == SKILLS_COLLECTION:
-                    if not _SKILL_SLUG_RE.fullmatch(doc_id):
-                        return _with_latency(
-                            _error_response(
-                                "INVALID_ARGUMENTS",
-                                f"collection='skills' requires doc_id matching "
-                                f"{_SKILL_SLUG_RE.pattern} — got {doc_id!r}. "
-                                "Slugs become directory names on each plugin node.",
-                            ),
-                            t0,
-                        )
-                    if embed_field is None:
-                        embed_field = "description"
-                # Optional semantic indexing: embed data[embed_field] so the
-                # doc participates in op=search. Missing/empty source field is
-                # a caller mistake — fail loud rather than silently skip.
+                # Skills slug rule — doc_id becomes a filesystem directory
+                # on the plugin side, so it must be filesystem-safe.
+                if collection == SKILLS_COLLECTION and not _SKILL_SLUG_RE.fullmatch(doc_id):
+                    return _with_latency(
+                        _error_response(
+                            "INVALID_ARGUMENTS",
+                            f"collection='skills' requires doc_id matching "
+                            f"{_SKILL_SLUG_RE.pattern} — got {doc_id!r}. "
+                            "Slugs become directory names on each plugin node.",
+                        ),
+                        t0,
+                    )
+                # Resolve which string in `data` gets embedded. The only
+                # embeddable field is data["summary"]; skills writes also
+                # accept data["description"] for back-compat. Non-skills
+                # writes without a summary store cleanly with no embedding
+                # (doc won't appear in op=search).
+                from core_api.services.doc_indexing import (
+                    InvalidDocIndexingError,
+                    resolve_embed_source,
+                )
+
+                try:
+                    source = resolve_embed_source(collection, data)
+                except InvalidDocIndexingError as exc:
+                    return _with_latency(_error_response("INVALID_ARGUMENTS", str(exc)), t0)
                 embedding: list[float] | None = None
-                if embed_field:
-                    source = data.get(embed_field)
-                    if not isinstance(source, str) or not source.strip():
-                        return _with_latency(
-                            _error_response(
-                                "INVALID_ARGUMENTS",
-                                f"op=write embed_field "
-                                f"'{embed_field}' not found in data or not a non-empty string.",
-                            ),
-                            t0,
-                        )
+                if source is not None:
                     from common.embedding import get_embedding
 
                     embedding = await get_embedding(source)
