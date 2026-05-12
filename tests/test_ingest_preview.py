@@ -30,7 +30,7 @@ def fake_chunker(monkeypatch):
         return_facts=[{"content": "default test fact", "suggested_type": "fact"}],
     )
 
-    async def _fake(text, focus=None, tenant_config=None):
+    async def _fake(text, focus=None, tenant_config=None, breadcrumb=None):
         state.calls.append((text, focus))
         return list(state.return_facts)
 
@@ -55,9 +55,7 @@ def fake_tenant_config(monkeypatch):
         return []
 
     monkeypatch.setattr(ingest_service, "resolve_config", _fake)
-    monkeypatch.setattr(
-        ingest_service, "_find_prior_ingest_by_doc_hash", _fake_no_cache
-    )
+    monkeypatch.setattr(ingest_service, "_find_prior_ingest_by_doc_hash", _fake_no_cache)
 
 
 # ---------------------------------------------------------------------------
@@ -70,9 +68,7 @@ def fake_tenant_config(monkeypatch):
 async def test_source_uri_stamped_text_input(fake_chunker, fake_tenant_config):
     """When the caller passes ``content`` (not url), every returned fact carries
     ``source_uri='text-input'``."""
-    req = IngestRequest(
-        tenant_id="t1", content="A meaningful sentence about distributed systems."
-    )
+    req = IngestRequest(tenant_id="t1", content="A meaningful sentence about distributed systems.")
     fake_chunker.return_facts = [
         {"content": "Fact A", "suggested_type": "fact"},
         {"content": "Fact B", "suggested_type": "decision"},
@@ -103,9 +99,7 @@ async def test_source_uri_stamped_url(fake_chunker, fake_tenant_config, monkeypa
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_existing_source_uri_in_fact_not_overwritten(
-    fake_chunker, fake_tenant_config
-):
+async def test_existing_source_uri_in_fact_not_overwritten(fake_chunker, fake_tenant_config):
     """``setdefault`` shouldn't clobber a source_uri the chunker explicitly set
     (defensive — current chunker doesn't, but the contract should hold)."""
     fake_chunker.return_facts = [
@@ -128,9 +122,7 @@ async def test_existing_source_uri_in_fact_not_overwritten(
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_content_length_under_cap_no_truncated_flag(
-    fake_chunker, fake_tenant_config
-):
+async def test_content_length_under_cap_no_truncated_flag(fake_chunker, fake_tenant_config):
     """Input well under cap → content_length = len(input), no truncated flag."""
     text = "A" * 5_000
     req = IngestRequest(tenant_id="t1", content=text)
@@ -143,20 +135,25 @@ async def test_content_length_under_cap_no_truncated_flag(
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_content_length_over_cap_truncated_with_original(
-    fake_chunker, fake_tenant_config
-):
-    """Input over cap → content_length = cap, truncated=True, original_length=full."""
-    full_text = "X" * 80_000
+async def test_large_content_now_fans_out_to_multiple_sections(fake_chunker, fake_tenant_config):
+    """PR #7: the 50k-char truncate is gone. Large content goes through the
+    block chunker which fans out to multiple per-section LLM calls. The
+    response reports the full content_length and the section count."""
+    # 80k chars of repeated paragraphs — the chunker should split into
+    # multiple sections (paragraph-pack heuristic on the plain-text path).
+    paragraph = (
+        "This paragraph contains a useful fact about quartz oscillators. "
+        "Quartz oscillators run at 32.768 kHz.\n\n"
+    )
+    full_text = paragraph * 800  # ~80k chars
     req = IngestRequest(tenant_id="t1", content=full_text)
     resp = await ingest_service.ingest_preview(db=None, request=req)
 
-    assert resp["content_length"] == ingest_service._INGEST_MAX_CONTENT_CHARS  # 50_000
-    assert resp["truncated"] is True
-    assert resp["original_length"] == 80_000
-    # And the chunker only got the truncated content
-    text_passed, _ = fake_chunker.calls[-1]
-    assert len(text_passed) == ingest_service._INGEST_MAX_CONTENT_CHARS
+    assert resp["content_length"] == len(full_text)
+    assert "truncated" not in resp, "post-PR#7 there's no truncate; response should not have the flag"
+    assert resp.get("sections", 0) >= 2, "chunker should fan out an 80k-char doc"
+    # _chunk_content called once per section
+    assert len(fake_chunker.calls) == resp["sections"]
 
 
 # ---------------------------------------------------------------------------
@@ -184,9 +181,7 @@ async def test_short_circuit_skips_llm(fake_chunker, fake_tenant_config, content
     assert resp["chunk_ms"] == 0
     assert resp["skipped_reason"] == "content_too_short"
     # The LLM (fake_chunker) was NEVER called
-    assert fake_chunker.calls == [], (
-        f"_chunk_content was called for short-circuited input {content!r}"
-    )
+    assert fake_chunker.calls == [], f"_chunk_content was called for short-circuited input {content!r}"
 
 
 @pytest.mark.unit
@@ -203,19 +198,21 @@ async def test_short_circuit_threshold_boundary(fake_chunker, fake_tenant_config
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_short_circuit_returns_truncated_flag_too(
-    fake_chunker, fake_tenant_config
-):
-    """A pathological caller could submit truncatable + tiny-after-strip input.
-    The skipped_reason response still surfaces the truncated/original_length flags."""
-    # ~60k chars of all whitespace — meaningful pre-strip but useless to LLM
+async def test_whitespace_only_still_short_circuits_regardless_of_size(fake_chunker, fake_tenant_config):
+    """Even a huge whitespace-only blob should hit the short-circuit, not the
+    chunker. (Pre-PR#7 this test asserted truncated=True; post-PR#7 the response
+    is just the plain skipped_reason since we no longer truncate.)"""
     content = " " * 60_000
     req = IngestRequest(tenant_id="t1", content=content)
     resp = await ingest_service.ingest_preview(db=None, request=req)
 
     assert resp["skipped_reason"] == "content_too_short"
-    assert resp["truncated"] is True
-    assert resp["original_length"] == 60_000
+    assert resp["chunk_ms"] == 0
+    # No truncated/original_length post-PR#7 — those fields are gone.
+    assert "truncated" not in resp
+    assert "original_length" not in resp
+    # And the chunker (LLM) was NOT called
+    assert fake_chunker.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -251,9 +248,7 @@ def test_meta_fact_regex_drops_self_referential():
         "The content of the agreement was disputed in court.",
     ]
     for body in keep_these:
-        assert not ingest_service._META_FACT_RE.search(body), (
-            f"Should NOT match: {body!r}"
-        )
+        assert not ingest_service._META_FACT_RE.search(body), f"Should NOT match: {body!r}"
 
 
 @pytest.mark.unit

@@ -23,7 +23,6 @@ import pytest
 from core_api.schemas import IngestCommitRequest, IngestFact, IngestRequest
 from core_api.services import ingest_service
 
-
 # ---------------------------------------------------------------------------
 # _doc_hash helper
 # ---------------------------------------------------------------------------
@@ -62,9 +61,7 @@ def fake_tenant_config(monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_cache_hit_returns_cached_facts_without_llm(
-    monkeypatch, fake_tenant_config
-):
+async def test_cache_hit_returns_cached_facts_without_llm(monkeypatch, fake_tenant_config):
     """Two prior memories with this doc_hash → preview returns them as cached
     facts with cached=True, the prior run_id, and chunk_ms=0."""
     # Stand up two prior memories as if a previous ingest happened
@@ -88,7 +85,7 @@ async def test_cache_hit_returns_cached_facts_without_llm(
     # Track that the LLM was NOT called
     llm_called = False
 
-    async def _fake_chunk(text, focus=None, tenant_config=None):
+    async def _fake_chunk(text, focus=None, tenant_config=None, breadcrumb=None):
         nonlocal llm_called
         llm_called = True
         return [{"content": "should not be called", "suggested_type": "fact"}]
@@ -118,7 +115,7 @@ async def test_cache_miss_runs_llm_normally(monkeypatch, fake_tenant_config):
 
     monkeypatch.setattr(ingest_service, "_find_prior_ingest_by_doc_hash", _no_cache)
 
-    async def _fake_chunk(text, focus=None, tenant_config=None):
+    async def _fake_chunk(text, focus=None, tenant_config=None, breadcrumb=None):
         return [
             {
                 "content": "Mercury orbits in 88 days.",
@@ -134,9 +131,7 @@ async def test_cache_miss_runs_llm_normally(monkeypatch, fake_tenant_config):
 
     assert resp.get("cached") is not True
     assert "doc_hash" in resp
-    assert resp["doc_hash"] == ingest_service._doc_hash(
-        "t1", "Mercury orbits the Sun every 88 days."
-    )
+    assert resp["doc_hash"] == ingest_service._doc_hash("t1", "Mercury orbits the Sun every 88 days.")
     assert len(resp["facts"]) == 1
 
 
@@ -247,11 +242,7 @@ async def test_commit_does_not_stamp_doc_hash_when_omitted(monkeypatch):
 
     req = IngestCommitRequest(
         tenant_id="t1",
-        facts=[
-            IngestFact(
-                content="Real fact without doc_hash echo.", suggested_type="fact"
-            )
-        ],
+        facts=[IngestFact(content="Real fact without doc_hash echo.", suggested_type="fact")],
     )
     await ingest_service.ingest_commit(db=None, request=req)
 

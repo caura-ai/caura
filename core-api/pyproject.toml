@@ -35,6 +35,11 @@ dependencies = [
     "slowapi>=0.1.9,<1.0",
     "sentry-sdk[fastapi]>=2.0,<3",
     "structlog>=25.4,<26",
+    # PR #7 (Tier-1 ingest A4): structure-aware document chunking.
+    # All three are pure-Python (no system C deps); together ~1 MB.
+    "markdown-it-py>=4.0,<5",  # markdown AST walker
+    "tiktoken>=0.10,<1",  # cl100k_base token counter for size caps
+    "pysbd>=0.3,<1",  # sentence boundary detection for sub-chunk splits
 ]
 
 [project.optional-dependencies]

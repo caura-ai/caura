@@ -21,6 +21,12 @@ from core_api.config import settings
 from core_api.constants import MEMORY_TYPES
 from core_api.providers._retry import call_with_fallback
 from core_api.schemas import IngestCommitRequest, IngestRequest, MemoryCreate
+from core_api.services.ingest_chunking import (
+    DOC_HARD_TOKEN_LIMIT,
+    chunk_blocks,
+    doc_token_count,
+    parse,
+)
 from core_api.services.memory_service import _content_hash, create_memory
 from core_api.services.organization_settings import resolve_config
 
@@ -55,6 +61,12 @@ _CLOUD_METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254"})
 # parallelism a 10-fact batch is ~20s+. With Semaphore(4) it's ~5s.
 # Bounded to avoid hammering the LLM provider with rate-limit failures.
 _COMMIT_CONCURRENCY = 4
+
+# Max concurrent ``_chunk_content`` LLM calls during preview. Post-PR#7
+# the chunker emits N sections per doc; this bounds the LLM fanout to
+# avoid rate-limit storms while still parallelizing the ~5s per-section
+# latency.
+_PREVIEW_CONCURRENCY = 4
 
 # Maximum content length the LLM sees. Inputs longer than this get
 # truncated; ``ingest_preview`` reports the post-truncate length as
@@ -114,7 +126,7 @@ CHUNKING_PROMPT = """\
 Extract discrete, atomic facts from the following content for storage in an
 agent's long-term memory. Each fact must stand on its own when retrieved
 later without the surrounding document.
-
+{breadcrumb_instruction}
 ## Rules
 
 1. **Self-contained.** Every fact must be understandable without the original
@@ -195,13 +207,19 @@ async def _chunk_content(
     text: str,
     focus: str | None = None,
     tenant_config=None,
+    breadcrumb: str | None = None,
 ) -> list[dict]:
     """Extract atomic facts from text via LLM.
 
-    Caller is responsible for truncation before calling — see
-    ``_INGEST_MAX_CONTENT_CHARS`` and ``ingest_preview``. This function
-    just builds the prompt, calls the LLM, validates the JSON shape,
-    and drops meta-facts (P2.4).
+    The chunker module produces section-sized text up to ~3k tokens;
+    callers pass each section here. The optional ``breadcrumb`` is the
+    heading trail of where this section sits in its source document
+    (e.g. ``"Release Notes > v2.3 > Performance"``) and gets injected
+    into the prompt as separate context so the LLM can disambiguate
+    references like "this release" or "the migration".
+
+    ``breadcrumb`` is the only addition; everything else (focus, meta-fact
+    filter, salience floor, short-fact filter) is unchanged from PR #5.
     """
     provider_name = (
         tenant_config.enrichment_provider if tenant_config else None
@@ -211,7 +229,19 @@ async def _chunk_content(
     if focus:
         focus_instruction = f"Focus on facts relevant to {focus}. Deprioritize unrelated details."
 
-    prompt = CHUNKING_PROMPT.format(content=text, focus_instruction=focus_instruction)
+    breadcrumb_instruction = ""
+    if breadcrumb:
+        breadcrumb_instruction = (
+            f"\n## Document context\n\nThis section appears under: {breadcrumb}\n"
+            "Use this trail to resolve ambiguous references (e.g. 'this version', "
+            "'the migration') when extracting facts.\n"
+        )
+
+    prompt = CHUNKING_PROMPT.format(
+        content=text,
+        focus_instruction=focus_instruction,
+        breadcrumb_instruction=breadcrumb_instruction,
+    )
 
     async def _do_chunk(llm):
         return await llm.complete_json(prompt)
@@ -452,11 +482,12 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
 
     Response fields:
       url             — echoed from the request (None when content was pasted)
-      content_length  — length of the string the LLM actually saw (post-truncate, P2.1)
-      truncated       — True iff input exceeded _INGEST_MAX_CONTENT_CHARS (P2.1)
-      original_length — pre-truncate length, only present when truncated=True (P2.1)
+      content_length  — length of the full input (no longer truncated post-PR#7)
       facts           — list of {content, suggested_type, source_uri[, salience]}
-      chunk_ms        — LLM round-trip duration; 0 when short-circuited
+      chunk_ms        — total LLM time across all sections; 0 when short-circuited
+      doc_hash        — sha256 of (tenant, content); caller echoes to commit for cache
+      sections        — A4: number of Sections the chunker produced (= number of LLM
+                        calls made). 0 when the parser yielded no usable content.
       skipped_reason  — only present when no LLM call happened
                         ("content_too_short" today; future reasons may surface)
       cached          — A2: present and True iff this content was previously
@@ -483,16 +514,11 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
     else:
         raise HTTPException(status_code=400, detail="Either url or content is required")
 
-    # ---- P2.1: honest truncation reporting ----
-    original_length = len(content)
-    truncated = original_length > _INGEST_MAX_CONTENT_CHARS
-    if truncated:
-        content = content[:_INGEST_MAX_CONTENT_CHARS]
-
     # ---- A2: doc-hash idempotency ----
-    # Hash the post-truncate text the LLM would actually see. If a prior
-    # ingest of identical content already exists for this tenant, return
-    # the cached facts straight from those memories — no LLM call needed.
+    # Hash the full content (post-PR#7 there's no more truncate-to-50k cap
+    # — the chunker handles arbitrarily large docs up to ``DOC_HARD_TOKEN_LIMIT``).
+    # If a prior ingest of identical content already exists for this tenant,
+    # return the cached facts straight from those memories — no LLM call.
     source_uri_default = url or "text-input"
     doc_hash = _doc_hash(request.tenant_id, content)
     cached_memories = await _find_prior_ingest_by_doc_hash(db, request.tenant_id, doc_hash)
@@ -515,7 +541,7 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
             prior_run_id,
             len(cached_facts),
         )
-        response: dict = {
+        return {
             "url": url,
             "content_length": len(content),
             "facts": cached_facts,
@@ -523,10 +549,6 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
             "cached": True,
             "run_id": prior_run_id,
         }
-        if truncated:
-            response["truncated"] = True
-            response["original_length"] = original_length
-        return response
 
     # ---- P2.3: whitespace / too-short short-circuit ----
     # Avoid burning an LLM call on input that can't produce meaningful
@@ -537,43 +559,99 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
             "ingest_preview: short-circuited (content too short: %d chars stripped)",
             len(content.strip()),
         )
-        sc_response: dict = {
+        return {
             "url": url,
             "content_length": len(content),
             "facts": [],
             "chunk_ms": 0,
             "skipped_reason": "content_too_short",
         }
-        if truncated:
-            sc_response["truncated"] = True
-            sc_response["original_length"] = original_length
-        return sc_response
 
-    # Extract facts via LLM
+    # ---- A4 (PR #7): doc-level token refuse + structure-aware chunking ----
+    # Reject pathologically large docs up front so the chunker doesn't
+    # waste work. The boundary is a clean 413 with the token count.
+    total_tokens = doc_token_count(content)
+    if total_tokens > DOC_HARD_TOKEN_LIMIT:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Document too large: {total_tokens} tokens "
+                f"(max {DOC_HARD_TOKEN_LIMIT}). Split the doc and ingest in pieces."
+            ),
+        )
+
+    # Parse → Block list → Section list. Format detection is heuristic
+    # (looks for markdown headings / fenced code); fallback is plain-text.
+    blocks = parse(content)
+    sections = chunk_blocks(blocks)
+    if not sections:
+        # Defensive: parser produced nothing usable. Treat as a no-op
+        # rather than crashing the request.
+        logger.warning(
+            "ingest_preview: chunker produced 0 sections from %d-char content; returning empty",
+            len(content),
+        )
+        return {
+            "url": url,
+            "content_length": len(content),
+            "facts": [],
+            "chunk_ms": 0,
+            "doc_hash": doc_hash,
+            "sections": 0,
+        }
+
+    # Extract facts from every section in parallel. Each section gets
+    # its own LLM call with its breadcrumb threaded into the prompt as
+    # context. Bound concurrency to avoid hammering the LLM provider.
     t0 = time.perf_counter()
-    try:
-        facts = await _chunk_content(content, request.focus, tenant_config)
-    except Exception as e:
-        logger.exception("Ingest chunking failed")
-        raise HTTPException(status_code=500, detail=f"Fact extraction failed: {e}")
+    sem = asyncio.Semaphore(_PREVIEW_CONCURRENCY)
+
+    async def _extract_section(sec) -> list[dict]:
+        async with sem:
+            try:
+                return await _chunk_content(
+                    sec.text,
+                    focus=request.focus,
+                    tenant_config=tenant_config,
+                    breadcrumb=sec.breadcrumb or None,
+                )
+            except Exception:
+                # Per-section failure shouldn't tank the whole preview.
+                # Log and return empty so other sections still contribute.
+                logger.exception(
+                    "ingest_preview: section extraction failed (breadcrumb=%r tokens=%d)",
+                    sec.breadcrumb,
+                    sec.token_count,
+                )
+                return []
+
+    section_results = await asyncio.gather(*(_extract_section(s) for s in sections))
+    facts: list[dict] = []
+    for sec, sec_facts in zip(sections, section_results):
+        # Stamp the section's breadcrumb into each fact's metadata-like
+        # field so the commit path can persist provenance at the
+        # section level later (Tier 2 follow-up may surface it on memory).
+        for f in sec_facts:
+            f.setdefault("source_uri", source_uri_default)
+        facts.extend(sec_facts)
     chunk_ms = int((time.perf_counter() - t0) * 1000)
 
-    # P1.2: stamp source_uri on every fact so the commit path doesn't need
-    # the caller to re-pass ``url``. Callers can still override per-fact.
-    for f in facts:
-        f.setdefault("source_uri", source_uri_default)
+    logger.info(
+        "ingest_preview: chunked %d sections (total %d tokens) into %d facts in %dms",
+        len(sections),
+        total_tokens,
+        len(facts),
+        chunk_ms,
+    )
 
-    response = {
+    return {
         "url": url,
         "content_length": len(content),
         "facts": facts,
         "chunk_ms": chunk_ms,
         "doc_hash": doc_hash,  # A2: caller echoes this to commit for future cache hits
+        "sections": len(sections),  # A4: diagnostic — how many LLM calls did this run?
     }
-    if truncated:
-        response["truncated"] = True
-        response["original_length"] = original_length
-    return response
 
 
 async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
