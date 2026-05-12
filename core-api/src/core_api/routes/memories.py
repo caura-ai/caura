@@ -1279,6 +1279,49 @@ async def ingest_commit_endpoint(
     return await ingest_commit(db, body)
 
 
+@router.post("/ingest/undo/{run_id}")
+async def ingest_undo_endpoint(
+    run_id: str,
+    tenant_id: str = Query(...),
+    auth: AuthContext = Depends(get_auth_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """A3 (PR #6): soft-delete every memory tagged with the given ingest_run_id.
+
+    The undo lever for an entire ingest batch. Filters by
+    ``metadata.source = "ingest"`` AND ``metadata.ingest_run_id = <run_id>``
+    and AND tenant_id ownership — so a tenant can only undo their own runs,
+    and non-ingest memories can never be touched by this endpoint.
+
+    Returns ``{"deleted": N, "run_id": "..."}``. ``deleted=0`` is a valid
+    response (no rows matched — already cleaned up or never existed).
+    """
+    auth.enforce_read_only()
+    auth.enforce_tenant(tenant_id)
+
+    stmt = (
+        update(Memory)
+        .where(
+            Memory.tenant_id == tenant_id,
+            Memory.deleted_at.is_(None),
+            Memory.metadata_["source"].astext == "ingest",
+            Memory.metadata_["ingest_run_id"].astext == run_id,
+        )
+        .values(deleted_at=datetime.now(UTC), status="deleted")
+    )
+    result = await db.execute(stmt)
+    deleted_count = result.rowcount
+    await log_action(
+        db,
+        tenant_id=tenant_id,
+        action="ingest_undo",
+        resource_type="memory",
+        detail={"run_id": run_id, "count": deleted_count},
+    )
+    await db.commit()
+    return {"deleted": deleted_count, "run_id": run_id}
+
+
 @router.post("/recall")
 @search_limit
 async def recall_endpoint(

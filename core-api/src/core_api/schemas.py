@@ -364,6 +364,12 @@ class IngestFact(BaseModel):
     # persist the right ``source_uri``. ``IngestCommitRequest.url`` still
     # wins if provided (dashboard back-compat).
     source_uri: str | None = None
+    # A1 (PR #5): LLM-emitted salience score, 0.0-1.0. Preview's validator
+    # already dropped sub-0.5 facts before returning, so any value seen
+    # here passed the floor at preview time. Persisted on the memory so
+    # an A2-cache-hit preview can restore it; not used for filtering at
+    # commit time.
+    salience: float | None = None
 
 
 class IngestCommitRequest(BaseModel):
@@ -373,6 +379,12 @@ class IngestCommitRequest(BaseModel):
     url: str | None = None
     facts: list[IngestFact]
     run_id: str | None = None
+    # A2: optional. When the caller echoes the ``doc_hash`` from a prior
+    # preview, commit stamps it on every persisted memory's metadata so
+    # the *next* preview of the same content can short-circuit the LLM
+    # call (cache-hit). Backward-compatible: omitting it just disables
+    # the cache for future previews of this content.
+    doc_hash: str | None = None
 
 
 class RelationUpsertOut(BaseModel):

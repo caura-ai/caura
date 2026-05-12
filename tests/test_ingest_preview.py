@@ -40,7 +40,7 @@ def fake_chunker(monkeypatch):
 
 @pytest.fixture
 def fake_tenant_config(monkeypatch):
-    """Stub resolve_config so preview doesn't need a real DB session."""
+    """Stub resolve_config + A2 cache lookup so preview doesn't need a real DB."""
 
     async def _fake(db, tenant_id):
         return SimpleNamespace(
@@ -49,7 +49,15 @@ def fake_tenant_config(monkeypatch):
             default_write_mode="fast",
         )
 
+    async def _fake_no_cache(db, tenant_id, doc_hash):
+        # A2: tests that don't care about caching get an unconditional miss.
+        # The dedicated A2 tests below override this.
+        return []
+
     monkeypatch.setattr(ingest_service, "resolve_config", _fake)
+    monkeypatch.setattr(
+        ingest_service, "_find_prior_ingest_by_doc_hash", _fake_no_cache
+    )
 
 
 # ---------------------------------------------------------------------------

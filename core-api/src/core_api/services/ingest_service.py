@@ -1,6 +1,7 @@
 """Document/URL ingestion: extract atomic facts via LLM, preview, and commit as memories."""
 
 import asyncio
+import hashlib
 import ipaddress
 import logging
 import re
@@ -11,8 +12,10 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from common.models.memory import Memory
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.constants import MEMORY_TYPES
@@ -66,6 +69,20 @@ _INGEST_MAX_CONTENT_CHARS = 50_000
 # producing useless meta-facts ("The content begins with the greeting
 # 'hi'"). We short-circuit instead and return ``skipped_reason``.
 _INGEST_MIN_CONTENT_CHARS = 20
+
+
+# A2: doc-hash for ingest idempotency. We hash the post-truncate text the LLM
+# will actually see so two calls with identical content (modulo the bytes we
+# don't process) deterministically collide. Tenant-scoped so the same content
+# from different tenants doesn't accidentally share a cache. Note we do NOT
+# include focus / source_uri / fleet_id — re-running with a different focus
+# on the same doc should still hit cache (we extracted EVERYTHING; the focus
+# was only a prompt hint). If we ever switch to focus-targeted extraction
+# the keying needs to change.
+def _doc_hash(tenant_id: str, content: str) -> str:
+    """SHA-256 of (tenant_id, content). Returns the hex digest."""
+    return hashlib.sha256(f"{tenant_id}:{content}".encode()).hexdigest()
+
 
 # A1: drop extracted facts whose LLM-emitted salience falls below this floor.
 # Lower-numbered = essential standalone fact, higher number toward 1.0. The
@@ -399,6 +416,37 @@ async def _fetch_url_text(url: str) -> str:
     return text
 
 
+async def _find_prior_ingest_by_doc_hash(db: AsyncSession, tenant_id: str, doc_hash: str) -> list[Memory]:
+    """A2 cache lookup. Returns memories from the most recent prior ingest of
+    the same content for the same tenant — or empty list if no cache hit.
+
+    A "prior ingest" means a non-deleted row whose metadata carries the same
+    ``doc_hash`` value and was tagged as ``source="ingest"``. When multiple
+    runs match (the user could have ingested the same content twice in the
+    past), we return the memories tagged with the most-recent ``ingest_run_id``.
+    """
+    stmt = (
+        select(Memory)
+        .where(
+            Memory.tenant_id == tenant_id,
+            Memory.metadata_["doc_hash"].astext == doc_hash,
+            Memory.metadata_["source"].astext == "ingest",
+            Memory.deleted_at.is_(None),
+        )
+        .order_by(Memory.created_at.desc())
+    )
+    result = await db.execute(stmt)
+    rows: list[Memory] = list(result.scalars().all())
+    if not rows:
+        return []
+
+    # Pick the most recent run_id — i.e. the ingest_run_id of the newest row.
+    # Then return only the memories tagged with that run_id, so the cached
+    # preview reflects exactly one prior ingest.
+    newest_run_id = (rows[0].metadata_ or {}).get("ingest_run_id")
+    return [r for r in rows if (r.metadata_ or {}).get("ingest_run_id") == newest_run_id]
+
+
 async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
     """Preview mode: extract facts from URL or text without writing anything.
 
@@ -407,10 +455,15 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
       content_length  — length of the string the LLM actually saw (post-truncate, P2.1)
       truncated       — True iff input exceeded _INGEST_MAX_CONTENT_CHARS (P2.1)
       original_length — pre-truncate length, only present when truncated=True (P2.1)
-      facts           — list of {content, suggested_type, source_uri}
+      facts           — list of {content, suggested_type, source_uri[, salience]}
       chunk_ms        — LLM round-trip duration; 0 when short-circuited
       skipped_reason  — only present when no LLM call happened
                         ("content_too_short" today; future reasons may surface)
+      cached          — A2: present and True iff this content was previously
+                        ingested by the same tenant. ``facts`` then come from
+                        the prior run, ``run_id`` is set to the prior run's id,
+                        and no LLM call was made.
+      run_id          — only set when cached=True; the prior ingest_run_id.
     """
     tenant_config = await resolve_config(db, request.tenant_id)
 
@@ -436,17 +489,55 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
     if truncated:
         content = content[:_INGEST_MAX_CONTENT_CHARS]
 
+    # ---- A2: doc-hash idempotency ----
+    # Hash the post-truncate text the LLM would actually see. If a prior
+    # ingest of identical content already exists for this tenant, return
+    # the cached facts straight from those memories — no LLM call needed.
+    source_uri_default = url or "text-input"
+    doc_hash = _doc_hash(request.tenant_id, content)
+    cached_memories = await _find_prior_ingest_by_doc_hash(db, request.tenant_id, doc_hash)
+    if cached_memories:
+        prior_run_id = (cached_memories[0].metadata_ or {}).get("ingest_run_id")
+        cached_facts = []
+        for m in cached_memories:
+            md = m.metadata_ or {}
+            fact: dict = {
+                "content": m.content,
+                "suggested_type": m.memory_type,
+                "source_uri": m.source_uri or source_uri_default,
+            }
+            if md.get("salience") is not None:
+                fact["salience"] = md["salience"]
+            cached_facts.append(fact)
+        logger.info(
+            "ingest_preview: doc-hash cache hit (tenant=%s prior_run=%s facts=%d)",
+            request.tenant_id,
+            prior_run_id,
+            len(cached_facts),
+        )
+        response: dict = {
+            "url": url,
+            "content_length": len(content),
+            "facts": cached_facts,
+            "chunk_ms": 0,
+            "cached": True,
+            "run_id": prior_run_id,
+        }
+        if truncated:
+            response["truncated"] = True
+            response["original_length"] = original_length
+        return response
+
     # ---- P2.3: whitespace / too-short short-circuit ----
     # Avoid burning an LLM call on input that can't produce meaningful
     # facts. The cap is generous (20 chars after strip()) so any
     # legitimate ingest still hits the LLM.
-    source_uri_default = url or "text-input"
     if len(content.strip()) < _INGEST_MIN_CONTENT_CHARS:
         logger.info(
             "ingest_preview: short-circuited (content too short: %d chars stripped)",
             len(content.strip()),
         )
-        response: dict = {
+        sc_response: dict = {
             "url": url,
             "content_length": len(content),
             "facts": [],
@@ -454,9 +545,9 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
             "skipped_reason": "content_too_short",
         }
         if truncated:
-            response["truncated"] = True
-            response["original_length"] = original_length
-        return response
+            sc_response["truncated"] = True
+            sc_response["original_length"] = original_length
+        return sc_response
 
     # Extract facts via LLM
     t0 = time.perf_counter()
@@ -477,6 +568,7 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
         "content_length": len(content),
         "facts": facts,
         "chunk_ms": chunk_ms,
+        "doc_hash": doc_hash,  # A2: caller echoes this to commit for future cache hits
     }
     if truncated:
         response["truncated"] = True
@@ -605,6 +697,23 @@ async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
         # (dashboard back-compat), else use the fact's own source_uri
         # (stamped by preview), else fall back to "text-input".
         effective_source = request_url_override or fact.source_uri or "text-input"
+        # A2: stamp the doc_hash from preview if the caller echoed it.
+        # Future previews of the same content will hit the cache via
+        # ``_find_prior_ingest_by_doc_hash``. Also persist any per-fact
+        # salience score from PR #5 so cached previews can restore it.
+        metadata: dict = {
+            "source": "ingest",
+            "ingest_run_id": run_id,
+            "ingest_url": request_url_override or fact.source_uri or None,
+        }
+        if request.doc_hash:
+            metadata["doc_hash"] = request.doc_hash
+        # Salience lives on IngestFact only when the LLM emitted it (PR #5).
+        # Guarded so we don't overwrite with None on facts the caller
+        # hand-crafted without going through preview.
+        salience_value = getattr(fact, "salience", None)
+        if salience_value is not None:
+            metadata["salience"] = salience_value
         mem_data = MemoryCreate(
             tenant_id=request.tenant_id,
             fleet_id=request.fleet_id,
@@ -614,11 +723,7 @@ async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
             source_uri=effective_source,
             run_id=run_id,
             write_mode="strong",
-            metadata={
-                "source": "ingest",
-                "ingest_run_id": run_id,
-                "ingest_url": request_url_override or fact.source_uri or None,
-            },
+            metadata=metadata,
         )
         async with sem:
             try:
