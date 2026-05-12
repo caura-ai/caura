@@ -284,3 +284,229 @@ async def test_chunk_content_filters_meta_facts(monkeypatch):
     assert all("The provided content" not in c for c in contents)
     assert all("This document describes" not in c for c in contents)
     assert len(facts) == 2
+
+
+# ---------------------------------------------------------------------------
+# PR #5 — A1 salience floor + A5 short-fact + prompt tightening
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_salience_floor_drops_low_score_facts(monkeypatch):
+    """Facts with salience below 0.5 are filtered out by the validator (A1)."""
+
+    async def fake(*, primary_provider_name, call_fn, fake_fn, **kw):
+        return {
+            "facts": [
+                {
+                    "content": "The Eiffel Tower stands 330 meters tall.",
+                    "suggested_type": "fact",
+                    "salience": 0.9,
+                },
+                {
+                    "content": "Some boilerplate phrasing appears in the document.",
+                    "suggested_type": "fact",
+                    "salience": 0.2,  # below floor
+                },
+                {
+                    "content": "Mercury orbits the Sun every 88 days.",
+                    "suggested_type": "fact",
+                    "salience": 0.7,
+                },
+                {
+                    "content": "A trivial restatement of earlier material happens.",
+                    "suggested_type": "fact",
+                    "salience": 0.3,  # below floor
+                },
+            ]
+        }
+
+    monkeypatch.setattr(ingest_service, "call_with_fallback", fake)
+    tc = SimpleNamespace(enrichment_provider="fake")
+    facts = await ingest_service._chunk_content("dummy", tenant_config=tc)
+
+    assert len(facts) == 2
+    assert all(f["salience"] >= ingest_service._SALIENCE_FLOOR for f in facts)
+    contents = {f["content"] for f in facts}
+    assert "The Eiffel Tower stands 330 meters tall." in contents
+    assert "Mercury orbits the Sun every 88 days." in contents
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_salience_exactly_at_floor_is_kept(monkeypatch):
+    """The threshold is strict less-than — 0.5 exactly survives."""
+
+    async def fake(*, primary_provider_name, call_fn, fake_fn, **kw):
+        return {
+            "facts": [
+                {
+                    "content": "A fact sitting exactly at the salience floor.",
+                    "suggested_type": "fact",
+                    "salience": 0.5,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(ingest_service, "call_with_fallback", fake)
+    tc = SimpleNamespace(enrichment_provider="fake")
+    facts = await ingest_service._chunk_content("dummy", tenant_config=tc)
+    assert len(facts) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_missing_salience_does_not_drop_fact_backward_compat(monkeypatch):
+    """If the LLM (or an old prompt) omits salience, the fact passes through.
+    Important during the prompt rollout window — don't accidentally drop
+    everything because the model didn't include the new field yet."""
+
+    async def fake(*, primary_provider_name, call_fn, fake_fn, **kw):
+        return {
+            "facts": [
+                {
+                    "content": "A solid fact without salience scoring.",
+                    "suggested_type": "fact",
+                },
+            ]
+        }
+
+    monkeypatch.setattr(ingest_service, "call_with_fallback", fake)
+    tc = SimpleNamespace(enrichment_provider="fake")
+    facts = await ingest_service._chunk_content("dummy", tenant_config=tc)
+    assert len(facts) == 1
+    assert "salience" not in facts[0]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_malformed_salience_does_not_drop_fact(monkeypatch):
+    """LLM occasionally emits garbage in the salience field (string, null).
+    Parser fails gracefully and falls back to 'no salience filter applied'."""
+
+    async def fake(*, primary_provider_name, call_fn, fake_fn, **kw):
+        return {
+            "facts": [
+                {
+                    "content": "This fact carries a non-numeric salience field.",
+                    "suggested_type": "fact",
+                    "salience": "high",
+                },
+                {
+                    "content": "This fact carries an explicit null salience value.",
+                    "suggested_type": "fact",
+                    "salience": None,
+                },
+            ]
+        }
+
+    monkeypatch.setattr(ingest_service, "call_with_fallback", fake)
+    tc = SimpleNamespace(enrichment_provider="fake")
+    facts = await ingest_service._chunk_content("dummy", tenant_config=tc)
+    assert len(facts) == 2
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_short_fact_filter_drops_sub_5_words(monkeypatch):
+    """A5: facts with fewer than 5 words are dropped — likely headings/labels."""
+
+    async def fake(*, primary_provider_name, call_fn, fake_fn, **kw):
+        return {
+            "facts": [
+                {"content": "Learn more", "suggested_type": "fact", "salience": 0.9},
+                {"content": "Section 3", "suggested_type": "fact", "salience": 0.9},
+                {
+                    "content": "Iron melts at 1538 Celsius.",
+                    "suggested_type": "fact",
+                    "salience": 0.9,
+                },
+                {"content": "Yes", "suggested_type": "fact", "salience": 0.9},
+                {
+                    "content": "The user can pay via credit card or wire transfer.",
+                    "suggested_type": "fact",
+                    "salience": 0.9,
+                },
+            ]
+        }
+
+    monkeypatch.setattr(ingest_service, "call_with_fallback", fake)
+    tc = SimpleNamespace(enrichment_provider="fake")
+    facts = await ingest_service._chunk_content("dummy", tenant_config=tc)
+
+    contents = {f["content"] for f in facts}
+    assert "Iron melts at 1538 Celsius." in contents
+    assert "The user can pay via credit card or wire transfer." in contents
+    assert "Learn more" not in contents
+    assert "Section 3" not in contents
+    assert "Yes" not in contents
+    assert len(facts) == 2
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_all_three_filters_compose(monkeypatch, caplog):
+    """Meta-fact + short + low-salience filters all apply to one batch.
+    Confirms the validator counts each drop reason separately in the log."""
+    import logging
+
+    async def fake(*, primary_provider_name, call_fn, fake_fn, **kw):
+        return {
+            "facts": [
+                {
+                    "content": "Mercury orbits the Sun every 88 days.",
+                    "suggested_type": "fact",
+                    "salience": 0.9,
+                },
+                {
+                    "content": "The provided content consists of trivia.",
+                    "suggested_type": "fact",
+                    "salience": 0.9,
+                },
+                {"content": "Mars red", "suggested_type": "fact", "salience": 0.9},
+                {
+                    "content": "Some boilerplate phrasing appears here.",
+                    "suggested_type": "fact",
+                    "salience": 0.2,
+                },
+                {
+                    "content": "Venus has the longest day in the solar system.",
+                    "suggested_type": "fact",
+                    "salience": 0.85,
+                },
+            ]
+        }
+
+    monkeypatch.setattr(ingest_service, "call_with_fallback", fake)
+    tc = SimpleNamespace(enrichment_provider="fake")
+    with caplog.at_level(logging.INFO, logger="core_api.services.ingest_service"):
+        facts = await ingest_service._chunk_content("dummy", tenant_config=tc)
+
+    assert len(facts) == 2
+    assert "meta=1" in caplog.text
+    assert "low_salience=1" in caplog.text
+    assert "short=1" in caplog.text
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_salience_field_surfaces_on_returned_facts(monkeypatch):
+    """Kept facts retain their salience score on the output. Callers
+    (preview UI, agents) can sort/display/threshold further."""
+
+    async def fake(*, primary_provider_name, call_fn, fake_fn, **kw):
+        return {
+            "facts": [
+                {
+                    "content": "Iron melts at 1538 Celsius.",
+                    "suggested_type": "fact",
+                    "salience": 0.85,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(ingest_service, "call_with_fallback", fake)
+    tc = SimpleNamespace(enrichment_provider="fake")
+    facts = await ingest_service._chunk_content("dummy", tenant_config=tc)
+    assert facts[0]["salience"] == 0.85

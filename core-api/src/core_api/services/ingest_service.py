@@ -67,6 +67,18 @@ _INGEST_MAX_CONTENT_CHARS = 50_000
 # 'hi'"). We short-circuit instead and return ``skipped_reason``.
 _INGEST_MIN_CONTENT_CHARS = 20
 
+# A1: drop extracted facts whose LLM-emitted salience falls below this floor.
+# Lower-numbered = essential standalone fact, higher number toward 1.0. The
+# 0.5 threshold is empirically anchored — adjustable via tenant config in a
+# follow-up if needed.
+_SALIENCE_FLOOR = 0.5
+
+# Minimum word count for a kept fact. A5 forbids the LLM from emitting these
+# in the first place, but real-world prompts still produce short fragments;
+# the validator drops them. "≥ 5 words" is the boundary — anything shorter
+# is almost always a heading, label, or one-word fragment.
+_MIN_FACT_WORDS = 5
+
 # Drop facts that describe the input itself rather than extracting from it.
 # These show up when the LLM has nothing real to chunk — typical on short
 # inputs that slipped past ``_INGEST_MIN_CONTENT_CHARS``. Belt-and-braces
@@ -82,22 +94,77 @@ _META_FACT_RE = re.compile(
 )
 
 CHUNKING_PROMPT = """\
-Extract discrete, atomic facts from the following content.
-Each fact should be a single claim that can stand alone as a memory.
+Extract discrete, atomic facts from the following content for storage in an
+agent's long-term memory. Each fact must stand on its own when retrieved
+later without the surrounding document.
 
-Guidelines:
-- Extract 5-20 facts depending on content length
-- Be specific: include names, numbers, dates, decisions
-- Each fact: one claim, not a paragraph
-- Suggest a memory_type for each: fact, decision, preference, task, plan, episode, semantic, intention, commitment, action, outcome, cancellation
-- Do NOT produce meta-facts that describe the input itself. Avoid claims like "The content begins with...", "The provided text says...", "This document is about...". Extract facts FROM the content, not facts ABOUT the content.
+## Rules
+
+1. **Self-contained.** Every fact must be understandable without the original
+   document. Resolve pronouns, references, and "the" + ambiguous noun against
+   the document. "He shipped it" is bad; "Bob shipped v2.3 of the SDK on
+   March 15" is good.
+
+2. **Atomic.** One claim per fact. A sentence containing "X happened and Y
+   was decided" becomes two facts unless one of them is trivial.
+
+3. **No duplicates or near-duplicates.** If the document repeats a claim,
+   emit it once. If two paragraphs say the same thing in different words,
+   emit it once. Better to under-extract than to clone.
+
+4. **Substantive only.** At least 5 words per fact. No UI labels ("Learn
+   more", "Subscribe"), no headings ("Section 3"), no boilerplate ("All
+   rights reserved"), no questions, no TODOs without an answer.
+
+5. **No meta-facts.** Do not describe the input itself. Avoid claims like
+   "The content begins with...", "The provided text says...", "This
+   document is about...". Extract facts FROM the content, not facts ABOUT
+   the content.
+
+6. **Salience score** (0.0 to 1.0). Rate how essential each fact is for
+   later recall. Use this scale:
+     - 1.0 = critical, would be sorely missed if absent
+     - 0.7 = useful specifics: names, numbers, dates, decisions, outcomes
+     - 0.5 = relevant but not load-bearing
+     - 0.3 = arguably extractable but mostly noise
+     - 0.0 = filler / restatement
+   Be honest. Anything below 0.5 will be dropped automatically.
+
+7. **memory_type.** Pick the most specific tag. When in doubt prefer the
+   left option in each pair:
+     - fact         — a stable proposition about the world ("Iron melts at 1538°C")
+     - decision     — a chosen course of action by an identified actor
+     - task         — work item assigned but not yet finished
+     - plan         — intended future action stated as plan
+     - outcome      — past event/result; if you'd write "X happened" or "Y
+                      was completed", use this (not "fact")
+     - preference   — a stated like/dislike
+     - intention    — what someone aims to do
+     - commitment   — explicit promise
+     - action       — something done (granular than outcome)
+     - episode      — narrative event tied to a specific moment
+     - semantic     — definitional/conceptual relationship
+     - cancellation — explicit revocation of a prior plan/commitment
+
+## Quantity guidance
+
+Extract 5-20 facts depending on content length. Err toward fewer, higher-
+salience facts over many low-salience ones.
+
 {focus_instruction}
 
-Content:
+## Content
+
 {content}
 
-Return ONLY valid JSON object with a "facts" key containing an array:
-{{"facts": [{{"content": "...", "suggested_type": "fact"}}, ...]}}
+## Output
+
+Return ONLY a valid JSON object with a "facts" key. Each item:
+
+{{"facts": [
+  {{"content": "...", "suggested_type": "fact", "salience": 0.9}},
+  ...
+]}}
 """
 
 
@@ -149,23 +216,58 @@ async def _chunk_content(
                 raw = v
                 break
     dropped_meta = 0
+    dropped_low_salience = 0
+    dropped_short = 0
     for item in raw:
         if not isinstance(item, dict) or not item.get("content"):
             continue
         body = str(item["content"]).strip()
+
+        # P2.4: drop facts that describe the input rather than extract
+        # from it. Prompt forbids them but the LLM still produces them
+        # occasionally — especially on short/trivial input.
         if _META_FACT_RE.search(body):
-            # P2.4: drop facts that describe the input rather than extract
-            # from it. Prompt forbids them but the LLM still produces them
-            # occasionally — especially on short/trivial input.
             dropped_meta += 1
             continue
+
+        # A5: drop sub-5-word fragments. Prompt forbids them but the LLM
+        # still emits short headings/labels on noisy inputs.
+        if len(body.split()) < _MIN_FACT_WORDS:
+            dropped_short += 1
+            continue
+
+        # A1: drop low-salience facts. The LLM emits a per-fact 0-1
+        # salience score (see CHUNKING_PROMPT); anything below the floor
+        # is dropped without ever reaching the write pipeline.
+        salience_raw = item.get("salience")
+        try:
+            salience = float(salience_raw) if salience_raw is not None else None
+        except (TypeError, ValueError):
+            salience = None
+        if salience is not None and salience < _SALIENCE_FLOOR:
+            dropped_low_salience += 1
+            continue
+
         st = item.get("suggested_type", "fact")
         if st not in MEMORY_TYPES:
             st = "fact"
-        facts.append({"content": body, "suggested_type": st})
 
-    if dropped_meta:
-        logger.info("ingest: dropped %d meta-fact(s) from extraction output", dropped_meta)
+        fact_out: dict = {"content": body, "suggested_type": st}
+        # Surface salience on the returned fact when present, so the
+        # caller (preview UI / agent) can sort / threshold / display it.
+        # Existing callers ignore the new field — backward compatible.
+        if salience is not None:
+            fact_out["salience"] = salience
+        facts.append(fact_out)
+
+    if dropped_meta or dropped_low_salience or dropped_short:
+        logger.info(
+            "ingest: filtered %d fact(s) from extraction output (meta=%d, low_salience=%d, short=%d)",
+            dropped_meta + dropped_low_salience + dropped_short,
+            dropped_meta,
+            dropped_low_salience,
+            dropped_short,
+        )
 
     return facts
 
