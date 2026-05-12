@@ -40,6 +40,13 @@ dependencies = [
     "markdown-it-py>=4.0,<5",  # markdown AST walker
     "tiktoken>=0.10,<1",  # cl100k_base token counter for size caps
     "pysbd>=0.3,<1",  # sentence boundary detection for sub-chunk splits
+    # PR #8 (Tier-1 ingest, optional multi-format): Kreuzberg replaces
+    # what would otherwise be pypdf + python-docx + python-pptx + … (88+
+    # formats). Provides ``extract_bytes(data, mime) -> ExtractionResult``;
+    # text-PDF works out of the box, scanned-PDF OCR requires Tesseract on
+    # the host (deferred to a follow-up — image-only PDFs raise 422 for now).
+    # License Elastic-2.0.
+    "kreuzberg>=4.9,<5",
 ]
 
 [project.optional-dependencies]

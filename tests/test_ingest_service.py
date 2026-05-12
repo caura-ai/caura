@@ -153,18 +153,103 @@ class TestFetchUrlText:
         result = await _fetch_url_text("https://example.com/")
         assert "Hello world" in result
 
-    async def test_application_pdf_rejected_422(self, monkeypatch) -> None:
-        """PDF MIME type → 422 with allowlist hint. The single most important
-        wet-tested bug this PR fixes."""
+    async def test_application_pdf_routed_through_kreuzberg(self, monkeypatch) -> None:
+        """PR #8: PDF MIME no longer auto-rejected — Kreuzberg extracts text.
+
+        Patches ``kreuzberg.extract_bytes`` to return a known string and
+        asserts that ``_fetch_url_text`` returns it (i.e. binary types
+        flow through the new path).
+        """
         monkeypatch.setattr(
             "core_api.services.ingest_service._check_hostname_safe", lambda url: None
+        )
+
+        async def fake_extract(data, mime, *_a, **_kw):
+            assert mime == "application/pdf"
+            assert data == b"%PDF-1.4\n%pdf bytes"
+
+            class _R:
+                content = "Hello extracted PDF body"
+                metadata = {"is_encrypted": False}
+
+            return _R()
+
+        monkeypatch.setattr(
+            "core_api.services.ingest_service.kreuzberg.extract_bytes", fake_extract
         )
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200,
                 headers={"content-type": "application/pdf"},
-                content=b"%PDF-1.4\n%garbage binary content",
+                content=b"%PDF-1.4\n%pdf bytes",
+            )
+
+        monkeypatch.setattr(
+            "core_api.services.ingest_service.httpx.AsyncClient",
+            lambda **kw: _make_client(handler),
+        )
+        result = await _fetch_url_text("https://example.com/file.pdf")
+        assert result == "Hello extracted PDF body"
+
+    async def test_docx_routed_through_kreuzberg(self, monkeypatch) -> None:
+        """Office DOCX MIME also goes through Kreuzberg."""
+        monkeypatch.setattr(
+            "core_api.services.ingest_service._check_hostname_safe", lambda url: None
+        )
+
+        async def fake_extract(data, mime, *_a, **_kw):
+            assert mime == (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+
+            class _R:
+                content = "Title: Quarterly Review\nBody paragraphs go here."
+                metadata = {}
+
+            return _R()
+
+        monkeypatch.setattr(
+            "core_api.services.ingest_service.kreuzberg.extract_bytes", fake_extract
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={
+                    "content-type": (
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )
+                },
+                content=b"PK\x03\x04...",
+            )
+
+        monkeypatch.setattr(
+            "core_api.services.ingest_service.httpx.AsyncClient",
+            lambda **kw: _make_client(handler),
+        )
+        result = await _fetch_url_text("https://example.com/report.docx")
+        assert "Quarterly Review" in result
+
+    async def test_encrypted_pdf_returns_422(self, monkeypatch) -> None:
+        """Encrypted PDF surfaces as 422 with a clean error message."""
+        monkeypatch.setattr(
+            "core_api.services.ingest_service._check_hostname_safe", lambda url: None
+        )
+        import kreuzberg as _kz
+
+        async def fake_extract(data, mime, *_a, **_kw):
+            raise _kz.ParsingError("PDF encrypted: password required")
+
+        monkeypatch.setattr(
+            "core_api.services.ingest_service.kreuzberg.extract_bytes", fake_extract
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/pdf"},
+                content=b"%PDF-1.4\n%encrypted",
             )
 
         monkeypatch.setattr(
@@ -172,9 +257,71 @@ class TestFetchUrlText:
             lambda **kw: _make_client(handler),
         )
         with pytest.raises(Exception) as exc:
-            await _fetch_url_text("https://example.com/file.pdf")
+            await _fetch_url_text("https://example.com/secret.pdf")
         assert exc.value.status_code == 422
-        assert "application/pdf" in exc.value.detail
+        assert "Encrypted PDF" in exc.value.detail
+
+    async def test_malformed_pdf_parsing_error_422(self, monkeypatch) -> None:
+        """Garbage PDF bytes → Kreuzberg raises ParsingError → 422."""
+        monkeypatch.setattr(
+            "core_api.services.ingest_service._check_hostname_safe", lambda url: None
+        )
+        import kreuzberg as _kz
+
+        async def fake_extract(data, mime, *_a, **_kw):
+            raise _kz.ParsingError("Invalid PDF: PdfiumLibraryInternalError")
+
+        monkeypatch.setattr(
+            "core_api.services.ingest_service.kreuzberg.extract_bytes", fake_extract
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/pdf"},
+                content=b"not a real pdf",
+            )
+
+        monkeypatch.setattr(
+            "core_api.services.ingest_service.httpx.AsyncClient",
+            lambda **kw: _make_client(handler),
+        )
+        with pytest.raises(Exception) as exc:
+            await _fetch_url_text("https://example.com/broken.pdf")
+        assert exc.value.status_code == 422
+
+    async def test_empty_extracted_content_422(self, monkeypatch) -> None:
+        """Image-only PDF (no OCR backend) → empty extraction → 422."""
+        monkeypatch.setattr(
+            "core_api.services.ingest_service._check_hostname_safe", lambda url: None
+        )
+
+        async def fake_extract(data, mime, *_a, **_kw):
+            class _R:
+                content = "   "  # whitespace-only, no real text
+                metadata = {"is_encrypted": False}
+
+            return _R()
+
+        monkeypatch.setattr(
+            "core_api.services.ingest_service.kreuzberg.extract_bytes", fake_extract
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/pdf"},
+                content=b"%PDF-1.4\n%image-only",
+            )
+
+        monkeypatch.setattr(
+            "core_api.services.ingest_service.httpx.AsyncClient",
+            lambda **kw: _make_client(handler),
+        )
+        with pytest.raises(Exception) as exc:
+            await _fetch_url_text("https://example.com/scanned.pdf")
+        assert exc.value.status_code == 422
+        assert "no text content" in exc.value.detail.lower()
 
     async def test_octet_stream_rejected_422(self, monkeypatch) -> None:
         """Unknown binary MIME → 422."""

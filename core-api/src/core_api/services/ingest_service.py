@@ -11,6 +11,7 @@ import uuid
 from urllib.parse import urlparse
 
 import httpx
+import kreuzberg
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,10 +33,10 @@ from core_api.services.organization_settings import resolve_config
 
 logger = logging.getLogger(__name__)
 
-# Allowed MIME types for URL ingest. Binary formats (PDF, DOCX, etc.) are
-# rejected here; the optional Kreuzberg integration (PR #8) will add a
-# separate path for them.
-ALLOWED_INGEST_MIME_TYPES = frozenset(
+# MIME types we strip HTML from and pass through directly as text. Anything
+# in this set skips Kreuzberg entirely — cheaper, and the strip-tags path
+# is good enough for HTML/markdown/plaintext.
+TEXT_INGEST_MIME_TYPES = frozenset(
     {
         "text/html",
         "text/plain",
@@ -44,6 +45,34 @@ ALLOWED_INGEST_MIME_TYPES = frozenset(
         "application/xhtml+xml",
     }
 )
+
+# Binary MIME types we route through Kreuzberg's ``extract_bytes`` to recover
+# plain text (PR #8). Kreuzberg supports 88+ formats; the list below is the
+# curated subset we accept — everything we expect users to ingest from a URL.
+# Adding a new format = append to this set; no code change.
+#
+# Notes:
+#   - PDFs: text-PDFs work out of the box; image-only PDFs need Tesseract on
+#     the host (not currently installed in our images, so they'll either
+#     return empty content or raise ParsingError → we surface as 422).
+#   - Encrypted PDFs without a password raise ParsingError → 422.
+BINARY_INGEST_MIME_TYPES = frozenset(
+    {
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # .pptx
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # .xlsx
+        "application/epub+zip",
+        "application/rtf",
+        "application/vnd.oasis.opendocument.text",  # .odt
+    }
+)
+
+# Union for the allowlist check. Anything outside both sets is a 422.
+ALLOWED_INGEST_MIME_TYPES = TEXT_INGEST_MIME_TYPES | BINARY_INGEST_MIME_TYPES
 
 # Hard cap on fetched-body size (post-decompression). Defends against
 # gzip-bomb URLs that claim Content-Length: 50KB but expand to gigabytes.
@@ -364,13 +393,83 @@ def _check_hostname_safe(url: str) -> None:
             )
 
 
+# Kreuzberg config used by ``_extract_with_kreuzberg``. We request markdown
+# output so the structure-aware chunker (PR #7) can detect headings in
+# extracted PDFs/Office docs and produce breadcrumb-tagged sections, instead
+# of dumping one giant plaintext blob. Created once at module load to avoid
+# rebuilding it on every request.
+_KREUZBERG_CFG = kreuzberg.ExtractionConfig(output_format=kreuzberg.OutputFormat.MARKDOWN)
+
+
+async def _extract_with_kreuzberg(body: bytes, mime: str) -> str:
+    """Hand a binary blob to Kreuzberg for text extraction (PR #8).
+
+    Supports PDFs, Office formats, EPUB, RTF, ODT, etc. — anything in
+    ``BINARY_INGEST_MIME_TYPES``. Requests markdown output so the chunker's
+    heading-aware path stays useful for extracted documents. Maps Kreuzberg's
+    failure modes to clean HTTP responses:
+
+    - Encrypted PDF (``metadata.is_encrypted=True`` with empty content, or
+      a ``ParsingError`` mentioning encryption) → 422.
+    - Garbage / malformed blob → 422 with the Kreuzberg error message
+      (callers see "Could not parse <type>: <reason>").
+    - Empty extracted content (image-only PDF with no Tesseract installed)
+      → 422 — better to fail loudly than to send the LLM 0 bytes.
+    """
+    try:
+        result = await kreuzberg.extract_bytes(body, mime, _KREUZBERG_CFG)
+    except kreuzberg.ParsingError as e:
+        detail = str(e)
+        status = 422
+        # Surface a friendlier error for the common encrypted-PDF case
+        # rather than dumping Kreuzberg's raw "PdfiumLibraryInternalError".
+        if "encrypted" in detail.lower() or "password" in detail.lower():
+            detail = "Encrypted PDF: password-protected documents are not supported."
+        raise HTTPException(status_code=status, detail=detail)
+    except kreuzberg.KreuzbergError as e:
+        # Catch-all for other Kreuzberg failures (OCR errors, image
+        # processing errors, etc.) — never let them escape as 500s.
+        raise HTTPException(status_code=422, detail=f"Document extraction failed: {e}")
+
+    # Defensive: an encrypted PDF *can* slip past ParsingError if the
+    # extractor returns metadata.is_encrypted=True with empty content
+    # (depends on backend). Catch that case here.
+    if (result.metadata or {}).get("is_encrypted") and not (result.content or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="Encrypted PDF: password-protected documents are not supported.",
+        )
+
+    text = (result.content or "").strip()
+    if not text:
+        # Most likely cause: image-only PDF and no OCR backend on the host.
+        # Returning empty would feed the LLM 0 bytes and produce 0 facts —
+        # the caller is better served by a clear 422.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Extracted document has no text content (mime={mime}). "
+                f"If this is a scanned/image PDF, OCR is required and is "
+                f"not currently enabled."
+            ),
+        )
+    return text
+
+
 async def _fetch_url_text(url: str) -> str:
-    """Fetch URL, validate MIME + size, decode safely, and strip HTML.
+    """Fetch URL, validate MIME + size, decode safely, and extract text.
+
+    For ``TEXT_INGEST_MIME_TYPES`` the body is decoded with the response
+    charset (or UTF-8 fallback) and HTML tags are stripped. For
+    ``BINARY_INGEST_MIME_TYPES`` (PR #8) the body bytes are handed to
+    Kreuzberg for format-specific extraction.
 
     Raises ``HTTPException`` for:
     - 400: invalid URL, DNS failure, hostname resolves to a blocked IP range
     - 413: fetched body exceeds ``MAX_INGEST_CONTENT_BYTES``
-    - 422: response Content-Type isn't in the text allowlist
+    - 422: response Content-Type isn't in the allowlist, or Kreuzberg
+           rejected the content (encrypted PDF, malformed file, empty
+           text extraction, etc.)
     - 4xx/5xx: passed through from the upstream server
     """
     _check_hostname_safe(url)
@@ -428,6 +527,10 @@ async def _fetch_url_text(url: str) -> str:
                     )
                 chunks.append(chunk)
             body = b"".join(chunks)
+
+            # ---- PR #8: binary formats route through Kreuzberg ----
+            if content_type in BINARY_INGEST_MIME_TYPES:
+                return await _extract_with_kreuzberg(body, content_type)
 
             # Decode using the response's declared charset, falling back
             # to UTF-8. httpx's default is ISO-8859-1 when no charset is
