@@ -474,14 +474,30 @@ async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
         )
 
     # ----- P1.3: parallel strong-mode writes -----
+    # ----- P1.C-lite: warn-and-continue on per-fact failure -----
+    # Outcomes returned by ``_write_one`` and aggregated after gather.
+    # Encoded as ints because gather's collection ordering doesn't matter
+    # here — we only need totals.
+    _OUTCOME_CREATED = 1
+    _OUTCOME_DUPLICATE = 0
+    _OUTCOME_ERRORED = -1
+
     sem = asyncio.Semaphore(_COMMIT_CONCURRENCY)
 
-    async def _write_one(fact) -> int:
-        """Return 1 on create, 0 on 409, raise on other failures.
+    async def _write_one(idx: int, fact) -> int:
+        """Always returns; never raises.
 
-        Errors from ``create_memory`` that aren't 409 propagate out of
-        ``asyncio.gather`` and abort the batch. Tier-1 P1.C-lite (next
-        PR) softens that to per-fact warn-and-continue.
+        Returns one of: ``_OUTCOME_CREATED`` (created+1),
+        ``_OUTCOME_DUPLICATE`` (409 from create_memory, skipped+1),
+        ``_OUTCOME_ERRORED`` (any other failure — logged with run_id +
+        fact index for manual cleanup, errored+1).
+
+        P1.C-lite: pre-PR, any non-409 exception escaped out of gather
+        and aborted the whole batch, leaving 0..N-1 memories already
+        persisted under the run_id with no per-fact telemetry. Now each
+        fact's outcome is captured independently; the run_id stamps
+        whatever did land so it can be cleaned up via bulk-delete or
+        the upcoming POST /ingest/undo/{run_id} (PR #6).
         """
         # P1.2: provenance precedence — caller-supplied request.url wins
         # (dashboard back-compat), else use the fact's own source_uri
@@ -505,24 +521,50 @@ async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
         async with sem:
             try:
                 await create_memory(db, mem_data)
-                return 1
+                return _OUTCOME_CREATED
             except HTTPException as e:
                 if e.status_code == 409:
-                    return 0
-                raise
+                    return _OUTCOME_DUPLICATE
+                logger.exception(
+                    "ingest_commit: fact[%d] write failed with HTTP %d "
+                    "(run_id=%s) — tagged for manual cleanup",
+                    idx,
+                    e.status_code,
+                    run_id,
+                )
+                return _OUTCOME_ERRORED
+            except Exception:
+                logger.exception(
+                    "ingest_commit: fact[%d] write raised (run_id=%s) — tagged for manual cleanup",
+                    idx,
+                    run_id,
+                )
+                return _OUTCOME_ERRORED
 
-    results = await asyncio.gather(*(_write_one(f) for f in survivors))
-    created = sum(results)
-    skipped_in_loop = len(survivors) - created
+    results = await asyncio.gather(*(_write_one(i, f) for i, f in enumerate(survivors)))
+    created = sum(1 for r in results if r == _OUTCOME_CREATED)
+    skipped_in_loop = sum(1 for r in results if r == _OUTCOME_DUPLICATE)
+    errored = sum(1 for r in results if r == _OUTCOME_ERRORED)
     skipped = pre_dedup_skipped + skipped_in_loop
     ingest_ms = int((time.perf_counter() - t0) * 1000)
 
+    if errored:
+        logger.warning(
+            "ingest_commit: run_id=%s had %d errored fact(s) — "
+            "find them in the logs above, or DELETE FROM memories WHERE "
+            "ingest_run_id='%s' to wipe partial batch",
+            run_id,
+            errored,
+            run_id,
+        )
+
     logger.info(
-        "ingest_commit: run_id=%s facts=%d created=%d skipped=%d (pre_dedup=%d, 409=%d) in %dms",
+        "ingest_commit: run_id=%s facts=%d created=%d skipped=%d errored=%d (pre_dedup=%d, 409=%d) in %dms",
         run_id,
         len(facts),
         created,
         skipped,
+        errored,
         pre_dedup_skipped,
         skipped_in_loop,
         ingest_ms,
@@ -533,6 +575,7 @@ async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
         "facts_extracted": len(facts),
         "memories_created": created,
         "skipped_duplicates": skipped,
+        "errored": errored,
         "run_id": run_id,
         "ingest_ms": ingest_ms,
     }

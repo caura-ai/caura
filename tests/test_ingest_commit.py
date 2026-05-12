@@ -49,6 +49,11 @@ def captured(monkeypatch):
         bulk_find_result={},
         write_delay_ms=0,
         write_409_for=set(),
+        # P1.C-lite (PR #4): map of content_hash → exception_to_raise. Lets a
+        # test simulate non-409 failures on specific facts. Use HTTPException
+        # for HTTP-coded errors, or any other Exception subclass for generic
+        # runtime errors.
+        write_raise_for={},
     )
 
     async def fake_resolve_config(db, tenant_id):
@@ -72,12 +77,15 @@ def captured(monkeypatch):
         state.writes.append(data)
         if state.write_delay_ms:
             await asyncio.sleep(state.write_delay_ms / 1000.0)
-        # Simulate 409 from inside create_memory when configured
         from fastapi import HTTPException
 
         from core_api.services.memory_service import _content_hash as ch_fn
 
         h = ch_fn(data.tenant_id, data.fleet_id, data.content)
+        # Configured generic / non-409 error → raise it (P1.C-lite test path)
+        if h in state.write_raise_for:
+            raise state.write_raise_for[h]
+        # Simulate 409 from inside create_memory when configured
         if h in state.write_409_for:
             raise HTTPException(status_code=409, detail="duplicate")
         return SimpleNamespace(id="00000000-0000-0000-0000-000000000000")
@@ -393,3 +401,129 @@ async def test_valid_suggested_types_pass_through(captured):
     )
     result = await ingest_service.ingest_commit(db=None, request=req)
     assert result["memories_created"] == len(MEMORY_TYPES)
+
+
+# ---------------------------------------------------------------------------
+# PR #4 — P1.C-lite warn-and-continue on commit failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_non_409_http_error_increments_errored_not_raises(captured, caplog):
+    """A 5xx (or any non-409 HTTPException) on one fact is captured, logged
+    with run_id + fact index, and the response carries an ``errored`` count.
+    Pre-PR: this would raise out of gather and abort the entire batch."""
+    import logging
+
+    from fastapi import HTTPException
+
+    from core_api.services.memory_service import _content_hash
+
+    facts = ["good fact A", "BAD will 502", "good fact B"]
+    captured.write_raise_for = {
+        _content_hash("t1", None, facts[1]): HTTPException(
+            status_code=502, detail="upstream barfed"
+        ),
+    }
+
+    req = _request("t1", *facts)
+    with caplog.at_level(logging.WARNING, logger="core_api.services.ingest_service"):
+        result = await ingest_service.ingest_commit(db=None, request=req)
+
+    # The good facts went through; the bad one didn't blow up the batch
+    assert result["memories_created"] == 2
+    assert result["skipped_duplicates"] == 0
+    assert result["errored"] == 1
+    # Log mentions the run_id + the fact index (P1.C-lite runbook hook)
+    assert result["run_id"] in caplog.text
+    assert "fact[1]" in caplog.text
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_generic_exception_logs_and_increments_errored(captured, caplog):
+    """RuntimeError (or any non-HTTPException) on one fact is captured too,
+    not just HTTPException-shaped failures."""
+    import logging
+
+    from core_api.services.memory_service import _content_hash
+
+    facts = ["good", "boom", "also good"]
+    captured.write_raise_for = {
+        _content_hash("t1", None, "boom"): RuntimeError("storage_client TCP reset"),
+    }
+
+    req = _request("t1", *facts)
+    with caplog.at_level(logging.WARNING, logger="core_api.services.ingest_service"):
+        result = await ingest_service.ingest_commit(db=None, request=req)
+
+    assert result["memories_created"] == 2
+    assert result["errored"] == 1
+    assert "fact[1]" in caplog.text
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_mixed_outcomes_all_three_counted_correctly(captured):
+    """5 facts: 2 created, 1 dup (409), 1 errored, 1 pre-dedup-filtered."""
+    from fastapi import HTTPException
+
+    from core_api.services.memory_service import _content_hash
+
+    facts = ["fact-a", "fact-b", "fact-c", "fact-d", "fact-e"]
+    # fact-a hits pre-loop dedup (already in storage)
+    captured.bulk_find_result = {_content_hash("t1", None, "fact-a")}
+    # fact-b 409s inside create_memory (race with concurrent writer)
+    captured.write_409_for = {_content_hash("t1", None, "fact-b")}
+    # fact-c errors with a 5xx
+    captured.write_raise_for = {
+        _content_hash("t1", None, "fact-c"): HTTPException(
+            status_code=503, detail="db down"
+        ),
+    }
+    # fact-d, fact-e succeed
+
+    req = _request("t1", *facts)
+    result = await ingest_service.ingest_commit(db=None, request=req)
+
+    assert result["facts_extracted"] == 5
+    assert result["memories_created"] == 2  # d, e
+    assert result["skipped_duplicates"] == 2  # a (pre-dedup), b (in-loop 409)
+    assert result["errored"] == 1  # c
+    # Total accounting: created + skipped + errored = facts_extracted
+    assert (
+        result["memories_created"] + result["skipped_duplicates"] + result["errored"]
+        == result["facts_extracted"]
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_all_facts_error_does_not_raise(captured):
+    """When every single write fails, the batch still returns — empty
+    errored=N is the contract, not raise."""
+    from core_api.services.memory_service import _content_hash
+
+    facts = ["f1", "f2", "f3"]
+    captured.write_raise_for = {
+        _content_hash("t1", None, c): RuntimeError(f"fail {c}") for c in facts
+    }
+
+    req = _request("t1", *facts)
+    result = await ingest_service.ingest_commit(db=None, request=req)
+
+    assert result["memories_created"] == 0
+    assert result["skipped_duplicates"] == 0
+    assert result["errored"] == 3
+    # Importantly, the response was generated — the function didn't raise
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_response_always_carries_errored_field(captured):
+    """``errored`` is a stable response field even when zero."""
+    req = _request("t1", "f1")
+    result = await ingest_service.ingest_commit(db=None, request=req)
+    assert "errored" in result
+    assert result["errored"] == 0
