@@ -33,15 +33,17 @@ from core_api.services.organization_settings import resolve_config
 
 logger = logging.getLogger(__name__)
 
-# MIME types we strip HTML from and pass through directly as text. Anything
-# in this set skips Kreuzberg entirely — cheaper, and the strip-tags path
-# is good enough for HTML/markdown/plaintext.
+# MIME types decoded as text. HTML/XHTML get the tag-strip + whitespace-
+# collapse treatment; everything else (plain/markdown/csv) preserves
+# newlines so the chunker's heading detection and CSV row structure stay
+# intact. Bypasses Kreuzberg entirely (cheaper).
 TEXT_INGEST_MIME_TYPES = frozenset(
     {
         "text/html",
         "text/plain",
         "text/markdown",
         "text/x-markdown",
+        "text/csv",  # PR #9: CSV support
         "application/xhtml+xml",
     }
 )
@@ -74,9 +76,15 @@ BINARY_INGEST_MIME_TYPES = frozenset(
 # Union for the allowlist check. Anything outside both sets is a 422.
 ALLOWED_INGEST_MIME_TYPES = TEXT_INGEST_MIME_TYPES | BINARY_INGEST_MIME_TYPES
 
-# Hard cap on fetched-body size (post-decompression). Defends against
-# gzip-bomb URLs that claim Content-Length: 50KB but expand to gigabytes.
-MAX_INGEST_CONTENT_BYTES = 200_000
+# Hard byte cap on every ingest input path (PR #9):
+#   - HTTP request body for /ingest/preview, /ingest/commit, /ingest/file
+#   - URL-fetched body (post-decompression — gzip-bomb guard)
+#   - Multipart file upload
+# Single knob so "max file size" is consistent across surfaces.
+INGEST_MAX_INPUT_BYTES = 3_000_000  # 3 MB
+
+# Back-compat alias for code/tests written before the unification.
+MAX_INGEST_CONTENT_BYTES = INGEST_MAX_INPUT_BYTES
 
 # Explicit deny-list for cloud-metadata service IPs that aren't always
 # caught by ipaddress.is_link_local (AWS 169.254.169.254 IS link-local;
@@ -401,6 +409,28 @@ def _check_hostname_safe(url: str) -> None:
 _KREUZBERG_CFG = kreuzberg.ExtractionConfig(output_format=kreuzberg.OutputFormat.MARKDOWN)
 
 
+def decode_text_body(body: bytes, mime: str, encoding: str | None = None) -> str:
+    """Decode a body classified as one of ``TEXT_INGEST_MIME_TYPES``.
+
+    HTML / XHTML get the legacy aggressive scrub: drop ``<script>`` and
+    ``<style>`` blocks, strip all tags, then collapse whitespace — web
+    pages have copious noise.
+
+    ``text/plain``, ``text/markdown``, ``text/csv``: decode + normalize
+    CRLF / CR to LF, preserve every other byte. The chunker's heading
+    detection relies on real newlines, and CSV becomes unreadable
+    without row breaks.
+    """
+    decoded = body.decode(encoding or "utf-8", errors="replace")
+    if mime in ("text/html", "application/xhtml+xml"):
+        text = re.sub(r"<script[^>]*>.*?</script>", "", decoded, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+    return decoded.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
 async def _extract_with_kreuzberg(body: bytes, mime: str) -> str:
     """Hand a binary blob to Kreuzberg for text extraction (PR #8).
 
@@ -537,16 +567,10 @@ async def _fetch_url_text(url: str) -> str:
             # advertised, which mojibakes any UTF-8 page that omits a
             # charset declaration.
             encoding = resp.charset_encoding or "utf-8"
-            html = body.decode(encoding, errors="replace")
 
-    # Strip HTML tags to get plain text. (BeautifulSoup-based extraction
-    # ships in a later PR; this regex is the same as before.)
-    text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-
-    return text
+    # PR #9: shared decoder. HTML still gets the tag-strip path;
+    # markdown / plain / csv preserve newlines.
+    return decode_text_body(body, content_type, encoding)
 
 
 async def _find_prior_ingest_by_doc_hash(db: AsyncSession, tenant_id: str, doc_hash: str) -> list[Memory]:

@@ -47,6 +47,10 @@ dependencies = [
     # the host (deferred to a follow-up — image-only PDFs raise 422 for now).
     # License Elastic-2.0.
     "kreuzberg>=4.9,<5",
+    # PR #9: FastAPI's UploadFile / Form support needs python-multipart at
+    # runtime. Pulled in transitively today via ``mcp`` but declaring
+    # explicitly so removing/upgrading mcp can't silently break uploads.
+    "python-multipart>=0.0.20,<1",
 ]
 
 [project.optional-dependencies]

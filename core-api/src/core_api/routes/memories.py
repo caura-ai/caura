@@ -6,7 +6,19 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, Response
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
@@ -56,7 +68,16 @@ from core_api.services.agent_service import (
     lookup_agent,
 )
 from core_api.services.audit_service import log_action
-from core_api.services.ingest_service import ingest_commit, ingest_preview
+from core_api.services.ingest_service import (
+    ALLOWED_INGEST_MIME_TYPES,
+    BINARY_INGEST_MIME_TYPES,
+    INGEST_MAX_INPUT_BYTES,
+    TEXT_INGEST_MIME_TYPES,
+    _extract_with_kreuzberg,
+    decode_text_body,
+    ingest_commit,
+    ingest_preview,
+)
 from core_api.services.memory_service import (
     _memory_to_out,
     create_memories_bulk,
@@ -1255,7 +1276,10 @@ async def ingest_preview_endpoint(
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    """Extract facts from a URL or text for preview (no writes)."""
+    """Extract facts from a URL or text for preview (no writes).
+
+    Body size cap: enforced upstream by ``IngestBodySizeMiddleware`` (PR #9).
+    """
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
@@ -1277,6 +1301,60 @@ async def ingest_commit_endpoint(
     if auth.tenant_id:  # skip for admin
         await check_and_increment(db, body.tenant_id, "write")
     return await ingest_commit(db, body)
+
+
+@router.post("/ingest/file")
+async def ingest_file_endpoint(
+    file: UploadFile = File(...),
+    tenant_id: str = Form(...),
+    focus: str | None = Form(None),
+    fleet_id: str | None = Form(None),
+    agent_id: str | None = Form(None),
+    auth: AuthContext = Depends(get_auth_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """PR #9: multipart file upload entry point.
+
+    Accepts the same 3 MB cap as JSON / URL ingest. Supported MIMEs:
+    - Text formats (md, txt, csv, html): decoded directly.
+    - Binary formats (pdf, docx, pptx, xlsx, epub, rtf, odt): routed
+      through Kreuzberg for text extraction.
+
+    The uploaded file's ``Content-Type`` drives dispatch. The Content-Length
+    cap is enforced upstream by ``IngestBodySizeMiddleware``; we re-check
+    the extracted payload size here for defense in depth (multipart envelope
+    overhead can hide the real payload size from the request header).
+    """
+    auth.enforce_read_only()
+    auth.enforce_usage_limits()
+    auth.enforce_tenant(tenant_id)
+
+    body = await file.read()
+    if len(body) > INGEST_MAX_INPUT_BYTES:
+        max_mb = INGEST_MAX_INPUT_BYTES // 1_000_000
+        raise HTTPException(
+            status_code=413,
+            detail=f"File must be {max_mb} MB or under (got {len(body):,} bytes).",
+        )
+
+    mime = (file.content_type or "").split(";")[0].strip().lower()
+    if mime in BINARY_INGEST_MIME_TYPES:
+        text = await _extract_with_kreuzberg(body, mime)
+    elif mime in TEXT_INGEST_MIME_TYPES:
+        text = decode_text_body(body, mime)
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"Unsupported content type: {mime}. Allowed: {sorted(ALLOWED_INGEST_MIME_TYPES)}"),
+        )
+
+    # IngestRequest.agent_id has a non-None default ("ingest-agent"); pass
+    # only when the form actually carried one to avoid clobbering the default.
+    kwargs: dict = {"tenant_id": tenant_id, "content": text, "focus": focus, "fleet_id": fleet_id}
+    if agent_id is not None:
+        kwargs["agent_id"] = agent_id
+    req = IngestRequest(**kwargs)
+    return await ingest_preview(db, req)
 
 
 @router.post("/ingest/undo/{run_id}")

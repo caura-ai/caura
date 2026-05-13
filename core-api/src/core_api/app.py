@@ -35,6 +35,7 @@ from core_api.clients.storage_client import get_storage_client
 from core_api.constants import VERSION, is_mcp_path
 from core_api.consumer import register_consumers
 from core_api.mcp_server import get_mcp_app, mcp_lifespan
+from core_api.middleware.ingest_body_size import IngestBodySizeMiddleware
 from core_api.middleware.per_tenant_concurrency import per_tenant_storage_slot
 from core_api.middleware.rate_limit import limiter
 from core_api.middleware.request_timeout import (
@@ -539,6 +540,10 @@ app.add_middleware(
     RequestTimeoutMiddleware,
     timeout_seconds=app_settings.request_timeout_seconds,
 )
+# PR #9: reject oversized ingest requests at Content-Length, before
+# FastAPI parses the body. Sits inside SecurityHeaders/CORS so the 413
+# still carries those headers.
+app.add_middleware(IngestBodySizeMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,

@@ -17,10 +17,12 @@ import httpx
 import pytest
 
 from core_api.services.ingest_service import (
+    INGEST_MAX_INPUT_BYTES,
     MAX_INGEST_CONTENT_BYTES,
     _check_hostname_safe,
     _fetch_url_text,
     _is_blocked_ip,
+    decode_text_body,
 )
 
 # Capture the un-patched factories. The tests monkeypatch
@@ -449,3 +451,101 @@ class TestFetchUrlText:
         result = await _fetch_url_text("https://example.com/doc.md")
         assert "Title" in result
         assert "Body" in result
+
+    async def test_csv_mime_allowed(self, monkeypatch) -> None:
+        """PR #9: text/csv is in the allowlist and rows are preserved."""
+        monkeypatch.setattr(
+            "core_api.services.ingest_service._check_hostname_safe", lambda url: None
+        )
+        csv_body = b"name,age,role\nAlice,30,founder\nBob,28,engineer\n"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, headers={"content-type": "text/csv"}, content=csv_body
+            )
+
+        monkeypatch.setattr(
+            "core_api.services.ingest_service.httpx.AsyncClient",
+            lambda **kw: _make_client(handler),
+        )
+        result = await _fetch_url_text("https://example.com/people.csv")
+        # Newlines must be preserved or the LLM can't tell rows apart
+        assert "\nAlice" in result
+        assert "\nBob" in result
+        assert "name,age,role" in result
+
+    async def test_markdown_preserves_newlines(self, monkeypatch) -> None:
+        """PR #9: markdown via URL no longer collapses whitespace, so the
+        chunker can detect heading boundaries on URL-fetched docs."""
+        monkeypatch.setattr(
+            "core_api.services.ingest_service._check_hostname_safe", lambda url: None
+        )
+        md = b"# H1\n\nPara 1.\n\n## H2\n\nPara 2.\n"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, headers={"content-type": "text/markdown"}, content=md
+            )
+
+        monkeypatch.setattr(
+            "core_api.services.ingest_service.httpx.AsyncClient",
+            lambda **kw: _make_client(handler),
+        )
+        result = await _fetch_url_text("https://example.com/doc.md")
+        assert "# H1" in result
+        assert "## H2" in result
+        assert "\n\n" in result  # blank line between sections preserved
+
+
+# ---------------------------------------------------------------------------
+# PR #9 — decode_text_body helper
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestDecodeTextBody:
+    def test_html_strips_scripts_and_collapses_whitespace(self) -> None:
+        body = b"<html><body><script>evil()</script><p>Hello   world</p></body></html>"
+        assert decode_text_body(body, "text/html") == "Hello world"
+
+    def test_xhtml_strips_tags(self) -> None:
+        body = b"<root><a>x</a> <b>y</b></root>"
+        out = decode_text_body(body, "application/xhtml+xml")
+        assert "x" in out and "y" in out
+        assert "<" not in out
+
+    def test_plain_preserves_newlines(self) -> None:
+        body = b"line one\n\nline two\n"
+        assert decode_text_body(body, "text/plain") == "line one\n\nline two"
+
+    def test_markdown_preserves_headings(self) -> None:
+        body = b"# Title\n\nBody.\n"
+        out = decode_text_body(body, "text/markdown")
+        assert "# Title" in out
+        assert "\n\n" in out
+
+    def test_csv_preserves_rows(self) -> None:
+        body = b"a,b,c\n1,2,3\n4,5,6\n"
+        out = decode_text_body(body, "text/csv")
+        assert out == "a,b,c\n1,2,3\n4,5,6"
+
+    def test_normalizes_crlf_to_lf(self) -> None:
+        body = b"line1\r\nline2\r\n"
+        assert decode_text_body(body, "text/plain") == "line1\nline2"
+
+    def test_utf8_decode_with_fallback(self) -> None:
+        body = "héllo wörld".encode("utf-8")
+        assert "héllo wörld" in decode_text_body(body, "text/plain")
+
+
+# ---------------------------------------------------------------------------
+# PR #9 — 3 MB unified cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_unified_cap_is_3mb() -> None:
+    """The single ``INGEST_MAX_INPUT_BYTES`` knob governs every entry point."""
+    assert INGEST_MAX_INPUT_BYTES == 3_000_000
+    # MAX_INGEST_CONTENT_BYTES is kept as a back-compat alias.
+    assert MAX_INGEST_CONTENT_BYTES == INGEST_MAX_INPUT_BYTES
