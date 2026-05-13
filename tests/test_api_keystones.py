@@ -256,11 +256,269 @@ async def test_delete_round_trip(client):
 
 
 async def test_delete_requires_trust(client):
-    """DELETE is also trust-gated — unseeded agent gets 403, not 404."""
+    """DELETE is trust-gated. The handler resolves the lookup first
+    (so missing-rule yields 404 without revealing authz state to a
+    probing caller); when the rule DOES exist, an unseeded ``ghost``
+    agent is rejected with 403."""
     tenant_id, headers = get_test_auth()
     tag = _uid()
+    # Seed a tenant-scope rule via a trusted author so the row exists.
+    admin = f"admin-{tag}"
+    await _seed_trusted_agent(client, tenant_id, headers, admin, f"fleet-{tag}")
+    doc_id = f"ks-{tag}"
+    set_resp = await _set_keystone(
+        client, _author_headers(headers, admin), tenant_id, doc_id=doc_id
+    )
+    assert set_resp.status_code == 200, set_resp.text
+
+    # Unseeded ``ghost`` agent tries to delete the existing rule.
     resp = await client.delete(
-        f"/api/v1/memclaw/keystones/anything?tenant_id={tenant_id}",
+        f"/api/v1/memclaw/keystones/{doc_id}?tenant_id={tenant_id}",
         headers=_author_headers(headers, f"ghost-{tag}"),
     )
     assert resp.status_code == 403, resp.text
+
+
+# ---------------------------------------------------------------------------
+# Tiered trust (agent self-author at ≥ 1; fleet/tenant/cross-agent at ≥ 2)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_default_trust_agent(client, tenant_id, headers, agent_id, fleet_id):
+    """Create an agent at the auto-default trust (=1) — no PATCH bump."""
+    resp = await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "fleet_id": fleet_id,
+            "memory_type": "fact",
+            "content": f"seed memory for {agent_id}",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+
+
+async def test_set_agent_scope_self_unverified_rejected(client):
+    """Anti-spoof: a self-author claim via X-Agent-ID alone (no
+    gateway-verified ``auth.agent_id``) is the spoofing surface — an
+    admin-key holder could supply any victim's id and forge a rule in
+    that victim's name at trust 1. The OSS test path is admin-keyed,
+    so ``caller_verified`` is False and ``_effective_min_for_caller``
+    bumps the floor to ≥ 2; a trust-1 agent attempting self-author
+    through this path is rejected. To exercise the legitimate
+    self-author tier in production, callers need a gateway-verified
+    agent identity (e.g. an ``mca_*`` agent-scoped key)."""
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    agent_id = f"self-{tag}"
+    fleet_id = f"fleet-{tag}"
+    await _seed_default_trust_agent(client, tenant_id, headers, agent_id, fleet_id)
+
+    resp = await _set_keystone(
+        client,
+        _author_headers(headers, agent_id),
+        tenant_id,
+        doc_id=f"ks-{tag}",
+        scope="agent",
+        fleet_id=fleet_id,
+        agent_id=agent_id,
+        weight="med",
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_xagent_id_mismatch_with_auth_rejected(client):
+    """When both ``auth.agent_id`` and ``X-Agent-ID`` are set but
+    disagree, the request is rejected as a spoofing attempt rather
+    than letting the helper silently pick one."""
+    # The OSS test infrastructure can't populate ``auth.agent_id``
+    # via the admin-key path (the admin path discards X-Agent-ID
+    # before constructing AuthContext). To prove the helper raises,
+    # we call it directly with a synthetic AuthContext.
+    from core_api.auth import AuthContext
+    from core_api.routes.keystones import _resolve_caller_identity
+    from fastapi import HTTPException
+
+    auth = AuthContext(tenant_id="t", agent_id="alice")
+    try:
+        _resolve_caller_identity(auth, "bob")
+    except HTTPException as exc:
+        assert exc.status_code == 403
+        assert "does not match" in str(exc.detail).lower()
+    else:
+        raise AssertionError("expected HTTPException(403) on mismatch")
+
+
+async def test_set_agent_scope_other_at_trust_1_rejected(client):
+    """A trust-1 agent cannot author scope=agent for someone else."""
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    me = f"me-{tag}"
+    other = f"other-{tag}"
+    fleet_id = f"fleet-{tag}"
+    await _seed_default_trust_agent(client, tenant_id, headers, me, fleet_id)
+
+    resp = await _set_keystone(
+        client,
+        _author_headers(headers, me),
+        tenant_id,
+        doc_id=f"ks-{tag}",
+        scope="agent",
+        fleet_id=fleet_id,
+        agent_id=other,
+        weight="med",
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_set_fleet_scope_at_trust_1_rejected(client):
+    """scope=fleet stays at trust ≥ 2."""
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    agent_id = f"author-{tag}"
+    fleet_id = f"fleet-{tag}"
+    await _seed_default_trust_agent(client, tenant_id, headers, agent_id, fleet_id)
+
+    resp = await _set_keystone(
+        client,
+        _author_headers(headers, agent_id),
+        tenant_id,
+        doc_id=f"ks-{tag}",
+        scope="fleet",
+        fleet_id=fleet_id,
+        weight="med",
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_set_tenant_scope_at_trust_1_rejected(client):
+    """scope=tenant stays at trust ≥ 2."""
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    agent_id = f"author-{tag}"
+    fleet_id = f"fleet-{tag}"
+    await _seed_default_trust_agent(client, tenant_id, headers, agent_id, fleet_id)
+
+    resp = await _set_keystone(
+        client,
+        _author_headers(headers, agent_id),
+        tenant_id,
+        doc_id=f"ks-{tag}",
+        scope="tenant",
+        weight="med",
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_delete_own_agent_rule_unverified_rejected(client):
+    """Same anti-spoof rationale as
+    ``test_set_agent_scope_self_unverified_rejected``: deleting a
+    ``scope=agent`` rule via the admin-key OSS path is treated as
+    unverified caller identity, so the floor bumps to ≥ 2 and a
+    trust-1 attempt fails. Authoring the seed rule itself also fails
+    (same anti-spoof) — seed via a trust-2 admin instead so the row
+    exists for the deletion attempt to exercise the gate.
+    """
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fleet_id = f"fleet-{tag}"
+    admin = f"admin-{tag}"
+    await _seed_trusted_agent(client, tenant_id, headers, admin, fleet_id)
+    doc_id = f"ks-{tag}"
+    # Author the rule via admin (trust 2) so it exists. The admin path
+    # is also unverified, but trust 2 clears the bumped floor (max(2, 2)).
+    set_resp = await _set_keystone(
+        client,
+        _author_headers(headers, admin),
+        tenant_id,
+        doc_id=doc_id,
+        scope="agent",
+        fleet_id=fleet_id,
+        agent_id=admin,
+        weight="med",
+    )
+    assert set_resp.status_code == 200, set_resp.text
+
+    # Seed the trust-1 agent who tries to delete.
+    member = f"self-{tag}"
+    await _seed_default_trust_agent(client, tenant_id, headers, member, fleet_id)
+    del_resp = await client.delete(
+        f"/api/v1/memclaw/keystones/{doc_id}?tenant_id={tenant_id}",
+        headers=_author_headers(headers, member),
+    )
+    # Member isn't the rule's owner (admin is) AND the path is unverified
+    # — both reasons land on 403. Either way: trust-1 unverified can't
+    # delete a ``scope=agent`` rule.
+    assert del_resp.status_code == 403, del_resp.text
+
+
+async def test_overwrite_fleet_rule_as_self_agent_rejected(client):
+    """Privilege escalation guard: a trust-1 agent must NOT be able to
+    overwrite an existing scope=fleet rule by sending scope=agent +
+    agent_id=<self> in the body. The effective floor takes the max of
+    the new shape (1) and the stored shape (2), so the gate fires."""
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fleet_id = f"fleet-{tag}"
+    # Trust-2 admin authors a fleet rule under doc_id ``ks-{tag}``.
+    admin = f"admin-{tag}"
+    await _seed_trusted_agent(client, tenant_id, headers, admin, fleet_id)
+    doc_id = f"ks-{tag}"
+    set_resp = await _set_keystone(
+        client,
+        _author_headers(headers, admin),
+        tenant_id,
+        doc_id=doc_id,
+        scope="fleet",
+        fleet_id=fleet_id,
+        weight="med",
+    )
+    assert set_resp.status_code == 200, set_resp.text
+
+    # Trust-1 member attempts to overwrite under the same doc_id by
+    # claiming scope=agent + agent_id=<self>.
+    attacker = f"attacker-{tag}"
+    await _seed_default_trust_agent(client, tenant_id, headers, attacker, fleet_id)
+    resp = await _set_keystone(
+        client,
+        _author_headers(headers, attacker),
+        tenant_id,
+        doc_id=doc_id,  # same doc_id as the fleet rule
+        scope="agent",
+        fleet_id=fleet_id,
+        agent_id=attacker,
+        weight="med",
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_delete_fleet_rule_at_trust_1_rejected(client):
+    """A trust-1 agent cannot delete a scope=fleet rule even within its fleet."""
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fleet_id = f"fleet-{tag}"
+    # Trust-2 admin authors the fleet rule.
+    admin = f"admin-{tag}"
+    await _seed_trusted_agent(client, tenant_id, headers, admin, fleet_id)
+    doc_id = f"ks-{tag}"
+    set_resp = await _set_keystone(
+        client,
+        _author_headers(headers, admin),
+        tenant_id,
+        doc_id=doc_id,
+        scope="fleet",
+        fleet_id=fleet_id,
+        weight="med",
+    )
+    assert set_resp.status_code == 200, set_resp.text
+
+    # Trust-1 member of the same fleet tries to delete it.
+    member = f"member-{tag}"
+    await _seed_default_trust_agent(client, tenant_id, headers, member, fleet_id)
+    del_resp = await client.delete(
+        f"/api/v1/memclaw/keystones/{doc_id}?tenant_id={tenant_id}",
+        headers=_author_headers(headers, member),
+    )
+    assert del_resp.status_code == 403, del_resp.text

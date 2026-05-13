@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import time
-from typing import Annotated
+from typing import Annotated, cast
 from uuid import UUID, uuid4
 
 import httpx
@@ -56,6 +56,7 @@ from core_api.services.memory_service import (
 from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
+from core_api.trust_utils import effective_keystone_min_trust, keystone_min_trust
 
 logger = logging.getLogger(__name__)
 
@@ -1440,9 +1441,15 @@ async def memclaw_evolve(
 #     admins/governance AUTHOR them. Surfacing them as two named tools
 #     keeps the read tool discoverable in ``instructions`` without the
 #     write surface bleeding into low-trust contexts.
-#   * Different trust profiles — read is open (``trust_required=0``),
-#     write is gated (``trust_required=1``) so a prompt-injected agent
-#     can't plant a malicious always-on rule.
+#   * Different trust profiles. Read is open (``trust_required=0``).
+#     Write declares ``trust_required=1`` as the minimum any successful
+#     call needs, then the handler computes the per-call floor from
+#     the rule's scope/agent_id: ``scope=agent`` for the caller's own
+#     agent_id is the self-author tier (≥1); everything else
+#     (``scope=fleet``, ``scope=tenant``, or cross-agent ``scope=agent``)
+#     stays at the cross-agent governance bar (≥2). The ≥2 tier is what
+#     blocks a prompt-injected freshly-registered agent from planting
+#     a tenant-wide rule or impersonating another agent.
 
 
 async def memclaw_keystones(
@@ -1510,7 +1517,13 @@ async def memclaw_keystones_set(
         str | None, Field(description="op=set: optional author identity for audit.")
     ] = None,
 ) -> str:
-    """Author or remove a keystone rule. Requires trust ≥ 2.
+    """Author or remove a keystone rule.
+
+    Trust gating is dynamic: ``scope=agent`` for the caller's own
+    ``agent_id`` is the self-author tier (trust ≥ 1); everything else
+    (``scope=fleet``, ``scope=tenant``, or cross-agent ``scope=agent``)
+    stays at the cross-agent governance bar (trust ≥ 2). Mirror of the
+    REST policy in ``routes/keystones.py``.
 
     Use this rarely and deliberately — keystones override conflicting
     user instructions and apply to every future session in scope.
@@ -1552,47 +1565,14 @@ async def memclaw_keystones_set(
         # SQLAlchemy / connection errors that aren't ``HTTPStatusError``
         # or ``HTTPException``. Mirrors memclaw_keystones' fallback.
         try:
-            trust, not_found, terr = await _require_trust(db, tenant_id, caller_agent_id, min_level=2)
-            # ``not_found`` must be checked independently of ``terr`` on write
-            # paths — see require_trust's docstring. An unregistered agent
-            # planting a keystone would corrupt the audit trail.
-            #
-            # Trust ≥ 2 (cross-agent tier) matches the elevated-trust
-            # threshold ``memclaw_list/stats/evolve/insights`` use for
-            # cross-agent scopes — keystones override user instructions
-            # across the tenant, so a default-trust=1 agent must not be
-            # able to author one. Cross-fleet authoring within trust ≥ 2
-            # is intentionally allowed; see the longer rationale on
-            # ``routes/keystones.py:_enforce_author_trust`` — finer-grained
-            # scope authority is a follow-up.
-            if not_found:
-                return _with_latency(
-                    _error_response(
-                        "FORBIDDEN",
-                        f"Agent '{caller_agent_id}' is not registered. "
-                        "Register the agent by writing one memory first.",
-                    ),
-                    t0,
-                )
-            if terr:
-                return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
-
             sc = get_storage_client()
+
             if op == "set":
-                # Bump the tenant's write quota — matches every other MCP
-                # write handler (memclaw_write/doc/manage/evolve). OSS
-                # impl is a no-op; enterprise can wire real metering
-                # without touching this call site. Skipped for op=delete
-                # because deletes don't charge the write budget (mirrors
-                # the REST route skipping ``enforce_usage_limits`` on
-                # DELETE).
-                await check_and_increment(db, tenant_id, "write")
-                # Surface missing fields locally instead of letting storage
-                # 422 on them — keeps the error envelope close to the
-                # caller and lists every missing field at once. We check
-                # ``is None`` (not ``not v``) so an explicit empty string
-                # falls through to storage's ``min_length=1`` check and
-                # surfaces the correct error.
+                # Surface missing fields BEFORE the trust gate so we can
+                # compute ``min_level`` from a non-None ``scope``. We
+                # check ``is None`` (not ``not v``) so an explicit empty
+                # string falls through to storage's ``min_length=1``
+                # check and surfaces the correct error.
                 required = {
                     "title": title,
                     "content": content,
@@ -1608,6 +1588,101 @@ async def memclaw_keystones_set(
                         ),
                         t0,
                     )
+
+                # ONE trust round-trip — mirrors the op=delete path.
+                # Ask ``_require_trust`` for the anti-probing minimum (1)
+                # and reuse the returned ``trust`` value for the in-memory
+                # floor check after the storage lookup. This collapses
+                # two DB queries into one while preserving both the
+                # registration-check guarantee (so an unregistered caller
+                # can't probe doc_id existence via sc.get_document) and
+                # the scope-derived floor check.
+                trust, early_not_found, _early_terr = await _require_trust(
+                    db, tenant_id, caller_agent_id, min_level=1
+                )
+                if early_not_found:
+                    return _with_latency(
+                        _error_response(
+                            "FORBIDDEN",
+                            f"Agent '{caller_agent_id}' is not registered. "
+                            "Register the agent by writing one memory first.",
+                        ),
+                        t0,
+                    )
+                if _early_terr:
+                    return _with_latency(
+                        _error_response("FORBIDDEN", parse_trust_error(_early_terr)),
+                        t0,
+                    )
+
+                # Look up the existing rule (if any) so the trust floor
+                # combines the NEW body shape and the STORED shape.
+                # Without this, a trust-1 agent could overwrite a
+                # ``scope=fleet`` rule by submitting
+                # ``scope=agent``+``agent_id=<self>`` — the new-shape
+                # floor (1) would pass the gate and storage would
+                # upsert unconditionally. Mirrors the REST upsert.
+                existing = await sc.get_document(
+                    tenant_id=tenant_id,
+                    collection="_keystones",
+                    doc_id=doc_id,
+                )
+                existing_data = (existing or {}).get("data") or {}
+                # ``cast`` is a static-only hint (no runtime branch — unlike
+                # ``assert``, which becomes a no-op under ``python -O``).
+                # ``scope`` is guaranteed non-None by the required-fields
+                # check above; this just makes that visible to mypy.
+                new_scope_str = cast("str", scope)
+                min_level = effective_keystone_min_trust(
+                    new_scope=new_scope_str,
+                    new_target_agent_id=agent_id,
+                    stored_scope=existing_data.get("scope") if existing else None,
+                    stored_target_agent_id=existing_data.get("agent_id") if existing else None,
+                    caller_agent_id=caller_agent_id,
+                )
+                if trust < min_level:
+                    return _with_latency(
+                        _error_response(
+                            "FORBIDDEN",
+                            f"Agent '{caller_agent_id}' (trust_level={trust}) < required {min_level}.",
+                        ),
+                        t0,
+                    )
+                # TOCTOU narrowing: re-fetch the stored row immediately
+                # before the upsert and abort if the shape changed. A
+                # legitimate concurrent upsert could otherwise promote
+                # the stored scope between the gate read and the write
+                # below, letting a caller authorised for the looser
+                # earlier shape overwrite a stricter rule. Window is
+                # now reduced to (recheck → write), matching the delete
+                # path; storage-side conditional upsert remains the
+                # proper fix.
+                recheck = await sc.get_document(tenant_id=tenant_id, collection="_keystones", doc_id=doc_id)
+                recheck_data = (recheck or {}).get("data") or {}
+                if (existing is None) != (recheck is None) or (
+                    existing is not None
+                    and recheck is not None
+                    and (
+                        recheck_data.get("scope") != existing_data.get("scope")
+                        or recheck_data.get("agent_id") != existing_data.get("agent_id")
+                    )
+                ):
+                    return _with_latency(
+                        _error_response(
+                            "CONFLICT",
+                            "Keystone scope changed during operation; aborting upsert.",
+                        ),
+                        t0,
+                    )
+
+                # Bump the tenant's write quota — matches every other MCP
+                # write handler (memclaw_write/doc/manage/evolve). OSS
+                # impl is a no-op; enterprise can wire real metering
+                # without touching this call site. Skipped for op=delete
+                # because deletes don't charge the write budget (mirrors
+                # the REST route skipping ``enforce_usage_limits`` on
+                # DELETE).
+                await check_and_increment(db, tenant_id, "write")
                 # Storage owns scope/weight/fleet/agent shape validation;
                 # surface its 422s directly so we don't drift from the
                 # canonical error list.
@@ -1656,6 +1731,76 @@ async def memclaw_keystones_set(
                     t0,
                 )
             # op == "delete"
+            # ONE trust round-trip for both the pre-lookup registration
+            # check (≥ 1, anti-probing — collapses 404 vs. 403 leak so
+            # unregistered callers can't probe ``doc_id`` existence)
+            # and the post-lookup floor check. Ask ``_require_trust``
+            # for the minimum the caller could possibly need (1), then
+            # compare the returned trust level against the scope-derived
+            # floor below.
+            trust, not_found, terr = await _require_trust(db, tenant_id, caller_agent_id, min_level=1)
+            if not_found:
+                return _with_latency(
+                    _error_response(
+                        "FORBIDDEN",
+                        f"Agent '{caller_agent_id}' is not registered. "
+                        "Register the agent by writing one memory first.",
+                    ),
+                    t0,
+                )
+            if terr:
+                return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
+
+            # Look up the rule so the floor check sees the stored
+            # ``scope`` + ``agent_id`` rather than trusting any caller
+            # assertion. The documents-store GET ignores the system-
+            # collection guard (it only fires on write/delete), so this
+            # needs no new storage endpoint.
+            existing = await sc.get_document(tenant_id=tenant_id, collection="_keystones", doc_id=doc_id)
+            if not existing:
+                return _with_latency(
+                    _error_response("NOT_FOUND", f"Keystone '{doc_id}' not found."),
+                    t0,
+                )
+            existing_data = existing.get("data") or {}
+            min_level = keystone_min_trust(
+                existing_data.get("scope", ""),
+                existing_data.get("agent_id"),
+                caller_agent_id,
+            )
+            if trust < min_level:
+                return _with_latency(
+                    _error_response(
+                        "FORBIDDEN",
+                        f"Agent '{caller_agent_id}' (trust_level={trust}) < required {min_level}.",
+                    ),
+                    t0,
+                )
+
+            # TOCTOU narrowing: re-fetch the stored row immediately
+            # before the delete and abort if the shape changed. Without
+            # this, a legitimate concurrent upsert can promote a
+            # ``scope=agent`` rule to ``scope=fleet`` between the first
+            # read and the storage delete, letting a trust-1 caller
+            # delete a now-fleet rule it was never authorised for. The
+            # remaining race window (recheck → delete) is a single
+            # storage round-trip; the proper fix is a storage-side
+            # compare-and-delete with preconditions. Mirrors the REST
+            # delete path.
+            recheck = await sc.get_document(tenant_id=tenant_id, collection="_keystones", doc_id=doc_id)
+            if not recheck:
+                return _with_latency(_error_response("NOT_FOUND", f"Keystone '{doc_id}' not found."), t0)
+            recheck_data = recheck.get("data") or {}
+            if recheck_data.get("scope") != existing_data.get("scope") or recheck_data.get(
+                "agent_id"
+            ) != existing_data.get("agent_id"):
+                return _with_latency(
+                    _error_response(
+                        "CONFLICT",
+                        "Keystone scope changed during operation; aborting delete.",
+                    ),
+                    t0,
+                )
             deleted = await sc.delete_keystone(tenant_id=tenant_id, doc_id=doc_id)
             if not deleted:
                 return _with_latency(_error_response("NOT_FOUND", f"Keystone '{doc_id}' not found."), t0)

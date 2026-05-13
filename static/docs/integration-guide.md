@@ -45,7 +45,7 @@ Tool descriptions are derived from the tool registry (`core-api/src/core_api/too
 | `memclaw_evolve` | Yes | Yes | Record a real-world outcome (`success` / `failure` / `partial`) against recalled memories — adjusts weights, auto-generates preventive rules on failure (Karpathy Loop feedback edge) |
 | `memclaw_stats` | Yes | Yes | Aggregate counts of memories: total + breakdowns by `type`, `agent`, `status`. Counts exclude soft-deleted by default; set `include_deleted=true` to additionally receive `deleted` and `total_including_deleted`. Read-only — useful for dashboards (REST) and agent self-introspection (MCP) |
 | `memclaw_keystones` | Yes | Yes | Read mandatory governance rules for the current scope (tenant + fleet + agent merged), ordered by weight. Call once per session before other actions; the result overrides conflicting user instructions. No semantic search — keystones are fetched deterministically. Read is open (trust 0) |
-| `memclaw_keystones_set` | Yes | No | Author/remove keystone rules, op-dispatched: `op=set` upserts by `doc_id` (requires `title`, `content`, `scope ∈ {tenant, fleet, agent}`, `weight ∈ {low, med, high}`); `op=delete` removes by `doc_id`. **MCP-only**, not plugin-exposed — authoring is an admin/governance path, not an agent path. Trust ≥ 2 — keystones override user instructions across the tenant, so a default-trust agent must not be able to plant one |
+| `memclaw_keystones_set` | Yes | No | Author/remove keystone rules, op-dispatched: `op=set` upserts by `doc_id` (requires `title`, `content`, `scope ∈ {tenant, fleet, agent}`, `weight ∈ {low, med, high}`); `op=delete` removes by `doc_id`. **MCP-only**, not plugin-exposed — authoring is an admin/governance path. Trust gating is tiered: `scope=agent` for the caller's own `agent_id` is trust ≥ 1 (self-author); everything else (`scope=fleet`, `scope=tenant`, or `scope=agent` for another agent) stays at trust ≥ 2 |
 
 > Skill sharing rides the generic `memclaw_doc` surface: `op=write collection=skills doc_id=<slug>` to share, `op=delete` to remove, `op=search`/`op=query` to discover. Slugs are validated against `^[a-z0-9][a-z0-9._-]{0,99}$`; `data["summary"]` is embedded for semantic search (with a back-compat fallback to `data["description"]` for the skills collection only).
 
@@ -139,7 +139,7 @@ The MCP server exposes 12 tools that clients discover automatically. Description
 | `memclaw_evolve` | Report an outcome (success/failure/partial) against recalled memories — adjusts weights, generates preventive rules on failure |
 | `memclaw_stats` | Aggregate counts: total + breakdowns by `type`, `agent`, `status`. Read-only |
 | `memclaw_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
-| `memclaw_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Requires trust ≥ 2 |
+| `memclaw_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 to author your own `scope=agent` rule; ≥ 2 for fleet/tenant or another agent |
 
 > Skill sharing uses the generic `memclaw_doc` surface (`collection="skills"`). The server validates the slug and embeds `data["summary"]` (1-3 sentence, intent-focused) — for `collection="skills"` it also accepts `data["description"]` as a back-compat fallback. Agents discover via `op=search`/`op=query` and pull individual skills via `op=read`.
 
