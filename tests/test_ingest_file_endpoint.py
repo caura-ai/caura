@@ -129,6 +129,23 @@ class TestIngestFileEndpoint:
         called_req = preview_mock.call_args.args[1]
         assert "# Title" in called_req.content
         assert "\n\n" in called_req.content
+        # Filename survives as upload:<name> on source_uri so each derived
+        # memory carries its origin (not the generic "text-input" marker).
+        assert called_req.source_uri == "upload:doc.md"
+
+    def test_upload_with_whitespace_only_filename_falls_back(self, monkeypatch) -> None:
+        """When the client sends a whitespace-only filename, source_uri
+        should fall back to the bare ``"upload"`` marker — not
+        ``upload:    `` (which would render as just the prefix in the UI)."""
+        client, preview_mock = _build_app(monkeypatch)
+        resp = client.post(
+            "/api/v1/ingest/file",
+            files={"file": ("   ", b"some plain text content here", "text/plain")},
+            data={"tenant_id": "t1"},
+        )
+        assert resp.status_code == 200, resp.text
+        called_req = preview_mock.call_args.args[1]
+        assert called_req.source_uri == "upload"
 
     def test_uploads_csv_preserves_rows(self, monkeypatch) -> None:
         client, preview_mock = _build_app(monkeypatch)
@@ -143,6 +160,29 @@ class TestIngestFileEndpoint:
         # Row breaks must survive — otherwise the LLM sees one mashed line.
         assert "\n" in called_req.content
         assert called_req.content == "a,b\n1,2\n3,4"
+
+    def test_pdf_upload_sets_upload_filename_source_uri(self, monkeypatch) -> None:
+        """Filename of a binary upload also survives via Kreuzberg dispatch."""
+
+        async def fake_extract(data, mime, *_a, **_kw):
+            class _R:
+                content = "Extracted body."
+                metadata = {"is_encrypted": False}
+
+            return _R()
+
+        monkeypatch.setattr(
+            "core_api.services.ingest_service.kreuzberg.extract_bytes", fake_extract
+        )
+        client, preview_mock = _build_app(monkeypatch)
+        resp = client.post(
+            "/api/v1/ingest/file",
+            files={"file": ("report.pdf", b"%PDF-1.4\nbytes", "application/pdf")},
+            data={"tenant_id": "t1"},
+        )
+        assert resp.status_code == 200, resp.text
+        called_req = preview_mock.call_args.args[1]
+        assert called_req.source_uri == "upload:report.pdf"
 
     def test_uploads_pdf_routes_through_kreuzberg(self, monkeypatch) -> None:
         """PDFs (and other binary MIMEs) hand off to Kreuzberg."""

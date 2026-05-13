@@ -99,6 +99,24 @@ async def test_source_uri_stamped_url(fake_chunker, fake_tenant_config, monkeypa
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_source_uri_request_override_beats_default(fake_chunker, fake_tenant_config):
+    """When the caller passes ``request.source_uri`` (used by /ingest/file to
+    thread ``upload:<filename>`` through), every fact's source_uri reflects
+    that override instead of the generic ``text-input`` marker."""
+    req = IngestRequest(
+        tenant_id="t1",
+        content="A meaningful sentence about distributed systems.",
+        source_uri="upload:report.pdf",
+    )
+    resp = await ingest_service.ingest_preview(db=None, request=req)
+
+    assert resp["facts"]
+    for f in resp["facts"]:
+        assert f["source_uri"] == "upload:report.pdf"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_existing_source_uri_in_fact_not_overwritten(fake_chunker, fake_tenant_config):
     """``setdefault`` shouldn't clobber a source_uri the chunker explicitly set
     (defensive — current chunker doesn't, but the contract should hold)."""

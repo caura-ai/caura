@@ -1353,6 +1353,13 @@ async def ingest_file_endpoint(
     kwargs: dict = {"tenant_id": tenant_id, "content": text, "focus": focus, "fleet_id": fleet_id}
     if agent_id is not None:
         kwargs["agent_id"] = agent_id
+    # Preserve the original filename as ``upload:<filename>`` so each
+    # resulting memory's ``source_uri`` says where it came from instead
+    # of the generic ``"text-input"`` marker. ``file.filename`` can be
+    # absent / empty when the client doesn't send a multipart name, in
+    # which case we fall back to a generic ``"upload"`` label.
+    filename = (file.filename or "").strip() or None
+    kwargs["source_uri"] = f"upload:{filename}" if filename else "upload"
     req = IngestRequest(**kwargs)
     return await ingest_preview(db, req)
 

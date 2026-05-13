@@ -352,6 +352,13 @@ class IngestRequest(BaseModel):
     url: str | None = None
     content: str | None = None
     focus: str | None = None
+    # Optional caller-supplied source label. Used by the multipart upload
+    # endpoint (``/ingest/file``) to thread ``upload:<filename>`` through
+    # so the per-fact ``source_uri`` carries the original filename instead
+    # of being stamped as the generic ``"text-input"`` marker. When
+    # absent, ``ingest_preview`` falls back to ``url`` (URL ingest) or
+    # ``"text-input"`` (pasted content) — unchanged behavior.
+    source_uri: str | None = None
 
 
 class IngestFact(BaseModel):

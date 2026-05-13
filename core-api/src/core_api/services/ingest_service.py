@@ -646,7 +646,12 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
     # — the chunker handles arbitrarily large docs up to ``DOC_HARD_TOKEN_LIMIT``).
     # If a prior ingest of identical content already exists for this tenant,
     # return the cached facts straight from those memories — no LLM call.
-    source_uri_default = url or "text-input"
+    # Per-fact source_uri precedence:
+    #   1. Caller-supplied ``request.source_uri`` — used by ``/ingest/file``
+    #      to thread ``upload:<filename>`` through so the filename survives.
+    #   2. URL the body was fetched from.
+    #   3. ``"text-input"`` marker for pasted-content / no-source ingests.
+    source_uri_default = request.source_uri or url or "text-input"
     doc_hash = _doc_hash(request.tenant_id, content)
     cached_memories = await _find_prior_ingest_by_doc_hash(db, request.tenant_id, doc_hash)
     if cached_memories:
