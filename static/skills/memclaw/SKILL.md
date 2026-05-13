@@ -58,7 +58,8 @@ Auto-registered at trust 1 on your first write.
 Scope-based escalation:
 - browsing or reflecting with `scope="fleet"` / `"all"` → trust 2
 - reporting outcomes (`memclaw_evolve`) → trust 2
-- authoring keystones (`memclaw_keystones_set`) → trust 2
+- authoring your OWN `scope=agent` keystone (`memclaw_keystones_set`) → trust 1
+- authoring `scope=fleet` / `scope=tenant` / another agent's keystone → trust 2
 - `memclaw_manage op=delete` → trust 3
 
 If denied, surface the error; do not silently retry with a narrower scope.
@@ -236,9 +237,9 @@ semantic search — deterministic retrieval. Trust 0 (read is open).
 Author/remove keystone rules. `op` ∈ {set, delete}. `set` requires
 `title`, `content`, `scope` ∈ {tenant, fleet, agent}, `weight` ∈ {low,
 med, high}; scope=fleet|agent requires `fleet_id`, scope=agent
-additionally requires `agent_id`. Trust ≥ 2 — keystones override user
-instructions across the tenant, so a default-trust agent must not be
-able to plant one.
+additionally requires `agent_id`. Trust gating is tiered: `scope=agent`
+for your own `agent_id` is trust ≥ 1 (self-author); `scope=fleet`,
+`scope=tenant`, or `scope=agent` for another agent stays at trust ≥ 2.
 
 ### Which tool, when
 
@@ -250,7 +251,8 @@ able to plant one.
 - Fact no longer true → `memclaw_write` (new) + `memclaw_manage op=transition status=outdated` (old)
 - Acted on a recalled memory → `memclaw_evolve`
 - Session start (before any other action) → `memclaw_keystones` (mandatory rules; obey them)
-- Add / remove a governance rule (admin path) → `memclaw_keystones_set op=set|delete` (trust ≥ 2)
+- Add / remove a governance rule for yourself → `memclaw_keystones_set op=set|delete scope=agent agent_id=<you>` (trust ≥ 1)
+- Add / remove a governance rule for the fleet or tenant (admin path) → `memclaw_keystones_set op=set|delete scope=fleet|tenant|agent` (trust ≥ 2)
 - Recall quality off across queries → `memclaw_tune` (once, sticky)
 - Session boundary / orchestrator sweep → `memclaw_insights`
 - Stuck on a non-trivial workflow → search by meaning (`memclaw_doc op=search collection=skills query=...`) or browse (`memclaw_doc op=query collection=skills`) before improvising

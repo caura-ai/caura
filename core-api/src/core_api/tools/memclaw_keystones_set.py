@@ -1,10 +1,16 @@
 """ToolSpec for memclaw_keystones_set — author/remove governance rules.
 
-Trust ≥ 2 required: keystones override user instructions across the
-tenant, so a freshly-registered default-trust (=1) agent must not be
-able to plant one. The bar matches the elevated tier used for other
-cross-agent operations (``memclaw_list/stats/evolve/insights`` with
-``scope=fleet|all``). Reads go through ``memclaw_keystones`` (open).
+Trust gating is tiered per the target rule's scope:
+
+* ``scope=agent`` AND ``agent_id == caller``: trust ≥ 1 (self-author).
+* ``scope=fleet`` / ``scope=tenant`` / cross-agent ``scope=agent``:
+  trust ≥ 2 (the cross-agent governance bar used elsewhere for
+  ``memclaw_list/stats/evolve/insights`` with ``scope=fleet|all``).
+
+Declared ``trust_required=1`` is the minimum any successful call needs;
+the per-op floor is computed dynamically and enforced server-side
+(mirrors the ``memclaw_evolve`` / ``memclaw_list`` pattern of dynamic
+trust). Reads go through ``memclaw_keystones`` (open).
 
 Op-dispatched in one tool (set|delete) rather than two named tools so
 the write surface lives in a single, clearly admin-flavoured place.
@@ -22,8 +28,9 @@ _DESCRIPTION = (
     "scope ∈ {tenant, fleet, agent}; weight ∈ {low, med, high}. "
     "scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id. "
     "delete requires {doc_id}. "
-    "Requires trust ≥ 2 — keystones override user instructions across "
-    "the tenant, so a default-trust (=1) agent must not be able to plant one."
+    "Trust gating is dynamic: scope=agent for the caller's own agent_id "
+    "is trust ≥ 1 (self-author); anything else (scope=fleet, scope=tenant, "
+    "or scope=agent targeting another agent) is trust ≥ 2."
 )
 
 _SPEC = ToolSpec(
@@ -31,7 +38,7 @@ _SPEC = ToolSpec(
     description=_DESCRIPTION,
     handler=mcp_server.memclaw_keystones_set,
     plugin_exposed=False,
-    trust_required=2,
+    trust_required=1,
     ops=(
         OpSpec(
             name="set",

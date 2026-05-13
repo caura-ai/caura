@@ -8,7 +8,7 @@
     "name": "memclaw_doc",
     "ops": [
       {
-        "description": "Upsert a document by collection+doc_id. Set data['summary'] to a short (1-3 sentence) intent-focused description to make the doc semantically searchable — that string (and only that string) is what gets embedded. The full body lives wherever the caller puts it (e.g. data['content']) and is returned in read/search results but is NOT indexed. Good: 'Postgres tuning runbook: vacuum, autovacuum, work_mem.' Bad: '<the first 200 chars of the body>' (truncation is not summarization). Omit summary to store the doc without indexing.",
+        "description": "Upsert a document by collection+doc_id. Set data['summary'] to a short (1-3 sentence) intent-focused description to make the doc semantically searchable \u2014 that string (and only that string) is what gets embedded. The full body lives wherever the caller puts it (e.g. data['content']) and is returned in read/search results but is NOT indexed. Good: 'Postgres tuning runbook: vacuum, autovacuum, work_mem.' Bad: '<the first 200 chars of the body>' (truncation is not summarization). Omit summary to store the doc without indexing.",
         "name": "write",
         "required_params": [
           "collection",
@@ -50,7 +50,7 @@
         "trust_required": 0
       },
       {
-        "description": "Semantic search. Pass collection to scope to one (narrow); omit collection to search every collection in the tenant (broad). Only docs written with a data['summary'] appear (no summary → no embedding → invisible to search). Returns up to top_k results ordered by cosine similarity (1.0 = identical). Each row includes its own collection so the caller can follow up with op=read.",
+        "description": "Semantic search. Pass collection to scope to one (narrow); omit collection to search every collection in the tenant (broad). Only docs written with a data['summary'] appear (no summary \u2192 no embedding \u2192 invisible to search). Returns up to top_k results ordered by cosine similarity (1.0 = identical). Each row includes its own collection so the caller can follow up with op=read.",
         "name": "search",
         "required_params": [
           "query"
@@ -287,7 +287,7 @@
     "trust_required": 0
   },
   {
-    "description": "Author or remove keystone rules. op: set|delete. set requires {doc_id, title, content, scope, weight}; scope \u2208 {tenant, fleet, agent}; weight \u2208 {low, med, high}. scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id. delete requires {doc_id}. Requires trust \u2265 2 \u2014 keystones override user instructions across the tenant, so a default-trust (=1) agent must not be able to plant one.",
+    "description": "Author or remove keystone rules. op: set|delete. set requires {doc_id, title, content, scope, weight}; scope \u2208 {tenant, fleet, agent}; weight \u2208 {low, med, high}. scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id. delete requires {doc_id}. Trust gating is dynamic: scope=agent for the caller's own agent_id is trust \u2265 1 (self-author); anything else (scope=fleet, scope=tenant, or scope=agent targeting another agent) is trust \u2265 2.",
     "error_codes": [
       "INVALID_ARGUMENTS",
       "FORBIDDEN",
@@ -307,7 +307,7 @@
           "scope",
           "weight"
         ],
-        "trust_required": 2
+        "trust_required": 1
       },
       {
         "description": "Remove a keystone rule by doc_id.",
@@ -315,7 +315,7 @@
         "required_params": [
           "doc_id"
         ],
-        "trust_required": 2
+        "trust_required": 1
       }
     ],
     "params": [
@@ -382,7 +382,7 @@
       }
     ],
     "plugin_exposed": false,
-    "trust_required": 2
+    "trust_required": 1
   },
   {
     "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' (default) lists your memories at trust \u2265 1; scope='fleet'/'all' requires trust \u2265 2. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use memclaw_recall.",
