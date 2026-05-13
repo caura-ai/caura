@@ -139,6 +139,47 @@ async def test_write_passes_fleet_id_kwarg_through(mcp_env):
     assert model.fleet_id == "caura-rnd-fleet"
 
 
+async def test_write_refuses_default_agent_on_gateway(mcp_env):
+    # Gateway-routed request + tenant key (no X-Agent-ID injection) + caller
+    # left agent_id at the default → MISSING_AGENT_ID. Standalone (default
+    # in tests) is unaffected.
+    mcp_env["service"]("create_memory").return_value = _OutStub("m-x")
+    from core_api import mcp_server
+
+    token = mcp_server._via_gateway_var.set(True)
+    try:
+        out = await mcp_server.memclaw_write(content="anything")
+    finally:
+        mcp_server._via_gateway_var.reset(token)
+    payload = parse_envelope(out)
+    assert payload["error"]["code"] == "MISSING_AGENT_ID"
+    # Create wasn't called because we short-circuited.
+    mcp_env["service_mocks"]["create_memory"].assert_not_awaited()
+
+
+async def test_write_explicit_agent_on_gateway_allowed(mcp_env):
+    # Same gateway-routed path, but caller passed an explicit agent_id —
+    # the guard doesn't fire and the write proceeds.
+    mcp_env["service"]("create_memory").return_value = _OutStub("m-y")
+    from core_api import mcp_server
+
+    token = mcp_server._via_gateway_var.set(True)
+    try:
+        out = await mcp_server.memclaw_write(content="hi", agent_id="real-agent")
+    finally:
+        mcp_server._via_gateway_var.reset(token)
+    payload = parse_envelope(out)
+    assert payload["id"] == "m-y"
+
+
+async def test_write_default_agent_in_standalone_ok(mcp_env):
+    # Standalone (no gateway) keeps the default-identity ergonomics.
+    mcp_env["service"]("create_memory").return_value = _OutStub("m-z")
+    out = await mcp_server.memclaw_write(content="hi")
+    payload = parse_envelope(out)
+    assert payload["id"] == "m-z"
+
+
 async def test_write_without_fleet_id_persists_null(mcp_env):
     """Absent ``fleet_id`` → model carries ``None``. This is the current
     server-side behavior; pairs with the skill guidance that tells
