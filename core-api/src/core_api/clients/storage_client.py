@@ -144,8 +144,20 @@ class CoreStorageClient:
         ``--no-allow-unauthenticated`` targets (CAURA-591 Part B Y3).
         Empty when no credentials available (tests / local / legacy
         allUsers services). The dict is cached and shared per audience
-        — httpx merges headers without mutation, so this is safe."""
+        — httpx merges headers without mutation, so this is safe.
+
+        Skip the metadata-server call entirely when the audience is
+        plain HTTP — Cloud Run ``--no-allow-unauthenticated`` always
+        uses TLS, so an ``http://`` audience is by definition local
+        or in-cluster and never needs an ID token. Without this guard,
+        the metadata-server fetch's 5 s timeout races the health
+        probe's own 5 s budget; a lost race surfaces ``CancelledError``
+        (not ``Exception``) which the inner catch misses, and the
+        health endpoint flips to ``storage: unreachable`` for the
+        duration of the failure-cache TTL."""
         audience = self._read_base_url if read else self._base_url
+        if audience.startswith("http://"):
+            return {}
         return await fetch_auth_header(audience)
 
     def _maybe_evict_on_auth_error(self, resp: httpx.Response, *, read: bool) -> None:
