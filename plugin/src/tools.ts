@@ -7,10 +7,12 @@
  * MemClaw tools: …" line in the prompt section, and any downstream UI
  * that renders tools in discovery order.
  *
- * Current surface: 10 tools — LTM (write/recall/list/manage), doc,
- * entity_get, tune, insights, evolve, stats. Skill sharing is now done
- * via memclaw_doc with collection="skills". STM tools are not exposed
- * via the plugin.
+ * Current surface: 11 tools — LTM (write/recall/list/manage), doc,
+ * entity_get, tune, insights, evolve, stats, plus keystones (read-only
+ * governance rules surfaced to agents at session start). Skill sharing
+ * is done via memclaw_doc with collection="skills". STM tools and
+ * memclaw_keystones_set (admin authoring path, ``plugin_exposed=false``)
+ * are not surfaced via the plugin.
  *
  * A boot-time drift check throws if this list and tools.json disagree.
  */
@@ -27,6 +29,7 @@ export const MEMCLAW_TOOLS = [
   "memclaw_insights",
   "memclaw_evolve",
   "memclaw_stats",
+  "memclaw_keystones",
 ] as const;
 
 // --- Boot-time drift check ---

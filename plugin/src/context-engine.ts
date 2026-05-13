@@ -10,6 +10,7 @@
  * - Recall timeout enforced via AbortController
  */
 
+import { createHash } from "crypto";
 import { apiCall } from "./transport.js";
 import {
   MEMCLAW_FLEET_ID,
@@ -21,11 +22,17 @@ import {
   MIN_TURN_CONTENT_LENGTH,
   MAX_TURN_SUMMARY_LENGTH,
   MAX_RECALL_CONTENT_LENGTH,
+  RECALL_POLICY,
+  RECALL_MIN_PROMPT_CHARS,
+  RECALL_TRIGGER_KEYWORDS,
+  RECALL_DENY_SESSIONS,
+  type RecallPolicy,
 } from "./env.js";
 import { memclawPromptSectionText } from "./prompt-section.js";
 import { MEMCLAW_TOOLS } from "./tools.js";
 import { resolveAgentId } from "./resolve-agent.js";
 import { logError, logErrorCritical } from "./logger.js";
+import { fetchKeystonesBlock } from "./keystones.js";
 
 // --- Typed interfaces for ContextEngine hooks ---
 
@@ -114,6 +121,248 @@ function buildQueryFromMessages(
     }
   }
   return fallbackPrompt && fallbackPrompt.length > 5 ? fallbackPrompt : "";
+}
+
+// --- Recall-policy predicate ---
+//
+// Decides whether `assemble()` should issue a `/search` call this turn or
+// emit only the static education + identity blocks. Inlined here (rather
+// than a dedicated module) so the v2.3.0→v2.4.0 first-hop deploy doesn't
+// have to know about a new file in its hardcoded srcFiles list.
+//
+// The OpenClaw runtime calls assemble() on every prompt assembly with no
+// triviality signal of its own (verified against
+// github.com/openclaw/openclaw/src/context-engine/types.ts:258-272). All
+// gating must happen here.
+
+export type ShouldRecallReason =
+  | "policy-always"
+  | "policy-never"
+  | "policy-keywords-no-trigger"
+  | "explicit-recall-trigger"
+  | "below-threshold"
+  | "trivial-ping"
+  | "slash-command"
+  | "session-denied"
+  | "default-substantive";
+
+export interface ShouldRecallInput {
+  policy: RecallPolicy;
+  prompt: string | undefined;
+  messages: Array<{ role: string; content: unknown }>;
+  minPromptChars: number;
+  triggerKeywords: readonly string[];
+  sessionKey?: string;
+  denySessions: readonly string[];
+}
+
+export interface ShouldRecallResult {
+  recall: boolean;
+  reason: ShouldRecallReason;
+}
+
+// Greetings / acks / single-emoji turns. Anchored on the FULL effective
+// prompt (after trim + lowercase). The list is conservative; if none of
+// these patterns matches we let recall through. Keep the source-of-truth
+// here and exercise it via context-engine.test.ts.
+const TRIVIAL_PING_LITERALS: ReadonlySet<string> = new Set([
+  // greetings
+  "hi", "hello", "hey", "yo", "yo!", "hi there", "hey there", "hello there",
+  // acks
+  "ok", "okay", "k", "kk", "yes", "yep", "yeah", "no", "nope", "nah",
+  "thanks", "thank you", "thx", "ty", "cheers", "got it", "noted",
+  "cool", "nice", "great", "sure", "alright", "right", "ack",
+  // emoji-only / sticker-style
+  "👍", "🙏", "💯", "🦞", "👋", "😀", "😄", "🙂", "✅", "❤️", "🔥",
+]);
+
+function _effectivePrompt(
+  prompt: string | undefined,
+  messages: ShouldRecallInput["messages"],
+): string {
+  const direct = (prompt || "").trim();
+  if (direct) return direct;
+  // Fall back to the most recent user message in the buffer.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m && m.role === "user" && typeof m.content === "string") {
+      const t = m.content.trim();
+      if (t) return t;
+    }
+  }
+  return "";
+}
+
+function _hasTriggerKeyword(
+  text: string,
+  keywords: readonly string[],
+): boolean {
+  if (!text) return false;
+  const lc = text.toLowerCase();
+  return keywords.some((kw) => {
+    const k = kw.toLowerCase();
+    if (!k) return false;
+    // Substring with **lenient one-sided** word boundary. The keyword
+    // matches if AT LEAST ONE side is a non-letter (or end-of-string).
+    // The match fails only when the keyword is embedded INSIDE another
+    // word (letters on both sides).
+    //
+    // Examples:
+    //   "remember the deadline"   ✓ (both sides whitespace)
+    //   "remembered yesterday"    ✓ (after='e' is letter, before=' ' is not — one-sided OK)
+    //   "preremember"             ✓ (before='r' is letter, after=end — one-sided OK)
+    //   "preremembered"           ✗ (both sides letters — embedded)
+    //   "memorylane"              ✓ (one-sided — known minor false-positive)
+    //
+    // This is INTENTIONAL: for a recall-gate heuristic, catching
+    // morphological variants ("remembered", "remembering", "recalling")
+    // matters more than excluding rare embedded-substring false
+    // positives. The cost of a false positive is one extra /search;
+    // the cost of a false negative is a missed-context turn.
+    // See context-engine.test.ts "_hasTriggerKeyword boundary"
+    // for the pinned cases. Do NOT switch to strict word-boundary
+    // (`return !(isLetterBefore || isLetterAfter)`) without updating
+    // those tests and reconsidering the trade-off.
+    //
+    // Walk ALL occurrences, not just the first. Without the loop, a
+    // prompt like `"preremembering: remember the deadline"` returns
+    // false: the first "remember" hit (inside "preremembering") is
+    // embedded both-sides → rejected → and we'd never check the
+    // second clean occurrence at the start of "remember the deadline".
+    let idx = lc.indexOf(k);
+    while (idx >= 0) {
+      const before = idx === 0 ? "" : lc[idx - 1];
+      const after = idx + k.length >= lc.length ? "" : lc[idx + k.length];
+      const isLetterBefore = /[a-z0-9]/.test(before);
+      const isLetterAfter = /[a-z0-9]/.test(after);
+      if (!(isLetterBefore && isLetterAfter)) return true;
+      idx = lc.indexOf(k, idx + 1);
+    }
+    return false;
+  });
+}
+
+function _isTrivialPing(text: string): boolean {
+  // Empty input is "no content", not a pleasantry — let the threshold
+  // check handle it so the reason is `below-threshold` rather than
+  // `trivial-ping`.
+  if (!text) return false;
+  const lc = text.trim().toLowerCase();
+  if (!lc) return false;
+  if (TRIVIAL_PING_LITERALS.has(lc)) return true;
+  // Pure-emoji / pure-symbol / pure-punctuation turns.
+  if (/^[\p{Emoji_Presentation}\p{Extended_Pictographic}\s\p{P}]+$/u.test(text))
+    return true;
+  return false;
+}
+
+export function shouldRecall(input: ShouldRecallInput): ShouldRecallResult {
+  // Per-session denylist applies regardless of policy.
+  if (
+    input.sessionKey &&
+    input.denySessions.some((s) => s && input.sessionKey!.includes(s))
+  ) {
+    return { recall: false, reason: "session-denied" };
+  }
+
+  switch (input.policy) {
+    case "always":
+      return { recall: true, reason: "policy-always" };
+    case "never":
+      return { recall: false, reason: "policy-never" };
+    case "keywords": {
+      const eff = _effectivePrompt(input.prompt, input.messages);
+      return _hasTriggerKeyword(eff, input.triggerKeywords)
+        ? { recall: true, reason: "explicit-recall-trigger" }
+        : { recall: false, reason: "policy-keywords-no-trigger" };
+    }
+    case "auto":
+    default: {
+      const eff = _effectivePrompt(input.prompt, input.messages);
+      // Explicit recall keywords always win — even on short / trivial /
+      // slash-command prompts. ("hi remember the deadline" → recall.)
+      if (_hasTriggerKeyword(eff, input.triggerKeywords)) {
+        return { recall: true, reason: "explicit-recall-trigger" };
+      }
+      // Specific-reason checks BEFORE the generic length threshold so
+      // operators see the precise skip reason in metrics + logs (a 5-char
+      // "/help" should report `slash-command`, not `below-threshold`).
+      if (_isTrivialPing(eff)) {
+        return { recall: false, reason: "trivial-ping" };
+      }
+      if (eff.startsWith("/") && eff.length < 60) {
+        return { recall: false, reason: "slash-command" };
+      }
+      if (eff.length < input.minPromptChars) {
+        return { recall: false, reason: "below-threshold" };
+      }
+      return { recall: true, reason: "default-substantive" };
+    }
+  }
+}
+
+// --- Skip-decision logging (rate-limited, in-memory, never blocks) ---
+
+interface SkipMetrics {
+  calls_total: number;
+  skipped_total: number;
+  skipped_by_reason: Record<string, number>;
+}
+
+const recallMetrics: SkipMetrics = {
+  calls_total: 0,
+  skipped_total: 0,
+  skipped_by_reason: {},
+};
+
+const _lastLoggedAt = new Map<string, number>();
+const _SKIP_LOG_INTERVAL_MS = 60_000;
+
+function _recordDecision(decision: ShouldRecallResult, sessionHash: string): void {
+  recallMetrics.calls_total += 1;
+  if (!decision.recall) {
+    recallMetrics.skipped_total += 1;
+    recallMetrics.skipped_by_reason[decision.reason] =
+      (recallMetrics.skipped_by_reason[decision.reason] || 0) + 1;
+    const k = `${decision.reason}:${sessionHash}`;
+    const last = _lastLoggedAt.get(k) || 0;
+    if (Date.now() - last > _SKIP_LOG_INTERVAL_MS) {
+      console.log(
+        `[memclaw] recall skipped: reason=${decision.reason} ` +
+          `policy=${RECALL_POLICY} session=${sessionHash}`,
+      );
+      _lastLoggedAt.set(k, Date.now());
+      // Bounded cleanup so the map doesn't grow indefinitely across
+      // sessions. Triggered only after we'd exceed 1000 distinct
+      // (reason, session-hash) pairs — orders of magnitude above any
+      // real fleet's per-process churn. Cutoff at 10× the log
+      // interval (10 min) so entries that haven't been touched in
+      // that long are pruned; entries within the rate-limit window
+      // stay.
+      if (_lastLoggedAt.size > 1000) {
+        const cutoff = Date.now() - _SKIP_LOG_INTERVAL_MS * 10;
+        for (const [key, ts] of _lastLoggedAt) {
+          if (ts < cutoff) _lastLoggedAt.delete(key);
+        }
+      }
+    }
+  }
+}
+
+function createHashShort(s: string): string {
+  return createHash("sha256").update(s).digest("hex").slice(0, 8);
+}
+
+/**
+ * Snapshot of the current rolling counters for the heartbeat payload.
+ * Counters reset on plugin restart — this is intentional for v1.
+ */
+export function getRecallMetrics(): SkipMetrics {
+  return {
+    calls_total: recallMetrics.calls_total,
+    skipped_total: recallMetrics.skipped_total,
+    skipped_by_reason: { ...recallMetrics.skipped_by_reason },
+  };
 }
 
 // --- Token budget helpers ---
@@ -288,12 +537,28 @@ export class MemClawContextEngine {
 
   /**
    * assemble — called before every LLM call.
-   * Respects tokenBudget with 20/80 split (education/recall).
-   * Uses buildQueryFromMessages for better recall targeting.
+   *
+   * Returns the OpenClaw `AssembleResult` shape (`messages`,
+   * `estimatedTokens`, optional `systemPromptAddition`) on every path.
+   * Pre-CAURA-444 we returned `{}` on empty output, which the runtime
+   * treats as a thrown error and falls back to pre-assembly state.
+   *
+   * Recall is gated by `shouldRecall()`. On skip we return the static
+   * education + identity block only — no `/search` HTTP call. The
+   * model can still call `memclaw_recall` explicitly when it judges it
+   * needs LTM on a short turn.
    */
   async assemble(
-    budget: AssembleBudget,
-    prompt?: string,
+    params: AssembleBudget & {
+      sessionId?: string;
+      sessionKey?: string;
+      messages?: Array<{ role: string; content: unknown }>;
+      availableTools?: Set<string>;
+      citationsMode?: string;
+      model?: string;
+      prompt?: string;
+    },
+    legacyPrompt?: string,
   ): Promise<{
     system?: string;
     systemPromptAddition?: string;
@@ -302,24 +567,101 @@ export class MemClawContextEngine {
     estimatedTokens?: number;
   }> {
     await this.bootstrap();
+
+    // Two call shapes supported:
+    //   - Modern OpenClaw (>= v2026.4.5): assemble({sessionId, messages, prompt, ...})
+    //   - Legacy:                          assemble(budget, prompt)
+    // Both flow through the same optional-chaining reads below
+    // (`params?.tokenBudget`, `params?.messages`, `params?.prompt`)
+    // and the legacy second-arg `legacyPrompt` fallback; no explicit
+    // branch is needed.
+    const tokenBudget = params?.tokenBudget || 0;
+    const incomingMessages: Array<{ role: string; content: unknown }> =
+      (params?.messages as Array<{ role: string; content: unknown }>) || [];
+    const prompt = (params?.prompt as string | undefined) ?? legacyPrompt;
+
     const agentId = resolveAgentId(this.config);
     const fleetId = MEMCLAW_FLEET_ID || undefined;
-    const tokenBudget = budget?.tokenBudget || 0;
 
-    // --- Section 1: Education (usage rules + identity) ---
+    // --- Section 1: Education (always emitted; cheap, static) ---
     const educationText = memclawPromptSectionText(new Set(MEMCLAW_TOOLS));
     const identityBlock =
       `\n**Your identity**: agent_id=\`${agentId}\`` +
       (fleetId ? `, fleet_id=\`${fleetId}\`` : "") +
       (MEMCLAW_TENANT_ID ? `, tenant_id=\`${MEMCLAW_TENANT_ID}\`` : "") +
       "\n";
-
     const operatorPrompt = process.env.MEMCLAW_EDUCATION_PROMPT || "";
     const operatorBlock = operatorPrompt
       ? `\n## Operator Instructions\n${operatorPrompt}\n`
       : "";
 
-    const staticSection = educationText + identityBlock + operatorBlock;
+    // --- Section 4: Keystone rules (mandatory policies, CAURA-000) ---
+    //
+    // Fetched + APPENDED unconditionally — they sit AFTER education,
+    // identity, and the operator prompt so recency-sensitive models
+    // treat them as the most-recent (and therefore highest-priority)
+    // instruction in the system prompt. Most current LLMs weight
+    // later-in-prompt content more heavily than earlier content, and
+    // keystones are exactly what we want to override the preceding
+    // sections when they conflict. (Recall content, when present, is
+    // appended even later — that's fine; keystones describe POLICY
+    // and recall describes FACTS, so they don't compete.)
+    //
+    // ``fetchKeystonesBlock`` is fail-open: it returns ``""`` on any
+    // backend / auth / network error so a transient outage degrades to
+    // "no rules injected" rather than blocking ``assemble``.
+    //
+    // Start the keystone fetch BEFORE the recall gate runs so its
+    // network round-trip overlaps with the synchronous decision (~1 ms)
+    // and any subsequent /search call (when the gate allows it). The
+    // shouldRecall predicate is pure and microsecond-cheap, so all the
+    // wall-clock time we save here is real keystone latency, not gate
+    // CPU. Await happens only at the point where we need the value.
+    const keystonePromise = fetchKeystonesBlock({
+      agentId,
+      fleetId,
+    });
+
+    const sessionKey = getSessionKey(this.config);
+    const sessionHash = createHashShort(sessionKey);
+
+    // --- Recall gate ---
+    const decision = shouldRecall({
+      policy: RECALL_POLICY,
+      prompt,
+      messages: incomingMessages,
+      minPromptChars: RECALL_MIN_PROMPT_CHARS,
+      triggerKeywords: RECALL_TRIGGER_KEYWORDS,
+      sessionKey,
+      denySessions: RECALL_DENY_SESSIONS,
+    });
+    _recordDecision(decision, sessionHash);
+
+    // Block on keystones now that the gate decision is in. In the skip
+    // path below we return immediately; in the recall path further down
+    // the /search call also overlaps with whatever keystone latency
+    // remained.
+    const keystoneBlock = await keystonePromise;
+    const staticSection =
+      educationText + identityBlock + operatorBlock + keystoneBlock;
+
+    if (!decision.recall) {
+      const tokens = estimateTokens(staticSection);
+      const out: {
+        system?: string;
+        systemPromptAddition?: string;
+        tokenEstimate?: number;
+        estimatedTokens?: number;
+      } = {
+        system: staticSection,
+        systemPromptAddition: staticSection,
+      };
+      if (tokenBudget > 0) {
+        out.tokenEstimate = tokens;
+        out.estimatedTokens = tokens;
+      }
+      return out;
+    }
 
     // --- Token budget split: 20% education, 80% recall ---
     let recallBudgetTokens = 0;
@@ -327,13 +669,11 @@ export class MemClawContextEngine {
       const staticTokens = estimateTokens(staticSection);
       const educationBudget = Math.floor(tokenBudget * 0.2);
       const recallBudget = tokenBudget - educationBudget;
-      // If education exceeds its 20% budget, borrow from recall
       const educationOverflow = Math.max(0, staticTokens - educationBudget);
       recallBudgetTokens = Math.max(0, recallBudget - educationOverflow);
     }
 
     // --- Section 2: Recalled memories (cached) ---
-    const sessionKey = getSessionKey(this.config);
     const queryFromMessages = buildQueryFromMessages(sessionKey, prompt);
     const searchQuery = queryFromMessages || prompt || agentId;
     const tenantPrefix = getTenantPrefix(this.config);
@@ -344,12 +684,10 @@ export class MemClawContextEngine {
     if (cached && Date.now() - cached.ts < RECALL_CACHE_TTL_MS) {
       recallBlock = cached.text;
     } else {
-      // Evict stale entries
       const now = Date.now();
       for (const [k, v] of recallCache) {
         if (now - v.ts > RECALL_CACHE_TTL_MS) recallCache.delete(k);
       }
-
       const controller = new AbortController();
       const timeout = setTimeout(
         () => controller.abort(),
@@ -357,14 +695,12 @@ export class MemClawContextEngine {
       );
       try {
         const tid = await ensureTenantId();
-
         const searchBody: Record<string, unknown> = {
           tenant_id: tid,
           filter_agent_id: agentId,
           query: searchQuery,
           top_k: 5,
         };
-
         const sr = (await apiCall(
           "POST",
           "/search",
@@ -372,7 +708,6 @@ export class MemClawContextEngine {
           undefined,
           controller.signal,
         )) as Record<string, unknown> | Record<string, unknown>[];
-
         const results = Array.isArray(sr)
           ? sr
           : ((sr as Record<string, unknown>)?.results as
@@ -403,25 +738,33 @@ export class MemClawContextEngine {
       }
     }
 
-    // --- Apply token budget to recall if needed ---
     if (tokenBudget > 0) {
       if (recallBudgetTokens <= 0) {
-        recallBlock = ""; // education alone fills the budget — drop recall
+        recallBlock = "";
       } else if (recallBlock) {
         recallBlock = trimToTokenBudget(recallBlock, recallBudgetTokens);
       }
     }
 
-    // --- Combine all sections ---
     const systemPromptAddition = staticSection + recallBlock;
     const estimatedTokens = estimateTokens(systemPromptAddition);
 
-    if (!systemPromptAddition.trim()) return {};
-
-    // Return both canonical (v2026.4.5+) and legacy (v2026.4.2) property names
+    // Always return AssembleResult-shaped payload, even when only the
+    // static block is non-empty. The legacy `system` alias is kept for
+    // older OpenClaw callers; modern callers read `systemPromptAddition`.
     return tokenBudget > 0
-      ? { system: systemPromptAddition, systemPromptAddition, tokenEstimate: estimatedTokens, estimatedTokens }
+      ? {
+          system: systemPromptAddition,
+          systemPromptAddition,
+          tokenEstimate: estimatedTokens,
+          estimatedTokens,
+        }
       : { system: systemPromptAddition, systemPromptAddition };
+
+    // Note: we intentionally do NOT mutate `params.messages`. The OpenClaw
+    // runtime replaces the session messages if our return's `messages`
+    // differs from input, which we never want from `assemble()` —
+    // compaction is `compact()`'s job.
   }
 
   async compact(context: CompactContext): Promise<undefined> {

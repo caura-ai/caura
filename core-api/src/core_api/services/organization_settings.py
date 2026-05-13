@@ -99,6 +99,19 @@ DEFAULT_SETTINGS: dict = {
     "agents": {
         "require_agent_approval": None,
     },
+    # CAURA-444 — plugin auto-upgrade. When `auto_upgrade_enabled` is
+    # true (the default), the heartbeat handler queues a `deploy`
+    # command for any node whose `plugin_version` is older than
+    # `MIN_RECOMMENDED_PLUGIN_VERSION` (version_compat.py).
+    # Per-tenant flip allows operators to opt out.
+    #
+    # The `KNOWN_BROKEN_DEPLOY_VERSIONS` denylist (in routes/fleet.py)
+    # is a separate global guard that prevents auto-deploy specifically
+    # for plugin versions whose deploy machinery is itself broken
+    # (currently: 2.3.0 — drift in srcFiles + missing version-stamp).
+    "memclaw": {
+        "auto_upgrade_enabled": None,  # None = use global default (true)
+    },
     "security_audit": {
         "schedule_enabled": None,
         "schedule_cron": None,
@@ -292,6 +305,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "chunking.auto_chunk_enabled": bool,
     "agents.require_agent_approval": bool,
     "entity_blocklist": list,
+    "memclaw.auto_upgrade_enabled": bool,
 }
 
 # Inclusive range constraints applied AFTER type validation. Listed

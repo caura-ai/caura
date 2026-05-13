@@ -214,3 +214,138 @@ export const RECALL_TIMEOUT_MS = 10_000;
 export const MIN_TURN_CONTENT_LENGTH = 100;
 export const MAX_TURN_SUMMARY_LENGTH = 500;
 export const MAX_RECALL_CONTENT_LENGTH = 300;
+
+// --- Keystones (CAURA-000): mandatory governance rules auto-injected ---
+//
+// The ContextEngine fetches keystones from ``/memclaw/keystones`` and
+// prepends them to every system prompt. Operators get three knobs:
+//
+// - ``MEMCLAW_KEYSTONES_ENABLED`` (default ``"true"``) — kill switch so
+//   ops can disable the auto-inject without redeploying if something
+//   misfires. Set to ``"false"`` to turn it off.
+// - ``MEMCLAW_KEYSTONES_TOKEN_CAP`` (default 500 tokens, ~2000 chars)
+//   — hard ceiling on the injected block. Lowest-weight rules are
+//   dropped first when the cap is hit so a runaway rule set can't crowd
+//   out recall or the operator prompt.
+// - ``MEMCLAW_KEYSTONES_CACHE_TTL_MS`` (default 5 minutes) — per-identity
+//   cache TTL. ``memclaw_keystones_set`` invocations bust the cache for
+//   the current session so a freshly authored rule takes effect on the
+//   next turn.
+function _readBoolEnv(name: string, defaultValue: boolean): boolean {
+  const v = process.env[name];
+  if (v === undefined) return defaultValue;
+  // Treat the standard set of "off" idioms as off: ``"false"``, ``"0"``,
+  // the empty string, ``"no"``, ``"off"``, and ``"disabled"``. The last
+  // three cover the common shell-script operator idioms that show up in
+  // ``.env`` files in the wild (``FLAG=no``, ``FLAG=off``,
+  // ``FLAG=disabled``). Anything else (including ``"true"``, ``"1"``,
+  // ``"yes"``, or unrecognised values) is treated as on so operators can
+  // opt-in with whatever convention their shell uses. The empty-string
+  // case matters because ``KEY=`` in an ``.env`` file is the natural way
+  // to "blank out" a previously-set value.
+  const lower = v.toLowerCase();
+  return (
+    lower !== "false" &&
+    lower !== "0" &&
+    lower !== "" &&
+    lower !== "no" &&
+    lower !== "off" &&
+    lower !== "disabled"
+  );
+}
+function _readIntEnv(name: string, defaultValue: number, min: number): number {
+  const raw = process.env[name];
+  if (!raw) return defaultValue;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < min) return defaultValue;
+  return n;
+}
+export const MEMCLAW_KEYSTONES_ENABLED: boolean = _readBoolEnv(
+  "MEMCLAW_KEYSTONES_ENABLED",
+  true,
+);
+export const MEMCLAW_KEYSTONES_TOKEN_CAP: number = _readIntEnv(
+  "MEMCLAW_KEYSTONES_TOKEN_CAP",
+  500,
+  1,
+);
+export const MEMCLAW_KEYSTONES_CACHE_TTL_MS: number = _readIntEnv(
+  "MEMCLAW_KEYSTONES_CACHE_TTL_MS",
+  300_000,
+  1_000,
+);
+export const KEYSTONES_TIMEOUT_MS = 5_000;
+
+// --- Recall policy (gates ContextEngine.assemble's /search call) ---
+//
+// The OpenClaw runtime calls our context engine on every prompt assembly
+// (heartbeats, tool follow-ups, no-reply lurk turns, trivial pings — all
+// of them). Without gating, every call hits the MemClaw backend with a
+// `/search` regardless of whether the turn would benefit from LTM. These
+// knobs let operators tune when recall fires.
+
+export type RecallPolicy = "auto" | "always" | "never" | "keywords";
+
+const _validPolicies: ReadonlySet<RecallPolicy> = new Set([
+  "auto",
+  "always",
+  "never",
+  "keywords",
+]);
+
+function _readPolicy(): RecallPolicy {
+  if (process.env.MEMCLAW_RECALL_FORCE === "true") return "always";
+  const raw = (process.env.MEMCLAW_RECALL_POLICY || "auto").toLowerCase();
+  return _validPolicies.has(raw as RecallPolicy)
+    ? (raw as RecallPolicy)
+    : "auto";
+}
+
+function _readMinPromptChars(): number {
+  const raw = parseInt(process.env.MEMCLAW_RECALL_MIN_PROMPT_CHARS || "", 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 14;
+}
+
+const DEFAULT_TRIGGER_KEYWORDS = [
+  "memclaw",
+  "ltm",
+  "long term",
+  "long-term",
+  "remember",
+  "recall",
+  "what did",
+  "earlier",
+  "previously",
+  "last time",
+  "before",
+  "we discussed",
+  "you said",
+  "i told",
+  "history",
+  "memory",
+  "lookup",
+] as const;
+
+function _readTriggerKeywords(): readonly string[] {
+  const raw = process.env.MEMCLAW_RECALL_TRIGGER_KEYWORDS;
+  if (!raw) return DEFAULT_TRIGGER_KEYWORDS;
+  const tokens = raw
+    .split(",")
+    .map((t) => t.trim().toLowerCase())
+    .filter((t) => t.length > 0);
+  return tokens.length > 0 ? tokens : DEFAULT_TRIGGER_KEYWORDS;
+}
+
+function _readDenySessions(): readonly string[] {
+  const raw = process.env.MEMCLAW_RECALL_DENY_SESSIONS;
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+export const RECALL_POLICY: RecallPolicy = _readPolicy();
+export const RECALL_MIN_PROMPT_CHARS: number = _readMinPromptChars();
+export const RECALL_TRIGGER_KEYWORDS: readonly string[] = _readTriggerKeywords();
+export const RECALL_DENY_SESSIONS: readonly string[] = _readDenySessions();

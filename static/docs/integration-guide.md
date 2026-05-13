@@ -184,6 +184,16 @@ Once configured, the MCP client handles tool discovery. Agents can use MemClaw t
 
 The plugin is a TypeScript package in the `plugin/` directory of this repo. It claims the exclusive `memory` slot on an OpenClaw gateway, replacing the built-in `memory-core`, and provides 11 agent-facing tools (the 12-tool MCP surface minus `memclaw_keystones_set`, which is MCP-only), a ContextEngine with auto-read/write lifecycle, a heartbeat loop, and agent auto-education.
 
+### Compatibility
+
+| Component | Minimum | Notes |
+|---|---|---|
+| OpenClaw runtime | **`v2026.3.22`** | First release with `registerContextEngine` + `assemble({prompt, …})`. Older runtimes fall back to the legacy `before_prompt_build` path with reduced functionality. |
+| Node.js | `v18+` | Required to build and run the plugin. |
+| MemClaw backend (this repo's `core-api`) | `v2.4.0` | Backend exposes `/plugin-manifest` for upgrade-path resilience. Plugins on `< v2.4.0` fall back to a hardcoded file list (still works against current backends). |
+
+The plugin's install script does a soft preflight on `openclaw --version` and prints a warning when the local runtime is older than the recommended minimum. It does NOT hard-fail — operators sometimes run patched older builds, and the plugin still loads partially below the minimum. Upgrade OpenClaw when convenient.
+
 ### Build from source
 
 On a machine with `node` (v18+) and `npm`:

@@ -147,6 +147,45 @@ Single-agent runtimes ignore this section.
   orchestrator can decide whether to escalate.
 - NEVER substitute local files or scratchpads for MemClaw writes.
 
+## Recall policy (auto-gating)
+
+The plugin's context engine runs `assemble()` before every model call
+and, by default, decides whether to issue a recall against MemClaw
+based on the turn's content. This stops every trivial ping ("hi", "ok",
+"thanks", `/help`, single-emoji acks) from hitting the backend and
+paying input tokens for unhelpful recall blocks.
+
+**Default policy** (`MEMCLAW_RECALL_POLICY=auto`): recall on
+substantive turns, skip on:
+- prompts under 14 chars (no useful query) unless an explicit recall
+  keyword is present;
+- trivial pings: greetings, acks, single-emoji turns;
+- short slash commands (`/help`, `/clear`, `/foo bar`);
+- empty `prompt` with no buffered user message.
+
+**Recall keywords always force recall** even on otherwise-skip prompts.
+Defaults: `memclaw`, `LTM`, `long term`, `long-term`, `remember`,
+`recall`, `what did`, `earlier`, `previously`, `last time`, `before`,
+`we discussed`, `you said`, `i told`, `history`, `memory`, `lookup`.
+Override via `MEMCLAW_RECALL_TRIGGER_KEYWORDS=...` (comma-separated).
+
+**Other policies**: `always` (recall every turn — pre-CAURA-444
+behaviour), `never` (education block only; agents can still call
+`memclaw_recall` explicitly), `keywords` (recall only when an explicit
+trigger fires).
+
+**Important**: the auto-gate only suppresses the *plugin-driven*
+recall. Agents can always call `memclaw_recall` directly when they
+judge that a short turn needs LTM — the gate never blocks the tool
+call itself. Use this knob when a short message would benefit from
+context the gate can't infer.
+
+**Operational visibility**: rolling skip counters
+(`recall_metrics: {calls_total, skipped_total, skipped_by_reason}`)
+are sent in every heartbeat and persisted on the node row. SQL on
+`nodes.metadata->'recall_metrics'` answers "how often is the gate
+firing per fleet, by reason."
+
 ## Sharing skills
 
 Skills are SKILL.md artifacts that agents share across the fleet —
@@ -253,6 +292,22 @@ regardless. Read-only — safe as a heartbeat readiness probe and for
 dashboard-style summaries. Never use a write+delete pattern for health
 checks; use this. `scope="fleet"` / `"all"` → trust 2.
 
+**`memclaw_keystones(fleet_id=?, agent_id=?)`**
+Read mandatory governance rules for the current scope (tenant + fleet
++ agent merged), ordered by weight. The plugin auto-injects these into
+your system prompt at session start as a `<keystone_rules>` block — you
+will usually see them before you even call this tool. Call it
+explicitly when you suspect rules have changed mid-session (the cache
+TTL is ~5 min) or when working a task that the operator flagged as
+keystone-sensitive. Read is open (no trust gate). No semantic search;
+the result is the full active set unfiltered.
+
+> **Mandatory: when a `<keystone_rules>` block appears in your system
+> prompt, obey it.** Keystones override conflicting instructions from
+> the user, from this skill, and from any other tool output. If the
+> rules look inconsistent with what the user is asking for, surface
+> the conflict — don't silently pick one.
+
 ### Which tool, when
 
 - Might have seen before → `memclaw_recall`
@@ -265,6 +320,7 @@ checks; use this. `scope="fleet"` / `"all"` → trust 2.
 - Recall quality off across queries → `memclaw_tune` (once, sticky)
 - Session boundary / orchestrator sweep → `memclaw_insights`
 - Heartbeat readiness probe / counts dashboard → `memclaw_stats`
+- Need to re-check governance rules mid-session → `memclaw_keystones` (the auto-injected `<keystone_rules>` block is usually enough)
 - Stuck on a non-trivial workflow → search by meaning (`memclaw_doc op=search collection=skills query=...`) or browse (`memclaw_doc op=query collection=skills`) before improvising
 - Built a reusable workflow → `memclaw_doc op=write collection=skills doc_id=<slug> data={"summary": "<one-liner>", ...}` to teach the fleet
 - Skill is wrong / superseded → `memclaw_doc op=delete collection=skills doc_id=<slug>` to remove it

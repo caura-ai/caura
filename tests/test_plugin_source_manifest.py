@@ -46,36 +46,41 @@ def test_python_allow_list_matches_plugin_src():
     )
 
 
-def test_install_script_srcfile_loop_matches_plugin_src():
-    """The bash `for srcfile in …` loop in the install script template must match."""
-    src = Path(plugin_mod.__file__).read_text(encoding="utf-8")
-    match = re.search(r"for srcfile in\s+([^;]+);", src)
+def _bash_fallback_src_files(src: str) -> set[str]:
+    """Extract the hardcoded ``SRC_FILES="..."`` fallback list from the install script."""
+    match = re.search(r'SRC_FILES="([^"]+)"', src)
     assert match, (
-        "Could not find the `for srcfile in …` loop in plugin.py — if you "
-        "renamed the install-script template, update this test's regex too."
+        "Could not find the hardcoded ``SRC_FILES=\"…\"`` fallback in plugin.py. "
+        "The install script must keep a fallback list so installs still succeed "
+        "when /api/plugin-manifest is unreachable or python3 is missing."
     )
-    loop_files = set(match.group(1).split())
+    return set(match.group(1).split())
+
+
+def test_install_script_srcfile_fallback_matches_plugin_src():
+    """The bash ``SRC_FILES=`` fallback in the install script template must match plugin/src."""
+    src = Path(plugin_mod.__file__).read_text(encoding="utf-8")
+    fallback = _bash_fallback_src_files(src)
     expected = _expected_source_files()
-    missing = expected - loop_files
-    extra = loop_files - expected
+    missing = expected - fallback
+    extra = fallback - expected
     assert not missing and not extra, (
-        f"install-script srcfile loop drift — missing={sorted(missing)}, "
-        f"extra={sorted(extra)}. Any .ts file in plugin/src/ must appear here "
-        "or `npm run build` on the target VM will fail with TS2307."
+        f"install-script SRC_FILES fallback drift — missing={sorted(missing)}, "
+        f"extra={sorted(extra)}. Any .ts file in plugin/src/ must appear in the "
+        "fallback list too, or installs that can't reach /api/plugin-manifest "
+        "(e.g. minimal containers without python3) will fail with TS2307."
     )
 
 
 def test_python_and_bash_lists_agree():
-    """Keep the two hardcoded lists in lockstep with each other."""
+    """Keep the Python allow-list and the bash fallback in lockstep with each other."""
     src = Path(plugin_mod.__file__).read_text(encoding="utf-8")
-    match = re.search(r"for srcfile in\s+([^;]+);", src)
-    assert match
-    loop_files = set(match.group(1).split())
+    fallback = _bash_fallback_src_files(src)
     python_files = set(plugin_mod._plugin_files)
-    assert loop_files == python_files, (
-        f"_plugin_files and install-script loop disagree — "
-        f"only-in-python={sorted(python_files - loop_files)}, "
-        f"only-in-bash={sorted(loop_files - python_files)}."
+    assert fallback == python_files, (
+        f"_plugin_files and install-script SRC_FILES fallback disagree — "
+        f"only-in-python={sorted(python_files - fallback)}, "
+        f"only-in-bash={sorted(fallback - python_files)}."
     )
 
 
@@ -106,13 +111,23 @@ def test_install_script_does_not_bake_a_manifest_heredoc():
 
 
 def test_install_script_fetches_manifest_from_plugin_source():
-    """Step [4/7] must curl the manifest from /plugin-source."""
+    """Step [4/7] must curl ``/api/plugin-manifest`` for the file list.
+
+    Drives both ``SRC_FILES`` and ``ROOT_FILES`` from the server response so
+    fresh installs don't lag the canonical allow-list. The hardcoded fallback
+    is exercised only when ``python3`` is missing or the endpoint is down.
+    """
     src = Path(plugin_mod.__file__).read_text(encoding="utf-8")
-    assert "/api/plugin-source?file=openclaw.plugin.json" in src, (
-        "Install script must fetch openclaw.plugin.json from "
-        "/api/plugin-source so the manifest stays in lockstep with the "
-        "canonical plugin/openclaw.plugin.json. See "
-        "test_install_script_does_not_bake_a_manifest_heredoc for context."
+    # Accept either the versioned (``/api/v1/plugin-manifest``, used with
+    # X-API-Key — the production path through the enterprise nginx
+    # gateway) or the unversioned bootstrap alias (``/api/plugin-manifest``,
+    # used if/when nginx allowlists it the way it does ``/plugin-source``).
+    # The contract being locked here is "the script DOES fetch the
+    # manifest at step [4/7]", not which exact URL it uses.
+    assert "/plugin-manifest" in src, (
+        "Install script must fetch /plugin-manifest at step [4/7] to drive "
+        "SRC_FILES/ROOT_FILES so file lists stay in lockstep with the "
+        "server's _plugin_files/_plugin_root_files."
     )
 
 
@@ -123,6 +138,43 @@ def test_plugin_root_files_includes_manifest():
         "/plugin-source endpoint serves it. The install script depends on "
         "this — without it, fresh installs would fall back to a 404."
     )
+
+
+async def test_plugin_manifest_endpoint_shape_and_contents(client):
+    """``/api/v1/plugin-manifest`` is the single source of truth for upgrades.
+
+    The plugin's deploy command (``heartbeat.ts:processCommand``) used to
+    carry its own hardcoded srcFiles array (CAURA-444 drift 1). Centralising
+    the answer here means the plugin queries one endpoint and trusts it.
+    Anyone changing the response shape will silently break every fleet
+    that has already upgraded — so this test pins the contract.
+    """
+    resp = await client.get("/api/v1/plugin-manifest")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    # Locked contract — adding fields is OK, removing or renaming is not.
+    assert "version" in data and isinstance(data["version"], str) and data["version"]
+    assert "src_files" in data and isinstance(data["src_files"], list)
+    assert "root_files" in data and isinstance(data["root_files"], list)
+    assert (
+        "content_hash" in data
+        and isinstance(data["content_hash"], str)
+        and len(data["content_hash"]) == 64  # sha256 hex
+    )
+
+    # The src_files list MUST equal the in-process list — that's the
+    # whole point of having a manifest endpoint. If they drift we
+    # introduce a NEW class of drift bugs, defeating the purpose.
+    assert data["src_files"] == list(plugin_mod._plugin_files)
+    assert set(data["root_files"]) == plugin_mod._plugin_root_files
+
+    # Sanity: hash should match the existing /plugin-source-hash output
+    # so old clients (still using -hash) and new ones (using manifest)
+    # see the same fingerprint.
+    hash_resp = await client.get("/api/v1/plugin-source-hash")
+    assert hash_resp.status_code == 200
+    assert data["content_hash"] == hash_resp.text.strip()
 
 
 def test_served_manifest_declares_contracts_tools():

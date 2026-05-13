@@ -291,6 +291,15 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     },
   },
 
+  memclaw_keystones: {
+    type: "object",
+    required: [],
+    properties: {
+      agent_id: { type: "string", description: "Caller agent ID (used with fleet_id to include agent-scope rules)" },
+      fleet_id: { type: "string", description: "Scope filter; supply to include fleet- and agent-scoped rules" },
+    },
+  },
+
 };
 
 // --- HTTP dispatch ---
@@ -494,6 +503,27 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
       query[k] = String(v);
     }
     return apiCall("GET", "/memories/stats", undefined, query, signal);
+  },
+
+  // GET /api/v1/memclaw/keystones — read-only; trust gate is open (PR3).
+  // The plugin's ContextEngine fetches this at session start and prepends
+  // the result to the system prompt (see ``plugin/src/keystones.ts``).
+  // Exposing it as a callable tool too gives agents a way to re-fetch
+  // mid-session when they suspect rules have changed.
+  memclaw_keystones: async (params, signal) => {
+    const enriched = await enrichBody(params);
+    const query: Record<string, string> = {};
+    for (const [k, v] of Object.entries(enriched)) {
+      if (v === undefined || v === null) continue;
+      // agent-scope rows are keyed on (fleet_id, agent_id) — sending
+      // agent_id without fleet_id would silently degrade the result
+      // and produce a different rule set from the one the agent saw
+      // injected at session start. Mirrors the auto-inject guard in
+      // ``plugin/src/keystones.ts``.
+      if (k === "agent_id" && !enriched.fleet_id) continue;
+      query[k] = String(v);
+    }
+    return apiCall("GET", "/memclaw/keystones", undefined, query, signal);
   },
 
 };

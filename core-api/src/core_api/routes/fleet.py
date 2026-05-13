@@ -1,11 +1,12 @@
 """Fleet heartbeat and command channel — replaces WebSocket/SSH gateway model."""
 
+import json
 import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,7 @@ from core_api.clients.storage_client import get_storage_client
 from core_api.constants import NODE_OFFLINE_SECONDS, NODE_STALE_SECONDS
 from core_api.db.session import get_db
 from core_api.services.audit_service import log_action
+from core_api.services.organization_settings import get_raw_settings
 from core_api.version_compat import MIN_RECOMMENDED_PLUGIN_VERSION, is_plugin_outdated
 
 router = APIRouter(tags=["Fleet"])
@@ -68,6 +70,33 @@ class HeartbeatIn(BaseModel):
     # without an ``install_id`` and recreating the very collision
     # this feature exists to fix. Reject at the API boundary instead.
     install_id: str | None = Field(None, max_length=32)
+    # CAURA-444: rolling counters from the plugin's recall-policy gate
+    # (context-engine.ts:getRecallMetrics). Reset on plugin restart;
+    # latest snapshot is stored on the node row for SQL aggregation.
+    recall_metrics: dict | None = None
+    # CAURA-444: epoch-ms cooldown signal. When set and in the future,
+    # the auto-upgrade trigger SKIPS queueing further deploy commands
+    # for this node — the plugin is signalling it knows it's in a
+    # broken-deploy state and another deploy would just loop.
+    #
+    # ``ge=1`` rejects 0 and negative values at the API boundary. The
+    # auto-upgrade gate already filters them out via the
+    # ``> now_ms`` check, but they'd still land in
+    # ``nodes.metadata.deploy_blocked_until`` and mislead operators
+    # reading the column (e.g. "blocked since 1970?"). Fail-loud here
+    # instead.
+    deploy_blocked_until: int | None = Field(None, ge=1)
+
+    @field_validator("recall_metrics")
+    @classmethod
+    def _cap_recall_metrics(cls, v: dict | None) -> dict | None:
+        # Cap incoming counter blob to keep a misbehaving / malicious
+        # plugin from ballooning `nodes.metadata` rows. The plugin's
+        # actual `getRecallMetrics()` payload is well under 1 KB even
+        # with every reason populated; 4 KB is a comfortable headroom.
+        if v is not None and len(json.dumps(v)) > 4096:
+            raise ValueError("recall_metrics exceeds 4 KB limit")
+        return v
 
 
 class CommandIn(BaseModel):
@@ -187,6 +216,190 @@ async def delete_fleet(
 # ── Heartbeat ──
 
 
+# CAURA-444 — plugin auto-upgrade. Versions whose deploy machinery is
+# itself broken; we never queue auto-deploy for these because the plugin
+# would loop. Each entry comes off the list once every node in the wild
+# has been manually upgraded past it.
+#
+# 2.3.0: hardcoded srcFiles list drifted from backend (15 vs 22 files);
+#        prebuild references a monorepo path missing on flat installs,
+#        so version.ts is never refreshed and PLUGIN_VERSION reports
+#        stale. Fixed structurally in 2.4.0 (manifest fetch + version
+#        stamp). Operators must manually upgrade 2.3.0 nodes once;
+#        auto-upgrade resumes from 2.4.0.
+KNOWN_BROKEN_DEPLOY_VERSIONS: frozenset[str] = frozenset({"2.3.0"})
+
+# Cap how far into the future a node can defer its own auto-upgrade.
+# Pre-cap a misbehaving / malicious plugin could send
+# ``deploy_blocked_until = Number.MAX_SAFE_INTEGER`` and DoS its own
+# upgrade path indefinitely. 7 days is comfortably above the longest
+# ``MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS`` an operator would set.
+MAX_BLOCK_MS: int = 7 * 24 * 3600 * 1000
+
+
+def _semver_lt(a: str | None, b: str | None) -> bool:
+    """``a < b`` for plain dotted-int versions. Returns False if either
+    side is unparseable so we never queue a deploy on a version we
+    don't understand.
+    """
+    if not a or not b:
+        return False
+    try:
+        a_parts = [int(x) for x in a.split(".") if x]
+        b_parts = [int(x) for x in b.split(".") if x]
+        # Pure-separator strings like "..." filter to an empty list. After
+        # zero-padding they would look like [0, 0, 0] and falsely test
+        # "older than" any real version — triggering a spurious auto-upgrade.
+        # Treat any side with no numeric components as "unknown", not "0".
+        if not a_parts or not b_parts:
+            return False
+        # Pad to the same length with zeros so "2.4" < "2.4.1".
+        n = max(len(a_parts), len(b_parts))
+        a_parts += [0] * (n - len(a_parts))
+        b_parts += [0] * (n - len(b_parts))
+        return a_parts < b_parts
+    except ValueError:
+        return False
+
+
+async def _auto_upgrade_enabled_for_tenant(db: AsyncSession, tenant_id: str) -> bool:
+    """Default true; per-tenant flip via
+    ``organization_settings.memclaw.auto_upgrade_enabled = false``.
+    """
+    try:
+        raw = await get_raw_settings(db, tenant_id)
+        flag = raw.get("memclaw", {}).get("auto_upgrade_enabled")
+        # None (no override) → use the global default (true).
+        return flag is not False
+    except Exception:
+        # Fail-open on settings-resolve errors so a misconfigured tenant
+        # doesn't permanently lose auto-upgrade. The cooldown machinery
+        # on the plugin side prevents loops in the worst case.
+        # Log the failure so chronic settings-resolve breakage is
+        # observable rather than silently masked.
+        logger.warning(
+            "fleet.heartbeat: failed to resolve auto_upgrade_enabled for tenant=%s",
+            tenant_id,
+            exc_info=True,
+        )
+        return True
+
+
+def _has_recent_deploy_command_from_list(pending: list) -> bool:
+    """True if the pending-commands list already contains a ``deploy``.
+    Sync helper — operates on an already-fetched list rather than
+    issuing its own storage call. The heartbeat handler fetches
+    ``pending`` exactly once and threads it through to
+    ``_maybe_queue_auto_upgrade``; without this split, the same
+    ``get_pending_commands`` round-trip fired twice per heartbeat
+    (once for the auto-upgrade gate, once for the response payload).
+
+    The list is already node-scoped at the call site (the storage
+    query takes the node name), so we don't re-filter by node here.
+
+    ``isinstance(c, dict)`` (not ``(c or {})``) guards against truthy
+    non-dict list elements — strings, numbers, etc. would have made
+    the pre-fix ``(c or {}).get(...)`` raise ``AttributeError`` because
+    ``c or {}`` returns ``c`` when ``c`` is truthy, and only dicts have
+    ``.get``. A storage backend bug returning unexpected types should
+    fail-closed (skip the gate) rather than crash the heartbeat.
+    """
+    return any(isinstance(c, dict) and c.get("command") == "deploy" for c in pending or [])
+
+
+async def _maybe_queue_auto_upgrade(
+    *,
+    db: AsyncSession,
+    sc,
+    body: "HeartbeatIn",
+    pending_commands: list,
+    node_id: str,
+) -> bool:
+    """If the node is on an older plugin version and the tenant has
+    auto-upgrade enabled, queue a ``deploy`` command. Multiple skip
+    conditions for safety:
+
+    - missing or unparseable plugin_version
+    - plugin_version >= MIN_RECOMMENDED_PLUGIN_VERSION (no upgrade needed)
+    - plugin_version is in KNOWN_BROKEN_DEPLOY_VERSIONS
+    - node has signalled cooldown via ``deploy_blocked_until``
+    - tenant has explicitly disabled auto-upgrade
+    - a deploy command is already pending for this node
+
+    ``pending_commands`` is the heartbeat handler's already-fetched
+    list of unacked commands for this node — passed in so we avoid a
+    redundant ``get_pending_commands`` round-trip.
+
+    Returns True iff a new ``deploy`` command was successfully created
+    (so the caller can re-fetch + return it in the same heartbeat).
+    """
+    # Plugin release cadence is independent of the backend's ``VERSION``
+    # (CAURA-000 / PR #131). Auto-upgrade target is ``MIN_RECOMMENDED_PLUGIN_VERSION``
+    # — the operator-curated floor in ``core_api.version_compat`` which is
+    # bumped on each plugin release. Comparing against backend ``VERSION``
+    # (pre-merge behaviour) would queue spurious deploys whenever the backend
+    # released ahead of the plugin (or block real upgrades when the plugin
+    # released ahead of the backend).
+    target_version = MIN_RECOMMENDED_PLUGIN_VERSION
+    if not body.plugin_version:
+        return False
+    if not _semver_lt(body.plugin_version, target_version):
+        return False
+    if body.plugin_version in KNOWN_BROKEN_DEPLOY_VERSIONS:
+        logger.info(
+            "fleet.heartbeat: skipping auto-upgrade for node=%s on "
+            "broken-deploy version %s (manual re-install required)",
+            body.node_name,
+            body.plugin_version,
+        )
+        return False
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    if (
+        body.deploy_blocked_until
+        and body.deploy_blocked_until > now_ms
+        and body.deploy_blocked_until < now_ms + MAX_BLOCK_MS
+    ):
+        return False
+    if not await _auto_upgrade_enabled_for_tenant(db, body.tenant_id):
+        return False
+    if _has_recent_deploy_command_from_list(pending_commands):
+        return False
+
+    try:
+        await sc.create_command(
+            {
+                "tenant_id": body.tenant_id,
+                # Storage expects ``node_id`` (UUID, FK to fleet_nodes.id),
+                # not ``node_name``. Pre-fix this call passed ``node_name``,
+                # which ``_filter_fields`` silently dropped (not a FleetCommand
+                # column), leaving ``node_id`` NULL and tripping the NOT NULL
+                # constraint at INSERT time — every auto-upgrade attempt 500'd
+                # silently on the storage round-trip.
+                "node_id": node_id,
+                "command": "deploy",
+                # Plugin re-fetches the canonical file list via
+                # /plugin-manifest; payload only carries the target
+                # version for logging / cooldown bookkeeping.
+                "payload": {"target_version": target_version},
+            }
+        )
+        logger.info(
+            "fleet.heartbeat: auto-upgrade queued for node=%s tenant=%s (%s -> %s)",
+            body.node_name,
+            body.tenant_id,
+            body.plugin_version,
+            target_version,
+        )
+        return True
+    except Exception as e:
+        logger.warning(
+            "fleet.heartbeat: failed to queue auto-upgrade for node=%s: %s",
+            body.node_name,
+            e,
+        )
+        return False
+
+
 @router.post("/fleet/heartbeat")
 async def heartbeat(
     body: HeartbeatIn,
@@ -208,6 +421,33 @@ async def heartbeat(
 
     now = datetime.now(UTC)
     sc = get_storage_client()
+
+    # Merge CAURA-444 metrics (recall counters + cooldown signal) into
+    # the existing metadata JSONB blob rather than introducing new
+    # columns. This keeps the storage schema unchanged while still
+    # exposing the data via the existing /fleet/nodes endpoint and
+    # ad-hoc SQL on `nodes.metadata`.
+    merged_metadata: dict | None = body.metadata
+    if body.recall_metrics is not None or body.deploy_blocked_until is not None:
+        merged_metadata = dict(merged_metadata or {})
+        if body.recall_metrics is not None:
+            merged_metadata["recall_metrics"] = body.recall_metrics
+        if body.deploy_blocked_until is not None:
+            # Mirror the gate's MAX_BLOCK_MS cap at write time. The gate
+            # already ignores beyond-cap values (treats them as if the
+            # cooldown weren't set), so persisting them would only
+            # mislead operators reading nodes.metadata ("blocked until
+            # year 5138?"). Storing only what the gate honors keeps the
+            # column truthful.
+            _now_ms = int(datetime.now(UTC).timestamp() * 1000)
+            # Also reject already-expired timestamps. The gate above only
+            # honours ``deploy_blocked_until > now_ms``, so persisting a
+            # past value would leak into ``nodes.metadata`` and mislead
+            # operators inspecting the column (the "blocked until last
+            # week?" trap). Symmetric with the gate's lower bound.
+            if _now_ms < body.deploy_blocked_until <= _now_ms + MAX_BLOCK_MS:
+                merged_metadata["deploy_blocked_until"] = body.deploy_blocked_until
+
     node = await sc.upsert_node(
         {
             "tenant_id": body.tenant_id,
@@ -222,7 +462,7 @@ async def heartbeat(
             "agents_json": body.agents,
             "tools_json": body.tools,
             "channels_json": body.channels,
-            "metadata": body.metadata,
+            "metadata": merged_metadata,
             "last_heartbeat": now.isoformat(),
         }
     )
@@ -330,8 +570,63 @@ async def heartbeat(
     node_id = node.get("id", "")
     node_name = node.get("node_name", body.node_name)
 
-    # Fetch pending commands and mark as acked
-    commands = await sc.get_pending_commands(body.tenant_id, node_name)
+    # Fetch pending commands ONCE. Used twice: (a) by the auto-upgrade
+    # gate to skip queueing if a deploy is already in-flight, and (b)
+    # returned to the caller in the response payload. Pre-refactor
+    # these were two separate ``get_pending_commands`` round-trips per
+    # heartbeat (CAURA-444 review feedback).
+    try:
+        pending = await sc.get_pending_commands(body.tenant_id, node_name)
+    except Exception:
+        # Same fail-loud-but-continue posture as the prior dedicated
+        # helper. Log so a chronic storage outage on this path is
+        # observable; treat as "no pending commands" so the rest of
+        # the heartbeat still completes (and the auto-upgrade gate
+        # below sees no in-flight deploy → may queue one).
+        logger.warning(
+            "fleet.heartbeat: failed to fetch pending commands node=%s tenant=%s",
+            node_name,
+            body.tenant_id,
+            exc_info=True,
+        )
+        pending = []
+
+    # CAURA-444: opportunistic auto-upgrade. Compares incoming
+    # plugin_version to MIN_RECOMMENDED_PLUGIN_VERSION and queues a deploy
+    # command when behind. Reads ``pending`` to check for an
+    # in-flight deploy. Multiple guards inside the helper — see
+    # _maybe_queue_auto_upgrade docstring. Returns True iff it queued
+    # a new command; we re-fetch in that case so the response carries
+    # it back to the plugin this heartbeat (instead of waiting 60 s).
+    # ``node`` came from the earlier ``upsert_node`` call and includes the
+    # storage-issued UUID. ``_maybe_queue_auto_upgrade`` needs it because
+    # ``fleet_commands.node_id`` is NOT NULL (FK to ``fleet_nodes.id``); a
+    # ``node_name``-only insert silently drops to None via ``_filter_fields``
+    # and 500s at the DB layer. Skip the queue (gracefully) if the upsert
+    # somehow didn't return an id — we'd rather miss one auto-upgrade tick
+    # than crash the heartbeat handler.
+    node_id_for_queue = node.get("id") if isinstance(node, dict) else None
+    if node_id_for_queue:
+        queued_new = await _maybe_queue_auto_upgrade(
+            db=db, sc=sc, body=body, pending_commands=pending, node_id=str(node_id_for_queue)
+        )
+    else:
+        queued_new = False
+    if queued_new:
+        try:
+            commands = await sc.get_pending_commands(body.tenant_id, node_name)
+        except Exception:
+            logger.warning(
+                "fleet.heartbeat: failed to re-fetch pending commands after "
+                "auto-upgrade queue node=%s tenant=%s",
+                node_name,
+                body.tenant_id,
+                exc_info=True,
+            )
+            commands = pending  # fall back to pre-queue list
+    else:
+        commands = pending
+
     if commands:
         await sc.ack_commands([c.get("id") for c in commands])
 

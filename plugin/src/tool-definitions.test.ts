@@ -59,6 +59,11 @@ describe("MEMCLAW_TOOLS surface", () => {
       "memclaw_insights",
       "memclaw_evolve",
       "memclaw_stats",
+      // ``memclaw_keystones`` (read) is plugin-exposed so agents can
+      // re-fetch governance rules mid-session; the ContextEngine also
+      // injects them automatically at session start. The companion
+      // write tool ``memclaw_keystones_set`` is MCP-only (admin path).
+      "memclaw_keystones",
     ]);
   });
 
