@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/v17.6.0/schemas/config.json",
   "signoff": "release-please[bot] <release-please[bot]@users.noreply.github.com>",
   "release-type": "simple",
-  "include-component-in-tag": false,
+  "include-component-in-tag": true,
   "include-v-in-tag": true,
   "separate-pull-requests": false,
   "bump-minor-pre-major": true,
@@ -14,6 +14,7 @@
     ".": {
       "release-type": "simple",
       "package-name": "caura-memclaw",
+      "component": "backend",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         {
@@ -30,12 +31,15 @@
           "type": "toml",
           "path": "core-storage-api/pyproject.toml",
           "jsonpath": "$.project.version"
-        },
-        {
-          "type": "json",
-          "path": "plugin/package.json",
-          "jsonpath": "$.version"
-        },
+        }
+      ]
+    },
+    "plugin": {
+      "release-type": "node",
+      "package-name": "memclaw-plugin",
+      "component": "plugin",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
         {
           "type": "json",
           "path": "plugin/openclaw.plugin.json",

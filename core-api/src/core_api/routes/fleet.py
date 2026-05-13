@@ -15,6 +15,7 @@ from core_api.clients.storage_client import get_storage_client
 from core_api.constants import NODE_OFFLINE_SECONDS, NODE_STALE_SECONDS
 from core_api.db.session import get_db
 from core_api.services.audit_service import log_action
+from core_api.version_compat import MIN_RECOMMENDED_PLUGIN_VERSION, is_plugin_outdated
 
 router = APIRouter(tags=["Fleet"])
 
@@ -194,6 +195,16 @@ async def heartbeat(
 ):
     """Plugin pushes status; receives pending commands in response."""
     auth.enforce_tenant(body.tenant_id)
+
+    if is_plugin_outdated(body.plugin_version):
+        logger.warning(
+            "outdated plugin heartbeat",
+            extra={
+                "node": body.node_name,
+                "plugin_version": body.plugin_version,
+                "min_recommended": MIN_RECOMMENDED_PLUGIN_VERSION,
+            },
+        )
 
     now = datetime.now(UTC)
     sc = get_storage_client()

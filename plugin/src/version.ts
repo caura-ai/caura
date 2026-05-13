@@ -1,2 +1,2 @@
 // Auto-generated from plugin/package.json — do not edit
-export const PLUGIN_VERSION = "2.1.0";
+export const PLUGIN_VERSION = "2.5.0";
