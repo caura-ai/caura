@@ -15,7 +15,9 @@ from core_api.providers._platform import (
     get_platform_init_errors,
     get_platform_llm,
 )
+from core_api.routes.plugin import _plugin_version
 from core_api.tools import REGISTRY  # SoT registry — populated at import time
+from core_api.version_compat import MIN_RECOMMENDED_PLUGIN_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +194,8 @@ async def status_() -> dict[str, Any]:
     # callers.
     return {
         "version": VERSION,
+        "plugin_version": _plugin_version(),
+        "plugin_min_recommended": MIN_RECOMMENDED_PLUGIN_VERSION,
         "health": health_state,
         "dependencies": deps,
         "llm": {
