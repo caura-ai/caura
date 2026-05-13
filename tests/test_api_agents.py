@@ -64,7 +64,7 @@ async def test_agent_created_on_memory_write(client):
 
 
 async def test_update_agent_trust_level(client):
-    """PATCH /api/agents/{agent_id}?tenant_id=X updates the trust level."""
+    """PATCH /api/agents/{agent_id}/trust?tenant_id=X updates the trust level."""
     tenant_id, headers = get_test_auth()
     tag = _uid()
     agent_name = f"agent-{tag}"
@@ -73,9 +73,9 @@ async def test_update_agent_trust_level(client):
                         f"A fact about trust levels for testing [{tag}]",
                         agent_id=agent_name, fleet_id=f"fleet-{tag}")
 
-    # Update trust level to 3
+    # Update trust level to 3 via the canonical /trust route.
     resp = await client.patch(
-        f"/api/v1/agents/{agent_name}?tenant_id={tenant_id}",
+        f"/api/v1/agents/{agent_name}/trust?tenant_id={tenant_id}",
         json={"trust_level": 3},
         headers=headers,
     )
