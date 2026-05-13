@@ -920,6 +920,19 @@ async def write_memories_bulk(
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
 
+    # Broker (mci_ install credential) calls don't carry an attempt id
+    # header or an ``agent_id`` body field — the broker's own per-
+    # session ``client_hash`` de-dup is the design contract per
+    # cloud-data-plane.md §2.4 (gap G3). Server-derive a per-request
+    # attempt id and attribute writes to the install. Non-broker
+    # callers (dashboard, SDK) keep the CAURA-602 invariants in full.
+    if auth.is_install_credential:
+        if not bulk_attempt_id:
+            import uuid as _uuid
+
+            bulk_attempt_id = f"broker-{auth.install_uuid or 'unknown'}-{_uuid.uuid4()}"
+        if not body.agent_id:
+            body.agent_id = f"broker:{auth.install_uuid or 'unknown'}"
     if not bulk_attempt_id:
         # Required as of CAURA-602 — without it we can't make the bulk
         # write retry-safe, and silent-create regressions reappear under

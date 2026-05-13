@@ -43,6 +43,8 @@ class AuthContext:
         org_role: str | None = None,
         agent_id: str | None = None,
         is_read_only: bool = False,
+        is_install_credential: bool = False,
+        install_uuid: str | None = None,
     ):
         self.tenant_id = tenant_id
         self.is_demo = is_demo
@@ -55,6 +57,13 @@ class AuthContext:
         # after a subscription cancellation. Blocks creates/updates but allows
         # deletes (so users can reduce usage) and reads.
         self.is_read_only = is_read_only
+        # True when the gateway authenticated the call with a memclawd
+        # install credential (mci_ prefix). Drives bulk-write relaxation
+        # for broker-mode callers — they don't drive an
+        # ``X-Bulk-Attempt-Id`` header and don't have an ``agent_id``
+        # on the wire.
+        self.is_install_credential = is_install_credential
+        self.install_uuid = install_uuid
 
     def enforce_read_only(self) -> None:
         """Raise 403 if this is a demo key (read-only sandbox)."""
@@ -157,11 +166,21 @@ async def get_auth_context(
     # ── Path 4: X-Tenant-ID header (set by enterprise nginx / ingress) ──
     tenant_id = request.headers.get("x-tenant-id")
     if tenant_id:
+        # The gateway's /_auth subrequest plumbs the api_key's ``kind``
+        # so this layer can branch on credential provenance without
+        # an extra DB hop. ``install_credential`` is what memclawd
+        # uses; ``user_api_key`` (the default) is the dashboard /
+        # SDK path.
+        credential_kind = (request.headers.get("x-caura-credential-kind") or "").lower()
+        is_install_credential = credential_kind == "install_credential"
+        install_uuid = request.headers.get("x-install-uuid") or None
         set_current_tenant(tenant_id)
         return AuthContext(
             tenant_id=tenant_id,
             agent_id=agent_id,
             is_read_only=is_read_only,
+            is_install_credential=is_install_credential,
+            install_uuid=install_uuid,
         )
 
     # No tenant header + no admin key configured = reject.

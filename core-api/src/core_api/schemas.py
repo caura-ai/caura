@@ -81,7 +81,13 @@ class BulkMemoryItem(BaseModel):
 class BulkMemoryCreate(BaseModel):
     tenant_id: str
     fleet_id: str | None = None
-    agent_id: str
+    # Optional on the wire so memclawd broker calls (cloud-data-plane.md
+    # §2.4) can omit it — the route handler defaults to
+    # ``broker:<install_uuid>`` when the caller authenticates with an
+    # install credential. Non-broker callers (dashboard / SDK) still
+    # must populate it; the route's relaxation branch keys off the
+    # credential kind, not the body.
+    agent_id: str | None = None
     items: list[BulkMemoryItem] = Field(min_length=1, max_length=BULK_MAX_ITEMS)
     visibility: str | None = Field(default=None, pattern=MEMORY_VISIBILITIES_PATTERN)
 
