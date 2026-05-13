@@ -5,6 +5,7 @@
   "include-component-in-tag": true,
   "include-v-in-tag": true,
   "separate-pull-requests": false,
+  "bootstrap-sha": "868da80d108573f259dae74f7c4330f23f614e86",
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": false,
   "draft": false,
