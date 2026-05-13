@@ -124,14 +124,40 @@ async def test_write_invalid_batch_item(mcp_env):
 
 
 async def test_write_service_http_exception_becomes_envelope(mcp_env):
+    # Non-duplicate 4xx still maps to the error envelope.
     mcp_env["service"]("create_memory").side_effect = HTTPException(
-        status_code=409, detail="duplicate memory"
+        status_code=409, detail="some other conflict"
     )
     out = await mcp_server.memclaw_write(content="dup")
-    # Service-raised HTTPException maps to `Error (…): detail` (plain string
-    # plus _latency_ms), not the structured envelope above.
     assert "CONFLICT" in out
-    assert "duplicate memory" in out
+    assert "some other conflict" in out
+
+
+async def test_write_exact_duplicate_returns_idempotent_envelope(mcp_env):
+    # When the dedup gate trips (Stage 5's per-agent exact-hash dedup), the
+    # MCP write surface returns 200 with status=duplicate and the existing
+    # memory id. Lets callers safely retry without branching on 4xx codes.
+    existing_id = "11111111-2222-3333-4444-555555555555"
+    mcp_env["service"]("create_memory").side_effect = HTTPException(
+        status_code=409, detail=f"Duplicate memory exists: {existing_id}"
+    )
+    out = await mcp_server.memclaw_write(content="same content", agent_id="a1")
+    payload = parse_envelope(out)
+    assert payload["status"] == "duplicate"
+    assert payload["existing_id"] == existing_id
+    assert payload["agent_id"] == "a1"
+
+
+async def test_write_near_duplicate_still_errors(mcp_env):
+    # Semantic-duplicate (different prefix) is NOT idempotent — caller wrote
+    # new content that the service suppressed; surface as error.
+    mcp_env["service"]("create_memory").side_effect = HTTPException(
+        status_code=409,
+        detail="Near-duplicate memory exists: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    )
+    out = await mcp_server.memclaw_write(content="paraphrase")
+    assert "CONFLICT" in out
+    assert "Near-duplicate" in out
 
 
 async def test_write_auth_failure_shortcircuits(monkeypatch):

@@ -193,6 +193,17 @@ def _refuse_default_agent_on_gateway(agent_id: str) -> str | None:
     )
 
 
+_DUPLICATE_DETAIL_RE = re.compile(r"^Duplicate memory exists:\s*(?P<id>[0-9a-fA-F-]{36})\s*$")
+
+
+def _extract_duplicate_id(detail: str) -> str | None:
+    """Parse the duplicate-memory exception detail. Returns the existing
+    memory id, or None if the format doesn't match (semantic-duplicate
+    hits use a different prefix and stay opaque to callers)."""
+    m = _DUPLICATE_DETAIL_RE.match(detail or "")
+    return m.group("id") if m else None
+
+
 def _check_auth() -> str | None:
     """Return an error string if auth fails, None if OK."""
     tid = _get_tenant()
@@ -464,6 +475,24 @@ async def memclaw_write(
             result = await create_memories_bulk(db, bulk_data, bulk_attempt_id=f"mcp:{uuid4()}")
             return _with_latency(_serialize(result), t0)
         except HTTPException as e:
+            # Idempotent retry-safe duplicate: when create_memory raises 409
+            # with the "Duplicate memory exists: <uuid>" detail (Stage 5's
+            # per-agent exact-hash dedup hit), surface a 200-shaped success
+            # envelope so callers can treat the retry as a no-op rather than
+            # an error. Semantic-duplicate hits still surface as errors —
+            # the caller wrote new content that we suppressed, which is a
+            # semantically distinct outcome.
+            if e.status_code == 409 and (existing_id := _extract_duplicate_id(str(e.detail))):
+                payload = {
+                    "status": "duplicate",
+                    "existing_id": existing_id,
+                    "agent_id": agent_id,
+                }
+                logger.info(
+                    "memclaw_write: idempotent duplicate hit existing=%s agent=%s",
+                    existing_id, agent_id,
+                )
+                return _with_latency(json.dumps(payload), t0)
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
             return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
 
