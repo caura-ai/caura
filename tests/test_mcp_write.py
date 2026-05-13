@@ -40,6 +40,40 @@ async def test_write_single_happy_path(mcp_env):
     mcp_env["service_mocks"]["create_memory"].assert_awaited_once()
 
 
+async def test_write_registers_agent(mcp_env):
+    # memclaw_write must lazy-create the Agent row (REST parity). Without this,
+    # an mca_-key holder's first MCP write succeeds but PATCH /agents/{id}/trust
+    # 404s because no Agent row exists.
+    enforce = mcp_env["service"]("enforce_fleet_write")
+    enforce.return_value = {"agent_id": "a1", "trust_level": 0}
+    mcp_env["service"]("create_memory").return_value = _OutStub("m-2")
+
+    await mcp_server.memclaw_write(
+        content="first write", agent_id="a1", fleet_id="f1"
+    )
+    enforce.assert_awaited_once()
+    args = enforce.await_args.args
+    # Signature: (db, tenant_id, agent_id, fleet_id)
+    assert args[1] == mcp_env["tenant"]
+    assert args[2] == "a1"
+    assert args[3] == "f1"
+
+
+async def test_write_batch_registers_agent(mcp_env):
+    enforce = mcp_env["service"]("enforce_fleet_write")
+    mcp_env["service"]("create_memories_bulk").return_value = _OutStub("batch-2")
+
+    await mcp_server.memclaw_write(
+        items=[{"content": "one"}, {"content": "two"}],
+        agent_id="a2",
+        fleet_id="f2",
+    )
+    enforce.assert_awaited_once()
+    args = enforce.await_args.args
+    assert args[2] == "a2"
+    assert args[3] == "f2"
+
+
 async def test_write_batch_happy_path(mcp_env):
     mcp_env["service"]("create_memories_bulk").return_value = _OutStub("batch-1")
 
