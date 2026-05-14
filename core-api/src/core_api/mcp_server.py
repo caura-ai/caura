@@ -852,9 +852,8 @@ async def memclaw_doc(
     agent_id = _get_agent_id() or agent_id
     # Refuse the default identity for write ops on the gateway path; read-only
     # ops don't carry the same attribution risk.
-    if op == "write":
-        if refuse := _refuse_default_agent_on_gateway(agent_id):
-            return _with_latency(refuse, t0)
+    if op == "write" and (refuse := _refuse_default_agent_on_gateway(agent_id)):
+        return _with_latency(refuse, t0)
 
     from core_api.repositories import document_repo
 
