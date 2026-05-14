@@ -136,27 +136,6 @@ async def patch_agent_tune(
     return AgentOut.model_validate(agent)
 
 
-@router.patch("/agents/{agent_id}", response_model=AgentOut)
-async def patch_agent(
-    agent_id: str,
-    body: AgentTrustUpdate,
-    tenant_id: str = Query(...),
-    auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
-):
-    """Update an agent's trust level (alias for /agents/{id}/trust)."""
-    auth.enforce_tenant(tenant_id)
-    agent = await update_trust_level(
-        db,
-        tenant_id,
-        agent_id,
-        body.trust_level,
-        fleet_id=body.fleet_id,
-    )
-    await db.commit()
-    return AgentOut.model_validate(agent)
-
-
 @router.delete("/agents/{agent_id}", status_code=204)
 async def delete_agent(
     agent_id: str,
