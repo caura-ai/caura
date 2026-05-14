@@ -1,4 +1,6 @@
-"""CheckExactDuplicate — reject if content_hash already exists in tenant+fleet."""
+"""CheckExactDuplicate — reject if content_hash already exists for the
+same (tenant, fleet, agent). Stage 5: per-agent dedup so cross-agent
+writes of identical content no longer collide (friction §2.8)."""
 
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ class CheckExactDuplicate:
             data.tenant_id,
             ch,
             fleet_id=data.fleet_id,
+            agent_id=data.agent_id,
         )
         if dup:
             raise HTTPException(

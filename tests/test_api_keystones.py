@@ -42,7 +42,7 @@ async def _seed_trusted_agent(client, tenant_id, headers, agent_id, fleet_id):
     )
     assert resp.status_code == 201, resp.text
     bump = await client.patch(
-        f"/api/v1/agents/{agent_id}?tenant_id={tenant_id}",
+        f"/api/v1/agents/{agent_id}/trust?tenant_id={tenant_id}",
         json={"trust_level": 2},
         headers=headers,
     )

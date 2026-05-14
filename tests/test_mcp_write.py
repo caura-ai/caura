@@ -40,6 +40,40 @@ async def test_write_single_happy_path(mcp_env):
     mcp_env["service_mocks"]["create_memory"].assert_awaited_once()
 
 
+async def test_write_registers_agent(mcp_env):
+    # memclaw_write must lazy-create the Agent row (REST parity). Without this,
+    # an mca_-key holder's first MCP write succeeds but PATCH /agents/{id}/trust
+    # 404s because no Agent row exists.
+    enforce = mcp_env["service"]("enforce_fleet_write")
+    enforce.return_value = {"agent_id": "a1", "trust_level": 0}
+    mcp_env["service"]("create_memory").return_value = _OutStub("m-2")
+
+    await mcp_server.memclaw_write(
+        content="first write", agent_id="a1", fleet_id="f1"
+    )
+    enforce.assert_awaited_once()
+    args = enforce.await_args.args
+    # Signature: (db, tenant_id, agent_id, fleet_id)
+    assert args[1] == mcp_env["tenant"]
+    assert args[2] == "a1"
+    assert args[3] == "f1"
+
+
+async def test_write_batch_registers_agent(mcp_env):
+    enforce = mcp_env["service"]("enforce_fleet_write")
+    mcp_env["service"]("create_memories_bulk").return_value = _OutStub("batch-2")
+
+    await mcp_server.memclaw_write(
+        items=[{"content": "one"}, {"content": "two"}],
+        agent_id="a2",
+        fleet_id="f2",
+    )
+    enforce.assert_awaited_once()
+    args = enforce.await_args.args
+    assert args[2] == "a2"
+    assert args[3] == "f2"
+
+
 async def test_write_batch_happy_path(mcp_env):
     mcp_env["service"]("create_memories_bulk").return_value = _OutStub("batch-1")
 
@@ -90,14 +124,40 @@ async def test_write_invalid_batch_item(mcp_env):
 
 
 async def test_write_service_http_exception_becomes_envelope(mcp_env):
+    # Non-duplicate 4xx still maps to the error envelope.
     mcp_env["service"]("create_memory").side_effect = HTTPException(
-        status_code=409, detail="duplicate memory"
+        status_code=409, detail="some other conflict"
     )
     out = await mcp_server.memclaw_write(content="dup")
-    # Service-raised HTTPException maps to `Error (…): detail` (plain string
-    # plus _latency_ms), not the structured envelope above.
     assert "CONFLICT" in out
-    assert "duplicate memory" in out
+    assert "some other conflict" in out
+
+
+async def test_write_exact_duplicate_returns_idempotent_envelope(mcp_env):
+    # When the dedup gate trips (Stage 5's per-agent exact-hash dedup), the
+    # MCP write surface returns 200 with status=duplicate and the existing
+    # memory id. Lets callers safely retry without branching on 4xx codes.
+    existing_id = "11111111-2222-3333-4444-555555555555"
+    mcp_env["service"]("create_memory").side_effect = HTTPException(
+        status_code=409, detail=f"Duplicate memory exists: {existing_id}"
+    )
+    out = await mcp_server.memclaw_write(content="same content", agent_id="a1")
+    payload = parse_envelope(out)
+    assert payload["status"] == "duplicate"
+    assert payload["existing_id"] == existing_id
+    assert payload["agent_id"] == "a1"
+
+
+async def test_write_near_duplicate_still_errors(mcp_env):
+    # Semantic-duplicate (different prefix) is NOT idempotent — caller wrote
+    # new content that the service suppressed; surface as error.
+    mcp_env["service"]("create_memory").side_effect = HTTPException(
+        status_code=409,
+        detail="Near-duplicate memory exists: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    )
+    out = await mcp_server.memclaw_write(content="paraphrase")
+    assert "CONFLICT" in out
+    assert "Near-duplicate" in out
 
 
 async def test_write_auth_failure_shortcircuits(monkeypatch):
@@ -137,6 +197,47 @@ async def test_write_passes_fleet_id_kwarg_through(mcp_env):
     kwargs = mock.await_args.kwargs
     model = kwargs.get("__self__", None) or mock.await_args.args[1]
     assert model.fleet_id == "caura-rnd-fleet"
+
+
+async def test_write_refuses_default_agent_on_gateway(mcp_env):
+    # Gateway-routed request + tenant key (no X-Agent-ID injection) + caller
+    # left agent_id at the default → MISSING_AGENT_ID. Standalone (default
+    # in tests) is unaffected.
+    mcp_env["service"]("create_memory").return_value = _OutStub("m-x")
+    from core_api import mcp_server
+
+    token = mcp_server._via_gateway_var.set(True)
+    try:
+        out = await mcp_server.memclaw_write(content="anything")
+    finally:
+        mcp_server._via_gateway_var.reset(token)
+    payload = parse_envelope(out)
+    assert payload["error"]["code"] == "MISSING_AGENT_ID"
+    # Create wasn't called because we short-circuited.
+    mcp_env["service_mocks"]["create_memory"].assert_not_awaited()
+
+
+async def test_write_explicit_agent_on_gateway_allowed(mcp_env):
+    # Same gateway-routed path, but caller passed an explicit agent_id —
+    # the guard doesn't fire and the write proceeds.
+    mcp_env["service"]("create_memory").return_value = _OutStub("m-y")
+    from core_api import mcp_server
+
+    token = mcp_server._via_gateway_var.set(True)
+    try:
+        out = await mcp_server.memclaw_write(content="hi", agent_id="real-agent")
+    finally:
+        mcp_server._via_gateway_var.reset(token)
+    payload = parse_envelope(out)
+    assert payload["id"] == "m-y"
+
+
+async def test_write_default_agent_in_standalone_ok(mcp_env):
+    # Standalone (no gateway) keeps the default-identity ergonomics.
+    mcp_env["service"]("create_memory").return_value = _OutStub("m-z")
+    out = await mcp_server.memclaw_write(content="hi")
+    payload = parse_envelope(out)
+    assert payload["id"] == "m-z"
 
 
 async def test_write_without_fleet_id_persists_null(mcp_env):

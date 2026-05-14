@@ -2,7 +2,7 @@ import asyncio
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Request, Response
 from starlette.status import HTTP_503_SERVICE_UNAVAILABLE
 
 from common.events.factory import get_event_bus
@@ -27,6 +27,46 @@ router = APIRouter(tags=["System"])
 @router.get("/version")
 async def version():
     return {"version": VERSION}
+
+
+@router.get("/whoami")
+async def whoami(request: Request) -> dict:
+    """Identity probe — returns the caller's resolved (tenant_id, agent_id)
+    along with the resolution source. A single round-trip answers ~80% of
+    "is my integration wired correctly?" debugging during plugin / SDK
+    bootstrap (friction §2.1, §2.8 / Stage 7).
+
+    Resolution priority mirrors MCPAuthMiddleware:
+      gateway-header — X-Tenant-ID (and optionally X-Agent-ID) injected
+                       by the enterprise gateway after auth_request
+      standalone     — settings.is_standalone fixed tenant
+      anonymous      — no auth resolved (caller will hit 401 on first
+                       write; this endpoint stays open as a probe)
+    """
+    tenant_id = request.headers.get("x-tenant-id")
+    agent_id = request.headers.get("x-agent-id")
+    if tenant_id:
+        return {
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "auth_source": "gateway-header",
+            "via_gateway": True,
+        }
+    if settings.is_standalone:
+        from core_api.standalone import get_standalone_tenant_id
+
+        return {
+            "tenant_id": get_standalone_tenant_id(),
+            "agent_id": None,
+            "auth_source": "standalone",
+            "via_gateway": False,
+        }
+    return {
+        "tenant_id": None,
+        "agent_id": None,
+        "auth_source": "anonymous",
+        "via_gateway": False,
+    }
 
 
 @router.get("/tool-descriptions")

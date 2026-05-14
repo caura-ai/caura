@@ -85,6 +85,15 @@ def mcp_env(monkeypatch):
 
     monkeypatch.setattr(mcp_server, "_require_trust", _always_allow)
 
+    # Write tools call ``enforce_fleet_write`` to lazy-create the Agent row;
+    # in unit tests there's no real DB, so stub it as a no-op returning the
+    # caller's identity. Tests that want to assert the call replace this via
+    # ``service("enforce_fleet_write")``.
+    async def _stub_enforce_fleet_write(db, tenant_id, agent_id, fleet_id):
+        return {"agent_id": agent_id, "tenant_id": tenant_id, "fleet_id": fleet_id, "trust_level": 3}
+
+    monkeypatch.setattr(mcp_server, "enforce_fleet_write", _stub_enforce_fleet_write)
+
     service_mocks: dict[str, AsyncMock] = {}
 
     def service(name: str) -> AsyncMock:
