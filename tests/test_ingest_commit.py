@@ -187,7 +187,8 @@ async def test_parent_document_skipped_when_zero_created(captured):
         "_ALL_": True,
     }
 
-    async def fake_bulk_find_all_existing(tenant_id, hashes):
+    async def fake_bulk_find_all_existing(tenant_id, hashes, *, fleet_id=None, agent_id=None):
+        # Stage 5 added per-agent dedup; accept the new kwargs.
         return {h: {"id": "x", "client_request_id": None} for h in hashes}
 
     captured.bulk_find_calls = []
