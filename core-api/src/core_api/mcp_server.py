@@ -40,6 +40,7 @@ from core_api.db.session import async_session
 from core_api.errors import code_for_status
 from core_api.repositories import memory_repo
 from core_api.schemas import BulkMemoryCreate, BulkMemoryItem, MemoryCreate, MemoryUpdate
+from core_api.services.agent_service import enforce_fleet_write
 from core_api.services.audit_service import log_action
 from core_api.services.entity_service import get_entity
 from core_api.services.memory_service import (
@@ -64,10 +65,16 @@ logger = logging.getLogger(__name__)
 
 _tenant_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("mcp_tenant_id")
 _agent_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("mcp_agent_id", default=None)
+# True iff X-Tenant-ID arrived as a request header (gateway-routed). On that
+# path the gateway is the source of truth for identity; falling back to the
+# literal "mcp-agent" tool-param default would silently attribute every write
+# from a tenant-key holder to a single shared identity (friction §2.8 / Stage 6b).
+_via_gateway_var: contextvars.ContextVar[bool] = contextvars.ContextVar("mcp_via_gateway", default=False)
 
 _UNAUTH = "__unauthenticated__"
 _ADMIN = "__admin__"
 _NO_AUTH = "__no_auth__"
+_DEFAULT_AGENT_ID = "mcp-agent"
 
 
 def _error_response(code: str, message: str, **details) -> str:
@@ -118,7 +125,9 @@ class MCPAuthMiddleware:
             tenant_header = headers.get(b"x-tenant-id", b"").decode()
             if tenant_header:
                 _tenant_id_var.set(tenant_header)
+                _via_gateway_var.set(True)
             else:
+                _via_gateway_var.set(False)
                 api_key = headers.get(b"x-api-key", b"").decode()
                 if not api_key:
                     auth_header = headers.get(b"authorization", b"").decode()
@@ -152,6 +161,47 @@ def _get_tenant() -> str:
 def _get_agent_id() -> str | None:
     """Return the verified agent_id from X-Agent-ID header, or None."""
     return _agent_id_var.get(None)
+
+
+def _refuse_default_agent_on_gateway(agent_id: str) -> str | None:
+    """When the request came through the enterprise gateway (X-Tenant-ID set)
+    and the gateway didn't inject X-Agent-ID (mc_ tenant-key path), the caller
+    must supply a real agent_id. Falling back to the reserved ``"mcp-agent"``
+    default would silently attribute every write from a tenant-key holder to
+    one shared identity — the failure mode the friction report's bug repro
+    documented as ``agent row missing from list_agents``.
+
+    Returns an error envelope if the call should be refused; ``None`` to proceed.
+    Standalone, admin, and gateway-routed mca_-key paths are unaffected:
+    standalone uses a stable single-tenant identity, admin is a system caller,
+    and an mca_ key resolves X-Agent-ID via auth_validate so this guard never
+    fires for it.
+    """
+    if not _via_gateway_var.get(False):
+        return None
+    if _get_agent_id() is not None:
+        return None
+    if agent_id != _DEFAULT_AGENT_ID:
+        return None
+    return _error_response(
+        "MISSING_AGENT_ID",
+        f"Writes via the gateway with a tenant ({'mc_'}) key must specify an "
+        "agent_id explicitly; the reserved default '"
+        f"{_DEFAULT_AGENT_ID}' is not accepted on this path. Either pass "
+        "agent_id=<your-agent-name> or use an mca_ per-agent key whose "
+        "identity the gateway will inject for you.",
+    )
+
+
+_DUPLICATE_DETAIL_RE = re.compile(r"^Duplicate memory exists:\s*(?P<id>[0-9a-fA-F-]{36})\s*$")
+
+
+def _extract_duplicate_id(detail: str) -> str | None:
+    """Parse the duplicate-memory exception detail. Returns the existing
+    memory id, or None if the format doesn't match (semantic-duplicate
+    hits use a different prefix and stay opaque to callers)."""
+    m = _DUPLICATE_DETAIL_RE.match(detail or "")
+    return m.group("id") if m else None
 
 
 def _check_auth() -> str | None:
@@ -346,9 +396,17 @@ async def memclaw_write(
         )
     tenant_id = _get_tenant()
     agent_id = _get_agent_id() or agent_id
+    if refuse := _refuse_default_agent_on_gateway(agent_id):
+        return _with_latency(refuse, t0)
 
     async with _mcp_session() as db:
         try:
+            # Register the calling agent (auto-create row on first write) and
+            # enforce trust gating for cross-fleet writes — same surface the
+            # REST write path uses. Without this, MCP writes succeed without
+            # ever creating an Agent row, so a follow-up
+            # PATCH /agents/{id}/trust 404s.
+            await enforce_fleet_write(db, tenant_id, agent_id, fleet_id)
             if content is not None:
                 await check_and_increment(db, tenant_id, "write")
                 result = await create_memory(
@@ -417,6 +475,25 @@ async def memclaw_write(
             result = await create_memories_bulk(db, bulk_data, bulk_attempt_id=f"mcp:{uuid4()}")
             return _with_latency(_serialize(result), t0)
         except HTTPException as e:
+            # Idempotent retry-safe duplicate: when create_memory raises 409
+            # with the "Duplicate memory exists: <uuid>" detail (Stage 5's
+            # per-agent exact-hash dedup hit), surface a 200-shaped success
+            # envelope so callers can treat the retry as a no-op rather than
+            # an error. Semantic-duplicate hits still surface as errors —
+            # the caller wrote new content that we suppressed, which is a
+            # semantically distinct outcome.
+            if e.status_code == 409 and (existing_id := _extract_duplicate_id(str(e.detail))):
+                payload = {
+                    "status": "duplicate",
+                    "existing_id": existing_id,
+                    "agent_id": agent_id,
+                }
+                logger.info(
+                    "memclaw_write: idempotent duplicate hit existing=%s agent=%s",
+                    existing_id,
+                    agent_id,
+                )
+                return _with_latency(json.dumps(payload), t0)
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
             return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
 
@@ -810,6 +887,10 @@ async def memclaw_doc(
         return _with_latency(_error_response("INVALID_ARGUMENTS", f"op={op} requires 'collection'."), t0)
     tenant_id = _get_tenant()
     agent_id = _get_agent_id() or agent_id
+    # Refuse the default identity for write ops on the gateway path; read-only
+    # ops don't carry the same attribution risk.
+    if op == "write" and (refuse := _refuse_default_agent_on_gateway(agent_id)):
+        return _with_latency(refuse, t0)
 
     from core_api.repositories import document_repo
 
@@ -872,6 +953,10 @@ async def memclaw_doc(
                             "(check provider config / quota). Write aborted.",
                             t0,
                         )
+                # Mirror memclaw_write's agent registration so a doc upsert
+                # via MCP creates the Agent row on first contact and enforces
+                # cross-fleet trust gating.
+                await enforce_fleet_write(db, tenant_id, agent_id, fleet_id)
                 await check_and_increment(db, tenant_id, "write")
                 row = await document_repo.upsert_returning_xmax(
                     db,

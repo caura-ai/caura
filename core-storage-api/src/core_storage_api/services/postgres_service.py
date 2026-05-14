@@ -493,7 +493,12 @@ class PostgresService:
         tenant_id: str,
         content_hash: str,
         fleet_id: str | None = None,
+        agent_id: str | None = None,
     ) -> Memory | None:
+        # ``agent_id`` scopes the dedup match: two different agents writing
+        # identical content in the same fleet should both succeed (they are
+        # independent observations). Omitted → legacy tenant+fleet+content
+        # scope, which silently collides cross-agent.
         async with get_session() as session:
             stmt = select(Memory).where(
                 Memory.tenant_id == tenant_id,
@@ -504,6 +509,8 @@ class PostgresService:
                 stmt = stmt.where(Memory.fleet_id == fleet_id)
             else:
                 stmt = stmt.where(Memory.fleet_id.is_(None))
+            if agent_id is not None:
+                stmt = stmt.where(Memory.agent_id == agent_id)
             return (await session.execute(stmt)).scalar_one_or_none()
 
     async def memory_find_duplicate_hash(
@@ -512,6 +519,7 @@ class PostgresService:
         content_hash: str,
         fleet_id: str | None = None,
         exclude_id: UUID | None = None,
+        agent_id: str | None = None,
     ) -> UUID | None:
         async with get_session() as session:
             stmt = select(Memory.id).where(
@@ -523,6 +531,8 @@ class PostgresService:
                 stmt = stmt.where(Memory.fleet_id == fleet_id)
             else:
                 stmt = stmt.where(Memory.fleet_id.is_(None))
+            if agent_id is not None:
+                stmt = stmt.where(Memory.agent_id == agent_id)
             if exclude_id is not None:
                 stmt = stmt.where(Memory.id != exclude_id)
             return (await session.execute(stmt)).scalar_one_or_none()
@@ -588,6 +598,7 @@ class PostgresService:
         tenant_id: str,
         hashes: list[str],
         fleet_id: str | None = None,
+        agent_id: str | None = None,
     ) -> dict[str, dict]:
         """Map ``content_hash → {id, client_request_id}`` for existing rows.
 
@@ -598,6 +609,9 @@ class PostgresService:
         (``duplicate_attempt``); any other match is a different
         attempt's content (``duplicate_content``). NULL on legacy rows
         written before the column existed.
+
+        ``agent_id`` scopes the dedup lookup so cross-agent writes of
+        identical content no longer collide (Stage 5 / friction §2.8).
         """
         async with get_session() as session:
             stmt = select(Memory.content_hash, Memory.id, Memory.client_request_id).where(
@@ -609,6 +623,8 @@ class PostgresService:
                 stmt = stmt.where(Memory.fleet_id == fleet_id)
             else:
                 stmt = stmt.where(Memory.fleet_id.is_(None))
+            if agent_id is not None:
+                stmt = stmt.where(Memory.agent_id == agent_id)
             rows = (await session.execute(stmt)).all()
             return {row[0]: {"id": row[1], "client_request_id": row[2]} for row in rows}
 
