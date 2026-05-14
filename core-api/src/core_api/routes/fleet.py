@@ -248,7 +248,7 @@ KNOWN_BROKEN_DEPLOY_VERSIONS: frozenset[str] = frozenset({"2.3.0"})
 # has not yet been cut into any released plugin tag. The first tagged
 # release that includes it (expected ``2.6.0``) will be the first
 # safe-to-auto-deploy version. Until that exists, every released
-# plugin (0.98.x / 2.0–2.5) needs a one-time manual re-install before
+# plugin (0.98.x / 2.0-2.5) needs a one-time manual re-install before
 # auto-deploy can take over.
 MIN_AUTO_DEPLOY_PLUGIN_VERSION: str = "2.6.0"
 
