@@ -630,7 +630,7 @@ class _MCPNoSlashShim:
         await self._inner(new_scope, receive, send)
 
 
-from starlette.routing import Route as _StarletteRoute  # noqa: E402
+from starlette.routing import Route as _StarletteRoute
 
 app.router.routes.append(
     _StarletteRoute(
