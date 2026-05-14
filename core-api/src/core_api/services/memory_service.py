@@ -744,11 +744,14 @@ async def _create_memory_legacy(db: AsyncSession, data: MemoryCreate) -> MemoryO
             return _dict_to_memory_out(parent)
 
     # -- Persist path --
-    # Dedup: check for exact content match within tenant+fleet
+    # Dedup: check for exact content match within tenant+fleet, scoped to
+    # the writing agent. Cross-agent writes of identical content should
+    # succeed as distinct observations — friction §2.8 / Stage 5.
     dup = await sc.find_by_content_hash(
         data.tenant_id,
         ch,
         fleet_id=data.fleet_id,
+        agent_id=data.agent_id,
     )
     if dup:
         raise HTTPException(
@@ -1034,9 +1037,14 @@ async def create_memories_bulk(
 
     existing_hashes: dict[str, dict] = {}
     if hashes:
+        # Stage 5: scope bulk dedup to (tenant, fleet, agent) so a batch
+        # from agent-A and a batch from agent-B in the same fleet don't
+        # collide on identical content.
         existing_hashes = await sc.bulk_find_by_content_hashes(
             data.tenant_id,
             hashes,
+            fleet_id=data.fleet_id,
+            agent_id=data.agent_id,
         )
 
     # -- Also detect intra-batch duplicates (same content appearing twice) --

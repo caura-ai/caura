@@ -975,7 +975,16 @@ async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
     if hashes:
         try:
             sc = get_storage_client()
-            existing = await sc.bulk_find_by_content_hashes(request.tenant_id, hashes)
+            # Stage 5: scope dedup to (tenant, fleet, agent) so an ingest
+            # run by one agent doesn't silently dedup against another agent's
+            # identical content. Falls back to (tenant, fleet) when agent_id
+            # is omitted.
+            existing = await sc.bulk_find_by_content_hashes(
+                request.tenant_id,
+                hashes,
+                fleet_id=request.fleet_id,
+                agent_id=request.agent_id,
+            )
         except Exception:
             # Fail-open: if the dedup query fails, fall through to the
             # per-fact path. ``create_memory`` still 409s exact dups, so

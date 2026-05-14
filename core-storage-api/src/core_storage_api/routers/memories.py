@@ -260,8 +260,9 @@ async def find_by_content_hash(
     tenant_id: str,
     content_hash: str,
     fleet_id: str | None = None,
+    agent_id: str | None = None,
 ) -> dict:
-    memory = await _svc.memory_find_by_content_hash(tenant_id, content_hash, fleet_id)
+    memory = await _svc.memory_find_by_content_hash(tenant_id, content_hash, fleet_id, agent_id=agent_id)
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found by content hash")
     return orm_to_dict(memory, MEMORY_FIELDS)
@@ -298,12 +299,15 @@ async def bulk_find_by_content_hashes(request: Request) -> dict:
     See ``memory_bulk_find_by_content_hashes`` for why
     ``client_request_id`` is part of the response — the upstream bulk
     route uses it to distinguish ``duplicate_attempt`` from
-    ``duplicate_content`` (CAURA-602).
+    ``duplicate_content`` (CAURA-602). ``agent_id`` (optional) scopes
+    the dedup lookup per Stage 5.
     """
     body: dict = await request.json()
     result = await _svc.memory_bulk_find_by_content_hashes(
         tenant_id=body["tenant_id"],
         hashes=body["hashes"],
+        fleet_id=body.get("fleet_id"),
+        agent_id=body.get("agent_id"),
     )
     return {ch: {"id": str(v["id"]), "client_request_id": v["client_request_id"]} for ch, v in result.items()}
 

@@ -278,10 +278,16 @@ class CoreStorageClient:
         tenant_id: str,
         content_hash: str,
         fleet_id: str | None = None,
+        agent_id: str | None = None,
     ) -> dict | None:
         params: dict[str, Any] = {"tenant_id": tenant_id, "content_hash": content_hash}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
+        if agent_id is not None:
+            # Per-agent dedup scope (Stage 5 / friction §2.8): cross-agent
+            # writes of identical content no longer collide. Omit to
+            # preserve legacy fleet-wide dedup.
+            params["agent_id"] = agent_id
         # Write-path exact-hash dedup gate — stale replica data here would
         # let a just-written duplicate slip through. Pair with
         # bulk_find_by_content_hashes and find_semantic_duplicate.
@@ -319,13 +325,17 @@ class CoreStorageClient:
         self,
         tenant_id: str,
         hashes: list[str],
+        fleet_id: str | None = None,
+        agent_id: str | None = None,
     ) -> dict[str, dict]:
         """Look up existing rows by content_hash for the dedup gate.
 
         Returns ``{content_hash: {"id": str, "client_request_id": str | None}}``.
         ``client_request_id`` lets the bulk path tell ``duplicate_attempt``
         (the caller's own retry) apart from ``duplicate_content``
-        (different attempt, same content).
+        (different attempt, same content). ``agent_id`` scopes the lookup
+        per-agent (Stage 5) so a batch from agent-A and a batch from
+        agent-B in the same fleet don't collide on identical content.
 
         Explicit ``read=False``: this is the dedup lookup called inline
         during bulk writes. Routing to a read replica risks missing a
@@ -334,9 +344,14 @@ class CoreStorageClient:
         Not relying on the default so a future flip of _post's default
         can't silently re-route it.
         """
+        body: dict[str, Any] = {"tenant_id": tenant_id, "hashes": hashes}
+        if fleet_id is not None:
+            body["fleet_id"] = fleet_id
+        if agent_id is not None:
+            body["agent_id"] = agent_id
         result = await self._post(
             "/memories/bulk-by-content-hashes",
-            {"tenant_id": tenant_id, "hashes": hashes},
+            body,
             read=False,
         )
         return result  # type: ignore[return-value]
