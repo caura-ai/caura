@@ -40,6 +40,7 @@ from core_api.db.session import async_session
 from core_api.errors import code_for_status
 from core_api.repositories import memory_repo
 from core_api.schemas import BulkMemoryCreate, BulkMemoryItem, MemoryCreate, MemoryUpdate
+from core_api.services.agent_service import enforce_fleet_write
 from core_api.services.audit_service import log_action
 from core_api.services.entity_service import get_entity
 from core_api.services.memory_service import (
@@ -349,6 +350,12 @@ async def memclaw_write(
 
     async with _mcp_session() as db:
         try:
+            # Register the calling agent (auto-create row on first write) and
+            # enforce trust gating for cross-fleet writes — same surface the
+            # REST write path uses. Without this, MCP writes succeed without
+            # ever creating an Agent row, so a follow-up
+            # PATCH /agents/{id}/trust 404s.
+            await enforce_fleet_write(db, tenant_id, agent_id, fleet_id)
             if content is not None:
                 await check_and_increment(db, tenant_id, "write")
                 result = await create_memory(
@@ -872,6 +879,10 @@ async def memclaw_doc(
                             "(check provider config / quota). Write aborted.",
                             t0,
                         )
+                # Mirror memclaw_write's agent registration so a doc upsert
+                # via MCP creates the Agent row on first contact and enforces
+                # cross-fleet trust gating.
+                await enforce_fleet_write(db, tenant_id, agent_id, fleet_id)
                 await check_and_increment(db, tenant_id, "write")
                 row = await document_repo.upsert_returning_xmax(
                     db,
