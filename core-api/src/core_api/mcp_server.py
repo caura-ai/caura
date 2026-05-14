@@ -490,7 +490,8 @@ async def memclaw_write(
                 }
                 logger.info(
                     "memclaw_write: idempotent duplicate hit existing=%s agent=%s",
-                    existing_id, agent_id,
+                    existing_id,
+                    agent_id,
                 )
                 return _with_latency(json.dumps(payload), t0)
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
