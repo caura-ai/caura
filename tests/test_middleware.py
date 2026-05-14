@@ -27,12 +27,21 @@ async def test_security_headers_on_api_routes(client):
     assert "content-security-policy" in resp.headers
 
 
-async def test_security_headers_absent_on_mcp(client):
-    """MCP routes should NOT have browser security headers."""
-    resp = await client.get("/mcp")
-    # /mcp may redirect or return protocol error — either way, no security headers
-    assert "x-frame-options" not in resp.headers
-    assert "content-security-policy" not in resp.headers
+def test_security_headers_absent_on_mcp():
+    """``SecurityHeadersMiddleware`` skips MCP-path scopes by design
+    (via ``is_mcp_path``) so streaming MCP responses don't get browser
+    security headers injected. After CAURA-000-mcp-trailing-slash a
+    GET /mcp reaches the FastMCP handler in-process — which crashes
+    without the session manager (no FastAPI lifespan in TestClient),
+    so we can't exercise this via ``client.get`` anymore. Verify the
+    middleware's skip condition directly instead.
+    """
+    from core_api.constants import is_mcp_path
+
+    assert is_mcp_path("/mcp") is True
+    assert is_mcp_path("/mcp/") is True
+    assert is_mcp_path("/mcp/anything") is True
+    assert is_mcp_path("/api/v1/memories") is False
 
 
 # ResponseTimeMiddleware was removed during OSS/Enterprise split
@@ -43,12 +52,16 @@ async def test_security_headers_absent_on_mcp(client):
 
 
 async def test_mcp_auth_middleware_bearer_extraction(client):
-    """MCPAuthMiddleware should extract API key from Authorization: Bearer header."""
+    """Bearer auth works on REST routes. (The legacy "MCP mount exists"
+    half of this test was an HTTP-level GET /mcp; after the Stage 1
+    no-redirect fix it now reaches the FastMCP handler which crashes
+    without the session manager — covered structurally in
+    ``test_mcp_mount_exists`` below.)
+    """
     import uuid
     tenant_id, headers = get_test_auth()
     uid = uuid.uuid4().hex[:8]
 
-    # X-API-Key works on REST routes (baseline)
     resp1 = await client.post("/api/v1/memories", json={
         "tenant_id": tenant_id,
         "agent_id": f"bearer-test-{uid}",
@@ -57,11 +70,6 @@ async def test_mcp_auth_middleware_bearer_extraction(client):
         "content": f"baseline write [{uid}]",
     }, headers=headers)
     assert resp1.status_code == 201
-
-    # MCP mount exists and accepts requests (session manager may not be running
-    # in test fixtures, so we just verify the endpoint is mounted)
-    resp2 = await client.get("/mcp")
-    assert resp2.status_code != 404
 
 
 async def test_mcp_bearer_returns_tools(client):
@@ -74,7 +82,17 @@ async def test_mcp_bearer_returns_tools(client):
     assert resp.status_code == 200
 
 
-async def test_mcp_mount_exists(client):
-    """MCP endpoint should be mounted (not 404)."""
-    resp = await client.get("/mcp")
-    assert resp.status_code != 404, f"MCP endpoint not mounted, got {resp.status_code}"
+def test_mcp_mount_exists():
+    """MCP endpoint mount + exact-/mcp route are both registered on
+    the app router. Structural check (post Stage-1 the HTTP-level
+    GET path goes through the FastMCP handler which needs a running
+    session manager — unavailable in TestClient without lifespan).
+    """
+    from starlette.routing import Mount, Route
+
+    from core_api.app import app
+
+    mounts = [r for r in app.router.routes if isinstance(r, Mount) and r.path == "/mcp"]
+    bare_routes = [r for r in app.router.routes if isinstance(r, Route) and r.path == "/mcp"]
+    assert mounts, "MCP mount missing at /mcp"
+    assert bare_routes, "Bare-/mcp Route missing — Stage-1 redirect would recur"
