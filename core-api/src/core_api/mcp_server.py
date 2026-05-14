@@ -1686,7 +1686,9 @@ async def memclaw_keystones_set(
     content: Annotated[str | None, Field(description="op=set: the rule text.")] = None,
     scope: Annotated[str | None, Field(description="op=set: tenant|fleet|agent.")] = None,
     weight: Annotated[str | None, Field(description="op=set: low|med|high.")] = None,
-    fleet_id: Annotated[str | None, Field(description="op=set: required for scope=fleet|agent; omit for scope=tenant.")] = None,
+    fleet_id: Annotated[
+        str | None, Field(description="op=set: required for scope=fleet|agent; omit for scope=tenant.")
+    ] = None,
     agent_id: Annotated[
         str | None,
         Field(
