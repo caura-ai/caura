@@ -218,16 +218,39 @@ async def delete_fleet(
 
 # CAURA-444 — plugin auto-upgrade. Versions whose deploy machinery is
 # itself broken; we never queue auto-deploy for these because the plugin
-# would loop. Each entry comes off the list once every node in the wild
-# has been manually upgraded past it.
+# would loop or land in a partially-deployed state. Each entry comes off
+# the list once every node in the wild has been manually upgraded past it.
 #
 # 2.3.0: hardcoded srcFiles list drifted from backend (15 vs 22 files);
 #        prebuild references a monorepo path missing on flat installs,
 #        so version.ts is never refreshed and PLUGIN_VERSION reports
-#        stale. Fixed structurally in 2.4.0 (manifest fetch + version
-#        stamp). Operators must manually upgrade 2.3.0 nodes once;
-#        auto-upgrade resumes from 2.4.0.
+#        stale.
 KNOWN_BROKEN_DEPLOY_VERSIONS: frozenset[str] = frozenset({"2.3.0"})
+
+# Floor below which auto-deploy is unsafe regardless of version-specific
+# brokenness above. Pre-manifest-aware plugins fetch source via their
+# own hardcoded ``FALLBACK_SRC_FILES`` (set at release time); any file
+# the backend later adds (e.g. ``keystones.ts``, statically imported
+# by ``context-engine.ts``) is never pulled, the post-deploy build
+# completes but ``dist/`` imports a missing module, and the plugin
+# is terminal on the next OpenClaw restart — same recovery as
+# KNOWN_BROKEN_DEPLOY_VERSIONS (manual re-install via
+# ``/api/v1/install-plugin``).
+#
+# Bump this constant in lockstep with each plugin release that adds a
+# new must-fetch source file. The plugin's ``FALLBACK_SRC_FILES`` array
+# in ``plugin/src/heartbeat.ts`` is the source of truth for what an
+# old client knows to fetch; mismatch with the backend's
+# ``_plugin_files`` in ``core_api/routes/plugin.py`` is what makes the
+# upgrade partial.
+#
+# As of CAURA-444 (this commit): manifest-aware deploy is on main but
+# has not yet been cut into any released plugin tag. The first tagged
+# release that includes it (expected ``2.6.0``) will be the first
+# safe-to-auto-deploy version. Until that exists, every released
+# plugin (0.98.x / 2.0-2.5) needs a one-time manual re-install before
+# auto-deploy can take over.
+MIN_AUTO_DEPLOY_PLUGIN_VERSION: str = "2.6.0"
 
 # Cap how far into the future a node can defer its own auto-upgrade.
 # Pre-cap a misbehaving / malicious plugin could send
@@ -321,6 +344,9 @@ async def _maybe_queue_auto_upgrade(
 
     - missing or unparseable plugin_version
     - plugin_version >= MIN_RECOMMENDED_PLUGIN_VERSION (no upgrade needed)
+    - plugin_version < MIN_AUTO_DEPLOY_PLUGIN_VERSION (pre-manifest-aware;
+      old client can't fetch new files, so auto-deploy would leave it
+      partially upgraded and unable to load)
     - plugin_version is in KNOWN_BROKEN_DEPLOY_VERSIONS
     - node has signalled cooldown via ``deploy_blocked_until``
     - tenant has explicitly disabled auto-upgrade
@@ -344,6 +370,21 @@ async def _maybe_queue_auto_upgrade(
     if not body.plugin_version:
         return False
     if not _semver_lt(body.plugin_version, target_version):
+        return False
+    # Pre-manifest-aware floor — old clients fetch source from their own
+    # hardcoded list and silently miss files added in later releases,
+    # which leaves dist/ importing modules that aren't on disk. Same
+    # recovery as KNOWN_BROKEN_DEPLOY_VERSIONS: manual re-install via
+    # ``/api/v1/install-plugin``.
+    if _semver_lt(body.plugin_version, MIN_AUTO_DEPLOY_PLUGIN_VERSION):
+        logger.info(
+            "fleet.heartbeat: skipping auto-upgrade for node=%s on "
+            "pre-manifest-aware version %s (manual re-install required; "
+            "floor=%s)",
+            body.node_name,
+            body.plugin_version,
+            MIN_AUTO_DEPLOY_PLUGIN_VERSION,
+        )
         return False
     if body.plugin_version in KNOWN_BROKEN_DEPLOY_VERSIONS:
         logger.info(
