@@ -8,6 +8,7 @@ import uuid
 
 import pytest
 
+from tests._mcp_test_helpers import as_text
 from tests.conftest import uid as _uid
 
 
@@ -977,7 +978,7 @@ class TestMCPHandlerTrustGating:
             outcome_type="failure",
             scope="all",
         )
-        assert "FORBIDDEN" in out
+        assert "FORBIDDEN" in as_text(out)
         assert service_spy.await_count == 0
 
 
@@ -993,8 +994,9 @@ class TestMCPHandlerScopeValidation:
             outcome_type="success",
             scope="bogus",
         )
-        assert "INVALID_ARGUMENTS" in out
-        assert "scope" in out.lower()
+        text = as_text(out)
+        assert "INVALID_ARGUMENTS" in text
+        assert "scope" in text.lower()
 
     @pytest.mark.asyncio
     async def test_scope_fleet_without_fleet_id_rejected(self, mcp_env):
@@ -1006,8 +1008,9 @@ class TestMCPHandlerScopeValidation:
             scope="fleet",
             fleet_id=None,
         )
-        assert "INVALID_ARGUMENTS" in out
-        assert "fleet_id" in out.lower()
+        text = as_text(out)
+        assert "INVALID_ARGUMENTS" in text
+        assert "fleet_id" in text.lower()
 
 
 # ---------------------------------------------------------------------------
