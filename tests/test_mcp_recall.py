@@ -11,13 +11,11 @@ Covers:
 """
 from __future__ import annotations
 
-import json
-
 import pytest
 from fastapi import HTTPException
 
 from core_api import mcp_server
-from tests._mcp_test_helpers import parse_envelope
+from tests._mcp_test_helpers import as_text, parse_envelope
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -86,14 +84,14 @@ async def test_recall_empty_results(mcp_env, monkeypatch):
 
 async def test_recall_invalid_memory_type_returns_422(mcp_env):
     out = await mcp_server.memclaw_recall(query="x", memory_type="garbage")
-    assert "INVALID_ARGUMENTS" in out
-    assert "Invalid memory_type 'garbage'" in out
+    assert "INVALID_ARGUMENTS" in as_text(out)
+    assert "Invalid memory_type 'garbage'" in as_text(out)
 
 
 async def test_recall_invalid_status_returns_422(mcp_env):
     out = await mcp_server.memclaw_recall(query="x", status="badstatus")
-    assert "INVALID_ARGUMENTS" in out
-    assert "Invalid status 'badstatus'" in out
+    assert "INVALID_ARGUMENTS" in as_text(out)
+    assert "Invalid status 'badstatus'" in as_text(out)
 
 
 async def test_recall_top_k_is_capped(mcp_env, monkeypatch):
@@ -123,8 +121,8 @@ async def test_recall_http_exception_becomes_error_envelope(mcp_env, monkeypatch
     monkeypatch.setattr("core_api.repositories.agent_repo.get_by_id", _async_none)
 
     out = await mcp_server.memclaw_recall(query="x")
-    assert "RATE_LIMITED" in out
-    assert "rate limited" in out
+    assert "RATE_LIMITED" in as_text(out)
+    assert "rate limited" in as_text(out)
 
 
 async def test_recall_auth_failure_shortcircuits(monkeypatch):

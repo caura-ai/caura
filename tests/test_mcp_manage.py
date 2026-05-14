@@ -17,7 +17,7 @@ import pytest
 from fastapi import HTTPException
 
 from core_api import mcp_server
-from tests._mcp_test_helpers import parse_envelope, strip_latency
+from tests._mcp_test_helpers import as_text, parse_envelope, strip_latency
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -64,7 +64,7 @@ async def test_manage_invalid_op_errors(mcp_env):
 
 async def test_manage_invalid_uuid_errors(mcp_env):
     out = await mcp_server.memclaw_manage(op="read", memory_id="not-a-uuid")
-    assert "Invalid memory_id" in out
+    assert "Invalid memory_id" in as_text(out)
 
 
 async def test_manage_read_not_found(mcp_env, monkeypatch):
@@ -91,16 +91,16 @@ async def test_manage_read_happy_path(mcp_env, monkeypatch):
 
 async def test_manage_transition_missing_status_errors(mcp_env):
     out = await mcp_server.memclaw_manage(op="transition", memory_id=VALID_UID)
-    assert "INVALID_ARGUMENTS" in out
-    assert "op=transition requires 'status'" in out
+    assert "INVALID_ARGUMENTS" in as_text(out)
+    assert "op=transition requires 'status'" in as_text(out)
 
 
 async def test_manage_transition_invalid_status_errors(mcp_env):
     out = await mcp_server.memclaw_manage(
         op="transition", memory_id=VALID_UID, status="garbage"
     )
-    assert "INVALID_ARGUMENTS" in out
-    assert "Invalid status 'garbage'" in out
+    assert "INVALID_ARGUMENTS" in as_text(out)
+    assert "Invalid status 'garbage'" in as_text(out)
 
 
 async def test_manage_transition_not_found(mcp_env, monkeypatch):
@@ -165,8 +165,8 @@ async def test_manage_service_http_exception_envelope(mcp_env):
         status_code=403, detail="insufficient trust"
     )
     out = await mcp_server.memclaw_manage(op="delete", memory_id=VALID_UID)
-    assert "FORBIDDEN" in out
-    assert "insufficient trust" in out
+    assert "FORBIDDEN" in as_text(out)
+    assert "insufficient trust" in as_text(out)
 
 
 async def test_manage_auth_failure_shortcircuits(monkeypatch):

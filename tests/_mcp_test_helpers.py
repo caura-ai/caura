@@ -9,6 +9,7 @@ The handlers in ``core_api.mcp_server`` depend on:
 These helpers patch those out so tests can exercise validation, op
 dispatch, error-envelope construction, and trust gating without a DB.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -23,21 +24,72 @@ import pytest
 _LATENCY_SUFFIX_RE = re.compile(r"\n\n_latency_ms:\s*\d+\s*$")
 
 
-def strip_latency(result: str) -> str:
-    """Drop the ``_latency_ms`` trailer from a non-JSON handler response."""
-    return _LATENCY_SUFFIX_RE.sub("", result)
+def strip_latency(result: Any) -> str:
+    """Drop the ``_latency_ms`` trailer from a non-JSON handler response.
+
+    Accepts both ``str`` (success-path) and ``CallToolResult`` (post-B2
+    error-path) — for the latter the JSON envelope's ``_latency_ms``
+    key would be the relevant marker, but tests using this helper
+    today care about the text-trailer form, so we flatten via
+    ``as_text`` and strip the trailer.
+    """
+    return _LATENCY_SUFFIX_RE.sub("", as_text(result))
 
 
-def parse_envelope(result: str) -> dict[str, Any]:
+def parse_envelope(result: Any) -> dict[str, Any]:
     """Parse a JSON response (error envelope or payload) from a handler.
 
-    Handlers that wrap JSON get a top-level ``_latency_ms`` key merged in;
-    we strip it so tests can assert on the semantic payload.
+    Accepts:
+      - ``str`` — the success-path return shape (and the legacy shape
+        for error returns before CAURA-000 FRICTION-REPORT-V3 B2 wired
+        errors through CallToolResult).
+      - ``CallToolResult`` — the post-B2 error shape. ``isError=True``
+        is implied for any caller that reaches a parsed envelope this
+        way; the JSON content lives in ``content[0].text``.
+
+    Handlers that wrap JSON get a top-level ``_latency_ms`` key merged
+    in; we strip it so tests can assert on the semantic payload.
     """
-    data = json.loads(result)
+    from mcp.types import CallToolResult, TextContent
+
+    if isinstance(result, CallToolResult):
+        text = (
+            result.content[0].text if isinstance(result.content[0], TextContent) else ""
+        )
+        data = json.loads(text)
+    else:
+        data = json.loads(result)
     if isinstance(data, dict):
         data.pop("_latency_ms", None)
     return data
+
+
+def as_text(result: Any) -> str:
+    """Return the textual content of a handler result regardless of
+    shape — used for tests that ``assert "X" in out``. Pre-B2 (FRICTION-
+    REPORT-V3) handlers returned strings for both success and error;
+    post-B2 the error path returns a ``CallToolResult``. This helper
+    bridges the two so the substring-check idiom keeps working.
+    """
+    from mcp.types import CallToolResult, TextContent
+
+    if isinstance(result, CallToolResult):
+        first = result.content[0] if result.content else None
+        return first.text if isinstance(first, TextContent) else ""
+    return result if isinstance(result, str) else str(result)
+
+
+def is_error_envelope(result: Any) -> bool:
+    """Return True iff ``result`` carries ``isError=True``.
+
+    Mirrors the post-B2 contract: any tool returning a structured
+    ``{"error": {...}}`` envelope reaches the MCP client as a
+    ``CallToolResult`` with ``isError=True``. Use in tests that need
+    to confirm the boolean flip, not just the JSON content.
+    """
+    from mcp.types import CallToolResult
+
+    return isinstance(result, CallToolResult) and result.isError is True
 
 
 @pytest.fixture
@@ -90,7 +142,12 @@ def mcp_env(monkeypatch):
     # caller's identity. Tests that want to assert the call replace this via
     # ``service("enforce_fleet_write")``.
     async def _stub_enforce_fleet_write(db, tenant_id, agent_id, fleet_id):
-        return {"agent_id": agent_id, "tenant_id": tenant_id, "fleet_id": fleet_id, "trust_level": 3}
+        return {
+            "agent_id": agent_id,
+            "tenant_id": tenant_id,
+            "fleet_id": fleet_id,
+            "trust_level": 3,
+        }
 
     monkeypatch.setattr(mcp_server, "enforce_fleet_write", _stub_enforce_fleet_write)
 

@@ -16,7 +16,7 @@ import pytest
 from fastapi import HTTPException
 
 from core_api import mcp_server
-from tests._mcp_test_helpers import parse_envelope
+from tests._mcp_test_helpers import as_text, parse_envelope
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -129,8 +129,8 @@ async def test_write_service_http_exception_becomes_envelope(mcp_env):
         status_code=409, detail="some other conflict"
     )
     out = await mcp_server.memclaw_write(content="dup")
-    assert "CONFLICT" in out
-    assert "some other conflict" in out
+    assert "CONFLICT" in as_text(out)
+    assert "some other conflict" in as_text(out)
 
 
 async def test_write_exact_duplicate_returns_idempotent_envelope(mcp_env):
@@ -156,8 +156,8 @@ async def test_write_near_duplicate_still_errors(mcp_env):
         detail="Near-duplicate memory exists: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     )
     out = await mcp_server.memclaw_write(content="paraphrase")
-    assert "CONFLICT" in out
-    assert "Near-duplicate" in out
+    assert "CONFLICT" in as_text(out)
+    assert "Near-duplicate" in as_text(out)
 
 
 async def test_write_auth_failure_shortcircuits(monkeypatch):

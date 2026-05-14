@@ -20,6 +20,7 @@ import httpx
 from fastapi import HTTPException
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import CallToolResult, TextContent
 from pydantic import Field, ValidationError
 from sqlalchemy import text as sa_text
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -83,8 +84,13 @@ def _error_response(code: str, message: str, **details) -> str:
     Shape matches the REST surface (see ``core_api.errors.make_error_payload``):
     ``{"error": {"code": "...", "message": "...", "details": {...}}}``.
 
-    Wrap with ``_with_latency(...)`` when an in-tool latency stamp is desired —
-    ``_with_latency`` parses the JSON, appends ``_latency_ms``, and re-serializes.
+    The string is wrapped into a ``CallToolResult(isError=True)`` before
+    leaving the tool — either by ``_with_latency`` (which detects the
+    error shape) or by ``_as_error_result`` for pre-tool returns that
+    skip the latency stamp. Tool callsites keep returning plain strings;
+    the wrap happens at one of those two chokepoints (CAURA-000,
+    FRICTION-REPORT-V3 B2 — clients literal-reading the MCP spec were
+    seeing ``isError=False`` on every gateway-side refusal).
     """
     from core_api.errors import make_error_payload
 
@@ -92,13 +98,34 @@ def _error_response(code: str, message: str, **details) -> str:
     return json.dumps(payload, default=str)
 
 
+def _as_error_result(envelope: str) -> CallToolResult:
+    """Wrap a ``_error_response`` JSON envelope into a CallToolResult
+    with ``isError=True``. The envelope JSON is preserved verbatim in
+    a single TextContent so callers reading ``result.content[0].text``
+    still get the structured payload. Used for the pre-tool / auth
+    return paths that don't run through ``_with_latency``.
+    """
+    return CallToolResult(
+        content=[TextContent(type="text", text=envelope)],
+        isError=True,
+    )
+
+
 # Pre-tool auth errors (returned directly, NOT through _with_latency, because
-# they fire before any tool work has begun).
-_AUTH_ERROR = _error_response(
-    "UNAUTHORIZED", "Missing or invalid X-API-Key header. Provide a tenant-scoped API key."
+# they fire before any tool work has begun, so we wrap them as
+# CallToolResults at module load — every tool that returns one
+# propagates ``isError=True`` to the MCP client.
+_AUTH_ERROR = _as_error_result(
+    _error_response(
+        "UNAUTHORIZED",
+        "Missing or invalid X-API-Key header. Provide a tenant-scoped API key.",
+    )
 )
-_ADMIN_ERROR = _error_response(
-    "FORBIDDEN", "Admin/system keys cannot be used with MCP. Use a tenant-scoped API key."
+_ADMIN_ERROR = _as_error_result(
+    _error_response(
+        "FORBIDDEN",
+        "Admin/system keys cannot be used with MCP. Use a tenant-scoped API key.",
+    )
 )
 
 
@@ -204,8 +231,12 @@ def _extract_duplicate_id(detail: str) -> str | None:
     return m.group("id") if m else None
 
 
-def _check_auth() -> str | None:
-    """Return an error string if auth fails, None if OK."""
+def _check_auth() -> CallToolResult | None:
+    """Return a pre-baked error ``CallToolResult`` if auth fails,
+    ``None`` if OK. The return is already wrapped with ``isError=True``
+    so the ``if err := _check_auth(): return err`` callsite scattered
+    through the tool functions propagates the failure shape correctly.
+    """
     tid = _get_tenant()
     if tid == _UNAUTH:
         return _AUTH_ERROR
@@ -259,14 +290,32 @@ def _serialize(obj) -> str:
     return json.dumps(obj.model_dump(mode="json"), indent=2, default=str)
 
 
-def _with_latency(result: str, t0: float) -> str:
-    """Append _latency_ms to response text."""
+def _with_latency(result: str, t0: float) -> str | CallToolResult:
+    """Stamp the response with ``_latency_ms`` — and promote error
+    envelopes to ``CallToolResult(isError=True)``.
+
+    Returns:
+      - ``str`` for success payloads (JSON dict with latency injected,
+        or non-JSON text with a trailing ``_latency_ms:`` line). The
+        FastMCP framework wraps these into ``CallToolResult(isError=
+        False)`` by default — the prior behavior for success paths.
+      - ``CallToolResult(isError=True)`` for ``{"error": {...}}``
+        envelopes produced by ``_error_response``. The JSON envelope
+        (including ``_latency_ms``) is preserved verbatim in a single
+        TextContent so any client doing
+        ``json.loads(result.content[0].text)`` keeps seeing the same
+        shape — only ``result.isError`` flips. CAURA-000
+        (FRICTION-REPORT-V3 B2).
+    """
     ms = round((time.perf_counter() - t0) * 1000)
     try:
         data = json.loads(result)
         if isinstance(data, dict):
             data["_latency_ms"] = ms
-            return json.dumps(data, default=str)
+            payload = json.dumps(data, default=str)
+            if isinstance(data.get("error"), dict):
+                return _as_error_result(payload)
+            return payload
     except (json.JSONDecodeError, ValueError):
         pass
     return result + f"\n\n_latency_ms: {ms}"
@@ -290,18 +339,24 @@ async def memclaw_recall(
     if err := _check_auth():
         return err
     if memory_type and memory_type not in MEMORY_TYPES:
-        return _error_response(
-            "INVALID_ARGUMENTS",
-            f"Invalid memory_type '{memory_type}'. Must be one of: {', '.join(MEMORY_TYPES)}",
-            field="memory_type",
-            value=memory_type,
+        return _with_latency(
+            _error_response(
+                "INVALID_ARGUMENTS",
+                f"Invalid memory_type '{memory_type}'. Must be one of: {', '.join(MEMORY_TYPES)}",
+                field="memory_type",
+                value=memory_type,
+            ),
+            t0,
         )
     if status and status not in MEMORY_STATUSES:
-        return _error_response(
-            "INVALID_ARGUMENTS",
-            f"Invalid status '{status}'. Must be one of: {', '.join(MEMORY_STATUSES)}",
-            field="status",
-            value=status,
+        return _with_latency(
+            _error_response(
+                "INVALID_ARGUMENTS",
+                f"Invalid status '{status}'. Must be one of: {', '.join(MEMORY_STATUSES)}",
+                field="status",
+                value=status,
+            ),
+            t0,
         )
     tenant_id = _get_tenant()
     agent_id = _get_agent_id() or agent_id  # prefer gateway-verified identity
@@ -545,7 +600,10 @@ async def memclaw_manage(
         try:
             uid = UUID(memory_id)
         except ValueError:
-            return _error_response("INVALID_ARGUMENTS", "Invalid memory_id — must be a valid UUID.")
+            return _with_latency(
+                _error_response("INVALID_ARGUMENTS", "Invalid memory_id — must be a valid UUID."),
+                t0,
+            )
     tenant_id = _get_tenant()
     agent_id = _get_agent_id() or agent_id
 
@@ -758,7 +816,10 @@ async def memclaw_entity_get(
     try:
         uid = UUID(entity_id)
     except ValueError:
-        return _error_response("INVALID_ARGUMENTS", "Invalid entity_id — must be a valid UUID.")
+        return _with_latency(
+            _error_response("INVALID_ARGUMENTS", "Invalid entity_id — must be a valid UUID."),
+            t0,
+        )
 
     async with _mcp_session() as db:
         result = await get_entity(db, uid, _get_tenant())
@@ -1141,25 +1202,46 @@ async def memclaw_list(
     if err := _check_auth():
         return err
     if scope not in VALID_SCOPES:
-        return _error_response("INVALID_ARGUMENTS", f"Invalid scope '{scope}'. Must be: agent, fleet, all.")
+        return _with_latency(
+            _error_response("INVALID_ARGUMENTS", f"Invalid scope '{scope}'. Must be: agent, fleet, all."),
+            t0,
+        )
     if memory_type and memory_type not in MEMORY_TYPES:
-        return _error_response(
-            "INVALID_ARGUMENTS",
-            f"Invalid memory_type '{memory_type}'. Must be one of: {', '.join(MEMORY_TYPES)}",
+        return _with_latency(
+            _error_response(
+                "INVALID_ARGUMENTS",
+                f"Invalid memory_type '{memory_type}'. Must be one of: {', '.join(MEMORY_TYPES)}",
+            ),
+            t0,
         )
     if status and status not in MEMORY_STATUSES:
-        return _error_response(
-            "INVALID_ARGUMENTS", f"Invalid status '{status}'. Must be one of: {', '.join(MEMORY_STATUSES)}"
+        return _with_latency(
+            _error_response(
+                "INVALID_ARGUMENTS",
+                f"Invalid status '{status}'. Must be one of: {', '.join(MEMORY_STATUSES)}",
+            ),
+            t0,
         )
     if sort not in {"created_at", "weight", "recall_count"}:
-        return _error_response(
-            "INVALID_ARGUMENTS", f"Invalid sort '{sort}'. Must be one of: created_at, weight, recall_count."
+        return _with_latency(
+            _error_response(
+                "INVALID_ARGUMENTS",
+                f"Invalid sort '{sort}'. Must be one of: created_at, weight, recall_count.",
+            ),
+            t0,
         )
     if order not in {"asc", "desc"}:
-        return _error_response("INVALID_ARGUMENTS", "order must be 'asc' or 'desc'.")
+        return _with_latency(
+            _error_response("INVALID_ARGUMENTS", "order must be 'asc' or 'desc'."),
+            t0,
+        )
     if cursor and (sort != "created_at" or order != "desc"):
-        return _error_response(
-            "INVALID_ARGUMENTS", "cursor pagination requires sort=created_at and order=desc."
+        return _with_latency(
+            _error_response(
+                "INVALID_ARGUMENTS",
+                "cursor pagination requires sort=created_at and order=desc.",
+            ),
+            t0,
         )
     capped_limit = max(1, min(int(limit), 50))
 
@@ -1172,9 +1254,12 @@ async def memclaw_list(
     agent_id = _get_agent_id() or agent_id
 
     if scope == "agent" and written_by is not None and written_by != agent_id:
-        return _error_response(
-            "INVALID_ARGUMENTS",
-            f"written_by must be omitted or match your own agent_id ('{agent_id}') when scope='agent'.",
+        return _with_latency(
+            _error_response(
+                "INVALID_ARGUMENTS",
+                f"written_by must be omitted or match your own agent_id ('{agent_id}') when scope='agent'.",
+            ),
+            t0,
         )
 
     # Dynamic trust: scope='agent' requires trust ≥ 1, 'fleet'/'all' requires ≥ 2.
