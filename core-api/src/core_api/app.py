@@ -602,7 +602,43 @@ if _os.getenv("TESTING") == "1":
 
     app.include_router(testing_router, prefix="/api/v1")
 
-app.mount("/mcp", get_mcp_app())
+# Mount at /mcp; FastMCP's internal Route("/") handles the canonical /mcp/.
+# Bare /mcp (no trailing slash) doesn't match Mount's regex, so the parent
+# router would issue a 307 — streaming MCP clients (e.g. Anthropic's
+# remote-MCP integration) hang on the initialize handshake when a redirect
+# precedes the upgrade. The shim below forwards /mcp into the same ASGI
+# app in-process so both paths serve identically without a wire redirect.
+_mcp_asgi_app = get_mcp_app()
+app.mount("/mcp", _mcp_asgi_app)
+
+
+class _MCPNoSlashShim:
+    """Forward /mcp into the mounted MCP app in-process (no HTTP redirect)."""
+
+    # slowapi.middleware introspects ``handler.__name__`` per request — without
+    # this attribute on the instance, every /mcp call 500s with AttributeError.
+    __name__ = "_mcp_no_slash_shim"
+
+    def __init__(self, inner: ASGIApplication) -> None:
+        self._inner = inner
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        new_scope = dict(scope)
+        new_scope["path"] = "/"
+        new_scope["raw_path"] = b"/"
+        new_scope["root_path"] = scope.get("root_path", "") + "/mcp"
+        await self._inner(new_scope, receive, send)
+
+
+from starlette.routing import Route as _StarletteRoute
+
+app.router.routes.append(
+    _StarletteRoute(
+        "/mcp",
+        endpoint=_MCPNoSlashShim(_mcp_asgi_app),
+        methods=["GET", "POST", "DELETE", "OPTIONS"],
+    )
+)
 
 
 # CAURA-602: turn a silent regression into a startup crash. The
