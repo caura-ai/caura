@@ -93,6 +93,7 @@ class MemoryRepository:
         written_by: str | None = None,
         memory_type: str | None = None,
         status: str | None = None,
+        run_id: str | None = None,
         weight_min: float | None = None,
         weight_max: float | None = None,
         created_after: datetime | None = None,
@@ -145,6 +146,11 @@ class MemoryRepository:
             stmt = stmt.where(Memory.memory_type == memory_type)
         if status:
             stmt = stmt.where(Memory.status == status)
+        if run_id is not None:
+            # Indexed by ``ix_memories_run_id (tenant_id, run_id)`` — drives
+            # the "show me memories from this ingest batch" filter used by
+            # the dashboard Past Uploads tab.
+            stmt = stmt.where(Memory.run_id == run_id)
         if weight_min is not None:
             stmt = stmt.where(Memory.weight >= weight_min)
         if weight_max is not None:

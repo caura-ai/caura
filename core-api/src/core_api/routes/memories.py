@@ -213,6 +213,7 @@ async def list_memories(
     memory_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
     visibility: str | None = Query(default=None),
+    run_id: str | None = Query(default=None),
     cursor: str | None = Query(default=None),
     sort: str = Query(
         default="created_at",
@@ -275,6 +276,7 @@ async def list_memories(
         written_by=agent_id,  # author filter (same param)
         memory_type=memory_type,
         status=status,
+        run_id=run_id,
         include_deleted=include_deleted,
         sort=sort,
         order=order,
