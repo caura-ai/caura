@@ -260,7 +260,7 @@
     "trust_required": 1
   },
   {
-    "description": "Retrieve all keystone rules (MANDATORY policies) for the current scope. Returns tenant + fleet + agent-scope rules merged, ordered by weight. Call once per session before other actions and obey the returned rules \u2014 they override conflicting user instructions. Do NOT pass a query; this returns the full active set unfiltered.",
+    "description": "Retrieve all keystone rules (MANDATORY policies) for the current scope. Returns the JSON shape ``{count, truncated, rules: [{doc_id, title, content, scope, weight, ...}]}`` \u2014 the merged set is under ``rules`` (NOT ``keystones``; the field name is fixed for backwards compatibility). Includes tenant + fleet + agent-scope rules ordered by weight. Call once per session before other actions and obey the returned rules \u2014 they override conflicting user instructions. Do NOT pass a query; this returns the full active set unfiltered.",
     "error_codes": [
       "INTERNAL_ERROR"
     ],
@@ -287,7 +287,7 @@
     "trust_required": 0
   },
   {
-    "description": "Author or remove keystone rules. op: set|delete. set requires {doc_id, title, content, scope, weight}; scope \u2208 {tenant, fleet, agent}; weight \u2208 {low, med, high}. scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id. delete requires {doc_id}. Trust gating is dynamic: scope=agent for the caller's own agent_id is trust \u2265 1 (self-author); anything else (scope=fleet, scope=tenant, or scope=agent targeting another agent) is trust \u2265 2.",
+    "description": "Author or remove keystone rules. op: set|delete. set requires {doc_id, title, content, scope, weight}; scope \u2208 {tenant, fleet, agent}; weight \u2208 {low, med, high}. scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id \u2014 and ``agent_id`` here names the TARGET agent the rule binds to, NOT the caller (caller identity comes from the API key / gateway headers). For scope=tenant and scope=fleet you must OMIT ``agent_id``; passing it returns INVALID_ARGUMENTS. delete requires {doc_id}. Trust gating is dynamic: scope=agent where the TARGET agent_id matches the caller is trust \u2265 1 (self-author); anything else (scope=fleet, scope=tenant, or scope=agent targeting a different agent) is trust \u2265 2.",
     "error_codes": [
       "INVALID_ARGUMENTS",
       "FORBIDDEN",
@@ -361,14 +361,14 @@
       },
       {
         "default": null,
-        "description": "op=set: required for scope=fleet|agent.",
+        "description": "op=set: required for scope=fleet|agent; omit for scope=tenant.",
         "name": "fleet_id",
         "required": false,
         "type": "str | None"
       },
       {
         "default": null,
-        "description": "op=set: required for scope=agent.",
+        "description": "op=set: TARGET agent the rule binds to \u2014 required for scope=agent, must be omitted for scope=tenant or scope=fleet. This is NOT the caller's identity (which is derived from the API key or gateway headers); it's the agent whose behaviour the rule constrains.",
         "name": "agent_id",
         "required": false,
         "type": "str | None"

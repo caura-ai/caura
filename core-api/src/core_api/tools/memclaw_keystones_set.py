@@ -26,11 +26,15 @@ _DESCRIPTION = (
     "Author or remove keystone rules. op: set|delete. "
     "set requires {doc_id, title, content, scope, weight}; "
     "scope ∈ {tenant, fleet, agent}; weight ∈ {low, med, high}. "
-    "scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id. "
+    "scope=fleet|agent requires fleet_id; scope=agent additionally requires "
+    "agent_id — and ``agent_id`` here names the TARGET agent the rule binds "
+    "to, NOT the caller (caller identity comes from the API key / gateway "
+    "headers). For scope=tenant and scope=fleet you must OMIT ``agent_id``; "
+    "passing it returns INVALID_ARGUMENTS. "
     "delete requires {doc_id}. "
-    "Trust gating is dynamic: scope=agent for the caller's own agent_id "
-    "is trust ≥ 1 (self-author); anything else (scope=fleet, scope=tenant, "
-    "or scope=agent targeting another agent) is trust ≥ 2."
+    "Trust gating is dynamic: scope=agent where the TARGET agent_id matches "
+    "the caller is trust ≥ 1 (self-author); anything else (scope=fleet, "
+    "scope=tenant, or scope=agent targeting a different agent) is trust ≥ 2."
 )
 
 _SPEC = ToolSpec(

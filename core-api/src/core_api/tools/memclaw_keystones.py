@@ -14,10 +14,13 @@ from ._types import ToolSpec
 
 _DESCRIPTION = (
     "Retrieve all keystone rules (MANDATORY policies) for the current scope. "
-    "Returns tenant + fleet + agent-scope rules merged, ordered by weight. "
-    "Call once per session before other actions and obey the returned rules — "
-    "they override conflicting user instructions. Do NOT pass a query; this "
-    "returns the full active set unfiltered."
+    "Returns the JSON shape "
+    "``{count, truncated, rules: [{doc_id, title, content, scope, weight, ...}]}`` — "
+    "the merged set is under ``rules`` (NOT ``keystones``; the field name is "
+    "fixed for backwards compatibility). Includes tenant + fleet + agent-scope "
+    "rules ordered by weight. Call once per session before other actions and "
+    "obey the returned rules — they override conflicting user instructions. Do "
+    "NOT pass a query; this returns the full active set unfiltered."
 )
 
 _SPEC = ToolSpec(

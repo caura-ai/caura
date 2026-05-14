@@ -1631,7 +1631,12 @@ async def memclaw_keystones(
 ) -> str:
     """Retrieve the scope-merged set of keystone rules for the caller.
 
-    Returns tenant + fleet + agent-scope rules ordered by weight.
+    Returns ``{"count": N, "truncated": bool, "rules": [...]}`` — the
+    merged rule set lives under ``rules``. The field name is ``rules``
+    (not ``keystones``) for backwards compatibility with existing
+    clients; if you build a new integration, key off ``rules``.
+
+    Includes tenant + fleet + agent-scope rules ordered by weight.
     Agents should call this once per session, surface the result as
     mandatory rules, and obey them. Do not pass a query — there is no
     semantic search here; the whole point of keystones is deterministic
@@ -1681,19 +1686,37 @@ async def memclaw_keystones_set(
     content: Annotated[str | None, Field(description="op=set: the rule text.")] = None,
     scope: Annotated[str | None, Field(description="op=set: tenant|fleet|agent.")] = None,
     weight: Annotated[str | None, Field(description="op=set: low|med|high.")] = None,
-    fleet_id: Annotated[str | None, Field(description="op=set: required for scope=fleet|agent.")] = None,
-    agent_id: Annotated[str | None, Field(description="op=set: required for scope=agent.")] = None,
+    fleet_id: Annotated[str | None, Field(description="op=set: required for scope=fleet|agent; omit for scope=tenant.")] = None,
+    agent_id: Annotated[
+        str | None,
+        Field(
+            description=(
+                "op=set: TARGET agent the rule binds to — required for "
+                "scope=agent, must be omitted for scope=tenant or scope=fleet. "
+                "This is NOT the caller's identity (which is derived from the "
+                "API key or gateway headers); it's the agent whose behaviour "
+                "the rule constrains."
+            ),
+        ),
+    ] = None,
     author_user_id: Annotated[
         str | None, Field(description="op=set: optional author identity for audit.")
     ] = None,
 ) -> str:
     """Author or remove a keystone rule.
 
-    Trust gating is dynamic: ``scope=agent`` for the caller's own
-    ``agent_id`` is the self-author tier (trust ≥ 1); everything else
-    (``scope=fleet``, ``scope=tenant``, or cross-agent ``scope=agent``)
-    stays at the cross-agent governance bar (trust ≥ 2). Mirror of the
-    REST policy in ``routes/keystones.py``.
+    ``agent_id`` is the TARGET agent the rule binds to — not the
+    caller's identity. Caller identity comes from the API key or the
+    gateway-injected ``X-Agent-ID``. Pass ``agent_id`` only for
+    ``scope=agent``; passing it for ``scope=tenant`` or ``scope=fleet``
+    returns ``INVALID_ARGUMENTS``.
+
+    Trust gating is dynamic: ``scope=agent`` where the target
+    ``agent_id`` matches the caller is the self-author tier (trust ≥
+    1); everything else (``scope=fleet``, ``scope=tenant``, or
+    ``scope=agent`` targeting a different agent) stays at the
+    cross-agent governance bar (trust ≥ 2). Mirror of the REST policy
+    in ``routes/keystones.py``.
 
     Use this rarely and deliberately — keystones override conflicting
     user instructions and apply to every future session in scope.

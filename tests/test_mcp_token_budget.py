@@ -22,10 +22,16 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 # Measured count after adding memclaw_keystones / memclaw_keystones_set
 # (12 tools, CAURA-000): 4906 cl100k. Was 4796 with the 12 tools before
-# Phase B's skills migration trimmed it to 10. Ceiling kept at 5000 —
-# gives modest headroom; raise deliberately when a feature genuinely
-# needs it (every agent call pays the tool-surface token bill).
-CEILING_TOKENS = 5000
+# Phase B's skills migration trimmed it to 10.
+#
+# 2026-05-14 (FRICTION-REPORT-V3 D5/D6): 5061 cl100k after expanding the
+# keystones descriptions to (a) clarify ``agent_id`` is the TARGET agent
+# for ``scope=agent`` and must NOT be passed for tenant/fleet scope, and
+# (b) call out the ``rules`` (not ``keystones``) response-key shape. The
+# external dev who wrote the v3 friction report lost ~10 minutes total
+# to those two misreads; the +155 tokens per session are worth more than
+# that across the install base.
+CEILING_TOKENS = 5200
 
 
 def _count(path: Path) -> int:
