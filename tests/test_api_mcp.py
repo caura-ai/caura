@@ -15,10 +15,32 @@ pytestmark = pytest.mark.asyncio
 # ── 1. MCP mount exists ──
 
 
-async def test_mcp_endpoint_exists(client):
-    """GET /mcp should not 404 — may return 405 or a protocol-specific response."""
-    resp = await client.get("/mcp")
-    assert resp.status_code != 404, f"MCP endpoint not mounted, got {resp.status_code}"
+async def test_mcp_mount_registered():
+    # Mount at /mcp handles canonical /mcp/* via FastMCP's internal Route("/").
+    from starlette.routing import Mount
+
+    from core_api.app import app
+
+    mounts = [r for r in app.router.routes if isinstance(r, Mount) and r.path == "/mcp"]
+    assert mounts, "MCP mount missing at /mcp"
+
+
+async def test_mcp_no_trailing_slash_route_registered():
+    # Streaming MCP clients hang on the initialize handshake if /mcp issues
+    # a 307/308 to /mcp/. The fix registers an exact /mcp Route that forwards
+    # into the mounted MCP ASGI app in-process so the redirect never fires.
+    from starlette.routing import Route
+
+    from core_api.app import app
+
+    bare_route = next(
+        (r for r in app.router.routes if isinstance(r, Route) and r.path == "/mcp"),
+        None,
+    )
+    assert bare_route is not None, "Bare /mcp Route missing — redirect would recur"
+    assert set(bare_route.methods or ()) >= {"GET", "POST", "DELETE"}, (
+        f"/mcp route is missing required methods: {bare_route.methods!r}"
+    )
 
 
 # ── 2. Write via API is searchable ──
