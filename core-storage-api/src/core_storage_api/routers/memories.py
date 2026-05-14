@@ -262,9 +262,7 @@ async def find_by_content_hash(
     fleet_id: str | None = None,
     agent_id: str | None = None,
 ) -> dict:
-    memory = await _svc.memory_find_by_content_hash(
-        tenant_id, content_hash, fleet_id, agent_id=agent_id
-    )
+    memory = await _svc.memory_find_by_content_hash(tenant_id, content_hash, fleet_id, agent_id=agent_id)
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found by content hash")
     return orm_to_dict(memory, MEMORY_FIELDS)
