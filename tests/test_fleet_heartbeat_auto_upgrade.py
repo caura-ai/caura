@@ -240,6 +240,9 @@ async def test_maybe_queue_auto_upgrade_ignores_absurd_block_cap(monkeypatch):
     the upgrade.
     """
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
+    # Disable the pre-manifest-aware floor for this test — we're
+    # exercising the absurd-block-cap branch, not the new gate.
+    monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "0.0.0")
 
     async def _enabled(_db, _tid):
         return True
@@ -286,6 +289,74 @@ async def test_maybe_queue_auto_upgrade_skips_when_already_pending(monkeypatch):
     assert sc.created_commands == []
 
 
+# ---------------------------------------------------------------------------
+# MIN_AUTO_DEPLOY_PLUGIN_VERSION — pre-manifest-aware floor (CAURA-000)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stale_version", ["0.98.4", "2.0.0", "2.3.0", "2.4.0", "2.5.0"])
+async def test_maybe_queue_auto_upgrade_skips_pre_manifest_aware(monkeypatch, stale_version):
+    """Pre-manifest-aware floor blocks every released plugin tag.
+
+    The hardcoded fallback file list in those releases doesn't include
+    files added in later releases (e.g. keystones.ts), so auto-deploy
+    leaves the plugin unable to load. Same recovery path as
+    KNOWN_BROKEN_DEPLOY_VERSIONS — operator runs the install one-liner.
+    """
+    monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.6.0")
+    monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "2.6.0")
+
+    async def _enabled(_db, _tid):
+        return True
+
+    monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
+    sc = _FakeStorage()
+    await fleet_mod._maybe_queue_auto_upgrade(
+        db=None, sc=sc, body=_body(stale_version),
+        pending_commands=sc.pending_commands, node_id="node-uuid-1",
+    )
+    assert sc.created_commands == [], (
+        f"Expected no deploy queued for pre-manifest-aware {stale_version!r}; "
+        f"got {sc.created_commands!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_maybe_queue_auto_upgrade_allowed_at_or_above_floor(monkeypatch):
+    """A plugin at the floor exact version OR above is eligible for
+    auto-deploy (subject to other gates). Asserts the floor is < rather
+    than <=, so floor versions can still be pushed forward."""
+    # Target is higher than floor — there's a real upgrade to issue.
+    monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.6.1")
+    monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "2.6.0")
+
+    async def _enabled(_db, _tid):
+        return True
+
+    monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
+    sc = _FakeStorage()
+    await fleet_mod._maybe_queue_auto_upgrade(
+        db=None, sc=sc, body=_body("2.6.0"),
+        pending_commands=sc.pending_commands, node_id="node-uuid-1",
+    )
+    assert len(sc.created_commands) == 1, (
+        f"Expected deploy queued for floor version 2.6.0; got {sc.created_commands!r}"
+    )
+    assert sc.created_commands[0]["command"] == "deploy"
+
+
+def test_min_auto_deploy_constant_shape():
+    """The floor is a string-shaped semver and stays a module-level
+    constant so operators can find / bump it without searching the file.
+    """
+    assert isinstance(fleet_mod.MIN_AUTO_DEPLOY_PLUGIN_VERSION, str)
+    parts = fleet_mod.MIN_AUTO_DEPLOY_PLUGIN_VERSION.split(".")
+    assert len(parts) >= 2
+    for p in parts:
+        assert p.isdigit(), f"Non-numeric segment in floor: {p!r}"
+
+
 def test_has_recent_deploy_from_list_handles_non_dict_entries():
     """Pre-fix ``(c or {}).get(...)`` raised AttributeError on a truthy
     non-dict element (string, number, list). The isinstance guard
@@ -314,6 +385,9 @@ def test_has_recent_deploy_from_list_handles_non_dict_entries():
 async def test_maybe_queue_auto_upgrade_queues_deploy_for_old_version(monkeypatch):
     """Happy path: enabled, not blocked, no pending, valid old version → queue."""
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
+    # Disable the pre-manifest-aware floor for this test — happy-path coverage
+    # is for an already-manifest-aware client; the new floor has its own tests.
+    monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "0.0.0")
 
     async def _enabled(_db, _tid):
         return True
