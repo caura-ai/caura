@@ -258,10 +258,16 @@ def _patch_fetch(return_value: dict[str, str]):
 
 
 async def test_authorization_header_attached_on_reader_calls() -> None:
+    # https:// audiences exercise the ID-token path; the storage
+    # client short-circuits before the metadata fetch for http://
+    # audiences (Cloud Run --no-allow-unauthenticated is always TLS,
+    # so a plain-HTTP audience is by definition local/in-cluster and
+    # never needs a token). These header-propagation tests
+    # deliberately use https:// to verify the live token-fetch path.
     a, b = _patch_fetch({"Authorization": "Bearer tok-reader"})
     with a, b:
         client, writer, reader = await _fresh_client(
-            writer_url="http://writer:8002", reader_url="http://reader:8002"
+            writer_url="https://writer:8002", reader_url="https://reader:8002"
         )
         await client.get_memory("11111111-1111-1111-1111-111111111111")
     assert reader.requests[0].headers["Authorization"] == "Bearer tok-reader"
@@ -271,7 +277,7 @@ async def test_authorization_header_attached_on_writer_calls() -> None:
     a, b = _patch_fetch({"Authorization": "Bearer tok-writer"})
     with a, b:
         client, writer, reader = await _fresh_client(
-            writer_url="http://writer:8002", reader_url="http://reader:8002"
+            writer_url="https://writer:8002", reader_url="https://reader:8002"
         )
         await client.create_memory({"tenant_id": "t", "content": "c"})
     assert writer.requests[0].headers["Authorization"] == "Bearer tok-writer"
@@ -281,7 +287,7 @@ async def test_authorization_header_attached_on_patch() -> None:
     a, b = _patch_fetch({"Authorization": "Bearer tok-writer"})
     with a, b:
         client, writer, reader = await _fresh_client(
-            writer_url="http://writer:8002", reader_url="http://reader:8002"
+            writer_url="https://writer:8002", reader_url="https://reader:8002"
         )
         await client.update_embedding("11111111-1111-1111-1111-111111111111", [0.1])
     assert writer.requests[0].headers["Authorization"] == "Bearer tok-writer"
@@ -291,10 +297,25 @@ async def test_authorization_header_attached_on_delete() -> None:
     a, b = _patch_fetch({"Authorization": "Bearer tok-writer"})
     with a, b:
         client, writer, reader = await _fresh_client(
-            writer_url="http://writer:8002", reader_url="http://reader:8002"
+            writer_url="https://writer:8002", reader_url="https://reader:8002"
         )
         await client.delete_agent("agent-1", tenant_id="t")
     assert writer.requests[0].headers["Authorization"] == "Bearer tok-writer"
+
+
+async def test_http_audience_skips_token_fetch() -> None:
+    """Plain-HTTP audience MUST short-circuit before the metadata
+    fetch so an unreachable metadata server (local docker, ASGI
+    bridges) can't race the call's own timeout budget. The mocked
+    ``fetch_auth_header`` returns a header that the storage client
+    must NOT attach — proves the bypass is active end-to-end."""
+    a, b = _patch_fetch({"Authorization": "Bearer tok-should-not-attach"})
+    with a, b:
+        client, writer, reader = await _fresh_client(
+            writer_url="http://writer:8002", reader_url="http://reader:8002"
+        )
+        await client.get_memory("11111111-1111-1111-1111-111111111111")
+    assert "Authorization" not in reader.requests[0].headers
 
 
 async def test_no_authorization_header_when_no_credentials() -> None:
