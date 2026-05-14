@@ -64,7 +64,10 @@ def captured(monkeypatch):
             default_write_mode="fast",
         )
 
-    async def fake_bulk_find(tenant_id, hashes):
+    async def fake_bulk_find(tenant_id, hashes, *, fleet_id=None, agent_id=None):
+        # ``fleet_id`` and ``agent_id`` were added in Stage 5 so cross-agent
+        # writes of identical content no longer collide; tests can still
+        # ignore them, but the signature must accept them.
         state.bulk_find_calls.append((tenant_id, list(hashes)))
         # Mimic the storage_client contract: dict[content_hash, {"id": str, ...}]
         return {
@@ -184,7 +187,8 @@ async def test_parent_document_skipped_when_zero_created(captured):
         "_ALL_": True,
     }
 
-    async def fake_bulk_find_all_existing(tenant_id, hashes):
+    async def fake_bulk_find_all_existing(tenant_id, hashes, *, fleet_id=None, agent_id=None):
+        # Stage 5 added per-agent dedup; accept the new kwargs.
         return {h: {"id": "x", "client_request_id": None} for h in hashes}
 
     captured.bulk_find_calls = []
