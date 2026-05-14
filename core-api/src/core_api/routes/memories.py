@@ -71,6 +71,7 @@ from core_api.services.audit_service import log_action
 from core_api.services.ingest_service import (
     ALLOWED_INGEST_MIME_TYPES,
     BINARY_INGEST_MIME_TYPES,
+    INGEST_DOCUMENTS_COLLECTION,
     INGEST_MAX_INPUT_BYTES,
     TEXT_INGEST_MIME_TYPES,
     _extract_with_kreuzberg,
@@ -1371,12 +1372,17 @@ async def ingest_undo_endpoint(
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    """A3 (PR #6): soft-delete every memory tagged with the given ingest_run_id.
+    """A3 (PR #6): soft-delete every memory tagged with the given run_id.
 
-    The undo lever for an entire ingest batch. Filters by
-    ``metadata.source = "ingest"`` AND ``metadata.ingest_run_id = <run_id>``
-    and AND tenant_id ownership — so a tenant can only undo their own runs,
-    and non-ingest memories can never be touched by this endpoint.
+    The undo lever for an entire ingest batch. Filters by the top-level
+    ``Memory.run_id`` column (indexed as of the parent-doc PR) AND
+    ``metadata.source = "ingest"`` (belt-and-braces — prevents non-ingest
+    memories sharing a run_id from being touched) AND tenant_id ownership.
+
+    Also deletes the parent ``documents`` row for the batch
+    (``collection='ingest-sources'``, ``doc_id=<run_id>``) on a best-effort
+    basis — a missing parent isn't an error since older batches predate
+    the parent-doc PR.
 
     Returns ``{"deleted": N, "run_id": "..."}``. ``deleted=0`` is a valid
     response (no rows matched — already cleaned up or never existed).
@@ -1389,13 +1395,29 @@ async def ingest_undo_endpoint(
         .where(
             Memory.tenant_id == tenant_id,
             Memory.deleted_at.is_(None),
+            Memory.run_id == run_id,
             Memory.metadata_["source"].astext == "ingest",
-            Memory.metadata_["ingest_run_id"].astext == run_id,
         )
         .values(deleted_at=datetime.now(UTC), status="deleted")
     )
     result = await db.execute(stmt)
     deleted_count = result.rowcount
+
+    # Delete the parent Document for this batch (introduced by the
+    # parent-doc PR). Best-effort: older batches predate the parent-doc
+    # write and won't have one, which is fine — undo on those still
+    # soft-deletes the memories, just without a parent record to drop.
+    try:
+        sc = get_storage_client()
+        await sc.delete_document(tenant_id=tenant_id, collection=INGEST_DOCUMENTS_COLLECTION, doc_id=run_id)
+    except Exception:
+        logger.info(
+            "ingest_undo: parent Document delete failed or no-op (run_id=%s) — "
+            "memories soft-deleted regardless",
+            run_id,
+            exc_info=False,
+        )
+
     await log_action(
         db,
         tenant_id=tenant_id,

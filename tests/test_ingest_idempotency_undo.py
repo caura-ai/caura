@@ -70,9 +70,12 @@ async def test_cache_hit_returns_cached_facts_without_llm(monkeypatch, fake_tena
     prior_memory.content = "The Eiffel Tower is 330 meters tall."
     prior_memory.memory_type = "fact"
     prior_memory.source_uri = "text-input"
+    # ``run_id`` now lives on the top-level column (single source of truth
+    # after the parent-doc PR) — preview cache-hit reads it from there
+    # instead of the old ``metadata.ingest_run_id`` JSONB key.
+    prior_memory.run_id = prior_run_id
     prior_memory.metadata_ = {
         "source": "ingest",
-        "ingest_run_id": prior_run_id,
         "doc_hash": "irrelevant",
         "salience": 0.85,
     }
@@ -141,21 +144,17 @@ async def test_cache_hit_picks_only_most_recent_run(monkeypatch):
     """If memories from two prior runs share a doc_hash, only the newest run's
     memories are returned. ``_find_prior_ingest_by_doc_hash`` does the filtering;
     we exercise the same logic by constructing a mock DB result."""
+    # ``run_id`` is on the top-level column now — the filtering query
+    # uses ``rows[0].run_id`` instead of ``metadata['ingest_run_id']``.
     older_mem = MagicMock()
-    older_mem.metadata_ = {
-        "source": "ingest",
-        "ingest_run_id": "older-run-id",
-        "doc_hash": "h",
-    }
+    older_mem.run_id = "older-run-id"
+    older_mem.metadata_ = {"source": "ingest", "doc_hash": "h"}
     older_mem.content = "older fact"
     older_mem.memory_type = "fact"
     older_mem.source_uri = "text-input"
     newer_mem = MagicMock()
-    newer_mem.metadata_ = {
-        "source": "ingest",
-        "ingest_run_id": "newer-run-id",
-        "doc_hash": "h",
-    }
+    newer_mem.run_id = "newer-run-id"
+    newer_mem.metadata_ = {"source": "ingest", "doc_hash": "h"}
     newer_mem.content = "newer fact"
     newer_mem.memory_type = "fact"
     newer_mem.source_uri = "text-input"

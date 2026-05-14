@@ -90,11 +90,21 @@ def captured(monkeypatch):
             raise HTTPException(status_code=409, detail="duplicate")
         return SimpleNamespace(id="00000000-0000-0000-0000-000000000000")
 
+    # ``upsert_document`` is called by ``_write_parent_ingest_document``
+    # after the per-fact loop. Capture the payload + give callers access
+    # via ``state.parent_doc_writes`` so they can assert on it.
+    state.parent_doc_writes = []  # list[dict]
+
+    async def fake_upsert_document(payload):
+        state.parent_doc_writes.append(payload)
+        return {"id": "doc-id", "data": payload.get("data", {})}
+
     # Patch the symbols *as imported into ingest_service*
     monkeypatch.setattr(ingest_service, "resolve_config", fake_resolve_config)
     monkeypatch.setattr(ingest_service, "create_memory", fake_create_memory)
     mock_sc = MagicMock()
     mock_sc.bulk_find_by_content_hashes = AsyncMock(side_effect=fake_bulk_find)
+    mock_sc.upsert_document = AsyncMock(side_effect=fake_upsert_document)
     monkeypatch.setattr(ingest_service, "get_storage_client", lambda: mock_sc)
     return state
 
@@ -118,14 +128,80 @@ async def test_every_write_uses_strong_mode(captured):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_metadata_carries_run_id_and_ingest_source(captured):
+async def test_run_id_on_column_and_source_in_metadata(captured):
+    """The parent-doc PR moved ``run_id`` to the top-level column (single
+    source of truth, indexed) and dropped the redundant
+    ``metadata.ingest_run_id`` write. The metadata only retains the
+    ``source`` discriminator + ``ingest_url`` for provenance."""
     req = _request("t1", "fact one")
     result = await ingest_service.ingest_commit(db=None, request=req)
 
     assert len(captured.writes) == 1
-    md = captured.writes[0].metadata
+    mc = captured.writes[0]
+    # run_id lives on the top-level column now
+    assert mc.run_id == result["run_id"]
+    # metadata.source is still the discriminator
+    md = mc.metadata
     assert md["source"] == "ingest"
-    assert md["ingest_run_id"] == result["run_id"]
+    # Redundant duplicate is gone — new writes do NOT carry this key
+    assert "ingest_run_id" not in md
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_parent_document_written_once_per_batch(captured):
+    """One ingest_commit produces exactly one ``documents`` row with
+    ``collection='ingest-sources'`` and ``doc_id == run_id``. The
+    ``data`` payload carries the batch's provenance + a summary string
+    for embedding (semantic search over uploads)."""
+    req = _request("t1", "fact one", "fact two", "fact three")
+    result = await ingest_service.ingest_commit(db=None, request=req)
+
+    assert len(captured.parent_doc_writes) == 1
+    payload = captured.parent_doc_writes[0]
+    assert payload["tenant_id"] == "t1"
+    assert payload["collection"] == "ingest-sources"
+    assert payload["doc_id"] == result["run_id"]
+
+    data = payload["data"]
+    assert data["memory_count"] == 3
+    assert data["errored"] == 0
+    assert data["skipped_duplicates"] == 0
+    # Summary is non-empty — embedding will be populated.
+    assert isinstance(data["summary"], str) and data["summary"]
+    # Carries the source_uri marker (text-input here since we didn't set url)
+    assert data["source_uri"] == "text-input"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_parent_document_skipped_when_zero_created(captured):
+    """A full-dedup batch (every fact already exists) shouldn't write a
+    parent Document — the prior batch's Document still describes the
+    content; an empty record would be noise."""
+    # Configure every hash to already exist → pre-loop dedup eliminates all.
+    captured.bulk_find_result = {
+        "_ALL_": True,
+    }
+
+    async def fake_bulk_find_all_existing(tenant_id, hashes):
+        return {h: {"id": "x", "client_request_id": None} for h in hashes}
+
+    captured.bulk_find_calls = []
+    # Replace the mock entirely for this test
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    ingest_service.get_storage_client().bulk_find_by_content_hashes = _AsyncMock(
+        side_effect=fake_bulk_find_all_existing
+    )
+
+    req = _request("t1", "fact one", "fact two")
+    result = await ingest_service.ingest_commit(db=None, request=req)
+
+    assert result["memories_created"] == 0
+    assert result["skipped_duplicates"] == 2
+    # No parent Document write when nothing was created
+    assert captured.parent_doc_writes == []
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +301,7 @@ async def test_pre_loop_dedup_failure_falls_through_to_per_fact_path(
 
     captured_sc = MagicMock()
     captured_sc.bulk_find_by_content_hashes = AsyncMock(side_effect=boom)
+    captured_sc.upsert_document = AsyncMock(return_value={"id": "doc-id"})
     monkeypatch.setattr(ingest_service, "get_storage_client", lambda: captured_sc)
 
     req = _request("t1", "f1", "f2", "f3")

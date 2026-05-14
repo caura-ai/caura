@@ -8,6 +8,7 @@ import re
 import socket
 import time
 import uuid
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 import httpx
@@ -118,6 +119,18 @@ _INGEST_MAX_CONTENT_CHARS = 50_000
 # producing useless meta-facts ("The content begins with the greeting
 # 'hi'"). We short-circuit instead and return ``skipped_reason``.
 _INGEST_MIN_CONTENT_CHARS = 20
+
+
+# Parent-Document collection name. Each successful ingest_commit writes ONE
+# row into ``documents`` with this collection and ``doc_id=<run_id>`` so the
+# batch of memories has a queryable, embeddable parent record. Each memory
+# joins back via the top-level ``memories.run_id`` column.
+INGEST_DOCUMENTS_COLLECTION = "ingest-sources"
+
+# Max chars from joined fact contents to put in the parent Document's
+# ``data["summary"]`` (which gets embedded for semantic search). Keeps the
+# embed payload bounded; ~500 chars is plenty for a useful similarity hit.
+_PARENT_DOC_SUMMARY_CAP = 500
 
 
 # A2: doc-hash for ingest idempotency. We hash the post-truncate text the LLM
@@ -580,7 +593,7 @@ async def _find_prior_ingest_by_doc_hash(db: AsyncSession, tenant_id: str, doc_h
     A "prior ingest" means a non-deleted row whose metadata carries the same
     ``doc_hash`` value and was tagged as ``source="ingest"``. When multiple
     runs match (the user could have ingested the same content twice in the
-    past), we return the memories tagged with the most-recent ``ingest_run_id``.
+    past), we return the memories tagged with the most-recent ``run_id``.
     """
     stmt = (
         select(Memory)
@@ -597,11 +610,11 @@ async def _find_prior_ingest_by_doc_hash(db: AsyncSession, tenant_id: str, doc_h
     if not rows:
         return []
 
-    # Pick the most recent run_id — i.e. the ingest_run_id of the newest row.
-    # Then return only the memories tagged with that run_id, so the cached
-    # preview reflects exactly one prior ingest.
-    newest_run_id = (rows[0].metadata_ or {}).get("ingest_run_id")
-    return [r for r in rows if (r.metadata_ or {}).get("ingest_run_id") == newest_run_id]
+    # Pick the most recent run_id from the top-level column. (We dropped the
+    # redundant ``metadata.ingest_run_id`` JSONB write in the parent-doc PR,
+    # so this is now the single source of truth for batch identity.)
+    newest_run_id = rows[0].run_id
+    return [r for r in rows if r.run_id == newest_run_id]
 
 
 async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
@@ -655,7 +668,7 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
     doc_hash = _doc_hash(request.tenant_id, content)
     cached_memories = await _find_prior_ingest_by_doc_hash(db, request.tenant_id, doc_hash)
     if cached_memories:
-        prior_run_id = (cached_memories[0].metadata_ or {}).get("ingest_run_id")
+        prior_run_id = cached_memories[0].run_id
         cached_facts = []
         for m in cached_memories:
             md = m.metadata_ or {}
@@ -786,6 +799,117 @@ async def ingest_preview(db: AsyncSession, request: IngestRequest) -> dict:
     }
 
 
+def _summarize_batch_for_embedding(survivors: list, cap: int = _PARENT_DOC_SUMMARY_CAP) -> str | None:
+    """Build a short, embeddable summary from the first few facts of an ingest batch.
+
+    Returned string goes into the parent Document's ``data["summary"]`` field
+    which the storage layer embeds for semantic search. Returns ``None`` when
+    no useful summary can be assembled (no facts / all empty), in which case
+    the caller MUST omit the field so the Document is stored without an
+    embedding (per ``doc_indexing.resolve_embed_source`` contract: present
+    summary keys must be non-empty strings).
+
+    The current heuristic is "concat fact contents up to ``cap`` chars". Good
+    enough for v1: gives semantic search a representative chunk without
+    needing a per-batch LLM summarization call. Can be upgraded later.
+    """
+    parts: list[str] = []
+    total = 0
+    for f in survivors:
+        text = (getattr(f, "content", None) or "").strip()
+        if not text:
+            continue
+        parts.append(text)
+        total += len(text) + 1  # +1 for joining space
+        if total >= cap:
+            break
+    if not parts:
+        return None
+    summary = " ".join(parts).strip()
+    if not summary:
+        return None
+    return summary[:cap]
+
+
+async def _write_parent_ingest_document(
+    *,
+    request: IngestCommitRequest,
+    run_id: str,
+    survivors: list,
+    created: int,
+    errored: int,
+    skipped: int,
+    ingest_ms: int,
+) -> None:
+    """Upsert one row into ``documents (collection='ingest-sources')`` so each
+    ingest batch has a queryable parent record. Each persisted memory joins
+    back via the ``memories.run_id`` column. Best-effort — failures here MUST
+    NOT roll back the memories the commit just wrote; we log and continue.
+
+    The Document's ``data["summary"]`` is populated from the first ~500 chars
+    of fact contents so the storage layer embeds it (free semantic search
+    over uploaded files). Other fields are pure provenance metadata.
+
+    Skipped entirely when ``created == 0`` — a batch that produced no new
+    memories doesn't need a parent record (it was a full dedup hit; the
+    prior batch's Document still describes the content).
+    """
+    if created <= 0:
+        return
+
+    # Resolve a source label: caller-supplied request.url (URL ingest, dashboard
+    # back-compat) wins; else the first fact's source_uri (stamped by preview
+    # — could be "https://...", "upload:report.pdf", or "text-input"); else
+    # the fallback marker.
+    source_label = request.url or (survivors[0].source_uri if survivors else None) or "text-input"
+    filename: str | None = (
+        source_label.removeprefix("upload:") if source_label.startswith("upload:") else None
+    )
+
+    data: dict = {
+        "source_uri": source_label,
+        "filename": filename,
+        "url": request.url,
+        "memory_count": created,
+        "errored": errored,
+        "skipped_duplicates": skipped,
+        "doc_hash": request.doc_hash,
+        "uploaded_at": datetime.now(UTC).isoformat(),
+        "ingest_ms": ingest_ms,
+        "agent_id": request.agent_id,
+    }
+    summary = _summarize_batch_for_embedding(survivors)
+    if summary is not None:
+        data["summary"] = summary  # triggers embedding population in storage
+
+    payload: dict = {
+        "tenant_id": request.tenant_id,
+        "fleet_id": request.fleet_id,
+        "collection": INGEST_DOCUMENTS_COLLECTION,
+        "doc_id": run_id,
+        "data": data,
+    }
+    try:
+        sc = get_storage_client()
+        await sc.upsert_document(payload)
+        logger.info(
+            "ingest_commit: parent Document written (run_id=%s collection=%s memory_count=%d)",
+            run_id,
+            INGEST_DOCUMENTS_COLLECTION,
+            created,
+        )
+    except Exception:
+        # Best-effort: the memories are already persisted; a missing parent
+        # Document is a degraded but recoverable state, not a commit failure.
+        # Future re-runs of the same content will hit doc-hash cache and
+        # cleanup tooling can backfill the parent.
+        logger.exception(
+            "ingest_commit: parent Document write failed (run_id=%s) — "
+            "memories are committed; parent record missing, run again to retry",
+            run_id,
+        )
+
+
 async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
     """Commit mode: write previewed facts as memories.
 
@@ -911,9 +1035,12 @@ async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
         # Future previews of the same content will hit the cache via
         # ``_find_prior_ingest_by_doc_hash``. Also persist any per-fact
         # salience score from PR #5 so cached previews can restore it.
+        # ``run_id`` lives on the top-level memory column — the redundant
+        # ``metadata.ingest_run_id`` JSONB key has been dropped from new
+        # writes (the column is indexed, queryable without JSON casting,
+        # and is the single source of truth as of the parent-doc PR).
         metadata: dict = {
             "source": "ingest",
-            "ingest_run_id": run_id,
             "ingest_url": request_url_override or fact.source_uri or None,
         }
         if request.doc_hash:
@@ -985,6 +1112,19 @@ async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
         pre_dedup_skipped,
         skipped_in_loop,
         ingest_ms,
+    )
+
+    # Write the parent Document so this batch shows up in the dashboard
+    # Documents tab and is queryable as a unit. Best-effort — won't unwind
+    # the memories if it fails. Skipped when ``created == 0`` (all dedup'd).
+    await _write_parent_ingest_document(
+        request=request,
+        run_id=run_id,
+        survivors=survivors,
+        created=created,
+        errored=errored,
+        skipped=skipped,
+        ingest_ms=ingest_ms,
     )
 
     return {
