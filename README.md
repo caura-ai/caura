@@ -67,6 +67,8 @@ Get up and running in minutes — no infrastructure, automatic updates, usage an
 }
 ```
 
+> **Production / team use:** `mc_` is a tenant-level key — fine for personal use, but a fleet of agents should bind each one to its own `mca_` key for trust gating, fleet membership, and per-agent keystones. Mint per-agent keys atomically via [`POST /api/v1/admin/agent-keys/provision`](docs/integration-without-plugin.md). The MCP server accepts the agent key on either `X-API-Key: mca_…` or `Authorization: Bearer mca_…`.
+
 ### Self-Hosted (Open Source)
 
 The fastest path is Docker Compose — one command brings up Postgres + pgvector + Redis + the API.
@@ -245,7 +247,7 @@ The plugin claims the OpenClaw `memory` slot (replacing `memory-core`) and expos
 
 - **Tenant isolation** — row-level database separation per tenant; PII auto-detected and quarantined before it can cross fleet boundaries
 - **Visibility scopes** — every memory is stamped at write time: `scope_agent` (private), `scope_team` (fleet-wide, default), or `scope_org` (cross-fleet). Cross-fleet recall is permissioned, not open
-- **Agent trust tiers** — four levels control cross-fleet reads, writes, and deletes. Agents auto-register on first write
+- **Agent trust tiers** — four levels control cross-fleet reads, writes, and deletes. Agents are either provisioned atomically via `POST /admin/agent-keys/provision` (recommended — mints key + row + trust + fleet in one call) or auto-registered on first write (legacy fallback)
 - **Full audit log** — every write, delete, and transition logged with tenant and scope context
 
 ### Memory Pipeline
@@ -298,6 +300,8 @@ Add MemClaw to any MCP client with one config block.
   }
 }
 ```
+
+> For team or production use, swap the tenant `mc_` key for a per-agent `mca_` key — atomic provisioning via `POST /api/v1/admin/agent-keys/provision` mints the key + Agent row + initial trust + fleet membership in one round trip. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md).
 
 **Where to add this config:**
 - **Claude Code** — `~/.claude/settings.json` under `"mcpServers"`
@@ -390,8 +394,8 @@ The recommended way to run MemClaw is via Docker Compose (see [Quick Start](#qui
 Each release publishes multi-arch (linux/amd64, linux/arm64) images to [GitHub Container Registry](https://github.com/orgs/caura-ai/packages):
 
 ```
-ghcr.io/caura-ai/caura-memclaw-core-api:v1.0.0
-ghcr.io/caura-ai/caura-memclaw-core-storage-api:v1.0.0
+ghcr.io/caura-ai/caura-memclaw-core-api:v2.5.0
+ghcr.io/caura-ai/caura-memclaw-core-storage-api:v2.5.0
 ```
 
 Tags follow SemVer with floating aliases — `:v1`, `:v1.0`, `:v1.0.0`, plus `:latest` for the latest stable release. Pull them in your own compose file or Kubernetes manifests instead of building from source.
@@ -820,7 +824,7 @@ All paths are prefixed with `/api/v1` unless noted. Request and response shapes 
 | Documents | `POST /documents`, `GET /documents`, `GET /documents/{id}`, `POST /documents/query`, `DELETE /documents/{id}` |
 | Keystones | `GET /memclaw/keystones`, `POST /memclaw/keystones`, `DELETE /memclaw/keystones/{doc_id}` |
 | Fleet | `POST /fleet/heartbeat`, `GET /fleet/nodes`, `POST /fleet/commands`, `GET /fleet/commands` |
-| Agents | `GET /agents`, `GET /agents/{id}`, `PATCH /agents/{id}/trust` |
+| Agents | `GET /agents`, `GET /agents/{id}`, `PATCH /agents/{id}/trust`, `POST /admin/agent-keys/provision` (atomic key + row + trust + fleet), `GET /whoami` (identity probe) |
 | Insights | `POST /insights/generate` |
 | Evolve | `POST /evolve/report` |
 | Crystallizer | `POST /crystallize`, `POST /crystallize/all`, `GET /crystallize/reports`, `GET /crystallize/latest` |
@@ -870,14 +874,10 @@ Anything not listed above is internal and may change in any release without a ma
 - Python module layout (`core_api.middleware.*`, `core_api.providers.*`, `core_api.pipeline.*`, `core_api.services.*`, `common/*`)
 - Database schema, table names, migration paths
 - Gateway-injected HTTP headers (`X-Memclaw-Gateway`, `X-Tenant-ID`, `X-Agent-ID`, `X-Org-Read-Only`)
-- `/api/v1/admin/*` and `/api/v1/testing/*` routes
+- Most `/api/v1/admin/*` and all `/api/v1/testing/*` routes (the documented exception is `POST /admin/agent-keys/provision`, which is part of the stable identity-bootstrap surface — see the Agents row above)
 - The `core-storage-api` microservice (internal, not user-facing)
 - The plugin's TypeScript module structure
 - API-key prefix formats (`mc_…`, `mca_…`) — formats may evolve
-
-### Pre-1.0 caveats
-
-While MemClaw ships under `0.x` (see [VERSION](VERSION)), every surface — including those listed above as "stable" — is subject to change without a major version bump. The contract above describes the *intended* v1.0 surface. Once `1.0.0` ships, the contract is fixed and any breaking change to a stable surface requires a major version bump.
 
 ### Reporting breaking changes
 
