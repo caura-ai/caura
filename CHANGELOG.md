@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.6.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.5.0...backend-v2.6.0) (2026-05-17)
+
+
+### Features
+
+* **core-api:** install-credential auth context + http:// ID-token bypass ([#146](https://github.com/caura-ai/caura-memclaw/issues/146)) ([160e143](https://github.com/caura-ai/caura-memclaw/commit/160e14317b2e3ace4ab8eecb42a4e4330b40cbf0))
+* **ingest:** 3 MB body cap + POST /ingest/file + text/csv support ([#130](https://github.com/caura-ai/caura-memclaw/issues/130)) ([eb1e3ce](https://github.com/caura-ai/caura-memclaw/commit/eb1e3ce19099313a4de7d237bc951f4236ef999a))
+* **ingest:** parent Document per batch + run_id index + undo migration ([#134](https://github.com/caura-ai/caura-memclaw/issues/134)) ([f2e0204](https://github.com/caura-ai/caura-memclaw/commit/f2e02041c48e4edaf542f91d4295fc97abb7968a))
+* **memories:** add run_id query filter to /api/memories ([#145](https://github.com/caura-ai/caura-memclaw/issues/145)) ([1063590](https://github.com/caura-ai/caura-memclaw/commit/1063590e9565f11431d3e8f4cd38940eacaacc80))
+* **plugin:** decouple plugin release cadence from backend ([#131](https://github.com/caura-ai/caura-memclaw/issues/131)) ([ac6c0f2](https://github.com/caura-ai/caura-memclaw/commit/ac6c0f2ec05a020b0acb27b6ec7b92a0be338d73))
+
+
+### Bug Fixes
+
+* **ingest:** preserve uploaded filename in source_uri ([#133](https://github.com/caura-ai/caura-memclaw/issues/133)) ([b25e609](https://github.com/caura-ai/caura-memclaw/commit/b25e60970eb5c1a84c5e920b158933e6c57597a7))
+* **search:** trust has_embedding sentinel in post-filter for FTS-only rows ([#150](https://github.com/caura-ai/caura-memclaw/issues/150)) ([cc1d311](https://github.com/caura-ai/caura-memclaw/commit/cc1d311ace07d6305717a0a4e32efa0a6dcf21fa))
+* **write:** close fast-branch coverage holes + add always-fire detection logs ([#152](https://github.com/caura-ai/caura-memclaw/issues/152)) ([ffb26fd](https://github.com/caura-ai/caura-memclaw/commit/ffb26fd2ed8e65068c9fc479992872d39734fa2a))
+* **write:** make ParallelEmbedEnrich deferral write_mode-aware ([#151](https://github.com/caura-ai/caura-memclaw/issues/151)) ([f2236ad](https://github.com/caura-ai/caura-memclaw/commit/f2236adc057274307c01364fa4da93334cb75ed7))
+
 ## [2.5.0](https://github.com/caura-ai/caura-memclaw/compare/v2.4.0...v2.5.0) (2026-05-11)
 
 
