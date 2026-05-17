@@ -77,6 +77,7 @@ async def recall(
     top_k: int = DEFAULT_SEARCH_TOP_K,
     valid_at: datetime | None = None,
     diagnostic: bool = False,
+    readable_tenant_ids: list[str] | None = None,
 ) -> dict:
     """Search memories and synthesize a context summary.
 
@@ -105,6 +106,7 @@ async def recall(
         tenant_config=config,
         diagnostic=diagnostic,
         diagnostic_ctx=diagnostic_ctx if diagnostic else None,
+        readable_tenant_ids=readable_tenant_ids,
     )
 
     if not memories:

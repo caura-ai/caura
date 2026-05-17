@@ -148,6 +148,8 @@ async def scored_search(request: Request) -> list[dict]:
                 top_k=body.get("top_k", 10),
                 date_range_start=date_range_start,
                 date_range_end=date_range_end,
+                # Optional; absent for legacy single-tenant callers
+                readable_tenant_ids=body.get("readable_tenant_ids") or None,
             )
         for r in results:
             row = orm_to_dict(r.Memory, MEMORY_FIELDS)

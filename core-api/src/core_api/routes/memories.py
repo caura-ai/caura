@@ -1247,6 +1247,9 @@ async def _search_inner(
     results: list = []
     try:
         config = await resolve_config(db, body.tenant_id)
+        # Widen the read predicate when the caller authenticated with
+        # a cross-tenant key. Single-tenant keys leave
+        # ``readable_tenant_ids = [tenant_id]`` so this is a no-op.
         results = await search_memories(
             db,
             tenant_id=body.tenant_id,
@@ -1262,6 +1265,7 @@ async def _search_inner(
             graph_expand=config.graph_expand,
             tenant_config=config,
             search_profile=_agent.get("search_profile") if _agent else None,
+            readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
         )
     except HTTPException:
         # Auth / tenant errors raised downstream are expected outcomes,
@@ -1475,6 +1479,7 @@ async def recall_endpoint(
         status_filter=body.status_filter,
         top_k=body.top_k,
         valid_at=body.valid_at,
+        readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
     )
 
 

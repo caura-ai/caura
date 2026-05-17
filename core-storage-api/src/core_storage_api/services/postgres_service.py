@@ -652,6 +652,7 @@ class PostgresService:
         top_k: int = 10,
         date_range_start: str | None = None,
         date_range_end: str | None = None,
+        readable_tenant_ids: list[str] | None = None,
     ) -> list[SimpleNamespace]:
         """Execute the full CTE-based scored search with entity-link JOIN.
 
@@ -871,7 +872,16 @@ class PostgresService:
                 has_embedding,
                 status_penalty,
             )
-            .where(Memory.tenant_id == tenant_id)
+            # Multi-tenant read predicate: when ``readable_tenant_ids``
+            # is provided (cross-tenant agent key), reads widen across
+            # the full set; otherwise we stay single-tenant for the
+            # common case. Result rows still carry ``Memory.tenant_id``
+            # so the caller can attribute each row to its source tenant.
+            .where(
+                Memory.tenant_id.in_(readable_tenant_ids)
+                if readable_tenant_ids
+                else Memory.tenant_id == tenant_id
+            )
             .where(Memory.deleted_at.is_(None))
             .where(
                 or_(

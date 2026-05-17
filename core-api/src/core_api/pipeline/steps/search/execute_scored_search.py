@@ -71,6 +71,15 @@ class ExecuteScoredSearch:
             "recall_boost_enabled": recall_boost_enabled,
         }
 
+        # Cross-tenant read widening: when the caller's AuthContext is
+        # authorised to read from more than its home tenant, pass the
+        # full set through to the storage-api so it widens the WHERE
+        # predicate. Absent / single-element list stays single-tenant
+        # (storage-api falls back to ``Memory.tenant_id == tenant_id``).
+        readable = data.get("readable_tenant_ids")
+        if readable and len(readable) > 1:
+            search_data["readable_tenant_ids"] = readable
+
         if temporal_window is not None:
             search_data["temporal_window_seconds"] = int(temporal_window.total_seconds())
 

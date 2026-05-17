@@ -421,6 +421,12 @@ async def memclaw_recall(
             agent_profile = None
             if _ag:
                 agent_profile = _ag.get("search_profile") if isinstance(_ag, dict) else _ag.search_profile
+            # Cross-tenant recall widens via readable_tenant_ids when
+            # the caller authenticated with an mcx_ key — the gateway
+            # plumbs ``X-Readable-Tenant-IDs`` and the MCP middleware
+            # parks it on ``_readable_tenant_ids_var``. Single-tenant
+            # keys leave the var empty; ``search_memories`` falls back
+            # to ``WHERE tenant_id = $1`` in that case.
             results = await search_memories(
                 db,
                 tenant_id=tenant_id,
@@ -435,6 +441,7 @@ async def memclaw_recall(
                 graph_expand=config.graph_expand,
                 tenant_config=config,
                 search_profile=agent_profile,
+                readable_tenant_ids=_get_readable_tenants() or None,
             )
             payload: dict = {
                 "results": [r.model_dump(mode="json") for r in results] if results else [],
@@ -452,6 +459,7 @@ async def memclaw_recall(
                     memory_type_filter=memory_type,
                     status_filter=status,
                     top_k=capped_top_k,
+                    readable_tenant_ids=_get_readable_tenants() or None,
                 )
                 payload["brief"] = brief
             return _with_latency(json.dumps(payload, indent=2, default=str), t0)
