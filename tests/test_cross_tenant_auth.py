@@ -173,3 +173,33 @@ async def test_headers_case_insensitive(_disable_standalone):
 
     assert ctx.readable_tenant_ids == ["home", "tenant-a"]
     assert ctx.scopes == {"recall"}
+
+
+# ── source_tenants_for_audit (audit hook seam) ──────────────────────
+
+
+@pytest.mark.unit
+def test_source_tenants_for_audit_empty_for_single_tenant():
+    ctx = AuthContext(tenant_id="home")
+    assert ctx.source_tenants_for_audit() == []
+
+
+@pytest.mark.unit
+def test_source_tenants_for_audit_excludes_home():
+    """The audit hook returns *source* tenants — never the home, since
+    a request always implicitly reads from its home tenant and
+    self-attribution would be noise in every source tenant's log."""
+    ctx = AuthContext(
+        tenant_id="home",
+        readable_tenant_ids=["home", "src-a", "src-b"],
+    )
+    assert ctx.source_tenants_for_audit() == ["src-a", "src-b"]
+
+
+@pytest.mark.unit
+def test_source_tenants_for_audit_empty_for_admin_tenant_none():
+    """Admin path: tenant_id=None means no tenant scoping at all.
+    Audit hook returns empty so admin reads don't emit per-tenant
+    events (admin actions get their own audit category)."""
+    ctx = AuthContext(tenant_id=None, is_admin=True)
+    assert ctx.source_tenants_for_audit() == []

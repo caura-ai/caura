@@ -90,6 +90,39 @@ class AuthContext:
         """True if this auth context can read from more than its home tenant."""
         return len(self.readable_tenant_ids) > 1
 
+    def source_tenants_for_audit(self) -> list[str]:
+        """Return tenants whose data was widened into for this request,
+        excluding the home tenant.
+
+        Hook for the per-use cross-tenant-read audit event. When the
+        memory/document/keystone read sweep lands (the follow-up to
+        this PR), recall/search/list handlers should:
+
+          1. After serving a result that includes rows from multiple
+             tenants, count results per tenant.
+          2. Call this method to get the set of source tenants
+             touched.
+          3. Emit one audit event per source tenant via the
+             enterprise audit publisher (not yet wired in OSS — the
+             ``common.events.audit_publisher`` module is
+             enterprise-only). For OSS-direct deployments without an
+             audit publisher, this is a no-op and the call is silently
+             skipped.
+
+        Format of the audit event (when it lands):
+          action=cross_tenant_read
+          tenant_id=<source tenant>          # logged TO this tenant
+          detail={
+            home_tenant_id: self.tenant_id,
+            home_agent_id: self.agent_id,
+            query_summary: <truncated query>,
+            result_count_from_this_tenant: <int>,
+          }
+        """
+        if not self.is_cross_tenant_read or not self.tenant_id:
+            return []
+        return [t for t in self.readable_tenant_ids if t != self.tenant_id]
+
     def enforce_read_only(self) -> None:
         """Raise 403 if this is a demo key (read-only sandbox)."""
         if self.is_demo:
