@@ -136,6 +136,7 @@ class ExecuteScoredSearch:
                                 "temporal_boost",
                                 "status_penalty",
                                 "entity_links",
+                                "has_embedding",
                             )
                         }
                     ),
@@ -148,6 +149,7 @@ class ExecuteScoredSearch:
                     recall_boost=row.get("recall_boost"),
                     temporal_boost=row.get("temporal_boost"),
                     status_penalty=row.get("status_penalty"),
+                    has_embedding=row.get("has_embedding", True),
                     entity_links=[],
                 )
             # Entity links may be inline in the row or as a nested list.
