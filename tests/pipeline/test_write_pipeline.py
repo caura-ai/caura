@@ -126,7 +126,9 @@ async def test_legacy_path_creates_memory(db):
     try:
         from core_api.services.memory_service import create_memory
 
-        data = _make_input(content="Legacy path baseline test memory — unique content to avoid hash collision with pipeline path test.")
+        data = _make_input(
+            content="Legacy path baseline test memory — unique content to avoid hash collision with pipeline path test."
+        )
         result = await create_memory(db, data)
 
         assert isinstance(result, MemoryOut)
@@ -352,8 +354,15 @@ async def test_merge_enrichment_no_pending_in_strong_mode():
 
 
 @pytest.mark.asyncio
-async def test_schedule_background_tasks_fast_mode_fires_background_enrichment():
-    """ScheduleBackgroundTasks fires _enrich_memory_background in fast mode."""
+async def test_schedule_background_tasks_fast_mode_fires_full_fan_out():
+    """ScheduleBackgroundTasks fast branch fires background enrichment +
+    entity extraction + Path A contradiction detection.
+
+    Pre-Gap-01/04 fix: fast mode only fired background_enrichment and
+    relied on ``_enrich_memory_background`` to chain into the others —
+    a chain that didn't fire in every flag profile (Enterprise+fast lost
+    entity extraction, OSS+fast lost Path A). The fast branch now fires
+    each directly, mirroring the strong branch's symmetric fan-out."""
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.write.schedule_background_tasks import (
         ScheduleBackgroundTasks,
@@ -386,8 +395,10 @@ async def test_schedule_background_tasks_fast_mode_fires_background_enrichment()
         step = ScheduleBackgroundTasks()
         await step.execute(ctx)
 
-    # Should fire background_enrichment, NOT entity_extraction or contradiction directly
-    assert mock_track.call_count == 1  # only background_enrichment
+    # 3 tracked tasks: background_enrichment + entity_extraction + Path A.
+    # Embed-reembed is NOT scheduled here because embedding is present.
+    # Detailed per-task wiring is covered in tests/test_fast_branch_fan_out.py.
+    assert mock_track.call_count == 3
 
 
 @pytest.mark.asyncio
