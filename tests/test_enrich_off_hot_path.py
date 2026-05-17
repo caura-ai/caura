@@ -72,9 +72,15 @@ def _ctx(
     enrichment: bool = True,
     cached_embedding=None,
     memory_id: uuid.UUID | None = None,
-    write_mode: str = "strong",
+    write_mode: str | None = None,
     data: MemoryCreate | None = None,
 ) -> PipelineContext:
+    # Default ``write_mode=None`` exercises the extract-only / auto-chunk
+    # sub-pipeline path where ``ParallelEmbedEnrich`` falls back to the
+    # global ``enrich_on_hot_path`` flag. Tests that need the explicit
+    # fast/strong dispatch must pass ``write_mode`` explicitly; the
+    # mode-aware override behaviour is covered in
+    # ``tests/test_write_mode_dispatch.py``.
     ctx_data: dict = {
         "input": data or _input(),
         "content_hash": "f" * 64,
