@@ -75,6 +75,8 @@ If `agent_id` is `null` or doesn't match what you provisioned, your key isn't be
 - The key was revoked or rotated.
 - A proxy in front of memclaw is stripping the `X-API-Key` header.
 
+> **Latency expectation:** `POST /search` returns 23 ms p50 / 27 ms p95 warm on our reference benchmarks. Recall (`memclaw_recall` / `POST /recall`) sits in the same band — it wraps search plus a small scoring step. See [`performance.md`](performance.md) for the full numbers and methodology.
+
 ---
 
 ## 3. Open an MCP session

@@ -15,6 +15,7 @@
 <p align="center">
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="#features">Features</a> &middot;
+  <a href="#performance">Performance</a> &middot;
   <a href="#mcp-model-context-protocol">MCP</a> &middot;
   <a href="#api-reference">API Reference</a> &middot;
   <a href="static/docs/integration-guide.md">Plugin Docs</a> &middot;
@@ -31,6 +32,8 @@ MemClaw is open-source memory for **multi-tenant, multi-agent** AI fleets. Your 
 Agents write plain text. MemClaw turns it into searchable, governed, self-improving memory.
 
 **One loop, three pillars: write, recall, compound** — every interaction makes the next one smarter.
+
+**Built for fleets, not single agents.** Public agent-memory benchmarks (LoCoMo, LongMemEval) measure one agent, one user, one long conversation — the single-chatbot shape. The deployment shape we see in production is the opposite: dozens or thousands of agents working on behalf of a company, sharing what they learn under governance. MemClaw is architected around that shape from day one — scoped memory, cross-agent outcome propagation, fleet-wide trust tiers — and competes on the axes that compound with agent count: latency, token efficiency, and governance. See [Performance](#performance) for the numbers, or read the [benchmarks write-up](https://memclaw.net/blog/memclaw-benchmarks).
 
 <p align="center">
   <img src="static/images/memclaw-concept.svg" alt="MemClaw — Fleet Memory that Compounds" width="700" />
@@ -270,6 +273,24 @@ The plugin claims the OpenClaw `memory` slot (replacing `memory-core`) and expos
 - **MCP server** — built-in [Model Context Protocol](https://modelcontextprotocol.io) at `/mcp` (Streamable HTTP). Connect Claude Desktop, Claude Code, Cursor, Windsurf, or any MCP client with a URL and API key
 - **Multi-provider LLM** — primary + fallback provider chain per tenant (OpenAI, Gemini, Anthropic, OpenRouter) with platform defaults for zero-config tenants
 - **Document store** — structured JSONB collections alongside semantic memories for exact-field lookups (customer records, config, task lists)
+
+---
+
+## Performance
+
+Benchmarked against the two most-cited public agent-memory benchmarks. Methodology and operator-scale context live in [`docs/performance.md`](docs/performance.md); the full write-up is on the blog.
+
+|  | LoCoMo | LongMemEval | Search latency |
+|---|---|---|---|
+| Accuracy (LLM-judge) | **77.6%** | **72.5%** | — |
+| Token savings vs full context | **96.6%** | **98.2%** | — |
+| Latency | — | — | **23 ms p50 · 27 ms p95** |
+
+Accuracy sits inside the leading cluster across the field (Mem0, Zep, MemClaw — scores cluster in a narrow band). The axes we push hardest are latency and token efficiency, because those are the ones that compound as agent count grows — a few hundred ms of search latency disappears behind one LLM call, but bills millions of times a day across a fleet.
+
+> Single-agent benchmarks can't measure cross-agent recall, outcome propagation between agents, fleet-scoped visibility, or governance-aware retrieval. Those are the questions that decide whether a memory system is *deployable* inside a company. See [`docs/performance.md`](docs/performance.md#what-these-benchmarks-cant-measure).
+
+Source: [Fast, Token-Efficient, and Built for Fleets](https://memclaw.net/blog/memclaw-benchmarks) (2026-04-19).
 
 ---
 
