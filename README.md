@@ -68,6 +68,8 @@ Get up and running in minutes — no infrastructure, automatic updates, usage an
 ```
 
 > **Production / team use:** `mc_` is a tenant-level key — fine for personal use, but a fleet of agents should bind each one to its own `mca_` key for trust gating, fleet membership, and per-agent keystones. Mint per-agent keys atomically via [`POST /api/v1/admin/agent-keys/provision`](docs/integration-without-plugin.md). The MCP server accepts the agent key on either `X-API-Key: mca_…` or `Authorization: Bearer mca_…`.
+>
+> Staying on `mc_` for the quickstart? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-key path.
 
 ### Self-Hosted (Open Source)
 
@@ -301,7 +303,7 @@ Add MemClaw to any MCP client with one config block.
 }
 ```
 
-> For team or production use, swap the tenant `mc_` key for a per-agent `mca_` key — atomic provisioning via `POST /api/v1/admin/agent-keys/provision` mints the key + Agent row + initial trust + fleet membership in one round trip. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md).
+> For team or production use, swap the tenant `mc_` key for a per-agent `mca_` key — atomic provisioning via `POST /api/v1/admin/agent-keys/provision` mints the key + Agent row + initial trust + fleet membership in one round trip. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md). Staying on `mc_`? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-key path.
 
 **Where to add this config:**
 - **Claude Code** — `~/.claude/settings.json` under `"mcpServers"`
