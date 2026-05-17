@@ -196,9 +196,15 @@ class MCPAuthMiddleware:
                 _readable_tenant_ids_var.set(
                     [t.strip() for t in readable_header.split(",") if t.strip()]
                 )
-            scopes_header = headers.get(b"x-key-scopes", b"").decode()
-            if scopes_header:
-                _scopes_var.set({s.strip() for s in scopes_header.split(",") if s.strip()})
+            # X-Capabilities is canonical from the unified auth-api;
+            # X-Key-Scopes is accepted as a back-compat alias during
+            # the gateway rollout window.
+            caps_header = (
+                headers.get(b"x-capabilities", b"").decode()
+                or headers.get(b"x-key-scopes", b"").decode()
+            )
+            if caps_header:
+                _scopes_var.set({s.strip() for s in caps_header.split(",") if s.strip()})
 
         await self.app(scope, receive, send)
 

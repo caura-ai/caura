@@ -36,8 +36,11 @@ class AuthContext:
     An agent may be authorized to read from tenants beyond its home tenant.
     ``readable_tenant_ids`` is the full set the caller may read from (always
     includes ``tenant_id``). Writes are always scoped to ``tenant_id``.
-    ``scopes`` constrains capabilities; when not None, ``write`` must be in
-    the set for any mutating call to succeed.
+    ``capabilities`` constrains the mutation gate; when not None, ``write``
+    must be in the set for any mutating call to succeed. Cross-tenant
+    credentials typically carry ``{read, write}`` capabilities; the
+    "writes pin to home" semantics come from ``enforce_tenant`` on the
+    write target — not from a structural absence of write capability.
     """
 
     def __init__(
@@ -53,6 +56,8 @@ class AuthContext:
         is_install_credential: bool = False,
         install_uuid: str | None = None,
         readable_tenant_ids: list[str] | None = None,
+        capabilities: set[str] | None = None,
+        # Back-compat alias — older callers still pass ``scopes``.
         scopes: set[str] | None = None,
     ):
         self.tenant_id = tenant_id
@@ -81,9 +86,16 @@ class AuthContext:
                 self.readable_tenant_ids.insert(0, tenant_id)
         else:
             self.readable_tenant_ids = [tenant_id] if tenant_id else []
-        # Capability scopes. None = full (legacy/admin keys). When a set is
-        # provided, callers must pass ``write`` for any mutating operation.
-        self.scopes = scopes
+        # Capability set. None = full (legacy/admin keys). When a set
+        # is provided, callers must pass ``write`` for any mutating
+        # operation. ``scopes`` is accepted as a back-compat alias so
+        # older AuthContext(scopes=...) callers keep working.
+        self.capabilities = capabilities if capabilities is not None else scopes
+        # Legacy alias retained as a read-only view so old code that
+        # still reads ``ctx.scopes`` keeps functioning during the
+        # deprecation window. Aliasing rather than dual storage prevents
+        # the two from drifting apart.
+        self.scopes = self.capabilities
 
     @property
     def is_cross_tenant_read(self) -> bool:
@@ -131,18 +143,25 @@ class AuthContext:
         without needing per-site edits:
 
         - ``is_demo`` → demo sandbox is read-only.
-        - ``scopes`` is set and does NOT include ``write`` → the
-          credential is read-only by construction (cross-tenant
-          ``mcx_`` keys). Legacy keys (scopes=None) pass through.
+        - ``capabilities`` is set and does NOT include ``write`` → the
+          credential is read-only by construction (a credential minted
+          with capabilities={'read'} — e.g., a viewer or reporting
+          credential). Legacy credentials (capabilities=None) pass
+          through unchanged.
 
         Usage-limit / plan-cap enforcement is intentionally separate
         (``enforce_usage_limits``) because the delete path is allowed
-        to bypass usage-limit blocks; demo + scope blocks have no
+        to bypass usage-limit blocks; demo + capability blocks have no
         such carve-out.
+
+        Note: a cross-tenant credential with ``capabilities={read,
+        write}`` PASSES this gate — its restriction is "writes pin to
+        home_tenant_id", which is enforced by ``enforce_tenant`` on
+        the write target, not here.
         """
         if self.is_demo:
             raise HTTPException(status_code=403, detail="Demo sandbox is read-only.")
-        if self.scopes is not None and "write" not in self.scopes:
+        if self.capabilities is not None and "write" not in self.capabilities:
             raise HTTPException(
                 status_code=403,
                 detail="This API key is read-only and cannot perform write operations.",
@@ -202,15 +221,16 @@ class AuthContext:
             )
 
     def enforce_write_scope(self) -> None:
-        """Raise 403 if this key has a scope set that excludes ``write``.
+        """Raise 403 if this credential's capabilities exclude ``write``.
 
-        No-op for keys without an explicit scope set (legacy + admin paths
-        keep working unchanged). Cross-tenant read-only keys reject here
-        before any handler logic runs.
+        No-op for credentials without an explicit capability set (legacy
+        + admin paths keep working unchanged). Standalone helper for
+        the niche case where a handler wants a finer-grained check than
+        ``enforce_read_only`` (which also covers ``is_demo``).
         """
-        if self.scopes is None:
+        if self.capabilities is None:
             return
-        if "write" not in self.scopes:
+        if "write" not in self.capabilities:
             raise HTTPException(
                 status_code=403,
                 detail="This API key is read-only and cannot perform write operations.",
@@ -240,10 +260,19 @@ async def get_auth_context(
     # [tenant_id] inside AuthContext). Present → AuthContext.readable_tenant_ids
     # widens to the union, while writes still target tenant_id.
     readable_tenants = _parse_csv_header(request.headers.get("x-readable-tenant-ids"))
-    # Capability scopes plumbed alongside readable tenants. Empty/absent →
-    # None (full scope, legacy behavior).
-    scope_list = _parse_csv_header(request.headers.get("x-key-scopes"))
-    scopes: set[str] | None = set(scope_list) if scope_list else None
+    # Capabilities plumbed alongside readable tenants. Empty/absent →
+    # None (full scope, legacy behavior). X-Capabilities is the
+    # canonical header from the unified auth-api; X-Key-Scopes is
+    # accepted as a back-compat alias during the gateway rollout
+    # window so an old gateway running against a new core-api (or
+    # vice versa) doesn't break auth.
+    capability_list = _parse_csv_header(
+        request.headers.get("x-capabilities")
+        or request.headers.get("x-key-scopes")
+    )
+    capabilities: set[str] | None = (
+        set(capability_list) if capability_list else None
+    )
 
     # ── Path 1: Admin API key ──
     if key and admin_key and hmac.compare_digest(key, admin_key):
@@ -317,7 +346,7 @@ async def get_auth_context(
             is_install_credential=is_install_credential,
             install_uuid=install_uuid,
             readable_tenant_ids=readable_tenants or None,
-            scopes=scopes,
+            capabilities=capabilities,
         )
 
     # No tenant header + no admin key configured = reject.

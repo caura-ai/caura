@@ -167,7 +167,8 @@ async def list_fleets(
 ):
     """Return distinct fleet_ids with memory counts."""
     if tenant_id:
-        auth.enforce_tenant(tenant_id)
+        # Read endpoint — honors cross-tenant readable set.
+        auth.enforce_readable_tenant(tenant_id)
     elif not auth.is_admin:
         # Non-admin must specify a tenant_id
         if not auth.tenant_id:
@@ -241,7 +242,7 @@ async def list_memories(
     sort order.
     """
     if tenant_id:
-        auth.enforce_tenant(tenant_id)
+        auth.enforce_readable_tenant(tenant_id)
     elif not auth.is_admin:
         if not auth.tenant_id:
             raise HTTPException(status_code=400, detail="tenant_id is required")
@@ -309,7 +310,7 @@ async def memory_stats(
     db: AsyncSession = Depends(get_db),
 ):
     if tenant_id:
-        auth.enforce_tenant(tenant_id)
+        auth.enforce_readable_tenant(tenant_id)
     elif not auth.is_admin:
         if not auth.tenant_id:
             raise HTTPException(status_code=400, detail="tenant_id is required")
@@ -500,7 +501,7 @@ async def get_memory(
 
     from common.models.entity import Entity, MemoryEntityLink
 
-    auth.enforce_tenant(tenant_id)
+    auth.enforce_readable_tenant(tenant_id)
 
     t_start = time.perf_counter()
     hit = False
@@ -642,7 +643,7 @@ async def get_contradictions(
       ``superseded_by`` (this memory was replaced by a newer row) or
       ``supersedes`` (this memory replaced an older row).
     """
-    auth.enforce_tenant(tenant_id)
+    auth.enforce_readable_tenant(tenant_id)
 
     memory = await db.get(Memory, memory_id)
     if not memory or memory.tenant_id != tenant_id or memory.deleted_at is not None:
@@ -1215,7 +1216,11 @@ async def search(
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    auth.enforce_tenant(body.tenant_id)
+    # Read endpoint — honors cross-tenant readable set. The SQL
+    # widens to readable_tenant_ids inside search_memories so the
+    # body.tenant_id can be any tenant the caller may read from
+    # (typically home, but explicit source queries work too).
+    auth.enforce_readable_tenant(body.tenant_id)
     async with per_tenant_slot("search", body.tenant_id):
         return await _search_inner(body, response, auth, db)
 
@@ -1457,7 +1462,8 @@ async def recall_endpoint(
     db: AsyncSession = Depends(get_db),
 ):
     """Search memories and return an LLM-synthesized context summary."""
-    auth.enforce_tenant(body.tenant_id)
+    # Read endpoint — readable set widening applies (see /search).
+    auth.enforce_readable_tenant(body.tenant_id)
     if auth.tenant_id:
         if body.filter_agent_id:
             fleet_id_hint = body.fleet_ids[0] if body.fleet_ids and len(body.fleet_ids) == 1 else None
