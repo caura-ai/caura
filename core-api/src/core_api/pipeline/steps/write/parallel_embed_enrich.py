@@ -1,19 +1,32 @@
 """Concurrent embedding + LLM enrichment via asyncio.gather.
 
-When ``settings.embed_on_hot_path`` is False the embedding provider call
-is skipped entirely — the row persists with embedding=NULL and
-``ScheduleBackgroundTasks`` publishes ``Topics.Memory.EMBED_REQUESTED``
-so ``core-worker`` backfills it asynchronously (CAURA-594 SaaS). When
-True (OSS default), the embed runs inline; on inline failure the same
-``ScheduleBackgroundTasks`` step schedules an in-process retry instead.
+Deferral is now ``write_mode``-aware (restores the original CAURA-229
+contract that the CAURA-524 step-consolidation + CAURA-595 PR-C global-
+flag pattern inadvertently flattened):
 
-CAURA-595 mirror: ``settings.enrich_on_hot_path=False`` skips the inline
-enrichment call too. The strong-write pipeline persists the row with
-agent-provided values + schema defaults for the LLM-derived columns
-(``memory_type`` / ``weight`` / ``status``); ``ScheduleBackgroundTasks``
-publishes ``Topics.Memory.ENRICH_REQUESTED`` and ``core-worker``
-PATCHes the enrichment fields back. Hint-based re-embed is DISABLED
-(CAURA-222): writes used to embed
+* ``write_mode == "strong"`` → embed and enrich **always inline**,
+  regardless of ``embed_on_hot_path`` / ``enrich_on_hot_path``. Strong
+  callers explicitly opted into "thorough write before commit"; the
+  global hot-path flags target fast-mode latency, not strong. Running
+  inline here is what gives strong its meaningful guarantees —
+  ``CheckSemanticDuplicate`` runs against a real embedding (so the
+  409-on-near-duplicate contract holds), and the agent reads its own
+  enriched ``title`` / ``memory_type`` / ``weight`` / ``status`` /
+  ``ts_valid_*`` back in the response.
+* ``write_mode == "fast"`` → LLM enrichment **always deferred**
+  (matches CAURA-229's "fast = no LLM on the request path"
+  intent). Embedding follows ``embed_on_hot_path`` so OSS local stays
+  inline ~200ms while SaaS prod defers to ``core-worker`` for the
+  sub-2s p99 visibility SLA.
+* Any other ``write_mode`` value (and the ``None`` case the
+  enrichment-only sub-pipeline hits during extract-only / auto-chunk)
+  falls back to the global flags — preserves today's behaviour for
+  those branches.
+
+Behind both deferred paths: ``ScheduleBackgroundTasks`` publishes
+``Topics.Memory.EMBED_REQUESTED`` / ``Topics.Memory.ENRICH_REQUESTED``
+so ``core-worker`` runs the provider call and PATCHes the row back.
+Hint-based re-embed is DISABLED (CAURA-222): writes used to embed
 ``compose_embedding_text(content, retrieval_hint)`` while queries embed
 raw text, producing a write/query surface asymmetry that capped recall
 across dedup, entity-lookup, and search ranking. Until a symmetric
@@ -46,11 +59,22 @@ class ParallelEmbedEnrich:
         tenant_config = ctx.tenant_config
         cached_embedding = ctx.data.get("cached_embedding")
         ch = ctx.data.get("content_hash")
+        resolved_write_mode = ctx.data.get("resolved_write_mode")
 
-        # A cached embedding is a hit on the idempotency/content-hash
-        # cache (pure dict lookup, no provider call) so we reuse it even
-        # when hot-path embed is off — nothing to offload.
-        defer_embedding = not settings.embed_on_hot_path and cached_embedding is None
+        # write_mode-aware deferral. See the module docstring for the
+        # contracts each mode enforces. A cached embedding is a hit on
+        # the idempotency/content-hash cache (pure dict lookup, no
+        # provider call) so we reuse it even when hot-path embed is off
+        # — nothing to offload.
+        if resolved_write_mode == "strong":
+            defer_embedding = False
+            defer_enrichment = False
+        elif resolved_write_mode == "fast":
+            defer_embedding = (not settings.embed_on_hot_path) and cached_embedding is None
+            defer_enrichment = True
+        else:
+            defer_embedding = (not settings.embed_on_hot_path) and cached_embedding is None
+            defer_enrichment = not settings.enrich_on_hot_path
 
         embedding_task = None
         if cached_embedding is not None:
@@ -62,13 +86,6 @@ class ParallelEmbedEnrich:
             embedding_task = _return_cached()
         elif not defer_embedding:
             embedding_task = get_embedding(data.content, tenant_config)
-
-        # ``enrich_on_hot_path=False`` — defer the LLM call to
-        # ``core-worker`` via ``Topics.Memory.ENRICH_REQUESTED`` published
-        # by ``ScheduleBackgroundTasks``. The strong-write response
-        # surface drops the LLM-derived fields (matches the user-accepted
-        # Q4 design decision in CAURA-595).
-        defer_enrichment = not settings.enrich_on_hot_path
 
         enrichment_task = None
         if (
