@@ -12,6 +12,7 @@ Multi-provider support:
 
 import asyncio
 import logging
+import time
 from datetime import datetime
 from uuid import UUID
 
@@ -88,6 +89,14 @@ async def detect_contradictions_async(
     """
     from core_api.services.organization_settings import resolve_config
 
+    # Always-fire completion log (Gap 06): without this, "function ran and
+    # found nothing" is indistinguishable from "function never fired" — the
+    # exact failure mode that hid Gap 01 and Gap 04 for weeks. Memory id is
+    # in the message string itself (rather than ``extra``) so a plain
+    # ``grep path_a_completed <memory_id>`` works regardless of the
+    # structlog renderer's ``extra={}`` behaviour.
+    t_start = time.monotonic()
+    n_conflicts = 0
     try:
         if new_memory is None:
             sc = get_storage_client()
@@ -97,6 +106,7 @@ async def detect_contradictions_async(
 
         tenant_config = await resolve_config(None, tenant_id)
         contradictions = await _detect(new_memory, embedding, tenant_config)
+        n_conflicts = len(contradictions) if contradictions else 0
 
         if contradictions:
             logger.info(
@@ -106,6 +116,15 @@ async def detect_contradictions_async(
             )
     except Exception:
         logger.exception("Async contradiction detection failed for memory %s", memory_id)
+    finally:
+        elapsed_ms = round((time.monotonic() - t_start) * 1000)
+        logger.info(
+            "path_a_completed for memory %s n_conflicts=%d elapsed_ms=%d tenant_id=%s",
+            memory_id,
+            n_conflicts,
+            elapsed_ms,
+            tenant_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +411,11 @@ async def detect_contradictions_by_entities_async(
     """
     from core_api.services.organization_settings import resolve_config
 
+    # Always-fire completion log (Gap 06) — see ``detect_contradictions_async``
+    # above for the rationale. Same memory-id-in-message convention.
+    t_start = time.monotonic()
+    n_candidates = 0
+    n_conflicts = 0
     try:
         sc = get_storage_client()
         new_memory = await sc.get_memory(str(memory_id))
@@ -408,6 +432,7 @@ async def detect_contradictions_by_entities_async(
                 "visibility": new_memory.get("visibility", "scope_team"),
             }
         )
+        n_candidates = len(candidates) if candidates else 0
         if not candidates:
             return
 
@@ -445,6 +470,7 @@ async def detect_contradictions_by_entities_async(
                         supersedes_id=str(cand_id),
                     )
                 found = True
+                n_conflicts += 1
                 logger.info(
                     "Entity-based contradiction: %s conflicted by %s",
                     cand_id,
@@ -452,6 +478,16 @@ async def detect_contradictions_by_entities_async(
                 )
     except Exception:
         logger.exception("Entity-based contradiction detection failed for %s", memory_id)
+    finally:
+        elapsed_ms = round((time.monotonic() - t_start) * 1000)
+        logger.info(
+            "path_c_completed for memory %s n_candidates=%d n_conflicts=%d elapsed_ms=%d tenant_id=%s",
+            memory_id,
+            n_candidates,
+            n_conflicts,
+            elapsed_ms,
+            tenant_id,
+        )
 
 
 # Backward-compat re-exports for tests
