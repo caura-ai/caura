@@ -48,3 +48,78 @@ def test_read_only_is_independent_of_demo():
     ctx.enforce_read_only()  # not demo → no raise
     with pytest.raises(HTTPException):
         ctx.enforce_usage_limits()
+
+
+# ── readable_tenant_ids defaults ─────────────────────────────────────
+
+
+def test_readable_tenant_ids_defaults_to_home_tenant():
+    ctx = AuthContext(tenant_id="t1")
+    assert ctx.readable_tenant_ids == ["t1"]
+    assert ctx.is_cross_tenant_read is False
+
+
+def test_readable_tenant_ids_empty_when_tenant_is_none():
+    ctx = AuthContext(tenant_id=None, is_admin=True)
+    assert ctx.readable_tenant_ids == []
+
+
+def test_readable_tenant_ids_prepends_home_tenant_if_missing():
+    ctx = AuthContext(tenant_id="home", readable_tenant_ids=["other-a", "other-b"])
+    assert ctx.readable_tenant_ids == ["home", "other-a", "other-b"]
+    assert ctx.is_cross_tenant_read is True
+
+
+def test_readable_tenant_ids_keeps_explicit_home_position():
+    ctx = AuthContext(tenant_id="home", readable_tenant_ids=["home", "other-a"])
+    assert ctx.readable_tenant_ids == ["home", "other-a"]
+
+
+# ── enforce_readable_tenant ──────────────────────────────────────────
+
+
+def test_enforce_readable_tenant_allows_home_tenant():
+    ctx = AuthContext(tenant_id="t1")
+    ctx.enforce_readable_tenant("t1")  # no raise
+
+
+def test_enforce_readable_tenant_allows_widened_tenant():
+    ctx = AuthContext(tenant_id="home", readable_tenant_ids=["other-a"])
+    ctx.enforce_readable_tenant("home")
+    ctx.enforce_readable_tenant("other-a")
+
+
+def test_enforce_readable_tenant_blocks_unrelated_tenant():
+    ctx = AuthContext(tenant_id="home", readable_tenant_ids=["other-a"])
+    with pytest.raises(HTTPException) as exc_info:
+        ctx.enforce_readable_tenant("intruder")
+    assert exc_info.value.status_code == 403
+
+
+def test_enforce_readable_tenant_admin_bypass():
+    ctx = AuthContext(tenant_id=None, is_admin=True)
+    ctx.enforce_readable_tenant("anything")  # no raise
+
+
+# ── enforce_write_scope ──────────────────────────────────────────────
+
+
+def test_enforce_write_scope_noop_when_scopes_unset():
+    ctx = AuthContext(tenant_id="t1")
+    ctx.enforce_write_scope()  # no raise — legacy/full-scope path
+
+
+def test_enforce_write_scope_allows_when_write_in_scopes():
+    ctx = AuthContext(tenant_id="t1", scopes={"recall", "search", "write"})
+    ctx.enforce_write_scope()
+
+
+def test_enforce_write_scope_blocks_read_only_scopes():
+    ctx = AuthContext(
+        tenant_id="t1",
+        scopes={"recall", "search", "memories_read", "documents_read"},
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        ctx.enforce_write_scope()
+    assert exc_info.value.status_code == 403
+    assert "read-only" in exc_info.value.detail.lower()

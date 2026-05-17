@@ -7,7 +7,7 @@ from fastapi.security import APIKeyHeader
 
 from core_api.config import settings
 from core_api.constants import API_KEY_HEADER
-from core_api.db.session import set_current_tenant
+from core_api.db.session import set_current_tenant, set_readable_tenants
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,13 @@ class AuthContext:
     2. MemClaw API key (MEMCLAW_API_KEY)  → gates all non-admin access when set
     3. Standalone mode                     → tenant_id from config, org_role="admin"
     4. X-Tenant-ID header (enterprise)    → tenant_id from header
+
+    Multi-tenant reads:
+    An agent may be authorized to read from tenants beyond its home tenant.
+    ``readable_tenant_ids`` is the full set the caller may read from (always
+    includes ``tenant_id``). Writes are always scoped to ``tenant_id``.
+    ``scopes`` constrains capabilities; when not None, ``write`` must be in
+    the set for any mutating call to succeed.
     """
 
     def __init__(
@@ -45,6 +52,8 @@ class AuthContext:
         is_read_only: bool = False,
         is_install_credential: bool = False,
         install_uuid: str | None = None,
+        readable_tenant_ids: list[str] | None = None,
+        scopes: set[str] | None = None,
     ):
         self.tenant_id = tenant_id
         self.is_demo = is_demo
@@ -64,6 +73,22 @@ class AuthContext:
         # on the wire.
         self.is_install_credential = is_install_credential
         self.install_uuid = install_uuid
+        # Tenants this caller may READ from. Always non-empty when tenant_id
+        # is set; equal to ``[tenant_id]`` for single-tenant keys.
+        if readable_tenant_ids:
+            self.readable_tenant_ids = list(readable_tenant_ids)
+            if tenant_id and tenant_id not in self.readable_tenant_ids:
+                self.readable_tenant_ids.insert(0, tenant_id)
+        else:
+            self.readable_tenant_ids = [tenant_id] if tenant_id else []
+        # Capability scopes. None = full (legacy/admin keys). When a set is
+        # provided, callers must pass ``write`` for any mutating operation.
+        self.scopes = scopes
+
+    @property
+    def is_cross_tenant_read(self) -> bool:
+        """True if this auth context can read from more than its home tenant."""
+        return len(self.readable_tenant_ids) > 1
 
     def enforce_read_only(self) -> None:
         """Raise 403 if this is a demo key (read-only sandbox)."""
@@ -108,6 +133,43 @@ class AuthContext:
                 detail=f"API key is not authorized for tenant '{requested_tenant}'",
             )
 
+    def enforce_readable_tenant(self, requested_tenant: str) -> None:
+        """Raise 403 unless the caller may READ from the requested tenant.
+
+        Use on read-shaped endpoints that accept an explicit tenant_id. For
+        single-tenant keys this is equivalent to ``enforce_tenant``; for
+        cross-tenant keys it permits any tenant in ``readable_tenant_ids``.
+        """
+        if self.is_admin:
+            return
+        if requested_tenant not in self.readable_tenant_ids:
+            raise HTTPException(
+                status_code=403,
+                detail=f"API key is not authorized to read tenant '{requested_tenant}'",
+            )
+
+    def enforce_write_scope(self) -> None:
+        """Raise 403 if this key has a scope set that excludes ``write``.
+
+        No-op for keys without an explicit scope set (legacy + admin paths
+        keep working unchanged). Cross-tenant read-only keys reject here
+        before any handler logic runs.
+        """
+        if self.scopes is None:
+            return
+        if "write" not in self.scopes:
+            raise HTTPException(
+                status_code=403,
+                detail="This API key is read-only and cannot perform write operations.",
+            )
+
+
+def _parse_csv_header(value: str | None) -> list[str]:
+    """Parse a comma-separated header value into a stripped, non-empty list."""
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
 
 async def get_auth_context(
     request: Request,
@@ -120,6 +182,15 @@ async def get_auth_context(
     # exceeded plan limits after a subscription cancellation. In standalone
     # and OSS-direct paths the header is absent, so enforcement is a no-op.
     is_read_only = request.headers.get("x-org-read-only", "").lower() == "true"
+    # Multi-tenant read support: the gateway plumbs the set of tenants this
+    # caller may read from. Absent header → single-tenant key (defaults to
+    # [tenant_id] inside AuthContext). Present → AuthContext.readable_tenant_ids
+    # widens to the union, while writes still target tenant_id.
+    readable_tenants = _parse_csv_header(request.headers.get("x-readable-tenant-ids"))
+    # Capability scopes plumbed alongside readable tenants. Empty/absent →
+    # None (full scope, legacy behavior).
+    scope_list = _parse_csv_header(request.headers.get("x-key-scopes"))
+    scopes: set[str] | None = set(scope_list) if scope_list else None
 
     # ── Path 1: Admin API key ──
     if key and admin_key and hmac.compare_digest(key, admin_key):
@@ -175,12 +246,25 @@ async def get_auth_context(
         is_install_credential = credential_kind == "install_credential"
         install_uuid = request.headers.get("x-install-uuid") or None
         set_current_tenant(tenant_id)
+        # When the gateway plumbs a multi-tenant read set, expose it to the
+        # DB layer so reads (and downstream RLS policies, when configured)
+        # can widen. The home tenant is prepended to keep the set complete.
+        if readable_tenants:
+            combined: list[str] = [tenant_id]
+            for t in readable_tenants:
+                if t != tenant_id:
+                    combined.append(t)
+            set_readable_tenants(combined)
+        else:
+            set_readable_tenants(None)
         return AuthContext(
             tenant_id=tenant_id,
             agent_id=agent_id,
             is_read_only=is_read_only,
             is_install_credential=is_install_credential,
             install_uuid=install_uuid,
+            readable_tenant_ids=readable_tenants or None,
+            scopes=scopes,
         )
 
     # No tenant header + no admin key configured = reject.

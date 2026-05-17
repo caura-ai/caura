@@ -30,6 +30,13 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 _current_tenant_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_current_tenant_id", default=None
 )
+# Additional readable tenants (writes still go to ``_current_tenant_id``).
+# Set when the caller authenticated with a credential authorized for
+# cross-tenant reads. The list always includes the home tenant_id when
+# populated; an empty list means "single-tenant key, no widening".
+_readable_tenant_ids: contextvars.ContextVar[list[str]] = contextvars.ContextVar(
+    "_readable_tenant_ids", default=[]
+)
 
 
 def set_current_tenant(tenant_id: str | None) -> None:
@@ -40,6 +47,22 @@ def set_current_tenant(tenant_id: str | None) -> None:
 def get_current_tenant() -> str | None:
     """Get the tenant_id for the current request context."""
     return _current_tenant_id.get()
+
+
+def set_readable_tenants(tenant_ids: list[str] | None) -> None:
+    """Set the set of tenants the current caller may READ from.
+
+    A single-tenant caller does not need to call this — reads default to
+    ``_current_tenant_id`` only. Cross-tenant credentials populate this
+    list so read paths and RLS policies can widen scope while writes
+    remain pinned to the home tenant_id.
+    """
+    _readable_tenant_ids.set(list(tenant_ids) if tenant_ids else [])
+
+
+def get_readable_tenants() -> list[str]:
+    """Get the cross-tenant read set for the current request context."""
+    return _readable_tenant_ids.get()
 
 
 async def get_db() -> AsyncGenerator[AsyncSession]:
@@ -53,4 +76,12 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
             )
         else:
             await session.execute(text("SELECT set_config('app.tenant_id', '__admin__', true)"))
+        # Plumb the readable-tenant set as a second GUC. Deployments that
+        # apply RLS may extend their policies to honor this for read paths;
+        # in OSS-default deployments it is informational only.
+        readable = _readable_tenant_ids.get()
+        await session.execute(
+            text("SELECT set_config('app.readable_tenant_ids', :csv, true)"),
+            {"csv": ",".join(readable) if readable else ""},
+        )
         yield session

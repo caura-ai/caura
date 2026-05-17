@@ -71,6 +71,15 @@ _agent_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("mcp_
 # literal "mcp-agent" tool-param default would silently attribute every write
 # from a tenant-key holder to a single shared identity (friction §2.8 / Stage 6b).
 _via_gateway_var: contextvars.ContextVar[bool] = contextvars.ContextVar("mcp_via_gateway", default=False)
+# Cross-tenant read set plumbed from X-Readable-Tenant-IDs (CSV). Empty list
+# means single-tenant key (reads pinned to ``_tenant_id_var``). When populated
+# the home tenant_id is the first element and writes still go there.
+_readable_tenant_ids_var: contextvars.ContextVar[list[str]] = contextvars.ContextVar(
+    "mcp_readable_tenant_ids", default=[]
+)
+_scopes_var: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
+    "mcp_scopes", default=None
+)
 
 _UNAUTH = "__unauthenticated__"
 _ADMIN = "__admin__"
@@ -178,6 +187,19 @@ class MCPAuthMiddleware:
             agent_header = headers.get(b"x-agent-id", b"").decode()
             _agent_id_var.set(agent_header or None)
 
+            # X-Readable-Tenant-IDs and X-Key-Scopes are plumbed by the gateway
+            # for credentials authorized to read beyond their home tenant
+            # (cross-tenant agent keys). Absent / empty headers leave the
+            # context vars at their single-tenant defaults.
+            readable_header = headers.get(b"x-readable-tenant-ids", b"").decode()
+            if readable_header:
+                _readable_tenant_ids_var.set(
+                    [t.strip() for t in readable_header.split(",") if t.strip()]
+                )
+            scopes_header = headers.get(b"x-key-scopes", b"").decode()
+            if scopes_header:
+                _scopes_var.set({s.strip() for s in scopes_header.split(",") if s.strip()})
+
         await self.app(scope, receive, send)
 
 
@@ -188,6 +210,24 @@ def _get_tenant() -> str:
 def _get_agent_id() -> str | None:
     """Return the verified agent_id from X-Agent-ID header, or None."""
     return _agent_id_var.get(None)
+
+
+def _get_readable_tenants() -> list[str]:
+    """Return the cross-tenant read set; empty for single-tenant keys."""
+    return _readable_tenant_ids_var.get([])
+
+
+def _get_scopes() -> set[str] | None:
+    """Return the credential's scope set, or None for full-scope (legacy) keys."""
+    return _scopes_var.get(None)
+
+
+def _is_write_allowed() -> bool:
+    """Return False if the active credential is scope-limited to read-only."""
+    scopes = _get_scopes()
+    if scopes is None:
+        return True
+    return "write" in scopes
 
 
 def _refuse_default_agent_on_gateway(agent_id: str) -> str | None:
@@ -257,6 +297,14 @@ async def _mcp_session():
             )
         else:
             await session.execute(sa_text("SELECT set_config('app.tenant_id', '', true)"))
+        # Plumb the cross-tenant read set as a second GUC alongside
+        # ``app.tenant_id``. Deployments may extend RLS policies to honor
+        # it for reads; OSS-default deployments use the app-layer filter.
+        readable = _get_readable_tenants()
+        await session.execute(
+            sa_text("SELECT set_config('app.readable_tenant_ids', :csv, true)"),
+            {"csv": ",".join(readable) if readable else ""},
+        )
         yield session
 
 
