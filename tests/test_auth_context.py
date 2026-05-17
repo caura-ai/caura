@@ -123,3 +123,32 @@ def test_enforce_write_scope_blocks_read_only_scopes():
         ctx.enforce_write_scope()
     assert exc_info.value.status_code == 403
     assert "read-only" in exc_info.value.detail.lower()
+
+
+# ── enforce_read_only also enforces scope (composite gate) ───────────
+
+
+def test_enforce_read_only_blocks_scope_restricted_keys():
+    """The write-side aggregate gate at every endpoint head — demo +
+    scope are both checked in one call so existing handlers don't need
+    per-site changes to honor mcx_ read-only credentials."""
+    ctx = AuthContext(
+        tenant_id="t1",
+        scopes={"recall", "search", "memories_read", "documents_read"},
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        ctx.enforce_read_only()
+    assert exc_info.value.status_code == 403
+    assert "read-only" in exc_info.value.detail.lower()
+
+
+def test_enforce_read_only_passes_when_write_in_scopes():
+    ctx = AuthContext(tenant_id="t1", scopes={"recall", "write"})
+    ctx.enforce_read_only()  # no raise
+
+
+def test_enforce_read_only_passes_when_scopes_unset():
+    """Legacy / full-scope keys (scopes=None) must still pass — this
+    is the most common path."""
+    ctx = AuthContext(tenant_id="t1")
+    ctx.enforce_read_only()  # no raise

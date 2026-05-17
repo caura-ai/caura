@@ -124,9 +124,29 @@ class AuthContext:
         return [t for t in self.readable_tenant_ids if t != self.tenant_id]
 
     def enforce_read_only(self) -> None:
-        """Raise 403 if this is a demo key (read-only sandbox)."""
+        """Raise 403 if the caller is not allowed to mutate state.
+
+        Two unconditional read-only signals, both checked here so every
+        write-shaped endpoint that already calls this gate is covered
+        without needing per-site edits:
+
+        - ``is_demo`` → demo sandbox is read-only.
+        - ``scopes`` is set and does NOT include ``write`` → the
+          credential is read-only by construction (cross-tenant
+          ``mcx_`` keys). Legacy keys (scopes=None) pass through.
+
+        Usage-limit / plan-cap enforcement is intentionally separate
+        (``enforce_usage_limits``) because the delete path is allowed
+        to bypass usage-limit blocks; demo + scope blocks have no
+        such carve-out.
+        """
         if self.is_demo:
             raise HTTPException(status_code=403, detail="Demo sandbox is read-only.")
+        if self.scopes is not None and "write" not in self.scopes:
+            raise HTTPException(
+                status_code=403,
+                detail="This API key is read-only and cannot perform write operations.",
+            )
 
     def enforce_usage_limits(self) -> None:
         """Raise 403 if the org is over its plan limits (read-only mode).
