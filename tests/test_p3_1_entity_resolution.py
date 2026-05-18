@@ -5,14 +5,20 @@ Unit tests validate:
 - Exact match still takes priority (Phase 1 short-circuits)
 - Entity type guard: same name different type → no merge
 - Alias tracking: merged entity has _aliases containing both names
-- Canonical name promotion: longer name replaces shorter one
+- Canonical preservation (A5a): first-seen canonical wins. The previous
+  "longer name promoted as canonical" rule actively turned hallucinated
+  suffixes into permanent canonical names (e.g., LLM hallucinating
+  "globex industries" for content saying only "Globex" produced a
+  permanent corruption); see commit history for A5a context.
 - No embedding → no fuzzy check (graceful skip)
 
 Integration tests verify:
 - Insert "john smith" twice → exact match, same entity
 - Insert "john smith", then "jon smith" (similar embedding) → fuzzy match, same entity
 - Insert "john smith" (person), then "john smith" (technology) → different entities
-- Insert "john smith", then "dr. john smith" → fuzzy match, canonical promoted
+- Insert "john smith", then "dr. john smith" → fuzzy match; canonical
+  stays as "john smith" (first-seen wins); "dr. john smith" lives in
+  the aliases list and remains searchable.
 - Insert "alice smith", then "bob smith" → different entities (distance too large)
 - Alias list grows correctly over multiple merges
 """
@@ -184,29 +190,21 @@ class TestAliasTracking:
         assert "John Smith" in aliases
         assert "J. Smith" in aliases
 
-    def test_longer_name_promoted(self):
-        """Longer incoming name should become canonical."""
+    def test_first_seen_canonical_preserved_when_longer_arrives(self):
+        """A5a: first-seen wins. When a longer alternative form arrives via
+        fuzzy match, the existing canonical name is preserved. The longer
+        form is tracked in the alias list above so it remains searchable."""
         existing_name = "J. Smith"
-        incoming_name = "Dr. John Smith"
+        # incoming_name preserved as an alias, not as the canonical
+        result = existing_name  # production rule in entity_service.upsert_entity
+        assert result == "J. Smith"
 
-        # The rule: if incoming is longer, promote it
-        if len(incoming_name) > len(existing_name):
-            result = incoming_name
-        else:
-            result = existing_name
-
-        assert result == "Dr. John Smith"
-
-    def test_shorter_name_not_promoted(self):
-        """Shorter incoming name should NOT replace longer existing."""
+    def test_first_seen_canonical_preserved_when_shorter_arrives(self):
+        """A5a: symmetric case. Shorter incoming name does NOT downgrade the
+        existing canonical. This case was already correct under the old
+        longer-wins rule by coincidence; now it's principled."""
         existing_name = "Dr. John Smith"
-        incoming_name = "John"
-
-        if len(incoming_name) > len(existing_name):
-            result = incoming_name
-        else:
-            result = existing_name
-
+        result = existing_name
         assert result == "Dr. John Smith"
 
 
@@ -283,8 +281,13 @@ class TestEntityResolutionIntegration:
         assert e1.id != e2.id
 
     @pytest.mark.asyncio
-    async def test_canonical_name_promoted(self, db, tenant_id, fleet_id):
-        """Insert 'john smith', then 'dr. john smith' → merged, canonical promoted."""
+    async def test_canonical_name_preserves_first_seen(self, db, tenant_id, fleet_id):
+        """A5a: insert 'john smith', then 'dr. john smith' → merged via fuzzy
+        match; canonical stays as 'john smith' (first-seen wins). The
+        previous behaviour promoted the longer name as canonical, which
+        actively turned hallucinated LLM suffixes into permanent
+        canonical names. 'dr. john smith' is now tracked as an alias
+        and remains searchable."""
         emb1 = fake_embedding("john smith")
         e1 = await self._insert_entity(
             db, tenant_id, fleet_id, "person", "john smith", emb1
@@ -296,7 +299,10 @@ class TestEntityResolutionIntegration:
         )
 
         assert e1.id == e2.id
-        assert e2.canonical_name == "dr. john smith"
+        assert e2.canonical_name == "john smith"
+        # Longer surface form is preserved as an alias.
+        aliases = (e2.attributes or {}).get("_aliases", [])
+        assert "dr. john smith" in aliases
 
     @pytest.mark.asyncio
     async def test_distant_names_not_merged(self, db, tenant_id, fleet_id):
