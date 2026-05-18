@@ -74,8 +74,8 @@ _via_gateway_var: contextvars.ContextVar[bool] = contextvars.ContextVar("mcp_via
 # Cross-tenant read set plumbed from X-Readable-Tenant-IDs (CSV). Empty list
 # means single-tenant key (reads pinned to ``_tenant_id_var``). When populated
 # the home tenant_id is the first element and writes still go there.
-_readable_tenant_ids_var: contextvars.ContextVar[list[str]] = contextvars.ContextVar(
-    "mcp_readable_tenant_ids", default=[]
+_readable_tenant_ids_var: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "mcp_readable_tenant_ids", default=None
 )
 _scopes_var: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
     "mcp_scopes", default=None
@@ -220,7 +220,7 @@ def _get_agent_id() -> str | None:
 
 def _get_readable_tenants() -> list[str]:
     """Return the cross-tenant read set; empty for single-tenant keys."""
-    return _readable_tenant_ids_var.get([])
+    return _readable_tenant_ids_var.get(None) or []
 
 
 def _get_scopes() -> set[str] | None:

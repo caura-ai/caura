@@ -34,8 +34,8 @@ _current_tenant_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # Set when the caller authenticated with a credential authorized for
 # cross-tenant reads. The list always includes the home tenant_id when
 # populated; an empty list means "single-tenant key, no widening".
-_readable_tenant_ids: contextvars.ContextVar[list[str]] = contextvars.ContextVar(
-    "_readable_tenant_ids", default=[]
+_readable_tenant_ids: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "_readable_tenant_ids", default=None
 )
 
 
@@ -62,7 +62,7 @@ def set_readable_tenants(tenant_ids: list[str] | None) -> None:
 
 def get_readable_tenants() -> list[str]:
     """Get the cross-tenant read set for the current request context."""
-    return _readable_tenant_ids.get()
+    return _readable_tenant_ids.get() or []
 
 
 async def get_db() -> AsyncGenerator[AsyncSession]:
@@ -79,7 +79,7 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
         # Plumb the readable-tenant set as a second GUC. Deployments that
         # apply RLS may extend their policies to honor this for read paths;
         # in OSS-default deployments it is informational only.
-        readable = _readable_tenant_ids.get()
+        readable = _readable_tenant_ids.get() or []
         await session.execute(
             text("SELECT set_config('app.readable_tenant_ids', :csv, true)"),
             {"csv": ",".join(readable) if readable else ""},
