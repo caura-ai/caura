@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.7.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.6.0...backend-v2.7.0) (2026-05-18)
+
+
+### Features
+
+* **core-api:** cross-tenant read plumbing + capabilities ([#154](https://github.com/caura-ai/caura-memclaw/issues/154)) ([27b02f6](https://github.com/caura-ai/caura-memclaw/commit/27b02f6eb72e1abe17157c1bd13faadaf12ec448))
+
 ## [2.6.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.5.0...backend-v2.6.0) (2026-05-17)
 
 
