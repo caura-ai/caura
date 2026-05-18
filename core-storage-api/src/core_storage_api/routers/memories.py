@@ -320,15 +320,23 @@ async def find_rdf_conflicts(
     subject_entity_id: str,
     predicate: str,
     exclude_id: str | None = None,
+    fleet_id: str | None = None,
+    object_value: str | None = None,
 ) -> list[dict]:
+    # CAURA-123 — forward ``fleet_id`` and ``object_value`` to the
+    # service. Without ``object_value`` the previous default of ``""``
+    # made the SQL filter ``object_value != ''`` return every non-empty
+    # value — including the new memory's own value — producing false
+    # RDF conflicts for two writes of the same fact (e.g., punctuation
+    # differences). With it forwarded the service's ``!=`` filter
+    # correctly excludes same-value rows.
     memories = await _svc.memory_find_rdf_conflicts(
         tenant_id=tenant_id,
         subject_entity_id=UUID(subject_entity_id),
         predicate=predicate,
-        # Service requires object_value and memory_id; use empty/exclude_id defaults
-        # so the endpoint works as a conflict finder by subject+predicate.
-        object_value="",
+        object_value=object_value or "",
         memory_id=UUID(exclude_id) if exclude_id else UUID(int=0),
+        fleet_id=fleet_id,
     )
     return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
 

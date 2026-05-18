@@ -201,6 +201,17 @@ async def _detect(
             subject_entity_id,
             predicate,
             exclude_id=str(memory_id),
+            # CAURA-123 — scope by fleet so RDF detection respects the
+            # same isolation boundary as semantic detection. Without
+            # this the storage-api router previously forced
+            # ``fleet_id IS NULL`` and the path was unreachable for
+            # any fleeted write.
+            fleet_id=new_memory.get("fleet_id"),
+            # CAURA-123 — pass the new memory's own object_value so
+            # the storage layer's ``Memory.object_value != :ov`` filter
+            # excludes same-value rows. Otherwise two writes of the
+            # same fact trigger a false conflict on themselves.
+            object_value=object_value,
         )
         for old in rdf_conflicts:
             if not _candidate_is_older(old, new_memory):

@@ -95,6 +95,13 @@ DEFAULT_SETTINGS: dict = {
     },
     "write": {
         "default_write_mode": None,  # None = "fast"; "fast" | "strong"
+        # CAURA-123 — RDF triple emission. When true (the default), a
+        # pre-write step extracts (subject_entity_id, predicate,
+        # object_value) from the request so the deterministic RDF
+        # contradiction path (contradiction_detector.py) can fire
+        # instead of falling through to the LLM. ``None`` resolves to
+        # the global default (true).
+        "triple_emission_enabled": None,
     },
     "agents": {
         "require_agent_approval": None,
@@ -306,6 +313,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "agents.require_agent_approval": bool,
     "entity_blocklist": list,
     "memclaw.auto_upgrade_enabled": bool,
+    "write.triple_emission_enabled": bool,
 }
 
 # Inclusive range constraints applied AFTER type validation. Listed
@@ -543,6 +551,13 @@ class ResolvedConfig:
         if val in ("fast", "strong"):
             return val
         return "fast"  # default to fast when unset
+
+    @property
+    def triple_emission_enabled(self) -> bool:
+        # CAURA-123 — default ON. Tenants can opt out per-org without
+        # a deploy (instant rollback path).
+        val = self._ts.get("write", {}).get("triple_emission_enabled")
+        return bool(val) if val is not None else True
 
     # Agents
     @property

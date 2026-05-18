@@ -6,6 +6,7 @@ from core_api.pipeline.steps.write import (
     CheckExactDuplicate,
     CheckSemanticDuplicate,
     ComputeContentHash,
+    EmitMemoryTriple,
     LoadTenantConfig,
     MergeEnrichmentFields,
     ParallelEmbedEnrich,
@@ -35,6 +36,9 @@ def build_persist_pipeline() -> Pipeline:
     return Pipeline(
         "write_persist",
         [
+            # entity_links and content are expected to be fully enriched by the
+            # upstream enrichment pipeline before this path runs.
+            EmitMemoryTriple(),
             CheckExactDuplicate(),
             CheckSemanticDuplicate(),
             WriteMemoryRow(),
@@ -53,6 +57,7 @@ def build_fast_write_pipeline() -> Pipeline:
             ComputeContentHash(),
             ParallelEmbedEnrich(),
             MergeEnrichmentFields(),
+            EmitMemoryTriple(),
             CheckExactDuplicate(),
             WriteMemoryRow(),
             ScheduleBackgroundTasks(),
@@ -82,6 +87,7 @@ def build_strong_write_pipeline() -> Pipeline:
             ComputeContentHash(),
             ParallelEmbedEnrich(),
             MergeEnrichmentFields(),
+            EmitMemoryTriple(),
             CheckExactDuplicate(),
             CheckSemanticDuplicate(),
             WriteMemoryRow(),

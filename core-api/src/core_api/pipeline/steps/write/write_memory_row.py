@@ -71,7 +71,11 @@ class WriteMemoryRow:
             await sc.create_entity_link(
                 {
                     "memory_id": memory["id"],
-                    "entity_id": link.entity_id,
+                    # Stringify the UUID for JSON transport — mirrors
+                    # line 60's handling of ``subject_entity_id`` and
+                    # the bulk write path. SQLAlchemy auto-coerces on
+                    # receive, so the persisted value is identical.
+                    "entity_id": str(link.entity_id),
                     "role": link.role,
                 }
             )

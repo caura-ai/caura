@@ -4,6 +4,7 @@ from core_api.pipeline.steps.write.check_content_length import CheckContentLengt
 from core_api.pipeline.steps.write.check_exact_duplicate import CheckExactDuplicate
 from core_api.pipeline.steps.write.check_semantic_duplicate import CheckSemanticDuplicate
 from core_api.pipeline.steps.write.compute_content_hash import ComputeContentHash
+from core_api.pipeline.steps.write.emit_memory_triple import EmitMemoryTriple
 from core_api.pipeline.steps.write.load_tenant_config import LoadTenantConfig
 from core_api.pipeline.steps.write.merge_enrichment_fields import MergeEnrichmentFields
 from core_api.pipeline.steps.write.parallel_embed_enrich import ParallelEmbedEnrich
@@ -19,6 +20,7 @@ __all__ = [
     "CheckExactDuplicate",
     "CheckSemanticDuplicate",
     "ComputeContentHash",
+    "EmitMemoryTriple",
     "LoadTenantConfig",
     "MergeEnrichmentFields",
     "ParallelEmbedEnrich",
