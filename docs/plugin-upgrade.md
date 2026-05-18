@@ -39,7 +39,7 @@ curl -ks -X POST "$MEMCLAW_API_URL/api/v1/install-plugin" \
   -H "Content-Type: application/json" \
   -d '{
     "api_url":   "https://your-memclaw-server",
-    "api_key":   "mc_… or mca_…",
+    "api_key":   "mc_…",
     "fleet_id":  "your-fleet",
     "tenant_id": "your-tenant",
     "node_name": "this-node"

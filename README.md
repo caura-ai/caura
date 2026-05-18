@@ -70,9 +70,9 @@ Get up and running in minutes — no infrastructure, automatic updates, usage an
 }
 ```
 
-> **Production / team use:** `mc_` is a tenant-level key — fine for personal use, but a fleet of agents should bind each one to its own `mca_` key for trust gating, fleet membership, and per-agent keystones. Mint per-agent keys atomically via [`POST /api/v1/admin/agent-keys/provision`](docs/integration-without-plugin.md). The MCP server accepts the agent key on either `X-API-Key: mca_…` or `Authorization: Bearer mca_…`.
+> **Production / team use:** the quickstart key above is a **tenant-scoped credential** — fine for personal use, but a fleet of agents should bind each one to its own **agent-scoped credential** for trust gating, fleet membership, and per-agent keystones. Provision agent-scoped credentials atomically via [`POST /api/v1/admin/agent-keys/provision`](docs/integration-without-plugin.md), or through the dashboard at `/settings/organization/api-credentials`. Both kinds use the `mc_` prefix on the wire — scope is bound at mint time on the credential itself. The MCP server accepts the credential on either `X-API-Key: mc_…` or `Authorization: Bearer mc_…`. *(Pre-existing `mca_…` and `mci_…` keys continue to authenticate via back-compat.)*
 >
-> Staying on `mc_` for the quickstart? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-key path.
+> Using a tenant-scoped credential? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-scoped path.
 
 ### Self-Hosted (Open Source)
 
@@ -324,7 +324,7 @@ Add MemClaw to any MCP client with one config block.
 }
 ```
 
-> For team or production use, swap the tenant `mc_` key for a per-agent `mca_` key — atomic provisioning via `POST /api/v1/admin/agent-keys/provision` mints the key + Agent row + initial trust + fleet membership in one round trip. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md). Staying on `mc_`? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-key path.
+> For team or production use, swap the tenant-scoped key for an **agent-scoped credential** — atomic provisioning via `POST /api/v1/admin/agent-keys/provision` (or the `/settings/organization/api-credentials` wizard) mints the credential + Agent row + initial trust + fleet membership in one round trip. Both kinds use the `mc_` prefix; scope is set at mint time on the credential. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md). Using a tenant-scoped credential? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-scoped path.
 
 **Where to add this config:**
 - **Claude Code** — `~/.claude/settings.json` under `"mcpServers"`
@@ -773,7 +773,7 @@ memclaw/
 ├── plugin/                        # OpenClaw plugin (TypeScript)
 │   └── src/
 │       ├── tools.ts               # Tool implementations
-│       ├── agent-auth.ts          # Per-agent API keys (mca_ prefix)
+│       ├── agent-auth.ts          # Per-agent credentials (agent-scoped mc_ keys)
 │       ├── context-engine.ts      # Auto-read/write lifecycle
 │       ├── heartbeat.ts           # 60s heartbeat → MemClaw API
 │       └── educate.ts             # Agent education delivery
@@ -900,7 +900,7 @@ Anything not listed above is internal and may change in any release without a ma
 - Most `/api/v1/admin/*` and all `/api/v1/testing/*` routes (the documented exception is `POST /admin/agent-keys/provision`, which is part of the stable identity-bootstrap surface — see the Agents row above)
 - The `core-storage-api` microservice (internal, not user-facing)
 - The plugin's TypeScript module structure
-- API-key prefix formats (`mc_…`, `mca_…`) — formats may evolve
+- API-key prefix formats — currently unified on `mc_…` (with legacy `mca_…` / `mci_…` aliases still accepted via back-compat); formats may continue to evolve
 
 ### Reporting breaking changes
 
