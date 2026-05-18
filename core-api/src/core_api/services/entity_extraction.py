@@ -2,6 +2,7 @@
 
 import logging
 import re
+import zlib
 
 from pydantic import BaseModel
 
@@ -92,7 +93,14 @@ async def extract_entities_from_content(
 
     async def _do_extract(llm: LLMProvider) -> ExtractedGraph:
         prompt = EXTRACTION_PROMPT.format(memory_type=memory_type, content=content)
-        raw = await llm.complete_json(prompt)
+        # Stable seed per prompt (A5 #2): without it, gpt-5.4-nano returns
+        # different entity sets / types across retries on identical content
+        # (e.g., "helios-9" → 'technology' on one call, 'project' on the
+        # next). CRC32 of the encoded prompt gives a deterministic 32-bit
+        # integer that survives process restarts — unlike ``hash()`` which
+        # is salted per-process for str inputs.
+        seed = zlib.crc32(prompt.encode("utf-8"))
+        raw = await llm.complete_json(prompt, seed=seed)
         return ExtractedGraph(**raw)
 
     extraction_model = (

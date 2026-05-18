@@ -114,18 +114,31 @@ class OpenAILLMProvider:
         prompt: str,
         *,
         temperature: float = 0.0,
+        seed: int | None = None,
     ) -> dict:
         """Send a prompt and return a parsed JSON dict.
 
         Uses ``response_format={"type": "json_object"}`` to enforce JSON output.
+
+        ``seed`` (A5 #2): when provided, forwarded to OpenAI's chat
+        completions API for response determinism. ``temperature=0.0`` is
+        not sufficient on its own — small models (gpt-class -nano) still
+        sample non-deterministically without a seed. Callers that need
+        repeatable output across retries (entity extraction, dedup
+        disambiguation) should pass a stable seed derived from the
+        prompt. Omit (or pass ``None``) for vanilla non-deterministic
+        completion.
         """
         t0 = time.perf_counter()
-        response = await self._client.chat.completions.create(
-            model=self._model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=temperature,
-        )
+        create_kwargs: dict = {
+            "model": self._model,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_object"},
+            "temperature": temperature,
+        }
+        if seed is not None:
+            create_kwargs["seed"] = seed
+        response = await self._client.chat.completions.create(**create_kwargs)
         llm_ms = int((time.perf_counter() - t0) * 1000)
         logger.info(
             "OpenAI-compatible complete_json (%s) took %dms",

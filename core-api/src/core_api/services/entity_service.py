@@ -80,10 +80,16 @@ async def upsert_entity(
             aliases.append(data.canonical_name)
         merged_attrs["_aliases"] = aliases
 
-        # Promote longer (more specific) name as canonical
+        # First-seen wins (A5 #3). The previous "promote longer name as
+        # canonical" rule actively turned hallucinated suffixes into the
+        # canonical row — e.g., the LLM returns ``globex industries`` for
+        # content that says only ``Globex``, embedding similarity merges
+        # the two, and the canonical permanently becomes ``globex
+        # industries``. Cross-link discovery then surfaces false overlaps
+        # against every other ``Globex`` mention. Alternative surface
+        # forms are still preserved via the ``_aliases`` list above so
+        # they remain searchable / discoverable.
         new_canonical = existing_name
-        if len(data.canonical_name) > len(existing_name):
-            new_canonical = data.canonical_name
 
         update_data: dict = {
             "entity_type": data.entity_type,
