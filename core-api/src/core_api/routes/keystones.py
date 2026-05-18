@@ -109,8 +109,9 @@ def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple
     """Return ``(caller_agent_id, verified)`` for the request.
 
     ``verified=True`` means the gateway cryptographically established
-    the caller's agent identity (an agent-scoped API key like ``mca_…``
-    populated ``auth.agent_id``). ``verified=False`` means the identity
+    the caller's agent identity (an agent-scoped credential whose
+    ``kind=agent_key`` populated ``auth.agent_id``). ``verified=False``
+    means the identity
     is asserted via the ``X-Agent-ID`` header alone — which is what
     happens when a non-agent-scoped (admin / tenant) key is in use.
     Unverified identities are still accepted but with stricter trust

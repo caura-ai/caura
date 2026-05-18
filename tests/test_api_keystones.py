@@ -309,7 +309,7 @@ async def test_set_agent_scope_self_unverified_rejected(client):
     bumps the floor to ≥ 2; a trust-1 agent attempting self-author
     through this path is rejected. To exercise the legitimate
     self-author tier in production, callers need a gateway-verified
-    agent identity (e.g. an ``mca_*`` agent-scoped key)."""
+    agent identity (an agent-scoped credential, kind=agent_key)."""
     tenant_id, headers = get_test_auth()
     tag = _uid()
     agent_id = f"self-{tag}"

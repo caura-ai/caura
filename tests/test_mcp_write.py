@@ -10,6 +10,7 @@ Covers:
 - Service ``HTTPException`` → ``Error (…)`` envelope.
 - Auth failure short-circuits.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -42,15 +43,13 @@ async def test_write_single_happy_path(mcp_env):
 
 async def test_write_registers_agent(mcp_env):
     # memclaw_write must lazy-create the Agent row (REST parity). Without this,
-    # an mca_-key holder's first MCP write succeeds but PATCH /agents/{id}/trust
-    # 404s because no Agent row exists.
+    # an agent-scoped credential holder's first MCP write succeeds but
+    # PATCH /agents/{id}/trust 404s because no Agent row exists.
     enforce = mcp_env["service"]("enforce_fleet_write")
     enforce.return_value = {"agent_id": "a1", "trust_level": 0}
     mcp_env["service"]("create_memory").return_value = _OutStub("m-2")
 
-    await mcp_server.memclaw_write(
-        content="first write", agent_id="a1", fleet_id="f1"
-    )
+    await mcp_server.memclaw_write(content="first write", agent_id="a1", fleet_id="f1")
     enforce.assert_awaited_once()
     args = enforce.await_args.args
     # Signature: (db, tenant_id, agent_id, fleet_id)
@@ -77,9 +76,7 @@ async def test_write_batch_registers_agent(mcp_env):
 async def test_write_batch_happy_path(mcp_env):
     mcp_env["service"]("create_memories_bulk").return_value = _OutStub("batch-1")
 
-    out = await mcp_server.memclaw_write(
-        items=[{"content": "one"}, {"content": "two"}]
-    )
+    out = await mcp_server.memclaw_write(items=[{"content": "one"}, {"content": "two"}])
     payload = parse_envelope(out)
     assert payload["id"] == "batch-1"
     mcp_env["service_mocks"]["create_memories_bulk"].assert_awaited_once()
@@ -115,9 +112,7 @@ async def test_write_batch_too_large(mcp_env):
 
 async def test_write_invalid_batch_item(mcp_env):
     """Item without ``content`` trips BulkMemoryItem validation → INVALID_BATCH_ITEM."""
-    out = await mcp_server.memclaw_write(
-        items=[{"content": "good"}, {"weight": 0.5}]
-    )
+    out = await mcp_server.memclaw_write(items=[{"content": "good"}, {"weight": 0.5}])
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INVALID_BATCH_ITEM"
     assert payload["error"]["details"]["received_count"] == 2

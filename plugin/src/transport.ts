@@ -39,7 +39,7 @@ export async function apiCall(
     }
   }
 
-  // Resolve per-agent key (mca_) or fall back to tenant key (mc_)
+  // Resolve agent-scoped credential, or fall back to the tenant-scoped key
   const effectiveAgentId = agentId || (body?.agent_id as string) || (query?.agent_id as string);
   let effectiveKey = MEMCLAW_API_KEY;
   if (effectiveAgentId) {

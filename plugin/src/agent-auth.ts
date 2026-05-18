@@ -1,9 +1,11 @@
 /**
  * Agent authentication broker for MemClaw plugin.
  *
- * Auto-provisions per-agent API keys (mca_ prefix) using the tenant key
- * (mc_ prefix) as a bootstrap credential. Keys are cached in memory and
- * persisted to a local secrets file (mode 600).
+ * Auto-provisions agent-scoped credentials using the tenant-scoped key
+ * as a bootstrap credential. Both kinds share the `mc_` prefix on the
+ * wire; the credential's kind (tenant vs agent) is bound at mint time.
+ * Keys are cached in memory and persisted to a local secrets file
+ * (mode 600).
  *
  * Flow:
  *   1. resolveAgentKey(agentId) checks in-memory cache
@@ -97,8 +99,10 @@ async function provisionAgentKey(
 /**
  * Resolve the API key for a specific agent.
  *
- * Returns the per-agent mca_ key if available/provisionable,
- * or null to fall back to the tenant mc_ key.
+ * Returns the agent-scoped credential if available/provisionable,
+ * or null to fall back to the tenant-scoped key. Both share the
+ * `mc_` wire prefix; the resolved kind drives the X-Agent-ID
+ * injection at the gateway.
  */
 export async function resolveAgentKey(
   agentId: string,

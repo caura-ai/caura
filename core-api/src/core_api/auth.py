@@ -72,10 +72,12 @@ class AuthContext:
         # deletes (so users can reduce usage) and reads.
         self.is_read_only = is_read_only
         # True when the gateway authenticated the call with a memclawd
-        # install credential (mci_ prefix). Drives bulk-write relaxation
-        # for broker-mode callers — they don't drive an
-        # ``X-Bulk-Attempt-Id`` header and don't have an ``agent_id``
-        # on the wire.
+        # install credential (kind=install_credential; HMAC-derived
+        # ``mci_v1_`` prefix on the wire — intentional carve-out from
+        # the unified ``mc_`` surface for retry idempotency). Drives
+        # bulk-write relaxation for broker-mode callers — they don't
+        # drive an ``X-Bulk-Attempt-Id`` header and don't have an
+        # ``agent_id`` on the wire.
         self.is_install_credential = is_install_credential
         self.install_uuid = install_uuid
         # Tenants this caller may READ from. Always non-empty when tenant_id
@@ -249,7 +251,8 @@ async def get_auth_context(
     key: str | None = Security(api_key_header),
 ) -> AuthContext:
     admin_key = get_admin_key()
-    # Enterprise gateway injects X-Agent-ID when caller uses an mca_ agent key.
+    # Enterprise gateway injects X-Agent-ID when the caller's credential
+    # is agent-scoped (kind=agent_key).
     agent_id = request.headers.get("x-agent-id") or None
     # Enterprise gateway injects X-Org-Read-Only: true when the org has
     # exceeded plan limits after a subscription cancellation. In standalone

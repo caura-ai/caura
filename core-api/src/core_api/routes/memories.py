@@ -921,8 +921,9 @@ async def write_memories_bulk(
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
 
-    # Broker (mci_ install credential) calls don't carry an attempt id
-    # header or an ``agent_id`` body field — the broker's own per-
+    # Broker (kind=install_credential, ``mci_v1_…`` wire prefix) calls
+    # don't carry an attempt id header or an ``agent_id`` body field
+    # — the broker's own per-
     # session ``client_hash`` de-dup is the design contract per
     # cloud-data-plane.md §2.4 (gap G3). Server-derive a per-request
     # attempt id and attribute writes to the install. Non-broker

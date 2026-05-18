@@ -131,7 +131,8 @@ def test_enforce_write_scope_blocks_read_only_scopes():
 def test_enforce_read_only_blocks_scope_restricted_keys():
     """The write-side aggregate gate at every endpoint head — demo +
     scope are both checked in one call so existing handlers don't need
-    per-site changes to honor mcx_ read-only credentials."""
+    per-site changes to honor read-only cross-tenant credentials
+    (kind=cross_tenant with the ``write`` capability omitted)."""
     ctx = AuthContext(
         tenant_id="t1",
         scopes={"recall", "search", "memories_read", "documents_read"},
