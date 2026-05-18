@@ -305,22 +305,90 @@ async def _detect(
 CONTRADICTION_PROMPT = """\
 You are a contradiction detector for a business memory system.
 
-Given two memory statements, determine if they CONTRADICT each other.
-Contradiction means they cannot both be true at the same time.
+Two statements contradict ONLY IF they make incompatible claims about the
+SAME real-world subject. Different subjects -> NOT a contradiction, even if
+the predicates look opposite or the statements look semantically similar.
 
 Statement A (NEW): {new_content}
 
 Statement B (EXISTING): {old_content}
 
-Rules:
-- Updates/corrections ARE contradictions (e.g., "X lives in Tel Aviv" vs "X lives in Haifa")
-- More specific versions of the same fact are NOT contradictions
-- Complementary information is NOT a contradiction
-- Different topics are NOT contradictions
+Follow these steps in order:
 
-Reply with ONLY a JSON object:
-{{"contradicts": true/false, "reason": "brief explanation"}}
+1. Extract subject_a: the entity Statement A is primarily about
+   (person, company, project, product, etc.). Use a short noun phrase.
+2. Extract subject_b: the entity Statement B is primarily about.
+3. Decide same_subject. Set true ONLY when subject_a and subject_b refer
+   to the SAME real-world entity. Treat these as same_subject=true:
+     - exact name match
+     - known alias / nickname / abbreviation of the same entity
+     - role description and proper name referring to the same individual
+       in context (e.g., "the CEO" and "Sarah Johnson" when context makes
+       it unambiguous)
+     - pronoun resolved unambiguously to the other statement's subject
+   Treat these as same_subject=false:
+     - two different people who share a first name or last name
+     - two different companies, products, projects, or teams
+     - any case where you are not confident the subjects are the same entity
+4. Decide contradicts:
+   - If same_subject is false, contradicts MUST be false.
+   - If same_subject is true, contradicts is true ONLY when the two
+     statements assert mutually exclusive states about that subject
+     referring to the same time frame.
+   - Updates / corrections about the same subject ARE contradictions
+     (e.g., "X lives in Tel Aviv" vs "X lives in Haifa").
+   - More specific versions of the same fact are NOT contradictions.
+   - Complementary information is NOT a contradiction.
+   - Two state claims about the same subject are NOT a contradiction ONLY
+     when BOTH statements explicitly reference non-overlapping past time
+     periods (e.g., "X lived in Tel Aviv from 2010 to 2014" vs "X lived in
+     Haifa from 2015 to 2018" — both can be historically true). In every
+     other case, including when only one statement carries a date stamp,
+     conflicting same-subject state claims ARE contradictions; do not
+     speculate that one might describe a future state that resolves the
+     conflict.
+
+Reply with ONLY a JSON object, no prose, no markdown fences:
+{{"subject_a": "<short noun phrase>",
+  "subject_b": "<short noun phrase>",
+  "same_subject": true/false,
+  "contradicts": true/false,
+  "reason": "one short phrase referencing the subjects and the conflict (or its absence)"}}
 """
+
+
+def _parse_contradiction_response(raw: dict) -> bool:
+    """Apply the structured-output safety gate.
+
+    The prompt requires the model to commit to ``same_subject`` before
+    ``contradicts``. If ``same_subject`` is false (or missing), ``contradicts``
+    MUST be false regardless of what the model emitted — this guards against
+    cross-subject false positives even when the model returns an inconsistent
+    combination. Missing keys are treated as false (conservative default).
+    """
+    if not isinstance(raw, dict):
+        return False
+    # Identity check against True — anything else (False, missing, the JSON
+    # string "false", numbers, None) is conservatively treated as False.
+    # ``bool("false")`` is True in Python, so a model returning the string
+    # "false" instead of the boolean would have silently bypassed the gate.
+    same_subject = raw.get("same_subject") is True
+    contradicts = raw.get("contradicts") is True
+    if contradicts and not same_subject:
+        logger.warning(
+            "Contradiction model returned contradicts=true with same_subject=false; "
+            "overriding to false. subject_a=%r subject_b=%r reason=%r",
+            raw.get("subject_a"),
+            raw.get("subject_b"),
+            raw.get("reason"),
+        )
+        return False
+    # The dangerous (contradicts=True, same_subject=False) case was handled
+    # above. Returning ``contradicts`` is therefore equivalent to
+    # ``same_subject and contradicts``: if contradicts is False the result
+    # is False either way; if contradicts is True we only reach this line
+    # when same_subject is True.
+    return contradicts
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +422,7 @@ async def _llm_contradiction_check(
 
     async def _do_check(llm) -> bool:
         raw = await llm.complete_json(prompt)
-        return bool(raw.get("contradicts", False))
+        return _parse_contradiction_response(raw)
 
     return await call_with_fallback(
         primary_provider_name=provider_name,
