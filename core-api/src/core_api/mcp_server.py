@@ -180,8 +180,9 @@ class MCPAuthMiddleware:
                 else:
                     _tenant_id_var.set(_UNAUTH)
 
-            # X-Agent-ID injected by enterprise gateway for mca_ agent keys.
-            # When present, this is the cryptographically verified agent identity.
+            # X-Agent-ID injected by enterprise gateway for agent-scoped
+            # credentials (kind=agent_key). When present, this is the
+            # cryptographically verified agent identity.
             agent_header = headers.get(b"x-agent-id", b"").decode()
             _agent_id_var.set(agent_header or None)
 
@@ -240,10 +241,10 @@ def _refuse_default_agent_on_gateway(agent_id: str) -> str | None:
     documented as ``agent row missing from list_agents``.
 
     Returns an error envelope if the call should be refused; ``None`` to proceed.
-    Standalone, admin, and gateway-routed mca_-key paths are unaffected:
+    Standalone, admin, and gateway-routed agent-scoped paths are unaffected:
     standalone uses a stable single-tenant identity, admin is a system caller,
-    and an mca_ key resolves X-Agent-ID via auth_validate so this guard never
-    fires for it.
+    and an agent-scoped credential resolves X-Agent-ID via auth_validate so
+    this guard never fires for it.
     """
     if not _via_gateway_var.get(False):
         return None
@@ -253,11 +254,14 @@ def _refuse_default_agent_on_gateway(agent_id: str) -> str | None:
         return None
     return _error_response(
         "MISSING_AGENT_ID",
-        f"Writes via the gateway with a tenant ({'mc_'}) key must specify an "
-        "agent_id explicitly; the reserved default '"
-        f"{_DEFAULT_AGENT_ID}' is not accepted on this path. Either pass "
-        "agent_id=<your-agent-name> or use an mca_ per-agent key whose "
-        "identity the gateway will inject for you.",
+        "Writes via the gateway with a tenant-scoped credential must specify "
+        "an agent_id explicitly; the reserved default "
+        f"'{_DEFAULT_AGENT_ID}' is not accepted on this path. Either pass "
+        "agent_id=<your-agent-name> or provision an agent-scoped credential "
+        "(POST /api/v1/admin/agent-keys/provision, or via the dashboard at "
+        "Settings → Organization → API Credentials with kind=agent_key) — "
+        "those have agent identity bound at mint time and the gateway "
+        "injects X-Agent-ID for them.",
     )
 
 
@@ -423,11 +427,12 @@ async def memclaw_recall(
             if _ag:
                 agent_profile = _ag.get("search_profile") if isinstance(_ag, dict) else _ag.search_profile
             # Cross-tenant recall widens via readable_tenant_ids when
-            # the caller authenticated with an mcx_ key — the gateway
-            # plumbs ``X-Readable-Tenant-IDs`` and the MCP middleware
-            # parks it on ``_readable_tenant_ids_var``. Single-tenant
-            # keys leave the var empty; ``search_memories`` falls back
-            # to ``WHERE tenant_id = $1`` in that case.
+            # the caller authenticated with a cross-tenant credential
+            # (kind=cross_tenant) — the gateway plumbs
+            # ``X-Readable-Tenant-IDs`` and the MCP middleware parks
+            # it on ``_readable_tenant_ids_var``. Single-tenant
+            # credentials leave the var empty; ``search_memories`` falls
+            # back to ``WHERE tenant_id = $1`` in that case.
             results = await search_memories(
                 db,
                 tenant_id=tenant_id,
