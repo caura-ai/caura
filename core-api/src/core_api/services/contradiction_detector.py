@@ -416,23 +416,57 @@ Reply with ONLY a JSON object, no prose, no markdown fences:
 """
 
 
-def _parse_contradiction_response(raw: dict) -> bool:
-    """Apply the structured-output safety gate.
+# CAURA-124 — within-subject false-positive shapes that hard-gate
+# ``contradicts=true`` to ``false``. ``none`` (or absent / unknown
+# value) is the only enum value that allows a contradiction to stand.
+# Keep this set in sync with the enum listed in ``CONTRADICTION_PROMPT``
+# and with the wet-test fixtures in
+# ``scripts/wet_test_contradiction_prompt.py``.
+NON_CONFLICT_REASONS: frozenset[str] = frozenset(
+    {
+        "temporal_supersession",
+        "list_valued_predicate",
+        "refinement",
+        "scope_mismatch",
+        "same_name_distinct_subject",
+        "conditional_unrealized",
+        "event_restatement",
+    }
+)
 
-    The prompt requires the model to commit to ``same_subject`` before
-    ``contradicts``. If ``same_subject`` is false (or missing), ``contradicts``
-    MUST be false regardless of what the model emitted — this guards against
-    cross-subject false positives even when the model returns an inconsistent
-    combination. Missing keys are treated as false (conservative default).
+
+def _parse_contradiction_response(raw: dict) -> bool:
+    """Apply the structured-output safety gates.
+
+    Two gates run, in order:
+
+    1. **Cross-subject gate (CAURA-111).** The prompt requires the model
+       to commit to ``same_subject`` before ``contradicts``. If
+       ``same_subject`` is false (or missing), ``contradicts`` MUST be
+       false regardless of what the model emitted.
+
+    2. **Within-subject FP gate (CAURA-124).** Even when same_subject is
+       true, certain shapes describe two claims that both hold and
+       must not be flagged. The model classifies the shape into
+       ``non_conflict_reason``; any value in ``NON_CONFLICT_REASONS``
+       forces ``contradicts=false``. ``"none"`` (or absent / unknown
+       value) leaves ``contradicts`` untouched.
+
+    Missing keys and non-boolean values are treated conservatively
+    (False for booleans; None for non_conflict_reason, which has the
+    same effect as "none" — neither fires Gate 2). ``bool("false")``
+    is True in Python, so a model returning the *string* "false"
+    instead of the boolean would have silently bypassed the gate —
+    both gates use identity-against-True comparisons to avoid that
+    trap.
     """
     if not isinstance(raw, dict):
         return False
-    # Identity check against True — anything else (False, missing, the JSON
-    # string "false", numbers, None) is conservatively treated as False.
-    # ``bool("false")`` is True in Python, so a model returning the string
-    # "false" instead of the boolean would have silently bypassed the gate.
+
     same_subject = raw.get("same_subject") is True
     contradicts = raw.get("contradicts") is True
+
+    # Gate 1 — cross-subject (CAURA-111).
     if contradicts and not same_subject:
         logger.warning(
             "Contradiction model returned contradicts=true with same_subject=false; "
@@ -442,11 +476,35 @@ def _parse_contradiction_response(raw: dict) -> bool:
             raw.get("reason"),
         )
         return False
-    # The dangerous (contradicts=True, same_subject=False) case was handled
-    # above. Returning ``contradicts`` is therefore equivalent to
-    # ``same_subject and contradicts``: if contradicts is False the result
-    # is False either way; if contradicts is True we only reach this line
-    # when same_subject is True.
+
+    # Gate 2 — within-subject FP shapes (CAURA-124). Only fires when
+    # the model both flagged a contradiction AND named a recognised
+    # non-conflict shape — otherwise it's a no-op. Locals are named
+    # ``non_conflict_reason`` (not ``reason``) so they don't collide
+    # with the model's free-text ``raw["reason"]`` field that the
+    # logger calls pass through verbatim.
+    raw_ncr = raw.get("non_conflict_reason")
+    non_conflict_reason = raw_ncr if isinstance(raw_ncr, str) else None
+    if contradicts and non_conflict_reason in NON_CONFLICT_REASONS:
+        # WARNING (not INFO): this branch fires only when the model
+        # returned an internally inconsistent response — contradicts=true
+        # alongside a recognised non_conflict_reason, which the prompt
+        # explicitly forbids in step 5. Same severity as Gate 1's
+        # cross-subject override so model regressions surface at the
+        # standard WARNING level rather than getting buried in INFO.
+        logger.warning(
+            "Contradiction model returned contradicts=true with "
+            "non_conflict_reason=%r; overriding to false. "
+            "subject_a=%r subject_b=%r reason=%r",
+            non_conflict_reason,
+            raw.get("subject_a"),
+            raw.get("subject_b"),
+            raw.get("reason"),
+        )
+        return False
+
+    # Both gates passed (or contradicts is already False) — return the
+    # model's verdict.
     return contradicts
 
 
