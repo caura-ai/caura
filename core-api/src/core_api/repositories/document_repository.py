@@ -97,9 +97,21 @@ class DocumentRepository:
         tenant_id: str,
         collection: str,
         doc_id: str,
+        readable_tenant_ids: list[str] | None = None,
     ) -> Document | None:
+        """Get a single document by (tenant_id, collection, doc_id).
+
+        ``readable_tenant_ids`` widens the tenant predicate to
+        ``ANY($readable)`` so cross-tenant credentials can fetch docs
+        from sibling tenants. ``tenant_id`` is still required as the
+        binding/home tenant.
+        """
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
         stmt = select(Document).where(
-            Document.tenant_id == tenant_id,
+            tenant_pred,
             Document.collection == collection,
             Document.doc_id == doc_id,
         )
@@ -118,10 +130,19 @@ class DocumentRepository:
         order: str = "asc",
         limit: int = 20,
         offset: int = 0,
+        readable_tenant_ids: list[str] | None = None,
     ) -> list[Document]:
-        """Query documents with optional JSONB field-equality filters."""
+        """Query documents with optional JSONB field-equality filters.
+
+        ``readable_tenant_ids`` widens ``tenant_id`` to ``ANY($readable)``
+        for cross-tenant credentials.
+        """
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
         stmt = select(Document).where(
-            Document.tenant_id == tenant_id,
+            tenant_pred,
             Document.collection == collection,
         )
         if fleet_id:
@@ -154,9 +175,14 @@ class DocumentRepository:
         fleet_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        readable_tenant_ids: list[str] | None = None,
     ) -> list[Document]:
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
         stmt = select(Document).where(
-            Document.tenant_id == tenant_id,
+            tenant_pred,
             Document.collection == collection,
         )
         if fleet_id:
@@ -171,6 +197,7 @@ class DocumentRepository:
         *,
         tenant_id: str,
         fleet_id: str | None = None,
+        readable_tenant_ids: list[str] | None = None,
     ) -> list[tuple[str, int]]:
         """Enumerate collections a tenant has written to, with per-collection
         document counts.
@@ -180,12 +207,20 @@ class DocumentRepository:
         that fleet are counted; otherwise counts span every fleet within the
         tenant.
 
+        ``readable_tenant_ids`` widens to ``ANY($readable)`` — counts then
+        span every collection across the readable set (collections with the
+        same name across multiple tenants merge into one row).
+
         This is the discovery primitive for ``memclaw_doc op=list_collections``
         — clients use it when they do not yet know which collections exist.
         """
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
         stmt = (
             select(Document.collection, func.count().label("count"))
-            .where(Document.tenant_id == tenant_id)
+            .where(tenant_pred)
             .group_by(Document.collection)
             .order_by(Document.collection)
         )
@@ -203,6 +238,7 @@ class DocumentRepository:
         collection: str | None = None,
         top_k: int = 5,
         fleet_id: str | None = None,
+        readable_tenant_ids: list[str] | None = None,
     ) -> list[tuple[Document, float]]:
         """Semantic search over docs — scoped or cross-collection.
 
@@ -212,17 +248,25 @@ class DocumentRepository:
         Only rows with ``embedding IS NOT NULL`` are considered — a doc
         written without ``data["summary"]`` is invisible either way.
 
+        ``readable_tenant_ids`` widens to ``ANY($readable)`` — semantic
+        search then spans every document across the readable set, sorted
+        by global cosine distance.
+
         Orders by cosine distance against ``query_embedding`` using the
         partial HNSW index from migration 003. Returns ``(Document,
         similarity)`` pairs where ``similarity = 1 - cosine_distance``
         (1.0 = identical, 0.0 = orthogonal, slightly negative values
         are legal for near-orthogonal high-dim vectors).
         """
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
         distance = Document.embedding.cosine_distance(query_embedding)
         stmt = (
             select(Document, distance.label("distance"))
             .where(
-                Document.tenant_id == tenant_id,
+                tenant_pred,
                 Document.embedding.is_not(None),
             )
             .order_by(distance)

@@ -108,30 +108,27 @@ class AuthContext:
         """Return tenants whose data was widened into for this request,
         excluding the home tenant.
 
-        Hook for the per-use cross-tenant-read audit event. When the
-        memory/document/keystone read sweep lands (the follow-up to
-        this PR), recall/search/list handlers should:
+        Hook for the per-use cross-tenant-read audit event. Wired into
+        recall/search/list/stats/document-read handlers — they call
+        this after a widened query, pass the result count breakdown,
+        and the ``log_cross_tenant_read`` helper in
+        ``services/audit_service.py`` emits one event per source tenant
+        via the same async-batched queue ``log_action`` uses.
 
-          1. After serving a result that includes rows from multiple
-             tenants, count results per tenant.
-          2. Call this method to get the set of source tenants
-             touched.
-          3. Emit one audit event per source tenant via the
-             enterprise audit publisher (not yet wired in OSS — the
-             ``common.events.audit_publisher`` module is
-             enterprise-only). For OSS-direct deployments without an
-             audit publisher, this is a no-op and the call is silently
-             skipped.
-
-        Format of the audit event (when it lands):
+        Each emitted event has:
           action=cross_tenant_read
-          tenant_id=<source tenant>          # logged TO this tenant
+          tenant_id=<source tenant>           # logged TO this tenant
           detail={
             home_tenant_id: self.tenant_id,
             home_agent_id: self.agent_id,
             query_summary: <truncated query>,
             result_count_from_this_tenant: <int>,
           }
+
+        Returns ``[]`` for single-tenant credentials so single-tenant
+        callers pay zero overhead. The emission helper is also a no-op
+        on empty input — the audit pipeline trusts this method to
+        gate.
         """
         if not self.is_cross_tenant_read or not self.tenant_id:
             return []

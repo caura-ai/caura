@@ -239,7 +239,7 @@ async def test_doc_list_collections_passes_fleet_id_filter(mcp_env, monkeypatch)
     """fleet_id scopes the count; not a mandatory param."""
     captured = {}
 
-    async def fake_list(db, *, tenant_id, fleet_id=None):  # noqa: ARG001
+    async def fake_list(db, *, tenant_id, fleet_id=None, readable_tenant_ids=None):  # noqa: ARG001
         captured["fleet_id"] = fleet_id
         return [("customers", 1)]
 

@@ -42,7 +42,7 @@ from core_api.errors import code_for_status
 from core_api.repositories import memory_repo
 from core_api.schemas import BulkMemoryCreate, BulkMemoryItem, MemoryCreate, MemoryUpdate
 from core_api.services.agent_service import enforce_fleet_write
-from core_api.services.audit_service import log_action
+from core_api.services.audit_service import log_action, log_cross_tenant_read
 from core_api.services.entity_service import get_entity
 from core_api.services.memory_service import (
     create_memories_bulk,
@@ -468,6 +468,20 @@ async def memclaw_recall(
                     readable_tenant_ids=_get_readable_tenants() or None,
                 )
                 payload["brief"] = brief
+            # Cross-tenant read audit (F2): emit one event per source
+            # tenant when the credential widened beyond home. Async
+            # queue — does not block the response.
+            readable = _get_readable_tenants()
+            source_tenants = [t for t in readable if t and t != tenant_id]
+            if source_tenants:
+                await log_cross_tenant_read(
+                    db,
+                    home_tenant_id=tenant_id,
+                    home_agent_id=agent_id,
+                    source_tenants=source_tenants,
+                    surface="memclaw_recall",
+                    query_summary=(query or "")[:200],
+                )
             return _with_latency(json.dumps(payload, indent=2, default=str), t0)
         except HTTPException as e:
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
@@ -1017,10 +1031,23 @@ async def memclaw_doc(
 
     from core_api.repositories import document_repo
 
+    # Cross-tenant credentials widen read ops (list_collections, read,
+    # query, search) via ``readable_tenant_ids``. Write/delete pin to
+    # home_tenant — same contract as recall vs write. ``readable``
+    # stays None for single-tenant callers; document_repo falls back to
+    # ``tenant_id = $1``.
+    readable = _get_readable_tenants() or None
+    READ_OPS = {"list_collections", "read", "query", "search"}
+
     async with _mcp_session() as db:
         try:
             if op == "list_collections":
-                rows = await document_repo.list_collections(db, tenant_id=tenant_id, fleet_id=fleet_id)
+                rows = await document_repo.list_collections(
+                    db,
+                    tenant_id=tenant_id,
+                    fleet_id=fleet_id,
+                    readable_tenant_ids=readable if op in READ_OPS else None,
+                )
                 return _with_latency(
                     json.dumps(
                         {
@@ -1117,7 +1144,11 @@ async def memclaw_doc(
                         _error_response("INVALID_ARGUMENTS", "op=read requires 'doc_id'."), t0
                     )
                 doc = await document_repo.get_by_doc_id(
-                    db, tenant_id=tenant_id, collection=collection, doc_id=doc_id
+                    db,
+                    tenant_id=tenant_id,
+                    collection=collection,
+                    doc_id=doc_id,
+                    readable_tenant_ids=readable,
                 )
                 if not doc:
                     return _with_latency(f"Not found: {collection}/{doc_id}", t0)
@@ -1143,6 +1174,7 @@ async def memclaw_doc(
                     order=order,
                     limit=min(limit, 100),
                     offset=offset,
+                    readable_tenant_ids=readable,
                 )
                 items = [{"doc_id": d.doc_id, "data": d.data} for d in docs]
                 return _with_latency(
@@ -1174,7 +1206,24 @@ async def memclaw_doc(
                     query_embedding=query_embedding,
                     top_k=capped_top_k,
                     fleet_id=fleet_id,
+                    readable_tenant_ids=readable,
                 )
+                source_tenants = [t for t in (readable or []) if t and t != tenant_id]
+                if source_tenants:
+                    counts: dict[str, int] = {}
+                    for d, _sim in pairs:
+                        rt = getattr(d, "tenant_id", None)
+                        if rt:
+                            counts[rt] = counts.get(rt, 0) + 1
+                    await log_cross_tenant_read(
+                        db,
+                        home_tenant_id=tenant_id,
+                        home_agent_id=agent_id,
+                        source_tenants=source_tenants,
+                        surface="memclaw_doc_search",
+                        result_count_by_tenant=counts,
+                        query_summary=(query or "")[:200],
+                    )
                 # Always include `collection` per-row. When collection is
                 # omitted (broad search) the caller needs it to follow up
                 # with op=read. Zero cost when scoped; avoids a conditional
@@ -1363,6 +1412,13 @@ async def memclaw_list(
             except Exception:
                 return _with_latency(_error_response("INVALID_ARGUMENTS", "Invalid cursor."), t0)
 
+        # Cross-tenant credentials widen via ``readable_tenant_ids`` —
+        # the gateway plumbs ``X-Readable-Tenant-IDs`` into the MCP
+        # context var. ``scope='all'`` aggregates across the widened set;
+        # ``scope='agent'`` still filters to the caller's own writes
+        # in the home tenant. Single-tenant credentials leave the var
+        # empty; ``list_by_filters`` falls back to ``tenant_id = $1``.
+        readable = _get_readable_tenants() or None
         rows = await memory_repo.list_by_filters(
             db,
             tenant_id=tenant_id,
@@ -1381,6 +1437,7 @@ async def memclaw_list(
             limit=capped_limit,
             cursor_ts=c_ts,
             cursor_id=c_id,
+            readable_tenant_ids=readable if scope != "agent" else None,
         )
         has_more = len(rows) > capped_limit
         items = [_memory_to_out(m).model_dump(mode="json") for m in rows[:capped_limit]]
@@ -1388,6 +1445,22 @@ async def memclaw_list(
         if has_more and rows:
             last = rows[capped_limit - 1]
             next_cursor = encode_cursor(last.created_at, last.id)
+        # Cross-tenant audit (F2): count per tenant from the served rows.
+        source_tenants = [t for t in (readable or []) if t and t != tenant_id]
+        if source_tenants:
+            counts: dict[str, int] = {}
+            for row in rows[:capped_limit]:
+                rt = getattr(row, "tenant_id", None)
+                if rt:
+                    counts[rt] = counts.get(rt, 0) + 1
+            await log_cross_tenant_read(
+                db,
+                home_tenant_id=tenant_id,
+                home_agent_id=agent_id,
+                source_tenants=source_tenants,
+                surface="memclaw_list",
+                result_count_by_tenant=counts,
+            )
         return _with_latency(
             json.dumps(
                 {"count": len(items), "results": items, "next_cursor": next_cursor, "scope": scope},
@@ -1464,6 +1537,11 @@ async def memclaw_stats(
         from core_api.services.memory_stats import compute_memory_stats
 
         try:
+            # Cross-tenant credentials with scope='fleet'/'all' aggregate
+            # across the widened readable set; scope='agent' stays
+            # home-only because per-agent stats are intrinsically tied
+            # to the home tenant identity.
+            readable = _get_readable_tenants() or None
             stats = await compute_memory_stats(
                 db,
                 tenant_id=tenant_id,
@@ -1472,7 +1550,19 @@ async def memclaw_stats(
                 memory_type=memory_type,
                 status=status,
                 include_deleted=effective_include_deleted,
+                readable_tenant_ids=readable if scope != "agent" else None,
             )
+            source_tenants = [t for t in (readable or []) if t and t != tenant_id]
+            if source_tenants and scope != "agent":
+                # by_tenant breakdown is already in stats — reuse for the audit.
+                await log_cross_tenant_read(
+                    db,
+                    home_tenant_id=tenant_id,
+                    home_agent_id=agent_id,
+                    source_tenants=source_tenants,
+                    surface="memclaw_stats",
+                    result_count_by_tenant=stats.get("by_tenant") or {},
+                )
             return _with_latency(json.dumps({**stats, "scope": scope}, default=str), t0)
         except Exception as e:
             logger.exception("Unhandled error in memclaw_stats")

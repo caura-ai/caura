@@ -186,8 +186,15 @@ async def list_keystones(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Return scope-merged keystone rules. No trust gate — reads are
-    safe and the plugin needs this on every session start."""
-    auth.enforce_tenant(tenant_id)
+    safe and the plugin needs this on every session start.
+
+    Cross-tenant credentials may inspect any tenant in their readable set
+    by pinning ``tenant_id`` to it; the read is scoped to that single
+    tenant's rules. Aggregate keystone view across the readable set
+    isn't exposed here — agents should keep keystones explicitly per
+    tenant for scope clarity.
+    """
+    auth.enforce_readable_tenant(tenant_id)
     sc = get_storage_client()
     # Drop ``agent_id`` when there's no ``fleet_id`` — agent-scope rows
     # are keyed on the (fleet_id, agent_id) pair, so an agent-only filter

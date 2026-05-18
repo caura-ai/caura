@@ -31,6 +31,7 @@ async def compute_memory_stats(
     memory_type: str | None = None,
     status: str | None = None,
     include_deleted: bool = False,
+    readable_tenant_ids: list[str] | None = None,
 ) -> dict:
     """Return ``{total, by_type, by_agent, by_status}`` for the given filters.
 
@@ -44,13 +45,20 @@ async def compute_memory_stats(
     would return. When ``include_deleted=True`` the result additionally
     carries ``deleted`` (count of soft-deleted rows matching the same
     scoping filters) and ``total_including_deleted`` (= ``total +
-    deleted``). The breakdown dicts deliberately stay non-deleted only —
-    they should match ``total``, not ``total_including_deleted``.
+    deleted``).
+
+    **Cross-tenant widening:** when ``readable_tenant_ids`` is a non-empty
+    list, the scope predicate expands from ``tenant_id = $1`` to
+    ``tenant_id = ANY($1)`` and the result includes a ``by_tenant`` dict
+    (tenant_id → count) so the caller can see per-tenant breakdown along
+    with the aggregate. Mirrors ``list_by_filters`` widening (#154).
     """
     # Scope filters apply equally to live and soft-deleted rows; only the
     # ``deleted_at`` predicate flips between the two counts.
     scope_filters = []
-    if tenant_id:
+    if readable_tenant_ids:
+        scope_filters.append(Memory.tenant_id.in_(readable_tenant_ids))
+    elif tenant_id:
         scope_filters.append(Memory.tenant_id == tenant_id)
     if fleet_id:
         scope_filters.append(Memory.fleet_id == fleet_id)
@@ -97,6 +105,16 @@ async def compute_memory_stats(
         "by_agent": by_agent,
         "by_status": by_status,
     }
+    if readable_tenant_ids and len(readable_tenant_ids) > 1:
+        # Cross-tenant breakdown — surfaces which tenants contributed
+        # to the aggregate so admin agents can spot lopsided activity.
+        result["by_tenant"] = dict(
+            (
+                await db.execute(
+                    select(Memory.tenant_id, func.count()).where(*filters).group_by(Memory.tenant_id)
+                )
+            ).all()
+        )
     if include_deleted:
         deleted_filters = [Memory.deleted_at.is_not(None), *scope_filters]
         deleted = (

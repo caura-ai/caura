@@ -67,7 +67,7 @@ from core_api.services.agent_service import (
     get_or_create_agent,
     lookup_agent,
 )
-from core_api.services.audit_service import log_action
+from core_api.services.audit_service import log_action, log_cross_tenant_read
 from core_api.services.ingest_service import (
     ALLOWED_INGEST_MIME_TYPES,
     BINARY_INGEST_MIME_TYPES,
@@ -269,6 +269,11 @@ async def list_memories(
     # visibility-scoping identity. When present, the caller can see their
     # own scope_agent memories. When absent, scope_agent memories are
     # hidden (safe default — fixes the scope_agent visibility gap).
+    # Cross-tenant widening: when the caller's credential carries a
+    # readable set wider than home AND didn't pin tenant_id, the
+    # repo widens to ``tenant_id = ANY($readable)``. Pinning to one
+    # tenant keeps the result scoped (the gate above already verified
+    # the caller may read it).
     rows = await _repo.list_by_filters(
         db,
         tenant_id=tenant_id or "",
@@ -285,6 +290,9 @@ async def list_memories(
         offset=offset,
         cursor_ts=c_ts,
         cursor_id=c_id,
+        readable_tenant_ids=(
+            auth.readable_tenant_ids if auth.is_cross_tenant_read and not tenant_id else None
+        ),
     )
 
     has_more = len(rows) > limit
@@ -294,6 +302,23 @@ async def list_memories(
     if has_more and items:
         last = rows[limit - 1]
         next_cursor = encode_cursor(last.created_at, last.id)
+
+    # Cross-tenant audit (F2): count per-tenant from served rows.
+    source_tenants = auth.source_tenants_for_audit()
+    if source_tenants and auth.is_cross_tenant_read and not tenant_id:
+        counts: dict[str, int] = {}
+        for row in rows[:limit]:
+            rt = getattr(row, "tenant_id", None)
+            if rt:
+                counts[rt] = counts.get(rt, 0) + 1
+        await log_cross_tenant_read(
+            db,
+            home_tenant_id=auth.tenant_id,
+            home_agent_id=auth.agent_id,
+            source_tenants=source_tenants,
+            surface="rest_memories_list",
+            result_count_by_tenant=counts,
+        )
 
     return PaginatedMemoryResponse(items=items, next_cursor=next_cursor)
 
@@ -327,6 +352,12 @@ async def memory_stats(
             memory_type=memory_type,
             status=status,
             include_deleted=include_deleted,
+            # Aggregate across the readable set when the caller has
+            # cross-tenant read AND didn't pin tenant_id. Pinning to a
+            # specific tenant returns just that tenant's stats.
+            readable_tenant_ids=(
+                auth.readable_tenant_ids if auth.is_cross_tenant_read and not tenant_id else None
+            ),
         )
     except (OperationalError, SQLATimeoutError):
         # Connection pool exhaustion / connection drop / per-query timeout

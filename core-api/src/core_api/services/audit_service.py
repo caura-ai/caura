@@ -66,3 +66,46 @@ async def log_action(
     # Fallback: synchronous POST. Same shape as pre-CAURA-628.
     sc = get_storage_client()
     await sc.create_audit_log(payload)
+
+
+async def log_cross_tenant_read(
+    db: AsyncSession,
+    *,
+    home_tenant_id: str | None,
+    home_agent_id: str | None,
+    source_tenants: list[str],
+    surface: str,
+    result_count_by_tenant: dict[str, int] | None = None,
+    query_summary: str | None = None,
+) -> None:
+    """Emit a ``cross_tenant_read`` audit event per source tenant touched.
+
+    Called from read handlers after they widen their query via
+    ``readable_tenant_ids``. The event is logged TO each source tenant
+    (``tenant_id=src``) so per-tenant audit-log queries surface "who
+    read FROM my tenant" — including the home tenant_id and agent_id
+    of the caller in ``detail`` for forensic traceability.
+
+    No-op when ``source_tenants`` is empty (single-tenant reads).
+    Emission is via the same async queue ``log_action`` uses — overflow
+    handling and back-pressure are identical.
+
+    Hook for ``AuthContext.source_tenants_for_audit()`` — callers pass
+    that method's return value as ``source_tenants``.
+    """
+    if not source_tenants:
+        return
+    for src in source_tenants:
+        await log_action(
+            db,
+            tenant_id=src,
+            agent_id=home_agent_id,
+            action="cross_tenant_read",
+            resource_type=surface,
+            detail={
+                "home_tenant_id": home_tenant_id,
+                "home_agent_id": home_agent_id,
+                "result_count_from_this_tenant": ((result_count_by_tenant or {}).get(src)),
+                "query_summary": query_summary,
+            },
+        )

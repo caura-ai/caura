@@ -46,26 +46,50 @@ async def whoami(request: Request) -> dict:
     tenant_id = request.headers.get("x-tenant-id")
     agent_id = request.headers.get("x-agent-id")
     if tenant_id:
+        # Surface the cross-tenant scope the gateway plumbed so callers
+        # can verify what their credential authorizes WITHOUT having to
+        # probe each readable tenant one at a time. Single-tenant
+        # credentials emit a readable list with just their home tenant.
+        # ``capabilities`` exposes the credential's row-level scope so
+        # SDKs can short-circuit obvious rejections (e.g. trying to
+        # write with a read-only credential). ``auth_mode`` distinguishes
+        # cross-tenant-key vs single-tenant for callers that care.
+        readable_csv = request.headers.get("x-readable-tenant-ids", "") or ""
+        readable = [t.strip() for t in readable_csv.split(",") if t.strip()]
+        if not readable:
+            readable = [tenant_id]
+        caps_csv = request.headers.get("x-capabilities", "") or ""
+        capabilities = [c.strip() for c in caps_csv.split(",") if c.strip()]
         return {
             "tenant_id": tenant_id,
             "agent_id": agent_id,
             "auth_source": "gateway-header",
             "via_gateway": True,
+            "readable_tenant_ids": readable,
+            "capabilities": capabilities or None,
+            "auth_mode": request.headers.get("x-auth-mode") or None,
         }
     if settings.is_standalone:
         from core_api.standalone import get_standalone_tenant_id
 
+        sid = get_standalone_tenant_id()
         return {
-            "tenant_id": get_standalone_tenant_id(),
+            "tenant_id": sid,
             "agent_id": None,
             "auth_source": "standalone",
             "via_gateway": False,
+            "readable_tenant_ids": [sid] if sid else [],
+            "capabilities": None,
+            "auth_mode": None,
         }
     return {
         "tenant_id": None,
         "agent_id": None,
         "auth_source": "anonymous",
         "via_gateway": False,
+        "readable_tenant_ids": [],
+        "capabilities": None,
+        "auth_mode": None,
     }
 
 

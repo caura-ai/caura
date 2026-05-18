@@ -105,6 +105,7 @@ class MemoryRepository:
         offset: int = 0,
         cursor_ts: datetime | None = None,
         cursor_id: UUID | None = None,
+        readable_tenant_ids: list[str] | None = None,
     ) -> list[Memory]:
         """Filter, sort, paginate memories with proper visibility scoping.
 
@@ -117,10 +118,20 @@ class MemoryRepository:
           If ``caller_agent_id`` is known, show the caller's own
           ``scope_agent`` memories + all team/org. If unknown, exclude
           all ``scope_agent`` rows.
+
+        **Cross-tenant widening:** when ``readable_tenant_ids`` is a
+        non-empty list, the query expands from ``tenant_id = $1`` to
+        ``tenant_id = ANY($1)``. The ``tenant_id`` arg is still used
+        as the binding/home tenant (for visibility scoping signals);
+        the list controls which tenants' rows are eligible. Mirrors
+        ``scored_search``'s widening contract (#154).
         """
         from sqlalchemy import tuple_
 
-        stmt = select(Memory).where(Memory.tenant_id == tenant_id)
+        if readable_tenant_ids:
+            stmt = select(Memory).where(Memory.tenant_id.in_(readable_tenant_ids))
+        else:
+            stmt = select(Memory).where(Memory.tenant_id == tenant_id)
 
         # ── Visibility predicate (critical: prevents scope_agent leaks) ──
         if caller_agent_id:

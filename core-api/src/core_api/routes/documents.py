@@ -14,7 +14,7 @@ from core_api.clients.storage_client import get_storage_client
 from core_api.db.session import get_db
 from core_api.middleware.idempotency import IDEMPOTENCY_HEADER, idempotency_for
 from core_api.middleware.rate_limit import write_limit
-from core_api.services.audit_service import log_action
+from core_api.services.audit_service import log_action, log_cross_tenant_read
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
 
 logger = logging.getLogger(__name__)
@@ -238,11 +238,21 @@ async def list_collections(
     """Enumerate document collections in the tenant. Mirror of MCP
     ``memclaw_doc op=list_collections``. Returns one row per collection
     with the per-collection document count.
+
+    Cross-tenant credentials see collections across every tenant in their
+    readable set; counts merge by collection name. Pinning ``tenant_id``
+    to a single tenant in the readable set scopes the result to that
+    tenant's collections.
     """
-    auth.enforce_tenant(tenant_id)
+    auth.enforce_readable_tenant(tenant_id)
     from core_api.repositories import document_repo
 
-    rows = await document_repo.list_collections(db, tenant_id=tenant_id, fleet_id=fleet_id)
+    rows = await document_repo.list_collections(
+        db,
+        tenant_id=tenant_id,
+        fleet_id=fleet_id,
+        readable_tenant_ids=(auth.readable_tenant_ids if auth.is_cross_tenant_read else None),
+    )
     return JSONResponse(
         {
             "collections": [{"name": name, "count": count} for name, count in rows],
@@ -258,8 +268,13 @@ async def get_document(
     collection: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Get a single document by collection + doc_id."""
-    auth.enforce_tenant(tenant_id)
+    """Get a single document by collection + doc_id.
+
+    Cross-tenant credentials may pass any ``tenant_id`` in their readable
+    set; the gate widens via ``enforce_readable_tenant``. Single-tenant
+    behavior unchanged.
+    """
+    auth.enforce_readable_tenant(tenant_id)
     sc = get_storage_client()
     doc = await sc.get_document(tenant_id=tenant_id, collection=collection, doc_id=doc_id)
     if not doc:
@@ -272,8 +287,13 @@ async def query_documents(
     body: DocQueryRequest,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Query documents by field equality filters on JSONB data."""
-    auth.enforce_tenant(body.tenant_id)
+    """Query documents by field equality filters on JSONB data.
+
+    Cross-tenant credentials may pass any tenant in their readable set
+    as ``body.tenant_id`` (one-tenant-at-a-time scope; aggregate-across
+    widening lives on the direct-DB ``memclaw_doc`` MCP path).
+    """
+    auth.enforce_readable_tenant(body.tenant_id)
 
     sc = get_storage_client()
     docs = await sc.query_documents(
@@ -301,8 +321,12 @@ async def list_documents(
     offset: int = Query(default=0, ge=0),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """List all documents in a collection."""
-    auth.enforce_tenant(tenant_id)
+    """List all documents in a collection.
+
+    Cross-tenant credentials may pass any tenant in their readable set
+    (one-tenant-at-a-time; the aggregate ``list_collections`` view widens).
+    """
+    auth.enforce_readable_tenant(tenant_id)
     sc = get_storage_client()
     docs = await sc.list_documents(
         tenant_id=tenant_id, collection=collection, fleet_id=fleet_id, limit=limit, offset=offset
@@ -358,9 +382,12 @@ async def search_documents(
     documents by cosine similarity. ``collection=None`` searches across all
     collections in the tenant; supplying ``collection`` scopes the search.
     """
-    auth.enforce_tenant(body.tenant_id)
+    auth.enforce_readable_tenant(body.tenant_id)
     if auth.tenant_id:
-        await check_and_increment(db, body.tenant_id, "search")
+        # Rate-limit against the home tenant (not every tenant in the
+        # readable set) — mirrors recall's pattern. The home tenant pays
+        # the search-budget cost for the widened query.
+        await check_and_increment(db, auth.tenant_id, "search")
 
     from common.embedding import get_embedding
     from core_api.repositories import document_repo
@@ -378,6 +405,7 @@ async def search_documents(
         query_embedding=query_embedding,
         top_k=body.top_k,
         fleet_id=body.fleet_id,
+        readable_tenant_ids=(auth.readable_tenant_ids if auth.is_cross_tenant_read else None),
     )
     items = [
         {
@@ -388,6 +416,22 @@ async def search_documents(
         }
         for d, sim in pairs
     ]
+    source_tenants = auth.source_tenants_for_audit()
+    if source_tenants and auth.is_cross_tenant_read:
+        counts: dict[str, int] = {}
+        for d, _sim in pairs:
+            rt = getattr(d, "tenant_id", None)
+            if rt:
+                counts[rt] = counts.get(rt, 0) + 1
+        await log_cross_tenant_read(
+            db,
+            home_tenant_id=auth.tenant_id,
+            home_agent_id=auth.agent_id,
+            source_tenants=source_tenants,
+            surface="rest_documents_search",
+            result_count_by_tenant=counts,
+            query_summary=(body.query or "")[:200],
+        )
     return JSONResponse(
         {
             "collection": body.collection,
