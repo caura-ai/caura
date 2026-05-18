@@ -28,7 +28,14 @@ class ScheduleBackgroundTasks:
         resolved_write_mode = ctx.data.get("resolved_write_mode")
         memory_id = memory["id"] if isinstance(memory, dict) else memory.id
 
-        # Fast mode: defer enrichment + entity extraction + contradiction to background
+        # Fast mode fan-out. The fast branch returns BEFORE the strong-mode
+        # entity-extraction + Path A blocks below, so historically each had
+        # to be wired through ``_enrich_memory_background`` indirectly —
+        # which left coverage holes (Gap 01: Enterprise+fast lost entity
+        # extraction; Gap 04: OSS+fast lost Path A) because the indirect
+        # chain didn't actually fire in every flag profile. Closes both
+        # gaps by mirroring the strong branch's direct fan-out below for
+        # extraction and Path A.
         if resolved_write_mode == "fast":
             if tenant_config.enrichment_enabled:
                 from core_api.services.memory_service import (
@@ -53,6 +60,62 @@ class ScheduleBackgroundTasks:
                         data.tenant_id,
                     )
                 )
+
+            # Entity extraction (Gap 01). Extraction reads only ``content`` —
+            # no dependency on the embedding being available — so it fires
+            # regardless of embed deferral. ``_enrich_memory_background``
+            # may also fire extraction in some profiles (OSS+fast inline
+            # path); ``process_entity_extraction`` is idempotent
+            # (``find_entity_link`` short-circuits link creation) so the
+            # potential second fire is a wasted LLM call, not a data
+            # integrity issue. Cleaning up the redundant fire is a
+            # follow-up once ``_enrich_memory_background`` is decomposed.
+            if tenant_config.entity_extraction_enabled:
+                track_task(
+                    tracked_task(
+                        process_entity_extraction(
+                            memory_id,
+                            data.tenant_id,
+                            data.fleet_id,
+                            data.agent_id,
+                            data.content,
+                            data.memory_type,
+                        ),
+                        "entity_extraction",
+                        memory_id,
+                        data.tenant_id,
+                    )
+                )
+
+            # Path A contradiction detection (Gap 04). Only fires when an
+            # inline embedding is available (OSS local + fast under
+            # ``embed_on_hot_path=True``, or strong's PR-2 force-inline).
+            # When ``embedding is None`` (Enterprise+fast deferred), Path A
+            # fires via the ``EMBEDDED`` back-channel after ``core-worker``
+            # PATCHes the embedding into the row — see the
+            # ``_enrich_memory_background`` gate gated on
+            # ``not settings.embed_on_hot_path``. Each cell of the matrix
+            # gets exactly one Path A trigger that way.
+            if embedding is not None:
+                from core_api.services.contradiction_detector import (
+                    detect_contradictions_async,
+                )
+
+                track_task(
+                    tracked_task(
+                        detect_contradictions_async(
+                            memory_id,
+                            data.tenant_id,
+                            data.fleet_id,
+                            data.content,
+                            embedding,
+                        ),
+                        "contradiction_detection",
+                        memory_id,
+                        data.tenant_id,
+                    )
+                )
+
             # CAURA-594: deferred-path or inline-failure backfill — the
             # shim publishes EMBED_REQUESTED in async mode, retries
             # in-process when embed_on_hot_path=True.

@@ -18,14 +18,21 @@ class PostFilterResults:
             return StepResult(outcome=StepOutcome.SKIPPED)
 
         min_similarity = ctx.data["search_params"]["min_similarity"]
-        # Mirror the legacy path in memory_service.py: rows with vec_sim=None
-        # are FTS-only matches that must not be gated by cosine similarity.
-        # Currently unreachable in practice (the scored_search SQL requires
-        # `embedding IS NOT NULL` and the storage layer coerces None → 0.0),
-        # but kept aligned so the two search code paths never diverge if
-        # either invariant changes to preserve FTS-only rows.
+        # NULL-embedding rows reach this point only when storage admitted them
+        # via the FTS half of `embedding IS NOT NULL OR search_vector @@ query`
+        # (relaxed in CAURA-594 so writes deferred via EMBED_REQUESTED stay
+        # searchable during the embed-pending window). Storage coerces their
+        # missing cosine to a 0.0 sentinel and emits `has_embedding=False` to
+        # disambiguate that from a real orthogonal match — trust that flag
+        # here and bypass the vec_sim threshold for FTS-only rows. Without
+        # this, the entire FTS-fallback contract is silently broken for any
+        # row whose embedding hasn't been PATCHed yet by core-worker.
         filtered = [
-            row for row in ctx.data["raw_rows"] if row.vec_sim is None or float(row.vec_sim) >= min_similarity
+            row
+            for row in ctx.data["raw_rows"]
+            if (not getattr(row, "has_embedding", True))
+            or row.vec_sim is None
+            or float(row.vec_sim) >= min_similarity
         ]
         # Trim to the user-requested top_k (storage returned top_k * overfetch_factor)
         final_top_k = ctx.data.get("final_top_k")

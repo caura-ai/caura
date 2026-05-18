@@ -5,6 +5,10 @@ They are intentionally **not symmetric**. Each serves a different audience and
 operates under different assumptions. This document records who owns what and
 when to add or move an operation.
 
+> Looking for **latency and throughput numbers** per surface? See
+> [`performance.md`](performance.md). This document is about *which surface
+> owns which operation*, not about how fast each one runs.
+
 ## Audiences
 
 | Surface | Primary audience | Trust model |
