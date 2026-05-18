@@ -77,9 +77,7 @@ _via_gateway_var: contextvars.ContextVar[bool] = contextvars.ContextVar("mcp_via
 _readable_tenant_ids_var: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
     "mcp_readable_tenant_ids", default=None
 )
-_scopes_var: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
-    "mcp_scopes", default=None
-)
+_scopes_var: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar("mcp_scopes", default=None)
 
 _UNAUTH = "__unauthenticated__"
 _ADMIN = "__admin__"
@@ -193,15 +191,12 @@ class MCPAuthMiddleware:
             # context vars at their single-tenant defaults.
             readable_header = headers.get(b"x-readable-tenant-ids", b"").decode()
             if readable_header:
-                _readable_tenant_ids_var.set(
-                    [t.strip() for t in readable_header.split(",") if t.strip()]
-                )
+                _readable_tenant_ids_var.set([t.strip() for t in readable_header.split(",") if t.strip()])
             # X-Capabilities is canonical from the unified auth-api;
             # X-Key-Scopes is accepted as a back-compat alias during
             # the gateway rollout window.
             caps_header = (
-                headers.get(b"x-capabilities", b"").decode()
-                or headers.get(b"x-key-scopes", b"").decode()
+                headers.get(b"x-capabilities", b"").decode() or headers.get(b"x-key-scopes", b"").decode()
             )
             if caps_header:
                 _scopes_var.set({s.strip() for s in caps_header.split(",") if s.strip()})

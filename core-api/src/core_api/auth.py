@@ -267,12 +267,9 @@ async def get_auth_context(
     # window so an old gateway running against a new core-api (or
     # vice versa) doesn't break auth.
     capability_list = _parse_csv_header(
-        request.headers.get("x-capabilities")
-        or request.headers.get("x-key-scopes")
+        request.headers.get("x-capabilities") or request.headers.get("x-key-scopes")
     )
-    capabilities: set[str] | None = (
-        set(capability_list) if capability_list else None
-    )
+    capabilities: set[str] | None = set(capability_list) if capability_list else None
 
     # ── Path 1: Admin API key ──
     if key and admin_key and hmac.compare_digest(key, admin_key):
