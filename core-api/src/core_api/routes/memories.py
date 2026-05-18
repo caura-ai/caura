@@ -241,6 +241,11 @@ async def list_memories(
     works with ``sort=created_at&order=desc``. Offset pagination works with any
     sort order.
     """
+    # Capture whether the caller explicitly pinned tenant_id BEFORE we
+    # default it to home below. This drives the cross-tenant widening
+    # decision: pinned → single-tenant scope; omitted + cross-tenant
+    # credential → widen across the readable set.
+    tenant_id_explicit = bool(tenant_id)
     if tenant_id:
         auth.enforce_readable_tenant(tenant_id)
     elif not auth.is_admin:
@@ -291,7 +296,7 @@ async def list_memories(
         cursor_ts=c_ts,
         cursor_id=c_id,
         readable_tenant_ids=(
-            auth.readable_tenant_ids if auth.is_cross_tenant_read and not tenant_id else None
+            auth.readable_tenant_ids if auth.is_cross_tenant_read and not tenant_id_explicit else None
         ),
     )
 
@@ -305,7 +310,7 @@ async def list_memories(
 
     # Cross-tenant audit (F2): count per-tenant from served rows.
     source_tenants = auth.source_tenants_for_audit()
-    if source_tenants and auth.is_cross_tenant_read and not tenant_id:
+    if source_tenants and auth.is_cross_tenant_read and not tenant_id_explicit:
         counts: dict[str, int] = {}
         for row in rows[:limit]:
             rt = getattr(row, "tenant_id", None)
@@ -334,6 +339,7 @@ async def memory_stats(
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
+    tenant_id_explicit = bool(tenant_id)
     if tenant_id:
         auth.enforce_readable_tenant(tenant_id)
     elif not auth.is_admin:
@@ -356,7 +362,7 @@ async def memory_stats(
             # cross-tenant read AND didn't pin tenant_id. Pinning to a
             # specific tenant returns just that tenant's stats.
             readable_tenant_ids=(
-                auth.readable_tenant_ids if auth.is_cross_tenant_read and not tenant_id else None
+                auth.readable_tenant_ids if auth.is_cross_tenant_read and not tenant_id_explicit else None
             ),
         )
     except (OperationalError, SQLATimeoutError):
