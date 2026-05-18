@@ -75,6 +75,16 @@ class Case:
     old_content: str
     expected: bool  # True = should be flagged as contradiction
     note: str
+    # CAURA-124 — shape tag groups fixtures into the 7 within-subject
+    # false-positive classes. ``existing`` covers the original CAURA-111
+    # fixtures plus the genuine-contradiction TPs.
+    shape: str = "existing"
+    # The enum value the model is expected to emit on the
+    # ``non_conflict_reason`` field once the gate ships in commit 3.
+    # ``None`` means the test does not assert a specific
+    # non_conflict_reason. Parser correctness for these cases is
+    # verified through the ``ok`` field instead.
+    expected_non_conflict_reason: str | None = None
 
 
 CASES: list[Case] = [
@@ -145,6 +155,208 @@ CASES: list[Case] = [
         expected=False,
         note="More specific version of the same fact.",
     ),
+    # ===================================================================
+    # CAURA-124 — within-subject false-positive shapes (must NOT fire).
+    # Each shape has 3 cases. Until the ``non_conflict_reason`` gate
+    # ships (commit 3 of this PR), most of these will misfire — that is
+    # the baseline this fixture set is here to measure.
+    # ===================================================================
+    # ----- Shape 1: temporal_supersession (planned → shipped, etc.) -----
+    Case(
+        label="ts_planned_shipped",
+        new_content="The Atlas feature shipped on 2026-09-12.",
+        old_content="The Atlas feature is planned for Q3 2026.",
+        expected=False,
+        note="Plan-then-ship sequence; both true sequentially.",
+        shape="temporal_supersession",
+        expected_non_conflict_reason="temporal_supersession",
+    ),
+    Case(
+        label="ts_ticket_open_closed",
+        new_content="Ticket OPS-4521 is closed.",
+        old_content="Ticket OPS-4521 is open.",
+        expected=False,
+        note="State machine transition: open → closed is supersession.",
+        shape="temporal_supersession",
+        expected_non_conflict_reason="temporal_supersession",
+    ),
+    Case(
+        label="ts_draft_published",
+        new_content="The Q3 board memo was published last Friday.",
+        old_content="The Q3 board memo is in draft.",
+        expected=False,
+        note="Document lifecycle: draft → published is supersession.",
+        shape="temporal_supersession",
+        expected_non_conflict_reason="temporal_supersession",
+    ),
+    # ----- Shape 2: list_valued_predicate (multi-value attributes) -----
+    Case(
+        label="lv_supports_languages",
+        new_content="Project Atlas supports French.",
+        old_content="Project Atlas supports English.",
+        expected=False,
+        note="``supports`` is list-valued; both can hold simultaneously.",
+        shape="list_valued_predicate",
+        expected_non_conflict_reason="list_valued_predicate",
+    ),
+    Case(
+        label="lv_speaks_languages",
+        new_content="Maria speaks Hebrew.",
+        old_content="Maria speaks Spanish.",
+        expected=False,
+        note="``speaks`` is list-valued; multiple languages coexist.",
+        shape="list_valued_predicate",
+        expected_non_conflict_reason="list_valued_predicate",
+    ),
+    Case(
+        label="lv_matrix_reports_to",
+        new_content="Bob reports to Carol on the product side of the matrix.",
+        old_content="Bob reports to Alice on the engineering side of the matrix.",
+        expected=False,
+        note="Matrix orgs: ``reports_to`` can be plural; both true.",
+        shape="list_valued_predicate",
+        expected_non_conflict_reason="list_valued_predicate",
+    ),
+    # ----- Shape 3: refinement (same fact, finer granularity) -----
+    Case(
+        label="rf_geo_coarse_fine",
+        new_content="Acme is headquartered in Munich, Germany.",
+        old_content="Acme is headquartered in Europe.",
+        expected=False,
+        note="Same fact, finer geographic granularity. Not a conflict.",
+        shape="refinement",
+        expected_non_conflict_reason="refinement",
+    ),
+    Case(
+        label="rf_industry_coarse_fine",
+        new_content="John works at Google as a senior engineer.",
+        old_content="John works in tech.",
+        expected=False,
+        note="Tech → Google is refinement, not a different claim.",
+        shape="refinement",
+        expected_non_conflict_reason="refinement",
+    ),
+    Case(
+        label="rf_date_coarse_fine",
+        new_content="The launch is on September 15, 2026.",
+        old_content="The launch is in Q3 2026.",
+        expected=False,
+        note="Q3 2026 → September 15, 2026 is refinement.",
+        shape="refinement",
+        expected_non_conflict_reason="refinement",
+    ),
+    # ----- Shape 4: scope_mismatch (whole/part, qualifier difference) -----
+    Case(
+        label="sm_whole_part_profitability",
+        new_content="Acme's Europe division is profitable.",
+        old_content="Acme is not profitable.",
+        expected=False,
+        note="Whole-vs-part: the parent loses money while one division profits.",
+        shape="scope_mismatch",
+        expected_non_conflict_reason="scope_mismatch",
+    ),
+    Case(
+        label="sm_annual_vs_quarterly_revenue",
+        new_content="Acme's Q2 revenue is $25M.",
+        old_content="Acme's annual revenue is $100M.",
+        expected=False,
+        note="Different time windows of the same metric; both true.",
+        shape="scope_mismatch",
+        expected_non_conflict_reason="scope_mismatch",
+    ),
+    Case(
+        label="sm_weekday_weekend_residence",
+        new_content="John lives in his Vermont cabin on weekends.",
+        old_content="John lives in NYC during the work week.",
+        expected=False,
+        note="Different temporal qualifiers; both residences coexist.",
+        shape="scope_mismatch",
+        expected_non_conflict_reason="scope_mismatch",
+    ),
+    # ----- Shape 5: same_name_distinct_subject (ambiguous reference) -----
+    Case(
+        label="snds_nightly_build_runs",
+        new_content="The nightly build passed at 14:30 UTC.",
+        old_content="The nightly build failed at 02:00 UTC.",
+        expected=False,
+        note="``The nightly build`` refers to two different runs of the same job.",
+        shape="same_name_distinct_subject",
+        expected_non_conflict_reason="same_name_distinct_subject",
+    ),
+    Case(
+        label="snds_recurring_standup",
+        new_content="Today's standup (2026-03-10) ran 45 minutes over.",
+        old_content="Today's standup (2026-03-09) got cancelled.",
+        expected=False,
+        note="``Today's standup`` on different dates — distinct meeting instances.",
+        shape="same_name_distinct_subject",
+        expected_non_conflict_reason="same_name_distinct_subject",
+    ),
+    Case(
+        label="snds_generic_first_name",
+        new_content="John just started as an intern this week.",
+        old_content="John was promoted to VP last quarter.",
+        expected=False,
+        note="``John`` is too generic — likely two different people.",
+        shape="same_name_distinct_subject",
+        expected_non_conflict_reason="same_name_distinct_subject",
+    ),
+    # ----- Shape 6: conditional_unrealized (irrealis vs factual) -----
+    Case(
+        label="cu_license_hypothetical",
+        new_content="Atlas is closed-source under the proprietary license.",
+        old_content="If we adopt the Apache 2.0 license, Atlas would be open-source.",
+        expected=False,
+        note="Conditional/hypothetical vs realized state; hypothetical isn't a claim.",
+        shape="conditional_unrealized",
+        expected_non_conflict_reason="conditional_unrealized",
+    ),
+    Case(
+        label="cu_hiring_condition",
+        new_content="We're shipping in Q1 2027.",
+        old_content="If we hire 10 engineers in Q3, we will ship by Q4 2026.",
+        expected=False,
+        note="The hiring condition was not met; the conditional doesn't bind.",
+        shape="conditional_unrealized",
+        expected_non_conflict_reason="conditional_unrealized",
+    ),
+    Case(
+        label="cu_merger_rumour",
+        new_content="Acme and Globex remain independent.",
+        old_content="If the merger goes through, Acme would absorb Globex.",
+        expected=False,
+        note="Speculative conditional vs realized state.",
+        shape="conditional_unrealized",
+        expected_non_conflict_reason="conditional_unrealized",
+    ),
+    # ----- Shape 7: event_restatement (same event, different lexicalization) -----
+    Case(
+        label="er_acquired_tense",
+        new_content="Acme is acquiring Globex.",
+        old_content="Acme acquired Globex last March.",
+        expected=False,
+        note="Same deal at different points in time; tense/aspect difference only.",
+        shape="event_restatement",
+        expected_non_conflict_reason="event_restatement",
+    ),
+    Case(
+        label="er_hired_joined",
+        new_content="John joined as Head of Marketing.",
+        old_content="John was hired as Head of Marketing.",
+        expected=False,
+        note="Synonymous verbs for the same event.",
+        shape="event_restatement",
+        expected_non_conflict_reason="event_restatement",
+    ),
+    Case(
+        label="er_deal_closed_aspect",
+        new_content="The deal has been closed.",
+        old_content="The deal closed yesterday.",
+        expected=False,
+        note="Perfect vs simple past, same closing event.",
+        shape="event_restatement",
+        expected_non_conflict_reason="event_restatement",
+    ),
 ]
 
 
@@ -158,7 +370,9 @@ def _build_openai_caller(model: str):
     try:
         from openai import OpenAI
     except ImportError:
-        print("ERROR: openai SDK not installed. Run: pip install openai", file=sys.stderr)
+        print(
+            "ERROR: openai SDK not installed. Run: pip install openai", file=sys.stderr
+        )
         sys.exit(2)
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -218,7 +432,11 @@ def _build_gemini_caller(model: str):
         except ValueError as exc:
             return {"_raw": "", "_parse_error": True, "_provider_error": str(exc)}
         if not text:
-            return {"_raw": "", "_parse_error": True, "_provider_error": "empty content"}
+            return {
+                "_raw": "",
+                "_parse_error": True,
+                "_provider_error": "empty content",
+            }
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
@@ -246,32 +464,96 @@ def call_model(caller, new_content: str, old_content: str) -> dict:
     return caller(prompt)
 
 
-def run_once(caller, provider: str, model: str, *, run_id: int) -> tuple[int, int]:
-    """Run all cases once. Returns (passed, failed)."""
+def run_once(caller, provider: str, model: str, *, run_id: int) -> dict:
+    """Run all cases once. Returns a structured summary including per-shape rollup."""
+    print(f"\n{'=' * 78}\nRUN {run_id}  provider={provider}  model={model}\n{'=' * 78}")
+
+    cases_out: list[dict] = []
+    by_shape: dict[str, dict[str, int]] = {}
     passed = 0
     failed = 0
-    print(f"\n{'=' * 78}\nRUN {run_id}  provider={provider}  model={model}\n{'=' * 78}")
     for case in CASES:
         t0 = time.perf_counter()
         raw = call_model(caller, case.new_content, case.old_content)
         latency_ms = int((time.perf_counter() - t0) * 1000)
         verdict = _parse_contradiction_response(raw)
         ok = verdict == case.expected
+        # ``reason_ok`` is diagnostic-only: the parser verdict can be
+        # correct (e.g. contradicts=False) even when the model picked a
+        # *different* non_conflict_reason than the fixture expected
+        # (e.g. routed the case through "event_restatement" instead of
+        # "list_valued_predicate"). That's an interesting signal for
+        # tuning the prompt but it does NOT affect pass/fail.
+        if case.expected_non_conflict_reason is None:
+            # For genuine-contradiction fixtures, verify the model
+            # didn't accidentally misfire Gate 2 — i.e., emit a
+            # recognised non_conflict_reason for a case that should
+            # land at contradicts=true. For "should not flag" fixtures
+            # with no specific reason expected (out-of-scope coverage),
+            # there is nothing to assert and reason_ok stays True.
+            reason_ok = not case.expected or raw.get("non_conflict_reason") in (
+                None,
+                "none",
+            )
+        else:
+            reason_ok = (
+                raw.get("non_conflict_reason") == case.expected_non_conflict_reason
+            )
         passed += int(ok)
         failed += int(not ok)
+        shape_bucket = by_shape.setdefault(case.shape, {"pass": 0, "fail": 0})
+        shape_bucket["pass" if ok else "fail"] += 1
 
         status = "PASS" if ok else "FAIL"
-        print(f"\n[{status}] {case.label}  ({latency_ms} ms)")
+        print(f"\n[{status}] {case.label}  shape={case.shape}  ({latency_ms} ms)")
         print(f"  note          : {case.note}")
         print(f"  new (A)       : {case.new_content}")
         print(f"  old (B)       : {case.old_content}")
-        print(f"  expected      : contradiction={case.expected}")
+        print(
+            f"  expected      : contradiction={case.expected} "
+            f"non_conflict_reason={case.expected_non_conflict_reason!r}"
+        )
         print(f"  model JSON    : {json.dumps(raw, ensure_ascii=False)}")
         print(f"  parser verdict: {verdict}")
         if not ok:
             print(f"  >>> MISMATCH: expected {case.expected}, got {verdict}")
+        if ok and not reason_ok:
+            print(
+                f"  note: correct verdict but unexpected reason "
+                f"(expected {case.expected_non_conflict_reason!r}, "
+                f"got {raw.get('non_conflict_reason')!r})"
+            )
+
+        cases_out.append(
+            {
+                "label": case.label,
+                "shape": case.shape,
+                "expected_contradicts": case.expected,
+                "expected_non_conflict_reason": case.expected_non_conflict_reason,
+                "raw": raw,
+                "parser_verdict": verdict,
+                "ok": ok,
+                "reason_ok": reason_ok,
+                "latency_ms": latency_ms,
+            }
+        )
+
     print(f"\nRun {run_id} summary: {passed}/{passed + failed} passed")
-    return passed, failed
+    print(f"\nPer-shape ({provider}/{model}):")
+    for shape in sorted(by_shape):
+        b = by_shape[shape]
+        total = b["pass"] + b["fail"]
+        pct = (100.0 * b["pass"] / total) if total else 0.0
+        print(f"  {shape:<32} {b['pass']:>2}/{total:<2}  ({pct:5.1f}%)")
+    return {
+        "provider": provider,
+        "model": model,
+        "run_id": run_id,
+        "passed": passed,
+        "failed": failed,
+        "by_shape": by_shape,
+        "cases": cases_out,
+    }
 
 
 def main() -> int:
@@ -289,6 +571,13 @@ def main() -> int:
         f"({DEFAULT_MODEL['openai']} for openai, {DEFAULT_MODEL['gemini']} for gemini)",
     )
     ap.add_argument("--runs", type=int, default=1, help="Repeat all cases N times")
+    ap.add_argument(
+        "--json-out",
+        default=None,
+        help="If set, write the structured run summary to this path (one JSON "
+        "object per --runs iteration, appended). Used by CAURA-124 to commit "
+        "baseline vs post-fix numbers.",
+    )
     args = ap.parse_args()
 
     model = args.model or DEFAULT_MODEL[args.provider]
@@ -301,10 +590,12 @@ def main() -> int:
 
     total_pass = 0
     total_fail = 0
+    summaries: list[dict] = []
     for run_id in range(1, args.runs + 1):
-        p, f = run_once(caller, args.provider, model, run_id=run_id)
-        total_pass += p
-        total_fail += f
+        summary = run_once(caller, args.provider, model, run_id=run_id)
+        total_pass += summary["passed"]
+        total_fail += summary["failed"]
+        summaries.append(summary)
 
     print(f"\n{'=' * 78}")
     print(
@@ -313,6 +604,26 @@ def main() -> int:
         f"[provider={args.provider} model={model}]"
     )
     print(f"{'=' * 78}")
+
+    if args.json_out:
+        # Append-mode so a baseline file accumulates across providers/models
+        # in a single artifact. One JSON object per line (JSONL).
+        # Warn if appending to a non-empty file — accumulating across
+        # providers in one shot is the documented use case, but a stale
+        # file from a previous invocation will create duplicate records
+        # that quietly skew any per-shape rollup downstream.
+        if os.path.exists(args.json_out) and os.path.getsize(args.json_out) > 0:
+            print(
+                f"WARNING: appending to existing non-empty file {args.json_out}; "
+                f"re-running will create duplicate records — use a fresh path "
+                f"if that is not intended.",
+                file=sys.stderr,
+            )
+        with open(args.json_out, "a") as f:
+            for s in summaries:
+                f.write(json.dumps(s, ensure_ascii=False) + "\n")
+        print(f"Wrote {len(summaries)} run summary record(s) to {args.json_out}")
+
     return 0 if total_fail == 0 else 1
 
 
