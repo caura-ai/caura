@@ -341,28 +341,76 @@ Follow these steps in order:
      - two different people who share a first name or last name
      - two different companies, products, projects, or teams
      - any case where you are not confident the subjects are the same entity
-4. Decide contradicts:
+4. Decide non_conflict_reason. Even when same_subject is true, certain
+   shapes describe two claims that BOTH hold and so are NOT a
+   contradiction. Pick at most one value; pick "none" when the two
+   statements really do assert mutually exclusive states.
+     - "temporal_supersession": the statements describe sequential
+       states of the same subject's lifecycle (planned -> shipped,
+       open -> closed, draft -> published, beta -> GA, hired ->
+       promoted). The newer state simply supersedes the older one;
+       both were true in sequence.
+     - "list_valued_predicate": the two statements describe attributes
+       of the same subject that do not compete for a single slot.
+       Two shapes both qualify:
+       (a) one predicate that naturally holds multiple values at the
+       same time — "supports English" / "supports French"; speaks
+       multiple languages; "reports_to" in matrix orgs; "works_on"
+       parallel projects;
+       (b) two entirely different attributes of the same subject —
+       e.g., "Alice was promoted to Senior Engineer" (her title)
+       and "Alice is on the platform team" (her team) are
+       complementary facts; both hold simultaneously. Different
+       attributes do not exclude each other.
+     - "refinement": one statement is a more specific version of the
+       other ("Europe" vs "Munich"; "tech" vs "Google"; "Q3" vs
+       "September 15"). Both hold; finer granularity does not negate
+       coarser.
+     - "scope_mismatch": the statements describe the same subject with
+       different implicit qualifiers — whole vs part (parent company
+       vs division), different time windows (annual vs quarterly), or
+       different context qualifiers (weekday vs weekend, work vs
+       residence). Both can hold simultaneously.
+     - "same_name_distinct_subject": subject_a and subject_b share a
+       surface name but plausibly refer to different real-world
+       instances (two different builds of "the nightly build", two
+       different days of "today's standup", two different people both
+       called "John" without disambiguator). This is the symmetric
+       complement to same_subject=false for cases where the names
+       happen to match.
+     - "conditional_unrealized": one statement is conditional /
+       hypothetical / irrealis ("if X then Y", "would", "could",
+       "might"), and the other is a realised state. The conditional
+       does not assert a claim that can contradict.
+     - "event_restatement": the two statements describe the SAME
+       event with different tense, aspect, or synonymous verbs
+       ("acquired" / "is acquiring" the same deal; "was hired" /
+       "joined"). They restate the same fact, not different facts.
+     - "none": none of the above applies. Use this when the two
+       statements really do make incompatible claims about the same
+       subject at the same time frame (e.g., "X lives in Tel Aviv"
+       vs "X lives in Haifa" as undated current-state claims).
+   Two state claims about the same subject are also NOT a
+   contradiction when BOTH statements explicitly reference
+   non-overlapping past time periods (e.g., "X lived in Tel Aviv
+   from 2010 to 2014" vs "X lived in Haifa from 2015 to 2018").
+   In that case set non_conflict_reason="scope_mismatch".
+5. Decide contradicts:
    - If same_subject is false, contradicts MUST be false.
-   - If same_subject is true, contradicts is true ONLY when the two
-     statements assert mutually exclusive states about that subject
-     referring to the same time frame.
-   - Updates / corrections about the same subject ARE contradictions
-     (e.g., "X lives in Tel Aviv" vs "X lives in Haifa").
-   - More specific versions of the same fact are NOT contradictions.
-   - Complementary information is NOT a contradiction.
-   - Two state claims about the same subject are NOT a contradiction ONLY
-     when BOTH statements explicitly reference non-overlapping past time
-     periods (e.g., "X lived in Tel Aviv from 2010 to 2014" vs "X lived in
-     Haifa from 2015 to 2018" — both can be historically true). In every
-     other case, including when only one statement carries a date stamp,
-     conflicting same-subject state claims ARE contradictions; do not
-     speculate that one might describe a future state that resolves the
-     conflict.
+   - If non_conflict_reason is not "none", contradicts MUST be false.
+   - Otherwise contradicts is true only when the two statements assert
+     mutually exclusive states about that subject in the same time
+     frame. Updates / corrections about the same subject ARE
+     contradictions (e.g., "X lives in Tel Aviv" vs "X lives in
+     Haifa"). Do not speculate that one statement might describe a
+     future state that resolves the conflict — if it does, choose
+     temporal_supersession explicitly.
 
 Reply with ONLY a JSON object, no prose, no markdown fences:
 {{"subject_a": "<short noun phrase>",
   "subject_b": "<short noun phrase>",
   "same_subject": true/false,
+  "non_conflict_reason": "none|temporal_supersession|list_valued_predicate|refinement|scope_mismatch|same_name_distinct_subject|conditional_unrealized|event_restatement",
   "contradicts": true/false,
   "reason": "one short phrase referencing the subjects and the conflict (or its absence)"}}
 """
