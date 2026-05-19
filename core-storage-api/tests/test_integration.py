@@ -609,6 +609,87 @@ class TestMemories:
                 f"query={blank_query!r} must not admit any NULL-embedding rows"
             )
 
+    async def test_scored_search_null_embedding_similarity_invariant_to_fts_weight(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """CAURA-679: NULL-embedding rows rank on ``fts_score`` alone — the
+        ``fts_weight`` haircut no longer applies. The old unconditional
+        ``(1 - w) * vec_sim + w * fts_score`` blend, combined with the
+        ``vec_sim = 0.0`` sentinel for NULL rows, made NULL-row similarity
+        scale linearly with ``w``: at ``w = 0.3`` it was ``0.3 * fts_score``,
+        at ``w = 0.7`` it was ``0.7 * fts_score``. That haircut let
+        noise-floor-cosine embedded rows (``vec_sim`` ~0.15-0.20 from
+        high-dim sphere clustering) beat unembedded FTS matches on rank
+        and slip past ``LIMIT top_k * overfetch_factor``.
+
+        The ``CASE`` on ``similarity`` falls back to ``fts_score`` when
+        ``embedding IS NULL``, so identical NULL rows produce identical
+        ``similarity`` across any ``fts_weight``. This test pins that
+        invariance — under the old blend the two values would differ by
+        a factor of ``w_high / w_low``.
+        """
+        keyword = f"caura679_{_uid()}"
+        query_embedding = fake_embedding(f"q-{keyword}")
+
+        # NULL-embedding row with an FTS-matching keyword.
+        payload = _memory_payload(
+            tenant_id, fleet_id, content=f"urgent dispatch {keyword} body details"
+        )
+        payload["embedding"] = None
+        resp = await client.post(f"{PREFIX}/memories", json=payload)
+        assert resp.status_code == 200, resp.text
+        memory_id = resp.json()["id"]
+
+        def make_body(fts_weight: float) -> dict:
+            return {
+                "tenant_id": tenant_id,
+                "embedding": query_embedding,
+                "query": keyword,
+                "fleet_ids": [fleet_id],
+                "top_k": 10,
+                "search_params": {
+                    "fts_weight": fts_weight,
+                    "freshness_floor": 0.5,
+                    "freshness_decay_days": 30.0,
+                    "recall_boost_cap": 2.0,
+                    "recall_decay_window_days": 7.0,
+                    "similarity_blend": 0.7,
+                },
+            }
+
+        resp_low = await client.post(f"{PREFIX}/memories/scored-search", json=make_body(0.3))
+        assert resp_low.status_code == 200, resp_low.text
+        resp_high = await client.post(f"{PREFIX}/memories/scored-search", json=make_body(0.7))
+        assert resp_high.status_code == 200, resp_high.text
+
+        row_low = next(r for r in resp_low.json() if r["id"] == memory_id)
+        row_high = next(r for r in resp_high.json() if r["id"] == memory_id)
+
+        # Sanity: still the NULL-embedding row, vec_sim still coalesced
+        # to the 0.0 sentinel (the CASE on `similarity` doesn't touch
+        # the CASE on `vec_sim`).
+        assert row_low["has_embedding"] is False
+        assert row_low["vec_sim"] == 0.0
+        assert row_high["has_embedding"] is False
+        assert row_high["vec_sim"] == 0.0
+
+        # FTS contributes a real signal — sanity that the keyword
+        # actually matched (else the assertion below is vacuous).
+        assert row_low["similarity"] > 0.0
+
+        # The defining assertion: similarity is invariant under
+        # fts_weight changes for NULL rows. Under the OLD blend,
+        # similarity_high / similarity_low would equal 0.7 / 0.3 ≈ 2.33.
+        assert row_low["similarity"] == pytest.approx(row_high["similarity"], rel=1e-9), (
+            "NULL-embedding similarity must not depend on fts_weight under CAURA-679; "
+            f"got similarity@w=0.3={row_low['similarity']}, "
+            f"similarity@w=0.7={row_high['similarity']} "
+            f"(old-blend ratio would be 0.7/0.3 ≈ 2.33)"
+        )
+
     async def test_public_counters_exclude_soft_deleted(
         self,
         client: AsyncClient,

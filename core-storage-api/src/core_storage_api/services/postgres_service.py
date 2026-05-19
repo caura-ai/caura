@@ -677,8 +677,7 @@ class PostgresService:
         # through the similarity blend into `score`, and PostgreSQL's
         # default `ORDER BY score DESC` sorts NULLS FIRST — putting
         # every unembedded row at the TOP of results. The CASE forces
-        # a numeric value (0.0 — the blend's identity element so NULL
-        # rows rank on fts_score alone) and also short-circuits so
+        # a numeric value (0.0) and also short-circuits so
         # cosine_distance isn't even evaluated for NULL rows.
         # `has_embedding` below is the authoritative NULL-vs-orthogonal
         # signal for callers — `vec_sim == 0.0` is ambiguous with a
@@ -696,7 +695,24 @@ class PostgresService:
         raw_fts = func.ts_rank_cd(Memory.search_vector, ts_query)
         fts_score = (raw_fts / (1.0 + raw_fts)).label("fts_score")
 
-        similarity = ((1.0 - _fts_weight) * vec_sim + _fts_weight * fts_score).label("similarity")
+        # CAURA-679: NULL-embedding rows fall back to `fts_score` alone
+        # rather than the `(1 - w) * 0 + w * fts_score` haircut that
+        # the unconditional blend would apply. The haircut multiplies
+        # the FTS signal by `fts_weight` (≤1), so an FTS-matching but
+        # unembedded row could rank below noise-floor-cosine embedded
+        # rows (vec_sim ~0.15-0.20 from high-dim sphere clustering),
+        # which then drop it past the `LIMIT top_k * overfetch_factor`
+        # cutoff. This protects the FTS-fallback contract for both the
+        # CAURA-594 deferred-embed window and any case where the embed
+        # worker fails permanently — the row stays discoverable rather
+        # than silently undiscoverable.
+        similarity = case(
+            (
+                Memory.embedding.is_not(None),
+                (1.0 - _fts_weight) * vec_sim + _fts_weight * fts_score,
+            ),
+            else_=fts_score,
+        ).label("similarity")
 
         anchor = func.greatest(
             Memory.created_at,
