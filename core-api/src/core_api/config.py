@@ -74,6 +74,21 @@ class Settings(BaseSettings):
     # Set the env override ``ENRICH_ON_HOT_PATH=false`` on the SaaS
     # deploy.
     enrich_on_hot_path: bool = True
+    # F3 Phase 1 — single per-deploy mode that supersedes the legacy
+    # ``embed_on_hot_path`` + ``enrich_on_hot_path`` pair.
+    #
+    # - ``"inline"``   : both embed + enrich run on the request path
+    #                    (OSS local default — no worker fleet required)
+    # - ``"deferred"`` : both deferred to ``core-worker`` via Pub/Sub
+    #                    (SaaS prod default — sub-2s p99 SLA)
+    #
+    # When unset (``None``), the derivation validator below populates
+    # this from the legacy flags and emits a deprecation warning if the
+    # two flags disagree. F3 Phase 3 removes the legacy flags entirely;
+    # this becomes the only per-deploy control. ``write_mode=strong``
+    # on a per-request basis continues to force inline regardless of
+    # ``deployment_mode`` (CAURA-229 contract, preserved by PR #151).
+    deployment_mode: Literal["inline", "deferred"] | None = None
     # Outer cap on the inline embed+enrich gather in ParallelEmbedEnrich.
     # Was hardcoded at 20.0 — too tight under load once embedding moved
     # off the hot path (CAURA-594) and enrichment LLM became the sole
@@ -439,6 +454,58 @@ class Settings(BaseSettings):
                     "enrichment."
                 )
         return self
+
+    @model_validator(mode="after")
+    def _derive_deployment_mode(self) -> "Settings":
+        """F3 Phase 1 — derive ``deployment_mode`` from legacy flags when unset.
+
+        Rules:
+          ``(T, T)`` → ``"inline"``
+          ``(F, F)`` → ``"deferred"``
+          asymmetric → ``"deferred"`` + WARNING. Conservative default —
+            silently exposing un-enriched rows under an "inline"
+            deployment shape is worse than under-delivering and
+            surfacing the misconfig via the warning.
+
+        When the operator sets ``DEPLOYMENT_MODE`` explicitly, that
+        value wins; legacy flags are ignored for derivation. The
+        legacy flags themselves stay readable until F3 Phase 3
+        removes them — 18 call sites across 3 files migrate to
+        ``inline_embedding`` / ``inline_enrichment`` helpers below
+        during F3 Phase 2.
+        """
+        if self.deployment_mode is not None:
+            return self  # explicit operator override wins
+
+        if self.embed_on_hot_path and self.enrich_on_hot_path:
+            derived = "inline"
+        elif not self.embed_on_hot_path and not self.enrich_on_hot_path:
+            derived = "deferred"
+        else:
+            derived = "deferred"
+            logger.warning(
+                "Asymmetric legacy flag pair: embed_on_hot_path=%s "
+                "enrich_on_hot_path=%s. F3 Phase 0 audit confirmed no "
+                "environment intentionally uses this combination. "
+                "Defaulting deployment_mode='deferred'. Set "
+                "DEPLOYMENT_MODE=inline|deferred explicitly to silence "
+                "this warning; the legacy flags are removed in F3 "
+                "Phase 3.",
+                self.embed_on_hot_path,
+                self.enrich_on_hot_path,
+            )
+        object.__setattr__(self, "deployment_mode", derived)
+        return self
+
+    @property
+    def inline_embedding(self) -> bool:
+        """True iff the resolved deployment mode runs embedding inline."""
+        return self.deployment_mode == "inline"
+
+    @property
+    def inline_enrichment(self) -> bool:
+        """True iff the resolved deployment mode runs enrichment inline."""
+        return self.deployment_mode == "inline"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
