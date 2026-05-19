@@ -204,7 +204,7 @@ async def test_reembed_skips_initial_sleep_when_flag_off() -> None:
     sc.update_embedding = AsyncMock()
 
     with (
-        patch.object(memory_service.settings, "embed_on_hot_path", False),
+        patch.object(memory_service.settings, "deployment_mode", "deferred"),
         patch.object(
             memory_service,
             "get_embedding",
@@ -219,7 +219,9 @@ async def test_reembed_skips_initial_sleep_when_flag_off() -> None:
         ),
     ):
         await memory_service._reembed_memory(uuid.uuid4(), "hello", TENANT_ID)
-    assert slept == [], "flag-off path must not sleep before the first embed attempt"
+    assert slept == [], (
+        "deferred-mode path must not sleep before the first embed attempt"
+    )
     sc.update_embedding.assert_awaited_once()
 
 
@@ -493,7 +495,7 @@ async def test_bulk_reembed_preserves_batching() -> None:
 
 
 async def test_enrich_fires_contradiction_on_existing_embedding_in_saas_mode() -> None:
-    """SaaS-mode (embed_on_hot_path=False) contradiction coverage.
+    """SaaS-mode (``deployment_mode=deferred``) contradiction coverage.
 
     Pre-CAURA-222 this path did a hint re-embed and fired
     ``contradiction_detection_post_enrich`` on the hint-enhanced vector.
@@ -501,6 +503,13 @@ async def test_enrich_fires_contradiction_on_existing_embedding_in_saas_mode() -
     see CAURA-222), but SaaS-mode contradiction coverage was preserved
     by adding a dedicated ``contradiction_detection_saas`` branch at
     the bottom of ``_enrich_memory_background``.
+
+    Post-F3-Phase-2c the branch is reachable only by directly invoking
+    ``_enrich_memory_background`` while ``deployment_mode=deferred`` —
+    in real deployments ``_schedule_enrich_or_inline`` publishes
+    instead of entering this function. The branch + this test are
+    deleted in F3 Phase 3 alongside ``test_f3_asymmetric_canary``;
+    see that file's docstring for the full F3 plan context.
 
     Expected behavior now:
       - No ``update_embedding`` call from this function (worker owns
@@ -562,7 +571,7 @@ async def test_enrich_fires_contradiction_on_existing_embedding_in_saas_mode() -
         return None
 
     with (
-        patch.object(memory_service.settings, "embed_on_hot_path", False),
+        patch.object(memory_service.settings, "deployment_mode", "deferred"),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch(
             "core_api.services.contradiction_detector.detect_contradictions_async",
@@ -1125,7 +1134,7 @@ async def test_shim_publishes_event_when_flag_off() -> None:
     memory_id = uuid.uuid4()
 
     with (
-        patch.object(memory_service.settings, "embed_on_hot_path", False),
+        patch.object(memory_service.settings, "deployment_mode", "deferred"),
         patch(
             "common.events.memory_embed_publisher.get_event_bus",
             return_value=fake_bus,

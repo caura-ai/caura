@@ -982,7 +982,7 @@ async def create_memories_bulk(
     # that will surface as an error anyway.
     valid_indices = [i for i in range(n) if i not in short_content_errors]
     embeddings: list = [None] * n
-    if valid_indices and settings.embed_on_hot_path:
+    if valid_indices and settings.inline_embedding:
         try:
             async with asyncio.timeout(BULK_EMBEDDING_TIMEOUT_SECONDS):
                 valid_embeddings = await get_embeddings_batch(
@@ -994,13 +994,13 @@ async def create_memories_bulk(
             embeddings[item_idx] = valid_embeddings[emb_pos]
 
     enrichments: list = [None] * n
-    # CAURA-595: ``enrich_on_hot_path=False`` defers the LLM call to
+    # CAURA-595: ``deployment_mode=deferred`` defers the LLM call to
     # ``core-worker``; the bulk-persist loop below still proceeds with
     # all-None enrichments and the publish happens post-persist (one
     # event per successfully-created row).
     if (
         valid_indices
-        and settings.enrich_on_hot_path
+        and settings.inline_enrichment
         and tenant_config.enrichment_enabled
         and tenant_config.enrichment_provider != "none"
     ):
@@ -1378,9 +1378,9 @@ async def create_memories_bulk(
         # LLM provider for entity extraction + enrichment).
         from core_api.services.contradiction_detector import detect_contradictions_async
 
-        # CAURA-595: per-row enrich publishes when the flag is off.
+        # CAURA-595: per-row enrich publishes when deployment_mode is deferred.
         defer_enrich_publish = (
-            not settings.enrich_on_hot_path
+            not settings.inline_enrichment
             and tenant_config.enrichment_enabled
             and tenant_config.enrichment_provider != "none"
         )
@@ -1492,13 +1492,15 @@ async def _schedule_embed_or_reembed(
 ) -> None:
     """Backfill the embedding for a memory persisted with ``embedding=NULL``.
 
-    True (OSS, no worker fleet): in-process retry via :func:`_reembed_memory`.
-    False (SaaS): publish ``EMBED_REQUESTED``; ``core-worker`` PATCHes
-    the row. ``content_hash`` is used by the worker to short-circuit
-    the provider call when the same content was already embedded for
-    this tenant — pass it whenever the caller has it in scope.
+    Inline mode (OSS, no worker fleet): in-process retry via
+    :func:`_reembed_memory`.
+    Deferred mode (SaaS): publish ``EMBED_REQUESTED``; ``core-worker``
+    PATCHes the row. ``content_hash`` is used by the worker to short-
+    circuit the provider call when the same content was already
+    embedded for this tenant — pass it whenever the caller has it in
+    scope.
     """
-    if settings.embed_on_hot_path:
+    if settings.inline_embedding:
         await _reembed_memory(memory_id, content, tenant_id)
     else:
         await publish_memory_embed_request(
@@ -1585,11 +1587,13 @@ async def _schedule_enrich_or_inline(
 ) -> None:
     """Enrichment counterpart of :func:`_schedule_embed_or_reembed`.
 
-    True (OSS / pre-CAURA-595 default): run enrichment as an in-process
-    background task in core-api via :func:`_enrich_memory_background`.
-    False (CAURA-595 SaaS): publish ``ENRICH_REQUESTED``; ``core-worker``
-    consumes the event, runs the LLM, and PATCHes the enrichment fields
-    back. The worker also emits ``ENRICHED`` after the PATCH lands.
+    Inline mode (OSS / pre-CAURA-595 default): run enrichment as an
+    in-process background task in core-api via
+    :func:`_enrich_memory_background`.
+    Deferred mode (CAURA-595 SaaS): publish ``ENRICH_REQUESTED``;
+    ``core-worker`` consumes the event, runs the LLM, and PATCHes the
+    enrichment fields back. The worker also emits ``ENRICHED`` after
+    the PATCH lands.
 
     ``agent_provided_fields`` is forwarded so the worker doesn't
     overwrite anything the agent set explicitly at write time —
@@ -1597,7 +1601,7 @@ async def _schedule_enrich_or_inline(
     ``model_dump(exclude_none=True)`` and would otherwise downgrade
     those columns on every redelivery.
     """
-    if settings.enrich_on_hot_path:
+    if settings.inline_enrichment:
         # NOTE: ``agent_provided_fields`` and ``reference_datetime``
         # are intentionally NOT forwarded to ``_enrich_memory_background``.
         # The inline path pre-dates these concepts and uses an
@@ -1646,10 +1650,10 @@ async def _reembed_memory(
     from core_api.constants import EMBEDDING_REEMBED_DELAY_S
     from core_api.services.organization_settings import resolve_config
 
-    if settings.embed_on_hot_path or is_failure_fallback:
-        # Two paths land here: pre-offload legacy behaviour (flag on,
+    if settings.inline_embedding or is_failure_fallback:
+        # Two paths land here: pre-offload legacy behaviour (inline mode,
         # this coroutine only runs on provider failure) and CAURA-594
-        # batch-fallback (flag off but the batch just failed). Both
+        # batch-fallback (deferred mode but the batch just failed). Both
         # want the backoff.
         await asyncio.sleep(EMBEDDING_REEMBED_DELAY_S)
     try:
@@ -2131,31 +2135,27 @@ async def _enrich_memory_background(
                     tenant_id,
                 )
             )
-        # SaaS-mode contradiction detection. Only fires when
-        # ``embed_on_hot_path=False``: in OSS mode the hot path already
-        # fired ``contradiction_detection`` via ScheduleBackgroundTasks
-        # on the same embedding (post-CAURA-222 there's no hint re-embed
-        # generating a different vector here, so re-firing would just
-        # duplicate the LLM check work — state is idempotent because the
-        # detector only writes via ``update_memory_status``).
+        # F3 Phase 2c — name swapped from legacy ``settings.embed_on_hot_path``
+        # to ``settings.inline_embedding`` (same value via the
+        # ``deployment_mode`` derivation). This branch is the asymmetric
+        # race guard documented in ``tests/test_f3_asymmetric_canary.py``:
+        # post-Phase-2c the helpers co-vary, so under both canonical
+        # cells the branch is unreachable in any real deployment (inline
+        # mode: ``_enrich_memory_background`` enters AND ``inline_embedding=True``
+        # → guard short-circuits; deferred mode: ``_schedule_enrich_or_inline``
+        # publishes instead of entering this function). F3 Phase 3 deletes
+        # the entire branch + the canary test.
         #
-        # On the OSS inline-embed-failure path, ``_reembed_memory``'s
-        # race guard fires its own contradiction call when the retry
-        # succeeds, so the OSS-mode coverage hole is also closed there.
+        # SaaS-mode contradiction detection (historical). On the OSS
+        # inline-embed-failure path, ``_reembed_memory``'s race guard fires
+        # its own contradiction call when the retry succeeds, so the
+        # OSS-mode coverage hole is also closed there.
         #
         # In SaaS mode, ``handle_memory_embedded`` and
-        # ``handle_memory_enriched`` consumers also fire contradiction
-        # when their respective worker PATCHes land. This in-process
-        # branch covers the case where ``enrich_on_hot_path=True`` AND
-        # ``embed_on_hot_path=False`` AND the embed worker has already
-        # PATCH-ed the row by the time we reach this point.
-        #
-        # CAURA-594 remaining gap (full SaaS, both flags off): when
-        # enrich runs before core-worker's embed PATCH lands, the
-        # ``embedding is not None`` guard skips this branch and the
-        # ``handle_memory_embedded`` consumer takes over when the
-        # worker's later EMBEDDED publish fires.
-        if embedding is not None and not settings.embed_on_hot_path:
+        # ``handle_memory_enriched`` consumers fire contradiction when
+        # their respective worker PATCHes land, covering both canonical
+        # states without this branch.
+        if embedding is not None and not settings.inline_embedding:
             from core_api.services.contradiction_detector import detect_contradictions_async
 
             track_task(
