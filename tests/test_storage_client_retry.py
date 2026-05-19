@@ -109,6 +109,25 @@ async def test_get_retries_then_gives_up_after_max_attempts() -> None:
     assert read.get.await_count == 3  # 1 initial + 2 retries = max attempts
 
 
+async def test_get_retries_on_connect_error_then_succeeds() -> None:
+    """ConnectError covers refused / DNS-not-yet-resolved / route-down — all
+    transient during Cloud Run autoscaling and storage-api restarts.
+    Local chaos test (network disconnect) raised ConnectError, not
+    ConnectTimeout, when storage-api was unreachable."""
+    client, _write, read = await _make_client()
+    read.get = AsyncMock(
+        side_effect=[
+            httpx.ConnectError("Name or service not known"),
+            _ok_response(200, {"id": "abc"}),
+        ]
+    )
+
+    result = await client._get("/entities/exact", read=True)
+
+    assert result == {"id": "abc"}
+    assert read.get.await_count == 2
+
+
 async def test_get_retries_on_5xx_status() -> None:
     """503 from storage-api (e.g. autoscaling cold-start, load-shedding)
     is also transient — same retry policy applies."""

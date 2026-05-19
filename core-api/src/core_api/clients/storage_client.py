@@ -45,6 +45,12 @@ _RETRYABLE_EXCEPTIONS = (
     httpx.ConnectTimeout,
     httpx.ReadTimeout,
     httpx.PoolTimeout,
+    # ConnectError covers refused / DNS-not-yet-resolved / route-down —
+    # all transient during Cloud Run autoscaling and storage-api
+    # restarts. Local chaos test (docker network disconnect) showed
+    # httpx raises ConnectError("Name or service not known"), not
+    # ConnectTimeout, when the upstream is temporarily unreachable.
+    httpx.ConnectError,
 )
 _RETRYABLE_STATUS_CODES = frozenset({502, 503, 504})
 
