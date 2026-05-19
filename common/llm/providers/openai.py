@@ -115,12 +115,15 @@ class OpenAILLMProvider:
         *,
         temperature: float = 0.0,
         seed: int | None = None,
+        response_schema: dict | None = None,
     ) -> dict:
         """Send a prompt and return a parsed JSON dict.
 
-        Uses ``response_format={"type": "json_object"}`` to enforce JSON output.
+        Without ``response_schema``, uses
+        ``response_format={"type": "json_object"}`` to enforce shape-less
+        JSON output (back-compat for enrichment and dedup callers).
 
-        ``seed`` (A5 #2): when provided, forwarded to OpenAI's chat
+        ``seed`` (A5a #2): when provided, forwarded to OpenAI's chat
         completions API for response determinism. ``temperature=0.0`` is
         not sufficient on its own — small models (gpt-class -nano) still
         sample non-deterministically without a seed. Callers that need
@@ -128,12 +131,31 @@ class OpenAILLMProvider:
         disambiguation) should pass a stable seed derived from the
         prompt. Omit (or pass ``None``) for vanilla non-deterministic
         completion.
+
+        ``response_schema`` (A5b #3): when provided, switches to
+        ``response_format={"type": "json_schema", ...}`` so the API
+        enforces the output shape server-side. ``strict=False`` —
+        Pydantic-generated schemas don't always satisfy OpenAI's strict-
+        mode requirements (additionalProperties=false everywhere); the
+        client-side Pydantic parse is the real guardrail. Passing
+        ``None`` preserves today's shape-less behaviour.
         """
         t0 = time.perf_counter()
+        if response_schema is not None:
+            response_format: dict = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "schema": response_schema,
+                    "strict": False,
+                },
+            }
+        else:
+            response_format = {"type": "json_object"}
         create_kwargs: dict = {
             "model": self._model,
             "messages": [{"role": "user", "content": prompt}],
-            "response_format": {"type": "json_object"},
+            "response_format": response_format,
             "temperature": temperature,
         }
         if seed is not None:
