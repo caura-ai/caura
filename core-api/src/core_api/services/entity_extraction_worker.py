@@ -68,17 +68,22 @@ async def process_entity_extraction(
     # worker service subscribes to ``Topics.Pipeline.ENTITY_EXTRACT_REQUESTED``
     # and this function becomes its handler body.
     try:
-        graph = await extract_entities_from_content(content, memory_type)
+        # A5c: resolve tenant_config BEFORE the extraction call so the
+        # tenant-level ``entity_extraction.provider`` / ``.model``
+        # overrides on ResolvedConfig actually take effect. Pre-A5c the
+        # worker passed nothing here, falling back to global settings,
+        # so per-tenant routing was dead code.
+        from core_api.services.organization_settings import resolve_config
+
+        tenant_cfg = await resolve_config(None, tenant_id)
+
+        graph = await extract_entities_from_content(content, memory_type, tenant_config=tenant_cfg)
         if not graph.entities:
             return
 
         sc = get_storage_client()
 
         try:
-            # Resolve tenant config for per-tenant blocklist
-            from core_api.services.organization_settings import resolve_config
-
-            tenant_cfg = await resolve_config(None, tenant_id)
             blocklist = tenant_cfg.entity_blocklist
 
             # Embed entity names for fuzzy resolution
