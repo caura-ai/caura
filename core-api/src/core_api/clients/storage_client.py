@@ -395,10 +395,49 @@ class CoreStorageClient:
         memory_id: str,
         status: str,
         supersedes_id: str | None = None,
+        *,
+        unset_supersedes: bool = False,
+        expected_supersedes_id: str | None = None,
     ) -> dict | None:
+        """Update status and optionally set or clear ``supersedes_id``.
+
+        Set path (existing behaviour):
+            ``supersedes_id=<uuid>`` sets the row's pointer, guarded by
+            a CAS against NULL so the first detection wins.
+
+        Clear path (A4 #10 — retraction):
+            ``unset_supersedes=True`` plus ``expected_supersedes_id=<uuid>``
+            clears the row's pointer, guarded by a CAS that requires the
+            current value to either match the expected uuid or already be
+            NULL. A current pointer to *a different* uuid yields a 409 so
+            the caller knows another writer took the row.
+
+        Raises
+        ------
+        ValueError
+            If ``unset_supersedes=True`` without ``expected_supersedes_id`` —
+            clearing without a CAS anchor would race concurrent setters.
+            If both ``supersedes_id`` (set) and ``unset_supersedes=True``
+            (clear) are passed in one call — contradictory intent.
+        """
+        if unset_supersedes:
+            if supersedes_id is not None:
+                raise ValueError(
+                    "supersedes_id (set) and unset_supersedes=True (clear) "
+                    "are mutually exclusive — choose one."
+                )
+            if expected_supersedes_id is None:
+                raise ValueError(
+                    "unset_supersedes=True requires expected_supersedes_id "
+                    "for the CAS anchor; clearing without one would race "
+                    "concurrent setters."
+                )
         payload: dict[str, Any] = {"status": status}
         if supersedes_id is not None:
             payload["supersedes_id"] = supersedes_id
+        if unset_supersedes:
+            payload["unset_supersedes"] = True
+            payload["expected_supersedes_id"] = expected_supersedes_id
         return await self._patch(f"/memories/{memory_id}/status", payload)
 
     async def find_by_content_hash(

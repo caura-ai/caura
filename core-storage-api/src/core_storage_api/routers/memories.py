@@ -703,16 +703,70 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
     body: dict = await request.json()
     status = body["status"]
     supersedes_id = body.get("supersedes_id")
-    # Update status
+    unset_supersedes = bool(body.get("unset_supersedes", False))
+    expected_supersedes_id = body.get("expected_supersedes_id")
+
+    if unset_supersedes and supersedes_id is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="supersedes_id and unset_supersedes are mutually exclusive",
+        )
+    if unset_supersedes and not expected_supersedes_id:
+        raise HTTPException(
+            status_code=422,
+            detail="unset_supersedes=True requires expected_supersedes_id",
+        )
+
+    if unset_supersedes:
+        # A4 #10 — retraction: clear ``supersedes_id`` AND set status in a
+        # single SQL statement, guarded by CAS that requires the row's
+        # current pointer to match ``expected_supersedes_id`` OR be
+        # already NULL (idempotent re-fire). A pointer to *a different*
+        # non-NULL uuid means another writer took the row in the meantime;
+        # reject with 409 so the caller knows their view was stale.
+        # Status + pointer update must be atomic — a partial update
+        # (status advances but pointer clear is rejected) would leave
+        # the row in an invalid state. Caught wet-testing 2026-05-19.
+        from sqlalchemy import or_
+        from sqlalchemy import update as sql_update
+
+        from common.models import Memory
+        from core_storage_api.services.postgres_service import get_session
+
+        expected_uuid = UUID(expected_supersedes_id)
+        async with get_session() as session:
+            result = await session.execute(
+                sql_update(Memory)
+                .where(
+                    Memory.id == memory_id,
+                    or_(
+                        Memory.supersedes_id == expected_uuid,
+                        Memory.supersedes_id.is_(None),
+                    ),
+                )
+                .values(supersedes_id=None, status=status)
+            )
+            if result.rowcount == 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "stale_retraction",
+                        "memory_id": str(memory_id),
+                        "expected_supersedes_id": expected_supersedes_id,
+                    },
+                )
+        return {"ok": True}
+
+    # Set or status-only paths
     await _svc.memory_update_status(memory_id, status)
-    # If supersedes_id is provided, also set that field via a direct update.
-    # Compare-and-swap (``WHERE supersedes_id IS NULL``) makes this idempotent:
-    # the first detection to land owns the chain, later re-fires on the same
-    # row become no-ops at the DB. Pairs with the created_at direction
-    # invariant in core_api.services.contradiction_detector to defend the
-    # CAURA-000 ``NEW.supersedes_id = OLD.id`` rule against re-fired
-    # detection on already-resolved memories (consumer-event paths).
+
     if supersedes_id is not None:
+        # Set path: compare-and-swap against NULL — the first detection
+        # to land owns the chain. Later re-fires on the same row no-op
+        # at the DB. Pairs with the created_at direction invariant in
+        # core_api.services.contradiction_detector to defend the
+        # CAURA-000 ``NEW.supersedes_id = OLD.id`` rule against re-fired
+        # detection on already-resolved memories.
         from sqlalchemy import update as sql_update
 
         from common.models import Memory
