@@ -5,10 +5,15 @@ Exercises the limiter at the HTTP layer (decorators applied to
 used here so tests don't need Redis; prod swaps to Redis via
 ``settings.redis_url``.
 
-Tests tune ``rate_limit_*`` settings to tiny values so a 429 fires
-within a handful of rapid requests. Each test also resets the limiter's
-in-memory store afterwards so neighbours stay independent.
+Burst tests fire requests via ``asyncio.gather`` rather than a
+sequential ``for`` loop. The limiter's window is wall-clock; a
+sequential loop's per-request roundtrip stretches the burst past the
+1-second window on slower runners and lets every request pass under
+budget. Concurrent fire is what an actual abusive client looks like
+anyway, and it makes the test runner-speed-independent.
 """
+
+import asyncio
 
 import pytest
 
@@ -72,33 +77,64 @@ async def test_key_func_falls_back_to_ip_without_api_key():
 # ── HTTP layer: 429 on burst ──
 
 
+async def _burst(coro_factories, *, concurrency: int) -> list[int]:
+    """Fire a batch of requests with bounded concurrency, return status codes.
+
+    Why bounded: slowapi's decorator runs INSIDE the wrapped route, so
+    FastAPI resolves dependencies (auth, ``Depends(get_db)``) BEFORE the
+    limiter fires. An unbounded ``asyncio.gather(*[100 reqs])`` opens 100
+    Postgres connections simultaneously and exhausts the test pool with
+    "sorry, too many clients already" — masking the 429s the test exists
+    to assert. ``concurrency`` chosen to comfortably exceed the per-second
+    budget (so 429s fire) while staying under the DB pool ceiling.
+    """
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _one(make):
+        async with sem:
+            r = await make()
+            return r.status_code
+
+    return await asyncio.gather(*[_one(f) for f in coro_factories])
+
+
 async def test_search_rate_limit_returns_429_after_budget(client):
     """The default 30/second limit should trip within a 100-request burst
-    from a single API key."""
+    from a single API key. The burst is capped at 50 in-flight via a
+    semaphore so the DB connection pool stays intact while still
+    delivering > 30 requests inside one rate-limit window."""
     headers = {"x-api-key": "mc_rate_test_search_key"}
     body = {"tenant_id": "default", "query": "hello"}
-    codes = []
-    for _ in range(100):
-        resp = await client.post("/api/v1/search", json=body, headers=headers)
-        codes.append(resp.status_code)
+    codes = await _burst(
+        [lambda: client.post("/api/v1/search", json=body, headers=headers)] * 100,
+        concurrency=50,
+    )
     assert 429 in codes, f"expected at least one 429 among {codes}"
 
 
 async def test_write_rate_limit_returns_429_after_budget(client):
     """Writes have a stricter limit (10/second by default) — a 50-request
-    burst from the same key should reliably see a 429."""
+    bounded burst from the same key should reliably see a 429.
+
+    Each request carries a unique ``content`` to avoid the dedup 409 path
+    masking a 429."""
     headers = {"x-api-key": "mc_rate_test_write_key"}
-    body = {
+    base_body = {
         "tenant_id": "default",
         "agent_id": "rate-test-agent",
         "memory_type": "fact",
-        "content": "rate-limit probe",
     }
-    codes = []
-    for i in range(50):
-        body["content"] = f"rate-limit probe {i}"  # avoid dedup 409s
-        resp = await client.post("/api/v1/memories", json=body, headers=headers)
-        codes.append(resp.status_code)
+    factories = [
+        (
+            lambda i=i: client.post(
+                "/api/v1/memories",
+                json={**base_body, "content": f"rate-limit probe {i}"},
+                headers=headers,
+            )
+        )
+        for i in range(50)
+    ]
+    codes = await _burst(factories, concurrency=25)
     assert 429 in codes, f"expected at least one 429 among {codes}"
 
 

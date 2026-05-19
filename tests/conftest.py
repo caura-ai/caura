@@ -33,6 +33,19 @@ _TEST_DEFAULTS = {
 for _k, _v in _TEST_DEFAULTS.items():
     os.environ.setdefault(_k, _v)
 
+# Defensively unset env vars that change auth shape and routinely leak in
+# from developers' shells (the OSS plugin onboarding writes
+# ``~/.config/caura-keys.env`` with ``MEMCLAW_API_KEY=...`` and many
+# rc files source it for the openclaw CLI). A leaked value flips
+# ``settings.memclaw_api_key`` to truthy, which makes ``get_auth_context``
+# enforce the gate at Path 2 with 401s before any standalone-mode
+# bypass — silently failing every test that doesn't sniff the env
+# itself (e.g. test_rate_limit's auth-gated burst test, which gets all
+# 401s instead of the expected 200/429 mix). Unset rather than
+# setdefault — setdefault doesn't override an existing env value.
+for _leaky in ("MEMCLAW_API_KEY", "MEMCLAW_KEY"):
+    os.environ.pop(_leaky, None)
+
 # ruff: noqa: E402 — these imports MUST stay below the env defaults above;
 # ``core_api.config`` reads settings at import time so ``pytest`` triggering
 # test collection (which transitively imports config) must see the
