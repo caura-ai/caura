@@ -746,7 +746,7 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                 )
                 .values(supersedes_id=None, status=status)
             )
-            if result.rowcount == 0:
+            if result.rowcount == 0:  # type: ignore[attr-defined]
                 raise HTTPException(
                     status_code=409,
                     detail={
