@@ -5,9 +5,9 @@ contract that the CAURA-524 step-consolidation + CAURA-595 PR-C global-
 flag pattern inadvertently flattened):
 
 * ``write_mode == "strong"`` → embed and enrich **always inline**,
-  regardless of ``embed_on_hot_path`` / ``enrich_on_hot_path``. Strong
-  callers explicitly opted into "thorough write before commit"; the
-  global hot-path flags target fast-mode latency, not strong. Running
+  regardless of ``settings.deployment_mode``. Strong callers
+  explicitly opted into "thorough write before commit"; the
+  per-deploy mode targets fast-mode latency, not strong. Running
   inline here is what gives strong its meaningful guarantees —
   ``CheckSemanticDuplicate`` runs against a real embedding (so the
   409-on-near-duplicate contract holds), and the agent reads its own
@@ -15,13 +15,13 @@ flag pattern inadvertently flattened):
   ``ts_valid_*`` back in the response.
 * ``write_mode == "fast"`` → LLM enrichment **always deferred**
   (matches CAURA-229's "fast = no LLM on the request path"
-  intent). Embedding follows ``embed_on_hot_path`` so OSS local stays
-  inline ~200ms while SaaS prod defers to ``core-worker`` for the
-  sub-2s p99 visibility SLA.
+  intent). Embedding follows ``settings.inline_embedding`` so OSS
+  local stays inline ~200ms while SaaS prod defers to ``core-worker``
+  for the sub-2s p99 visibility SLA.
 * Any other ``write_mode`` value (and the ``None`` case the
   enrichment-only sub-pipeline hits during extract-only / auto-chunk)
-  falls back to the global flags — preserves today's behaviour for
-  those branches.
+  reads both helpers — preserves today's behaviour for those
+  branches.
 
 Behind both deferred paths: ``ScheduleBackgroundTasks`` publishes
 ``Topics.Memory.EMBED_REQUESTED`` / ``Topics.Memory.ENRICH_REQUESTED``
@@ -66,15 +66,23 @@ class ParallelEmbedEnrich:
         # the idempotency/content-hash cache (pure dict lookup, no
         # provider call) so we reuse it even when hot-path embed is off
         # — nothing to offload.
+        # F3 Phase 2 batch 1: read the new ``deployment_mode``-derived
+        # helpers instead of the legacy ``embed_on_hot_path`` /
+        # ``enrich_on_hot_path`` flags. Polarity matches:
+        # ``settings.inline_embedding == settings.embed_on_hot_path``
+        # under the canonical (T,T) / (F,F) deployments — the only
+        # configurations any real environment uses per the Phase 0
+        # audit. The legacy flags continue to back the helpers via the
+        # Phase 1 derivation validator until F3 Phase 3 deletes them.
         if resolved_write_mode == "strong":
             defer_embedding = False
             defer_enrichment = False
         elif resolved_write_mode == "fast":
-            defer_embedding = (not settings.embed_on_hot_path) and cached_embedding is None
+            defer_embedding = (not settings.inline_embedding) and cached_embedding is None
             defer_enrichment = True
         else:
-            defer_embedding = (not settings.embed_on_hot_path) and cached_embedding is None
-            defer_enrichment = not settings.enrich_on_hot_path
+            defer_embedding = (not settings.inline_embedding) and cached_embedding is None
+            defer_enrichment = not settings.inline_enrichment
 
         embedding_task = None
         if cached_embedding is not None:

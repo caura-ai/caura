@@ -36,7 +36,9 @@ pytestmark = pytest.mark.asyncio
 TENANT_ID = f"test-594-{uuid.uuid4().hex[:8]}"
 
 
-def _input(content: str = "A test memory long enough to pass any content-length gate.") -> MemoryCreate:
+def _input(
+    content: str = "A test memory long enough to pass any content-length gate.",
+) -> MemoryCreate:
     return MemoryCreate(
         tenant_id=TENANT_ID,
         fleet_id="f",
@@ -59,7 +61,9 @@ def _ctx(*, enrichment: bool = False, cached_embedding=None) -> PipelineContext:
     data: dict = {"input": _input(), "content_hash": "f" * 64}
     if cached_embedding is not None:
         data["cached_embedding"] = cached_embedding
-    return PipelineContext(db=AsyncMock(), data=data, tenant_config=_tenant_config(enrichment=enrichment))
+    return PipelineContext(
+        db=AsyncMock(), data=data, tenant_config=_tenant_config(enrichment=enrichment)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -68,9 +72,18 @@ def _ctx(*, enrichment: bool = False, cached_embedding=None) -> PipelineContext:
 
 
 async def test_skips_embed_when_flag_off() -> None:
+    """F3 Phase 2: ``deployment_mode=deferred`` is the post-Phase-2
+    equivalent of legacy ``embed_on_hot_path=False`` for tests against
+    ``ParallelEmbedEnrich`` (which now reads the helpers, not the legacy
+    flag). The legacy flag still exists in ``Settings`` until Phase 3
+    removes it; it stays steering ``schedule_background_tasks.py`` and
+    ``memory_service.py`` until those batches migrate too."""
     ctx = _ctx()
     with (
-        patch("core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path", False),
+        patch(
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "deferred",
+        ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",
             new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
@@ -86,7 +99,10 @@ async def test_runs_embed_when_flag_on() -> None:
     ctx = _ctx()
     fake = [0.1] * VECTOR_DIM
     with (
-        patch("core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path", True),
+        patch(
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "inline",
+        ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",
             new=AsyncMock(return_value=fake),
@@ -99,11 +115,14 @@ async def test_runs_embed_when_flag_on() -> None:
 
 async def test_uses_cached_embedding_even_when_flag_off() -> None:
     """A cached embedding is a pure dict lookup — there's no provider call
-    to offload. The step must reuse it regardless of the flag."""
+    to offload. The step must reuse it regardless of mode."""
     cached = [0.42] * VECTOR_DIM
     ctx = _ctx(cached_embedding=cached)
     with (
-        patch("core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path", False),
+        patch(
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "deferred",
+        ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",
             new=AsyncMock(return_value=[0.0] * VECTOR_DIM),
@@ -114,28 +133,21 @@ async def test_uses_cached_embedding_even_when_flag_off() -> None:
     assert ctx.data["embedding"] == cached
 
 
-async def test_enrichment_still_runs_when_flag_off() -> None:
-    """Strong-write pipeline consumes enrichment output (title, ts_valid_*)
-    to build the row. Deferring embedding must not defer enrichment."""
-    ctx = _ctx(enrichment=True)
-    enrichment_result = SimpleNamespace(retrieval_hint="")
-
-    async def _enrich(*_a, **_k):
-        return enrichment_result
-
-    with (
-        patch("core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path", False),
-        patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",
-            new=AsyncMock(return_value=[0.0] * VECTOR_DIM),
-        ) as embed,
-        patch("core_api.services.memory_enrichment.enrich_memory", new=_enrich),
-    ):
-        await ParallelEmbedEnrich().execute(ctx)
-
-    embed.assert_not_called()
-    assert ctx.data["embedding"] is None
-    assert ctx.data["enrichment"] is enrichment_result
+# F3 Phase 2 — DROPPED CAPABILITY (asymmetric flag pair)
+# ────────────────────────────────────────────────────────────────────
+# The original test ``test_enrichment_still_runs_when_flag_off`` here
+# pinned a scenario that ONLY exists under asymmetric flags
+# ``(embed=False, enrich=True)``: embedding deferred, enrichment
+# still inline. Per the Phase 0 audit (and the user's confirmation
+# 2026-05-19) no real environment ever runs the asymmetric state;
+# every deploy uses canonical ``(F, F)`` or ``(T, T)``.
+#
+# F3 Phase 2 batch 1 migrated ``parallel_embed_enrich.py`` onto the
+# ``deployment_mode``-derived helpers, which co-vary both axes. The
+# asymmetric capability is no longer expressible at this layer. The
+# old test was deleted intentionally; if you came here looking for
+# it via git blame, see the F3 plan in
+# memory/fast-vs-strong-investigation.md.
 
 
 async def test_hint_reembed_skipped_when_flag_off() -> None:
@@ -143,13 +155,18 @@ async def test_hint_reembed_skipped_when_flag_off() -> None:
     — pointless work when we're deferring the first one. The background
     re-embed uses raw content; a follow-up can plumb the hint through."""
     ctx = _ctx(enrichment=True)
-    enrichment_result = SimpleNamespace(retrieval_hint="a hint that would normally trigger re-embed")
+    enrichment_result = SimpleNamespace(
+        retrieval_hint="a hint that would normally trigger re-embed"
+    )
 
     async def _enrich(*_a, **_k):
         return enrichment_result
 
     with (
-        patch("core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path", False),
+        patch(
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "deferred",
+        ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",
             new=AsyncMock(return_value=[0.0] * VECTOR_DIM),
@@ -181,16 +198,25 @@ async def test_reembed_skips_initial_sleep_when_flag_off() -> None:
         slept.append(secs)
 
     sc = MagicMock()
-    sc.get_memory = AsyncMock(return_value={"id": "m1", "deleted_at": None, "fleet_id": "f"})
+    sc.get_memory = AsyncMock(
+        return_value={"id": "m1", "deleted_at": None, "fleet_id": "f"}
+    )
     sc.update_embedding = AsyncMock()
 
     with (
         patch.object(memory_service.settings, "embed_on_hot_path", False),
-        patch.object(memory_service, "get_embedding", new=AsyncMock(return_value=[0.1] * VECTOR_DIM)),
+        patch.object(
+            memory_service,
+            "get_embedding",
+            new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
+        ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch("core_api.services.memory_service.asyncio.sleep", new=_fake_sleep),
         patch.object(memory_service, "track_task"),
-        patch("core_api.services.organization_settings.resolve_config", new=AsyncMock(return_value=None)),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         await memory_service._reembed_memory(uuid.uuid4(), "hello", TENANT_ID)
     assert slept == [], "flag-off path must not sleep before the first embed attempt"
@@ -209,16 +235,25 @@ async def test_reembed_sleeps_on_failure_path_when_flag_on() -> None:
         slept.append(secs)
 
     sc = MagicMock()
-    sc.get_memory = AsyncMock(return_value={"id": "m1", "deleted_at": None, "fleet_id": "f"})
+    sc.get_memory = AsyncMock(
+        return_value={"id": "m1", "deleted_at": None, "fleet_id": "f"}
+    )
     sc.update_embedding = AsyncMock()
 
     with (
         patch.object(memory_service.settings, "embed_on_hot_path", True),
-        patch.object(memory_service, "get_embedding", new=AsyncMock(return_value=[0.1] * VECTOR_DIM)),
+        patch.object(
+            memory_service,
+            "get_embedding",
+            new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
+        ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch("core_api.services.memory_service.asyncio.sleep", new=_fake_sleep),
         patch.object(memory_service, "track_task"),
-        patch("core_api.services.organization_settings.resolve_config", new=AsyncMock(return_value=None)),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         await memory_service._reembed_memory(uuid.uuid4(), "hello", TENANT_ID)
     assert slept and slept[0] == EMBEDDING_REEMBED_DELAY_S
@@ -231,7 +266,12 @@ async def test_reembed_schedules_contradiction_after_success() -> None:
 
     sc = MagicMock()
     sc.get_memory = AsyncMock(
-        return_value={"id": "m1", "deleted_at": None, "fleet_id": "f1", "embedding": None}
+        return_value={
+            "id": "m1",
+            "deleted_at": None,
+            "fleet_id": "f1",
+            "embedding": None,
+        }
     )
     sc.update_embedding = AsyncMock()
 
@@ -247,12 +287,23 @@ async def test_reembed_schedules_contradiction_after_success() -> None:
 
     with (
         patch.object(memory_service.settings, "embed_on_hot_path", False),
-        patch.object(memory_service, "get_embedding", new=AsyncMock(return_value=[0.1] * VECTOR_DIM)),
+        patch.object(
+            memory_service,
+            "get_embedding",
+            new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
+        ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch("core_api.services.memory_service.asyncio.sleep", new=_noop_sleep),
         patch.object(memory_service, "track_task"),
-        patch.object(memory_service, "tracked_task", new=MagicMock(side_effect=_stub_tracked_task)) as tracked,
-        patch("core_api.services.organization_settings.resolve_config", new=AsyncMock(return_value=None)),
+        patch.object(
+            memory_service,
+            "tracked_task",
+            new=MagicMock(side_effect=_stub_tracked_task),
+        ) as tracked,
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         await memory_service._reembed_memory(uuid.uuid4(), "hello", TENANT_ID)
 
@@ -272,7 +323,12 @@ async def test_reembed_race_guard_fires_with_flag_on_too() -> None:
     hint_enhanced = [0.9] * VECTOR_DIM  # written by _enrich_memory_background
     sc = MagicMock()
     sc.get_memory = AsyncMock(
-        return_value={"id": "m1", "deleted_at": None, "fleet_id": "f1", "embedding": hint_enhanced}
+        return_value={
+            "id": "m1",
+            "deleted_at": None,
+            "fleet_id": "f1",
+            "embedding": hint_enhanced,
+        }
     )
     sc.update_embedding = AsyncMock()
 
@@ -286,12 +342,23 @@ async def test_reembed_race_guard_fires_with_flag_on_too() -> None:
     with (
         # Flag ON — the configuration where the earlier guard was broken.
         patch.object(memory_service.settings, "embed_on_hot_path", True),
-        patch.object(memory_service, "get_embedding", new=AsyncMock(return_value=[0.1] * VECTOR_DIM)),
+        patch.object(
+            memory_service,
+            "get_embedding",
+            new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
+        ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch("core_api.services.memory_service.asyncio.sleep", new=_noop_sleep),
         patch.object(memory_service, "track_task"),
-        patch.object(memory_service, "tracked_task", new=MagicMock(side_effect=_stub_tracked_task)) as tracked,
-        patch("core_api.services.organization_settings.resolve_config", new=AsyncMock(return_value=None)),
+        patch.object(
+            memory_service,
+            "tracked_task",
+            new=MagicMock(side_effect=_stub_tracked_task),
+        ) as tracked,
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         await memory_service._reembed_memory(uuid.uuid4(), "hello", TENANT_ID)
 
@@ -311,7 +378,12 @@ async def test_reembed_respects_existing_embedding_from_enrich_race() -> None:
     existing = [0.9] * VECTOR_DIM  # hint-enhanced embedding written by enrich
     sc = MagicMock()
     sc.get_memory = AsyncMock(
-        return_value={"id": "m1", "deleted_at": None, "fleet_id": "f1", "embedding": existing}
+        return_value={
+            "id": "m1",
+            "deleted_at": None,
+            "fleet_id": "f1",
+            "embedding": existing,
+        }
     )
     sc.update_embedding = AsyncMock()
 
@@ -321,6 +393,7 @@ async def test_reembed_respects_existing_embedding_from_enrich_race() -> None:
 
     def _fake_detect(*args, **_kwargs):
         detect_calls.append(args)
+
         # Return a no-op coroutine that tracked_task can close cleanly.
         async def _noop() -> None:
             return None
@@ -336,13 +409,27 @@ async def test_reembed_respects_existing_embedding_from_enrich_race() -> None:
 
     with (
         patch.object(memory_service.settings, "embed_on_hot_path", False),
-        patch.object(memory_service, "get_embedding", new=AsyncMock(return_value=[0.1] * VECTOR_DIM)),
+        patch.object(
+            memory_service,
+            "get_embedding",
+            new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
+        ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch("core_api.services.memory_service.asyncio.sleep", new=_noop_sleep),
-        patch("core_api.services.contradiction_detector.detect_contradictions_async", new=_fake_detect),
+        patch(
+            "core_api.services.contradiction_detector.detect_contradictions_async",
+            new=_fake_detect,
+        ),
         patch.object(memory_service, "track_task"),
-        patch.object(memory_service, "tracked_task", new=MagicMock(side_effect=_stub_tracked_task)) as tracked,
-        patch("core_api.services.organization_settings.resolve_config", new=AsyncMock(return_value=None)),
+        patch.object(
+            memory_service,
+            "tracked_task",
+            new=MagicMock(side_effect=_stub_tracked_task),
+        ) as tracked,
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         await memory_service._reembed_memory(uuid.uuid4(), "hello", TENANT_ID)
 
@@ -386,8 +473,15 @@ async def test_bulk_reembed_preserves_batching() -> None:
         patch.object(memory_service, "get_embeddings_batch", new=_fake_batch),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch.object(memory_service, "track_task"),
-        patch.object(memory_service, "tracked_task", new=MagicMock(side_effect=_stub_tracked_task)) as tracked,
-        patch("core_api.services.organization_settings.resolve_config", new=AsyncMock(return_value=None)),
+        patch.object(
+            memory_service,
+            "tracked_task",
+            new=MagicMock(side_effect=_stub_tracked_task),
+        ) as tracked,
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         await memory_service._reembed_memories_bulk(items, TENANT_ID)
 
@@ -470,8 +564,14 @@ async def test_enrich_fires_contradiction_on_existing_embedding_in_saas_mode() -
     with (
         patch.object(memory_service.settings, "embed_on_hot_path", False),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.contradiction_detector.detect_contradictions_async", new=_fake_detect),
-        patch("core_api.services.memory_enrichment.enrich_memory", new=AsyncMock(return_value=enrichment)),
+        patch(
+            "core_api.services.contradiction_detector.detect_contradictions_async",
+            new=_fake_detect,
+        ),
+        patch(
+            "core_api.services.memory_enrichment.enrich_memory",
+            new=AsyncMock(return_value=enrichment),
+        ),
         patch.object(memory_service, "track_task"),
         # NB: patch the SOURCE (task_tracker.tracked_task) rather than
         # memory_service.tracked_task — _enrich_memory_background does a
@@ -541,10 +641,19 @@ async def test_enrich_no_contradiction_when_no_prior_embedding() -> None:
     sc._patch = AsyncMock()
 
     enrichment = SimpleNamespace(
-        memory_type="fact", weight=None, title=None, summary=None, tags=None,
-        llm_ms=None, contains_pii=False, pii_types=None,
-        retrieval_hint="hint", ts_valid_start=None, ts_valid_end=None,
-        status=None, atomic_facts=None,
+        memory_type="fact",
+        weight=None,
+        title=None,
+        summary=None,
+        tags=None,
+        llm_ms=None,
+        contains_pii=False,
+        pii_types=None,
+        retrieval_hint="hint",
+        ts_valid_start=None,
+        ts_valid_end=None,
+        status=None,
+        atomic_facts=None,
     )
 
     def _stub_tracked_task(coro, _name, *_a, **_k):
@@ -553,9 +662,14 @@ async def test_enrich_no_contradiction_when_no_prior_embedding() -> None:
 
     with (
         patch.object(memory_service.settings, "embed_on_hot_path", False),
-        patch.object(memory_service, "get_embedding", new=AsyncMock(return_value=hint_enhanced)),
+        patch.object(
+            memory_service, "get_embedding", new=AsyncMock(return_value=hint_enhanced)
+        ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.memory_enrichment.enrich_memory", new=AsyncMock(return_value=enrichment)),
+        patch(
+            "core_api.services.memory_enrichment.enrich_memory",
+            new=AsyncMock(return_value=enrichment),
+        ),
         patch.object(memory_service, "track_task"),
         patch(
             "core_api.services.task_tracker.tracked_task",
@@ -598,17 +712,29 @@ async def test_reembed_is_failure_fallback_triggers_backoff() -> None:
 
     sc = MagicMock()
     sc.get_memory = AsyncMock(
-        return_value={"id": "m1", "deleted_at": None, "fleet_id": "f", "embedding": None}
+        return_value={
+            "id": "m1",
+            "deleted_at": None,
+            "fleet_id": "f",
+            "embedding": None,
+        }
     )
     sc.update_embedding = AsyncMock()
 
     with (
         patch.object(memory_service.settings, "embed_on_hot_path", False),
-        patch.object(memory_service, "get_embedding", new=AsyncMock(return_value=[0.1] * VECTOR_DIM)),
+        patch.object(
+            memory_service,
+            "get_embedding",
+            new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
+        ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch("core_api.services.memory_service.asyncio.sleep", new=_fake_sleep),
         patch.object(memory_service, "track_task"),
-        patch("core_api.services.organization_settings.resolve_config", new=AsyncMock(return_value=None)),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         await memory_service._reembed_memory(
             uuid.uuid4(), "hello", TENANT_ID, is_failure_fallback=True
@@ -646,8 +772,15 @@ async def test_bulk_reembed_fallback_passes_is_failure_fallback() -> None:
         patch.object(memory_service, "get_embeddings_batch", new=_failing_batch),
         patch.object(memory_service, "_reembed_memory", new=_capture),
         patch.object(memory_service, "track_task"),
-        patch.object(memory_service, "tracked_task", new=MagicMock(side_effect=_stub_tracked_task)),
-        patch("core_api.services.organization_settings.resolve_config", new=AsyncMock(return_value=None)),
+        patch.object(
+            memory_service,
+            "tracked_task",
+            new=MagicMock(side_effect=_stub_tracked_task),
+        ),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         items = [(uuid.uuid4(), f"m{i}") for i in range(3)]
         await memory_service._reembed_memories_bulk(items, TENANT_ID)
@@ -689,8 +822,15 @@ async def test_bulk_reembed_fallback_catches_unexpected_exception_types() -> Non
         patch.object(memory_service, "get_embeddings_batch", new=_failing_batch),
         patch.object(memory_service, "_reembed_memory", new=_capture),
         patch.object(memory_service, "track_task"),
-        patch.object(memory_service, "tracked_task", new=MagicMock(side_effect=_stub_tracked_task)),
-        patch("core_api.services.organization_settings.resolve_config", new=AsyncMock(return_value=None)),
+        patch.object(
+            memory_service,
+            "tracked_task",
+            new=MagicMock(side_effect=_stub_tracked_task),
+        ),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         items = [(uuid.uuid4(), f"m{i}") for i in range(3)]
         await memory_service._reembed_memories_bulk(items, TENANT_ID)
@@ -737,13 +877,23 @@ async def test_bulk_reembed_reschedules_items_whose_get_memory_failed() -> None:
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_batch),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.contradiction_detector.detect_contradictions_async", new=_fake_detect),
+        patch(
+            "core_api.services.contradiction_detector.detect_contradictions_async",
+            new=_fake_detect,
+        ),
         patch.object(memory_service, "track_task"),
         # _reembed_memories_bulk uses the module-level tracked_task
         # binding (not a local re-import like _enrich_memory_background),
         # so we patch memory_service.tracked_task directly.
-        patch.object(memory_service, "tracked_task", new=MagicMock(side_effect=_stub_tracked_task)) as tracked,
-        patch("core_api.services.organization_settings.resolve_config", new=AsyncMock(return_value=None)),
+        patch.object(
+            memory_service,
+            "tracked_task",
+            new=MagicMock(side_effect=_stub_tracked_task),
+        ) as tracked,
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         await memory_service._reembed_memories_bulk(
             [(mem_a_id, "body a"), (mem_b_id, "body b")], TENANT_ID
@@ -799,10 +949,20 @@ async def test_bulk_reembed_patch_failure_reschedules_item() -> None:
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_batch),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.contradiction_detector.detect_contradictions_async", new=_fake_detect),
+        patch(
+            "core_api.services.contradiction_detector.detect_contradictions_async",
+            new=_fake_detect,
+        ),
         patch.object(memory_service, "track_task"),
-        patch.object(memory_service, "tracked_task", new=MagicMock(side_effect=_stub_tracked_task)) as tracked,
-        patch("core_api.services.organization_settings.resolve_config", new=AsyncMock(return_value=None)),
+        patch.object(
+            memory_service,
+            "tracked_task",
+            new=MagicMock(side_effect=_stub_tracked_task),
+        ) as tracked,
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         await memory_service._reembed_memories_bulk(
             [(mem_a_id, "body a"), (mem_b_id, "body b")], TENANT_ID
@@ -817,8 +977,6 @@ async def test_bulk_reembed_patch_failure_reschedules_item() -> None:
     assert "contradiction_detection_post_reembed" in names
 
 
-
-
 async def test_bulk_reembed_respects_existing_embedding_per_item() -> None:
     """Per-item race guard in the bulk path: if enrichment has already
     written a hint-enhanced embedding for item[i], the bulk re-embed
@@ -827,7 +985,7 @@ async def test_bulk_reembed_respects_existing_embedding_per_item() -> None:
     from core_api.services import memory_service
 
     hint_enhanced = [0.9] * VECTOR_DIM  # already written by _enrich_memory_background
-    fresh = [0.1] * VECTOR_DIM          # what the bulk batch call returns
+    fresh = [0.1] * VECTOR_DIM  # what the bulk batch call returns
 
     # mem_a: enrichment already wrote an embedding (race guard should fire)
     # mem_b: still NULL (normal path should fire)
@@ -836,7 +994,12 @@ async def test_bulk_reembed_respects_existing_embedding_per_item() -> None:
 
     def _get_memory(mid: str):
         if mid == str(mem_a_id):
-            return {"id": mid, "deleted_at": None, "fleet_id": "f", "embedding": hint_enhanced}
+            return {
+                "id": mid,
+                "deleted_at": None,
+                "fleet_id": "f",
+                "embedding": hint_enhanced,
+            }
         return {"id": mid, "deleted_at": None, "fleet_id": "f", "embedding": None}
 
     sc = MagicMock()
@@ -863,10 +1026,20 @@ async def test_bulk_reembed_respects_existing_embedding_per_item() -> None:
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_batch),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.contradiction_detector.detect_contradictions_async", new=_fake_detect),
+        patch(
+            "core_api.services.contradiction_detector.detect_contradictions_async",
+            new=_fake_detect,
+        ),
         patch.object(memory_service, "track_task"),
-        patch.object(memory_service, "tracked_task", new=MagicMock(side_effect=_stub_tracked_task)),
-        patch("core_api.services.organization_settings.resolve_config", new=AsyncMock(return_value=None)),
+        patch.object(
+            memory_service,
+            "tracked_task",
+            new=MagicMock(side_effect=_stub_tracked_task),
+        ),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         await memory_service._reembed_memories_bulk(
             [(mem_a_id, "body a"), (mem_b_id, "body b")], TENANT_ID
@@ -895,7 +1068,9 @@ async def test_bulk_reembed_falls_back_on_length_mismatch() -> None:
         return [[0.1] * VECTOR_DIM for _ in texts[:2]]
 
     sc = MagicMock()
-    sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None, "fleet_id": "f"})
+    sc.get_memory = AsyncMock(
+        return_value={"id": "m", "deleted_at": None, "fleet_id": "f"}
+    )
     sc.update_embedding = AsyncMock()
 
     def _stub_tracked_task(coro, _name, *_a, **_k):
@@ -908,8 +1083,15 @@ async def test_bulk_reembed_falls_back_on_length_mismatch() -> None:
         patch.object(memory_service, "get_embeddings_batch", new=_short_batch),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch.object(memory_service, "track_task"),
-        patch.object(memory_service, "tracked_task", new=MagicMock(side_effect=_stub_tracked_task)) as tracked,
-        patch("core_api.services.organization_settings.resolve_config", new=AsyncMock(return_value=None)),
+        patch.object(
+            memory_service,
+            "tracked_task",
+            new=MagicMock(side_effect=_stub_tracked_task),
+        ) as tracked,
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         await memory_service._reembed_memories_bulk(items, TENANT_ID)
 

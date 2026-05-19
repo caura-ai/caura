@@ -79,13 +79,12 @@ async def test_strong_runs_inline_when_both_flags_off() -> None:
     embed_value = [0.7] * VECTOR_DIM
 
     with (
+        # F3 Phase 2: parallel_embed_enrich reads `settings.deployment_mode`
+        # via the inline_embedding / inline_enrichment helpers. The
+        # canonical (F, F) legacy state derives to "deferred".
         patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path",
-            False,
-        ),
-        patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.enrich_on_hot_path",
-            False,
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "deferred",
         ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",
@@ -112,12 +111,8 @@ async def test_strong_runs_inline_when_both_flags_on() -> None:
 
     with (
         patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path",
-            True,
-        ),
-        patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.enrich_on_hot_path",
-            True,
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "inline",
         ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",
@@ -152,12 +147,8 @@ async def test_fast_defers_enrichment_when_flag_on() -> None:
 
     with (
         patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path",
-            True,
-        ),
-        patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.enrich_on_hot_path",
-            True,
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "inline",
         ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",
@@ -183,12 +174,8 @@ async def test_fast_defers_both_when_both_flags_off() -> None:
 
     with (
         patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path",
-            False,
-        ),
-        patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.enrich_on_hot_path",
-            False,
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "deferred",
         ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",
@@ -223,12 +210,8 @@ async def test_no_mode_honors_flags_inline() -> None:
 
     with (
         patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path",
-            True,
-        ),
-        patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.enrich_on_hot_path",
-            True,
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "inline",
         ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",
@@ -254,12 +237,8 @@ async def test_no_mode_honors_flags_deferred() -> None:
 
     with (
         patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path",
-            False,
-        ),
-        patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.enrich_on_hot_path",
-            False,
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "deferred",
         ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",

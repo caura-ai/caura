@@ -103,15 +103,16 @@ def _ctx(
 
 
 async def test_skips_inline_enrich_when_flag_off() -> None:
-    """``enrich_on_hot_path=False`` skips the LLM call entirely; the
-    pipeline records ``enrichment=None`` and the strong-write response
-    drops the LLM-derived fields."""
+    """F3 Phase 2 contract: ``deployment_mode=deferred`` skips the LLM
+    call entirely at ``ParallelEmbedEnrich``; ``enrichment`` stays None.
+    Pre-Phase-2 this scenario was driven by ``enrich_on_hot_path=False``;
+    that legacy flag is removed in Phase 3."""
     ctx = _ctx(enrichment=True)
     enrich_spy = AsyncMock(return_value=SimpleNamespace(retrieval_hint=""))
     with (
         patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.enrich_on_hot_path",
-            False,
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "deferred",
         ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",
@@ -128,7 +129,8 @@ async def test_skips_inline_enrich_when_flag_off() -> None:
 
 
 async def test_runs_inline_enrich_when_flag_on() -> None:
-    """OSS default: enrichment runs inline alongside embed."""
+    """OSS default: enrichment runs inline alongside embed
+    (``deployment_mode=inline``)."""
     ctx = _ctx(enrichment=True)
     enrichment_result = SimpleNamespace(retrieval_hint="")
 
@@ -137,8 +139,8 @@ async def test_runs_inline_enrich_when_flag_on() -> None:
 
     with (
         patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.enrich_on_hot_path",
-            True,
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "inline",
         ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",
@@ -152,14 +154,14 @@ async def test_runs_inline_enrich_when_flag_on() -> None:
 
 async def test_hint_reembed_skipped_when_enrich_flag_off() -> None:
     """Hint re-embed needs the inline enrichment output. Deferring enrich
-    means the hint isn't available; back-channel ENRICHED consumer can
-    pick it up later if high-value."""
+    (``deployment_mode=deferred``) means the hint isn't available; the
+    back-channel ENRICHED consumer can pick it up later if high-value."""
     ctx = _ctx(enrichment=True)
     embed_spy = AsyncMock(return_value=[0.1] * VECTOR_DIM)
     with (
         patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.enrich_on_hot_path",
-            False,
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "deferred",
         ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",
@@ -168,8 +170,9 @@ async def test_hint_reembed_skipped_when_enrich_flag_off() -> None:
         patch("core_api.services.memory_enrichment.enrich_memory", new=AsyncMock()),
     ):
         await ParallelEmbedEnrich().execute(ctx)
-    # Single embed call (initial), no follow-up hint re-embed.
-    assert embed_spy.await_count == 1
+    # Deferred mode: embed not called inline either; hint re-embed
+    # skipped because enrichment didn't run to produce a hint.
+    assert embed_spy.await_count == 0
 
 
 # ---------------------------------------------------------------------------
