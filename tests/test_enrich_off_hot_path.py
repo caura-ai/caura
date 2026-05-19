@@ -181,7 +181,10 @@ async def test_hint_reembed_skipped_when_enrich_flag_off() -> None:
 
 
 async def test_strong_mode_publishes_enrich_when_flag_off() -> None:
-    """Strong-write + flag=off triggers ``_schedule_enrich_or_inline``."""
+    """Strong-write + ``deployment_mode=deferred`` triggers
+    ``_schedule_enrich_or_inline``. F3 Phase 2 batch 2b: SBT now reads
+    ``settings.inline_enrichment`` (derived from ``deployment_mode``)
+    instead of the legacy ``enrich_on_hot_path`` flag."""
     memory_id = uuid.uuid4()
     ctx = _ctx(memory_id=memory_id, write_mode="strong")
     ctx.data["enrichment"] = None  # parallel step deferred
@@ -189,8 +192,8 @@ async def test_strong_mode_publishes_enrich_when_flag_off() -> None:
     publish_spy = AsyncMock(return_value=None)
     with (
         patch(
-            "core_api.pipeline.steps.write.schedule_background_tasks.settings.enrich_on_hot_path",
-            False,
+            "core_api.pipeline.steps.write.schedule_background_tasks.settings.deployment_mode",
+            "deferred",
         ),
         patch(
             "core_api.services.memory_service._schedule_enrich_or_inline",
@@ -210,7 +213,8 @@ async def test_strong_mode_publishes_enrich_when_flag_off() -> None:
 
 
 async def test_strong_mode_no_publish_when_flag_on() -> None:
-    """Strong-write + flag=on → enrichment ran inline, no scheduling needed."""
+    """Strong-write + ``deployment_mode=inline`` → enrichment ran
+    inline, no scheduling needed."""
     memory_id = uuid.uuid4()
     ctx = _ctx(memory_id=memory_id, write_mode="strong")
     ctx.data["enrichment"] = SimpleNamespace(retrieval_hint="")  # ran inline
@@ -218,8 +222,8 @@ async def test_strong_mode_no_publish_when_flag_on() -> None:
     publish_spy = AsyncMock()
     with (
         patch(
-            "core_api.pipeline.steps.write.schedule_background_tasks.settings.enrich_on_hot_path",
-            True,
+            "core_api.pipeline.steps.write.schedule_background_tasks.settings.deployment_mode",
+            "inline",
         ),
         patch(
             "core_api.services.memory_service._schedule_enrich_or_inline",

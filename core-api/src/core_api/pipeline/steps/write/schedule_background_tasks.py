@@ -89,12 +89,12 @@ class ScheduleBackgroundTasks:
 
             # Path A contradiction detection (Gap 04). Only fires when an
             # inline embedding is available (OSS local + fast under
-            # ``embed_on_hot_path=True``, or strong's PR-2 force-inline).
+            # ``settings.inline_embedding``, or strong's PR-2 force-inline).
             # When ``embedding is None`` (Enterprise+fast deferred), Path A
             # fires via the ``EMBEDDED`` back-channel after ``core-worker``
             # PATCHes the embedding into the row — see the
             # ``_enrich_memory_background`` gate gated on
-            # ``not settings.embed_on_hot_path``. Each cell of the matrix
+            # ``not settings.inline_embedding``. Each cell of the matrix
             # gets exactly one Path A trigger that way.
             if embedding is not None:
                 from core_api.services.contradiction_detector import (
@@ -117,8 +117,8 @@ class ScheduleBackgroundTasks:
                 )
 
             # CAURA-594: deferred-path or inline-failure backfill — the
-            # shim publishes EMBED_REQUESTED in async mode, retries
-            # in-process when embed_on_hot_path=True.
+            # shim publishes EMBED_REQUESTED in deferred mode, retries
+            # in-process when ``settings.inline_embedding`` is True.
             if embedding is None:
                 from core_api.services.memory_service import (
                     _schedule_embed_or_reembed,
@@ -141,14 +141,15 @@ class ScheduleBackgroundTasks:
 
         # Strong mode (or no mode set): today's behavior
 
-        # CAURA-595: when ``enrich_on_hot_path=False`` the parallel
-        # embed/enrich step skipped the LLM call by design and
+        # CAURA-595: when ``settings.inline_enrichment`` is False the
+        # parallel embed/enrich step skipped the LLM call by design and
         # ``enrichment`` is None. Publish ``ENRICH_REQUESTED`` so the
-        # worker fills the row in the background. ``enrich_on_hot_path=True``
-        # already ran enrichment inline upstream; nothing to schedule.
+        # worker fills the row in the background. Inline-enrichment mode
+        # already ran enrichment upstream; nothing to schedule.
+        # F3 Phase 2 batch 2b — was ``not settings.enrich_on_hot_path``.
         if (
             enrichment is None
-            and not settings.enrich_on_hot_path
+            and not settings.inline_enrichment
             and tenant_config.enrichment_enabled
             and tenant_config.enrichment_provider != "none"
         ):
@@ -203,8 +204,8 @@ class ScheduleBackgroundTasks:
             )
 
         # CAURA-594: deferred-path or inline-failure backfill — the shim
-        # publishes EMBED_REQUESTED in async mode, retries in-process
-        # when embed_on_hot_path=True.
+        # publishes EMBED_REQUESTED in deferred mode, retries in-process
+        # when ``settings.inline_embedding`` is True.
         if embedding is None:
             from core_api.services.memory_service import (
                 _schedule_embed_or_reembed,
