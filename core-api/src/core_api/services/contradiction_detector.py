@@ -39,25 +39,45 @@ def _parse_dt(value) -> datetime | None:
         return None
 
 
-def _candidate_is_older(candidate: dict, new_memory: dict) -> bool:
-    """Return True only if ``candidate`` was created strictly before ``new_memory``.
+def _pick_older(a: dict, b: dict) -> dict:
+    """Return whichever of ``a`` or ``b`` was created first.
 
-    Enforces the supersession-direction invariant: ``NEW.supersedes_id = OLD.id``
-    (CAURA-000). Detection has four call sites, two of them event-driven
-    (``MemoryEnriched`` / ``MemoryEmbedded`` consumers), so it can fire on a row
-    long after that row was written — by which time newer contradicting rows
-    may exist. Without this guard, the detector would happily mark the newer
-    candidate as ``outdated`` and write ``older.supersedes_id = newer.id``,
-    inverting the chain and producing cycles like ``A → B → A``.
+    Used at *attribution* time to keep the supersession chain pointing
+    newer→older regardless of which row carried the "new memory"
+    framing at detection time. CAURA-125 (audit gap A6) — prior to
+    this helper, the detector used a strict
+    ``candidate.created_at < new_memory.created_at`` filter to GATE
+    detection itself, causing the verdict to depend on which row
+    happened to be written first. That's now split: detection is
+    symmetric (both shapes get checked), and direction is decided
+    here after a conflict is confirmed.
 
-    If either timestamp is missing or unparseable we conservatively return
-    False — a missed detection is cheaper than a corrupted chain.
+    Tiebreaker rules, in order:
+      1. Both ``created_at`` parseable and different → strictly older
+         timestamp wins.
+      2. Tied or unparseable timestamp → smaller-by-string UUID wins.
+         Deterministic across replays and across UUID versions (v4/v6/
+         v7); we don't depend on UUIDs being time-ordered.
+
+    The caller is responsible for using the returned identity to
+    decide which row to mark ``outdated`` / ``conflicted`` and where
+    to point the ``supersedes_id`` edge.
     """
-    cand_dt = _parse_dt(candidate.get("created_at"))
-    new_dt = _parse_dt(new_memory.get("created_at"))
-    if cand_dt is None or new_dt is None:
-        return False
-    return cand_dt < new_dt
+    a_dt = _parse_dt(a.get("created_at"))
+    b_dt = _parse_dt(b.get("created_at"))
+    if a_dt is not None and b_dt is not None and a_dt != b_dt:
+        return a if a_dt < b_dt else b
+    # Tied or unparseable — fall back to UUID string ordering.
+    a_id = str(a.get("id") or "")
+    b_id = str(b.get("id") or "")
+    if a_id < b_id:
+        return a
+    if b_id < a_id:
+        return b
+    # Truly equal (same row twice, or both ids missing/None).
+    # Return ``a`` by convention; callers should not pass the same
+    # row on both sides in production, but tests do for invariants.
+    return a
 
 
 # ---------------------------------------------------------------------------
@@ -213,39 +233,107 @@ async def _detect(
             # same fact trigger a false conflict on themselves.
             object_value=object_value,
         )
+        # CAURA-125 — state-corruption guard. When ``rdf_conflicts``
+        # mixes older and newer candidates relative to ``new_memory``,
+        # an earlier flipped iteration already marked ``new_memory``
+        # outdated; a later canonical iteration must NOT then re-write
+        # ``new_memory`` back to its previous status ("active") while
+        # setting ``supersedes_id``.
+        new_memory_is_outdated = False
         for old in rdf_conflicts:
-            if not _candidate_is_older(old, new_memory):
-                # Skip: candidate is newer than us. Marking it outdated and
-                # writing our supersedes_id at it would invert direction.
-                continue
-            old_id = old.get("id")
-            # Mark old memory as outdated via storage client
-            await sc.update_memory_status(str(old_id), "outdated")
-            # P1-2: correct supersession -- NEW supersedes OLD
-            if not supersedes_id:
-                supersedes_id = old_id
-                await sc.update_memory_status(
-                    str(memory_id),
-                    new_memory.get("status", "active"),
-                    supersedes_id=str(old_id),
-                )
+            # CAURA-125 — decide attribution direction AFTER confirming
+            # the conflict, not before. ``_pick_older`` chooses which
+            # row carries ``outdated`` status; the other carries the
+            # supersedes_id edge pointing at the older row. This makes
+            # the verdict symmetric under candidate vs. new_memory swap
+            # while preserving the chain's newer→older direction.
+            older = _pick_older(old, new_memory)
+            older_is_new = str(older.get("id")) == str(memory_id)
+            newer = new_memory if not older_is_new else old
+            older_id = older.get("id")
+            newer_id = newer.get("id")
+
+            await sc.update_memory_status(str(older_id), "outdated")
+            if newer is new_memory:
+                # Canonical case (candidate is older). Track via local
+                # ``supersedes_id`` so multiple conflict candidates in
+                # this run don't each issue a write; storage's CAS
+                # ``WHERE supersedes_id IS NULL`` would only honour the
+                # first anyway.
+                if not supersedes_id:
+                    supersedes_id = older_id
+                    # Separate the status-reversion guard from the
+                    # chain edge. When a prior flipped iteration has
+                    # already marked ``new_memory`` ``"outdated"``,
+                    # the canonical iteration must still wire
+                    # ``new_memory.supersedes_id`` to ``older_id`` —
+                    # otherwise the older canonical candidate is left
+                    # orphaned (outdated but unreachable via the
+                    # chain). Using ``"outdated"`` as the target
+                    # status here is idempotent with the flipped
+                    # iteration's earlier write.
+                    target_status = (
+                        "outdated" if new_memory_is_outdated else new_memory.get("status", "active")
+                    )
+                    await sc.update_memory_status(
+                        str(memory_id),
+                        target_status,
+                        supersedes_id=str(older_id),
+                    )
+            else:
+                # Flipped case (candidate is newer). The just-written
+                # memory is the older row and is now ``outdated``; the
+                # pre-existing candidate carries supersedes_id pointing
+                # back at new_memory.
+                new_memory_is_outdated = True
+                # Application-level guard against overwriting an
+                # existing supersedes_id on the candidate. Storage CAS
+                # (``WHERE supersedes_id IS NULL``) is the
+                # last-line-of-defence; this guard logs an explicit
+                # warning so the orphaning attempt is visible in logs
+                # rather than silently no-op'd at the DB.
+                if newer.get("supersedes_id"):
+                    logger.warning(
+                        "Flipped contradiction skipped supersedes_id overwrite "
+                        "for candidate %s (already supersedes %s)",
+                        newer_id,
+                        newer.get("supersedes_id"),
+                    )
+                else:
+                    await sc.update_memory_status(
+                        str(newer_id),
+                        newer.get("status", "active"),
+                        supersedes_id=str(older_id),
+                    )
+
+            # ``ContradictionInfo.old_memory_id`` is documented as the
+            # pre-existing candidate. Always populate from ``old``
+            # (the candidate row from storage), never from ``older``
+            # — those diverge in the flipped case.
+            direction = "canonical" if newer is new_memory else "flipped"
             contradictions.append(
                 ContradictionInfo(
-                    old_memory_id=old_id,
-                    old_status="outdated",
+                    old_memory_id=old.get("id"),
+                    # In canonical, the candidate is the row we just
+                    # marked outdated. In flipped, the candidate's
+                    # status is unchanged — surface its actual current
+                    # state rather than a misleading "outdated".
+                    old_status="outdated" if direction == "canonical" else old.get("status", "active"),
                     reason="rdf_conflict",
                     old_content_preview=old.get("content", "")[:200],
+                    direction=direction,
                 )
             )
             logger.info(
                 "RDF contradiction: memory %s outdated by %s "
-                "(subject=%s predicate=%s old_value=%s new_value=%s)",
-                old_id,
-                memory_id,
+                "(subject=%s predicate=%s old_value=%s new_value=%s direction=%s)",
+                older_id,
+                newer_id,
                 subject_entity_id,
                 predicate,
-                old.get("object_value"),
-                object_value,
+                older.get("object_value"),
+                newer.get("object_value"),
+                direction,
             )
 
     # --- Path 2: Semantic contradiction (vector similarity + batch LLM check) ---
@@ -273,6 +361,9 @@ async def _detect(
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
+            # CAURA-125 — state-corruption guard, same rationale as the
+            # RDF path above.
+            new_memory_is_outdated = False
             for candidate, result in zip(candidates, results):
                 if isinstance(result, Exception):
                     logger.warning(
@@ -282,32 +373,67 @@ async def _detect(
                     )
                     continue
                 if result:
-                    if not _candidate_is_older(candidate, new_memory):
-                        # Same direction-invariant guard as path 1.
-                        continue
-                    cand_id = candidate.get("id")
-                    # Mark candidate as conflicted via storage client
-                    await sc.update_memory_status(str(cand_id), "conflicted")
-                    # P1-2: correct supersession -- NEW supersedes OLD
-                    if not supersedes_id:
-                        supersedes_id = cand_id
-                        await sc.update_memory_status(
-                            str(memory_id),
-                            new_memory.get("status", "active"),
-                            supersedes_id=str(cand_id),
-                        )
+                    # CAURA-125 — symmetric attribution; see RDF path
+                    # above for the rationale.
+                    older = _pick_older(candidate, new_memory)
+                    older_is_new = str(older.get("id")) == str(memory_id)
+                    newer = new_memory if not older_is_new else candidate
+                    older_id = older.get("id")
+                    newer_id = newer.get("id")
+
+                    await sc.update_memory_status(str(older_id), "conflicted")
+                    if newer is new_memory:
+                        if not supersedes_id:
+                            supersedes_id = older_id
+                            # See RDF path above for the rationale of
+                            # separating the status-reversion guard
+                            # from the chain edge. Semantic-path
+                            # status literal is ``"conflicted"`` (not
+                            # ``"outdated"``), matching what the
+                            # flipped iteration would have just set.
+                            target_status = (
+                                "conflicted" if new_memory_is_outdated else new_memory.get("status", "active")
+                            )
+                            await sc.update_memory_status(
+                                str(memory_id),
+                                target_status,
+                                supersedes_id=str(older_id),
+                            )
+                    else:
+                        new_memory_is_outdated = True
+                        # Application-level guard; see RDF flipped
+                        # branch for rationale.
+                        if newer.get("supersedes_id"):
+                            logger.warning(
+                                "Flipped contradiction skipped supersedes_id overwrite "
+                                "for candidate %s (already supersedes %s)",
+                                newer_id,
+                                newer.get("supersedes_id"),
+                            )
+                        else:
+                            await sc.update_memory_status(
+                                str(newer_id),
+                                newer.get("status", "active"),
+                                supersedes_id=str(older_id),
+                            )
+
+                    direction = "canonical" if newer is new_memory else "flipped"
                     contradictions.append(
                         ContradictionInfo(
-                            old_memory_id=cand_id,
-                            old_status="conflicted",
+                            old_memory_id=candidate.get("id"),
+                            old_status="conflicted"
+                            if direction == "canonical"
+                            else candidate.get("status", "active"),
                             reason="semantic_conflict",
                             old_content_preview=candidate.get("content", "")[:200],
+                            direction=direction,
                         )
                     )
                     logger.info(
-                        "Semantic contradiction: memory %s conflicted by %s",
-                        cand_id,
-                        memory_id,
+                        "Semantic contradiction: memory %s conflicted by %s direction=%s",
+                        older_id,
+                        newer_id,
+                        direction,
                     )
 
     return contradictions
@@ -631,6 +757,9 @@ async def detect_contradictions_by_entities_async(
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         found = False
+        # CAURA-125 — state-corruption guard; mirrors the RDF and
+        # semantic paths in ``_detect()``.
+        new_memory_is_outdated = False
         for candidate, result in zip(candidates, results):
             if isinstance(result, Exception):
                 logger.warning(
@@ -640,26 +769,57 @@ async def detect_contradictions_by_entities_async(
                 )
                 continue
             if result:
-                if not _candidate_is_older(candidate, new_memory):
-                    # Same direction-invariant guard as paths 1 and 2.
-                    continue
-                cand_id = candidate.get("id")
-                await sc.update_memory_status(str(cand_id), "conflicted")
+                # CAURA-125 — symmetric attribution; see RDF path for
+                # the rationale. First match sets supersedes_id on the
+                # newer row (most relevant — candidates are ordered by
+                # shared-entity-count DESC); subsequent matches only
+                # update the older row's status.
+                older = _pick_older(candidate, new_memory)
+                older_is_new = str(older.get("id")) == str(memory_id)
+                newer = new_memory if not older_is_new else candidate
+                older_id = older.get("id")
+                newer_id = newer.get("id")
+
+                await sc.update_memory_status(str(older_id), "conflicted")
                 if not found:
-                    # First match is most relevant (ordered by shared entity
-                    # count DESC). Entity-based detection is more precise than
-                    # embedding-based, so overwrite supersedes_id.
-                    await sc.update_memory_status(
-                        str(memory_id),
-                        new_memory.get("status", "active"),
-                        supersedes_id=str(cand_id),
-                    )
+                    if newer is new_memory:
+                        # See RDF path above for the rationale of
+                        # separating the status-reversion guard from
+                        # the chain edge. Entity-based path uses
+                        # ``"conflicted"`` (matching the flipped
+                        # iteration's earlier write to new_memory).
+                        target_status = (
+                            "conflicted" if new_memory_is_outdated else new_memory.get("status", "active")
+                        )
+                        await sc.update_memory_status(
+                            str(memory_id),
+                            target_status,
+                            supersedes_id=str(older_id),
+                        )
+                    else:
+                        new_memory_is_outdated = True
+                        # Application-level guard; see RDF flipped
+                        # branch in _detect() for rationale.
+                        if newer.get("supersedes_id"):
+                            logger.warning(
+                                "Flipped contradiction skipped supersedes_id overwrite "
+                                "for candidate %s (already supersedes %s)",
+                                newer_id,
+                                newer.get("supersedes_id"),
+                            )
+                        else:
+                            await sc.update_memory_status(
+                                str(newer_id),
+                                newer.get("status", "active"),
+                                supersedes_id=str(older_id),
+                            )
                 found = True
                 n_conflicts += 1
                 logger.info(
-                    "Entity-based contradiction: %s conflicted by %s",
-                    cand_id,
-                    memory_id,
+                    "Entity-based contradiction: %s conflicted by %s direction=%s",
+                    older_id,
+                    newer_id,
+                    "canonical" if newer is new_memory else "flipped",
                 )
     except Exception:
         logger.exception("Entity-based contradiction detection failed for %s", memory_id)

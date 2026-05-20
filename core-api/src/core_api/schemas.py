@@ -258,12 +258,32 @@ class MemoryOut(BaseModel):
 
 
 class ContradictionInfo(BaseModel):
-    """Summary of a contradiction detected on write."""
+    """Summary of a contradiction detected on write.
+
+    ``old_memory_id`` always refers to the **pre-existing candidate**
+    (never to ``new_memory``), regardless of which row ended up being
+    the older one in the supersession chain. The ``direction`` field
+    disambiguates the two cases:
+
+      - ``"canonical"`` — the candidate is older than ``new_memory``;
+        the candidate became outdated/conflicted, ``new_memory``
+        carries ``supersedes_id`` pointing at it. (Historical behaviour.)
+      - ``"flipped"`` — the candidate is newer than ``new_memory``;
+        ``new_memory`` is the row that became outdated/conflicted, and
+        the candidate now carries ``supersedes_id`` pointing back at
+        ``new_memory``. This branch was previously unreachable
+        (CAURA-125; gap A6) and is now exercised by deferred-embedding
+        races and ``created_at`` ties.
+    """
 
     old_memory_id: UUID
     old_status: str
     reason: str  # "rdf_conflict" or "semantic_conflict"
     old_content_preview: str
+    # CAURA-125 — defaults to "canonical" so any existing caller that
+    # constructs ``ContradictionInfo`` without supplying ``direction``
+    # keeps producing the same shape it did before this PR.
+    direction: Literal["canonical", "flipped"] = "canonical"
 
 
 # --- Search ---
