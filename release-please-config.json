@@ -43,7 +43,7 @@
       "extra-files": [
         {
           "type": "json",
-          "path": "plugin/openclaw.plugin.json",
+          "path": "openclaw.plugin.json",
           "jsonpath": "$.version"
         }
       ]
