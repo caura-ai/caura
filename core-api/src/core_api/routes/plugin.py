@@ -503,7 +503,7 @@ if (!config.plugins.load.paths.includes(pluginDir)) config.plugins.load.paths.pu
 
 if (!config.tools) config.tools = {{}};
 if (!Array.isArray(config.tools.alsoAllow)) config.tools.alsoAllow = [];
-const tools = ['memclaw_recall','memclaw_write','memclaw_manage','memclaw_doc','memclaw_list','memclaw_entity_get','memclaw_tune','memclaw_insights','memclaw_evolve','memclaw_stats'];
+const tools = ['memclaw_recall','memclaw_write','memclaw_manage','memclaw_doc','memclaw_list','memclaw_entity_get','memclaw_tune','memclaw_insights','memclaw_evolve','memclaw_stats','memclaw_keystones'];
 for (const t of tools) {{
   if (!config.tools.alsoAllow.includes(t)) config.tools.alsoAllow.push(t);
 }}

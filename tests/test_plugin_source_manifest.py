@@ -11,6 +11,7 @@ This test keeps them in lockstep with `plugin/src/*.ts`.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -197,4 +198,78 @@ def test_served_manifest_declares_contracts_tools():
         f"plugin/openclaw.plugin.json must declare contracts.tools — got "
         f"{contracts!r}. OpenClaw rejects all api.registerTool calls "
         "without it."
+    )
+
+
+def test_install_script_alsoAllow_lockstep():
+    """The install script's hardcoded ``alsoAllow`` array MUST match
+    ``contracts.tools`` in ``plugin/openclaw.plugin.json`` (and, transitively,
+    ``MEMCLAW_TOOLS`` in ``plugin/src/tools.ts`` — the TS-side boot-time
+    drift check enforces that direction; this Python test pins the
+    cross-language symmetry).
+
+    Drift this guards: pre-fix the install script's ``alsoAllow`` was
+    written by hand at ``plugin.py:506`` and shipped 10 entries — missing
+    ``memclaw_keystones``. Every fresh ``curl /api/install-plugin | bash``
+    install wrote that 10-tool list into ``~/.openclaw/openclaw.json``, and
+    OpenClaw silently refused every ``memclaw_keystones`` invocation
+    because it wasn't in the allowed set. The plugin's boot log emitted a
+    warning, but operators don't read gateway.log, so the keystone tool
+    was effectively disabled on every fresh-installed node.
+
+    ``memclaw_keystones_set`` is intentionally NOT in the install-script's
+    ``alsoAllow`` because ``tools.json`` marks it ``plugin_exposed: false``
+    — it is the admin authoring path, served only via MCP (memclaw_server)
+    and never exposed to OpenClaw-side agents. The two sides of this test
+    deliberately use the SAME canonical source (``contracts.tools``) so a
+    future plugin_exposed flip is picked up automatically.
+    """
+    src = Path(plugin_mod.__file__).read_text(encoding="utf-8")
+    m = re.search(r"const tools = \[(.*?)\];", src, re.DOTALL)
+    assert m, (
+        "Could not find ``const tools = [...]`` in the install-script template. "
+        "If you renamed the variable, update this test's regex."
+    )
+    install_tools = [s.strip().strip("'\"") for s in m.group(1).split(",")]
+    install_tools = [t for t in install_tools if t]  # drop trailing-comma empties
+
+    manifest_path = REPO_ROOT / "plugin" / "openclaw.plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    contracts_tools = manifest["contracts"]["tools"]
+
+    assert install_tools == contracts_tools, (
+        f"install-script alsoAllow drift — \n"
+        f"  install-script: {install_tools}\n"
+        f"  contracts.tools: {contracts_tools}\n"
+        f"missing-from-install={sorted(set(contracts_tools) - set(install_tools))}, "
+        f"extra-in-install={sorted(set(install_tools) - set(contracts_tools))}. "
+        "Both lists must hold every ``plugin_exposed: true`` tool from "
+        "``plugin/tools.json`` in the same order."
+    )
+
+
+def test_plugin_manifest_version_matches_package_json():
+    """``openclaw.plugin.json:version`` must match ``plugin/package.json:version``.
+
+    The two are read by different downstream surfaces:
+      - ``package.json:version`` is what ``_plugin_version()`` (in
+        ``core_api/routes/plugin.py``) returns; the heartbeat auto-upgrade
+        trigger and the install script's stamped ``MEMCLAW_PLUGIN_VERSION``
+        derive from this side.
+      - ``openclaw.plugin.json:version`` is what OpenClaw reads when
+        loading the plugin and what any plugin-info UI renders to operators.
+
+    Drift this guards: ``openclaw.plugin.json`` was at "2.5.0" while
+    ``package.json`` was at "2.6.0" on main 2026-05-20. A node fresh-installed
+    via the install script ended up with two different version labels in
+    its own directory, depending on which file the inspecting tool happened
+    to read.
+    """
+
+
+    pkg = json.loads((REPO_ROOT / "plugin" / "package.json").read_text(encoding="utf-8"))
+    mfst = json.loads((REPO_ROOT / "plugin" / "openclaw.plugin.json").read_text(encoding="utf-8"))
+    assert pkg["version"] == mfst["version"], (
+        f"version drift — package.json={pkg['version']!r}, "
+        f"openclaw.plugin.json={mfst['version']!r}. Bump both in lockstep."
     )
