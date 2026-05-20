@@ -24,10 +24,21 @@ def mcp_register(mcp, spec: ToolSpec) -> None:
 
     No-op when `spec.handler is None` (Phase 1 of the refactor — handlers
     still live in `mcp_server.py`'s `@mcp.tool` decorators).
+
+    Handlers are annotated `-> str` but their error paths return
+    `CallToolResult` via `_as_error_result` to preserve the unified
+    error-envelope clients parse from `content[0].text`. With structured
+    output enabled, FastMCP would auto-generate a `{result: str}` schema
+    from the `-> str` annotation and reject the `CallToolResult` at
+    validation time, so disable it here.
     """
     if spec.handler is None:
         return
-    mcp.tool(name=spec.name, description=spec.description)(spec.handler)
+    mcp.tool(
+        name=spec.name,
+        description=spec.description,
+        structured_output=False,  # mcp>=1.10 (PR #993); current pin >=1.26 covers it
+    )(spec.handler)
 
 
 def _python_type_name(annotation: Any) -> str:

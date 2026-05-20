@@ -16,8 +16,15 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
-HandlerFn = Callable[..., Awaitable[str]]
-"""All MCP tool handlers are async and return a JSON-or-text string."""
+from mcp.types import CallToolResult
+
+HandlerFn = Callable[..., Awaitable[str | CallToolResult]]
+"""Async; success returns a string, errors return ``CallToolResult`` via
+``_as_error_result``. Type checkers accept ``CallToolResult`` on any path —
+returning it from a success branch silently sets ``isError=True`` for
+clients; enforce the split in code review. Registration sets
+``structured_output=False`` to accept this union — see ``mcp_register``
+in ``_builders.py``."""
 
 
 ImplStatus = Literal["live", "reserved", "deprecated"]

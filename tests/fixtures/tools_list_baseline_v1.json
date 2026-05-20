@@ -140,19 +140,7 @@
       "title": "memclaw_docArguments",
       "type": "object"
     },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "string"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "memclaw_docOutput",
-      "type": "object"
-    },
+    "outputSchema": null,
     "icons": null,
     "annotations": null,
     "meta": null,
@@ -176,19 +164,7 @@
       "title": "memclaw_entity_getArguments",
       "type": "object"
     },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "string"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "memclaw_entity_getOutput",
-      "type": "object"
-    },
+    "outputSchema": null,
     "icons": null,
     "annotations": null,
     "meta": null,
@@ -259,19 +235,7 @@
       "title": "memclaw_evolveArguments",
       "type": "object"
     },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "string"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "memclaw_evolveOutput",
-      "type": "object"
-    },
+    "outputSchema": null,
     "icons": null,
     "annotations": null,
     "meta": null,
@@ -320,19 +284,7 @@
       "title": "memclaw_insightsArguments",
       "type": "object"
     },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "string"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "memclaw_insightsOutput",
-      "type": "object"
-    },
+    "outputSchema": null,
     "icons": null,
     "annotations": null,
     "meta": null,
@@ -367,19 +319,7 @@
       "title": "memclaw_keystonesArguments",
       "type": "object"
     },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "string"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "memclaw_keystonesOutput",
-      "type": "object"
-    },
+    "outputSchema": null,
     "icons": null,
     "annotations": null,
     "meta": null,
@@ -500,19 +440,7 @@
       "title": "memclaw_keystones_setArguments",
       "type": "object"
     },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "string"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "memclaw_keystones_setOutput",
-      "type": "object"
-    },
+    "outputSchema": null,
     "icons": null,
     "annotations": null,
     "meta": null,
@@ -681,19 +609,7 @@
       "title": "memclaw_listArguments",
       "type": "object"
     },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "string"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "memclaw_listOutput",
-      "type": "object"
-    },
+    "outputSchema": null,
     "icons": null,
     "annotations": null,
     "meta": null,
@@ -837,19 +753,7 @@
       "title": "memclaw_manageArguments",
       "type": "object"
     },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "string"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "memclaw_manageOutput",
-      "type": "object"
-    },
+    "outputSchema": null,
     "icons": null,
     "annotations": null,
     "meta": null,
@@ -946,19 +850,7 @@
       "title": "memclaw_recallArguments",
       "type": "object"
     },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "string"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "memclaw_recallOutput",
-      "type": "object"
-    },
+    "outputSchema": null,
     "icons": null,
     "annotations": null,
     "meta": null,
@@ -1031,19 +923,7 @@
       "title": "memclaw_statsArguments",
       "type": "object"
     },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "string"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "memclaw_statsOutput",
-      "type": "object"
-    },
+    "outputSchema": null,
     "icons": null,
     "annotations": null,
     "meta": null,
@@ -1182,19 +1062,7 @@
       "title": "memclaw_tuneArguments",
       "type": "object"
     },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "string"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "memclaw_tuneOutput",
-      "type": "object"
-    },
+    "outputSchema": null,
     "icons": null,
     "annotations": null,
     "meta": null,
@@ -1364,19 +1232,7 @@
       "title": "memclaw_writeArguments",
       "type": "object"
     },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "title": "Result",
-          "type": "string"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "title": "memclaw_writeOutput",
-      "type": "object"
-    },
+    "outputSchema": null,
     "icons": null,
     "annotations": null,
     "meta": null,

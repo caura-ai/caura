@@ -36,47 +36,39 @@ def strip_latency(result: Any) -> str:
     return _LATENCY_SUFFIX_RE.sub("", as_text(result))
 
 
-def parse_envelope(result: Any) -> dict[str, Any]:
-    """Parse a JSON response (error envelope or payload) from a handler.
-
-    Accepts:
-      - ``str`` — the success-path return shape (and the legacy shape
-        for error returns before CAURA-000 FRICTION-REPORT-V3 B2 wired
-        errors through CallToolResult).
-      - ``CallToolResult`` — the post-B2 error shape. ``isError=True``
-        is implied for any caller that reaches a parsed envelope this
-        way; the JSON content lives in ``content[0].text``.
-
-    Handlers that wrap JSON get a top-level ``_latency_ms`` key merged
-    in; we strip it so tests can assert on the semantic payload.
-    """
-    from mcp.types import CallToolResult, TextContent
-
-    if isinstance(result, CallToolResult):
-        text = (
-            result.content[0].text if isinstance(result.content[0], TextContent) else ""
-        )
-        data = json.loads(text)
-    else:
-        data = json.loads(result)
-    if isinstance(data, dict):
-        data.pop("_latency_ms", None)
-    return data
-
-
 def as_text(result: Any) -> str:
     """Return the textual content of a handler result regardless of
     shape — used for tests that ``assert "X" in out``. Pre-B2 (FRICTION-
     REPORT-V3) handlers returned strings for both success and error;
-    post-B2 the error path returns a ``CallToolResult``. This helper
-    bridges the two so the substring-check idiom keeps working.
+    post-B2 the error path returns a ``CallToolResult``. ``mcp.call_tool``
+    callers may also see a bare ``Sequence[ContentBlock]`` when the handler
+    returned a string that FastMCP wrapped into text content. This helper
+    bridges all three so the substring-check idiom keeps working.
     """
     from mcp.types import CallToolResult, TextContent
 
     if isinstance(result, CallToolResult):
         first = result.content[0] if result.content else None
         return first.text if isinstance(first, TextContent) else ""
+    if isinstance(result, (list, tuple)) and result:
+        first = result[0]
+        return first.text if isinstance(first, TextContent) else ""
     return result if isinstance(result, str) else str(result)
+
+
+def parse_envelope(result: Any) -> dict[str, Any]:
+    """Parse a JSON response (error envelope or payload) from a handler.
+
+    Delegates text extraction to ``as_text`` so all three shapes —
+    ``str``, ``CallToolResult``, and ``Sequence[ContentBlock]`` — are
+    handled uniformly. Handlers that wrap JSON get a top-level
+    ``_latency_ms`` key merged in; we strip it so tests can assert on
+    the semantic payload.
+    """
+    data = json.loads(as_text(result))
+    if isinstance(data, dict):
+        data.pop("_latency_ms", None)
+    return data
 
 
 def is_error_envelope(result: Any) -> bool:
