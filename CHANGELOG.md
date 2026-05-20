@@ -6,6 +6,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.8.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.7.0...backend-v2.8.0) (2026-05-20)
+
+
+### Features
+
+* **config:** add deployment_mode setting alongside legacy flags (F3 Phase 1) ([#173](https://github.com/caura-ai/caura-memclaw/issues/173)) ([1cc30b0](https://github.com/caura-ai/caura-memclaw/commit/1cc30b0525da92c8dc73e7a6960978d8fc249010))
+* **entity-extraction:** plumb tenant_config through worker → extractor (A5c) ([#170](https://github.com/caura-ai/caura-memclaw/issues/170)) ([62bdee9](https://github.com/caura-ai/caura-memclaw/commit/62bdee99d9484f47b4a43a099fe72d6bd8ce11f8))
+* **entity-extraction:** prompt + schema overhaul (A5b) ([#169](https://github.com/caura-ai/caura-memclaw/issues/169)) ([7c0d862](https://github.com/caura-ai/caura-memclaw/commit/7c0d86206812f61267403f7d9030965c552b969b))
+* **storage:** support retracting supersedes_id verdicts (A4 [#10](https://github.com/caura-ai/caura-memclaw/issues/10)) ([#171](https://github.com/caura-ai/caura-memclaw/issues/171)) ([ccebcb5](https://github.com/caura-ai/caura-memclaw/commit/ccebcb514ed7a91dc49efd43feb9c8affaaa8143))
+* widen cross-tenant credential reads across all surfaces + audit emission + /whoami scope ([#164](https://github.com/caura-ai/caura-memclaw/issues/164)) ([0afacdb](https://github.com/caura-ai/caura-memclaw/commit/0afacdbcc7cf67b0e1f368fe96f4687bf6b90b63))
+
+
+### Bug Fixes
+
+* **entity-extraction:** deterministic seed + first-seen canonical preservation (A5a) ([#167](https://github.com/caura-ai/caura-memclaw/issues/167)) ([0a27e66](https://github.com/caura-ai/caura-memclaw/commit/0a27e66c41cec2871df31e797fa441bc966fd18f))
+* **mcp:** disable auto-generated output schema on tool registrations ([#180](https://github.com/caura-ai/caura-memclaw/issues/180)) ([61d19a4](https://github.com/caura-ai/caura-memclaw/commit/61d19a4d84430cc7080b32f3822f5a00d98afff7))
+* **mcp:** MISSING_AGENT_ID error no longer points at deprecated mca_ keys ([#161](https://github.com/caura-ai/caura-memclaw/issues/161)) ([c7525bf](https://github.com/caura-ai/caura-memclaw/commit/c7525bf303f6dfb4631e82e749c36131463de278))
+* **plugin:** close install-script alsoAllow drift + manifest version drift (CAURA-444) ([#181](https://github.com/caura-ai/caura-memclaw/issues/181)) ([28f22aa](https://github.com/caura-ai/caura-memclaw/commit/28f22aa72b0ca306b5f1a7e25a6005ead484db02))
+* **release-please:** correct openclaw.plugin.json path under the plugin package ([#182](https://github.com/caura-ai/caura-memclaw/issues/182)) ([630653c](https://github.com/caura-ai/caura-memclaw/commit/630653caa7ca4b0d9ebca0729bc101173b3c3c4d))
+* **tests:** make rate-limit burst tests reliable + defensively unset MEMCLAW_API_KEY ([#177](https://github.com/caura-ai/caura-memclaw/issues/177)) ([bc5e144](https://github.com/caura-ai/caura-memclaw/commit/bc5e1446734db05e012653ad1cb7d9832fcc40fb))
+
+
+### Code Refactoring
+
+* **memory_service:** migrate 7 legacy flag reads onto deployment_mode (F3 Phase 2c) ([#178](https://github.com/caura-ai/caura-memclaw/issues/178)) ([17d8635](https://github.com/caura-ai/caura-memclaw/commit/17d8635a4265b9d90b70965b9ade1c0d4d59f48b))
+* **pipeline:** migrate parallel_embed_enrich onto deployment_mode (F3 Phase 2 batch 1) ([#174](https://github.com/caura-ai/caura-memclaw/issues/174)) ([1a36481](https://github.com/caura-ai/caura-memclaw/commit/1a364819162e28fb68e202be4c7c5068f475e260))
+
 ## [2.7.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.6.0...backend-v2.7.0) (2026-05-18)
 
 
