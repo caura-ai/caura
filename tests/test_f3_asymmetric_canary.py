@@ -122,14 +122,21 @@ async def test_asymmetric_branch_fires_contradiction_when_embed_deferred_and_wor
     detect_contradictions_async = MagicMock(return_value="coro-sentinel")
     tracked_task = MagicMock(side_effect=lambda coro, label, *_a, **_k: (label, coro))
 
+    # F3 Phase 2c renamed the legacy flag reads to ``settings.inline_*``
+    # helpers (derived from ``deployment_mode``). The two axes co-vary
+    # under the helpers, so the asymmetric ``(False_embed, True_enrich)``
+    # state is no longer expressible by patching legacy flags. We patch
+    # ``deployment_mode="deferred"`` so ``inline_embedding=False`` →
+    # ``not inline_embedding=True`` → branch at memory_service.py:2162
+    # fires. In real deployments the function this drives
+    # (``_enrich_memory_background``) is never CALLED when
+    # ``deployment_mode=deferred`` because ``_schedule_enrich_or_inline``
+    # publishes instead. The canary is artificial by design — it pins
+    # the branch's shape so Phase 3 can delete it confidently.
     with (
         patch(
-            "core_api.services.memory_service.settings.embed_on_hot_path",
-            False,
-        ),
-        patch(
-            "core_api.services.memory_service.settings.enrich_on_hot_path",
-            True,
+            "core_api.services.memory_service.settings.deployment_mode",
+            "deferred",
         ),
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -185,10 +192,12 @@ async def test_asymmetric_branch_fires_contradiction_when_embed_deferred_and_wor
 
 
 async def test_asymmetric_branch_does_not_fire_when_both_flags_true() -> None:
-    """Negative pin: the canonical OSS-inline cell. ``embed_on_hot_path=True``
-    means ``not settings.embed_on_hot_path`` is False, so the branch
-    short-circuits. ``detect_contradictions_async`` is NOT called from
-    this path — the OSS hot path already fired its own Path A via
+    """Negative pin: the canonical OSS-inline cell. Under
+    ``deployment_mode=inline``, ``inline_embedding=True`` →
+    ``not inline_embedding`` is False, so the branch at
+    memory_service.py:2162 short-circuits.
+    ``detect_contradictions_async`` is NOT called from this path — the
+    OSS hot path already fired its own Path A via
     ``ScheduleBackgroundTasks``.
     """
     from core_api.services.memory_service import _enrich_memory_background
@@ -210,12 +219,8 @@ async def test_asymmetric_branch_does_not_fire_when_both_flags_true() -> None:
 
     with (
         patch(
-            "core_api.services.memory_service.settings.embed_on_hot_path",
-            True,
-        ),
-        patch(
-            "core_api.services.memory_service.settings.enrich_on_hot_path",
-            True,
+            "core_api.services.memory_service.settings.deployment_mode",
+            "inline",
         ),
         patch(
             "core_api.services.organization_settings.resolve_config",
