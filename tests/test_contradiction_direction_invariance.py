@@ -320,7 +320,8 @@ class TestSemanticAttributionDirection:
             ),
             patch(
                 "core_api.services.contradiction_detector._llm_contradiction_check",
-                AsyncMock(return_value=True),
+                # A4 #12 — judge returns (verdict, confidence) tuple.
+                AsyncMock(return_value=(True, 0.90)),
             ),
         ):
             await _detect(new, [0.1] * VECTOR_DIM)
@@ -359,7 +360,8 @@ class TestSemanticAttributionDirection:
             ),
             patch(
                 "core_api.services.contradiction_detector._llm_contradiction_check",
-                AsyncMock(return_value=True),
+                # A4 #12 — judge returns (verdict, confidence) tuple.
+                AsyncMock(return_value=(True, 0.90)),
             ),
         ):
             await _detect(new, [0.1] * VECTOR_DIM)
@@ -420,7 +422,8 @@ class TestNoConflictNoSupersession:
             ),
             patch(
                 "core_api.services.contradiction_detector._llm_contradiction_check",
-                AsyncMock(return_value=False),
+                # A4 #12 — judge returns (verdict, confidence) tuple.
+                AsyncMock(return_value=(False, 0.90)),
             ),
         ):
             await _detect(new, [0.1] * VECTOR_DIM)
@@ -699,7 +702,8 @@ class TestFlippedSkipsExistingSupersedesId:
             ),
             patch(
                 "core_api.services.contradiction_detector._llm_contradiction_check",
-                AsyncMock(return_value=True),
+                # A4 #12 — judge returns (verdict, confidence) tuple.
+                AsyncMock(return_value=(True, 0.90)),
             ),
         ):
             with caplog.at_level("WARNING"):

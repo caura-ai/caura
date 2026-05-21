@@ -250,7 +250,8 @@ class TestSupersessionSemantics:
         ), patch(
             "core_api.services.contradiction_detector._llm_contradiction_check",
             new_callable=AsyncMock,
-            return_value=True,
+            # A4 #12 — judge returns (verdict, confidence) tuple.
+            return_value=(True, 0.90),
         ):
             contradictions = await _detect(new_memory, [0.1] * 10)
 
@@ -307,7 +308,8 @@ class TestSupersessionSemantics:
             patch(
                 "core_api.services.contradiction_detector._llm_contradiction_check",
                 new_callable=AsyncMock,
-                return_value=True,
+                # A4 #12 — judge returns (verdict, confidence) tuple.
+                return_value=(True, 0.90),
             ),
         ):
             contradictions = await _detect(new_memory, [0.1] * 10)

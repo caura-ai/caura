@@ -372,7 +372,12 @@ async def _detect(
                         result,
                     )
                     continue
-                if result:
+                # A4 #12 — judge now returns (verdict, confidence).
+                # Path A continues to gate only on verdict at this site;
+                # A4 #13 will introduce confidence-weighted vetoes on
+                # Path C's else-branch.
+                verdict, _confidence = result  # type: ignore[misc]
+                if verdict:
                     # CAURA-125 — symmetric attribution; see RDF path
                     # above for the rationale.
                     older = _pick_older(candidate, new_memory)
@@ -635,6 +640,58 @@ def _parse_contradiction_response(raw: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# A4 #12 — Confidence-scored judge wrapper around the bool parser.
+# ---------------------------------------------------------------------------
+
+
+# Confidence rubric (see ``tests/test_a4_12_contradiction_judge_confidence.py``
+# for the per-branch pin):
+#   0.90 — Clean LLM agreement (both gates aligned with the verdict).
+#   0.85 — Gate 2 fired (model itself named a non-conflict pattern,
+#          parser overrode contradicts=true to false).
+#   0.60 — Gate 1 fired (model's same_subject contradicted its
+#          contradicts=true; parser overrode to false).
+#   0.50 — Malformed / unparseable response (parser conservative-default).
+_CONF_CLEAN = 0.90
+_CONF_GATE2 = 0.85
+_CONF_GATE1 = 0.60
+_CONF_FALLBACK = 0.50
+
+
+def _judge_contradiction(raw) -> tuple[bool, float]:
+    """A4 #12 — wrap ``_parse_contradiction_response`` with a confidence
+    score derived from the model's own coherence.
+
+    Callers (A4 #13 retraction's confidence-weighted veto, A1 #16
+    dedup danger-zone judge) use the score to decide whether the
+    final verdict is trustworthy enough to act on. Verdict semantics
+    are identical to ``_parse_contradiction_response``; this is purely
+    additive on top.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return False, _CONF_FALLBACK
+
+    verdict = _parse_contradiction_response(raw)
+    same_subject = raw.get("same_subject") is True
+    model_contradicts = raw.get("contradicts") is True
+    raw_ncr = raw.get("non_conflict_reason")
+    non_conflict_reason = raw_ncr if isinstance(raw_ncr, str) else None
+
+    if model_contradicts and not same_subject:
+        # Gate 1 fired — model said contradicts=true but its own
+        # same_subject said false. Internal inconsistency → lower trust.
+        return verdict, _CONF_GATE1
+    if model_contradicts and non_conflict_reason in NON_CONFLICT_REASONS:
+        # Gate 2 fired — model recognised a non-conflict pattern AND
+        # said contradicts=true. The pattern-recognition signal is
+        # what we trust — high confidence in NOT-a-contradiction.
+        return verdict, _CONF_GATE2
+    # Either contradicts=False with consistent ancillary fields, or
+    # contradicts=True with both gates aligned. Clean case.
+    return verdict, _CONF_CLEAN
+
+
+# ---------------------------------------------------------------------------
 # Multi-provider LLM contradiction check with fallback chain
 # ---------------------------------------------------------------------------
 
@@ -643,19 +700,18 @@ async def _llm_contradiction_check(
     new_content: str,
     old_content: str,
     tenant_config=None,
-) -> bool:
+) -> tuple[bool, float]:
     """Ask the LLM whether two texts contradict each other.
+
+    Returns ``(verdict, confidence)`` — see ``_judge_contradiction`` for
+    the rubric. A4 #12 widened this from ``bool`` so downstream
+    consumers (A4 #13 retraction, A1 #16 dedup judge) can gate
+    decisions on the model's coherence.
 
     Uses the standard 3-tier fallback chain:
     1. Try the configured provider (with retry)
     2. Try the configured fallback provider (via resolve_fallback)
     3. Fall back to negation-word heuristic
-
-    Note: the previous implementation tried ALL providers with valid
-    credentials before falling back to the heuristic. This was replaced
-    with the standard single-fallback pattern for consistency across
-    services. The heuristic fallback (step 3) is now reachable, which
-    it previously was not due to the FakeLLMProvider short-circuit bug.
     """
     provider_name = (
         tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
@@ -663,14 +719,14 @@ async def _llm_contradiction_check(
 
     prompt = CONTRADICTION_PROMPT.format(new_content=new_content[:500], old_content=old_content[:500])
 
-    async def _do_check(llm) -> bool:
+    async def _do_check(llm) -> tuple[bool, float]:
         raw = await llm.complete_json(prompt)
-        return _parse_contradiction_response(raw)
+        return _judge_contradiction(raw)
 
     return await call_with_fallback(
         primary_provider_name=provider_name,
         call_fn=_do_check,
-        fake_fn=lambda: _fake_contradiction_check(new_content, old_content),
+        fake_fn=lambda: (_fake_contradiction_check(new_content, old_content), _CONF_FALLBACK),
         tenant_config=tenant_config,
         service_label="contradiction",
         model_attr="entity_extraction_model",
@@ -768,7 +824,11 @@ async def detect_contradictions_by_entities_async(
                     result,
                 )
                 continue
-            if result:
+            # A4 #12 — judge now returns (verdict, confidence).
+            # Path C continues to gate only on verdict at this site;
+            # A4 #13 will introduce confidence-weighted vetoes here.
+            verdict, _confidence = result  # type: ignore[misc]
+            if verdict:
                 # CAURA-125 — symmetric attribution; see RDF path for
                 # the rationale. First match sets supersedes_id on the
                 # newer row (most relevant — candidates are ordered by

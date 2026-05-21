@@ -208,6 +208,9 @@ async def _run_check_with_payload(payload: dict) -> bool:
     but bypass the provider-resolution / fallback chain by stubbing
     ``call_with_fallback`` to invoke the supplied ``call_fn`` against a
     ``_StubLLM(payload)``. This exercises the full prompt-format → parse path.
+
+    Returns just the verdict bool (A4 #12 widened the underlying return
+    to ``(verdict, confidence)``; these tests pin parser behaviour only).
     """
 
     async def fake_call_with_fallback(*, call_fn, **_kwargs):
@@ -217,10 +220,11 @@ async def _run_check_with_payload(payload: dict) -> bool:
         "core_api.services.contradiction_detector.call_with_fallback",
         side_effect=fake_call_with_fallback,
     ):
-        return await _llm_contradiction_check(
+        verdict, _confidence = await _llm_contradiction_check(
             new_content="ignored — stub returns payload directly",
             old_content="ignored — stub returns payload directly",
         )
+        return verdict
 
 
 @pytest.mark.unit

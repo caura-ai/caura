@@ -365,7 +365,8 @@ class TestSupersessionFirstMatchOnly:
         ), patch(
             "core_api.services.contradiction_detector._llm_contradiction_check",
             new_callable=AsyncMock,
-            return_value=True,
+            # A4 #12 — judge returns (verdict, confidence) tuple.
+            return_value=(True, 0.90),
         ):
             embedding = [0.1] * VECTOR_DIM
             contradictions = await _detect(new_memory, embedding)

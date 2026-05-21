@@ -158,7 +158,13 @@ class TestResolveOpenAICompatible:
 
 @pytest.mark.unit
 class TestFallbackChain:
-    """Verify the fallback chain in _llm_contradiction_check."""
+    """Verify the fallback chain in _llm_contradiction_check.
+
+    A4 #12 — judge now returns ``(verdict, confidence)``. These tests
+    pin only the verdict bool; the heuristic fallback always emits
+    confidence=0.50 (see ``_CONF_FALLBACK``), exercised in the A4 #12
+    test module's malformed-response case.
+    """
 
     @pytest.mark.asyncio
     async def test_none_provider_returns_false(self):
@@ -166,7 +172,8 @@ class TestFallbackChain:
 
         config = MagicMock()
         config.entity_extraction_provider = "none"
-        assert await _llm_contradiction_check("a", "b", config) is False
+        verdict, _conf = await _llm_contradiction_check("a", "b", config)
+        assert verdict is False
 
     @pytest.mark.asyncio
     async def test_fake_provider_uses_heuristic(self):
@@ -175,12 +182,10 @@ class TestFallbackChain:
         config = MagicMock()
         config.entity_extraction_provider = "fake"
         # No negation difference → False
-        assert (
-            await _llm_contradiction_check(
-                "the system is running", "the system is fast", config
-            )
-            is False
+        verdict, _conf = await _llm_contradiction_check(
+            "the system is running", "the system is fast", config
         )
+        assert verdict is False
 
     @pytest.mark.asyncio
     async def test_fake_provider_triggers_heuristic_via_fallback(self):
@@ -193,12 +198,12 @@ class TestFallbackChain:
         config.openai_api_key = None  # no credentials -> FakeLLMProvider
 
         # Negation difference → heuristic returns True
-        result = await _llm_contradiction_check(
+        verdict, _conf = await _llm_contradiction_check(
             "the system is not running and it crashed",
             "the system is running and it works fine",
             config,
         )
-        assert result is True
+        assert verdict is True
 
     @pytest.mark.asyncio
     async def test_no_credentials_heuristic_returns_false(self):
@@ -213,10 +218,10 @@ class TestFallbackChain:
         config.openrouter_api_key = None
 
         # No negation → heuristic returns False
-        result = await _llm_contradiction_check(
+        verdict, _conf = await _llm_contradiction_check(
             "the system works", "the system is fine", config
         )
-        assert result is False
+        assert verdict is False
 
 
 # ---------------------------------------------------------------------------
