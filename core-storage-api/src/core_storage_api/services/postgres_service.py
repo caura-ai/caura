@@ -1096,6 +1096,7 @@ class PostgresService:
         fleet_id: str | None = None,
         visibility: str = "scope_team",
         limit: int = CONTRADICTION_CANDIDATE_MAX,
+        include_supersedes: bool = False,
     ) -> list[Memory]:
         """Find active memories sharing entities with the given memory by entity name.
 
@@ -1103,6 +1104,17 @@ class PostgresService:
         provided, candidates are scoped to the same fleet. ``visibility``
         scopes candidates to the writer's visibility tier so a scope_org
         write can't be linked into a scope_team chain (and vice versa).
+
+        ``include_supersedes`` (A4 #11): when True, also return
+        ``conflicted`` rows whose ``supersedes_id`` equals ``memory_id``.
+        Path C uses this to surface memories Path A already conflicted
+        by ``memory_id`` so it can decide whether to retract the verdict
+        via ``update_memory_status(..., unset_supersedes=True)`` (A4 #10).
+        The expansion is targeted: a ``conflicted`` row that points at
+        some other memory's ``supersedes_id`` is NOT returned — only
+        the ones in the retraction-candidate scope of THIS query.
+        Default ``False`` preserves the back-compat behaviour for every
+        existing caller.
         """
         async with get_session() as session:
             # Subquery: canonical names of entities linked to the target memory
@@ -1119,6 +1131,17 @@ class PostgresService:
             other_mel = MemoryEntityLink.__table__.alias("other_mel")
             other_ent = Entity.__table__.alias("other_ent")
 
+            if include_supersedes:
+                status_filter = or_(
+                    Memory.status.in_(("active", "confirmed", "pending")),
+                    and_(
+                        Memory.status == "conflicted",
+                        Memory.supersedes_id == memory_id,
+                    ),
+                )
+            else:
+                status_filter = Memory.status.in_(("active", "confirmed", "pending"))
+
             stmt = (
                 select(
                     Memory,
@@ -1134,7 +1157,7 @@ class PostgresService:
                     Memory.tenant_id == tenant_id,
                     Memory.id != memory_id,
                     Memory.deleted_at.is_(None),
-                    Memory.status.in_(("active", "confirmed", "pending")),
+                    status_filter,
                     Memory.visibility == visibility,
                     *([Memory.fleet_id == fleet_id] if fleet_id else []),
                 )
