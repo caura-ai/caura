@@ -79,8 +79,8 @@ async def test_inline_timeout_uses_setting_value() -> None:
             7.5,
         ),
         patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path",
-            False,
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "inline",
         ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.asyncio.wait_for",
@@ -108,8 +108,8 @@ async def test_504_fires_when_inner_timeout_exceeded() -> None:
             0.05,
         ),
         patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path",
-            False,
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "inline",
         ),
         patch("core_api.services.memory_enrichment.enrich_memory", new=_slow_enrich),
         pytest.raises(HTTPException) as exc_info,
@@ -142,6 +142,9 @@ def test_validator_rejects_inline_timeout_at_or_above_request_timeout() -> None:
 
 def test_validator_accepts_default_ordering() -> None:
     """Sanity check the live singleton's defaults — 35s inline < 45s request."""
-    assert _settings_singleton.enrichment_inline_timeout_seconds < _settings_singleton.request_timeout_seconds
+    assert (
+        _settings_singleton.enrichment_inline_timeout_seconds
+        < _settings_singleton.request_timeout_seconds
+    )
     assert _settings_singleton.enrichment_inline_timeout_seconds == 35.0
     assert _settings_singleton.openai_request_timeout_seconds == 25.0

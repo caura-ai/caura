@@ -46,49 +46,29 @@ class Settings(BaseSettings):
     admin_api_key: str | None = None
     memclaw_api_key: str | None = None  # Optional: when set, all non-admin requests must present this key
     embedding_provider: str = "openai"  # fake | openai | local
-    # When True (default), the inline write path embeds on the request
-    # and contradiction detection fires before the response returns —
-    # the OSS-friendly shape, no worker fleet required.
+    # Per-deploy control for where embedding + LLM enrichment run.
     #
-    # When False (CAURA-594 SaaS), the row persists with embedding=NULL
-    # and the write path publishes ``Topics.Memory.EMBED_REQUESTED`` to
-    # the bus; ``core-worker`` consumes the event and PATCHes the row.
-    # Semantic search tolerates NULL embeddings via FTS fallback (Step
-    # A); exact-hash dedup still runs inline. Set the env override
-    # ``EMBED_ON_HOT_PATH=false`` on the SaaS deploy.
-    embed_on_hot_path: bool = True
-    # CAURA-595 mirror of ``embed_on_hot_path`` for LLM enrichment.
+    # - ``"inline"`` (default): both embed + enrich run on the request
+    #   path. Response includes LLM-derived fields (title, summary,
+    #   tags, retrieval_hint) and ``CheckSemanticDuplicate`` runs
+    #   against a real embedding. OSS-friendly — no worker fleet
+    #   required. ``write_mode="strong"`` always forces this regardless
+    #   of the deploy mode (CAURA-229 contract preserved by PR #151).
+    # - ``"deferred"``: row persists with ``embedding=NULL`` + schema-
+    #   default ``memory_type`` / ``weight`` / ``status``. Write
+    #   publishes ``Topics.Memory.EMBED_REQUESTED`` and
+    #   ``ENRICH_REQUESTED``; ``core-worker`` consumes both, runs the
+    #   provider calls, and PATCHes the row. Search tolerates NULL
+    #   embeddings via the FTS fallback (PR #150). Clients that need
+    #   the LLM fields re-fetch after the back-channel ``ENRICHED``
+    #   event lands. SaaS prod shape — sub-2s p99 SLA.
     #
-    # When True (OSS default), the strong-write pipeline + single-write
-    # fast path + bulk-write all run ``enrich_memory`` inline, blocking
-    # the response until the LLM call returns.
-    #
-    # When False (CAURA-595 SaaS), the row persists with the agent-
-    # provided values + schema defaults for ``memory_type`` / ``weight``
-    # / ``status``, and the write path publishes
-    # ``Topics.Memory.ENRICH_REQUESTED`` to the bus; ``core-worker``
-    # consumes the event, runs the enricher, and PATCHes the row. The
-    # API response surface drops the LLM-derived fields (``title``,
-    # ``summary``, ``tags``, ``retrieval_hint``) — clients that need
-    # them must re-fetch after the back-channel ENRICHED event lands.
-    # Set the env override ``ENRICH_ON_HOT_PATH=false`` on the SaaS
-    # deploy.
-    enrich_on_hot_path: bool = True
-    # F3 Phase 1 — single per-deploy mode that supersedes the legacy
-    # ``embed_on_hot_path`` + ``enrich_on_hot_path`` pair.
-    #
-    # - ``"inline"``   : both embed + enrich run on the request path
-    #                    (OSS local default — no worker fleet required)
-    # - ``"deferred"`` : both deferred to ``core-worker`` via Pub/Sub
-    #                    (SaaS prod default — sub-2s p99 SLA)
-    #
-    # When unset (``None``), the derivation validator below populates
-    # this from the legacy flags and emits a deprecation warning if the
-    # two flags disagree. F3 Phase 3 removes the legacy flags entirely;
-    # this becomes the only per-deploy control. ``write_mode=strong``
-    # on a per-request basis continues to force inline regardless of
-    # ``deployment_mode`` (CAURA-229 contract, preserved by PR #151).
-    deployment_mode: Literal["inline", "deferred"] | None = None
+    # F3 history: replaces the legacy ``embed_on_hot_path`` +
+    # ``enrich_on_hot_path`` pair. Phase 1 introduced this field as a
+    # derived alias; Phase 2 migrated 18 call sites to read it via the
+    # ``inline_embedding`` / ``inline_enrichment`` helpers; Phase 3
+    # (this revision) deleted the legacy flags + derivation validator.
+    deployment_mode: Literal["inline", "deferred"] = "inline"
     # Outer cap on the inline embed+enrich gather in ParallelEmbedEnrich.
     # Was hardcoded at 20.0 — too tight under load once embedding moved
     # off the hot path (CAURA-594) and enrichment LLM became the sole
@@ -453,48 +433,6 @@ class Settings(BaseSettings):
                     "OPENAI_API_KEY or configure PLATFORM_LLM_PROVIDER to restore "
                     "enrichment."
                 )
-        return self
-
-    @model_validator(mode="after")
-    def _derive_deployment_mode(self) -> "Settings":
-        """F3 Phase 1 — derive ``deployment_mode`` from legacy flags when unset.
-
-        Rules:
-          ``(T, T)`` → ``"inline"``
-          ``(F, F)`` → ``"deferred"``
-          asymmetric → ``"deferred"`` + WARNING. Conservative default —
-            silently exposing un-enriched rows under an "inline"
-            deployment shape is worse than under-delivering and
-            surfacing the misconfig via the warning.
-
-        When the operator sets ``DEPLOYMENT_MODE`` explicitly, that
-        value wins; legacy flags are ignored for derivation. The
-        legacy flags themselves stay readable until F3 Phase 3
-        removes them — 18 call sites across 3 files migrate to
-        ``inline_embedding`` / ``inline_enrichment`` helpers below
-        during F3 Phase 2.
-        """
-        if self.deployment_mode is not None:
-            return self  # explicit operator override wins
-
-        if self.embed_on_hot_path and self.enrich_on_hot_path:
-            derived = "inline"
-        elif not self.embed_on_hot_path and not self.enrich_on_hot_path:
-            derived = "deferred"
-        else:
-            derived = "deferred"
-            logger.warning(
-                "Asymmetric legacy flag pair: embed_on_hot_path=%s "
-                "enrich_on_hot_path=%s. F3 Phase 0 audit confirmed no "
-                "environment intentionally uses this combination. "
-                "Defaulting deployment_mode='deferred'. Set "
-                "DEPLOYMENT_MODE=inline|deferred explicitly to silence "
-                "this warning; the legacy flags are removed in F3 "
-                "Phase 3.",
-                self.embed_on_hot_path,
-                self.enrich_on_hot_path,
-            )
-        object.__setattr__(self, "deployment_mode", derived)
         return self
 
     @property

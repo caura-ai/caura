@@ -146,7 +146,6 @@ class ScheduleBackgroundTasks:
         # ``enrichment`` is None. Publish ``ENRICH_REQUESTED`` so the
         # worker fills the row in the background. Inline-enrichment mode
         # already ran enrichment upstream; nothing to schedule.
-        # F3 Phase 2 batch 2b — was ``not settings.enrich_on_hot_path``.
         if (
             enrichment is None
             and not settings.inline_enrichment

@@ -66,14 +66,9 @@ class ParallelEmbedEnrich:
         # the idempotency/content-hash cache (pure dict lookup, no
         # provider call) so we reuse it even when hot-path embed is off
         # — nothing to offload.
-        # F3 Phase 2 batch 1: read the new ``deployment_mode``-derived
-        # helpers instead of the legacy ``embed_on_hot_path`` /
-        # ``enrich_on_hot_path`` flags. Polarity matches:
-        # ``settings.inline_embedding == settings.embed_on_hot_path``
-        # under the canonical (T,T) / (F,F) deployments — the only
-        # configurations any real environment uses per the Phase 0
-        # audit. The legacy flags continue to back the helpers via the
-        # Phase 1 derivation validator until F3 Phase 3 deletes them.
+        # Deferral driven by ``settings.deployment_mode`` via the
+        # ``inline_embedding`` / ``inline_enrichment`` helpers — the
+        # only per-deploy control after F3 Phase 3.
         if resolved_write_mode == "strong":
             defer_embedding = False
             defer_enrichment = False

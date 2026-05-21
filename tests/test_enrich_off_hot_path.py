@@ -306,7 +306,7 @@ async def test_schedule_enrich_runs_inline_when_flag_on() -> None:
     tc = _tenant_config()
 
     with (
-        patch.object(memory_service.settings, "enrich_on_hot_path", True),
+        patch.object(memory_service.settings, "deployment_mode", "inline"),
         patch.object(memory_service, "publish_memory_enrich_request", new=publish_spy),
         patch.object(memory_service, "_enrich_memory_background", new=bg_spy),
     ):

@@ -35,17 +35,29 @@ mkdir -p "${OUTPUT_DIR}"
 trap 'rm -f "${COMPOSE_OVERRIDE}"' EXIT
 
 restart_with_flags() {
+  # F3 Phase 3 reset: legacy ``EMBED_ON_HOT_PATH`` / ``ENRICH_ON_HOT_PATH``
+  # env vars are no longer read by Settings (Pydantic ``extra: ignore``
+  # silently drops them). ``DEPLOYMENT_MODE`` is the only per-deploy
+  # control. The two positional args still map to the canonical cells
+  # (true/true → inline, false/false → deferred) so the runner's
+  # ``inline`` / ``deferred`` cell names keep their meaning.
   local embed="$1"
   local enrich="$2"
-  # docker compose auto-loads `docker-compose.override.yml` from the
-  # project dir if present. We write one that injects the two flags
-  # into core-api's env block, then tear it down on EXIT.
+  local mode
+  if [ "$embed" = "true" ] && [ "$enrich" = "true" ]; then
+    mode="inline"
+  elif [ "$embed" = "false" ] && [ "$enrich" = "false" ]; then
+    mode="deferred"
+  else
+    # Asymmetric configurations are not expressible post-F3. Force the
+    # conservative default and let the wet test surface it.
+    mode="deferred"
+  fi
   cat > "${COMPOSE_OVERRIDE}" <<EOF
 services:
   core-api:
     environment:
-      EMBED_ON_HOT_PATH: "${embed}"
-      ENRICH_ON_HOT_PATH: "${enrich}"
+      DEPLOYMENT_MODE: "${mode}"
 EOF
   cd "${ENT_DIR}"
   TESTING=1 docker compose \

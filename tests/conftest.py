@@ -22,13 +22,12 @@ _TEST_DEFAULTS = {
     "POSTGRES_REQUIRE_SSL": "false",
     "PLATFORM_LLM_PROVIDER": "",
     "PLATFORM_EMBEDDING_PROVIDER": "",
-    # CAURA-594: ``embed_on_hot_path`` defaults to True (OSS shape) as
-    # of Step C, which already matches what the integration suite needs
-    # (non-null embeddings on the write path — test_pipeline_latency
-    # etc.). Set explicitly so a future default change doesn't silently
-    # break tests; the CAURA-594 test module overrides this to False
-    # to exercise the deferred publish path.
-    "EMBED_ON_HOT_PATH": "true",
+    # F3: ``deployment_mode`` defaults to ``"inline"`` post-Phase 3
+    # (OSS shape: embed + enrich on the request path, no worker fleet
+    # required). Set explicitly so a future default change doesn't
+    # silently break tests; flag-off / deferred-path tests override
+    # this to ``"deferred"``.
+    "DEPLOYMENT_MODE": "inline",
 }
 for _k, _v in _TEST_DEFAULTS.items():
     os.environ.setdefault(_k, _v)

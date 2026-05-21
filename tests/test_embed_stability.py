@@ -95,8 +95,8 @@ async def test_hot_path_embeds_raw_content_when_enrichment_yields_hint() -> None
 
     with (
         patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path",
-            True,
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "inline",
         ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",
@@ -189,7 +189,7 @@ async def test_atomic_fact_children_embed_raw_fact_content() -> None:
         return None
 
     with (
-        patch.object(memory_service.settings, "embed_on_hot_path", True),
+        patch.object(memory_service.settings, "deployment_mode", "inline"),
         patch.object(memory_service, "get_embedding", new=_spy_embed),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch(
@@ -272,8 +272,8 @@ async def test_write_and_query_embed_identical_input_for_identical_text() -> Non
 
     with (
         patch(
-            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.embed_on_hot_path",
-            True,
+            "core_api.pipeline.steps.write.parallel_embed_enrich.settings.deployment_mode",
+            "inline",
         ),
         patch(
             "core_api.pipeline.steps.write.parallel_embed_enrich.get_embedding",

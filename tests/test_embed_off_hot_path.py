@@ -243,7 +243,7 @@ async def test_reembed_sleeps_on_failure_path_when_flag_on() -> None:
     sc.update_embedding = AsyncMock()
 
     with (
-        patch.object(memory_service.settings, "embed_on_hot_path", True),
+        patch.object(memory_service.settings, "deployment_mode", "inline"),
         patch.object(
             memory_service,
             "get_embedding",
@@ -288,7 +288,7 @@ async def test_reembed_schedules_contradiction_after_success() -> None:
         return None
 
     with (
-        patch.object(memory_service.settings, "embed_on_hot_path", False),
+        patch.object(memory_service.settings, "deployment_mode", "deferred"),
         patch.object(
             memory_service,
             "get_embedding",
@@ -343,7 +343,7 @@ async def test_reembed_race_guard_fires_with_flag_on_too() -> None:
 
     with (
         # Flag ON — the configuration where the earlier guard was broken.
-        patch.object(memory_service.settings, "embed_on_hot_path", True),
+        patch.object(memory_service.settings, "deployment_mode", "inline"),
         patch.object(
             memory_service,
             "get_embedding",
@@ -410,7 +410,7 @@ async def test_reembed_respects_existing_embedding_from_enrich_race() -> None:
         return None
 
     with (
-        patch.object(memory_service.settings, "embed_on_hot_path", False),
+        patch.object(memory_service.settings, "deployment_mode", "deferred"),
         patch.object(
             memory_service,
             "get_embedding",
@@ -495,126 +495,24 @@ async def test_bulk_reembed_preserves_batching() -> None:
 
 
 async def test_enrich_fires_contradiction_on_existing_embedding_in_saas_mode() -> None:
-    """SaaS-mode (``deployment_mode=deferred``) contradiction coverage.
+    """F3 Phase 3 — DROPPED CAPABILITY MARKER.
 
-    Pre-CAURA-222 this path did a hint re-embed and fired
-    ``contradiction_detection_post_enrich`` on the hint-enhanced vector.
-    The hint re-embed is gone (caused write/query surface asymmetry —
-    see CAURA-222), but SaaS-mode contradiction coverage was preserved
-    by adding a dedicated ``contradiction_detection_saas`` branch at
-    the bottom of ``_enrich_memory_background``.
+    The previous body of this test pinned an asymmetric race-guard
+    branch in ``_enrich_memory_background`` (``contradiction_detection_saas``
+    label) that only fired when embed was deferred AND enrich ran
+    inline. Phase 3 collapsed the two axes into a single
+    ``deployment_mode`` and deleted the branch as unreachable. This
+    test now no-ops; left behind as a git-blame marker so a future
+    reader following the trail of "where did the SaaS-mode
+    contradiction branch go?" lands here and finds the answer.
 
-    Post-F3-Phase-2c the branch is reachable only by directly invoking
-    ``_enrich_memory_background`` while ``deployment_mode=deferred`` —
-    in real deployments ``_schedule_enrich_or_inline`` publishes
-    instead of entering this function. The branch + this test are
-    deleted in F3 Phase 3 alongside ``test_f3_asymmetric_canary``;
-    see that file's docstring for the full F3 plan context.
-
-    Expected behavior now:
-      - No ``update_embedding`` call from this function (worker owns
-        the stored vector).
-      - Contradiction detection fires once with task name
-        ``contradiction_detection_saas`` against the embedding read
-        from storage at the top of the function.
+    Contradiction coverage on the deferred path is now owned by the
+    ``handle_memory_embedded`` and ``handle_memory_enriched`` consumers
+    in ``core_api/consumer.py``.
     """
-    from core_api.services import memory_service
-
-    raw_existing = [0.1] * VECTOR_DIM  # already written by core-worker
-
-    mem_row = {
-        "id": "m1",
-        "deleted_at": None,
-        "fleet_id": "f1",
-        "embedding": raw_existing,
-        "memory_type": "fact",
-        "weight": 0.5,
-        "status": "active",
-        "ts_valid_start": None,
-        "ts_valid_end": None,
-        "metadata_": {},
-    }
-    sc = MagicMock()
-    sc.get_memory = AsyncMock(return_value=mem_row)
-    sc.update_embedding = AsyncMock()
-    sc.update_memory_status = AsyncMock()
-    sc._patch = AsyncMock()
-
-    enrichment = SimpleNamespace(
-        memory_type="fact",
-        weight=None,
-        title=None,
-        summary=None,
-        tags=None,
-        llm_ms=None,
-        contains_pii=False,
-        pii_types=None,
-        retrieval_hint="a stronger retrieval hint",
-        ts_valid_start=None,
-        ts_valid_end=None,
-        status=None,
-        atomic_facts=None,
+    pytest.skip(
+        "F3 Phase 3 deleted the asymmetric contradiction_detection_saas branch."
     )
-
-    detect_calls: list[tuple] = []
-
-    def _fake_detect(*args, **_kwargs):
-        detect_calls.append(args)
-
-        async def _noop() -> None:
-            return None
-
-        return _noop()
-
-    def _stub_tracked_task(coro, _name, *_a, **_k):
-        coro.close()
-        return None
-
-    with (
-        patch.object(memory_service.settings, "deployment_mode", "deferred"),
-        patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch(
-            "core_api.services.contradiction_detector.detect_contradictions_async",
-            new=_fake_detect,
-        ),
-        patch(
-            "core_api.services.memory_enrichment.enrich_memory",
-            new=AsyncMock(return_value=enrichment),
-        ),
-        patch.object(memory_service, "track_task"),
-        # NB: patch the SOURCE (task_tracker.tracked_task) rather than
-        # memory_service.tracked_task — _enrich_memory_background does a
-        # local ``from core_api.services.task_tracker import tracked_task``
-        # that would shadow the module-level patch.
-        patch(
-            "core_api.services.task_tracker.tracked_task",
-            new=MagicMock(side_effect=_stub_tracked_task),
-        ) as tracked,
-        patch(
-            "core_api.services.organization_settings.resolve_config",
-            new=AsyncMock(
-                return_value=SimpleNamespace(
-                    enrichment_enabled=True,
-                    enrichment_provider="fake",
-                    entity_extraction_enabled=False,
-                )
-            ),
-        ),
-    ):
-        await memory_service._enrich_memory_background(
-            uuid.uuid4(), "hello", TENANT_ID, "f1", "a"
-        )
-
-    # No hint re-embed roundtrip → no update_embedding call from enrich
-    # (the worker owns the stored vector under embed_on_hot_path=False).
-    sc.update_embedding.assert_not_awaited()
-    # SaaS-mode contradiction detection fires on the embedding read
-    # from storage at the top of the function.
-    names = [call.args[1] for call in tracked.call_args_list]
-    assert "contradiction_detection_saas" in names
-    assert "contradiction_detection_post_enrich" not in names
-    # arg[4] in detect_contradictions_async is the embedding.
-    assert any(call[4] == raw_existing for call in detect_calls)
 
 
 async def test_enrich_no_contradiction_when_no_prior_embedding() -> None:
@@ -670,7 +568,7 @@ async def test_enrich_no_contradiction_when_no_prior_embedding() -> None:
         return None
 
     with (
-        patch.object(memory_service.settings, "embed_on_hot_path", False),
+        patch.object(memory_service.settings, "deployment_mode", "deferred"),
         patch.object(
             memory_service, "get_embedding", new=AsyncMock(return_value=hint_enhanced)
         ),
@@ -731,7 +629,7 @@ async def test_reembed_is_failure_fallback_triggers_backoff() -> None:
     sc.update_embedding = AsyncMock()
 
     with (
-        patch.object(memory_service.settings, "embed_on_hot_path", False),
+        patch.object(memory_service.settings, "deployment_mode", "deferred"),
         patch.object(
             memory_service,
             "get_embedding",
@@ -1180,7 +1078,7 @@ async def test_shim_calls_reembed_in_process_when_flag_on() -> None:
     memory_id = uuid.uuid4()
 
     with (
-        patch.object(memory_service.settings, "embed_on_hot_path", True),
+        patch.object(memory_service.settings, "deployment_mode", "inline"),
         patch.object(memory_service, "_reembed_memory", new=_fake_reembed),
         patch(
             "common.events.memory_embed_publisher.get_event_bus",

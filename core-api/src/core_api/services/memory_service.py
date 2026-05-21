@@ -893,10 +893,10 @@ async def _create_memory_legacy(db: AsyncSession, data: MemoryCreate) -> MemoryO
             )
         )
 
-    # CAURA-594: when ``embed_on_hot_path=False`` this is the deferred path
-    # (parallel_embed_enrich.py skipped the provider call by design); when
-    # ``True``, embedding is None means an inline failure to retry. The
-    # shim picks the right backend.
+    # CAURA-594: under ``deployment_mode=deferred`` this is the
+    # deferred path (parallel_embed_enrich.py skipped the provider
+    # call by design); under ``inline``, embedding is None means an
+    # inline failure to retry. The shim picks the right backend.
     if embedding is None:
         track_task(
             tracked_task(
@@ -1405,9 +1405,9 @@ async def create_memories_bulk(
                 )
             if defer_enrich_publish:
                 # ``defer_enrich_publish`` already encodes
-                # ``not enrich_on_hot_path`` — call the publisher
-                # directly instead of routing through
-                # ``_schedule_enrich_or_inline`` whose flag-check would
+                # ``not settings.inline_enrichment`` — call the
+                # publisher directly instead of routing through
+                # ``_schedule_enrich_or_inline`` whose mode-check would
                 # be dead code at this site.
                 track_task(
                     tracked_task(
@@ -1694,11 +1694,11 @@ async def _reembed_memory(
         # quality than our raw-content embedding) and just fire contradiction
         # detection on the existing value instead of overwriting.
         #
-        # Flag-agnostic: the race exists even with embed_on_hot_path=True —
-        # in fast write mode with enrichment enabled, a hot-path embed
-        # failure causes ScheduleBackgroundTasks to queue BOTH _reembed and
-        # _enrich_memory_background, so enrich can beat us to the row
-        # regardless of the flag.
+        # Mode-agnostic: the race exists even under ``deployment_mode=
+        # "inline"`` — in fast write mode with enrichment enabled, a
+        # hot-path embed failure causes ScheduleBackgroundTasks to
+        # queue BOTH _reembed and _enrich_memory_background, so enrich
+        # can beat us to the row regardless of the deploy mode.
         if mem.get("embedding") is not None:
             from core_api.services.contradiction_detector import detect_contradictions_async
 
@@ -2031,17 +2031,18 @@ async def _enrich_memory_background(
             if status_val:
                 await sc.update_memory_status(str(memory_id), status_val)
 
-        embedding = mem.get("embedding")
         memory_type = patch.get("memory_type") or mem.get("memory_type")
 
         # Hint-based re-embed removed (CAURA-222): the hot path embeds raw
         # ``content`` and the search side embeds raw query, so the stored
         # vector is already on the correct surface by the time enrichment
         # finishes. Re-embedding ``content`` here would just produce an
-        # identical vector — wasted provider call and DB write. The
-        # SaaS-mode contradiction-coverage branch that lived inside this
-        # block is gone with it; OSS-mode contradiction detection still
-        # fires below on the stored embedding.
+        # identical vector — wasted provider call and DB write. F3 Phase 3
+        # also removed the SaaS-mode contradiction-coverage branch that
+        # used to live here; deferred-mode contradiction detection is now
+        # fully owned by the worker consumers (handle_memory_embedded /
+        # handle_memory_enriched), and OSS-mode contradiction fires
+        # through the inline write pipeline before this function runs.
 
         # Atomic-fact fan-out: if the enricher detected 2+ independent claims in
         # this turn, create a child memory for each so queries targeting a
@@ -2135,44 +2136,18 @@ async def _enrich_memory_background(
                     tenant_id,
                 )
             )
-        # F3 Phase 2c — name swapped from legacy ``settings.embed_on_hot_path``
-        # to ``settings.inline_embedding`` (same value via the
-        # ``deployment_mode`` derivation). This branch is the asymmetric
-        # race guard documented in ``tests/test_f3_asymmetric_canary.py``:
-        # post-Phase-2c the helpers co-vary, so under both canonical
-        # cells the branch is unreachable in any real deployment (inline
-        # mode: ``_enrich_memory_background`` enters AND ``inline_embedding=True``
-        # → guard short-circuits; deferred mode: ``_schedule_enrich_or_inline``
-        # publishes instead of entering this function). F3 Phase 3 deletes
-        # the entire branch + the canary test.
-        #
-        # SaaS-mode contradiction detection (historical). On the OSS
-        # inline-embed-failure path, ``_reembed_memory``'s race guard fires
-        # its own contradiction call when the retry succeeds, so the
-        # OSS-mode coverage hole is also closed there.
-        #
-        # In SaaS mode, ``handle_memory_embedded`` and
-        # ``handle_memory_enriched`` consumers fire contradiction when
-        # their respective worker PATCHes land, covering both canonical
-        # states without this branch.
-        if embedding is not None and not settings.inline_embedding:
-            from core_api.services.contradiction_detector import detect_contradictions_async
-
-            track_task(
-                tracked_task(
-                    detect_contradictions_async(
-                        memory_id,
-                        tenant_id,
-                        fleet_id,
-                        content,
-                        embedding,
-                    ),
-                    "contradiction_detection_saas",
-                    memory_id,
-                    tenant_id,
-                )
-            )
-
+        # F3 Phase 3 removed the asymmetric ``(embed=deferred,
+        # enrich=inline)`` race-guard branch that previously lived here.
+        # Under ``deployment_mode`` the two axes co-vary, so the branch
+        # was unreachable in any real deployment: inline mode entered
+        # this function with ``inline_embedding=True`` (guard short-
+        # circuits); deferred mode never enters this function because
+        # ``_schedule_enrich_or_inline`` publishes ``ENRICH_REQUESTED``
+        # instead. Contradiction detection on the deferred path is now
+        # owned solely by the ``handle_memory_embedded`` and
+        # ``handle_memory_enriched`` consumers in ``consumer.py`` —
+        # they fire ``detect_contradictions_async`` when their
+        # respective worker PATCHes land.
         logger.info("Background enrichment succeeded for memory %s", memory_id)
     except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError):
         logger.exception("Background enrichment error for memory %s", memory_id)
