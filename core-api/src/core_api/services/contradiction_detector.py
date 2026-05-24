@@ -18,6 +18,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core_api.cache import cache_set_nx
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.constants import SINGLE_VALUE_PREDICATES
@@ -25,6 +26,35 @@ from core_api.providers._retry import call_with_fallback
 from core_api.schemas import ContradictionInfo
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# A4 #14 — back-channel idempotency for back-to-back detection invocations.
+# ---------------------------------------------------------------------------
+
+# Lock TTL. Long enough for any detection to complete (worst case
+# ~10s per candidate; ~80s for a typical batch); short enough that
+# a process crash holding the lock doesn't permanently block
+# re-detection for the same memory.
+_DETECTION_LOCK_TTL_SECONDS = 3600
+
+
+async def _acquire_path_a_lock(memory_id) -> bool:
+    """Try to acquire the Path A (semantic + RDF) idempotency lock for
+    ``memory_id``. Returns True iff this caller owns the lock and should
+    proceed; False if another caller already holds it and we should skip.
+
+    Lock is keyed per-path so Path A and Path C run independently for
+    the same memory.
+    """
+    return await cache_set_nx(f"contradiction:path_a:{memory_id}", "1", _DETECTION_LOCK_TTL_SECONDS)
+
+
+async def _acquire_path_c_lock(memory_id) -> bool:
+    """Try to acquire the Path C (entity-overlap) idempotency lock for
+    ``memory_id``. Returns True iff this caller owns the lock; False
+    means another caller already ran detection for this memory."""
+    return await cache_set_nx(f"contradiction:path_c:{memory_id}", "1", _DETECTION_LOCK_TTL_SECONDS)
 
 
 def _parse_dt(value) -> datetime | None:
@@ -117,7 +147,19 @@ async def detect_contradictions_async(
     # structlog renderer's ``extra={}`` behaviour.
     t_start = time.monotonic()
     n_conflicts = 0
+    skipped = False
     try:
+        # A4 #14 — back-channel idempotency. Both the ENRICHED and
+        # EMBEDDED handlers fire ``detect_contradictions_async`` for
+        # the same memory; whichever arrives first owns the lock and
+        # runs detection, the other skips. Fail-open: if Redis is
+        # unavailable, ``_acquire_path_a_lock`` returns True and we
+        # fall back to the prior double-detection behaviour (storage
+        # CAS still keeps writes idempotent).
+        if not await _acquire_path_a_lock(memory_id):
+            skipped = True
+            return
+
         if new_memory is None:
             sc = get_storage_client()
             new_memory = await sc.get_memory(str(memory_id))
@@ -139,9 +181,10 @@ async def detect_contradictions_async(
     finally:
         elapsed_ms = round((time.monotonic() - t_start) * 1000)
         logger.info(
-            "path_a_completed for memory %s n_conflicts=%d elapsed_ms=%d tenant_id=%s",
+            "path_a_completed for memory %s n_conflicts=%d skipped=%s elapsed_ms=%d tenant_id=%s",
             memory_id,
             n_conflicts,
+            str(skipped).lower(),
             elapsed_ms,
             tenant_id,
         )
@@ -910,7 +953,16 @@ async def detect_contradictions_by_entities_async(
     n_candidates = 0
     n_conflicts = 0
     n_retractions = 0
+    skipped = False
     try:
+        # A4 #14 — back-channel idempotency. Entity extraction can
+        # complete more than once per memory (delta re-extraction,
+        # partial retry), each completion firing Path C. First caller
+        # wins the lock; the rest skip. Fail-open on Redis outage.
+        if not await _acquire_path_c_lock(memory_id):
+            skipped = True
+            return
+
         sc = get_storage_client()
         new_memory = await sc.get_memory(str(memory_id))
         if not new_memory or new_memory.get("deleted_at") is not None:
@@ -1030,11 +1082,12 @@ async def detect_contradictions_by_entities_async(
         elapsed_ms = round((time.monotonic() - t_start) * 1000)
         logger.info(
             "path_c_completed for memory %s n_candidates=%d n_conflicts=%d "
-            "n_retractions=%d elapsed_ms=%d tenant_id=%s",
+            "n_retractions=%d skipped=%s elapsed_ms=%d tenant_id=%s",
             memory_id,
             n_candidates,
             n_conflicts,
             n_retractions,
+            str(skipped).lower(),
             elapsed_ms,
             tenant_id,
         )

@@ -78,6 +78,28 @@ async def cache_delete(key: str) -> bool:
         return False
 
 
+async def cache_set_nx(key: str, value: str, ttl: int) -> bool:
+    """Atomic SET-if-not-exists with TTL. Returns True iff we newly set
+    the key (i.e. the caller "owns" the lock); False if the key already
+    existed.
+
+    **Fail-open semantics**: when Redis is unavailable (``_get_redis``
+    returns ``None``) or the SET call raises, returns True. The
+    idempotency check using this helper is best-effort — losing it
+    means falling back to whatever upstream behaviour exists (e.g.
+    storage CAS guards), never silently blocking work.
+    """
+    r = await _get_redis()
+    if r is None:
+        return True
+    try:
+        result = await r.set(key, value, ex=ttl, nx=True)
+        return bool(result)
+    except Exception:
+        logger.debug("cache_set_nx failed for key=%s", key, exc_info=True)
+        return True
+
+
 # ── JSON helpers ──
 
 
