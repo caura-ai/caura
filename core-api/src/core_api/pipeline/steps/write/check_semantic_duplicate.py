@@ -35,6 +35,7 @@ from common.constants import (
 from core_api.clients.storage_client import get_storage_client
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
+from core_api.services.dedup_identifier_filter import _content_is_identifier_bearing
 from core_api.services.dedup_judge import (
     DEDUP_JUDGE_CONFIDENCE_THRESHOLD,
     _llm_dedup_check,
@@ -105,6 +106,20 @@ class CheckSemanticDuplicate:
 
         if not tenant_config.semantic_dedup_enabled or embedding is None:
             return StepResult(outcome=StepOutcome.SKIPPED)
+
+        # A1 identifier pre-filter — when content carries an
+        # identifier-shaped token (UUID, PR ref, build number, semver,
+        # commit SHA, ticket ref), the embedder treats it as a low-
+        # information template slot and collapses superficially
+        # different writes (different builds, different PRs) to
+        # cosine ≥ 0.95. Skip semantic dedup entirely; exact-hash
+        # dedup at the write path catches literal duplicates.
+        if _content_is_identifier_bearing(getattr(data, "content", "") or ""):
+            metadata["dedup_skipped_reason"] = "identifier_prefilter"
+            return StepResult(
+                outcome=StepOutcome.SKIPPED,
+                detail={"reason": "identifier_prefilter"},
+            )
 
         t_dedup = time.perf_counter()
         # Surface candidates down to the JUDGE band so this step can
