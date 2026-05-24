@@ -13,6 +13,7 @@ from core_api.constants import ENTITY_STOPWORDS, ENTITY_TOKEN_MIN_LENGTH
 # Unit tests: stopword filtering
 # ---------------------------------------------------------------------------
 
+
 def _extract_tokens(query: str) -> list[str]:
     """Replicate the token extraction logic from search_memories."""
     return [
@@ -62,12 +63,16 @@ class TestStopwordFiltering:
 
     def test_short_tokens_removed(self):
         tokens = _extract_tokens("go to db on vm")
-        # All tokens <= 2 chars should be filtered by ENTITY_TOKEN_MIN_LENGTH
-        assert "go" not in tokens
-        assert "to" not in tokens
-        assert "on" not in tokens
-        assert "db" not in tokens
-        assert "vm" not in tokens
+        # A7 (2026-05-24): ENTITY_TOKEN_MIN_LENGTH lowered to 2 to
+        # retain acronym entities (``AI`` / ``ML`` / ``PR`` / ``DB`` /
+        # ``VM``…). 2-char English fillers stay filtered via
+        # ENTITY_STOPWORDS, not the length floor.
+        assert "go" not in tokens  # stopword
+        assert "to" not in tokens  # stopword
+        assert "on" not in tokens  # stopword
+        # ``db`` and ``vm`` are now retained (legitimate acronym entities).
+        assert "db" in tokens
+        assert "vm" in tokens
 
     def test_meaningful_tokens_preserved(self):
         tokens = _extract_tokens("kubernetes deployment failed for auth-service")
@@ -99,6 +104,7 @@ class TestStopwordFiltering:
 # Integration tests: PG FTS on entities table
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 class TestEntityFTSMatching:
     """Verify PostgreSQL full-text search on the entities table."""
@@ -106,14 +112,17 @@ class TestEntityFTSMatching:
     async def _create_entity(self, db, tenant_id, name, entity_type="concept"):
         from common.models.entity import Entity
         from sqlalchemy import select, text as sql_text
+
         # Return existing entity if it already exists (unique index)
-        existing = (await db.execute(
-            select(Entity).where(
-                Entity.tenant_id == tenant_id,
-                Entity.entity_type == entity_type,
-                Entity.canonical_name == name,
+        existing = (
+            await db.execute(
+                select(Entity).where(
+                    Entity.tenant_id == tenant_id,
+                    Entity.entity_type == entity_type,
+                    Entity.canonical_name == name,
+                )
             )
-        )).scalar_one_or_none()
+        ).scalar_one_or_none()
         if existing:
             return existing
         entity = Entity(
@@ -124,15 +133,19 @@ class TestEntityFTSMatching:
         db.add(entity)
         await db.flush()
         # Manually set search_vector (normally the trigger does this)
-        await db.execute(sql_text(
-            "UPDATE entities SET search_vector = to_tsvector('english', :name) WHERE id = :id"
-        ), {"name": name, "id": entity.id})
+        await db.execute(
+            sql_text(
+                "UPDATE entities SET search_vector = to_tsvector('english', :name) WHERE id = :id"
+            ),
+            {"name": name, "id": entity.id},
+        )
         await db.flush()
         return entity
 
     async def _match_entities(self, db, tenant_id, query_tokens):
         from sqlalchemy import func, select
         from common.models.entity import Entity
+
         entity_ts_query = func.plainto_tsquery("english", " ".join(query_tokens))
         stmt = select(Entity.id, Entity.canonical_name).where(
             Entity.tenant_id == tenant_id,

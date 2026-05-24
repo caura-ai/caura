@@ -2168,12 +2168,34 @@ class PostgresService:
         tenant_id: str,
         fleet_ids: list[str] | None = None,
     ) -> list[UUID]:
-        """Full-text search against the entity tsvector index."""
+        """Full-text search against the entity tsvector index.
+
+        A7: ORs tokens (any-match) instead of ANDing (all-match). The
+        AND default (``plainto_tsquery('english', " ".join(tokens))``)
+        meant a query like ``Helios telescope`` AND'd → matched only
+        entities containing BOTH terms, hiding ``Helios Robotics``
+        from the entity-lookup short-circuit. Switching to OR matches
+        any token; downstream graph expansion + memory linking +
+        ``GRAPH_MAX_EXPANDED_ENTITIES`` cap are the precision filter.
+
+        Empty token list → empty result (defensive: prior behaviour
+        passed empty string to plainto_tsquery, which returned the
+        empty tsquery and matched zero rows; explicit guard is
+        clearer).
+        """
+        if not tokens:
+            return []
         async with get_session() as session:
-            ts_query = func.plainto_tsquery("english", " ".join(tokens))
+            # OR across tokens via one plainto_tsquery per token. Each
+            # term passes through PG's ``english`` config (stem +
+            # stopword), so we don't have to escape — plainto_tsquery
+            # is the safe variant. Empty / all-stopword tokens degrade
+            # to ``''::tsquery`` and contribute False to the OR, which
+            # is correct.
+            per_token = [Entity.search_vector.op("@@")(func.plainto_tsquery("english", t)) for t in tokens]
             stmt = select(Entity.id).where(
                 Entity.tenant_id == tenant_id,
-                Entity.search_vector.op("@@")(ts_query),
+                or_(*per_token),
             )
             if fleet_ids:
                 stmt = stmt.where(or_(Entity.fleet_id.in_(fleet_ids), Entity.fleet_id.is_(None)))

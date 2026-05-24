@@ -128,7 +128,12 @@ MIN_SEARCH_SIMILARITY = 0.3
 FRESHNESS_DECAY_DAYS = 90
 FRESHNESS_FLOOR = 0.7
 ENTITY_BOOST_FACTOR = 1.3
-ENTITY_TOKEN_MIN_LENGTH = 3
+ENTITY_TOKEN_MIN_LENGTH = 2  # A7: was 3; lowered to retain 2-char acronym
+# entities (``AI`` / ``ML`` / ``PR`` / ``UI`` / ``QA`` / ``HR`` /
+# ``UK`` / ``US``…). 2-char English fillers (``in`` / ``on`` / ``to``
+# / ``be`` / ``is``…) are already in ENTITY_STOPWORDS so the noise
+# floor is unchanged; single-letter tokens still drop via the >=2
+# check.
 ENTITY_STOPWORDS: frozenset[str] = frozenset(
     {
         # ── Determiners / articles ──
