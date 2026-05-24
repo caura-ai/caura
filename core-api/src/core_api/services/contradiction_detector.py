@@ -760,6 +760,128 @@ def _fake_contradiction_check(new_content: str, old_content: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# A4 #13 — Retraction phase: re-judge a Path A verdict with full entity
+# context and undo it via the A4 #10 storage primitive when the re-judge
+# disagrees with sufficient confidence.
+# ---------------------------------------------------------------------------
+
+
+# Minimum confidence the judge must report for a ``verdict=False`` to
+# trigger retraction. Above this we trust the "not a contradiction"
+# call; below this we leave Path A's verdict in place (the model's
+# response was malformed / unparseable — see ``_CONF_FALLBACK``).
+#
+# Gate 1 (0.60) is the canonical retraction signal: model said
+# ``contradicts=True`` with ``same_subject=False``, parser overrode
+# to False. Path A flagged on surface similarity; the entity-aware
+# judge confirmed they're different subjects. Acting on 0.60 is
+# exactly the bug A4 #13 fixes.
+RETRACTION_CONFIDENCE_THRESHOLD = 0.60
+
+
+async def _attempt_path_c_retraction(
+    sc,
+    new_memory: dict,
+    tenant_config,
+) -> bool:
+    """Re-judge whatever candidate Path A retracted; undo if the judge
+    disagrees with sufficient confidence. Returns True iff a retraction
+    was performed.
+
+    Lookup is a direct dereference of ``new_memory.supersedes_id`` —
+    bypasses A4 #11's ``include_supersedes`` filter (which is structurally
+    inverted relative to Path A's chain shape — see follow-up). Works
+    in both canonical and flipped Path A directions: the dereferenced
+    row IS the conflicted candidate in either case.
+
+    Retraction is a two-step write via A4 #10:
+      1. ``update_memory_status(candidate.id, "active")`` — revert
+         the conflicted row. Idempotent if a concurrent writer beat
+         us to it.
+      2. ``update_memory_status(new_memory.id, status,
+         unset_supersedes=True, expected_supersedes_id=candidate.id)``
+         — clear the chain edge with a CAS anchor. A 409 from the
+         storage layer means someone else mutated the chain between
+         our read and our write; we treat that as "the retraction is
+         no longer ours to do" and swallow it.
+    """
+    retraction_target_id = new_memory.get("supersedes_id")
+    if not retraction_target_id:
+        return False
+
+    candidate = await sc.get_memory(str(retraction_target_id))
+    if not candidate or candidate.get("deleted_at") is not None:
+        return False
+    # Only retract rows still in the conflicted state Path A produced.
+    # If the row has already been moved on by another writer (or by
+    # a previous Path C invocation), our retraction is no longer
+    # meaningful — skip without calling the judge.
+    if candidate.get("status") != "conflicted":
+        return False
+
+    new_content = new_memory.get("content", "") or ""
+    old_content = candidate.get("content", "") or ""
+
+    try:
+        verdict, confidence = await asyncio.wait_for(
+            _llm_contradiction_check(new_content, old_content, tenant_config),
+            timeout=10.0,
+        )
+    except (TimeoutError, Exception) as e:
+        logger.warning(
+            "Path C retraction judge failed for memory %s candidate %s: %s",
+            new_memory.get("id"),
+            candidate.get("id"),
+            e,
+        )
+        return False
+
+    if verdict:
+        # Judge agrees with Path A — real contradiction, leave it.
+        return False
+    if confidence < RETRACTION_CONFIDENCE_THRESHOLD:
+        # Heuristic fallback / malformed — don't trust ``verdict=False``.
+        logger.info(
+            "Path C retraction skipped low-confidence verdict for memory %s "
+            "candidate %s (confidence=%.2f < threshold=%.2f)",
+            new_memory.get("id"),
+            candidate.get("id"),
+            confidence,
+            RETRACTION_CONFIDENCE_THRESHOLD,
+        )
+        return False
+
+    # Two-step retraction via A4 #10.
+    await sc.update_memory_status(str(candidate.get("id")), "active")
+    try:
+        await sc.update_memory_status(
+            str(new_memory.get("id")),
+            new_memory.get("status", "active"),
+            unset_supersedes=True,
+            expected_supersedes_id=str(candidate.get("id")),
+        )
+    except Exception as e:
+        # CAS rejection (409) means another writer mutated the chain
+        # — the candidate revert above still landed (idempotent), and
+        # the chain edge is whatever the other writer chose. Don't
+        # roll the candidate back.
+        logger.warning(
+            "Path C retraction chain-clear failed for memory %s candidate %s: %s",
+            new_memory.get("id"),
+            candidate.get("id"),
+            e,
+        )
+
+    logger.info(
+        "Path C retracted Path A's verdict for memory %s: candidate %s reverted to active (confidence=%.2f)",
+        new_memory.get("id"),
+        candidate.get("id"),
+        confidence,
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Entity-based contradiction detection (post entity extraction)
 # ---------------------------------------------------------------------------
 
@@ -775,6 +897,10 @@ async def detect_contradictions_by_entities_async(
     Finds memories that share entities with the new memory and checks for
     contradictions via LLM -- catches by-the-way updates that embedding
     similarity misses.
+
+    Also re-judges any candidate Path A retracted (A4 #13). If the
+    entity-aware re-judge disagrees with Path A's verdict at sufficient
+    confidence, the retraction is undone via the A4 #10 storage primitive.
     """
     from core_api.services.organization_settings import resolve_config
 
@@ -783,6 +909,7 @@ async def detect_contradictions_by_entities_async(
     t_start = time.monotonic()
     n_candidates = 0
     n_conflicts = 0
+    n_retractions = 0
     try:
         sc = get_storage_client()
         new_memory = await sc.get_memory(str(memory_id))
@@ -790,6 +917,22 @@ async def detect_contradictions_by_entities_async(
             return
 
         tenant_config = await resolve_config(None, tenant_id)
+
+        # A4 #13 — re-judge Path A's verdict (if any) before the
+        # standard entity-overlap detection. Phases are independent:
+        # this lookup dereferences ``new_memory.supersedes_id``, while
+        # the detection phase below looks at memories that share
+        # entities with new_memory. A retraction in this phase doesn't
+        # short-circuit the detection phase — Path C may still find a
+        # different (genuine) contradiction below.
+        if await _attempt_path_c_retraction(sc, new_memory, tenant_config):
+            n_retractions = 1
+            # The new memory's ``supersedes_id`` was just cleared.
+            # Re-fetch so the detection phase below sees the fresh state.
+            refreshed = await sc.get_memory(str(memory_id))
+            if refreshed and refreshed.get("deleted_at") is None:
+                new_memory = refreshed
+
         candidates = await sc.find_entity_overlap_candidates(
             {
                 "memory_id": str(memory_id),
@@ -886,10 +1029,12 @@ async def detect_contradictions_by_entities_async(
     finally:
         elapsed_ms = round((time.monotonic() - t_start) * 1000)
         logger.info(
-            "path_c_completed for memory %s n_candidates=%d n_conflicts=%d elapsed_ms=%d tenant_id=%s",
+            "path_c_completed for memory %s n_candidates=%d n_conflicts=%d "
+            "n_retractions=%d elapsed_ms=%d tenant_id=%s",
             memory_id,
             n_candidates,
             n_conflicts,
+            n_retractions,
             elapsed_ms,
             tenant_id,
         )
