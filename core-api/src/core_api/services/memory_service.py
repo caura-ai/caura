@@ -111,21 +111,30 @@ async def _find_semantic_duplicate(
     embedding: list[float],
     exclude_id: UUID | None = None,
     visibility: str | None = None,
+    min_similarity: float | None = None,
 ) -> dict | None:
     """Find a near-duplicate memory via cosine similarity.
 
-    Returns the closest match above SEMANTIC_DEDUP_THRESHOLD, or None.
+    Returns the closest match above the threshold (or ``None``). The
+    returned dict carries a ``similarity`` field — added in A1 #16 so
+    two-tier callers can dispatch by score.
+
+    ``min_similarity`` defaults to ``SEMANTIC_DEDUP_THRESHOLD`` (0.95)
+    via the storage layer for back-compat. A1 #16's
+    ``CheckSemanticDuplicate`` pipeline step passes
+    ``SEMANTIC_DEDUP_JUDGE_THRESHOLD`` to surface the judge band.
     """
     sc = get_storage_client()
-    return await sc.find_semantic_duplicate(
-        {
-            "tenant_id": tenant_id,
-            "fleet_id": fleet_id,
-            "embedding": embedding,
-            "exclude_id": str(exclude_id) if exclude_id else None,
-            "visibility": visibility,
-        }
-    )
+    payload: dict = {
+        "tenant_id": tenant_id,
+        "fleet_id": fleet_id,
+        "embedding": embedding,
+        "exclude_id": str(exclude_id) if exclude_id else None,
+        "visibility": visibility,
+    }
+    if min_similarity is not None:
+        payload["min_similarity"] = min_similarity
+    return await sc.find_semantic_duplicate(payload)
 
 
 def _dict_to_memory_out(

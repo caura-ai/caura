@@ -562,7 +562,21 @@ class PostgresService:
         embedding: list[float],
         exclude_id: UUID | None = None,
         visibility: str | None = None,
-    ) -> Memory | None:
+        min_similarity: float | None = None,
+    ) -> tuple[Memory, float] | None:
+        """Find the closest memory above ``min_similarity``.
+
+        ``min_similarity`` (A1 #16): cosine-similarity cutoff applied
+        in SQL. Defaults to ``SEMANTIC_DEDUP_THRESHOLD`` (0.95) for
+        back-compat with single-tier callers; A1 #16's tier-dispatching
+        pipeline step passes ``SEMANTIC_DEDUP_JUDGE_THRESHOLD`` (0.85)
+        so candidates in the judge band become visible.
+
+        Returns ``(memory, similarity)`` or ``None``. The similarity
+        field is what callers use to decide auto-reject vs judge-dispatch
+        vs accept (see ``check_semantic_duplicate.py``).
+        """
+        threshold = min_similarity if min_similarity is not None else SEMANTIC_DEDUP_THRESHOLD
         async with get_session() as session:
             distance = Memory.embedding.cosine_distance(embedding)
             similarity = (1.0 - distance).label("similarity")
@@ -575,7 +589,7 @@ class PostgresService:
                     Memory.status.in_(("active", "confirmed", "pending")),
                     Memory.embedding.is_not(None),
                 )
-                .where((1.0 - distance) >= SEMANTIC_DEDUP_THRESHOLD)
+                .where((1.0 - distance) >= threshold)
                 .order_by(distance)
                 .limit(SEMANTIC_DEDUP_CANDIDATE_LIMIT)
             )
@@ -591,7 +605,9 @@ class PostgresService:
 
             result = await session.execute(stmt)
             row = result.first()
-            return row.Memory if row else None
+            if row is None:
+                return None
+            return row.Memory, float(row.similarity)
 
     async def memory_bulk_find_by_content_hashes(
         self,
