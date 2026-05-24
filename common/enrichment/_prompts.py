@@ -31,6 +31,16 @@ Analyze the following memory content and return a JSON object with these fields:
     + _TYPE_BULLETS
     + """
 
+   Action vs episode (common confusion):
+   - action — actor's own deed, first-person past tense (subject=agent).
+   - episode — observed event tied to time/place (subject=event,
+     often third-person).
+   Pairs:
+     "I deployed v2.3 to production"                 -> action
+     "The v2.3 deployment succeeded at 14:00"        -> episode
+     "Merged the auth refactor PR"                   -> action
+     "Production outage between 14:00 and 14:30"     -> episode
+
 2. "weight": float 0.0-1.0 indicating importance
    - 0.9-1.0: critical decisions, key facts with evidence, high-impact events
    - 0.7-0.8: solid facts, meaningful events, clear preferences

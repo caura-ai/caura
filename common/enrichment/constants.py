@@ -61,7 +61,12 @@ MEMORY_TYPE_DESCRIPTIONS: dict[str, str] = {
         'Look for: "committed to", "promised", "guaranteed", '
         '"agreed to deliver", "pledged"'
     ),
-    "action": "concrete steps taken or being taken",
+    "action": (
+        "concrete step the actor (first-person / agent itself) took or is taking. "
+        'Past-tense first-person framing: "I deployed", "filed", "merged", '
+        '"sent". Distinct from "episode" (an observed event tied to time, '
+        "regardless of who performed it)."
+    ),
     "outcome": "results of actions, tasks, or plans",
     "cancellation": "explicit record that something was cancelled or abandoned",
     "rule": (

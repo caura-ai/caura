@@ -13,12 +13,14 @@ import pytest
 # Unit tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.unit
 class TestEnrichmentPromptSignalPhrases:
     """Verify signal phrases are present in the enrichment prompt."""
 
     def _get_prompt(self) -> str:
         from core_api.services.memory_enrichment import ENRICHMENT_PROMPT
+
         return ENRICHMENT_PROMPT
 
     def test_decision_has_signal_phrases(self):
@@ -41,12 +43,15 @@ class TestEnrichmentPromptSignalPhrases:
     def test_prompt_token_count_reasonable(self):
         """Prompt ceiling — keeps cost bounded while leaving room for small additions.
 
-        Baseline grew with retrieval_hint, atomic_facts, and the temporal
-        ts_valid_end guidance; 1100 gives ~15% headroom over today's ~942.
+        Baseline grew with retrieval_hint, atomic_facts, the temporal
+        ts_valid_end guidance, A8's tag-format guidance, and A9's
+        action/episode disambiguation pairs. Raised to 1200 (2026-05-24).
         """
         prompt = self._get_prompt()
         word_count = len(prompt.split())
-        assert word_count < 1100, f"Prompt is {word_count} words — too long, will increase cost"
+        assert word_count < 1200, (
+            f"Prompt is {word_count} words — too long, will increase cost"
+        )
 
     def test_prompt_structure_unchanged(self):
         """JSON template should still be present and valid."""
@@ -71,10 +76,12 @@ class TestEnrichmentPromptVocabularySync:
 
     def _get_prompt(self) -> str:
         from core_api.services.memory_enrichment import ENRICHMENT_PROMPT
+
         return ENRICHMENT_PROMPT
 
     def test_every_memory_type_appears_quoted_in_inline_list(self):
         from common.enrichment.constants import MEMORY_TYPES
+
         prompt = self._get_prompt()
         for t in MEMORY_TYPES:
             assert f'"{t}"' in prompt, (
@@ -84,6 +91,7 @@ class TestEnrichmentPromptVocabularySync:
 
     def test_every_memory_type_has_a_bullet(self):
         from common.enrichment.constants import MEMORY_TYPE_DESCRIPTIONS
+
         prompt = self._get_prompt()
         for name, desc in MEMORY_TYPE_DESCRIPTIONS.items():
             assert f"   - {name}: " in prompt, f"{name!r} bullet missing from prompt"
@@ -97,6 +105,7 @@ class TestEnrichmentPromptVocabularySync:
         import re
         from common.enrichment.constants import MEMORY_TYPES
         from core_api.constants import MEMORY_TYPES_PATTERN
+
         for t in MEMORY_TYPES:
             assert re.match(MEMORY_TYPES_PATTERN, t), (
                 f"{t!r} not accepted by MEMORY_TYPES_PATTERN — pattern drifted"
@@ -109,51 +118,79 @@ class TestHeuristicRegressions:
 
     def test_decision_classification(self):
         from core_api.services.memory_enrichment import _fake_enrich
+
         assert _fake_enrich("We decided to use PostgreSQL").memory_type == "decision"
         assert _fake_enrich("Team chose Redis for caching").memory_type == "decision"
         assert _fake_enrich("Management approved the budget").memory_type == "decision"
 
     def test_preference_classification(self):
         from core_api.services.memory_enrichment import _fake_enrich
+
         assert _fake_enrich("The team prefers dark mode").memory_type == "preference"
 
     def test_episode_classification(self):
         from core_api.services.memory_enrichment import _fake_enrich
+
         assert _fake_enrich("We deployed v2.3 to production").memory_type == "episode"
 
     def test_task_classification(self):
         from core_api.services.memory_enrichment import _fake_enrich
+
         assert _fake_enrich("Need to review the PR by Friday").memory_type == "task"
 
     def test_commitment_classification(self):
         from core_api.services.memory_enrichment import _fake_enrich
-        assert _fake_enrich("We committed to delivering by Q2").memory_type == "commitment"
+
+        assert (
+            _fake_enrich("We committed to delivering by Q2").memory_type == "commitment"
+        )
 
     def test_rule_classification(self):
         from core_api.services.memory_enrichment import _fake_enrich
-        assert _fake_enrich("Always notify security before deploying").memory_type == "rule"
+
+        assert (
+            _fake_enrich("Always notify security before deploying").memory_type
+            == "rule"
+        )
         assert _fake_enrich("Never store PII in Redis").memory_type == "rule"
 
     def test_cancellation_classification(self):
         from core_api.services.memory_enrichment import _fake_enrich
-        assert _fake_enrich("The project was cancelled last week").memory_type == "cancellation"
+
+        assert (
+            _fake_enrich("The project was cancelled last week").memory_type
+            == "cancellation"
+        )
 
     def test_outcome_classification(self):
         from core_api.services.memory_enrichment import _fake_enrich
-        assert _fake_enrich("The migration achieved 99.9% uptime").memory_type == "outcome"
+
+        assert (
+            _fake_enrich("The migration achieved 99.9% uptime").memory_type == "outcome"
+        )
 
     def test_fact_default(self):
         from core_api.services.memory_enrichment import _fake_enrich
+
         assert _fake_enrich("The server runs on port 8080").memory_type == "fact"
 
     def test_plan_classification(self):
         from core_api.services.memory_enrichment import _fake_enrich
+
         assert _fake_enrich("The roadmap includes three phases").memory_type == "plan"
 
     def test_intention_classification(self):
         from core_api.services.memory_enrichment import _fake_enrich
-        assert _fake_enrich("We intend to migrate to AWS next quarter").memory_type == "intention"
+
+        assert (
+            _fake_enrich("We intend to migrate to AWS next quarter").memory_type
+            == "intention"
+        )
 
     def test_action_classification(self):
         from core_api.services.memory_enrichment import _fake_enrich
-        assert _fake_enrich("I executed the database backup script").memory_type == "action"
+
+        assert (
+            _fake_enrich("I executed the database backup script").memory_type
+            == "action"
+        )

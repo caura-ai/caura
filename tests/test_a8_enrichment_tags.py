@@ -86,10 +86,12 @@ def test_prompt_includes_a_tag_example():
 
 
 def test_prompt_word_count_remains_bounded():
-    """Adding the new tag guidance must not bust the existing 1100-word ceiling."""
+    """Adding tag guidance must not bust the prompt budget. Ceiling
+    raised to 1200 in A9 to cover the action/episode disambiguation
+    block + A8's tag guidance."""
     prompt = _get_prompt()
     word_count = len(prompt.split())
-    assert word_count < 1100, f"prompt is {word_count} words — too long"
+    assert word_count < 1200, f"prompt is {word_count} words — too long"
 
 
 # ---------------------------------------------------------------------------
