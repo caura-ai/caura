@@ -385,3 +385,62 @@ describe("MemoryFlushPlan resolver — input-hardening (regression: review 2026-
     assert.match(rp, /^memclaw\/flush-\d{4}-\d{2}-\d{2}\.md$/);
   });
 });
+
+describe("MemoryFlushPlan resolver — negative-timestamp guard (review 2026-05-24)", () => {
+  // ``Number.isFinite(-1) === true``, so without an explicit positive
+  // lower bound a negative ``nowMs`` (test mock, time-travel scenario,
+  // accidental ``-Date.now()``) would produce a ``relativePath`` like
+  // ``memclaw/flush-1969-12-31.md``. The path-shape check would still
+  // pass (it's just a valid YYYY-MM-DD) but the file name is meaningless
+  // and confuses operators reading the workspace. Lock the lower bound.
+
+  test("resolver({nowMs: -1}) falls back to Date.now() instead of pre-epoch", () => {
+    const r = _loadFlushPlanResolver();
+    const plan = r({ nowMs: -1 });
+    assert.ok(plan);
+    const rp = (plan as Record<string, unknown>).relativePath as string;
+    const yearMatch = rp.match(/^memclaw\/flush-(\d{4})-\d{2}-\d{2}\.md$/);
+    assert.ok(yearMatch, `unexpected path shape: ${rp}`);
+    const yearInPath = Number.parseInt(yearMatch[1], 10);
+    const currentYear = new Date().getUTCFullYear();
+    assert.equal(
+      yearInPath,
+      currentYear,
+      `negative nowMs must fall back to current year, got ${yearInPath} for path ${rp}`,
+    );
+  });
+
+  test("resolver({nowMs: -Date.now()}) falls back to Date.now()", () => {
+    const r = _loadFlushPlanResolver();
+    const plan = r({ nowMs: -Date.now() });
+    assert.ok(plan);
+    const rp = (plan as Record<string, unknown>).relativePath as string;
+    const yearMatch = rp.match(/^memclaw\/flush-(\d{4})-\d{2}-\d{2}\.md$/);
+    assert.ok(yearMatch);
+    assert.equal(Number.parseInt(yearMatch[1], 10), new Date().getUTCFullYear());
+  });
+
+  test("resolver({nowMs: 0}) falls back to Date.now() (epoch is also rejected)", () => {
+    const r = _loadFlushPlanResolver();
+    const plan = r({ nowMs: 0 });
+    assert.ok(plan);
+    const rp = (plan as Record<string, unknown>).relativePath as string;
+    const yearMatch = rp.match(/^memclaw\/flush-(\d{4})-\d{2}-\d{2}\.md$/);
+    assert.ok(yearMatch);
+    assert.notEqual(
+      Number.parseInt(yearMatch[1], 10),
+      1970,
+      "nowMs=0 must NOT produce a 1970-stamped path",
+    );
+  });
+
+  test("resolver still accepts a real positive nowMs (no regression)", () => {
+    const r = _loadFlushPlanResolver();
+    const plan = r({ nowMs: Date.UTC(2026, 4, 24, 12, 0, 0) });
+    assert.ok(plan);
+    assert.match(
+      (plan as Record<string, unknown>).relativePath as string,
+      /^memclaw\/flush-2026-05-24\.md$/,
+    );
+  });
+});

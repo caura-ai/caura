@@ -642,6 +642,67 @@ async def count_distinct_tenants() -> dict:
 
 
 # ------------------------------------------------------------------
+# A1 #18 — Dedup review queue
+# ------------------------------------------------------------------
+
+
+_DEDUP_REVIEW_FIELDS = [
+    "id",
+    "tenant_id",
+    "fleet_id",
+    "agent_id",
+    "new_memory_id",
+    "candidate_memory_id",
+    "new_content",
+    "candidate_content",
+    "similarity",
+    "judge_verdict",
+    "judge_confidence",
+    "decision_band",
+    "status",
+    "decided_at",
+    "decided_by",
+    "created_at",
+]
+
+
+@router.post("/dedup-reviews")
+async def enqueue_dedup_review(request: Request) -> dict:
+    body: dict = await request.json()
+    try:
+        review = await _svc.dedup_review_enqueue(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return orm_to_dict(review, _DEDUP_REVIEW_FIELDS)
+
+
+@router.get("/dedup-reviews")
+async def list_dedup_reviews(
+    tenant_id: str,
+    status: str = "pending",
+    limit: int = 50,
+) -> list[dict]:
+    reviews = await _svc.dedup_review_list(tenant_id, status=status, limit=limit)
+    return [orm_to_dict(r, _DEDUP_REVIEW_FIELDS) for r in reviews]
+
+
+@router.post("/dedup-reviews/{review_id}/decision")
+async def decide_dedup_review(review_id: UUID, request: Request) -> dict:
+    body: dict = await request.json()
+    status = body.get("status")
+    decided_by = body.get("decided_by")
+    if not isinstance(status, str):
+        raise HTTPException(status_code=400, detail="status (string) required")
+    try:
+        review = await _svc.dedup_review_decide(review_id, status, decided_by=decided_by)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if review is None:
+        raise HTTPException(status_code=404, detail="Review not found")
+    return orm_to_dict(review, _DEDUP_REVIEW_FIELDS)
+
+
+# ------------------------------------------------------------------
 # Parameterised paths — MUST come last to avoid catching /count etc.
 # ------------------------------------------------------------------
 

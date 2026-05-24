@@ -510,8 +510,15 @@ const memclawPlugin = {
           (params?: { cfg?: unknown; nowMs?: number } | null) => {
             try {
               const candidate = params?.nowMs;
+              // Number.isFinite(-1) === true, so a negative nowMs
+              // would slip through and produce a 1969-era relativePath.
+              // Add a positive-lower-bound guard so test-time mocks or
+              // time-travel scenarios degrade to Date.now() rather
+              // than silently writing into pre-epoch-named files.
               const ts =
-                typeof candidate === "number" && Number.isFinite(candidate)
+                typeof candidate === "number" &&
+                Number.isFinite(candidate) &&
+                candidate > 0
                   ? candidate
                   : Date.now();
               return buildPlan(new Date(ts).toISOString().slice(0, 10));

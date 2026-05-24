@@ -24,6 +24,7 @@ from core_api.config import settings
 from core_api.constants import SINGLE_VALUE_PREDICATES
 from core_api.providers._retry import call_with_fallback
 from core_api.schemas import ContradictionInfo
+from core_api.services.subject_preflight import _subjects_differ_with_certainty
 
 logger = logging.getLogger(__name__)
 
@@ -996,6 +997,31 @@ async def detect_contradictions_by_entities_async(
         )
         n_candidates = len(candidates) if candidates else 0
         if not candidates:
+            return
+
+        # A1 #17 — subject preflight. Drop candidates whose
+        # ``subject_entity_id`` is non-NULL AND differs from the new
+        # memory's: they're definitionally about different subjects,
+        # so the LLM judge would be (1) at risk of a false-positive
+        # contradiction call when entities share canonical names like
+        # "priya" but resolve to distinct entity rows (see
+        # ``followup-path-c-judge-first-name-collisions``) and (2)
+        # wasteful API spend regardless. Candidates with NULL
+        # ``subject_entity_id`` on either side fall through unchanged.
+        new_subject = new_memory.get("subject_entity_id")
+        filtered_candidates = [
+            c
+            for c in candidates
+            if not _subjects_differ_with_certainty(new_subject, c.get("subject_entity_id"))
+        ]
+        n_preflight_skipped = len(candidates) - len(filtered_candidates)
+        candidates = filtered_candidates
+        if not candidates:
+            logger.info(
+                "Path C preflight skipped all %d candidates for memory %s (distinct subject_entity_id)",
+                n_preflight_skipped,
+                memory_id,
+            )
             return
 
         new_content = new_memory.get("content", "")
