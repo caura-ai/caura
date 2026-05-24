@@ -43,6 +43,7 @@ from common.models import (
     AuditLog,
     BackgroundTaskLog,
     CrystallizationReport,
+    DedupReview,
     Document,
     Entity,
     FleetCommand,
@@ -608,6 +609,94 @@ class PostgresService:
             if row is None:
                 return None
             return row.Memory, float(row.similarity)
+
+    # ------------------------------------------------------------------
+    # A1 #18 — Dedup review queue
+    # ------------------------------------------------------------------
+
+    async def dedup_review_enqueue(self, payload: dict) -> DedupReview:
+        """Insert a new ``dedup_reviews`` row in ``pending`` status.
+
+        Caller-supplied fields:
+          - tenant_id, fleet_id, agent_id (scoping)
+          - new_memory_id (may be NULL — rejected writes never persist)
+          - candidate_memory_id (the matched memory)
+          - new_content, candidate_content (snapshots — preserved even
+            if either memory is later deleted)
+          - similarity, judge_verdict, judge_confidence
+          - decision_band (one of ``DEDUP_REVIEW_BANDS``)
+        """
+        from common.models.dedup_review import DEDUP_REVIEW_BANDS
+
+        band = payload.get("decision_band")
+        if band not in DEDUP_REVIEW_BANDS:
+            raise ValueError(f"unknown decision_band: {band!r}")
+
+        async with get_session() as session:
+            row = DedupReview(
+                tenant_id=payload["tenant_id"],
+                fleet_id=payload.get("fleet_id"),
+                agent_id=payload["agent_id"],
+                new_memory_id=UUID(payload["new_memory_id"]) if payload.get("new_memory_id") else None,
+                candidate_memory_id=UUID(payload["candidate_memory_id"]),
+                new_content=payload["new_content"],
+                candidate_content=payload["candidate_content"],
+                similarity=float(payload["similarity"]),
+                judge_verdict=payload.get("judge_verdict"),
+                judge_confidence=(
+                    float(payload["judge_confidence"])
+                    if payload.get("judge_confidence") is not None
+                    else None
+                ),
+                decision_band=band,
+            )
+            session.add(row)
+            await session.flush()
+            return row
+
+    async def dedup_review_list(
+        self,
+        tenant_id: str,
+        status: str = "pending",
+        limit: int = 50,
+    ) -> list[DedupReview]:
+        """Return reviews for ``tenant_id`` filtered by ``status``,
+        newest-first. Default ``status='pending'`` keeps the busy-queue
+        case (decided rows piled up) from drowning the caller."""
+        async with get_session() as session:
+            stmt = (
+                select(DedupReview)
+                .where(
+                    DedupReview.tenant_id == tenant_id,
+                    DedupReview.status == status,
+                )
+                .order_by(DedupReview.created_at.desc())
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+    async def dedup_review_decide(
+        self, review_id: UUID, status: str, decided_by: str | None = None
+    ) -> DedupReview | None:
+        """Transition a review from ``pending`` to one of the terminal
+        statuses (``confirmed_duplicate`` / ``override_not_duplicate``
+        / ``dismissed``). Returns the updated row, or None if the row
+        doesn't exist. Raises ``ValueError`` for unknown statuses."""
+        from common.models.dedup_review import DEDUP_REVIEW_STATUSES
+
+        if status not in DEDUP_REVIEW_STATUSES or status == "pending":
+            raise ValueError(f"invalid terminal status: {status!r}")
+
+        async with get_session() as session:
+            row = await session.get(DedupReview, review_id)
+            if row is None:
+                return None
+            row.status = status
+            row.decided_by = decided_by
+            row.decided_at = datetime.now(UTC)
+            await session.flush()
+            return row
 
     async def memory_bulk_find_by_content_hashes(
         self,

@@ -529,6 +529,33 @@ class CoreStorageClient:
         # through. See bulk_find_by_content_hashes for the same reasoning.
         return await self._post_optional("/memories/semantic-duplicate", data, read=False)
 
+    # ------------------------------------------------------------------
+    # A1 #18 — Dedup review queue
+    # ------------------------------------------------------------------
+
+    async def enqueue_dedup_review(self, payload: dict) -> dict:
+        """Append a row to the ambiguous-dedup review queue. Caller-side
+        wraps this in ``track_task`` to keep the write path off the
+        queue's failure modes."""
+        return await self._post("/memories/dedup-reviews", payload, read=False)  # type: ignore[return-value]
+
+    async def list_dedup_reviews(self, params: dict) -> list[dict]:
+        """List reviews for a tenant, default ``status='pending'``."""
+        return await self._get(  # type: ignore[return-value]
+            "/memories/dedup-reviews",
+            read=True,
+            **{k: v for k, v in params.items() if v is not None},
+        )
+
+    async def decide_dedup_review(self, review_id, status: str, *, decided_by: str | None = None) -> dict:
+        """Record a terminal decision (confirmed_duplicate /
+        override_not_duplicate / dismissed) on a review row."""
+        return await self._post(  # type: ignore[return-value]
+            f"/memories/dedup-reviews/{review_id}/decision",
+            {"status": status, "decided_by": decided_by},
+            read=False,
+        )
+
     async def find_entity_overlap_candidates(self, data: dict) -> list[dict]:
         # Called from contradiction_detector.py as a *post-commit* async
         # background task. Replica lag here only risks missing a

@@ -107,6 +107,7 @@ def _import_all_models():
     import common.models.fleet  # noqa: F401
     import common.models.document  # noqa: F401
     import common.models.background_task  # noqa: F401
+    import common.models.dedup_review  # noqa: F401
     import common.models.organization_settings  # noqa: F401
 
 
