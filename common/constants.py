@@ -10,6 +10,22 @@ VECTOR_DIM = 1024
 SEMANTIC_DEDUP_THRESHOLD = 0.95  # cosine similarity above this -> near-duplicate
 SEMANTIC_DEDUP_CANDIDATE_LIMIT = 1  # only need to know if any match exists
 
+# Two-tier dedup constants (A1 #15). The dispatch that consumes them
+# lives in A1 #16. Today's single-tier code keeps using
+# ``SEMANTIC_DEDUP_THRESHOLD`` above — this PR adds the band cutoffs
+# without changing any call site.
+#
+# Decision band (cosine similarity to nearest existing memory):
+#   ≥ AUTO          → auto-reject (clear duplicate; no LLM)
+#   JUDGE ≤ s < AUTO → LLM judge decides (A1 #16; A4 #12 verdict+confidence)
+#   < JUDGE         → accept (not a dup)
+SEMANTIC_DEDUP_AUTO_THRESHOLD = 0.97  # auto-reject band — tighter than the
+# legacy 0.95 so refinements (same first sentence + extra detail) drop into
+# the judge band rather than getting silently rejected.
+SEMANTIC_DEDUP_JUDGE_THRESHOLD = 0.85  # broad enough to catch refinements,
+# tight enough that the LLM judge isn't swamped with unrelated memories that
+# happen to share vocabulary.
+
 # ── Contradiction detection ──
 CONTRADICTION_SIMILARITY_THRESHOLD = (
     0.70  # cosine similarity above this triggers LLM check
