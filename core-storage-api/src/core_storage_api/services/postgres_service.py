@@ -1105,14 +1105,26 @@ class PostgresService:
         scopes candidates to the writer's visibility tier so a scope_org
         write can't be linked into a scope_team chain (and vice versa).
 
-        ``include_supersedes`` (A4 #11): when True, also return
-        ``conflicted`` rows whose ``supersedes_id`` equals ``memory_id``.
-        Path C uses this to surface memories Path A already conflicted
-        by ``memory_id`` so it can decide whether to retract the verdict
-        via ``update_memory_status(..., unset_supersedes=True)`` (A4 #10).
-        The expansion is targeted: a ``conflicted`` row that points at
-        some other memory's ``supersedes_id`` is NOT returned — only
-        the ones in the retraction-candidate scope of THIS query.
+        ``include_supersedes`` (A4 #11): when True, also return the
+        ``conflicted`` row that ``memory_id``'s chain points at — i.e.
+        the candidate Path A retracted FOR this memory. Path C uses
+        this to re-judge Path A's verdict (A4 #13).
+
+        Filter direction: a row M is included via this branch iff
+        ``M.status == 'conflicted'`` AND
+        ``memory_id``'s ``supersedes_id`` field equals ``M.id``. This
+        matches Path A's chain shape — the *newer/active* row carries
+        ``supersedes_id`` pointing back at the *older/conflicted* row;
+        the conflicted row itself has ``supersedes_id=NULL``.
+
+        The original A4 #11 (PR #185) used ``Memory.supersedes_id ==
+        memory_id`` instead, which was structurally inverted — it
+        looked for "conflicted rows pointing at me" but Path A leaves
+        the conflicted row's ``supersedes_id`` as NULL. That filter
+        matched zero production rows. See
+        ``flow-debug-contradiction-chain-shape`` memory for the
+        investigation that surfaced it.
+
         Default ``False`` preserves the back-compat behaviour for every
         existing caller.
         """
@@ -1132,11 +1144,17 @@ class PostgresService:
             other_ent = Entity.__table__.alias("other_ent")
 
             if include_supersedes:
+                # Subquery: the supersedes_id field on the query target
+                # memory itself. If non-NULL, it points at the row Path A
+                # marked conflicted on this memory's behalf.
+                target_supersedes = (
+                    select(Memory.supersedes_id).where(Memory.id == memory_id).scalar_subquery()
+                )
                 status_filter = or_(
                     Memory.status.in_(("active", "confirmed", "pending")),
                     and_(
                         Memory.status == "conflicted",
-                        Memory.supersedes_id == memory_id,
+                        Memory.id == target_supersedes,
                     ),
                 )
             else:

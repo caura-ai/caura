@@ -77,6 +77,28 @@ async def _make_shared_entity(sc) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Chain-shape helper — mirror what Path A actually writes
+# ---------------------------------------------------------------------------
+#
+# Path A's chain edge is **newer → older**: the active/newer row carries
+# ``supersedes_id`` pointing at the conflicted/older row; the conflicted
+# row itself has ``supersedes_id=NULL``. See
+# ``flow-debug-contradiction-chain-shape`` memory + every write site in
+# ``contradiction_detector.py``. This helper builds the same state via
+# the storage client so the integration tests exercise the exact shape
+# the filter must match in production.
+
+
+async def _wire_path_a_retraction(sc, *, newer_id: str, older_id: str) -> None:
+    """Mark ``older_id`` conflicted (no supersedes_id) and set
+    ``newer_id``'s ``supersedes_id`` to point at it. This is the
+    bidirectional state Path A produces: older.status=conflicted,
+    older.supersedes_id=NULL, newer.supersedes_id=older."""
+    await sc.update_memory_status(older_id, "conflicted")
+    await sc.update_memory_status(newer_id, "active", supersedes_id=older_id)
+
+
+# ---------------------------------------------------------------------------
 # Default behaviour — conflicted-by-A row is INVISIBLE (current contract)
 # ---------------------------------------------------------------------------
 
@@ -95,9 +117,9 @@ async def test_default_excludes_conflicted_rows_unchanged_from_main(sc):
     for m in (a, b, active_control):
         await _link_memory_to_entity(sc, m["id"], entity["id"])
 
-    # Mark B as conflicted by A using the A4 #10 retraction-capable
-    # ``update_memory_status``.
-    await sc.update_memory_status(b["id"], "conflicted", supersedes_id=a["id"])
+    # Reproduce Path A's actual chain shape: B conflicted (no
+    # supersedes_id on B), A.supersedes_id = B.
+    await _wire_path_a_retraction(sc, newer_id=a["id"], older_id=b["id"])
 
     # DEFAULT call — back-compat path.
     candidates = await sc.find_entity_overlap_candidates(
@@ -119,15 +141,15 @@ async def test_default_excludes_conflicted_rows_unchanged_from_main(sc):
 
 
 # ---------------------------------------------------------------------------
-# Opt-in behaviour — conflicted-by-A row IS returned when requested
+# Opt-in behaviour — the row Path A retracted for this memory IS returned
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
 async def test_include_supersedes_returns_conflicted_supersedes_of_target(sc):
-    """``include_supersedes=True`` must surface a ``conflicted`` row whose
-    ``supersedes_id`` equals the query target. This is the gate Path C
-    needs to retract Path A's verdict."""
+    """``include_supersedes=True`` must surface the ``conflicted`` row
+    that the query memory's chain points at. This is the gate Path C
+    needs to re-judge Path A's verdict (A4 #13)."""
     a = await _make_overlapping_memory(sc, "A new memory")
     b = await _make_overlapping_memory(sc, "B was conflicted by A")
     active_control = await _make_overlapping_memory(sc, "C active control")
@@ -136,7 +158,7 @@ async def test_include_supersedes_returns_conflicted_supersedes_of_target(sc):
     for m in (a, b, active_control):
         await _link_memory_to_entity(sc, m["id"], entity["id"])
 
-    await sc.update_memory_status(b["id"], "conflicted", supersedes_id=a["id"])
+    await _wire_path_a_retraction(sc, newer_id=a["id"], older_id=b["id"])
 
     candidates = await sc.find_entity_overlap_candidates(
         {
@@ -150,34 +172,34 @@ async def test_include_supersedes_returns_conflicted_supersedes_of_target(sc):
 
     assert active_control["id"] in ids, "active control still returned alongside"
     assert b["id"] in ids, (
-        f"with include_supersedes=True the conflicted-by-A row B must appear "
+        f"with include_supersedes=True the row Path A retracted for A "
+        f"(i.e. ``B`` such that ``A.supersedes_id == B.id``) must appear "
         f"so Path C can call the retraction primitive. Got: {ids}"
     )
 
 
 @pytest.mark.integration
 async def test_include_supersedes_excludes_conflicted_pointing_elsewhere(sc):
-    """The opt-in is targeted, not blanket. A conflicted row whose
-    ``supersedes_id`` does NOT equal the query target must STILL be
-    excluded under ``include_supersedes=True``.
+    """The opt-in is targeted, not blanket. A conflicted row that the
+    QUERY MEMORY's chain does NOT point at must stay excluded.
 
-    Otherwise Path C would attempt retraction on conflicted rows that
-    were superseded by an entirely different memory — wrong scope.
+    Setup: some other memory ``other_a`` retracted ``b_other`` (so
+    ``other_a.supersedes_id = b_other``). The query memory ``a`` has
+    no chain edge to ``b_other``. Even with ``include_supersedes=True``,
+    ``b_other`` must NOT be returned — otherwise Path C would attempt
+    retraction on conflicted rows from unrelated chains.
     """
     a = await _make_overlapping_memory(sc, "A the query target")
     other_a = await _make_overlapping_memory(sc, "other A")
-    b_conflicted_by_other = await _make_overlapping_memory(
-        sc, "B conflicted by some other memory"
-    )
+    b_other = await _make_overlapping_memory(sc, "B conflicted by other_a, not A")
 
     entity = await _make_shared_entity(sc)
-    for m in (a, other_a, b_conflicted_by_other):
+    for m in (a, other_a, b_other):
         await _link_memory_to_entity(sc, m["id"], entity["id"])
 
-    # B was conflicted by ``other_a``, NOT by ``a``.
-    await sc.update_memory_status(
-        b_conflicted_by_other["id"], "conflicted", supersedes_id=other_a["id"]
-    )
+    # ``b_other`` is conflicted; ``other_a`` (NOT ``a``) carries the
+    # chain edge. ``a.supersedes_id`` is NULL.
+    await _wire_path_a_retraction(sc, newer_id=other_a["id"], older_id=b_other["id"])
 
     candidates = await sc.find_entity_overlap_candidates(
         {
@@ -189,8 +211,9 @@ async def test_include_supersedes_excludes_conflicted_pointing_elsewhere(sc):
     )
     ids = {c["id"] for c in candidates}
 
-    assert b_conflicted_by_other["id"] not in ids, (
-        "include_supersedes is targeted: only conflicted rows whose "
-        "supersedes_id equals the query target are returned. A row "
-        "conflicted by a different memory must stay excluded."
+    assert b_other["id"] not in ids, (
+        "include_supersedes is targeted by the QUERY memory's chain edge: "
+        "only the conflicted row that ``memory_id.supersedes_id`` points at "
+        "is returned. A conflicted row from someone else's chain must stay "
+        "excluded."
     )
