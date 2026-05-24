@@ -445,7 +445,8 @@ async def test_evolve_generate_rule_returns_valid_structure(db, sc):
 
     from core_api.services.evolve_service import _generate_rule
 
-    rule = await _generate_rule(
+    # A10: _generate_rule now returns (skip_reason, rule_dict) tuple.
+    reason, rule = await _generate_rule(
         db,
         tenant_id=tenant_id,
         outcome=f"Failed because of bad info [{tag}]",
@@ -456,6 +457,7 @@ async def test_evolve_generate_rule_returns_valid_structure(db, sc):
     )
 
     # FakeLLMProvider.complete_json returns {} — _generate_rule sanitizes to valid structure
+    assert reason is None, f"unexpected skip reason: {reason}"
     assert rule is not None
     assert "condition" in rule
     assert "action" in rule

@@ -30,6 +30,39 @@ from core_api.utils.sanitize import sanitize_content as _sanitize_content
 logger = logging.getLogger(__name__)
 
 
+# A10 — slugs identifying every silent-exit path on the rule synthesis
+# flow. Callers (the harness, the dashboard, an operator inspecting
+# ``report_outcome`` results) read these from the response's
+# ``rule_skipped_reason`` field instead of grep'ing log strings, so
+# downstream tooling can pattern-match without parsing prose.
+RULE_SKIP_REASONS: tuple[str, ...] = (
+    "not_failure_or_partial",  # success outcomes don't generate rules
+    "no_related_ids",  # failure/partial but no memories supplied
+    "no_memories_fetched",  # every storage fetch failed
+    "llm_failed",  # provider raised or returned non-dict
+    "below_confidence_threshold",  # rule generated but conf < threshold
+    "persist_failed",  # _persist_rule returned None
+)
+
+
+def _log_rule_skip(reason: str, tenant_id: str, outcome_type: str, **extra) -> None:
+    """Always-fire log line for an evolve rule-synthesis skip.
+
+    Mirrors the ``path_a_completed`` / ``path_c_completed`` pattern in
+    ``contradiction_detector.py`` (Gap 06): the reason slug lives in
+    the message string itself so a plain
+    ``grep evolve_rule_skipped <reason>`` works regardless of the
+    structlog renderer's ``extra={}`` handling."""
+    extras = " ".join(f"{k}={v}" for k, v in extra.items() if v is not None)
+    logger.info(
+        "evolve_rule_skipped reason=%s tenant_id=%s outcome_type=%s %s",
+        reason,
+        tenant_id,
+        outcome_type,
+        extras,
+    )
+
+
 # -- Delta map ----------------------------------------------------------------
 
 _DELTA_MAP = {
@@ -332,10 +365,17 @@ async def _generate_rule(
     related_ids: list[str],
     agent_id: str,
     fleet_id: str | None,
-) -> dict | None:
+) -> tuple[str | None, dict | None]:
     """Ask LLM to generate a preventive rule from a failure/partial outcome.
 
-    Returns dict with {condition, action, confidence, reasoning} or None on failure.
+    Returns ``(skip_reason, rule)``:
+      - ``(None, {...})`` on success
+      - ``(<RULE_SKIP_REASONS slug>, None)`` on any silent-exit path
+
+    A10 widened the return from ``dict | None`` to the tuple so callers
+    (``report_outcome``) can propagate the specific reason out to the
+    response + structured log instead of conflating "no candidates",
+    "LLM blew up", and "fetched zero memories" into a single None.
     """
     from core_api.clients.storage_client import get_storage_client
     from core_api.providers._retry import call_with_fallback
@@ -370,7 +410,7 @@ async def _generate_rule(
         memories_text_lines.append(f"- (id:{mid_str}) [{mtype}] {title}: {content} [weight: {weight:.2f}]")
 
     if not memories_text_lines:
-        return None
+        return ("no_memories_fetched", None)
 
     memories_text = "\n".join(memories_text_lines)
     # Escape user-controlled braces before .format() — both outcome (agent input)
@@ -400,10 +440,10 @@ async def _generate_rule(
         )
     except Exception:
         logger.exception("evolve: rule generation failed")
-        return None
+        return ("llm_failed", None)
 
     if not isinstance(raw, dict):
-        return None
+        return ("llm_failed", None)
 
     # LLMs occasionally return confidence as None, a string like "high", or
     # omit it entirely. Coerce defensively to avoid TypeError/ValueError
@@ -413,12 +453,15 @@ async def _generate_rule(
     except (TypeError, ValueError):
         confidence = 0.0
 
-    return {
-        "condition": str(raw.get("condition", ""))[:500],
-        "action": str(raw.get("action", ""))[:500],
-        "confidence": confidence,
-        "reasoning": str(raw.get("reasoning", ""))[:500],
-    }
+    return (
+        None,
+        {
+            "condition": str(raw.get("condition", ""))[:500],
+            "action": str(raw.get("action", ""))[:500],
+            "confidence": confidence,
+            "reasoning": str(raw.get("reasoning", ""))[:500],
+        },
+    )
 
 
 # -- Persist ------------------------------------------------------------------
@@ -629,9 +672,20 @@ async def report_outcome(
     # doing it first means Phase 2's row locks are held for DB round-trips only,
     # never across HTTP/LLM I/O. The rule prompt only needs memory content for
     # context — it has no dependency on the updated weights.
-    rule_result = None
-    if outcome_type in ("failure", "partial") and related_ids:
-        rule_result = await _generate_rule(
+    #
+    # A10 — track the specific skip reason through every silent-exit
+    # branch so the response carries it back to the caller (and a
+    # structured log line lets operators bisect by reason).
+    rule_result: dict | None = None
+    rule_skipped_reason: str | None = None
+    if outcome_type not in ("failure", "partial"):
+        rule_skipped_reason = "not_failure_or_partial"
+        _log_rule_skip(rule_skipped_reason, tenant_id, outcome_type)
+    elif not related_ids:
+        rule_skipped_reason = "no_related_ids"
+        _log_rule_skip(rule_skipped_reason, tenant_id, outcome_type)
+    else:
+        gen_reason, rule_result = await _generate_rule(
             db,
             tenant_id,
             outcome,
@@ -640,6 +694,9 @@ async def report_outcome(
             agent_id,
             fleet_id,
         )
+        if gen_reason is not None:
+            rule_skipped_reason = gen_reason
+            _log_rule_skip(rule_skipped_reason, tenant_id, outcome_type)
 
     # Phase 2: Adjust weights atomically. Row locks are acquired and released
     # entirely within this block — no long-running work runs while locks are held.
@@ -653,8 +710,22 @@ async def report_outcome(
     # Phase 3: Persist rule memory if confidence meets threshold. outcome_id
     # is not known yet; it is backfilled in Phase 5 after the outcome exists.
     rule_memory_id: str | None = None
-    if rule_result and rule_result.get("confidence", 0) >= EVOLVE_RULE_CONFIDENCE_THRESHOLD:
-        rule_memory_id = await _persist_rule(db, tenant_id, agent_id, fleet_id, rule_result, scope=scope)
+    if rule_result is not None:
+        confidence = rule_result.get("confidence", 0)
+        if confidence < EVOLVE_RULE_CONFIDENCE_THRESHOLD:
+            rule_skipped_reason = "below_confidence_threshold"
+            _log_rule_skip(
+                rule_skipped_reason,
+                tenant_id,
+                outcome_type,
+                confidence=confidence,
+                threshold=EVOLVE_RULE_CONFIDENCE_THRESHOLD,
+            )
+        else:
+            rule_memory_id = await _persist_rule(db, tenant_id, agent_id, fleet_id, rule_result, scope=scope)
+            if rule_memory_id is None:
+                rule_skipped_reason = "persist_failed"
+                _log_rule_skip(rule_skipped_reason, tenant_id, outcome_type)
 
     # Phase 4: Persist outcome memory — records rule_memory_id and the IDs
     # that actually got their weights updated.
@@ -727,6 +798,11 @@ async def report_outcome(
         ]
         if rule_memory_id and rule_result
         else [],
+        # A10 — see ``RULE_SKIP_REASONS`` for the slug taxonomy. None
+        # means a rule was generated; a slug names the silent-exit
+        # path that fired. Mirrors the always-fire log line emitted
+        # alongside.
+        "rule_skipped_reason": rule_skipped_reason,
         "out_of_scope_count": out_of_scope_count,
         "evolve_ms": int((time.perf_counter() - t0) * 1000),
     }
