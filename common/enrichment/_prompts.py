@@ -41,7 +41,13 @@ Analyze the following memory content and return a JSON object with these fields:
 
 4. "summary": 1-2 sentence condensed version capturing the key information
 
-5. "tags": array of 2-6 lowercase keyword tags for search and filtering
+5. "tags": array of 1-5 lowercase keyword tags for search and filtering
+   - Use SINGULAR form: "meeting" not "meetings", "decision" not "decisions",
+     "deployment" not "deployments". Stable singular keys join cleanly across memories.
+   - Multi-word tags use HYPHEN separator (kebab-case): "code-review" not "code review"
+     or "code_review" or "code reviews". Example tag set:
+     ["deployment", "post-mortem", "decision", "team-meeting"].
+   - At most 5 tags. Fewer is better — pick the highest-signal terms.
 
 6. "status": one of "active", "pending", "confirmed" (optional, default "active")
    - active: default for most memories — current and valid

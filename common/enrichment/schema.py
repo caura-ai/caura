@@ -15,9 +15,36 @@ enrichment, distinct from the ``MemoryEnrichRequest`` event payload.
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+import re
+
+from pydantic import BaseModel, field_validator
 
 from common.enrichment.constants import MemoryType
+
+
+# A8 — number of tags retained after normalisation. Mirrors the cap
+# the prompt asks the LLM to respect; the validator enforces it
+# regardless of LLM output.
+_TAGS_MAX = 5
+
+# Multi-character whitespace / underscore runs collapse to a single
+# hyphen so ``code review`` / ``code  review`` / ``code_review`` /
+# ``code__review`` all normalise to ``code-review``.
+_TAG_SEPARATOR_RE = re.compile(r"[\s_]+")
+
+
+def _normalize_tag(raw: object) -> str:
+    """Apply the A8 tag normalisation: coerce-to-str, lowercase,
+    collapse internal whitespace / underscores to a single hyphen,
+    strip leading/trailing hyphens. Returns the normalised tag, or
+    the empty string if nothing remains (caller drops empties)."""
+    if raw is None:
+        return ""
+    s = str(raw).strip().lower()
+    if not s:
+        return ""
+    s = _TAG_SEPARATOR_RE.sub("-", s)
+    return s.strip("-")
 
 
 class AtomicFact(BaseModel):
@@ -49,6 +76,31 @@ class EnrichmentResult(BaseModel):
     summary: str = ""
     tags: list[str] = []
     status: str = "active"
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _normalize_tags(cls, raw):
+        """A8 — defensive normalisation against LLM drift.
+
+        Lowercases, collapses whitespace / underscores to hyphens,
+        dedupes (preserves first-seen order), drops empties, caps at
+        ``_TAGS_MAX`` (5). Runs even when the LLM ignored the prompt's
+        format guidance, so downstream tag-joins see stable keys.
+        """
+        if not isinstance(raw, list):
+            return []
+        seen: set[str] = set()
+        normalised: list[str] = []
+        for item in raw:
+            tag = _normalize_tag(item)
+            if not tag or tag in seen:
+                continue
+            seen.add(tag)
+            normalised.append(tag)
+            if len(normalised) >= _TAGS_MAX:
+                break
+        return normalised
+
     ts_valid_start: str | None = None
     ts_valid_end: str | None = None
     contains_pii: bool = False
