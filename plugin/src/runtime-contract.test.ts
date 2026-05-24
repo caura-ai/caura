@@ -247,3 +247,141 @@ describe("memory-runtime contract (OpenClaw MemoryPluginRuntime)", () => {
     // answer. What matters is the SHAPE, not the content.
   });
 });
+
+// ─── MemoryFlushPlan contract (added 2026-05-21) ────────────────────────────
+// OpenClaw's ``memory-state.d.ts`` defines MemoryFlushPlan with SIX required
+// fields. The agent-runner calls ``resolver(...).relativePath`` and passes it
+// to ``ensureMemoryFlushTargetFile``, which throws "Invalid memory flush
+// target path" on any falsy / absolute value. Pre-fix our resolver returned
+// ``{instructions, softThresholdTokens}`` and the error only surfaced on
+// long sessions that crossed the compaction threshold — making it look
+// intermittent. These tests lock the entire required shape.
+
+type _FlushPlanResolver = (params?: {
+  cfg?: unknown;
+  nowMs?: number;
+}) => Record<string, unknown> | null;
+
+function _loadFlushPlanResolver(): _FlushPlanResolver {
+  let captured: _FlushPlanResolver | undefined;
+  const api = {
+    registerTool: () => {},
+    registerGatewayMethod: () => {},
+    registerMemoryPromptSection: () => {},
+    registerMemoryFlushPlan: (r: _FlushPlanResolver) => {
+      captured = r;
+    },
+    registerMemoryRuntime: () => {},
+    registerContextEngine: () => {},
+    on: () => {},
+  };
+  memclawPlugin.register(api);
+  if (!captured) throw new Error("registerMemoryFlushPlan was not called");
+  return captured;
+}
+
+describe("MemoryFlushPlan contract (OpenClaw agent-runner.runtime)", () => {
+  test("plan has every required field with the right primitive type", () => {
+    const plan = _loadFlushPlanResolver()({
+      nowMs: Date.UTC(2026, 4, 21, 12, 0, 0),
+    });
+    assert.ok(plan, "resolver must return a plan, not null");
+    assert.equal(typeof plan.softThresholdTokens, "number");
+    assert.equal(typeof plan.forceFlushTranscriptBytes, "number");
+    assert.equal(typeof plan.reserveTokensFloor, "number");
+    assert.equal(typeof plan.prompt, "string");
+    assert.equal(typeof plan.systemPrompt, "string");
+    assert.equal(typeof plan.relativePath, "string");
+  });
+
+  test("relativePath is non-empty, workspace-relative, no absolute / parent-escape", () => {
+    const plan = _loadFlushPlanResolver()({
+      nowMs: Date.UTC(2026, 4, 21, 12, 0, 0),
+    });
+    assert.ok(plan && typeof plan.relativePath === "string");
+    const rp = plan.relativePath as string;
+    assert.ok(rp.length > 0);
+    assert.equal(rp.startsWith("/"), false);
+    assert.equal(rp.startsWith("../"), false);
+    assert.equal(rp.includes("/../"), false);
+    assert.match(rp, /^memclaw\//);
+  });
+
+  test("relativePath embeds the provided nowMs date stamp deterministically", () => {
+    const r = _loadFlushPlanResolver();
+    const a = r({ nowMs: Date.UTC(2026, 4, 21, 23, 59, 0) });
+    const b = r({ nowMs: Date.UTC(2026, 4, 22, 0, 1, 0) });
+    assert.ok(a && b);
+    assert.match(a.relativePath as string, /2026-05-21/);
+    assert.match(b.relativePath as string, /2026-05-22/);
+    const c1 = r({ nowMs: Date.UTC(2026, 4, 21, 12, 0, 0) });
+    const c2 = r({ nowMs: Date.UTC(2026, 4, 21, 12, 0, 0) });
+    assert.equal(
+      (c1 as Record<string, unknown>).relativePath,
+      (c2 as Record<string, unknown>).relativePath,
+    );
+  });
+
+  test("resolver tolerates being called with no args (legacy OpenClaw callers)", () => {
+    const plan = _loadFlushPlanResolver()();
+    assert.ok(plan, "resolver() with no args must still return a plan");
+    assert.equal(typeof (plan as Record<string, unknown>).relativePath, "string");
+  });
+});
+
+describe("MemoryFlushPlan resolver — input-hardening (regression: review 2026-05-21)", () => {
+  // The resolver runs in OpenClaw's agent-runner stack, outside the
+  // registration-time try/catch. A throw here crashes the flush turn.
+  // These tests pin the defensive contract: null input, non-finite
+  // nowMs, and any inner failure must still yield a valid plan.
+
+  test("resolver(null) returns a valid plan (destructure-null TypeError regression)", () => {
+    const r = _loadFlushPlanResolver();
+    // Cast to call with null — pre-fix the ``= {}`` default did NOT fire
+    // for null (only undefined), so destructuring threw TypeError.
+    const plan = (r as unknown as (p: unknown) => Record<string, unknown> | null)(null);
+    assert.ok(plan, "resolver(null) must still return a plan");
+    assert.equal(typeof (plan as Record<string, unknown>).relativePath, "string");
+    assert.match(
+      (plan as Record<string, unknown>).relativePath as string,
+      /^memclaw\/flush-\d{4}-\d{2}-\d{2}\.md$/,
+    );
+  });
+
+  test("resolver({nowMs: NaN}) falls back to Date.now() (RangeError regression)", () => {
+    const r = _loadFlushPlanResolver();
+    const plan = r({ nowMs: Number.NaN });
+    assert.ok(plan);
+    const rp = (plan as Record<string, unknown>).relativePath as string;
+    assert.match(rp, /^memclaw\/flush-\d{4}-\d{2}-\d{2}\.md$/, `bad rp=${rp}`);
+  });
+
+  test("resolver({nowMs: Infinity}) falls back to Date.now()", () => {
+    const r = _loadFlushPlanResolver();
+    const plan = r({ nowMs: Number.POSITIVE_INFINITY });
+    assert.ok(plan);
+    const rp = (plan as Record<string, unknown>).relativePath as string;
+    assert.match(rp, /^memclaw\/flush-\d{4}-\d{2}-\d{2}\.md$/);
+  });
+
+  test("resolver({nowMs: -Infinity}) falls back to Date.now()", () => {
+    const r = _loadFlushPlanResolver();
+    const plan = r({ nowMs: Number.NEGATIVE_INFINITY });
+    assert.ok(plan);
+    const rp = (plan as Record<string, unknown>).relativePath as string;
+    assert.match(rp, /^memclaw\/flush-\d{4}-\d{2}-\d{2}\.md$/);
+  });
+
+  test("resolver({nowMs: 'oops' as any}) ignores non-number and falls back", () => {
+    const r = _loadFlushPlanResolver();
+    // Real OpenClaw versions only pass number | undefined, but the gate is
+    // structural — string / object / boolean inputs all must degrade
+    // gracefully rather than crash.
+    const plan = (r as unknown as (p: { nowMs: unknown }) => Record<string, unknown> | null)({
+      nowMs: "oops",
+    });
+    assert.ok(plan);
+    const rp = (plan as Record<string, unknown>).relativePath as string;
+    assert.match(rp, /^memclaw\/flush-\d{4}-\d{2}-\d{2}\.md$/);
+  });
+});

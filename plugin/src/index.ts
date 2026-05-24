@@ -445,17 +445,82 @@ const memclawPlugin = {
     }
 
     // --- Memory flush plan ---
+    //
+    // OpenClaw's MemoryFlushPlan contract (see memory-state.d.ts)
+    // requires SIX fields:
+    //
+    //   softThresholdTokens, forceFlushTranscriptBytes, reserveTokensFloor,
+    //   prompt, systemPrompt, relativePath
+    //
+    // Pre-fix we returned {instructions, softThresholdTokens} — wrong
+    // field name (instructions vs prompt) AND missing the four
+    // other fields. relativePath is the load-bearing omission: when
+    // compaction crosses softThresholdTokens, OpenClaw's
+    // agent-runner.runtime reads activeMemoryFlushPlan.relativePath
+    // and passes it to ensureMemoryFlushTargetFile, which throws
+    // "Invalid memory flush target path" on any falsy / absolute
+    // value. The error only surfaces on long sessions that actually hit
+    // the compaction threshold, so it looked intermittent — but the bug
+    // is unconditional. Customer report 2026-05-21.
+    //
+    // relativePath is the workspace-relative scratch file the
+    // compaction sub-agent has append-only write access to during the
+    // flush turn. MemClaw's server-side persistence is orthogonal — the
+    // sub-agent still calls memclaw_write to capture salient
+    // context, but it ALSO needs the file to exist because that's the
+    // only filesystem write surface OpenClaw exposes to it. Mirror
+    // memory-core's memory/YYYY-MM-DD.md layout but namespace under
+    // memclaw/ so we don't collide on hosts running both plugins.
+    // The outer try here only catches REGISTRATION-time failure. The
+    // resolver itself runs later in OpenClaw's agent-runner stack — any
+    // throw there propagates up and crashes the flush turn. Pre-fix two
+    // input shapes did exactly that:
+    //   1. resolver(null) — destructuring null, = {} default
+    //      only fires for undefined, so we'd hit
+    //      TypeError: Cannot destructure property 'nowMs' of 'null'.
+    //   2. resolver({ nowMs: NaN }) — typeof NaN === "number" so
+    //      the fallback didn't fire, then new Date(NaN).toISOString()
+    //      throws RangeError: Invalid time value.
+    // The defensive resolver below: (a) reads nowMs via optional
+    // chaining so null/non-object inputs degrade silently, (b) gates
+    // with Number.isFinite so NaN / Infinity fall through to
+    // Date.now(), (c) wraps the body in its own try/catch so
+    // unforeseen failure modes still hand OpenClaw a valid plan (using
+    // a same-day fallback path) rather than crashing the flush turn.
+    const buildPlan = (dateStamp: string) => ({
+      softThresholdTokens: 4000,
+      forceFlushTranscriptBytes: 2 * 1024 * 1024,
+      reserveTokensFloor: 20000,
+      prompt:
+        "Before this conversation is compacted, save any important context to MemClaw. " +
+        "Call memclaw_write with a summary of: decisions made, tasks completed, bugs found, " +
+        "configuration changes, and any commitments or deadlines discovered in this session. " +
+        "Include your agent_id, specific names, dates, paths, and outcomes. " +
+        "Use memory_type 'episode' and tag with 'pre-compaction'. " +
+        "Do NOT reply to the user from this turn.",
+      systemPrompt:
+        "You are running inside an OpenClaw memory-flush turn. Your only job is to " +
+        "persist salient context to MemClaw via memclaw_write before this conversation " +
+        "is compacted. Do not call any other tools. Do not produce a user-visible reply.",
+      relativePath: `memclaw/flush-${dateStamp}.md`,
+    });
     try {
       if (typeof api.registerMemoryFlushPlan === "function") {
-        api.registerMemoryFlushPlan(() => ({
-          instructions:
-            "Before this conversation is compacted, save any important context to MemClaw. " +
-            "Call memclaw_write with a summary of: decisions made, tasks completed, bugs found, " +
-            "configuration changes, and any commitments or deadlines discovered in this session. " +
-            "Include your agent_id, specific names, dates, paths, and outcomes. " +
-            "Use memory_type 'episode' and tag with 'pre-compaction'.",
-          softThresholdTokens: 4000,
-        }));
+        api.registerMemoryFlushPlan(
+          (params?: { cfg?: unknown; nowMs?: number } | null) => {
+            try {
+              const candidate = params?.nowMs;
+              const ts =
+                typeof candidate === "number" && Number.isFinite(candidate)
+                  ? candidate
+                  : Date.now();
+              return buildPlan(new Date(ts).toISOString().slice(0, 10));
+            } catch (e: unknown) {
+              logError("MemoryFlushPlan resolver failed", e);
+              return buildPlan(new Date().toISOString().slice(0, 10));
+            }
+          },
+        );
       }
     } catch (e: unknown) {
       logError("registerMemoryFlushPlan failed", e);
@@ -488,10 +553,14 @@ const memclawPlugin = {
           // Required by OpenClaw >=2026.4.x gateway — memory slot plugins must
           // expose this so the gateway can resolve backend config at startup.
           resolveMemoryBackendConfig(_params: Record<string, unknown>) {
-            return {
-              backend: "memclaw",
-              memoryFlushWritePath: null, // MemClaw persists server-side, no local file
-            };
+            // memoryFlushWritePath is NOT on this contract — that field
+            // name was a 2026-04 misunderstanding. The actual flush-time
+            // file lives on the MemoryFlushPlan.relativePath returned
+            // by registerMemoryFlushPlan above (different code path,
+            // different contract). Returning it here was inert but
+            // misleading; removed so future readers don't think disabling
+            // local-file persistence happens here.
+            return { backend: "memclaw" };
           },
           async getMemorySearchManager(_params: Record<string, unknown>) {
             // Refuse to hand back a manager when we already know the backend
