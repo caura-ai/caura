@@ -197,16 +197,22 @@ async def scored_search(request: Request) -> list[dict]:
 @router.post("/semantic-duplicate")
 async def find_semantic_duplicate(request: Request) -> dict:
     body: dict = await request.json()
-    memory = await _svc.memory_find_semantic_duplicate(
+    result = await _svc.memory_find_semantic_duplicate(
         tenant_id=body["tenant_id"],
         fleet_id=body.get("fleet_id"),
         embedding=body["embedding"],
         exclude_id=UUID(body["exclude_id"]) if body.get("exclude_id") else None,
         visibility=body.get("visibility"),
+        min_similarity=body.get("min_similarity"),
     )
-    if memory is None:
+    if result is None:
         raise HTTPException(status_code=404, detail="No semantic duplicate found")
-    return orm_to_dict(memory, MEMORY_FIELDS)
+    memory, similarity = result
+    payload = orm_to_dict(memory, MEMORY_FIELDS)
+    # A1 #16 — surface the score so the dispatching pipeline step can
+    # pick auto-reject vs judge-dispatch vs accept by tier.
+    payload["similarity"] = similarity
+    return payload
 
 
 @router.post("/entity-overlap-candidates")
