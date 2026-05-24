@@ -6,6 +6,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.9.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.8.0...backend-v2.9.0) (2026-05-24)
+
+
+### Features
+
+* **contradiction:** back-channel idempotency on detection entry (A4 [#14](https://github.com/caura-ai/caura-memclaw/issues/14)) ([#188](https://github.com/caura-ai/caura-memclaw/issues/188)) ([f370fad](https://github.com/caura-ai/caura-memclaw/commit/f370fad23af42d3c662fb19a2c214590d160e7f1))
+* **contradiction:** Path C re-judges and retracts wrong Path A verdicts (A4 [#13](https://github.com/caura-ai/caura-memclaw/issues/13)) ([#187](https://github.com/caura-ai/caura-memclaw/issues/187)) ([1669690](https://github.com/caura-ai/caura-memclaw/commit/1669690c6e37c740e1315e2c867b69fd62d3823b))
+* **contradiction:** widen _llm_contradiction_check to (verdict, confidence) (A4 [#12](https://github.com/caura-ai/caura-memclaw/issues/12)) ([#186](https://github.com/caura-ai/caura-memclaw/issues/186)) ([0c332a3](https://github.com/caura-ai/caura-memclaw/commit/0c332a3e8923acc78fcc15db70513e9a9f31f6e9))
+* **dedup:** add two-tier dedup threshold constants (A1 [#15](https://github.com/caura-ai/caura-memclaw/issues/15)) ([#190](https://github.com/caura-ai/caura-memclaw/issues/190)) ([dcc41ae](https://github.com/caura-ai/caura-memclaw/commit/dcc41aea2e2589c2ca8163415e4560ce8b78eaf8))
+* **dedup:** backend review queue for ambiguous decisions (A1 [#18](https://github.com/caura-ai/caura-memclaw/issues/18)) ([#194](https://github.com/caura-ai/caura-memclaw/issues/194)) ([bf6dce7](https://github.com/caura-ai/caura-memclaw/commit/bf6dce73d697b08c7a0ba3a35e341502e93016ea))
+* **dedup:** identifier pre-filter in CheckSemanticDuplicate (A1) ([#195](https://github.com/caura-ai/caura-memclaw/issues/195)) ([a578a35](https://github.com/caura-ai/caura-memclaw/commit/a578a35e36be38f9fef35b42215e66ec640913f0))
+* **evolve:** surface rule-synthesis skip reason on every path (A10) ([#199](https://github.com/caura-ai/caura-memclaw/issues/199)) ([b16de2b](https://github.com/caura-ai/caura-memclaw/commit/b16de2bfbbfdc74d79ce1d4b9e318069cec5a05c))
+* **storage:** find_entity_overlap_candidates surfaces conflicted supersedes_of target (A4 [#11](https://github.com/caura-ai/caura-memclaw/issues/11)) ([#185](https://github.com/caura-ai/caura-memclaw/issues/185)) ([f120f55](https://github.com/caura-ai/caura-memclaw/commit/f120f558d13ad1b4f37a5069a1c187a918fec930))
+
+
+### Bug Fixes
+
+* **enrichment:** action/episode few-shot disambiguation (A9) ([#198](https://github.com/caura-ai/caura-memclaw/issues/198)) ([81ec08f](https://github.com/caura-ai/caura-memclaw/commit/81ec08f59411b4d20fd1732ff4c6abe788c82f9d))
+* **enrichment:** tighten tag generation prompt + normalising validator (A8) ([#197](https://github.com/caura-ai/caura-memclaw/issues/197)) ([6bea431](https://github.com/caura-ai/caura-memclaw/commit/6bea4318de2f6324a621a5573ae9b79ded85b54c))
+* **plugin:** conform to OpenClaw MemoryFlushPlan contract (CAURA-000) ([#191](https://github.com/caura-ai/caura-memclaw/issues/191)) ([ea750c7](https://github.com/caura-ai/caura-memclaw/commit/ea750c7abea37cbce21fef85ffe21db830bb5f07))
+* **search:** query classifier recall on entity-token queries (A7) ([#196](https://github.com/caura-ai/caura-memclaw/issues/196)) ([670549b](https://github.com/caura-ai/caura-memclaw/commit/670549b4596395e91e8932030605248e75066321))
+* **storage:** invert A4 [#11](https://github.com/caura-ai/caura-memclaw/issues/11) include_supersedes filter direction ([#189](https://github.com/caura-ai/caura-memclaw/issues/189)) ([831897d](https://github.com/caura-ai/caura-memclaw/commit/831897d17f89b436530e47452938f62fa9b0fea0))
+
+
+### Code Refactoring
+
+* **config:** delete legacy embed/enrich_on_hot_path flags + asymmetric branch (F3 Phase 3) ([#183](https://github.com/caura-ai/caura-memclaw/issues/183)) ([9116e80](https://github.com/caura-ai/caura-memclaw/commit/9116e80237a4186493c8923b1ac1e40a3da4faf7))
+
 ## [2.8.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.7.0...backend-v2.8.0) (2026-05-20)
 
 

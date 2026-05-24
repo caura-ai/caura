@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.2](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.6.1...plugin-v2.6.2) (2026-05-24)
+
+
+### Bug Fixes
+
+* **plugin:** conform to OpenClaw MemoryFlushPlan contract (CAURA-000) ([#191](https://github.com/caura-ai/caura-memclaw/issues/191)) ([ea750c7](https://github.com/caura-ai/caura-memclaw/commit/ea750c7abea37cbce21fef85ffe21db830bb5f07))
+
 ## [2.6.1](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.6.0...plugin-v2.6.1) (2026-05-20)
 
 
