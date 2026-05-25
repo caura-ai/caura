@@ -15,6 +15,7 @@ from core_api.schemas import (
     RelationUpsert,
     RelationUpsertOut,
 )
+from core_api.services.audit_service import log_cross_tenant_read
 from core_api.services.entity_service import get_entity, upsert_entity, upsert_relation
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
 
@@ -31,15 +32,33 @@ async def list_entities(
     search: str | None = Query(default=None),
     limit: int = Query(default=DEFAULT_ENTITY_LIMIT, ge=1, le=MAX_LIST_LIMIT),
     auth: AuthContext = Depends(get_auth_context),
+    db: AsyncSession = Depends(get_db),
 ):
-    """List all entities for a tenant."""
-    auth.enforce_tenant(tenant_id)
+    """List all entities for a tenant.
+
+    Reads widen across the caller's ``readable_tenant_ids`` set when the
+    requested ``tenant_id`` is in that set — the same contract memory
+    reads use (see ``routes/memories.py:list_memories``). Cross-tenant
+    reads emit a ``cross_tenant_read`` audit event TO the source tenant
+    so per-tenant audit-log queries surface "who read FROM my tenant".
+    """
+    auth.enforce_readable_tenant(tenant_id)
     sc = get_storage_client()
     entities = await sc.list_entities(tenant_id, fleet_id=fleet_id, limit=limit)
 
     # Count linked memories per entity
     eids = [e.get("id", "") for e in entities]
     memory_counts_raw = await sc.count_memories_per_entity(tenant_id, eids) if eids else {}
+
+    if auth.is_cross_tenant_read and tenant_id != auth.tenant_id:
+        await log_cross_tenant_read(
+            db,
+            home_tenant_id=auth.tenant_id,
+            home_agent_id=auth.agent_id,
+            source_tenants=[tenant_id],
+            surface="rest_entities_list",
+            result_count_by_tenant={tenant_id: len(entities)},
+        )
 
     return [
         {
@@ -60,9 +79,15 @@ async def get_graph(
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
     auth: AuthContext = Depends(get_auth_context),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Return full knowledge graph (entities + relations) for a tenant."""
-    auth.enforce_tenant(tenant_id)
+    """Return full knowledge graph (entities + relations) for a tenant.
+
+    Matches the read-widening contract used by memory reads — cross-tenant
+    credentials may inspect the graph of any tenant in
+    ``readable_tenant_ids``. Audited to the source tenant.
+    """
+    auth.enforce_readable_tenant(tenant_id)
 
     sc = get_storage_client()
     graph = await sc.get_full_graph(tenant_id, fleet_id)
@@ -73,6 +98,16 @@ async def get_graph(
     logger.info(
         f"Graph query: tenant={tenant_id} fleet={fleet_id} → {len(entities)} entities, {len(relations)} relations"
     )
+
+    if auth.is_cross_tenant_read and tenant_id != auth.tenant_id:
+        await log_cross_tenant_read(
+            db,
+            home_tenant_id=auth.tenant_id,
+            home_agent_id=auth.agent_id,
+            source_tenants=[tenant_id],
+            surface="rest_graph",
+            result_count_by_tenant={tenant_id: len(entities) + len(relations)},
+        )
 
     # Memory counts per entity
     eids = [e.get("id", "") for e in entities]
@@ -126,10 +161,22 @@ async def get_entity_route(
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    auth.enforce_tenant(tenant_id)
+    """Fetch a single entity. Mirrors ``GET /memories/{memory_id}`` —
+    reads widen via ``readable_tenant_ids``; foreign-tenant reads are
+    audited to the source tenant."""
+    auth.enforce_readable_tenant(tenant_id)
     entity = await get_entity(db, entity_id, tenant_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
+    if auth.is_cross_tenant_read and tenant_id != auth.tenant_id:
+        await log_cross_tenant_read(
+            db,
+            home_tenant_id=auth.tenant_id,
+            home_agent_id=auth.agent_id,
+            source_tenants=[tenant_id],
+            surface="rest_entity_get",
+            result_count_by_tenant={tenant_id: 1},
+        )
     return entity
 
 
