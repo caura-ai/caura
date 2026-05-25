@@ -108,7 +108,9 @@ class TestEmitMemoryTriple:
             # The supplied field stays exactly what the caller passed.
             assert getattr(data, untouched) == preset
             # The other two fields must NOT have been written by us.
-            other_fields = {"subject_entity_id", "predicate", "object_value"} - {untouched}
+            other_fields = {"subject_entity_id", "predicate", "object_value"} - {
+                untouched
+            }
             for f in other_fields:
                 assert getattr(data, f) is None, f"step wrote {f} on partial-supply"
 
@@ -181,7 +183,9 @@ class TestEmitMemoryTriple:
     async def test_object_bounded_to_current_sentence(self):
         # Trailing clauses must not bleed into object_value.
         sid = uuid4()
-        data = _input("Ran lives in New York. He also enjoys long walks.", subject_id=sid)
+        data = _input(
+            "Ran lives in New York. He also enjoys long walks.", subject_id=sid
+        )
         await EmitMemoryTriple().execute(_ctx(data))
         assert data.object_value == "new york"
 
@@ -206,28 +210,168 @@ class TestEmitMemoryTriple:
 
     async def test_emitted_predicate_is_in_allowlist(self):
         # Every populate path must produce a predicate the detector accepts.
+        # Covers original CAURA-123 cluster + the four CAURA-126 tiers.
         sid = uuid4()
-        for content in [
-            "X lives in Y",
-            "X is located in Y",
-            "X is based in Y",
-            "X is headquartered in Y",
-            "X reports to Y",
-            "X is managed by Y",
-            "X is owned by Y",
-            "X is assigned to Y",
-            "X is employed by Y",
-            "X is the CEO of Y",
-            "X is the CTO of Y",
-            "X is the CFO of Y",
-            "X is renamed to Y",
+        for content, expected in [
+            # -- Original CAURA-123 cluster --
+            ("X lives in Y", "lives_in"),
+            ("X is located in Y", "located_in"),
+            ("X is based in Y", "based_in"),
+            ("X is headquartered in Y", "headquartered_in"),
+            ("X reports to Y", "reports_to"),
+            ("X is managed by Y", "managed_by"),
+            ("X is owned by Y", "owned_by"),
+            ("X is assigned to Y", "assigned_to"),
+            ("X is employed by Y", "employed_by"),
+            ("X is the CEO of Y", "ceo_of"),
+            ("X is the CTO of Y", "cto_of"),
+            ("X is the CFO of Y", "cfo_of"),
+            ("X is renamed to Y", "renamed_to"),
+            # -- Tier 1: dates --
+            ("X has release date 2027-05-01", "release_date"),
+            ("X release date is 2027-05-01", "release_date"),
+            ("X has launch date 2027-05-01", "launch_date"),
+            ("X launch date is 2027-05-01", "launch_date"),
+            ("X has go-live date 2027-05-01", "go_live_date"),
+            ("X has target date 2027-05-01", "target_date"),
+            ("X has due date 2027-05-01", "due_date"),
+            ("X is due on 2027-05-01", "due_date"),
+            ("X is due by 2027-05-01", "due_date"),
+            ("X has start date 2027-05-01", "start_date"),
+            ("X has end date 2027-05-01", "end_date"),
+            ("X expires on 2027-05-01", "expiry_date"),
+            ("X has deadline 2027-05-01", "deadline"),
+            ("X ETA is 2027-05-01", "eta"),
+            ("X has ETA of 2027-05-01", "eta"),
+            ("X is scheduled for 2027-05-01", "scheduled_for"),
+            ("X is rescheduled to 2027-05-01", "rescheduled_to"),
+            ("X was born on 1990-01-01", "birthdate"),
+            # -- Tier 2: status / state / role --
+            ("X status is in_progress", "status"),
+            ("X current status is in_progress", "status"),
+            ("X phase is beta", "phase"),
+            ("X current phase is beta", "phase"),
+            ("X state is open", "state"),
+            ("X mode is debug", "mode"),
+            ("X priority is high", "priority"),
+            ("X has priority high", "priority"),
+            ("X severity is critical", "severity"),
+            ("X has severity critical", "severity"),
+            ("X role is engineer", "role"),
+            ("X has role engineer", "role"),
+            ("X title is VP", "title"),
+            ("X job title is VP", "title"),
+            ("X sprint is Sprint-7", "sprint"),
+            ("X is in sprint Sprint-7", "sprint"),
+            ("X milestone is GA", "milestone"),
+            ("X epic is checkout-redesign", "epic"),
+            ("X is in epic checkout-redesign", "epic"),
+            # -- Tier 3: money / metrics / versioning --
+            ("X is priced at 100", "price"),
+            ("X price is 100", "price"),
+            ("X has price of 100", "price"),
+            ("X cost is 50", "cost"),
+            ("X salary is 100000", "salary"),
+            ("X has budget of 1M", "budget"),
+            ("X budget is 1M", "budget"),
+            ("X revenue is 5M", "revenue"),
+            ("X annual revenue is 5M", "revenue"),
+            ("X has revenue of 5M", "revenue"),
+            ("X is valued at 10M", "valuation"),
+            ("X valuation is 10M", "valuation"),
+            ("X funding is 2M", "funding"),
+            ("X total funding is 2M", "funding"),
+            ("X score is 95", "score"),
+            ("X has score of 95", "score"),
+            ("X rating is A", "rating"),
+            ("X has rating of A", "rating"),
+            ("X rank is 3", "rank"),
+            ("X is ranked 3", "rank"),
+            ("X confidence is 0.9", "confidence"),
+            ("X confidence score is 0.9", "confidence_score"),
+            ("X potential score is 7", "potential_score"),
+            ("X risk score is 0.4", "risk_score"),
+            ("X quality score is 95", "quality_score"),
+            ("X health score is 8", "health_score"),
+            ("X sentiment score is 0.7", "sentiment_score"),
+            ("X f1 score is 0.92", "f1_score"),
+            ("X version is 2.4.0", "current_version"),
+            ("X current version is 2.4.0", "current_version"),
+            ("X is on version 2.4.0", "current_version"),
+            # -- Tier 4: infra / contact / hierarchy / license --
+            ("X hostname is host-01", "hostname"),
+            ("X has hostname host-01", "hostname"),
+            ("X cluster is prod-us", "cluster"),
+            ("X is in cluster prod-us", "cluster"),
+            ("X namespace is default", "namespace"),
+            ("X is in namespace default", "namespace"),
+            ("X zone is us-east-1a", "zone"),
+            ("X is in availability zone us-east-1a", "zone"),
+            ("X region is us-east-1", "region"),
+            ("X country is Germany", "country"),
+            ("X city is Berlin", "city"),
+            ("X email is a@b.com", "email"),
+            ("X email address is a@b.com", "email"),
+            ("X has email a@b.com", "email"),
+            ("X phone is 555-0100", "phone"),
+            ("X phone number is 555-0100", "phone"),
+            ("X website is example.com", "website"),
+            ("X is led by Alice", "led_by"),
+            ("X is headed by Alice", "headed_by"),
+            ("X is maintained by Alice", "maintained_by"),
+            ("X is supervised by Alice", "supervised_by"),
+            ("X is licensed under MIT", "license"),
+            ("X license is MIT", "license"),
+            ("X is on the plan Pro", "subscription_plan"),
+            ("X subscription plan is Pro", "subscription_plan"),
+            ("X tier is gold", "tier"),
         ]:
             data = _input(content, subject_id=sid)
             await EmitMemoryTriple().execute(_ctx(data))
-            assert data.predicate is not None, f"Failed to emit for: {content}"
+            assert data.predicate is not None, f"Failed to emit for: {content!r}"
+            assert data.predicate == expected, (
+                f"Wrong predicate for {content!r}: got {data.predicate!r}, "
+                f"expected {expected!r}"
+            )
             assert data.predicate in SINGLE_VALUE_PREDICATES, (
                 f"Emitted predicate {data.predicate!r} not in SINGLE_VALUE_PREDICATES"
             )
+
+    async def test_intra_predicate_double_match_not_ambiguous(self):
+        # CAURA-126 follow-up: when two patterns in the table match
+        # but they map to the SAME canonical predicate (e.g. the
+        # ``\bhas\s+release\s+date\b`` and ``\brelease\s+date\s+is\b``
+        # rows both fire on "has release date is 2027"), the step must
+        # NOT treat this as ambiguous and must emit. Ambiguity is on
+        # the predicate, not the number of phrase hits. The match
+        # whose ``end()`` is furthest right wins, so ``object_value``
+        # excludes interstitial words like "is".
+        sid = uuid4()
+        data = _input("Atlas has release date is 2027-05-01", subject_id=sid)
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result is None, (
+            f"Same-predicate double-match must emit (not skip); got {result}"
+        )
+        assert data.predicate == "release_date"
+        assert data.object_value == "2027-05-01", (
+            f"object_value must use the furthest-right match's tail "
+            f"to skip 'is'; got {data.object_value!r}"
+        )
+
+    async def test_whitespace_normalised_before_lookbehind_check(self):
+        # CAURA-126 follow-up: the score lookbehinds are fixed-width
+        # one-character (``(?<!confidence\s)``). Content with a tab
+        # between "confidence" and "score" would bypass the lookbehind
+        # and route to the bare ``score`` predicate instead of
+        # ``confidence_score``. Normalising whitespace at the top of
+        # ``execute()`` keeps the lookbehinds load-bearing.
+        sid = uuid4()
+        data = _input("Atlas confidence\tscore is 0.9", subject_id=sid)
+        await EmitMemoryTriple().execute(_ctx(data))
+        assert data.predicate == "confidence_score", (
+            f"Tab whitespace must still route to confidence_score; "
+            f"got predicate={data.predicate!r}"
+        )
 
     async def test_unexpected_error_degrades_to_skip(self):
         # A malformed input object that breaks attribute access mid-step
@@ -258,7 +402,9 @@ class TestPipelineComposition:
         names = [s.name for s in build_fast_write_pipeline()._steps]
         assert "emit_memory_triple" in names
         assert names.index("emit_memory_triple") < names.index("check_exact_duplicate")
-        assert names.index("merge_enrichment_fields") < names.index("emit_memory_triple")
+        assert names.index("merge_enrichment_fields") < names.index(
+            "emit_memory_triple"
+        )
 
     def test_strong_pipeline_includes_step(self):
         from core_api.pipeline.compositions.write import build_strong_write_pipeline
@@ -321,15 +467,11 @@ class TestTenantConfigFlag:
     def test_explicit_false_disables(self):
         from core_api.services.organization_settings import ResolvedConfig
 
-        cfg = ResolvedConfig(
-            org_settings={"write": {"triple_emission_enabled": False}}
-        )
+        cfg = ResolvedConfig(org_settings={"write": {"triple_emission_enabled": False}})
         assert cfg.triple_emission_enabled is False
 
     def test_explicit_true_enables(self):
         from core_api.services.organization_settings import ResolvedConfig
 
-        cfg = ResolvedConfig(
-            org_settings={"write": {"triple_emission_enabled": True}}
-        )
+        cfg = ResolvedConfig(org_settings={"write": {"triple_emission_enabled": True}})
         assert cfg.triple_emission_enabled is True
