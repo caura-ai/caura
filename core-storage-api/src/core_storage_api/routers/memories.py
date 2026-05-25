@@ -864,7 +864,12 @@ async def update_embedding(memory_id: UUID, request: Request) -> dict:
 async def update_memory_entities(memory_id: UUID, request: Request) -> dict:
     body: dict = await request.json()
     entity_links = body.get("entity_links", [])
-    links = [{"entity_id": UUID(link["entity_id"]), "role": link["role"]} for link in entity_links]
+    try:
+        links = [{"entity_id": UUID(link["entity_id"]), "role": link["role"]} for link in entity_links]
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if any(not isinstance(lnk["role"], str) or not lnk["role"] for lnk in links):
+        raise HTTPException(status_code=422, detail="Each entity link must have a non-empty string 'role'")
     await _svc.memory_add_entity_links(memory_id, links)
     return {"ok": True}
 
