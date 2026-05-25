@@ -184,7 +184,7 @@ class CoreStorageClient:
         else:
             # Share one pool when the split isn't configured — or when an
             # operator accidentally points both URLs at the same upstream.
-            # Otherwise we'd double the connection budget (200 vs 100 max)
+            # Otherwise we'd double the connection budget (400 vs 200 max)
             # against a single service for no benefit.
             self._read_http = self._http
 
@@ -210,7 +210,15 @@ class CoreStorageClient:
         """
         return httpx.AsyncClient(
             timeout=httpx.Timeout(connect=5.0, read=120.0, write=120.0, pool=5.0),
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=50),
+            # CAURA-682: pre-fix values 100/50 caused TCP ConnectTimeout
+            # retries (3x 5s ~= 13s tail per affected request) during
+            # noisy-neighbor write storms — concurrent core-api → storage
+            # demand exceeded keepalive ceiling, forcing new TCP
+            # handshakes that piled up at the Cloud Run frontend.
+            # Sized for 20 concurrent storm writes x ~5 storage calls
+            # each = 100 in-flight at peak, plus tenant-B probe headroom
+            # and a 33% burst margin.
+            limits=httpx.Limits(max_connections=200, max_keepalive_connections=150),
             follow_redirects=True,
         )
 
