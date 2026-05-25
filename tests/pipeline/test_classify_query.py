@@ -106,7 +106,7 @@ async def test_entity_lookup_with_match(mock_get_sc):
 
     sc = _mock_sc()
     sc.fts_search_entities = AsyncMock(return_value=[eid_str])
-    sc.expand_graph = AsyncMock(return_value={eid_str: [0, 1.0]})
+    sc.expand_graph = AsyncMock(return_value={eid_str: {"hop": 0, "weight": 1.0}})
     sc.get_memory_ids_by_entity_ids = AsyncMock(
         return_value=[{"memory_id": mid_str, "entity_id": eid_str, "role": "subject"}]
     )
@@ -143,7 +143,7 @@ async def test_entity_lookup_no_linked_memories(mock_get_sc):
 
     sc = _mock_sc()
     sc.fts_search_entities = AsyncMock(return_value=[eid_str])
-    sc.expand_graph = AsyncMock(return_value={eid_str: [0, 1.0]})
+    sc.expand_graph = AsyncMock(return_value={eid_str: {"hop": 0, "weight": 1.0}})
     sc.get_memory_ids_by_entity_ids = AsyncMock(return_value=[])
     mock_get_sc.return_value = sc
 
@@ -291,7 +291,7 @@ async def test_entity_lookup_takes_priority_over_temporal(mock_get_sc):
 
     sc = _mock_sc()
     sc.fts_search_entities = AsyncMock(return_value=[eid_str])
-    sc.expand_graph = AsyncMock(return_value={eid_str: [0, 1.0]})
+    sc.expand_graph = AsyncMock(return_value={eid_str: {"hop": 0, "weight": 1.0}})
     sc.get_memory_ids_by_entity_ids = AsyncMock(
         return_value=[{"memory_id": mid_str, "entity_id": eid_str, "role": "subject"}]
     )
@@ -395,7 +395,7 @@ async def test_entity_lookup_takes_priority_over_recent(mock_get_sc):
 
     sc = _mock_sc()
     sc.fts_search_entities = AsyncMock(return_value=[eid_str])
-    sc.expand_graph = AsyncMock(return_value={eid_str: [0, 1.0]})
+    sc.expand_graph = AsyncMock(return_value={eid_str: {"hop": 0, "weight": 1.0}})
     sc.get_memory_ids_by_entity_ids = AsyncMock(
         return_value=[{"memory_id": mid_str, "entity_id": eid_str, "role": "subject"}]
     )
@@ -451,8 +451,12 @@ async def test_expand_per_fleet_parallel_merges_correctly():
     sc = AsyncMock()
     sc.expand_graph = AsyncMock(
         side_effect=[
-            {str(eid_a): [0, 1.0], str(eid_b): [2, 0.5]},
-            {str(eid_a): [1, 0.8], str(eid_b): [1, 0.9], str(eid_c): [0, 1.0]},
+            {str(eid_a): {"hop": 0, "weight": 1.0}, str(eid_b): {"hop": 2, "weight": 0.5}},
+            {
+                str(eid_a): {"hop": 1, "weight": 0.8},
+                str(eid_b): {"hop": 1, "weight": 0.9},
+                str(eid_c): {"hop": 0, "weight": 1.0},
+            },
         ]
     )
 
@@ -478,7 +482,7 @@ async def test_expand_per_fleet_partial_failure():
     sc = AsyncMock()
     sc.expand_graph = AsyncMock(
         side_effect=[
-            {str(eid_a): [0, 1.0]},  # fleet 1 succeeds
+            {str(eid_a): {"hop": 0, "weight": 1.0}},  # fleet 1 succeeds
             RuntimeError("DB connection lost"),  # fleet 2 fails
         ]
     )

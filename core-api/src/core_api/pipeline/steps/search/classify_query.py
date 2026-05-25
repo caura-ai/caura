@@ -208,10 +208,13 @@ class ClassifyQuery:
             if isinstance(partial, BaseException):
                 logger.warning("expand_graph failed for a fleet: %s", partial)
                 continue
-            # Storage client returns {entity_id_str: [hop, weight], ...}
+            # Storage returns {entity_id_str: {"hop": int, "weight": float}, ...}
+            # (See core-storage-api/.../routers/entities.py expand_graph route.)
+            # Positional indexing here used to ``KeyError: 0`` on every call,
+            # silently killing the ENTITY_LOOKUP short-circuit. CAURA-684.
             for eid_str, hop_weight in partial.items():
                 eid = UUID(eid_str)
-                hop, weight = hop_weight[0], hop_weight[1]
+                hop, weight = hop_weight["hop"], hop_weight["weight"]
                 if (
                     eid not in merged
                     or hop < merged[eid][0]
