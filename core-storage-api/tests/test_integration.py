@@ -15,6 +15,8 @@ import uuid
 import pytest
 from httpx import AsyncClient
 
+from common.constants import VECTOR_DIM
+
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 PREFIX = "/api/v1/storage"
@@ -30,7 +32,7 @@ def _uid() -> str:
     return uuid.uuid4().hex[:8]
 
 
-def fake_embedding(seed: str, dim: int = 768) -> list[float]:
+def fake_embedding(seed: str, dim: int = VECTOR_DIM) -> list[float]:
     """Deterministic unit-length embedding from a seed string."""
     h = hashlib.sha256(seed.encode()).digest()
     raw = h * (dim // len(h) + 1)
