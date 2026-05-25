@@ -63,6 +63,67 @@ async def test_validate_step_rejects_short_content():
 
 
 @pytest.mark.asyncio
+async def test_compute_content_hash_skips_cache_lookup_when_embedding_deferred(
+    monkeypatch,
+):
+    """CAURA-682 / CAURA-685: ComputeContentHash must NOT call
+    ``sc.find_embedding_by_content_hash`` when ``settings.inline_embedding``
+    is False (the SaaS / staging default). The cache lookup is only
+    useful to bypass an inline ``get_embedding`` call; when embedding is
+    deferred to ``core-worker``, the lookup is wasted work AND under
+    storm load (noisy-neighbor scenario) it observed p95 of ~17.8 s on
+    staging — the single step that dominated the write degradation."""
+    from unittest.mock import AsyncMock, patch
+    from core_api.config import settings
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.write.compute_content_hash import ComputeContentHash
+
+    # ``inline_embedding`` is a derived property from ``deployment_mode``.
+    monkeypatch.setattr(settings, "deployment_mode", "deferred")
+    ctx = PipelineContext(db=AsyncMock(), data={"input": _make_input()})
+
+    mock_sc = AsyncMock()
+    with patch(
+        "core_api.pipeline.steps.write.compute_content_hash.get_storage_client",
+        return_value=mock_sc,
+    ):
+        await ComputeContentHash().execute(ctx)
+
+    mock_sc.find_embedding_by_content_hash.assert_not_called()
+    # Hash is still computed; just the lookup is skipped.
+    assert ctx.data["content_hash"] is not None
+    assert ctx.data["cached_embedding"] is None
+
+
+@pytest.mark.asyncio
+async def test_compute_content_hash_still_looks_up_when_embedding_inline(
+    monkeypatch,
+):
+    """OSS-standalone (``inline_embedding=True``) preserves the optimization
+    — the cache lookup still runs so a duplicate-content write skips the
+    inline ``get_embedding`` call. Regression guard for the path the
+    deferred-mode fix MUST NOT break."""
+    from unittest.mock import AsyncMock, patch
+    from core_api.config import settings
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.write.compute_content_hash import ComputeContentHash
+
+    monkeypatch.setattr(settings, "deployment_mode", "inline")
+    ctx = PipelineContext(db=AsyncMock(), data={"input": _make_input()})
+
+    mock_sc = AsyncMock()
+    mock_sc.find_embedding_by_content_hash.return_value = [0.1, 0.2, 0.3]
+    with patch(
+        "core_api.pipeline.steps.write.compute_content_hash.get_storage_client",
+        return_value=mock_sc,
+    ):
+        await ComputeContentHash().execute(ctx)
+
+    mock_sc.find_embedding_by_content_hash.assert_called_once()
+    assert ctx.data["cached_embedding"] == [0.1, 0.2, 0.3]
+
+
+@pytest.mark.asyncio
 async def test_apply_enrichment_step_defaults():
     """MergeEnrichmentFields applies correct defaults when no enrichment."""
     from unittest.mock import AsyncMock
