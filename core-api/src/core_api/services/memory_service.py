@@ -332,13 +332,64 @@ async def _create_memory_pipeline(db: AsyncSession, data: MemoryCreate) -> Memor
     else:
         pipeline = build_strong_write_pipeline()
 
-    await pipeline.run(ctx)
+    # CAURA-682 Phase 1: per-phase write-latency emission. One line per
+    # write request, structured so GCP log queries can slice by tenant /
+    # phase to identify the dominant phase under noisy-neighbor load
+    # (loadtest finding ``noisy-neighbor-write``, 3.58x degradation).
+    # ``phase_timings`` keys are present only for phases that actually
+    # ran; missing key = deferred to core-worker via background topic.
+    #
+    # The emit lives in ``finally`` so timeouts — the actual
+    # noisy-neighbor failure mode (``HTTPException(504)`` from
+    # ``parallel_embed_enrich`` on ``asyncio.wait_for`` timeout) — also
+    # produce a log line with the partial timings that DID land. Without
+    # this, the worst case for diagnosis (timed-out writes) is exactly
+    # the case that produces no diagnostic signal. ``success`` lets GCP
+    # queries filter failed from successful writes.
+    _exc: BaseException | None = None
+    try:
+        try:
+            await pipeline.run(ctx)
+        except BaseException as e:
+            _exc = e
+            raise
 
-    memory = ctx.data["memory"]
-    return _memory_to_out(
-        memory,
-        entity_links=[EntityLinkOut(entity_id=link.entity_id, role=link.role) for link in data.entity_links],
-    )
+        memory = ctx.data["memory"]
+        return _memory_to_out(
+            memory,
+            entity_links=[
+                EntityLinkOut(entity_id=link.entity_id, role=link.role) for link in data.entity_links
+            ],
+        )
+    finally:
+        timings = ctx.data.get("phase_timings", {})
+        # Defensive ``.get`` — when the pipeline raised, ``ctx.data["memory"]``
+        # may not be set. Explicit ``is not None`` on ``metadata_`` so an
+        # empty dict (no flags set yet) isn't treated as falsy and
+        # fallthrough'd into ``metadata``.
+        memory = ctx.data.get("memory") or {}
+        memory_metadata = memory.get("metadata_")
+        if memory_metadata is None:
+            memory_metadata = memory.get("metadata") or {}
+        logger.info(
+            "memory_write_latency",
+            extra={
+                "path": "memory-write",
+                "tenant_id": data.tenant_id,
+                "agent_id": data.agent_id,
+                "fleet_id": data.fleet_id,
+                "write_mode": resolved_mode,
+                "embedding_ms": timings.get("embedding_ms"),
+                "enrichment_ms": timings.get("enrichment_ms"),
+                "storage_ms": timings.get("storage_ms"),
+                "entity_links_ms": timings.get("entity_links_ms"),
+                "total_ms": round((time.perf_counter() - ctx.data["t0"]) * 1000),
+                "embedding_pending": bool(memory_metadata.get("embedding_pending")),
+                "enrichment_pending": bool(memory_metadata.get("enrichment_pending")),
+                "cached_embedding": ctx.data.get("cached_embedding") is not None,
+                "success": _exc is None,
+            },
+        )
 
 
 async def _handle_auto_chunk_from_ctx(db: AsyncSession, data: MemoryCreate, ctx: object) -> MemoryOut:

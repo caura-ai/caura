@@ -25,12 +25,23 @@ class WriteMemoryRow:
         fields = ctx.data["memory_fields"]
         metadata = fields["metadata"]
         t0 = ctx.data.get("t0", time.perf_counter())
+        # CAURA-682 Phase 1: per-phase latency capture (see
+        # ParallelEmbedEnrich). ``storage_ms`` measures just the
+        # ``create_memory`` roundtrip; ``entity_links_ms`` is the
+        # subsequent fan-out for ``data.entity_links`` (zero links →
+        # zero ms — the key is still emitted to keep field surface
+        # uniform across writes).
+        timings: dict = ctx.data.setdefault("phase_timings", {})
 
         if embedding is None:
             metadata["embedding_pending"] = True
             logger.warning("Storing memory without embedding; deferred backfill scheduled")
 
-        # Store write latency in metadata
+        # Store write latency in metadata. Despite the name, this is
+        # pipeline-start-to-pre-storage, not the storage call duration —
+        # kept as-is because metadata consumers (audit log, dashboard)
+        # depend on the contract. ``timings["storage_ms"]`` below is
+        # the new, accurately-named signal for Phase 1 measurement.
         write_ms = round((time.perf_counter() - t0) * 1000)
         metadata["write_latency_ms"] = write_ms
 
@@ -65,8 +76,11 @@ class WriteMemoryRow:
             "status": fields["status"],
             "visibility": data.visibility or "scope_team",
         }
+        storage_t0 = time.perf_counter()
         memory = await sc.create_memory(memory_data)
+        timings["storage_ms"] = round((time.perf_counter() - storage_t0) * 1000)
 
+        links_t0 = time.perf_counter()
         for link in data.entity_links:
             await sc.create_entity_link(
                 {
@@ -79,6 +93,7 @@ class WriteMemoryRow:
                     "role": link.role,
                 }
             )
+        timings["entity_links_ms"] = round((time.perf_counter() - links_t0) * 1000)
 
         detail = {
             "memory_type": fields["memory_type"],

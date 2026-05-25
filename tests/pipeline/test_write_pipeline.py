@@ -117,6 +117,128 @@ async def test_pipeline_path_creates_memory(db):
 
 
 @pytest.mark.asyncio
+async def test_pipeline_emits_memory_write_latency_log(db, caplog):
+    """CAURA-682 Phase 1: write pipeline emits ``memory_write_latency``
+    structured log with per-phase timings + tenant_id at INFO level.
+
+    The summary log is the input to GCP-side per-tenant slice queries that
+    answer "which phase is the bottleneck under noisy-neighbor load?" —
+    so the test pins the field surface contract, not specific values.
+    """
+    import logging
+
+    from core_api.services import memory_service
+
+    original = memory_service._USE_PIPELINE_WRITE
+    memory_service._USE_PIPELINE_WRITE = True
+    try:
+        from core_api.services.memory_service import create_memory
+
+        data = _make_input(
+            content="CAURA-682 Phase 1 latency log emission test — unique content for hash dedup."
+        )
+        with caplog.at_level(logging.INFO, logger="core_api.services.memory_service"):
+            await create_memory(db, data)
+
+        latency_records = [
+            r for r in caplog.records if r.getMessage() == "memory_write_latency"
+        ]
+        assert len(latency_records) == 1, (
+            f"expected exactly one memory_write_latency log, got {len(latency_records)}"
+        )
+        record = latency_records[0]
+        # Pin the field surface so the GCP log query stays stable.
+        for key in (
+            "path",
+            "tenant_id",
+            "agent_id",
+            "fleet_id",
+            "write_mode",
+            "total_ms",
+            "embedding_pending",
+            "enrichment_pending",
+            "cached_embedding",
+        ):
+            assert hasattr(record, key), f"missing field: {key}"
+        assert record.path == "memory-write"
+        assert record.tenant_id == TENANT_ID
+        assert record.agent_id == AGENT_ID
+        assert record.fleet_id == FLEET_ID
+        assert record.write_mode in ("fast", "strong")
+        assert isinstance(record.total_ms, int)
+        assert record.total_ms >= 0
+        # Storage call always runs; per-phase keys present when the
+        # phase ran inline (may be None if deferred to core-worker).
+        assert hasattr(record, "storage_ms")
+        assert hasattr(record, "entity_links_ms")
+        assert hasattr(record, "embedding_ms")
+        assert hasattr(record, "enrichment_ms")
+        # Success path: ``success`` must be True so failed-vs-successful
+        # write filters in GCP work.
+        assert record.success is True
+    finally:
+        memory_service._USE_PIPELINE_WRITE = original
+
+
+@pytest.mark.asyncio
+async def test_pipeline_emits_latency_log_on_pipeline_failure(db, caplog):
+    """CAURA-682 Phase 1: timeouts (the actual noisy-neighbor failure mode)
+    must also produce a ``memory_write_latency`` log with ``success=False``
+    and whatever partial timings landed before the exception.
+
+    Pre-fix, the log lived after ``await pipeline.run(ctx)`` with no
+    exception handling, so a ``HTTPException(504)`` from
+    ``parallel_embed_enrich`` on ``asyncio.wait_for`` timeout skipped the
+    log entirely — the worst case for diagnosis."""
+    import logging
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+    from core_api.pipeline.runner import Pipeline
+    from core_api.services import memory_service
+
+    original = memory_service._USE_PIPELINE_WRITE
+    memory_service._USE_PIPELINE_WRITE = True
+
+    async def _boom(self, ctx):
+        # Mirrors parallel_embed_enrich's timeout shape exactly.
+        raise HTTPException(
+            status_code=504, detail="Memory write timed out (embedding/enrichment)"
+        )
+
+    try:
+        from core_api.services.memory_service import create_memory
+
+        data = _make_input(
+            content="CAURA-682 Phase 1 timeout-emits-log path — distinct content for hash uniqueness."
+        )
+        with (
+            caplog.at_level(logging.INFO, logger="core_api.services.memory_service"),
+            patch.object(Pipeline, "run", _boom),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await create_memory(db, data)
+            assert exc_info.value.status_code == 504
+
+        latency_records = [
+            r for r in caplog.records if r.getMessage() == "memory_write_latency"
+        ]
+        assert len(latency_records) == 1, (
+            f"expected exactly one memory_write_latency log on failure, got {len(latency_records)}"
+        )
+        record = latency_records[0]
+        assert record.success is False
+        assert record.tenant_id == TENANT_ID
+        # ``total_ms`` is computed in finally → must be present even when
+        # the pipeline raised before populating ``ctx.data["memory"]``.
+        assert isinstance(record.total_ms, int)
+        assert record.embedding_pending is False
+        assert record.enrichment_pending is False
+    finally:
+        memory_service._USE_PIPELINE_WRITE = original
+
+
+@pytest.mark.asyncio
 async def test_legacy_path_creates_memory(db):
     """Legacy path creates a memory and returns valid MemoryOut (baseline)."""
     from core_api.services import memory_service

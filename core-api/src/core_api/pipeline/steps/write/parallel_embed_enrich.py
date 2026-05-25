@@ -38,6 +38,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Awaitable
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -47,6 +50,22 @@ from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 
 logger = logging.getLogger(__name__)
+
+
+async def _timed(awaitable: Awaitable[Any], timings: dict, key: str) -> Any:
+    """Await ``awaitable`` and record its wall-clock duration into ``timings[key]``.
+
+    Used to separate embed and enrich latencies even though ``asyncio.gather``
+    runs them concurrently — without this, a slow LLM enrichment masks the
+    embedding's own latency in the gather wall-clock. The pre-/post-await
+    `perf_counter` samples each task's own time, so values are additive but
+    not exclusive (they overlap when gather runs both).
+    """
+    t0 = time.perf_counter()
+    try:
+        return await awaitable
+    finally:
+        timings[key] = round((time.perf_counter() - t0) * 1000)
 
 
 class ParallelEmbedEnrich:
@@ -60,6 +79,10 @@ class ParallelEmbedEnrich:
         cached_embedding = ctx.data.get("cached_embedding")
         ch = ctx.data.get("content_hash")
         resolved_write_mode = ctx.data.get("resolved_write_mode")
+        # CAURA-682 Phase 1: per-phase latency capture. The summary emit
+        # lives in ``_create_memory_pipeline`` after pipeline.run; each
+        # phase deposits its duration here.
+        timings: dict = ctx.data.setdefault("phase_timings", {})
 
         # write_mode-aware deferral. See the module docstring for the
         # contracts each mode enforces. A cached embedding is a hit on
@@ -86,9 +109,14 @@ class ParallelEmbedEnrich:
             async def _return_cached():
                 return cached_embedding
 
-            embedding_task = _return_cached()
+            # ``_timed`` records a sub-millisecond duration around the
+            # trivial cache-return coroutine — that satisfies the
+            # "key present = ran inline (≈0 ms = cached)" contract for
+            # downstream log readers. Distinct from "deferred to
+            # core-worker" where the key is absent entirely.
+            embedding_task = _timed(_return_cached(), timings, "embedding_ms")
         elif not defer_embedding:
-            embedding_task = get_embedding(data.content, tenant_config)
+            embedding_task = _timed(get_embedding(data.content, tenant_config), timings, "embedding_ms")
 
         enrichment_task = None
         if (
@@ -98,8 +126,10 @@ class ParallelEmbedEnrich:
         ):
             from core_api.services.memory_enrichment import enrich_memory
 
-            enrichment_task = enrich_memory(
-                data.content, tenant_config, reference_datetime=data.reference_datetime
+            enrichment_task = _timed(
+                enrich_memory(data.content, tenant_config, reference_datetime=data.reference_datetime),
+                timings,
+                "enrichment_ms",
             )
 
         # Gather whichever subset of tasks exists; stays parallel when
