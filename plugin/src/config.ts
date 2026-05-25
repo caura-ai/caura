@@ -53,12 +53,29 @@ export function isMemorySlotClaimed(config: Record<string, any>): boolean {
   return config?.plugins?.slots?.memory === "memclaw";
 }
 
+/**
+ * True iff OpenClaw's contextEngine slot is claimed by memclaw. The
+ * contextEngine slot is what gates ``ContextEngine.assemble()`` — the
+ * code path that injects ``<keystone_rules>`` into the system prompt
+ * on every turn. Without this slot, OpenClaw falls back to the default
+ * "legacy" engine and our ``assemble()`` never runs. The tool surface
+ * (``memclaw_keystones``) still works because tool registration is
+ * slot-independent — but the dynamic keystone injection silently dies.
+ *
+ * Confirmed against OpenClaw 2026.5.4
+ * ``dist/registry-DFFgCbcm.js:241 resolveContextEngine``.
+ */
+export function isContextEngineSlotClaimed(config: Record<string, any>): boolean {
+  return config?.plugins?.slots?.contextEngine === "memclaw";
+}
+
 export function isMemclawFullyConfigured(config: Record<string, any>): boolean {
   return (
     isMemclawAllowed(config) &&
     isMemclawEnabled(config) &&
     isMemclawPathLoaded(config) &&
-    isMemorySlotClaimed(config)
+    isMemorySlotClaimed(config) &&
+    isContextEngineSlotClaimed(config)
   );
 }
 
@@ -115,7 +132,8 @@ export function autoFixAllowlist(options?: {
     if (previousSlot && !options?.forceSlotOverride) {
       console.warn(
         `[memclaw] plugins.slots.memory already set to "${previousSlot}" — ` +
-          `skipping auto-override. Call memclaw.allowlist.fix to force.`,
+          `skipping auto-override. Run "openclaw gateway memclaw.allowlist.fix" ` +
+          `or set MEMCLAW_AUTO_FIX_CONFIG=true to force.`,
       );
     } else {
       config.plugins.slots.memory = "memclaw";
@@ -128,6 +146,42 @@ export function autoFixAllowlist(options?: {
         previousSlot
           ? `plugins.slots.memory (was: ${previousSlot})`
           : "plugins.slots.memory",
+      );
+    }
+  }
+
+  // 4b. Claim the contextEngine slot. Without this, OpenClaw falls back
+  //     to the "legacy" default engine and our ContextEngine.assemble()
+  //     never runs — so <keystone_rules> never appears in the system
+  //     prompt. Mirrors step 4's forceSlotOverride handling so an
+  //     operator who deliberately set a different engine doesn't get
+  //     silently stomped.
+  if (config.plugins.slots.contextEngine !== "memclaw") {
+    const previousCe = config.plugins.slots.contextEngine;
+    if (previousCe && !options?.forceSlotOverride) {
+      console.warn(
+        `[memclaw] plugins.slots.contextEngine already set to "${previousCe}" — ` +
+          `skipping auto-override. Run "openclaw gateway memclaw.allowlist.fix" ` +
+          `or set MEMCLAW_AUTO_FIX_CONFIG=true to force. ` +
+          `Note: keystone rules will NOT inject without contextEngine="memclaw".`,
+      );
+    } else {
+      config.plugins.slots.contextEngine = "memclaw";
+      // Disable the previous contextEngine plugin to avoid slot conflict.
+      // Without this, two plugins are both ``enabled`` and both
+      // declared a contextEngine — OpenClaw's resolveContextEngine
+      // reads the slot value and picks the matching engine, but the
+      // OTHER plugin still registers its engine at load time, which is
+      // either dead weight or a load-order race depending on the
+      // runtime version. Mirrors step 4 (memory slot) exactly.
+      if (previousCe && config.plugins.entries?.[previousCe]) {
+        config.plugins.entries[previousCe].enabled = false;
+        changes.push(`disabled ${previousCe}`);
+      }
+      changes.push(
+        previousCe
+          ? `plugins.slots.contextEngine (was: ${previousCe})`
+          : "plugins.slots.contextEngine",
       );
     }
   }

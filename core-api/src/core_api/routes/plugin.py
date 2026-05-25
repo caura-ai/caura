@@ -493,9 +493,17 @@ if (config.plugins.entries['memory-core']) {{
   config.plugins.entries['memory-core'].enabled = false;
 }}
 
-// Claim the exclusive memory slot
+// Claim the exclusive memory slot (controls registerMemoryPromptSection +
+// registerMemoryRuntime delivery) AND the contextEngine slot (controls
+// ContextEngine.assemble() — the path that injects the <keystone_rules>
+// block into the system prompt on every turn). Without contextEngine set
+// to 'memclaw', OpenClaw falls back to the default "legacy" engine and
+// our assemble() never runs, so keystones never appear in the prompt
+// even though the tool surface is registered. Confirmed against
+// OpenClaw 2026.5.4 dist/registry-DFFgCbcm.js:241 resolveContextEngine.
 if (!config.plugins.slots) config.plugins.slots = {{}};
 config.plugins.slots.memory = 'memclaw';
+config.plugins.slots.contextEngine = 'memclaw';
 
 if (!config.plugins.load) config.plugins.load = {{}};
 if (!Array.isArray(config.plugins.load.paths)) config.plugins.load.paths = [];

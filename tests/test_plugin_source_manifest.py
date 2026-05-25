@@ -273,3 +273,32 @@ def test_plugin_manifest_version_matches_package_json():
         f"version drift — package.json={pkg['version']!r}, "
         f"openclaw.plugin.json={mfst['version']!r}. Bump both in lockstep."
     )
+
+
+def test_install_script_claims_both_slots():
+    """The install script's inline setup.js MUST set both ``slots.memory``
+    AND ``slots.contextEngine`` to ``"memclaw"``.
+
+    Pre-fix the script only set ``slots.memory``. OpenClaw resolves the
+    active ContextEngine from ``plugins.slots.contextEngine`` (see
+    OpenClaw 2026.5.4 ``dist/registry-DFFgCbcm.js:241 resolveContextEngine``);
+    when that slot is unset, OpenClaw falls back to the default "legacy"
+    engine and our plugin's ``assemble()`` is never called.
+
+    Symptom: a customer running plugin v2.6.0 reported via WhatsApp that
+    the agent could fetch keystones via the ``memclaw_keystones`` tool
+    but the ``<keystone_rules>`` block never appeared in the system
+    prompt. Tool surface works (slot-independent); dynamic injection
+    silently disabled. This test pins both slot lines in the install
+    script so we can't regress to the half-claimed state.
+    """
+    src = Path(plugin_mod.__file__).read_text(encoding="utf-8")
+    assert "config.plugins.slots.memory = 'memclaw'" in src, (
+        "Install script must claim plugins.slots.memory for memclaw."
+    )
+    assert "config.plugins.slots.contextEngine = 'memclaw'" in src, (
+        "Install script must ALSO claim plugins.slots.contextEngine for memclaw — "
+        "without it, OpenClaw falls back to the legacy context engine and our "
+        "assemble() never runs, silently disabling keystone injection."
+    )
+

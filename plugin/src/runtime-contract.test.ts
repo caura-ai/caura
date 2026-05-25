@@ -444,3 +444,131 @@ describe("MemoryFlushPlan resolver — negative-timestamp guard (review 2026-05-
     );
   });
 });
+
+// --- ContextEngine.assemble() contract (CAURA-000 WhatsApp keystones) ---
+//
+// Customer report 2026-05-25: ``context engine assemble failed, using
+// pipeline messages: TypeError: Cannot read properties of undefined
+// (reading 'slice')`` fired on every WhatsApp turn after the customer
+// set ``plugins.slots.contextEngine = "memclaw"``. OpenClaw's catch at
+// selection-BfCSa_QL.js:7689 calls ``String(err)`` which strips the
+// stack — so the throw was invisible in the gateway log past the
+// top-line.
+//
+// Two related contracts the runtime depends on (OpenClaw 2026.5.4
+// plugin-sdk/src/context-engine/types.d.ts: AssembleResult):
+//
+//   * ``messages`` is required. The runtime reads it by reference and
+//     overwrites ``activeSession.agent.state.messages`` when the
+//     returned reference differs from input. ``undefined`` here
+//     produces the ``.slice`` TypeError downstream that the customer
+//     saw.
+//   * ``estimatedTokens`` is required. Used by the budget tracker
+//     surrounding the assemble call.
+//
+// These tests lock both fields on every return path, AND lock the
+// outer try/catch that protects the runtime from any future inner
+// throw — even when we can't reproduce the exact upstream condition
+// in unit tests, the catch guarantees we never surface ``messages:
+// undefined`` to OpenClaw.
+
+import { MemClawContextEngine } from "./context-engine.js";
+
+describe("ContextEngine.assemble contract (OpenClaw AssembleResult)", () => {
+  function makeEngine(): MemClawContextEngine {
+    // Tenant-less config — bootstrap's educate POST will fail-fast
+    // against MEMCLAW_API_URL, but assemble's own try/catch swallows
+    // it so the test still exercises the return shape. We're testing
+    // the contract surface, not the bootstrap success path.
+    return new MemClawContextEngine({});
+  }
+
+  test("returns AssembleResult shape with `messages` and `estimatedTokens` (skip-recall path)", async () => {
+    const engine = makeEngine();
+    const result = await engine.assemble({
+      messages: [{ role: "user", content: "hi" }],
+      prompt: "hi",
+      tokenBudget: 1000,
+    });
+    assert.ok(result, "assemble must return a result");
+    assert.ok(Array.isArray(result.messages), "result.messages must be an array");
+    assert.equal(
+      typeof result.estimatedTokens,
+      "number",
+      "result.estimatedTokens must be a number (AssembleResult contract)",
+    );
+  });
+
+  test("does not throw when params.messages is undefined (defensive coercion)", async () => {
+    const engine = makeEngine();
+    // The actual customer-observed shape: OpenClaw 2026.5.4 passed
+    // params without `messages` (or with messages typed differently
+    // than we expected). Our prologue must coerce, not crash.
+    const result = await engine.assemble({
+      prompt: "hello",
+      tokenBudget: 1000,
+    });
+    assert.ok(result);
+    assert.ok(
+      Array.isArray(result.messages),
+      "messages must default to [] when input is undefined, never be undefined",
+    );
+  });
+
+  test("does not throw when called with no params (legacy + degenerate callers)", async () => {
+    const engine = makeEngine();
+    const result = await engine.assemble(
+      undefined as unknown as Parameters<typeof engine.assemble>[0],
+    );
+    assert.ok(result);
+    assert.ok(Array.isArray(result.messages));
+    assert.equal(typeof result.estimatedTokens, "number");
+  });
+
+  test("outer try/catch returns safe fallback on inner throw (never propagates)", async () => {
+    // Synthesize an inner throw by monkey-patching `bootstrap` —
+    // it's the first awaited call inside _assembleInner, so a throw
+    // there exercises the outer catch without depending on any
+    // particular downstream code path.
+    const engine = makeEngine();
+    (engine as unknown as { bootstrap: () => Promise<void> }).bootstrap =
+      async () => {
+        throw new Error("synthetic bootstrap failure");
+      };
+
+    const input = [{ role: "user", content: "hi" }];
+    const result = await engine.assemble({
+      messages: input,
+      prompt: "hi",
+      tokenBudget: 1000,
+    });
+
+    // Contract: even on inner throw, return a well-shaped result so
+    // OpenClaw's `assembled.messages` access never throws downstream.
+    assert.ok(result);
+    assert.ok(Array.isArray(result.messages));
+    assert.equal(typeof result.estimatedTokens, "number");
+    // Safe fallback means no system-prompt injection on this turn.
+    assert.equal(result.systemPromptAddition ?? "", "");
+  });
+
+  test("echoes input messages reference (never returns a new array under success)", async () => {
+    // OpenClaw 2026.5.4 selection-BfCSa_QL.js:7677 overwrites
+    // activeSession.agent.state.messages when `assembled.messages !==
+    // activeSession.messages`. Returning a fresh array would
+    // mass-replace the runtime's session state every turn — only
+    // compact() may do that. Lock reference equality.
+    const engine = makeEngine();
+    const input = [{ role: "user", content: "hi" }];
+    const result = await engine.assemble({
+      messages: input,
+      prompt: "hi",
+      tokenBudget: 1000,
+    });
+    assert.strictEqual(
+      result.messages,
+      input,
+      "assemble must echo the input `messages` reference on the success path",
+    );
+  });
+});

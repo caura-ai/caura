@@ -566,6 +566,67 @@ export class MemClawContextEngine {
     tokenEstimate?: number;
     estimatedTokens?: number;
   }> {
+    // Echo the (defensively coerced) input messages on every return path,
+    // including the catch-all below. OpenClaw 2026.5.4's
+    // selection-BfCSa_QL.js:7677 reads ``assembled.messages`` and
+    // overwrites ``activeSession.agent.state.messages`` when the
+    // reference differs from input — returning ``undefined`` there
+    // produces a downstream ``Cannot read properties of undefined
+    // (reading 'slice')`` that the runtime catches as a generic
+    // ``context engine assemble failed`` warning with no stack
+    // (``String(err)`` strips the trace), so a stray throw inside our
+    // assemble surfaces in customer logs as a useless top-line and the
+    // ``systemPromptAddition`` is silently dropped. The outer try/catch
+    // below mirrors this: on ANY internal throw we log the full stack
+    // ourselves and still return a well-shaped, no-injection result —
+    // OpenClaw moves on with the original messages and the agent loses
+    // one turn of memory injection instead of the entire turn breaking.
+    const safeMessages: Array<{ role: string; content: unknown }> = Array.isArray(
+      params?.messages,
+    )
+      ? (params!.messages as Array<{ role: string; content: unknown }>)
+      : [];
+
+    try {
+      return await this._assembleInner(params, legacyPrompt, safeMessages);
+    } catch (err: unknown) {
+      // Log context + full stack in a single ``console.error`` so log
+      // aggregators that filter or split by severity can't drop one
+      // half. Two separate emissions (e.g. ``console.error`` for the
+      // context line and ``console.warn`` for the stack) get
+      // dropped-or-kept independently by level-based filters, which
+      // costs us exactly the forensic signal this catch exists to
+      // surface. OpenClaw's own catch logs only ``String(err)`` which
+      // strips the stack — this is the only place a customer's
+      // gateway log will carry the trace.
+      const stack =
+        err instanceof Error && err.stack ? err.stack : String(err);
+      console.error(
+        `[memclaw] assemble: unexpected error (returning safe fallback)\n${stack}`,
+      );
+      return { messages: safeMessages, systemPromptAddition: "", estimatedTokens: 0 };
+    }
+  }
+
+  private async _assembleInner(
+    params: AssembleBudget & {
+      sessionId?: string;
+      sessionKey?: string;
+      messages?: Array<{ role: string; content: unknown }>;
+      availableTools?: Set<string>;
+      citationsMode?: string;
+      model?: string;
+      prompt?: string;
+    },
+    legacyPrompt: string | undefined,
+    safeMessages: Array<{ role: string; content: unknown }>,
+  ): Promise<{
+    system?: string;
+    systemPromptAddition?: string;
+    messages?: unknown[];
+    tokenEstimate?: number;
+    estimatedTokens?: number;
+  }> {
     await this.bootstrap();
 
     // Two call shapes supported:
@@ -576,8 +637,7 @@ export class MemClawContextEngine {
     // and the legacy second-arg `legacyPrompt` fallback; no explicit
     // branch is needed.
     const tokenBudget = params?.tokenBudget || 0;
-    const incomingMessages: Array<{ role: string; content: unknown }> =
-      (params?.messages as Array<{ role: string; content: unknown }>) || [];
+    const incomingMessages = safeMessages;
     const prompt = (params?.prompt as string | undefined) ?? legacyPrompt;
 
     const agentId = resolveAgentId(this.config);
@@ -647,18 +707,26 @@ export class MemClawContextEngine {
 
     if (!decision.recall) {
       const tokens = estimateTokens(staticSection);
+      // OpenClaw 2026.5.4 AssembleResult contract: must include
+      // ``messages`` (echo of input is safe — reference equality means
+      // the runtime won't overwrite activeSession.agent.state.messages)
+      // and ``estimatedTokens``. The legacy ``system`` + ``tokenEstimate``
+      // aliases stay for older runtimes that read them; modern OpenClaw
+      // ignores extra fields.
       const out: {
         system?: string;
         systemPromptAddition?: string;
+        messages?: unknown[];
         tokenEstimate?: number;
         estimatedTokens?: number;
       } = {
         system: staticSection,
         systemPromptAddition: staticSection,
+        messages: incomingMessages,
+        estimatedTokens: tokens,
       };
       if (tokenBudget > 0) {
         out.tokenEstimate = tokens;
-        out.estimatedTokens = tokens;
       }
       return out;
     }
@@ -750,16 +818,28 @@ export class MemClawContextEngine {
     const estimatedTokens = estimateTokens(systemPromptAddition);
 
     // Always return AssembleResult-shaped payload, even when only the
-    // static block is non-empty. The legacy `system` alias is kept for
-    // older OpenClaw callers; modern callers read `systemPromptAddition`.
+    // static block is non-empty. OpenClaw 2026.5.4's AssembleResult
+    // (plugin-sdk/src/context-engine/types.d.ts) requires ``messages``
+    // and ``estimatedTokens``; the runtime reads ``messages`` by
+    // reference and overwrites ``activeSession.agent.state.messages``
+    // if it differs from input — so echo the input array. The legacy
+    // ``system`` + ``tokenEstimate`` aliases stay for older runtimes;
+    // modern OpenClaw reads ``systemPromptAddition`` and ignores
+    // extras.
     return tokenBudget > 0
       ? {
           system: systemPromptAddition,
           systemPromptAddition,
+          messages: incomingMessages,
           tokenEstimate: estimatedTokens,
           estimatedTokens,
         }
-      : { system: systemPromptAddition, systemPromptAddition };
+      : {
+          system: systemPromptAddition,
+          systemPromptAddition,
+          messages: incomingMessages,
+          estimatedTokens,
+        };
 
     // Note: we intentionally do NOT mutate `params.messages`. The OpenClaw
     // runtime replaces the session messages if our return's `messages`

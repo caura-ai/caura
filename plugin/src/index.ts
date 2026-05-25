@@ -54,6 +54,7 @@ import {
   isMemclawEnabled,
   isMemclawPathLoaded,
   isMemclawFullyConfigured,
+  isContextEngineSlotClaimed,
 } from "./config.js";
 import { createToolFromSpec } from "./tool-definitions.js";
 import { deployPlugin } from "./deploy.js";
@@ -424,7 +425,22 @@ const memclawPlugin = {
         logError("Auto-fix allowlist failed", e);
       }
     } else {
-      // Flag exists (or opted out) — emit diagnostic if tools are missing
+      // Flag exists (or opted out) — emit diagnostics. Two independent
+      // warning paths:
+      //
+      //   1. Missing tools in ``tools.alsoAllow`` → agents can't invoke
+      //      those tools. Mutes the tool surface.
+      //   2. ``plugins.slots.contextEngine !== "memclaw"`` → OpenClaw
+      //      falls back to the default "legacy" context engine, so our
+      //      ``ContextEngine.assemble()`` is never called and the
+      //      ``<keystone_rules>`` block never reaches the system prompt.
+      //      Confirmed against OpenClaw 2026.5.4
+      //      ``dist/registry-DFFgCbcm.js:241 resolveContextEngine``.
+      //
+      // Operators on pre-fix installs need this loud signal — the
+      // install-script auto-fix only runs once on first boot; existing
+      // nodes won't pick up the slot change on a plain gateway restart
+      // without explicit re-fix.
       try {
         const config = readOpenClawConfig() as Record<string, any> | null;
         if (config) {
@@ -436,6 +452,18 @@ const memclawPlugin = {
             );
             console.warn(
               `[memclaw] Fix: run "openclaw gateway memclaw.allowlist.fix" or set MEMCLAW_AUTO_FIX_CONFIG=true`,
+            );
+          }
+          if (!isContextEngineSlotClaimed(config)) {
+            const currentCe = config?.plugins?.slots?.contextEngine;
+            console.warn(
+              `[memclaw] WARNING: plugins.slots.contextEngine is ${currentCe ? `"${currentCe}"` : "unset"} — ` +
+              `keystone rules and dynamic recall WILL NOT inject into agent prompts. ` +
+              `OpenClaw will fall back to the default "legacy" context engine.`,
+            );
+            console.warn(
+              `[memclaw] Fix: set plugins.slots.contextEngine to "memclaw" in ~/.openclaw/openclaw.json, ` +
+              `or run "openclaw gateway memclaw.allowlist.fix" / set MEMCLAW_AUTO_FIX_CONFIG=true`,
             );
           }
         }
@@ -709,6 +737,30 @@ const memclawPlugin = {
       }
     } catch (e: unknown) {
       logError("registerContextEngine failed", e);
+    }
+
+    // --- Boot diagnostic line (CAURA-000 forensic anchor) ---
+    //
+    // One-shot startup log so customer reports can paste a single
+    // grep result that pins (a) the deployed plugin version, (b) the
+    // tool surface count, and (c) the Node runtime version. The
+    // WhatsApp keystones investigation cost two hours because we
+    // couldn't confirm the customer was on v2.6.x without asking
+    // them to cat package.json. This line makes that a one-grep
+    // answer: ``grep "BOOT" /tmp/openclaw/openclaw-*.log``.
+    try {
+      const nodeVersion =
+        typeof process !== "undefined" && process.versions
+          ? process.versions.node
+          : "unknown";
+      console.log(
+        `[memclaw] BOOT: plugin v${PLUGIN_VERSION}, ${MEMCLAW_TOOLS.length} tools registered, node ${nodeVersion}`,
+      );
+    } catch (e: unknown) {
+      // Diagnostic line must never block registration — swallow any
+      // exotic environment error (e.g. process is undefined in a
+      // restricted worker).
+      logError("boot diagnostic line failed", e);
     }
 
     // --- Educate gateway method ---
