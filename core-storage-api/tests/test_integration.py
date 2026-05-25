@@ -771,6 +771,101 @@ class TestMemories:
         assert post_total == before_total
         assert post_agents == before_agents
 
+    async def test_patch_entities_is_bulk_and_idempotent(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        # CAURA-686: ``PATCH /memories/{id}/entities`` is a single bulk
+        # ``INSERT … ON CONFLICT (memory_id, entity_id) DO NOTHING``. Two
+        # behaviours are pinned here:
+        #   1. All N links land via one PATCH — re-PATCHing the same body
+        #      is a no-op, not an ``IntegrityError`` on the PK.
+        #   2. ``ON CONFLICT DO NOTHING`` preserves the *original* role
+        #      when the same ``(memory_id, entity_id)`` is re-sent with a
+        #      different role. This is the contract the route relies on
+        #      to keep concurrent storage-api writes from serialising on
+        #      ``Lock/transactionid``.
+        mem = (
+            await client.post(
+                f"{PREFIX}/memories",
+                json=_memory_payload(tenant_id, fleet_id),
+            )
+        ).json()
+        memory_id = mem["id"]
+
+        entity_ids: list[str] = []
+        for _ in range(3):
+            entity = (
+                await client.post(
+                    f"{PREFIX}/entities",
+                    json={
+                        "tenant_id": tenant_id,
+                        "fleet_id": fleet_id,
+                        "entity_type": "person",
+                        "canonical_name": f"BulkLink-{_uid()}",
+                    },
+                )
+            ).json()
+            entity_ids.append(entity["id"])
+
+        first = [{"entity_id": eid, "role": "mentioned"} for eid in entity_ids]
+        resp = await client.patch(
+            f"{PREFIX}/memories/{memory_id}/entities",
+            json={"entity_links": first},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["ok"] is True
+
+        links_after_first = (
+            await client.post(
+                f"{PREFIX}/memories/entity-links",
+                json={"memory_ids": [memory_id]},
+            )
+        ).json()[memory_id]
+        assert sorted(link["entity_id"] for link in links_after_first) == sorted(entity_ids)
+        assert {link["role"] for link in links_after_first} == {"mentioned"}
+
+        # Re-PATCH with two old entity_ids (different role) + one new
+        # entity. The conflicting rows must be silently skipped (original
+        # role retained); the new row must be inserted.
+        new_entity = (
+            await client.post(
+                f"{PREFIX}/entities",
+                json={
+                    "tenant_id": tenant_id,
+                    "fleet_id": fleet_id,
+                    "entity_type": "person",
+                    "canonical_name": f"BulkLink-{_uid()}",
+                },
+            )
+        ).json()
+        second = [
+            {"entity_id": entity_ids[0], "role": "subject"},
+            {"entity_id": entity_ids[1], "role": "object"},
+            {"entity_id": new_entity["id"], "role": "mentioned"},
+        ]
+        resp2 = await client.patch(
+            f"{PREFIX}/memories/{memory_id}/entities",
+            json={"entity_links": second},
+        )
+        assert resp2.status_code == 200, resp2.text
+
+        final_links = (
+            await client.post(
+                f"{PREFIX}/memories/entity-links",
+                json={"memory_ids": [memory_id]},
+            )
+        ).json()[memory_id]
+        by_entity = {link["entity_id"]: link["role"] for link in final_links}
+        assert by_entity == {
+            entity_ids[0]: "mentioned",
+            entity_ids[1]: "mentioned",
+            entity_ids[2]: "mentioned",
+            new_entity["id"]: "mentioned",
+        }
+
 
 # =====================================================================
 # Entities

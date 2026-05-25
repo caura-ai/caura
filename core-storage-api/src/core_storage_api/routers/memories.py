@@ -864,10 +864,8 @@ async def update_embedding(memory_id: UUID, request: Request) -> dict:
 async def update_memory_entities(memory_id: UUID, request: Request) -> dict:
     body: dict = await request.json()
     entity_links = body.get("entity_links", [])
-    for link in entity_links:
-        entity_id = UUID(link["entity_id"])
-        role = link["role"]
-        await _svc.memory_add_entity_link(memory_id, entity_id, role)
+    links = [{"entity_id": UUID(link["entity_id"]), "role": link["role"]} for link in entity_links]
+    await _svc.memory_add_entity_links(memory_id, links)
     return {"ok": True}
 
 

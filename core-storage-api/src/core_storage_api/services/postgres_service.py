@@ -1981,14 +1981,28 @@ class PostgresService:
     # H) Entity links (memory side)
     # ------------------------------------------------------------------
 
-    async def memory_add_entity_link(
+    async def memory_add_entity_links(
         self,
         memory_id: UUID,
-        entity_id: UUID,
-        role: str,
+        links: list[dict],
     ) -> None:
+        # Bulk-insert with ``ON CONFLICT (memory_id, entity_id) DO NOTHING``
+        # so two concurrent writes targeting the same ``(memory_id,
+        # entity_id)`` pair don't serialise on ``Lock/transactionid``
+        # (CAURA-686). Each ``link`` dict carries ``entity_id`` (UUID) and
+        # ``role`` (str).
+        if not links:
+            return
+        rows = [
+            {"memory_id": memory_id, "entity_id": link["entity_id"], "role": link["role"]} for link in links
+        ]
         async with get_session() as session:
-            session.add(MemoryEntityLink(memory_id=memory_id, entity_id=entity_id, role=role))
+            stmt = (
+                pg_insert(MemoryEntityLink)
+                .values(rows)
+                .on_conflict_do_nothing(index_elements=["memory_id", "entity_id"])
+            )
+            await session.execute(stmt)
 
     async def memory_get_entity_links_for_memories(
         self,
