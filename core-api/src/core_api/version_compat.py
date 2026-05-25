@@ -6,7 +6,7 @@ We log a warning when a heartbeat reports a plugin older than the minimum
 recommended version; no hard rejection — operators decide when to upgrade.
 """
 
-MIN_RECOMMENDED_PLUGIN_VERSION = "2.5.0"
+MIN_RECOMMENDED_PLUGIN_VERSION = "2.6.2"
 
 
 def _parse(v: str) -> tuple[int, ...]:
