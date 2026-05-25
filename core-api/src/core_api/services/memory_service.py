@@ -2560,6 +2560,22 @@ def _normalize_query_for_cache(query: str) -> str:
     return re.sub(r"\s+", " ", query.strip().lower())
 
 
+# Per-process stampede guard for cold-cache embed calls. Maps cache-key to
+# the in-flight Future producing the embedding. When N concurrent callers
+# miss the cache for the same key, the first arrival registers the Future
+# and fires the embed call; subsequent arrivals find the Future and await
+# its result instead of each issuing their own OpenAI round-trip.
+#
+# Scope is intentionally per-process: a Redis-side lock would coordinate
+# across replicas but the latency floor of the read path is already a
+# single embed call per cold key per replica, and the stampede pattern
+# observed in production is dominated by the same client issuing N
+# parallel recalls (e.g. fan-out probe, agent batch) hitting the same
+# replica. Cache_set still happens, so once any replica completes the
+# embed, the next request — local OR remote — finds it in Redis.
+_inflight_embeddings: dict[str, asyncio.Future] = {}
+
+
 async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
     """Get embedding from cache or generate it.
 
@@ -2567,6 +2583,11 @@ async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
     migration doesn't surface stale cached embeddings to the new schema;
     old entries with a mismatched dim become unreachable under the new
     key and expire naturally via ``EMBEDDING_CACHE_TTL``.
+
+    Concurrent cold-cache callers for the same key share a single
+    ``get_query_embedding`` round-trip via ``_inflight_embeddings`` —
+    measured 3-second tail spread on 5 parallel novel-query recalls
+    pre-fix; post-fix all callers join the leader's future.
     """
     from core_api.cache import cache_get, cache_set
 
@@ -2588,18 +2609,45 @@ async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
             return json.loads(_cached_raw)
         except (ValueError, TypeError):
             pass
-    # Search-side embed uses the instruction-aware path. For symmetric
-    # models (OpenAI, bge, snowflake-m, gte-en-v1.5) this is identical to
-    # ``get_embedding(query, tenant_config)``. For instruction-aware models
-    # (Qwen3-Embedding, e5-instruct), the provider prepends the configured
-    # task instruction (env: ``EMBEDDING_QUERY_INSTRUCTION``) so the query
-    # is encoded with the same instruction prefix the model was trained on.
-    # Documents (writes) embed unmodified text.
-    embedding = await asyncio.wait_for(get_query_embedding(query, tenant_config), timeout=10.0)
-    if embedding is None:
-        raise ValueError("Embedding service unavailable")
-    await cache_set(_cache_key, json.dumps(embedding), ttl=EMBEDDING_CACHE_TTL)
-    return embedding
+
+    # Cold cache: check whether another coroutine is already producing
+    # this embedding. If so, await its result. Otherwise become the
+    # leader, register the future, and fire the embed call.
+    inflight = _inflight_embeddings.get(_cache_key)
+    if inflight is not None:
+        return await inflight
+
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+    _inflight_embeddings[_cache_key] = fut
+    try:
+        # Search-side embed uses the instruction-aware path. For symmetric
+        # models (OpenAI, bge, snowflake-m, gte-en-v1.5) this is identical to
+        # ``get_embedding(query, tenant_config)``. For instruction-aware models
+        # (Qwen3-Embedding, e5-instruct), the provider prepends the configured
+        # task instruction (env: ``EMBEDDING_QUERY_INSTRUCTION``) so the query
+        # is encoded with the same instruction prefix the model was trained on.
+        # Documents (writes) embed unmodified text.
+        embedding = await asyncio.wait_for(get_query_embedding(query, tenant_config), timeout=10.0)
+        if embedding is None:
+            raise ValueError("Embedding service unavailable")
+        await cache_set(_cache_key, json.dumps(embedding), ttl=EMBEDDING_CACHE_TTL)
+        fut.set_result(embedding)
+        return embedding
+    except BaseException as exc:
+        # Propagate to every waiter so they raise consistently rather
+        # than hanging forever on a fulfilled-never future. BaseException
+        # catches CancelledError too — leaking a cancelled future would
+        # otherwise strand every joiner. The leader re-raises after the
+        # finally block.
+        if not fut.done():
+            fut.set_exception(exc)
+        raise
+    finally:
+        # Drop the inflight slot only after the future has been resolved.
+        # A late arrival that read the slot before this pop still gets
+        # the cached future and awaits its already-resolved state.
+        _inflight_embeddings.pop(_cache_key, None)
 
 
 async def _entity_boost_pipeline(
