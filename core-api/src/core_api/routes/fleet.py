@@ -17,7 +17,11 @@ from core_api.constants import NODE_OFFLINE_SECONDS, NODE_STALE_SECONDS
 from core_api.db.session import get_db
 from core_api.services.audit_service import log_action
 from core_api.services.organization_settings import get_raw_settings
-from core_api.version_compat import MIN_RECOMMENDED_PLUGIN_VERSION, is_plugin_outdated
+from core_api.version_compat import (
+    MIN_AUTO_DEPLOY_PLUGIN_VERSION,
+    MIN_RECOMMENDED_PLUGIN_VERSION,
+    is_plugin_outdated,
+)
 
 router = APIRouter(tags=["Fleet"])
 
@@ -226,31 +230,6 @@ async def delete_fleet(
 #        so version.ts is never refreshed and PLUGIN_VERSION reports
 #        stale.
 KNOWN_BROKEN_DEPLOY_VERSIONS: frozenset[str] = frozenset({"2.3.0"})
-
-# Floor below which auto-deploy is unsafe regardless of version-specific
-# brokenness above. Pre-manifest-aware plugins fetch source via their
-# own hardcoded ``FALLBACK_SRC_FILES`` (set at release time); any file
-# the backend later adds (e.g. ``keystones.ts``, statically imported
-# by ``context-engine.ts``) is never pulled, the post-deploy build
-# completes but ``dist/`` imports a missing module, and the plugin
-# is terminal on the next OpenClaw restart — same recovery as
-# KNOWN_BROKEN_DEPLOY_VERSIONS (manual re-install via
-# ``/api/v1/install-plugin``).
-#
-# Bump this constant in lockstep with each plugin release that adds a
-# new must-fetch source file. The plugin's ``FALLBACK_SRC_FILES`` array
-# in ``plugin/src/heartbeat.ts`` is the source of truth for what an
-# old client knows to fetch; mismatch with the backend's
-# ``_plugin_files`` in ``core_api/routes/plugin.py`` is what makes the
-# upgrade partial.
-#
-# As of CAURA-444 (this commit): manifest-aware deploy is on main but
-# has not yet been cut into any released plugin tag. The first tagged
-# release that includes it (expected ``2.6.0``) will be the first
-# safe-to-auto-deploy version. Until that exists, every released
-# plugin (0.98.x / 2.0-2.5) needs a one-time manual re-install before
-# auto-deploy can take over.
-MIN_AUTO_DEPLOY_PLUGIN_VERSION: str = "2.6.0"
 
 # Cap how far into the future a node can defer its own auto-upgrade.
 # Pre-cap a misbehaving / malicious plugin could send

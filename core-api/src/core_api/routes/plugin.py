@@ -10,6 +10,8 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
+from core_api.version_compat import MIN_AUTO_DEPLOY_PLUGIN_VERSION
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["System"])
@@ -160,10 +162,11 @@ async def plugin_manifest():
 
     Response shape (stable contract; see CAURA-444):
         {
-            "version":      "<plugin version from plugin/package.json>",
-            "src_files":    ["index.ts", ...],
-            "root_files":   ["openclaw.plugin.json", ...],
-            "content_hash": "<sha256 over all served files>"
+            "version":                         "<plugin version from plugin/package.json>",
+            "src_files":                       ["index.ts", ...],
+            "root_files":                      ["openclaw.plugin.json", ...],
+            "content_hash":                    "<sha256 over all served files>",
+            "min_auto_deploy_plugin_version":  "<server floor for plugin auto-deploy>"
         }
 
     ``version`` is the **plugin's** release version (read from
@@ -171,6 +174,12 @@ async def plugin_manifest():
     are decoupled (PR #131). The plugin's deploy handler uses this
     value to stamp ``version.ts`` and ``package.json`` post-build, so
     it must reflect what the plugin SHOULD be after a successful deploy.
+
+    ``min_auto_deploy_plugin_version`` is the server-side floor below
+    which plugins must NOT auto-upgrade (matches
+    ``MIN_AUTO_DEPLOY_PLUGIN_VERSION`` enforced in /fleet/heartbeat).
+    Surfaced here so the plugin can read the current floor without a
+    second round trip.
 
     Auth: unauthenticated (mirrors ``/plugin-source`` and
     ``/plugin-source-hash``); the plugin uses this on the update path
@@ -196,6 +205,7 @@ async def plugin_manifest():
         "src_files": present_src,
         "root_files": present_root,
         "content_hash": content_hash,
+        "min_auto_deploy_plugin_version": MIN_AUTO_DEPLOY_PLUGIN_VERSION,
     }
 
 

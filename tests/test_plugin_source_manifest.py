@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 
 
+from core_api.routes import fleet as fleet_mod
 from core_api.routes import plugin as plugin_mod
 
 
@@ -163,6 +164,13 @@ async def test_plugin_manifest_endpoint_shape_and_contents(client):
         and isinstance(data["content_hash"], str)
         and len(data["content_hash"]) == 64  # sha256 hex
     )
+    # ``min_auto_deploy_plugin_version`` lets the plugin client know the
+    # server-side floor for auto-upgrade decisions without a second
+    # round trip. Must mirror ``fleet.MIN_AUTO_DEPLOY_PLUGIN_VERSION``
+    # exactly — drift would defeat the whole point of surfacing it here.
+    assert "min_auto_deploy_plugin_version" in data
+    assert data["min_auto_deploy_plugin_version"] == fleet_mod.MIN_AUTO_DEPLOY_PLUGIN_VERSION
+    assert isinstance(data["min_auto_deploy_plugin_version"], str)
 
     # The src_files list MUST equal the in-process list — that's the
     # whole point of having a manifest endpoint. If they drift we
