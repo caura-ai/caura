@@ -24,6 +24,7 @@ from sqlalchemy import and_, case, delete, false, func, literal_column, or_, sel
 from sqlalchemy import update as sql_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import load_only
 
 from common.constants import (
     CONTRADICTION_CANDIDATE_MAX,
@@ -2402,9 +2403,27 @@ class PostgresService:
         tenant_id: str,
         fleet_id: str | None = None,
     ) -> tuple[list[Entity], list[Relation]]:
-        """Return all entities and relations for a tenant (optionally filtered by fleet)."""
+        """Return all entities and relations for a tenant (optionally filtered by fleet).
+
+        Skips the heavy ``name_embedding`` (pgvector) and ``search_vector`` (TSVECTOR)
+        columns — the graph view doesn't need them, and loading + serialising them
+        dominates the response time for tenants with many entities.
+        """
         async with get_session() as session:
-            entity_stmt = select(Entity).where(Entity.tenant_id == tenant_id)
+            entity_stmt = (
+                select(Entity)
+                .options(
+                    load_only(
+                        Entity.id,
+                        Entity.tenant_id,
+                        Entity.fleet_id,
+                        Entity.entity_type,
+                        Entity.canonical_name,
+                        Entity.attributes,
+                    )
+                )
+                .where(Entity.tenant_id == tenant_id)
+            )
             if fleet_id:
                 entity_stmt = entity_stmt.where(or_(Entity.fleet_id == fleet_id, Entity.fleet_id.is_(None)))
             entities_result = await session.execute(entity_stmt)

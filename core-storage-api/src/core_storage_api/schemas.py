@@ -89,8 +89,6 @@ ENTITY_FIELDS: list[str] = [
     "canonical_name",
     "entity_type",
     "attributes",
-    "name_embedding",
-    "search_vector",
 ]
 
 RELATION_FIELDS: list[str] = [
