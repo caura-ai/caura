@@ -82,6 +82,42 @@ class TestHealth:
         resp = await client.get(f"{PREFIX}/healthz")
         assert resp.status_code == 200
 
+    async def test_debug_pg_locks_returns_shape(self, client: AsyncClient) -> None:
+        """GET /_debug/pg_locks returns the expected snapshot shape.
+
+        CAURA-686: the endpoint is wired up and runs the
+        ``pg_stat_activity`` + ``pg_blocking_pids`` snapshot against
+        the test DB without raising. ``rows`` may be empty when no
+        contention is happening (the normal case during a unit
+        test); the contract pinned here is the response shape,
+        not the row count.
+        """
+        resp = await client.get(f"{PREFIX}/_debug/pg_locks")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "captured_at" in body
+        assert "pg_read_all_stats" in body
+        # Direct ``pg_has_role`` privilege check — always boolean,
+        # independent of whether contention is present.
+        assert isinstance(body["pg_read_all_stats"], bool)
+        assert "rows" in body
+        assert isinstance(body["rows"], list)
+        # If any rows DO appear (e.g., the test's own connections),
+        # they must carry the documented field surface so callers
+        # (loadtest poller, operator triage) can rely on it.
+        for row in body["rows"]:
+            for key in (
+                "pid",
+                "wait_event_type",
+                "wait_event",
+                "xact_age_sec",
+                "query_age_sec",
+                "query",
+                "blocked_by_pids",
+                "blocked_by_n",
+            ):
+                assert key in row, f"missing field {key!r}; row={row!r}"
+
 
 # =====================================================================
 # Memories
@@ -635,9 +671,7 @@ class TestMemories:
         query_embedding = fake_embedding(f"q-{keyword}")
 
         # NULL-embedding row with an FTS-matching keyword.
-        payload = _memory_payload(
-            tenant_id, fleet_id, content=f"urgent dispatch {keyword} body details"
-        )
+        payload = _memory_payload(tenant_id, fleet_id, content=f"urgent dispatch {keyword} body details")
         payload["embedding"] = None
         resp = await client.post(f"{PREFIX}/memories", json=payload)
         assert resp.status_code == 200, resp.text
@@ -725,9 +759,7 @@ class TestMemories:
         # tenant_count delta is loose — fixture may already contribute the tenant.
         assert after_write == before_total + 2
         assert after_agents == before_agents + 1
-        assert (
-            await client.get(f"{PREFIX}/memories/distinct-tenants")
-        ).json()["count"] >= before_tenants
+        assert (await client.get(f"{PREFIX}/memories/distinct-tenants")).json()["count"] >= before_tenants
 
         # Soft-delete both. ``deleted_at`` is set; ``status`` flips to ``"deleted"``.
         assert (await client.delete(f"{PREFIX}/memories/{m1['id']}")).status_code == 200
@@ -1487,9 +1519,7 @@ class TestKeystones:
             params={"tenant_id": tenant_id, "fleet_id": fleet_id},
         )
         assert resp2.status_code == 200
-        scopes_no_agent = {
-            r["data"]["scope"] for r in resp2.json() if r["doc_id"] in created_doc_ids
-        }
+        scopes_no_agent = {r["data"]["scope"] for r in resp2.json() if r["doc_id"] in created_doc_ids}
         assert "agent" not in scopes_no_agent
 
     async def test_validation_rejects_bad_scope(

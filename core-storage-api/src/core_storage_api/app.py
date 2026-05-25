@@ -28,6 +28,7 @@ from core_storage_api.middleware import RejectWritesOnReaderMiddleware
 from core_storage_api.routers import (
     agents_router,
     audit_router,
+    debug_router,
     documents_router,
     entities_router,
     fleet_router,
@@ -119,6 +120,11 @@ def create_app() -> FastAPI:
     app.include_router(tasks_router, prefix=prefix)
     app.include_router(idempotency_router, prefix=prefix)
     app.include_router(lifecycle_audit_router, prefix=prefix)
+    # CAURA-686: ``GET /api/v1/storage/_debug/pg_locks`` for live
+    # pg_locks / pg_stat_activity snapshots during contention triage.
+    # Behind the same private-VPC posture as everything else here —
+    # not exposed via the gateway.
+    app.include_router(debug_router, prefix=prefix)
 
     return app
 
