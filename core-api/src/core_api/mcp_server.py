@@ -190,17 +190,24 @@ class MCPAuthMiddleware:
             # for credentials authorized to read beyond their home tenant
             # (cross-tenant agent keys). Absent / empty headers leave the
             # context vars at their single-tenant defaults.
+            # Always reset both context vars at the start of every request,
+            # not just when the header is present. ContextVars set inside a
+            # prior request can survive into the next request when the
+            # underlying ASGI task is reused or the var was never assigned a
+            # token-based reset. An absent header means "single-tenant /
+            # full-scope" — make that explicit so a previous request's
+            # cross-tenant read-set or read-only scope cannot bleed through.
             readable_header = headers.get(b"x-readable-tenant-ids", b"").decode()
-            if readable_header:
-                _readable_tenant_ids_var.set([t.strip() for t in readable_header.split(",") if t.strip()])
+            _readable_tenant_ids_var.set(
+                [t.strip() for t in readable_header.split(",") if t.strip()] if readable_header else None
+            )
             # X-Capabilities is canonical from the unified auth-api;
             # X-Key-Scopes is accepted as a back-compat alias during
             # the gateway rollout window.
             caps_header = (
                 headers.get(b"x-capabilities", b"").decode() or headers.get(b"x-key-scopes", b"").decode()
             )
-            if caps_header:
-                _scopes_var.set({s.strip() for s in caps_header.split(",") if s.strip()})
+            _scopes_var.set({s.strip() for s in caps_header.split(",") if s.strip()} if caps_header else None)
 
         await self.app(scope, receive, send)
 
@@ -288,6 +295,33 @@ def _check_auth() -> CallToolResult | None:
     if tid in (_ADMIN, _NO_AUTH):
         return _ADMIN_ERROR
     return None
+
+
+_READ_ONLY_ERROR = _as_error_result(
+    _error_response(
+        "FORBIDDEN",
+        "This credential is scope-limited to read operations. "
+        "Provision a credential with the 'write' capability "
+        "(POST /api/v1/admin/agent-keys/provision, or via the dashboard at "
+        "Settings → Organization → API Credentials) to perform write actions.",
+    )
+)
+
+
+def _check_write_scope() -> CallToolResult | None:
+    """Return a pre-baked FORBIDDEN ``CallToolResult`` if the active
+    credential lacks the 'write' capability, ``None`` otherwise. Mirrors
+    ``_check_auth()`` so write tools can guard themselves with:
+
+        if err := _check_write_scope(): return err
+
+    A ``None`` scope set means "legacy / full-scope key" and is allowed
+    (back-compat for credentials minted before scopes existed). Only an
+    explicitly-set scope set without 'write' triggers the block.
+    """
+    if _is_write_allowed():
+        return None
+    return _READ_ONLY_ERROR
 
 
 @contextlib.asynccontextmanager
@@ -508,6 +542,8 @@ async def memclaw_write(
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
+    if err := _check_write_scope():
+        return err
     if (content is None) == (items is None):
         return _with_latency(
             json.dumps(
@@ -669,6 +705,10 @@ async def memclaw_manage(
             ),
             t0,
         )
+    # Mutating ops gated by the credential scope set; read/lineage stay open
+    # to read-only keys.
+    if op in {"update", "transition", "delete", "bulk_delete"} and (err := _check_write_scope()):
+        return err
     # bulk_delete uses memory_ids (list); all other ops use memory_id (single UUID).
     # Validate accordingly so a missing memory_id on bulk_delete doesn't fail with
     # a misleading "Invalid UUID" error.
@@ -918,6 +958,8 @@ async def memclaw_tune(
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
+    if err := _check_write_scope():
+        return err
     tenant_id = _get_tenant()
     agent_id = _get_agent_id() or agent_id
 
@@ -1022,6 +1064,10 @@ async def memclaw_doc(
     # strategy; supply collection to scope the search to just one).
     if op not in {"list_collections", "search"} and not collection:
         return _with_latency(_error_response("INVALID_ARGUMENTS", f"op={op} requires 'collection'."), t0)
+    # Write/delete are gated by the credential scope set; read/query/list/search
+    # remain available to read-only keys.
+    if op in {"write", "delete"} and (err := _check_write_scope()):
+        return err
     tenant_id = _get_tenant()
     agent_id = _get_agent_id() or agent_id
     # Refuse the default identity for write ops on the gateway path; read-only
@@ -1683,6 +1729,8 @@ async def memclaw_evolve(
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
+    if err := _check_write_scope():
+        return err
     tenant_id = _get_tenant()
     agent_id = _get_agent_id() or agent_id
 
@@ -1877,6 +1925,8 @@ async def memclaw_keystones_set(
     """
     t0 = time.perf_counter()
     if err := _check_auth():
+        return err
+    if err := _check_write_scope():
         return err
     if op not in {"set", "delete"}:
         return _with_latency(
