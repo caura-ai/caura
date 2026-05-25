@@ -743,6 +743,26 @@ class CoreStorageClient:
     async def batch_update_status(self, data: dict) -> dict:
         return await self._post("/memories/batch-update-status", data)  # type: ignore[return-value]
 
+    async def bulk_get_memories(
+        self,
+        ids: list[str],
+        tenant_id: str | None = None,
+    ) -> list[dict | None]:
+        """Fetch many memories in one round-trip; order matches input ``ids``.
+
+        Missing rows (deleted, nonexistent, or — when ``tenant_id`` is
+        provided — cross-tenant) come back as ``None`` in the same slot
+        rather than being dropped from the list. Lets callers zip the
+        response back to their original id list. Capped at 1000 ids
+        server-side; callers needing more must chunk client-side.
+        """
+        payload: dict[str, Any] = {"ids": ids}
+        if tenant_id is not None:
+            payload["tenant_id"] = tenant_id
+        return await self._post(  # type: ignore[return-value]
+            "/memories/bulk-get", payload, read=True
+        )
+
     # =====================================================================
     # Entities
     # =====================================================================
@@ -790,6 +810,37 @@ class CoreStorageClient:
         return await self._post(  # type: ignore[return-value]
             "/entities/embedding-similarity",
             payload,
+        )
+
+    async def bulk_upsert_entities(self, items: list[dict]) -> list[dict]:
+        """Apply many entity create / update operations in one round-trip.
+
+        Companion to ``bulk_resolve_entities``. Per-item shape and
+        response semantics documented at ``/entities/bulk-upsert``.
+        """
+        return await self._post(  # type: ignore[return-value]
+            "/entities/bulk-upsert", {"items": items}
+        )
+
+    async def bulk_resolve_entities(
+        self,
+        tenant_id: str,
+        items: list[dict],
+        threshold: float,
+        candidate_limit: int = 3,
+    ) -> list[dict | None]:
+        """Resolve many entities in one round-trip. See
+        ``/entities/bulk-resolve`` for the per-item payload + response
+        shape. The caller computes attribute merges from the response
+        and follows up with ``bulk_upsert_entities``."""
+        payload: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "items": items,
+            "threshold": threshold,
+            "candidate_limit": candidate_limit,
+        }
+        return await self._post(  # type: ignore[return-value]
+            "/entities/bulk-resolve", payload, read=True
         )
 
     async def fts_search_entities(self, data: dict) -> list[str]:
@@ -862,6 +913,18 @@ class CoreStorageClient:
 
     async def create_entity_link(self, data: dict) -> dict:
         return await self._post("/entities/links", data)  # type: ignore[return-value]
+
+    async def bulk_upsert_entity_links(self, items: list[dict]) -> list[dict]:
+        """Idempotently create many memory→entity links in one round-trip.
+
+        Per-item: ``{"input_idx", "memory_id", "entity_id", "role"}``.
+        Response aligned to input with ``{"input_idx", "memory_id",
+        "entity_id", "role", "created": bool}``. ``created=False`` means
+        the link already existed (its prior role preserved).
+        """
+        return await self._post(  # type: ignore[return-value]
+            "/entities/links/bulk", {"items": items}
+        )
 
     async def get_memory_ids_by_entity_ids(
         self,

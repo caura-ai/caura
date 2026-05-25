@@ -301,6 +301,55 @@ async def find_duplicate_hash(
     return {"memory_id": str(dup_id)}
 
 
+@router.post("/bulk-get")
+async def bulk_get_memories(request: Request) -> list[dict | None]:
+    """Fetch many memories by id in a single round-trip.
+
+    Body: ``{"ids": ["uuid", ...], "tenant_id": "..." (optional)}``.
+
+    Returns a list of memory dicts in the **same order** as the input ids,
+    with ``null`` for ids that don't exist (or are soft-deleted, or — if
+    ``tenant_id`` is provided — belong to a different tenant). Order
+    preservation matters: callers (e.g. crystallizer archive sweep) zip
+    the response back to their original id list.
+
+    Tenant filter is optional to mirror the single-row ``GET /memories/{id}``
+    contract. Callers that need tenant safety supply ``tenant_id``; the
+    request fails open per-row (returns ``null``) when an id belongs to a
+    different tenant, never with a 4xx.
+
+    Cap: 1000 ids per request to bound query plan size and response payload.
+    """
+    body: dict = await request.json()
+    raw_ids = body.get("ids", [])
+    if not isinstance(raw_ids, list):
+        raise HTTPException(status_code=422, detail="'ids' must be a list")
+    if len(raw_ids) > 1000:
+        raise HTTPException(
+            status_code=422,
+            detail=f"bulk-get capped at 1000 ids (got {len(raw_ids)})",
+        )
+    if not raw_ids:
+        return []
+
+    try:
+        uids = [UUID(i) for i in raw_ids]
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=422, detail=f"invalid UUID in ids: {e}")
+
+    tenant_filter = body.get("tenant_id")
+    by_id = await _svc.memory_get_memories_by_ids(uids)
+
+    out: list[dict | None] = []
+    for uid in uids:
+        mem = by_id.get(uid)
+        if mem is None or (tenant_filter is not None and mem.tenant_id != tenant_filter):
+            out.append(None)
+        else:
+            out.append(orm_to_dict(mem, MEMORY_FIELDS))
+    return out
+
+
 @router.post("/bulk-by-content-hashes")
 async def bulk_find_by_content_hashes(request: Request) -> dict:
     """Wire format: ``{content_hash: {id, client_request_id}}``.
@@ -401,10 +450,73 @@ async def get_entity_links_for_memories(request: Request) -> dict:
 
 @router.post("/batch-update-status")
 async def batch_update_status(request: Request) -> dict:
+    """Apply status (and optional supersedes-id) updates to many memories.
+
+    Per-row payload:
+      - ``memory_id`` (required), ``status`` (required)
+      - ``supersedes_id`` (optional, UUID): set the pointer to this id
+      - ``unset_supersedes`` (optional, bool): clear the pointer; takes
+        precedence over ``supersedes_id`` if both are present
+      - ``expected_supersedes_id`` (optional, UUID): CAS gate — skip the
+        row unless its current ``supersedes_id`` matches this value
+
+    Backward-compatible with the prior 2-field shape — rows containing
+    only ``memory_id`` + ``status`` behave exactly as before.
+
+    Returns ``{"ok": True, "skipped": [memory_id, ...]}`` listing rows
+    that failed the CAS gate (or pointed at a deleted / nonexistent id).
+    Callers that don't use the CAS field can safely ignore ``skipped``.
+    """
     body: dict = await request.json()
+
+    # Two passes: validate everything FIRST, then execute. A malformed
+    # item in the middle of the batch would otherwise commit rows
+    # 0..K-1 before the 422 lands, leaving the caller no receipt of
+    # what got written. The validation pass is O(N) memory + zero DB
+    # work, so the cost is negligible compared to the partial-commit
+    # surprise it prevents.
+    parsed: list[tuple[UUID, str, UUID | None, bool, UUID | None]] = []
     for item in body.get("updates", []):
-        await _svc.memory_update_status(UUID(item["memory_id"]), item["status"])
-    return {"ok": True}
+        try:
+            sup_id = item.get("supersedes_id")
+            exp_sup_id = item.get("expected_supersedes_id")
+            parsed.append(
+                (
+                    UUID(item["memory_id"]),
+                    item["status"],
+                    UUID(sup_id) if sup_id else None,
+                    bool(item.get("unset_supersedes", False)),
+                    UUID(exp_sup_id) if exp_sup_id else None,
+                )
+            )
+        except (ValueError, KeyError) as exc:
+            # ``ValueError`` from ``UUID(...)`` includes the raw input
+            # in its message ("badly formed hexadecimal UUID string: ...")
+            # — surfacing ``exc`` verbatim would echo the offending
+            # value back across the API boundary. Use a generic
+            # field-hint instead.
+            field_hint = "memory_id or status" if isinstance(exc, KeyError) else "a UUID field"
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"invalid update item "
+                    f"(memory_id={item.get('memory_id', '?')!r}): "
+                    f"{type(exc).__name__} in {field_hint}"
+                ),
+            )
+
+    skipped: list[str] = []
+    for mid, new_status, sup_uuid, unset_sup, exp_sup_uuid in parsed:
+        ok = await _svc.memory_update_status(
+            mid,
+            new_status,
+            supersedes_id=sup_uuid,
+            unset_supersedes=unset_sup,
+            expected_supersedes_id=exp_sup_uuid,
+        )
+        if not ok:
+            skipped.append(str(mid))
+    return {"ok": True, "skipped": skipped}
 
 
 # ------------------------------------------------------------------
@@ -825,8 +937,12 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                 )
         return {"ok": True}
 
-    # Set or status-only paths
-    await _svc.memory_update_status(memory_id, status)
+    # Set or status-only paths. ``memory_update_status`` returns False
+    # when the target row doesn't exist (or was already deleted); surface
+    # as 404 so the caller doesn't silently treat a no-op as success.
+    ok = await _svc.memory_update_status(memory_id, status)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"memory {memory_id} not found")
 
     if supersedes_id is not None:
         # Set path: compare-and-swap against NULL — the first detection

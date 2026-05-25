@@ -19,6 +19,32 @@ router = APIRouter(prefix="/entities", tags=["Entities"])
 _svc = PostgresService()
 
 
+def _validate_input_idxs(items: list[dict]) -> None:
+    """Ensure each bulk-endpoint item has a unique, in-range ``input_idx``.
+
+    The two bulk endpoints (``/bulk-upsert``, ``/bulk-resolve``) place
+    their response into ``results[item["input_idx"]]``. An out-of-range
+    ``input_idx`` would crash with IndexError → 500; a duplicate would
+    overwrite an earlier slot and return a list shorter than the input.
+    Validate both up-front so the failure mode is a clear 422 rather
+    than a stack trace.
+    """
+    idxs: set[int] = set()
+    for i, item in enumerate(items):
+        raw = item.get("input_idx")
+        if not isinstance(raw, int) or raw < 0 or raw >= len(items):
+            raise HTTPException(
+                status_code=422,
+                detail=f"item {i}: input_idx must be int in [0, {len(items)})",
+            )
+        if raw in idxs:
+            raise HTTPException(
+                status_code=422,
+                detail=f"item {i}: duplicate input_idx {raw}",
+            )
+        idxs.add(raw)
+
+
 # ------------------------------------------------------------------
 # Entity CRUD (collection-level)
 # ------------------------------------------------------------------
@@ -97,6 +123,172 @@ async def resolve_entity_candidates(request: Request) -> list[dict]:
     return out
 
 
+@router.post("/bulk-upsert")
+async def bulk_upsert_entities(request: Request) -> list[dict]:
+    """Apply many entity create/update operations in one round-trip.
+
+    Companion to ``/entities/bulk-resolve`` — caller takes the resolve
+    output, runs the client-side merge (first-seen-wins canonical,
+    accumulate aliases), then sends the resulting create/update plan
+    here.
+
+    Per-item shape: ``{"input_idx", "action": "create"|"update",
+    "entity_id"?, "tenant_id", "fleet_id", "entity_type",
+    "canonical_name", "attributes", "name_embedding"?}``.
+
+    Response is aligned to input order. ``action`` in the response
+    reflects what actually happened:
+
+    - ``"created"``: INSERT succeeded
+    - ``"updated"``: UPDATE matched
+    - ``"merged"``: INSERT lost a race; the row that won was updated
+      with this caller's attributes (mirrors ``entity_add``'s recovery)
+    - ``"missing"``: UPDATE didn't match (entity_id deleted between
+      resolve and upsert)
+
+    Cap: 500 items per request.
+    """
+    body: dict = await request.json()
+    items = body.get("items", [])
+    if not isinstance(items, list):
+        raise HTTPException(status_code=422, detail="'items' must be a list")
+    if len(items) > 500:
+        raise HTTPException(
+            status_code=422,
+            detail=f"bulk-upsert capped at 500 items (got {len(items)})",
+        )
+    # Validate required per-item fields up-front so a missing key
+    # surfaces as a 422 instead of an uncaught KeyError → 500 inside
+    # the service. ``action`` is checked separately below.
+    _REQUIRED_BASE = {"tenant_id", "entity_type", "canonical_name", "attributes"}
+    for item in items:
+        missing = _REQUIRED_BASE - item.keys()
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"item at input_idx {item.get('input_idx')!r} missing fields: {sorted(missing)}"),
+            )
+    _validate_input_idxs(items)
+    # Validate per-item action + update preconditions up-front. The
+    # service partitions on action ∈ {"create", "update"}; unknown
+    # values would otherwise be silently dropped (response shorter
+    # than input), and a missing entity_id on action="update" would
+    # crash inside the service with a KeyError → 500.
+    for item in items:
+        if item.get("action") not in {"create", "update"}:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"invalid action {item.get('action')!r} at input_idx {item.get('input_idx')!r}"),
+            )
+        if item.get("action") == "update":
+            eid_raw = item.get("entity_id")
+            if not eid_raw:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"action='update' requires 'entity_id' at input_idx {item.get('input_idx')!r}",
+                )
+            # Validate UUID shape at the router boundary — without this
+            # a non-UUID ``entity_id`` would crash inside the service
+            # (``UUID(eid)``) and surface via the generic 500 fallback.
+            try:
+                UUID(eid_raw)
+            except (ValueError, AttributeError):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"invalid entity_id UUID at input_idx {item.get('input_idx')!r}",
+                )
+    try:
+        return await _svc.entity_bulk_upsert(items)
+    except (ValueError, KeyError):
+        # The service no longer raises ValueError for the TOCTOU race
+        # (it reports ``action="missing"`` instead). Any ValueError /
+        # KeyError reaching here is an internal inconsistency, not a
+        # client-resolvable conflict — 500 is the honest status. Use a
+        # generic detail so internals (raw item dicts, traceback bits)
+        # don't leak across the API boundary; the real cause is in the
+        # server logs.
+        raise HTTPException(status_code=500, detail="internal entity upsert error")
+
+
+@router.post("/bulk-resolve")
+async def bulk_resolve_entities(request: Request) -> list[dict | None]:
+    """Resolve many entities in one round-trip using the same precedence
+    as ``entity_service.upsert_entity`` (Phase 1 exact → Phase 2 cosine).
+
+    Body shape::
+
+        {
+          "tenant_id": "...",
+          "threshold": 0.85,                 # required, no server-side default
+          "items": [
+            {"input_idx": 0, "fleet_id": null, "canonical_name": "...",
+             "entity_type": "...", "name_embedding": [...] | null},
+            ...
+          ]
+        }
+
+    Response is a list aligned to ``input_idx``: each element is either
+    ``null`` (no match) or ``{"entity_id", "canonical_name", "attributes",
+    "matched_by": "exact" | "similarity", "similarity": float}``. Callers
+    use the ``matched_by`` field to decide whether to take the update path
+    (with client-side attribute merge) or the create path in a follow-up
+    ``/entities/bulk-upsert`` call.
+
+    Cap: 500 items per request. Bigger batches risk pushing the Phase 1
+    OR-of-ANDs plan into a seq scan; chunk client-side if you need more.
+    """
+    body: dict = await request.json()
+    items = body.get("items", [])
+    if not isinstance(items, list):
+        raise HTTPException(status_code=422, detail="'items' must be a list")
+    if len(items) > 500:
+        raise HTTPException(
+            status_code=422,
+            detail=f"bulk-resolve capped at 500 items (got {len(items)})",
+        )
+    if "tenant_id" not in body:
+        raise HTTPException(status_code=422, detail="'tenant_id' is required")
+    if "threshold" not in body:
+        raise HTTPException(status_code=422, detail="'threshold' is required")
+    # Validate required per-item fields up-front so a missing key
+    # surfaces as a 422 instead of an uncaught KeyError inside the
+    # service. ``name_embedding`` is optional (skips Phase 2).
+    _REQUIRED_RESOLVE = {"canonical_name", "entity_type"}
+    for item in items:
+        missing = _REQUIRED_RESOLVE - item.keys()
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"item at input_idx {item.get('input_idx')!r} missing fields: {sorted(missing)}"),
+            )
+    _validate_input_idxs(items)
+
+    # Numeric coercion before the service call so a non-numeric value
+    # from the client surfaces as a 422 rather than an uncaught
+    # ValueError/TypeError → 500.
+    try:
+        threshold = float(body["threshold"])
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail=f"'threshold' must be numeric (got {body['threshold']!r})",
+        )
+    try:
+        candidate_limit = int(body.get("candidate_limit", 3))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail=f"'candidate_limit' must be int (got {body.get('candidate_limit')!r})",
+        )
+
+    return await _svc.entity_bulk_resolve(
+        tenant_id=body["tenant_id"],
+        items=items,
+        threshold=threshold,
+        candidate_limit=candidate_limit,
+    )
+
+
 # ------------------------------------------------------------------
 # Graph
 # ------------------------------------------------------------------
@@ -170,6 +362,55 @@ async def create_memory_entity_link(request: Request) -> dict:
     body: dict = await request.json()
     link = await _svc.entity_add_entity_link(body)
     return orm_to_dict(link, MEMORY_ENTITY_LINK_FIELDS)
+
+
+@router.post("/links/bulk")
+async def bulk_upsert_memory_entity_links(request: Request) -> list[dict]:
+    """Idempotently create many memory→entity links in one round-trip.
+
+    Body: ``{"items": [{"input_idx", "memory_id", "entity_id", "role"}, ...]}``.
+    Response is aligned to input order with ``{"input_idx", "memory_id",
+    "entity_id", "role", "created": bool}`` — ``created=False`` means a
+    row with the same ``(memory_id, entity_id)`` PK already existed and
+    its prior ``role`` is preserved (matches today's find-then-create
+    flow which never overwrites role).
+
+    Cap: 500 items per request.
+    """
+    body: dict = await request.json()
+    items = body.get("items", [])
+    if not isinstance(items, list):
+        raise HTTPException(status_code=422, detail="'items' must be a list")
+    if len(items) > 500:
+        raise HTTPException(
+            status_code=422,
+            detail=f"bulk-links capped at 500 items (got {len(items)})",
+        )
+    # Validate required per-item fields up-front so a missing key
+    # surfaces as a 422 instead of an uncaught KeyError inside the
+    # service.
+    _REQUIRED_LINK = {"memory_id", "entity_id", "role"}
+    for item in items:
+        missing = _REQUIRED_LINK - item.keys()
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"item at input_idx {item.get('input_idx')!r} missing fields: {sorted(missing)}"),
+            )
+    # UUID shape validation at the router boundary — without this a
+    # malformed ``memory_id`` / ``entity_id`` would crash inside the
+    # service's ``UUID(...)`` call and surface as an uncaught 500.
+    for item in items:
+        for field in ("memory_id", "entity_id"):
+            try:
+                UUID(item[field])
+            except (ValueError, AttributeError):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"invalid {field} UUID at input_idx {item.get('input_idx')!r}",
+                )
+    _validate_input_idxs(items)
+    return await _svc.entity_bulk_upsert_links(items)
 
 
 @router.get("/links/find")

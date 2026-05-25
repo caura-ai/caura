@@ -20,9 +20,10 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, case, delete, false, func, literal_column, or_, select, text
+from sqlalchemy import and_, case, delete, false, func, literal_column, or_, select, text, tuple_
 from sqlalchemy import update as sql_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import load_only
 
@@ -470,9 +471,48 @@ class PostgresService:
                 )
         return True
 
-    async def memory_update_status(self, memory_id: UUID, status: str) -> None:
+    async def memory_update_status(
+        self,
+        memory_id: UUID,
+        status: str,
+        *,
+        supersedes_id: UUID | None = None,
+        unset_supersedes: bool = False,
+        expected_supersedes_id: UUID | None = None,
+    ) -> bool:
+        """Update a memory's ``status`` and optionally (re)set ``supersedes_id``.
+
+        Args:
+            memory_id: Target row.
+            status: New status value.
+            supersedes_id: If provided, set ``supersedes_id`` to this UUID.
+                Ignored when ``unset_supersedes`` is True.
+            unset_supersedes: If True, clear ``supersedes_id`` to NULL.
+                Takes precedence over ``supersedes_id``.
+            expected_supersedes_id: Optional CAS gate — only update if the
+                row's current ``supersedes_id`` matches this value. Used by
+                the contradiction-retraction path so a concurrent writer
+                that already cleared / changed the pointer doesn't get
+                clobbered.
+
+        Returns:
+            True if the row was updated, False if the ``expected_supersedes_id``
+            CAS check failed (or the row id doesn't exist). Existing callers
+            ignore the return value — adding it is backward-compatible.
+        """
+        values: dict[str, Any] = {"status": status}
+        if unset_supersedes:
+            values["supersedes_id"] = None
+        elif supersedes_id is not None:
+            values["supersedes_id"] = supersedes_id
+
         async with get_session() as session:
-            await session.execute(sql_update(Memory).where(Memory.id == memory_id).values(status=status))
+            stmt = sql_update(Memory).where(Memory.id == memory_id)
+            if expected_supersedes_id is not None:
+                stmt = stmt.where(Memory.supersedes_id == expected_supersedes_id)
+            stmt = stmt.values(**values)
+            result = await session.execute(stmt)
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
 
     async def memory_update_embedding(
         self,
@@ -2062,7 +2102,10 @@ class PostgresService:
                 Entity.entity_type == entity_type,
                 Entity.canonical_name == canonical_name,
             )
-            if fleet_id:
+            # ``is not None`` rather than truthy so an empty-string
+            # ``fleet_id`` matches an empty-string column value instead
+            # of silently routing to the IS NULL branch.
+            if fleet_id is not None:
                 stmt = stmt.where(Entity.fleet_id == fleet_id)
             else:
                 stmt = stmt.where(Entity.fleet_id.is_(None))
@@ -2095,13 +2138,331 @@ class PostgresService:
                 .order_by(distance)
                 .limit(limit)
             )
-            if fleet_id:
+            # ``is not None`` rather than truthy so an empty-string
+            # ``fleet_id`` matches an empty-string column value instead
+            # of silently routing to the IS NULL branch.
+            if fleet_id is not None:
                 stmt = stmt.where(Entity.fleet_id == fleet_id)
             else:
                 stmt = stmt.where(Entity.fleet_id.is_(None))
 
             result = await session.execute(stmt)
             return list(result.all())  # type: ignore[arg-type]
+
+    async def entity_bulk_resolve(
+        self,
+        tenant_id: str,
+        items: list[dict],
+        threshold: float,
+        candidate_limit: int = ENTITY_RESOLUTION_CANDIDATE_LIMIT,
+    ) -> list[dict | None]:
+        """Bulk version of the two-phase resolution in entity_service.upsert_entity.
+
+        Replicates the same precedence — Phase 1 exact match by
+        ``(tenant_id, fleet_id, canonical_name, entity_type)``; Phase 2
+        embedding cosine similarity (top-N by distance, first ≥ threshold
+        wins) — but in one round-trip and one DB connection. Phase 1 is
+        a single batched SELECT keyed by row tuple; Phase 2 issues one
+        similarity SELECT per unresolved item with a non-null embedding,
+        all sharing the same session.
+
+        Each input item: ``{"input_idx": int, "fleet_id": str|None,
+        "canonical_name": str, "entity_type": str, "name_embedding":
+        list[float]|None}``. Returns a list aligned to input order where
+        each element is either ``None`` (no match) or
+        ``{"entity_id", "canonical_name", "attributes", "matched_by",
+        "similarity"}`` — ``matched_by`` ∈ {"exact", "similarity"}.
+
+        Threshold is required, not defaulted — the resolution rule lives
+        in the core-api layer; the storage service is the executor.
+        """
+        if not items:
+            return []
+
+        out: list[dict | None] = [None] * len(items)
+
+        async with get_read_session() as session:
+            # Phase 1: one batched SELECT keyed by row tuple. We can't
+            # use SQL VALUES/JOIN here because (canonical_name, entity_type,
+            # fleet_id) includes a nullable column, so build an OR-of-ANDs
+            # of the input tuples. Single round-trip, single plan.
+
+            # Group items by their (canonical_name, entity_type, fleet_id)
+            # so a duplicate tuple in the input batch only triggers one
+            # comparison; map back to input idxs at the end.
+            tuple_to_idxs: dict[tuple[str, str, str | None], list[int]] = {}
+            for it in items:
+                key = (
+                    it["canonical_name"],
+                    it["entity_type"],
+                    it.get("fleet_id"),
+                )
+                tuple_to_idxs.setdefault(key, []).append(it["input_idx"])
+
+            # SQLAlchemy ``tuple_(...).in_(...)`` doesn't honor NULL
+            # equality, so split into the with-fleet and no-fleet halves.
+            with_fleet = [k for k in tuple_to_idxs if k[2] is not None]
+            no_fleet = [k for k in tuple_to_idxs if k[2] is None]
+
+            exact_rows: list[Entity] = []
+            if with_fleet:
+                stmt = select(Entity).where(
+                    Entity.tenant_id == tenant_id,
+                    tuple_(Entity.canonical_name, Entity.entity_type, Entity.fleet_id).in_(with_fleet),
+                )
+                exact_rows.extend((await session.execute(stmt)).scalars().all())
+            if no_fleet:
+                stmt = select(Entity).where(
+                    Entity.tenant_id == tenant_id,
+                    Entity.fleet_id.is_(None),
+                    tuple_(Entity.canonical_name, Entity.entity_type).in_([(k[0], k[1]) for k in no_fleet]),
+                )
+                exact_rows.extend((await session.execute(stmt)).scalars().all())
+
+            matched_idxs: set[int] = set()
+            for row in exact_rows:
+                key = (row.canonical_name, row.entity_type, row.fleet_id)
+                for idx in tuple_to_idxs.get(key, []):
+                    out[idx] = {
+                        "entity_id": str(row.id),
+                        "canonical_name": row.canonical_name,
+                        "attributes": row.attributes or {},
+                        "matched_by": "exact",
+                        "similarity": 1.0,
+                    }
+                    matched_idxs.add(idx)
+
+            # Phase 2: per-unmatched-item similarity SELECT, all in this
+            # session. N queries one HTTP — the win is HTTP-roundtrip
+            # elimination, not query count. Items without a name_embedding
+            # skip Phase 2 (mirrors ``entity_service.upsert_entity`` line 46).
+            for it in items:
+                idx = it["input_idx"]
+                if idx in matched_idxs:
+                    continue
+                emb = it.get("name_embedding")
+                if emb is None:
+                    continue
+                distance = Entity.name_embedding.cosine_distance(emb)
+                sim_col = (1.0 - distance).label("similarity")
+                stmt = (
+                    select(Entity, sim_col)
+                    .where(
+                        Entity.tenant_id == tenant_id,
+                        Entity.entity_type == it["entity_type"],
+                        Entity.name_embedding.isnot(None),
+                    )
+                    .order_by(distance)
+                    .limit(candidate_limit)
+                )
+                # Mirror Phase 1's None-vs-value semantics so an empty-
+                # string ``fleet_id`` doesn't silently route to IS NULL.
+                if it.get("fleet_id") is not None:
+                    stmt = stmt.where(Entity.fleet_id == it["fleet_id"])
+                else:
+                    stmt = stmt.where(Entity.fleet_id.is_(None))
+
+                rows = (await session.execute(stmt)).all()
+                for entity, sim in rows:
+                    if float(sim) >= threshold:
+                        out[idx] = {
+                            "entity_id": str(entity.id),
+                            "canonical_name": entity.canonical_name,
+                            "attributes": entity.attributes or {},
+                            "matched_by": "similarity",
+                            "similarity": float(sim),
+                        }
+                        break
+
+        return out
+
+    async def entity_bulk_upsert(self, items: list[dict]) -> list[dict]:
+        """Apply many entity create / update operations in one round-trip.
+
+        Each input item:
+          - ``input_idx``: int (preserved in response)
+          - ``action``: "create" | "update"
+          - ``entity_id``: UUID (required when action="update")
+          - ``tenant_id``, ``fleet_id``, ``entity_type``, ``canonical_name``,
+            ``attributes`` (dict), ``name_embedding`` (list[float] | None)
+
+        Returns aligned list: ``{"input_idx", "entity_id", "action"}``.
+        ``action`` in the response reflects what actually happened:
+        ``"created"`` (INSERT succeeded), ``"updated"`` (UPDATE matched),
+        or ``"merged"`` (INSERT race lost → ON CONFLICT DO UPDATE picked
+        up the prior row; same outcome as today's IntegrityError recovery
+        in ``entity_add``).
+
+        Caller pre-computed the merged attributes from ``bulk_resolve_entities``
+        output — server side does not re-merge. Concurrent writers between
+        resolve and upsert have the same lost-update window as today's
+        serial path (find_exact → update_entity); see crystallizer
+        cluster-locking notes for the full race story.
+        """
+        if not items:
+            return []
+
+        # Partition by action; updates and creates each use a per-item
+        # session (for FK-error isolation — a constraint error on item
+        # N must not roll back items 0..N-1). Per-row sessions for both
+        # paths cost connection pool checkouts but stay within one HTTP
+        # — same big win.
+        results: list[dict | None] = [None] * len(items)
+
+        updates = [it for it in items if it["action"] == "update"]
+        creates = [it for it in items if it["action"] == "create"]
+
+        # Per-item sessions so a constraint error on item N doesn't roll
+        # back items 0..N-1. The HTTP-roundtrip win is what matters; per-
+        # item session checkout cost is negligible.
+        for item in updates:
+            eid = item["entity_id"]
+            if not isinstance(eid, UUID):
+                eid = UUID(eid)
+            values: dict[str, Any] = {
+                "entity_type": item["entity_type"],
+                "canonical_name": item["canonical_name"],
+                "attributes": item["attributes"],
+            }
+            if item.get("name_embedding") is not None:
+                values["name_embedding"] = item["name_embedding"]
+            async with get_session() as session:
+                # ``tenant_id`` in the WHERE so a cross-tenant ``entity_id``
+                # (caller bug or hostile input) is treated as "missing"
+                # rather than silently updating someone else's row.
+                upd = await session.execute(
+                    sql_update(Entity)
+                    .where(Entity.id == eid, Entity.tenant_id == item["tenant_id"])
+                    .values(**values)
+                )
+                # rowcount==0 means the entity_id no longer exists, was
+                # deleted, or belongs to a different tenant. All three
+                # surface as ``missing`` so the caller can disambiguate
+                # from ``updated``.
+                results[item["input_idx"]] = {
+                    "input_idx": item["input_idx"],
+                    "entity_id": str(eid),
+                    "action": "missing" if (upd.rowcount or 0) == 0 else "updated",  # type: ignore[attr-defined]
+                }
+
+        for item in creates:
+            # The natural-key unique index is functional (``lower(canonical_name)``,
+            # ``COALESCE(fleet_id, '')``), which SQLAlchemy's ON CONFLICT helpers
+            # can't target via the column list, so we use the read-then-write
+            # shape with TOCTOU recovery. The recovery folds SELECT + UPDATE
+            # into one writer session to guarantee read-your-writes against
+            # the row we just collided with.
+
+            # Step 1: was it already there before we tried? Determines the
+            # response ``action`` field even when we win the insert race.
+            existed_before = await self.entity_find_exact(
+                tenant_id=item["tenant_id"],
+                entity_type=item["entity_type"],
+                canonical_name=item["canonical_name"],
+                fleet_id=item.get("fleet_id"),
+            )
+
+            merge_values: dict[str, Any] = {"attributes": item["attributes"]}
+            if item.get("name_embedding") is not None:
+                merge_values["name_embedding"] = item["name_embedding"]
+
+            if existed_before is not None:
+                # Pre-existing → apply caller's merged attributes. If the
+                # row got deleted between our SELECT and UPDATE (a narrow
+                # but real window), ``entity_update`` returns None — surface
+                # as "missing" rather than reporting a "merged" that didn't
+                # actually happen.
+                updated = await self.entity_update(existed_before.id, merge_values)
+                results[item["input_idx"]] = {
+                    "input_idx": item["input_idx"],
+                    "entity_id": str(existed_before.id),
+                    "action": "missing" if updated is None else "merged",
+                }
+                continue
+
+            # Step 2: insert; on IntegrityError another writer raced us
+            # between Step 1 and now. Recover by re-SELECT + UPDATE in
+            # a single writer session — guarantees read-your-writes against
+            # the row we just collided with, and avoids the prior
+            # two-session window where the racing writer could DELETE
+            # between our SELECT and our UPDATE.
+            payload: dict[str, Any] = {
+                "tenant_id": item["tenant_id"],
+                "fleet_id": item.get("fleet_id"),
+                "entity_type": item["entity_type"],
+                "canonical_name": item["canonical_name"],
+                "attributes": item["attributes"],
+            }
+            if item.get("name_embedding") is not None:
+                payload["name_embedding"] = item["name_embedding"]
+
+            try:
+                async with get_session() as session:
+                    new_entity = Entity(**payload)
+                    session.add(new_entity)
+                    await session.flush()
+                    new_id = new_entity.id
+                results[item["input_idx"]] = {
+                    "input_idx": item["input_idx"],
+                    "entity_id": str(new_id),
+                    "action": "created",
+                }
+            except IntegrityError:
+                # TOCTOU recovery — SELECT + UPDATE in one writer session.
+                logger.info(
+                    "Entity bulk-upsert race: '%s' created concurrently, re-selecting",
+                    item["canonical_name"],
+                )
+                async with get_session() as session:
+                    sel = select(Entity).where(
+                        Entity.tenant_id == item["tenant_id"],
+                        Entity.entity_type == item["entity_type"],
+                        func.lower(Entity.canonical_name) == item["canonical_name"].lower(),
+                    )
+                    if item.get("fleet_id") is not None:
+                        sel = sel.where(Entity.fleet_id == item["fleet_id"])
+                    else:
+                        sel = sel.where(Entity.fleet_id.is_(None))
+                    racy_existing = (await session.execute(sel)).scalar_one_or_none()
+
+                    if racy_existing is None:
+                        # The row that conflicted with us was deleted in
+                        # the microseconds between our IntegrityError and
+                        # the recovery SELECT. Surface as "missing"; the
+                        # caller can retry the whole flow if they care.
+                        results[item["input_idx"]] = {
+                            "input_idx": item["input_idx"],
+                            "entity_id": None,
+                            "action": "missing",
+                        }
+                    else:
+                        # Defence-in-depth ``tenant_id`` guard on the
+                        # recovery UPDATE — the SELECT above already
+                        # filters by tenant, but pinning the UPDATE
+                        # WHERE too keeps the invariant local to the
+                        # write statement (a future refactor of the
+                        # SELECT can't accidentally let a cross-tenant
+                        # row slip through).
+                        upd = await session.execute(
+                            sql_update(Entity)
+                            .where(
+                                Entity.id == racy_existing.id,
+                                Entity.tenant_id == item["tenant_id"],
+                            )
+                            .values(**merge_values)
+                        )
+                        # rowcount==0 here means the row was deleted
+                        # between our SELECT and UPDATE inside the SAME
+                        # session — vanishingly unlikely but report
+                        # consistently as "missing".
+                        results[item["input_idx"]] = {
+                            "input_idx": item["input_idx"],
+                            "entity_id": str(racy_existing.id),
+                            "action": "missing" if (upd.rowcount or 0) == 0 else "merged",  # type: ignore[attr-defined]
+                        }
+
+        # All slots filled (we partitioned over all items); filter for mypy.
+        return [r for r in results if r is not None]
 
     async def entity_list(
         self,
@@ -2540,6 +2901,91 @@ class PostgresService:
             session.add(link)
             await session.flush()
             return link
+
+    async def entity_bulk_upsert_links(self, items: list[dict]) -> list[dict]:
+        """Idempotently create many memory→entity links in one statement.
+
+        Each input item: ``{"input_idx", "memory_id", "entity_id", "role"}``.
+        Returns aligned list with ``{"input_idx", "memory_id", "entity_id",
+        "role", "created": bool}``. ``created=False`` means a row with the
+        same composite PK ``(memory_id, entity_id)`` already existed;
+        its ``role`` is preserved (mirrors today's ``find_entity_link``
+        → ``create_entity_link`` flow which skips on a hit).
+
+        Cap enforced at the router level.
+        """
+        if not items:
+            return []
+
+        # Composite PK is (memory_id, entity_id); ``role`` is not part of
+        # the unique key. INSERT ... ON CONFLICT DO UPDATE with the
+        # no-op SET (``role = memory_entity_links.role``) is the standard
+        # trick that lets RETURNING fire on both branches so we can
+        # detect insert-vs-existed via the ``xmax`` system column.
+        #
+        # Per-item sessions: an FK violation (memory_id or entity_id
+        # pointing at a deleted/nonexistent row) on item N would
+        # otherwise roll back items 0..N-1 in a shared transaction.
+        # Keyed by ``input_idx`` rather than (mid, eid) so a caller
+        # accidentally sending the same pair twice doesn't lose the
+        # second slot's result to map overwrite.
+        idx_to_result: dict[int, dict[str, Any]] = {}
+
+        for it in items:
+            mid = it["memory_id"]
+            eid = it["entity_id"]
+            if not isinstance(mid, UUID):
+                mid = UUID(mid)
+            if not isinstance(eid, UUID):
+                eid = UUID(eid)
+            ins_stmt = (
+                pg_insert(MemoryEntityLink)
+                .values(memory_id=mid, entity_id=eid, role=it["role"])
+                .on_conflict_do_update(
+                    index_elements=[
+                        MemoryEntityLink.memory_id,
+                        MemoryEntityLink.entity_id,
+                    ],
+                    set_={"role": MemoryEntityLink.role},
+                )
+                .returning(
+                    MemoryEntityLink.memory_id,
+                    MemoryEntityLink.entity_id,
+                    MemoryEntityLink.role,
+                    literal_column("xmax"),
+                )
+            )
+            try:
+                async with get_session() as session:
+                    row = (await session.execute(ins_stmt)).one()
+                # xmax=0 ⇒ INSERT inserted; non-zero ⇒ existing row hit
+                # by the DO UPDATE no-op.
+                idx_to_result[it["input_idx"]] = {
+                    "input_idx": it["input_idx"],
+                    "memory_id": str(mid),
+                    "entity_id": str(eid),
+                    "role": row[2],
+                    "created": int(row[3]) == 0,
+                }
+            except IntegrityError:
+                # FK violation on memory_id or entity_id — report per-row
+                # so the caller can continue processing the other links
+                # rather than losing the whole batch.
+                logger.warning(
+                    "Entity link bulk-upsert FK violation: memory_id=%s entity_id=%s",
+                    mid,
+                    eid,
+                )
+                idx_to_result[it["input_idx"]] = {
+                    "input_idx": it["input_idx"],
+                    "memory_id": str(mid),
+                    "entity_id": str(eid),
+                    "role": it["role"],
+                    "created": False,
+                    "error": "fk_violation",
+                }
+
+        return [idx_to_result[it["input_idx"]] for it in items]
 
     async def entity_delete_entity_links(
         self,
