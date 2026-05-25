@@ -358,7 +358,7 @@ async def test_doc_write_embedding_provider_failure_aborts(mcp_env, monkeypatch)
         doc_id="d",
         data={"summary": "valid summary string"},
     )
-    assert "embedding provider returned no vector" in strip_latency(out)
+    assert "embedding provider returned no vector" in strip_latency(out).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +476,7 @@ async def test_doc_search_embedding_provider_failure_aborts(mcp_env, monkeypatch
     """Provider failure → no search attempt, caller sees a clear error."""
     monkeypatch.setattr("common.embedding.get_embedding", _async_return(None))
     out = await mcp_server.memclaw_doc(op="search", collection="c", query="anything")
-    assert "embedding provider returned no vector" in strip_latency(out)
+    assert "embedding provider returned no vector" in strip_latency(out).lower()
 
 
 # ---------------------------------------------------------------------------

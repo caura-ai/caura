@@ -63,6 +63,25 @@ jobs:
       - name: Run Ruff formatter check (core-storage-api)
         run: uv run ruff format --check core-storage-api/src/
 
+      - name: Guard against raw-string MCP error returns (audit B4 / CAURA-000 #147)
+        # MCP tool handlers must build error envelopes via ``_error_response(...)``
+        # so ``_with_latency`` can flip ``CallToolResult.isError = True``. Raw
+        # ``"Error: ..."`` / ``"Error (NNN): ..."`` returns slip past the
+        # JSON-shape detector and reach the client as ``isError=False`` —
+        # the exact regression we keep closing. Fail CI if any reappear.
+        run: |
+          # Match both double- and single-quoted forms, with optional f-string
+          # prefix. ``grep -n`` prefixes each hit with ``LINE:`` so the
+          # comment-skip filter anchors on ``^[0-9]+:\s*#``.
+          if grep -nE '[f]?"Error(:| \()' core-api/src/core_api/mcp_server.py | grep -vE '^[0-9]+:\s*#'; then
+            echo "::error::Raw-string MCP error return found (double-quote). Use _error_response(code, message) instead — see tests/test_mcp_iserror_propagation.py."
+            exit 1
+          fi
+          if grep -nE "[f]?'Error(:| \()" core-api/src/core_api/mcp_server.py | grep -vE '^[0-9]+:\s*#'; then
+            echo "::error::Raw-string MCP error return found (single-quote). Use _error_response(code, message) instead — see tests/test_mcp_iserror_propagation.py."
+            exit 1
+          fi
+
       - name: Run mypy (core-api)
         run: cd core-api && uv run mypy src/
 

@@ -94,3 +94,102 @@ async def test_success_path_unchanged(mcp_env, monkeypatch):
     assert isinstance(out, str), f"success path must stay str, got {type(out).__name__}"
     payload = parse_envelope(out)
     assert "error" not in payload
+
+
+# ---------------------------------------------------------------------------
+# Codebase-audit 2026-05-19 finding B4 — 5 raw-string ``"Error: ..."`` returns
+# in ``mcp_server.py`` previously slipped past ``_with_latency``'s JSON-shape
+# detection and reached the MCP client as ``isError=False``. After the fix
+# all 5 sites must produce structured envelopes with ``isError=True``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_b4_manage_update_no_fields_sets_iserror(mcp_env):
+    """``memclaw_manage(op='update')`` with no field args is the
+    ``"Error: No fields to update..."`` site."""
+    out = await mcp_server.memclaw_manage(
+        op="update",
+        memory_id="00000000-0000-0000-0000-000000000001",
+    )
+    assert is_error_envelope(out), f"expected isError=True, got {out!r}"
+    payload = parse_envelope(out)
+    assert payload["error"]["code"] == "INVALID_ARGUMENTS"
+    assert "No fields to update" in payload["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_b4_doc_write_no_embedding_sets_iserror(mcp_env, monkeypatch):
+    """``memclaw_doc(op='write', ...)`` when the embedding provider returns
+    ``None`` is the ``"Error: embedding provider returned no vector ...
+    Write aborted."`` site."""
+    import common.embedding as _emb
+
+    async def _no_vector(_text: str):
+        return None
+
+    monkeypatch.setattr(_emb, "get_embedding", _no_vector)
+    out = await mcp_server.memclaw_doc(
+        op="write",
+        collection="notes",
+        doc_id="d1",
+        data={"summary": "hello"},
+    )
+    assert is_error_envelope(out), f"expected isError=True, got {out!r}"
+    payload = parse_envelope(out)
+    assert payload["error"]["code"] == "UPSTREAM_ERROR"
+    assert "Write aborted" in payload["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_b4_doc_search_no_embedding_sets_iserror(mcp_env, monkeypatch):
+    """``memclaw_doc(op='search', ...)`` when the embedding provider returns
+    ``None`` is the ``"Error: embedding provider returned no vector ...
+    Search aborted."`` site."""
+    import common.embedding as _emb
+
+    async def _no_vector(_text: str):
+        return None
+
+    monkeypatch.setattr(_emb, "get_embedding", _no_vector)
+    out = await mcp_server.memclaw_doc(op="search", query="anything")
+    assert is_error_envelope(out), f"expected isError=True, got {out!r}"
+    payload = parse_envelope(out)
+    assert payload["error"]["code"] == "UPSTREAM_ERROR"
+    assert "Search aborted" in payload["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_b4_insights_unregistered_agent_sets_iserror(mcp_env, monkeypatch):
+    """``memclaw_insights`` with ``_require_trust`` returning ``not_found=True``
+    is one of the two ``"Error (403): Agent ... is not registered"`` sites."""
+
+    async def _not_found(db, tenant_id, agent_id, min_level):
+        return 0, True, None
+
+    monkeypatch.setattr(mcp_server, "_require_trust", _not_found)
+    out = await mcp_server.memclaw_insights(focus="patterns", scope="agent")
+    assert is_error_envelope(out), f"expected isError=True, got {out!r}"
+    payload = parse_envelope(out)
+    assert payload["error"]["code"] == "FORBIDDEN"
+    assert "is not registered" in payload["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_b4_evolve_unregistered_agent_sets_iserror(mcp_env, monkeypatch):
+    """``memclaw_evolve`` with ``_require_trust`` returning ``not_found=True``
+    is the second ``"Error (403): Agent ... is not registered"`` site."""
+
+    async def _not_found(db, tenant_id, agent_id, min_level):
+        return 0, True, None
+
+    monkeypatch.setattr(mcp_server, "_require_trust", _not_found)
+    out = await mcp_server.memclaw_evolve(
+        outcome="shipped a thing",
+        outcome_type="success",
+        scope="agent",
+    )
+    assert is_error_envelope(out), f"expected isError=True, got {out!r}"
+    payload = parse_envelope(out)
+    assert payload["error"]["code"] == "FORBIDDEN"
+    assert "is not registered" in payload["error"]["message"]

@@ -910,7 +910,11 @@ async def memclaw_manage(
                     fields["source_uri"] = source_uri
                 if not fields:
                     return _with_latency(
-                        "Error: No fields to update. Provide at least one field to change.", t0
+                        _error_response(
+                            "INVALID_ARGUMENTS",
+                            "No fields to update. Provide at least one field to change.",
+                        ),
+                        t0,
                     )
                 await check_and_increment(db, tenant_id, "write")
                 result = await update_memory(db, uid, tenant_id, MemoryUpdate(**fields), agent_id=agent_id)
@@ -1145,8 +1149,11 @@ async def memclaw_doc(
                     embedding = await get_embedding(source)
                     if embedding is None:
                         return _with_latency(
-                            "Error: embedding provider returned no vector "
-                            "(check provider config / quota). Write aborted.",
+                            _error_response(
+                                "UPSTREAM_ERROR",
+                                "Embedding provider returned no vector "
+                                "(check provider config / quota). Write aborted.",
+                            ),
                             t0,
                         )
                 # Mirror memclaw_write's agent registration so a doc upsert
@@ -1240,8 +1247,11 @@ async def memclaw_doc(
                 query_embedding = await get_embedding(query)
                 if query_embedding is None:
                     return _with_latency(
-                        "Error: embedding provider returned no vector "
-                        "(check provider config / quota). Search aborted.",
+                        _error_response(
+                            "UPSTREAM_ERROR",
+                            "Embedding provider returned no vector "
+                            "(check provider config / quota). Search aborted.",
+                        ),
                         t0,
                     )
                 capped_top_k = max(1, min(top_k, 50))
@@ -1682,8 +1692,10 @@ async def memclaw_insights(
         _, not_found, terr = await _require_trust(db, tenant_id, agent_id, min_level=min_level)
         if not_found:
             return _with_latency(
-                f"Error (403): Agent '{agent_id}' is not registered. "
-                "Register the agent by writing one memory first.",
+                _error_response(
+                    "FORBIDDEN",
+                    f"Agent '{agent_id}' is not registered. Register the agent by writing one memory first.",
+                ),
                 t0,
             )
         if terr:
@@ -1769,8 +1781,10 @@ async def memclaw_evolve(
         _, not_found, terr = await _require_trust(db, tenant_id, agent_id, min_level=min_level)
         if not_found:
             return _with_latency(
-                f"Error (403): Agent '{agent_id}' is not registered. "
-                "Register the agent by writing one memory first.",
+                _error_response(
+                    "FORBIDDEN",
+                    f"Agent '{agent_id}' is not registered. Register the agent by writing one memory first.",
+                ),
                 t0,
             )
         if terr:
