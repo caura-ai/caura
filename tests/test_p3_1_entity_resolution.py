@@ -100,8 +100,6 @@ class TestUpsertEntityExactMatch:
         mock_sc.find_exact_entity.return_value = existing_dict
         mock_sc.update_entity.return_value = existing_dict
 
-        db = AsyncMock()
-
         with patch(
             "core_api.services.entity_service.get_storage_client",
             return_value=mock_sc,
@@ -109,7 +107,6 @@ class TestUpsertEntityExactMatch:
             from core_api.services.entity_service import upsert_entity
 
             result = await upsert_entity(
-                db,
                 EntityUpsert(
                     tenant_id="t1",
                     entity_type="person",
@@ -142,8 +139,6 @@ class TestUpsertEntityExactMatch:
         mock_sc.find_exact_entity.return_value = None
         mock_sc.create_entity.return_value = created_dict
 
-        db = AsyncMock()
-
         with patch(
             "core_api.services.entity_service.get_storage_client",
             return_value=mock_sc,
@@ -151,7 +146,6 @@ class TestUpsertEntityExactMatch:
             from core_api.services.entity_service import upsert_entity
 
             result = await upsert_entity(
-                db,
                 EntityUpsert(
                     tenant_id="t1",
                     entity_type="person",
@@ -231,7 +225,6 @@ class TestEntityResolutionIntegration:
         from core_api.services.entity_service import upsert_entity
 
         return await upsert_entity(
-            db,
             EntityUpsert(
                 tenant_id=tenant_id,
                 fleet_id=fleet_id,

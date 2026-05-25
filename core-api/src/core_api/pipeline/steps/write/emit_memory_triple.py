@@ -19,10 +19,13 @@ import logging
 import re
 import time
 from typing import Final
+from uuid import UUID
 
 from common.constants import SINGLE_VALUE_PREDICATES
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
+from core_api.schemas import EntityUpsert
+from core_api.services.entity_service import upsert_entity
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +223,134 @@ _PHRASE_TO_PREDICATE: Final[list[tuple[re.Pattern[str], str]]] = [
 
 _LEADING_ARTICLES = re.compile(r"^(the|a|an)\s+", re.IGNORECASE)
 
+# CAURA-127 — identifier-token regex for the bare-POST subject-inference
+# fallback. The regex deliberately matches ONLY identifier-shaped tokens
+# (the audit's gap-A5 failure mode for entity extraction):
+#   - capitalised dash-numeric IDs with minimum 2-letter prefix:
+#     PR-1234, OPS-4521, TOKEN-XYZ
+#   - canonical UUIDs (with hyphens)
+#   - dotted / underscore / hyphenated service names: api.user.create,
+#     user-service-prod, my_module_v2
+#   - "build #4521" / "build-734" style refs
+#   - version strings: ``v``-prefixed short forms (v2.4) or explicit
+#     3-part dotted forms (2.4.0). Bare two-part decimals (0.9, 1.5)
+#     are deliberately excluded — they conflict with common metric
+#     literals ("confidence 0.9", "rating 4.5") and would otherwise
+#     create spurious ``v_score_is`` Entity rows.
+# Proper-noun subjects ("Alice", "Atlas") are explicitly NOT matched —
+# they fall through to ``no_subject`` and stay the domain of the
+# background entity-extraction worker (which can later overwrite our
+# inferred row with the correct ``entity_type``). Picking
+# ``entity_type="identifier"`` on the upsert below matches what entity
+# extraction would emit for these shapes if it ran (per
+# ``entity_extraction.py:20``) so the two routes converge on the same
+# canonical entity row instead of fragmenting.
+_IDENTIFIER_TOKEN = re.compile(
+    # IGNORECASE deliberately OFF — with it, the first alternative
+    # ``[A-Z][A-Z0-9]{1,}-...`` matches any lowercase hyphenated word
+    # (full-stack, long-term, pre-release, …) and turns ordinary English
+    # into spurious identifier entities. Each alternative below already
+    # encodes its case explicitly: uppercase IDs, lowercase dotted
+    # names, ``Build``/``build`` prefix, version strings. The UUID
+    # alternative is case-permissive via the explicit ``[0-9a-fA-F]``
+    # character class so ``DEADBEEF-…`` UUIDs match without re-enabling
+    # global ``re.IGNORECASE`` (which would re-introduce the
+    # full-stack regression). Mixed-case ``Token-XYZ`` is intentionally
+    # excluded — production identifiers should normalise to one case
+    # or the other anyway, and missing this shape is far cheaper than
+    # false-positive entities for every "full-stack".
+    r"("
+    # Trailing-hyphen guard: the suffix must START with an
+    # alphanumeric (``[A-Z0-9]``) so canonical names like
+    # ``TOKEN-XYZ-`` (with trailing dash) can't be captured.
+    r"[A-Z][A-Z0-9]{1,}-[A-Z0-9][A-Z0-9-]*"
+    r"|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"|[a-z][a-z0-9]+(?:[._-][a-z0-9]+){2,}"
+    r"|[Bb]uild[\s-]?#?\d+"
+    r"|v\d+\.\d+(?:\.\d+)?|\d+\.\d+\.\d+"
+    r")\s*$"
+)
+
+# Belt-and-braces stopword set. The ``_IDENTIFIER_TOKEN`` regex
+# already won't match any of these (lowercase pronouns, articles,
+# temporal anchors), but listed explicitly so a future regex
+# loosening doesn't silently start firing on them.
+_SUBJECT_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "it",
+        "this",
+        "that",
+        "these",
+        "those",
+        "they",
+        "them",
+        "he",
+        "she",
+        "we",
+        "i",
+        "you",
+        "there",
+        "here",
+        "everyone",
+        "everything",
+        "someone",
+        "something",
+        "today",
+        "yesterday",
+        "tomorrow",
+        "now",
+        "later",
+        "soon",
+        "q1",
+        "q2",
+        "q3",
+        "q4",
+    }
+)
+
+
+def _infer_subject_token(content: str, match: re.Match[str]) -> str | None:
+    """Pick an identifier-shaped subject anchored at ``match.start()``.
+
+    Returns the trailing identifier token in ``content[:match.start()]``
+    (after stripping leading article + sentence-boundary backtrack),
+    or ``None`` if no identifier-shaped token is present. Skip-on-doubt:
+    proper-noun subjects ("Alice", "Atlas") deliberately return None
+    rather than risk creating a fragmented entity row that would
+    collide with the background entity-extraction worker's later
+    higher-precision output.
+    """
+    # Strip trailing whitespace AND sentence-internal punctuation. The
+    # latter avoids silent skips on content like
+    # ``"TOKEN-XYZ, has release date 2027"`` — without the punctuation
+    # strip, ``head`` becomes ``"TOKEN-XYZ,"`` and ``_IDENTIFIER_TOKEN``'s
+    # ``\s*$`` anchor would fail. Question-mark is intentionally
+    # excluded — questions don't usually anchor business facts and
+    # the sentence-split below handles real ``?`` sentence ends.
+    head = content[: match.start()].rstrip().rstrip(".,;:!")
+    # Trim to the current clause — never grab from a previous sentence.
+    # ``\n`` branch dropped — ``content`` is whitespace-normalised
+    # via ``re.sub(r"\s+", " ", ...)`` at the top of ``execute()``,
+    # so newlines have already collapsed to single spaces by here.
+    head = re.split(r"[.!?]\s+", head)[-1].strip()
+    head = _LEADING_ARTICLES.sub("", head).strip()
+    if not head or head.lower() in _SUBJECT_STOPWORDS:
+        return None
+    m = _IDENTIFIER_TOKEN.search(head)
+    if m is None:
+        return None
+    # ``rstrip("-")`` defends against rare edge cases where a punctuation
+    # strip earlier leaves a trailing dash on what the regex captured
+    # (e.g. ``"TOKEN-XYZ-"`` followed by a comma the punctuation strip
+    # peeled off). Canonical names must not carry a dangling dash.
+    token = m.group(1).strip().rstrip("-")
+    if not token or len(token) > 80 or token.lower() in _SUBJECT_STOPWORDS:
+        return None
+    return token
+
 
 def _normalize_object(raw: str) -> str | None:
     """Trim, strip trailing terminal punctuation, drop leading article. Empty → None."""
@@ -251,23 +382,11 @@ class EmitMemoryTriple:
             return StepResult(outcome=StepOutcome.SKIPPED, detail={"reason": "already_set"})
 
         try:
-            subject_links = [
-                link for link in (data.entity_links or []) if (link.role or "").lower() == "subject"
-            ]
-            if len(subject_links) != 1:
-                return StepResult(
-                    outcome=StepOutcome.SKIPPED,
-                    detail={"reason": "no_subject" if not subject_links else "ambiguous_subject"},
-                )
-            subject_entity_id = subject_links[0].entity_id
-
-            # Normalise whitespace to single ASCII spaces. The score
-            # lookbehinds (``(?<!confidence\s)`` etc.) are fixed-width
-            # at one space character, so content like "confidence
-            # \tscore is 0.9" (tab between words) would otherwise
-            # bypass the lookbehind and incorrectly route to the
-            # bare ``score`` predicate. Done once at the top so all
-            # subsequent regex searches see canonical whitespace.
+            # CAURA-127 — predicate match is sought BEFORE subject
+            # resolution so the heuristic subject-inference fallback
+            # can anchor on ``match.start()``. If no phrase matches we
+            # can short-circuit regardless of whether a subject link
+            # exists.
             content = re.sub(r"\s+", " ", data.content or "")
             matches: list[tuple[re.Match[str], str]] = []
             for pat, predicate in _PHRASE_TO_PREDICATE:
@@ -297,6 +416,17 @@ class EmitMemoryTriple:
             # interstitial words like "is" in the tail and pollute
             # ``object_value``.
             match, predicate = max(matches, key=lambda m_p: m_p[0].end())
+            # ``match`` is the *furthest-right* phrase hit (anchored on
+            # match.end() for clean object extraction). For subject
+            # inference we need the *furthest-left* hit instead — its
+            # ``start()`` is the rightmost boundary BEFORE which the
+            # subject lives. The two diverge only when a predicate is
+            # hit by multiple overlapping phrase rows (e.g.
+            # "has release date is" matches both ``\bhas\s+release
+            # \s+date\b`` and ``\brelease\s+date\s+is\b``); using
+            # ``match`` for subject slicing would cut INTO the
+            # predicate chain and miss the real subject.
+            head_match = min(matches, key=lambda m_p: m_p[0].start())[0]
 
             # Defensive: the allowlist parity test guards this set, but
             # belt-and-braces — never emit a predicate the detector
@@ -305,6 +435,39 @@ class EmitMemoryTriple:
                 return StepResult(
                     outcome=StepOutcome.SKIPPED, detail={"reason": "predicate_not_in_allowlist"}
                 )
+
+            # CAURA-127 — subject resolution. Two paths:
+            #   (a) caller-supplied ``entity_links`` with role="subject"
+            #       — high-trust, no DB hit, used by SDK / MCP callers.
+            #   (b) identifier-token heuristic on ``content[:match.start()]``
+            #       — closes the loadtest's bare-POST shape. Only fires
+            #       for identifier-shaped tokens (gap A5); proper-noun
+            #       subjects skip and stay the entity-extraction
+            #       worker's responsibility.
+            subject_links = [
+                link for link in (data.entity_links or []) if (link.role or "").lower() == "subject"
+            ]
+            if len(subject_links) > 1:
+                return StepResult(
+                    outcome=StepOutcome.SKIPPED,
+                    detail={"reason": "ambiguous_subject"},
+                )
+            # Two-phase subject resolution. Phase A (here): identify
+            # the source — caller-supplied link OR heuristic-inferred
+            # text. Phase B (after all SKIP gates pass): if the source
+            # was the heuristic, do the entity upsert. Splitting these
+            # keeps us from creating orphan Entity rows when a later
+            # gate (object-extraction, predicate-not-in-allowlist)
+            # skips the emission.
+            subject_entity_id: UUID | None
+            inferred: str | None = None
+            if len(subject_links) == 1:
+                subject_entity_id = subject_links[0].entity_id
+            else:
+                inferred = _infer_subject_token(content, head_match)
+                if inferred is None:
+                    return StepResult(outcome=StepOutcome.SKIPPED, detail={"reason": "no_subject"})
+                subject_entity_id = None  # filled by the deferred upsert below.
 
             # Bound the object to the current sentence — without this,
             # a follow-up clause like "Ran lives in NYC. He also …"
@@ -320,6 +483,33 @@ class EmitMemoryTriple:
             object_value = _normalize_object(tail[: sentence_end.start()] if sentence_end else tail)
             if object_value is None:
                 return StepResult(outcome=StepOutcome.SKIPPED, detail={"reason": "object_unparseable"})
+
+            # Phase B — deferred upsert. Only runs if the subject came
+            # from the heuristic AND every downstream gate above passed.
+            # If the upsert raises (transient storage failure, etc.),
+            # SKIP with ``subject_upsert_failed`` — never break the
+            # write pipeline.
+            if inferred is not None and subject_entity_id is None:
+                try:
+                    entity = await upsert_entity(
+                        EntityUpsert(
+                            tenant_id=data.tenant_id,
+                            fleet_id=data.fleet_id,
+                            entity_type="identifier",
+                            canonical_name=inferred,
+                        ),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Subject-inference upsert failed for %r: %s",
+                        inferred,
+                        exc,
+                    )
+                    return StepResult(
+                        outcome=StepOutcome.SKIPPED,
+                        detail={"reason": "subject_upsert_failed"},
+                    )
+                subject_entity_id = entity.id
 
             data.subject_entity_id = subject_entity_id
             data.predicate = predicate

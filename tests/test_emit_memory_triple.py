@@ -393,6 +393,289 @@ class TestEmitMemoryTriple:
 
 
 @pytest.mark.unit
+class TestSubjectInference:
+    """CAURA-127 — identifier-token heuristic + upsert for the bare-POST
+    shape. When no ``role="subject"`` entity_link is supplied, the
+    step looks at ``content[:match.start()]`` and emits a subject
+    from a deterministic identifier-token regex. Proper-noun shapes
+    deliberately skip — they're left to the background entity-
+    extraction worker. Each test below mocks ``upsert_entity`` (it
+    would otherwise touch the real storage client)."""
+
+    @staticmethod
+    def _patch_upsert(monkeypatch, returned_id):
+        """Replace ``upsert_entity`` with an AsyncMock returning an
+        object whose ``.id`` attribute is ``returned_id``."""
+        from unittest.mock import AsyncMock as _AM
+
+        fake = _AM(return_value=SimpleNamespace(id=returned_id))
+        monkeypatch.setattr(
+            "core_api.pipeline.steps.write.emit_memory_triple.upsert_entity",
+            fake,
+        )
+        return fake
+
+    async def test_identifier_token_subject_upserts_and_emits(self, monkeypatch):
+        """TOKEN-shaped subject without entity_links → heuristic infers
+        ``TOKEN-XYZ``, calls upsert, populates triple."""
+        upserted_id = uuid4()
+        fake = self._patch_upsert(monkeypatch, upserted_id)
+        data = _input("TOKEN-736C57D0 has release date 2027-05-01")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result is None, f"Expected emit; got {result}"
+        assert data.subject_entity_id == upserted_id
+        assert data.predicate == "release_date"
+        assert data.object_value == "2027-05-01"
+        # The upsert call carries the inferred canonical_name and the
+        # canonical ``identifier`` entity_type. Under the CAURA-127
+        # signature cleanup, ``data`` is positional[0] (was [1] when
+        # the legacy ``db`` parameter still came first).
+        fake.assert_called_once()
+        entity_upsert = fake.call_args.args[0]
+        assert entity_upsert.entity_type == "identifier"
+        assert entity_upsert.canonical_name == "TOKEN-736C57D0"
+
+    async def test_uuid_subject_infers(self, monkeypatch):
+        """Canonical UUID subjects are identifier-shaped → infer + emit."""
+        self._patch_upsert(monkeypatch, uuid4())
+        data = _input("12345678-1234-1234-1234-123456789abc status is open")
+        await EmitMemoryTriple().execute(_ctx(data))
+        assert data.predicate == "status"
+        assert data.object_value == "open"
+
+    async def test_dotted_identifier_subject_infers(self, monkeypatch):
+        """Dotted service names: ``api.user.create`` → identifier."""
+        self._patch_upsert(monkeypatch, uuid4())
+        data = _input("api.user.create status is deprecated")
+        await EmitMemoryTriple().execute(_ctx(data))
+        assert data.predicate == "status"
+        assert data.subject_entity_id is not None
+
+    async def test_build_ref_subject_infers(self, monkeypatch):
+        """Build references like ``build #4521`` and ``build-734``."""
+        self._patch_upsert(monkeypatch, uuid4())
+        data = _input("build #4521 status is failed")
+        await EmitMemoryTriple().execute(_ctx(data))
+        assert data.predicate == "status"
+        assert data.subject_entity_id is not None
+
+    async def test_proper_noun_subject_skips(self, monkeypatch):
+        """``Alice`` is a proper noun, not an identifier — skip and
+        leave it to background entity extraction. Mirrors the
+        skip-on-doubt contract for the object side."""
+        fake = self._patch_upsert(monkeypatch, uuid4())
+        data = _input("Alice has release date 2027-05-01")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result.outcome == StepOutcome.SKIPPED
+        assert result.detail["reason"] == "no_subject"
+        fake.assert_not_called()
+
+    async def test_stopword_subject_skips(self, monkeypatch):
+        """``She`` / ``They`` / ``Today`` / ``Q4`` all skip."""
+        fake = self._patch_upsert(monkeypatch, uuid4())
+        for content in [
+            "She has release date 2027",
+            "They deadline is Friday",
+            "Today status is open",
+            "Q4 has release date 2027",
+        ]:
+            data = _input(content)
+            result = await EmitMemoryTriple().execute(_ctx(data))
+            assert result.outcome == StepOutcome.SKIPPED, content
+            assert result.detail["reason"] == "no_subject", content
+        fake.assert_not_called()
+
+    async def test_empty_head_skips(self, monkeypatch):
+        """Content with no text before the predicate phrase → skip."""
+        fake = self._patch_upsert(monkeypatch, uuid4())
+        data = _input("has release date 2027-05-01")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result.outcome == StepOutcome.SKIPPED
+        assert result.detail["reason"] == "no_subject"
+        fake.assert_not_called()
+
+    async def test_sentence_boundary_trims_subject_head(self, monkeypatch):
+        """Subject inference must take the identifier from the CURRENT
+        clause, not from a previous sentence. ``"Foo. TOKEN-X has …"``
+        should yield ``TOKEN-X``, not ``Foo. TOKEN-X``."""
+        self._patch_upsert(monkeypatch, uuid4())
+        data = _input("Foo. TOKEN-X9 has release date 2027-05-01")
+        await EmitMemoryTriple().execute(_ctx(data))
+        assert data.predicate == "release_date"
+        assert data.subject_entity_id is not None
+
+    async def test_all_dash_suffix_identifier_not_captured(self, monkeypatch):
+        """``TOKEN---`` (post-dash group consists ONLY of dashes) used
+        to match because ``[A-Z0-9-]+`` permitted any combination of
+        alphanumerics and dashes. The tightened first alternative
+        ``[A-Z][A-Z0-9]{1,}-[A-Z0-9][A-Z0-9-]*`` now requires the
+        post-dash group to START with an alphanumeric, so all-dash
+        suffixes can't form a canonical name.
+
+        NOTE: the regex still permits a single trailing dash on a
+        non-empty suffix (e.g. ``TOKEN-XYZ-``) because the
+        ``[A-Z0-9-]*`` continuation is greedy. That's the smaller
+        sibling case the reviewer accepted; fully forbidding any
+        trailing dash would need ``(?:[A-Z0-9-]*[A-Z0-9])?`` which
+        is out of scope here."""
+        fake = self._patch_upsert(monkeypatch, uuid4())
+        data = _input("TOKEN--- has release date 2027-05-01")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result.outcome == StepOutcome.SKIPPED
+        assert result.detail["reason"] == "no_subject"
+        fake.assert_not_called()
+
+    async def test_subject_inferred_from_leftmost_match(self, monkeypatch):
+        """When multiple phrase rows match the same predicate (e.g.
+        ``"TOKEN-XYZ has release date is 2027-05-01"`` hits both
+        ``\\bhas\\s+release\\s+date\\b`` and ``\\brelease\\s+date\\s+is\\b``),
+        the subject must be sliced from BEFORE the leftmost hit —
+        otherwise we'd cut inside the predicate chain and miss the
+        identifier. The object still uses the rightmost end for a
+        clean tail."""
+        upserted_id = uuid4()
+        fake = self._patch_upsert(monkeypatch, upserted_id)
+        data = _input("TOKEN-XYZ has release date is 2027-05-01")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result is None, f"Expected emit; got {result}"
+        assert data.predicate == "release_date"
+        assert data.object_value == "2027-05-01"
+        fake.assert_called_once()
+        eu = fake.call_args.args[0]
+        assert eu.canonical_name == "TOKEN-XYZ"
+
+    async def test_uppercase_uuid_subject_infers(self, monkeypatch):
+        """UUIDs in the wild come in both cases. The UUID alternative
+        uses an explicit ``[0-9a-fA-F]`` class so uppercase
+        ``DEADBEEF-…`` matches without re-enabling global
+        ``re.IGNORECASE`` (which would re-introduce the full-stack
+        regression)."""
+        self._patch_upsert(monkeypatch, uuid4())
+        data = _input("DEADBEEF-1234-5678-9ABC-DEF012345678 status is shipped")
+        await EmitMemoryTriple().execute(_ctx(data))
+        assert data.predicate == "status"
+        assert data.subject_entity_id is not None
+
+    async def test_upsert_deferred_until_after_object_extraction(self, monkeypatch):
+        """If object extraction skips (``object_unparseable``), the
+        upsert MUST NOT have fired — otherwise we'd leak orphan
+        Entity rows for memories that never persisted their triple.
+        Content "TOKEN-NOPE has release date" with empty tail after
+        the predicate fails ``_normalize_object`` and skips."""
+        fake = self._patch_upsert(monkeypatch, uuid4())
+        # Trailing "has release date" with no date after → unparseable.
+        data = _input("TOKEN-NOPE has release date")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result.outcome == StepOutcome.SKIPPED
+        assert result.detail["reason"] == "object_unparseable"
+        # Upsert must NOT have been called — that's the whole point of
+        # deferring it until after object extraction succeeds.
+        fake.assert_not_called()
+
+    async def test_upsert_failure_degrades_to_skip(self, monkeypatch):
+        """Upsert raising must not break the write pipeline."""
+        from unittest.mock import AsyncMock as _AM
+
+        fake = _AM(side_effect=RuntimeError("storage unavailable"))
+        monkeypatch.setattr(
+            "core_api.pipeline.steps.write.emit_memory_triple.upsert_entity", fake
+        )
+        data = _input("TOKEN-FAILS has release date 2027")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result.outcome == StepOutcome.SKIPPED
+        assert result.detail["reason"] == "subject_upsert_failed"
+
+    async def test_lowercase_hyphenated_word_does_not_match(self, monkeypatch):
+        """``IGNORECASE`` was removed from ``_IDENTIFIER_TOKEN`` so the
+        first alternative ``[A-Z][A-Z0-9]{2,}-[A-Z0-9-]+`` no longer
+        matches ordinary English words like ``full-stack``,
+        ``long-term``, ``pre-release``. The heuristic must skip rather
+        than create a spurious ``full-stack`` Entity."""
+        fake = self._patch_upsert(monkeypatch, uuid4())
+        for content in [
+            "full-stack has release date 2027",
+            "long-term status is ongoing",
+            "pre-release priority is high",
+        ]:
+            data = _input(content)
+            result = await EmitMemoryTriple().execute(_ctx(data))
+            assert result.outcome == StepOutcome.SKIPPED, content
+            assert result.detail["reason"] == "no_subject", content
+        fake.assert_not_called()
+
+    async def test_short_capitalised_prefix_id_infers(self, monkeypatch):
+        """``PR-1234`` is the canonical 2-letter prefix shape used by
+        GitHub / Jira / Linear. Earlier ``{2,}`` quantifier required 3+
+        letters before the dash; ``{1,}`` lets ``PR``, ``OP``, ``QA``
+        through while still rejecting ``A-1`` (only 1 char)."""
+        self._patch_upsert(monkeypatch, uuid4())
+        for content, expected_subject in [
+            ("PR-1234 status is merged", "PR-1234"),
+            ("OP-87 priority is high", "OP-87"),
+        ]:
+            data = _input(content)
+            await EmitMemoryTriple().execute(_ctx(data))
+            assert data.predicate is not None, content
+            assert data.subject_entity_id is not None, content
+
+    async def test_bare_decimal_is_not_an_identifier(self, monkeypatch):
+        """``0.9``, ``1.5``, ``4.5`` are metric literals, not version
+        IDs. The version alternative now requires either a ``v`` prefix
+        (v2.4) or a 3-part dotted form (2.4.0) so bare decimals can't
+        accidentally become Entity rows."""
+        fake = self._patch_upsert(monkeypatch, uuid4())
+        for content in [
+            "0.9 status is shipped",
+            "1.5 status is open",
+            "4.5 priority is high",
+        ]:
+            data = _input(content)
+            result = await EmitMemoryTriple().execute(_ctx(data))
+            assert result.outcome == StepOutcome.SKIPPED, content
+            assert result.detail["reason"] == "no_subject", content
+        fake.assert_not_called()
+
+    async def test_v_prefixed_and_three_part_versions_infer(self, monkeypatch):
+        """Counter-test to ``test_bare_decimal_is_not_an_identifier``:
+        the canonical version shapes ``v2.4`` and ``2.4.0`` ARE
+        identifier-like and must still infer."""
+        self._patch_upsert(monkeypatch, uuid4())
+        for content in [
+            "v2.4 status is shipped",
+            "v1.0 status is GA",
+            "2.4.0 status is shipped",
+            "12.5.1 status is failed",
+        ]:
+            data = _input(content)
+            result = await EmitMemoryTriple().execute(_ctx(data))
+            assert result is None, f"Expected emit; got {result} for {content!r}"
+            assert data.subject_entity_id is not None, content
+
+    async def test_trailing_comma_before_predicate_still_infers(self, monkeypatch):
+        """``"TOKEN-XYZ, has release date 2027"`` — the comma between
+        the subject and the predicate would defeat the regex's
+        ``\\s*$`` anchor without an explicit punctuation strip.
+        ``_infer_subject_token`` strips trailing ``.,;:!`` before the
+        sentence-split."""
+        self._patch_upsert(monkeypatch, uuid4())
+        data = _input("TOKEN-XYZ, has release date 2027-05-01")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result is None, f"Expected emit; got {result}"
+        assert data.predicate == "release_date"
+        assert data.subject_entity_id is not None
+
+    async def test_explicit_entity_links_still_take_precedence(self, monkeypatch):
+        """When caller supplies role=subject link AND content has an
+        identifier token, the link wins — no upsert call."""
+        fake = self._patch_upsert(monkeypatch, uuid4())
+        link_id = uuid4()
+        data = _input("TOKEN-Z has release date 2027", subject_id=link_id)
+        await EmitMemoryTriple().execute(_ctx(data))
+        assert data.subject_entity_id == link_id
+        fake.assert_not_called()
+
+
+@pytest.mark.unit
 class TestPipelineComposition:
     """Guard: STM and extract-only pipelines must NOT include EmitMemoryTriple."""
 

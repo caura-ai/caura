@@ -151,7 +151,13 @@ async def upsert_entity_route(
     auth.enforce_tenant(body.tenant_id)
     if auth.tenant_id:
         await check_and_increment(db, body.tenant_id, "write")
-    return await upsert_entity(db, body)
+    # NOTE: entity upsert uses its own connection (storage-api HTTP
+    # client); not atomic with the ``check_and_increment`` quota
+    # bump above. ``db`` is intentionally dropped at the call site so
+    # the non-atomicity is visible at the seam rather than hidden
+    # inside ``upsert_entity`` (where the param was historically
+    # accepted-and-ignored).
+    return await upsert_entity(data=body)
 
 
 @router.get("/entities/{entity_id}", response_model=EntityOut)

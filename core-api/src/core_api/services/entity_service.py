@@ -22,11 +22,19 @@ logger = logging.getLogger(__name__)
 
 
 async def upsert_entity(
-    db: AsyncSession,
     data: EntityUpsert,
+    *,
     name_embedding: list[float] | None = None,
 ) -> EntityOut:
     """Two-phase entity upsert with optional embedding-based resolution.
+
+    Signature: ``data`` is required and positional; ``name_embedding``
+    is keyword-only. The function uses the storage client (HTTP) for
+    all writes — there is no AsyncSession parameter because the
+    operation is NOT transactional with the caller's DB session.
+    Routes that combine ``check_and_increment`` with this call must
+    document the non-atomicity at the seam (see
+    ``routes/entities.py``); the function itself can't enforce it.
 
     Phase 1: Exact match on tenant + fleet + canonical_name (fast, btree).
     Phase 2: If no exact match AND name_embedding is provided, check for
@@ -102,13 +110,17 @@ async def upsert_entity(
         updated = await sc.update_entity(str(entity_id), update_data)
         entity = updated or entity
     else:
-        # Create new entity
+        # Create new entity. Coerce ``attributes=None`` to ``{}`` so
+        # the persisted row matches what the update branch (line ~80)
+        # already does on its merge — ``None``-typed JSONB columns
+        # would otherwise diverge from update-branch's ``{}`` and
+        # confuse downstream readers that expect a dict.
         create_data: dict = {
             "tenant_id": data.tenant_id,
             "fleet_id": data.fleet_id,
             "entity_type": data.entity_type,
             "canonical_name": data.canonical_name,
-            "attributes": data.attributes,
+            "attributes": data.attributes or {},
         }
         if name_embedding is not None:
             create_data["name_embedding"] = name_embedding

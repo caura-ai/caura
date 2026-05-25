@@ -197,7 +197,6 @@ async def test_upsert_preserves_canonical_when_longer_alternative_arrives() -> N
 
     with patch("core_api.services.entity_service.get_storage_client", return_value=sc):
         result = await upsert_entity(
-            None,
             await _make_entity_upsert("globex industries"),
             name_embedding=[0.1] * 1536,
         )
@@ -250,7 +249,6 @@ async def test_upsert_preserves_canonical_when_shorter_alternative_arrives() -> 
 
     with patch("core_api.services.entity_service.get_storage_client", return_value=sc):
         await upsert_entity(
-            None,
             await _make_entity_upsert("globex"),
             name_embedding=[0.1] * 1536,
         )

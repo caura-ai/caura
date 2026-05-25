@@ -108,9 +108,9 @@ async def process_entity_extraction(
                         ent.canonical_name,
                     )
                     continue
-                # upsert_entity still takes db param for backward compat; pass None
+                # ``data`` is positional, ``name_embedding`` keyword-only
+                # under the CAURA-127 signature cleanup.
                 result = await upsert_entity(
-                    None,
                     EntityUpsert(
                         tenant_id=tenant_id,
                         fleet_id=fleet_id,
