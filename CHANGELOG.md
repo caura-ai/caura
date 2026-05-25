@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.10.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.9.0...backend-v2.10.0) (2026-05-25)
+
+
+### Features
+
+* **core-api:** per-phase write-latency instrumentation (CAURA-682 Phase 1) ([#201](https://github.com/caura-ai/caura-memclaw/issues/201)) ([d28055e](https://github.com/caura-ai/caura-memclaw/commit/d28055e95cfdc833a86e4643f144801688848dfa))
+
+
+### Bug Fixes
+
+* **version-compat:** bump MIN_RECOMMENDED_PLUGIN_VERSION to 2.6.2 ([#204](https://github.com/caura-ai/caura-memclaw/issues/204)) ([3ae24a3](https://github.com/caura-ai/caura-memclaw/commit/3ae24a303e83fa5f11b79d562cfb536974ae1e77))
+
 ## [2.9.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.8.0...backend-v2.9.0) (2026-05-24)
 
 
