@@ -70,6 +70,99 @@ class LoggingConfigurationWarning(UserWarning):
     """
 
 
+# Canonical attrs on a vanilla `logging.LogRecord`. Mirrors
+# `structlog.stdlib._LOG_RECORD_KEYS` (the set that ExtraAdder excludes)
+# — by constructing a dummy record we stay aligned with whatever the
+# stdlib reports for the current Python version, rather than hard-coding
+# the names (which change between releases — e.g. ``taskName`` was added
+# in 3.12). Frozen at import time so a downstream library's runtime
+# monkey-patching of the LogRecord class can't widen the deny set under
+# our feet.
+_LOG_RECORD_STANDARD_ATTRS: frozenset[str] = frozenset(
+    logging.LogRecord("name", 0, "pathname", 0, "msg", (), None).__dict__.keys()
+)
+
+# Keys the structlog/GCP pipeline reserves for itself. A user-supplied
+# ``extra={...}`` must not be allowed to populate any of these — each
+# would open a silent-corruption channel into a different GCP field:
+#
+#   * ``event`` — would overwrite ProcessorFormatter's
+#     ``event_dict["event"]`` (the real LogRecord message); then
+#     ``_rename_event_to_message`` would rename the extra's value as
+#     the GCP ``message`` field, silently losing the original text.
+#     (Stdlib ``logger.*()`` accepts ``extra={"event": ...}`` because
+#     ``event`` isn't a standard LogRecord attribute — structlog's
+#     convention only.)
+#
+#   * ``message`` — stdlib's own LogRecord-attr-collision guard
+#     ``raise KeyError("Attempt to overwrite 'message'")`` already
+#     blocks the ``extra={"message": ...}`` route. The deny entry
+#     here is defense-in-depth for the ``logging.Filter`` path: a
+#     filter that stamps ``record.message = "x"`` directly bypasses
+#     stdlib's ``extra=`` validation.
+#
+#   * ``severity`` — ``_add_logrecord_extras`` runs BEFORE
+#     ``_map_to_gcp_severity``, whose guard only fills the field when
+#     it is ``None`` or ``""``. A stdlib ``extra={"severity": "P1"}``
+#     (an application-domain label) would therefore propagate
+#     untouched into the GCP severity field, overriding the correct
+#     log-level-derived value, producing an invalid GCP severity, and
+#     potentially misrouting log-based alerts.
+#
+#   * ``stack`` — set by ``StackInfoRenderer`` ONLY when the caller
+#     passes ``stack_info=True``. Without that flag, the renderer is
+#     a no-op and an ``extra={"stack": "noise"}`` would propagate
+#     untouched into the JSON payload alongside any future
+#     stack-trace-based tooling.
+#
+#   * ``exception`` — set by ``format_exc_info`` ONLY when ``exc_info``
+#     is present on the call. Without exception context an
+#     ``extra={"exception": "fake"}`` persists in the JSON payload,
+#     fabricating exception data on a non-exception log line.
+_RESERVED_OUTPUT_KEYS: frozenset[str] = frozenset(
+    {"event", "message", "severity", "stack", "exception"}
+)
+
+
+def _add_logrecord_extras(
+    _logger: Any,
+    _method_name: str,
+    event_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """structlog processor: copy a ``LogRecord``'s non-standard attrs
+    into the event dict, but block reserved-output-key collisions.
+
+    Equivalent to ``structlog.stdlib.ExtraAdder()`` for typical extras
+    (``path``, ``tenant_id``, ``total_ms``, etc.) but additionally
+    refuses to propagate ``event`` / ``message`` — the two keys that
+    silently corrupt the GCP ``message`` field if a caller passes them
+    via ``extra={...}``. ``ExtraAdder`` exposes only ``allow`` (since
+    structlog 21.5), not ``deny``, so we can't use it directly without
+    resorting to a brittle static allowlist of every key the codebase
+    might ever log.
+
+    Also covers attributes stamped onto records by a ``logging.Filter``
+    — no such filter exists in-tree today; flagged so a future addition
+    is a known channel, not a surprise.
+    """
+    record = event_dict.get("_record")
+    if record is None:
+        return event_dict
+    for key, value in record.__dict__.items():
+        if key in _LOG_RECORD_STANDARD_ATTRS:
+            continue
+        if key.startswith("_"):
+            continue
+        if key in _RESERVED_OUTPUT_KEYS:
+            continue
+        # ``setdefault`` so a key a prior processor already set wins
+        # over a user extra of the same name — defensive, though in
+        # practice no prior processor in our chain sets keys an
+        # ``extra={}`` would collide with.
+        event_dict.setdefault(key, value)
+    return event_dict
+
+
 def _map_to_gcp_severity(
     _logger: Any,
     method_name: str,
@@ -129,6 +222,19 @@ def _base_processors() -> list[Any]:
         # don't have `method_name`) and kept on the native side for shape
         # consistency across the two pipelines.
         structlog.stdlib.add_log_level,
+        # ``_add_logrecord_extras`` (defined above) is the deny-list
+        # equivalent of ``structlog.stdlib.ExtraAdder()``. It propagates
+        # ``extra={...}`` keys from stdlib ``logger.*()`` calls into the
+        # JSON payload but refuses to forward ``event`` / ``message``,
+        # which would otherwise silently corrupt the GCP ``message``
+        # field. Without it, every existing ``extra``-based call site
+        # (memory-search / memory-get summary logs, the per-tenant
+        # concurrency saturation log, CAURA-682's memory_write_latency
+        # phase timings) emits to GCP with only ``message`` and
+        # ``timestamp`` populated — the structured fields are silently
+        # dropped. This is the stdlib-bridge counterpart to passing
+        # kwargs directly on the structlog-native side.
+        _add_logrecord_extras,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         # StackInfoRenderer is a no-op unless a caller passes stack_info=True;
         # when they do, it puts the formatted stack under `stack` so both
