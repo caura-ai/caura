@@ -1232,7 +1232,23 @@ async def update_memory_endpoint(
     db: AsyncSession = Depends(get_db),
 ):
     """Update a memory. Only provide fields you want to change.
-    If content changes, embedding and entity extraction are re-run automatically."""
+
+    If content changes, embedding and entity extraction are re-run automatically.
+
+    Concurrency contract (intentional, not a bug):
+
+    - Each top-level column is **last-write-wins**. Two concurrent PATCHes that
+      set the same column (e.g. ``title``) will both return 200 and the row
+      will hold whichever update commits second. There is no compare-and-swap
+      and no optimistic-lock token — callers that need that must coordinate
+      externally or use ``If-Match`` semantics layered on top.
+    - ``metadata`` defaults to a **JSONB top-level merge** (``||``): keys not
+      present in the patch are preserved, keys present in both patches resolve
+      last-write-wins per key. Pass ``metadata_mode: "replace"`` for a full
+      overwrite. Two concurrent PATCHes that each set a distinct metadata key
+      will therefore leave **both keys present** on the row — that is the
+      defined behaviour, not a partial-merge anomaly.
+    """
     auth.enforce_tenant(tenant_id)
     if auth.tenant_id:  # skip usage metering for admin
         await check_and_increment(db, tenant_id, "write")
