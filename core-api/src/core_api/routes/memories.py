@@ -1515,7 +1515,21 @@ async def recall_endpoint(
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
-    """Search memories and return an LLM-synthesized context summary."""
+    """Search memories and return an LLM-synthesized context summary.
+
+    Audit P3 (extended to REST): the legacy ``recall(db, ...)`` wrapper
+    held the FastAPI-injected DB session across the multi-second LLM
+    brief, pinning a pooled connection. Load-test gate flagged
+    ``slo-p95-recall_brief`` (6.9 s vs 5 s target) and
+    ``noisy-neighbor-write`` (6.49x regression under search storm) —
+    both rooted in the same pool-pinning pattern.
+
+    Mitigation: do the DB-bound search inside the request session,
+    explicitly ``await db.close()`` to return the connection to the
+    pool, then call ``summarize_memories`` (the no-DB LLM helper from
+    PR #228). ``AsyncSession.close()`` is idempotent, so FastAPI's
+    dependency cleanup at request end runs harmlessly.
+    """
     # Read endpoint — readable set widening applies (see /search).
     auth.enforce_readable_tenant(body.tenant_id)
     if auth.tenant_id:
@@ -1527,19 +1541,45 @@ async def recall_endpoint(
             if body.fleet_ids and len(body.fleet_ids) == 1:
                 await enforce_fleet_read(db, body.tenant_id, body.filter_agent_id, body.fleet_ids[0])
         await check_and_increment(db, body.tenant_id, "search")
-    from core_api.services.recall_service import recall
 
-    return await recall(
+    from core_api.services.memory_service import search_memories
+    from core_api.services.organization_settings import resolve_config
+    from core_api.services.recall_service import summarize_memories
+
+    t0 = time.perf_counter()
+
+    # ── Phase 1: DB-bound — config + search ──────────────────────
+    config = await resolve_config(db, body.tenant_id)
+    memories = await search_memories(
         db,
         tenant_id=body.tenant_id,
         query=body.query,
         fleet_ids=body.fleet_ids,
         filter_agent_id=body.filter_agent_id,
+        caller_agent_id=body.filter_agent_id,
         memory_type_filter=body.memory_type_filter,
         status_filter=body.status_filter,
         top_k=body.top_k,
         valid_at=body.valid_at,
+        recall_boost=config.recall_boost,
+        graph_expand=config.graph_expand,
+        tenant_config=config,
         readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
+    )
+
+    # Release the pooled DB connection before the LLM round-trip.
+    # FastAPI's outer ``get_db`` ``async with`` will re-close on exit —
+    # idempotent, so it's a no-op there.
+    await db.close()
+
+    # ── Phase 2: LLM brief (no DB held) ──────────────────────────
+    return await summarize_memories(
+        memories,
+        body.query,
+        config,
+        valid_at=body.valid_at,
+        top_k=body.top_k,
+        t0=t0,
     )
 
 
