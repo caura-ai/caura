@@ -22,14 +22,19 @@ from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.constants import MEMORY_TYPES
 from core_api.providers._retry import call_with_fallback
-from core_api.schemas import IngestCommitRequest, IngestRequest, MemoryCreate
+from core_api.schemas import (
+    BulkMemoryCreate,
+    BulkMemoryItem,
+    IngestCommitRequest,
+    IngestRequest,
+)
 from core_api.services.ingest_chunking import (
     DOC_HARD_TOKEN_LIMIT,
     chunk_blocks,
     doc_token_count,
     parse,
 )
-from core_api.services.memory_service import _content_hash, create_memory
+from core_api.services.memory_service import _content_hash, create_memories_bulk
 from core_api.services.organization_settings import resolve_config
 
 logger = logging.getLogger(__name__)
@@ -93,12 +98,6 @@ MAX_INGEST_CONTENT_BYTES = INGEST_MAX_INPUT_BYTES
 # Azure uses the same IP). Listed defensively even though is_link_local
 # covers them.
 _CLOUD_METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254"})
-
-# Max concurrent ``create_memory`` calls during commit. Strong-mode write
-# runs sync enrichment per fact (a real LLM round-trip), so without
-# parallelism a 10-fact batch is ~20s+. With Semaphore(4) it's ~5s.
-# Bounded to avoid hammering the LLM provider with rate-limit failures.
-_COMMIT_CONCURRENCY = 4
 
 # Max concurrent ``_chunk_content`` LLM calls during preview. Post-PR#7
 # the chunker emits N sections per doc; this bounds the LLM fanout to
@@ -1010,94 +1009,101 @@ async def ingest_commit(db: AsyncSession, request: IngestCommitRequest) -> dict:
             len(facts),
         )
 
-    # ----- P1.3: parallel strong-mode writes -----
-    # ----- P1.C-lite: warn-and-continue on per-fact failure -----
-    # Outcomes returned by ``_write_one`` and aggregated after gather.
-    # Encoded as ints because gather's collection ordering doesn't matter
-    # here — we only need totals.
-    _OUTCOME_CREATED = 1
-    _OUTCOME_DUPLICATE = 0
-    _OUTCOME_ERRORED = -1
-
-    sem = asyncio.Semaphore(_COMMIT_CONCURRENCY)
-
-    async def _write_one(idx: int, fact) -> int:
-        """Always returns; never raises.
-
-        Returns one of: ``_OUTCOME_CREATED`` (created+1),
-        ``_OUTCOME_DUPLICATE`` (409 from create_memory, skipped+1),
-        ``_OUTCOME_ERRORED`` (any other failure — logged with run_id +
-        fact index for manual cleanup, errored+1).
-
-        P1.C-lite: pre-PR, any non-409 exception escaped out of gather
-        and aborted the whole batch, leaving 0..N-1 memories already
-        persisted under the run_id with no per-fact telemetry. Now each
-        fact's outcome is captured independently; the run_id stamps
-        whatever did land so it can be cleaned up via bulk-delete or
-        the upcoming POST /ingest/undo/{run_id} (PR #6).
-        """
-        # P1.2: provenance precedence — caller-supplied request.url wins
-        # (dashboard back-compat), else use the fact's own source_uri
-        # (stamped by preview), else fall back to "text-input".
-        effective_source = request_url_override or fact.source_uri or "text-input"
-        # A2: stamp the doc_hash from preview if the caller echoed it.
-        # Future previews of the same content will hit the cache via
-        # ``_find_prior_ingest_by_doc_hash``. Also persist any per-fact
-        # salience score from PR #5 so cached previews can restore it.
-        # ``run_id`` lives on the top-level memory column — the redundant
-        # ``metadata.ingest_run_id`` JSONB key has been dropped from new
-        # writes (the column is indexed, queryable without JSON casting,
-        # and is the single source of truth as of the parent-doc PR).
-        metadata: dict = {
-            "source": "ingest",
-            "ingest_url": request_url_override or fact.source_uri or None,
-        }
-        if request.doc_hash:
-            metadata["doc_hash"] = request.doc_hash
-        # Salience lives on IngestFact only when the LLM emitted it (PR #5).
-        # Guarded so we don't overwrite with None on facts the caller
-        # hand-crafted without going through preview.
-        salience_value = getattr(fact, "salience", None)
-        if salience_value is not None:
-            metadata["salience"] = salience_value
-        mem_data = MemoryCreate(
+    # ----- Bulk write -----
+    # Survivors are committed via ``create_memories_bulk`` so the per-fact
+    # OpenAI embed/enrich round-trips share a single batched provider
+    # call: 1 ``get_embeddings_batch`` for the whole batch, semaphored
+    # enrichment with the same concurrency budget as the bulk endpoint,
+    # and a single bulk storage insert. Pre-fix this fanned out N parallel
+    # ``create_memory`` calls (each owning its own embed+enrich+dedup
+    # round-trip) capped at Semaphore(4); wet-tested at 7.93s for 4 facts
+    # and 8.87s for 8 facts. Audit finding #28.
+    #
+    # Idempotency token: ``run_id`` is the natural per-attempt key here —
+    # ``ingest_commit`` is invoked once per run, and a client retry that
+    # reuses the same ``run_id`` should see ``duplicate_attempt`` on
+    # already-committed rows from the previous attempt (the same contract
+    # the dashboard's bulk-write path already relies on).
+    #
+    # Behavior tradeoff: ``create_memories_bulk`` performs content-hash
+    # dedup but skips the per-write semantic-duplicate check that
+    # individual ``create_memory`` calls run via ``CheckSemanticDuplicate``.
+    # The preview step has already shown the user the candidate facts, so
+    # a semantic-dup "safety net" at commit catches a tight race window
+    # only — the latency win outweighs the loss. Verbatim re-ingest of
+    # the same content is still caught by the content-hash dedup at the
+    # top of this function and inside ``create_memories_bulk``.
+    if survivors:
+        bulk_items: list[BulkMemoryItem] = []
+        for fact in survivors:
+            # P1.2 provenance precedence preserved verbatim — caller-
+            # supplied request URL wins, else the fact's own source_uri
+            # from preview, else "text-input".
+            effective_source = request_url_override or fact.source_uri or "text-input"
+            metadata: dict = {
+                "source": "ingest",
+                "ingest_url": request_url_override or fact.source_uri or None,
+            }
+            if request.doc_hash:
+                metadata["doc_hash"] = request.doc_hash
+            salience_value = getattr(fact, "salience", None)
+            if salience_value is not None:
+                metadata["salience"] = salience_value
+            bulk_items.append(
+                BulkMemoryItem(
+                    memory_type=fact.suggested_type,
+                    content=fact.content,
+                    source_uri=effective_source,
+                    run_id=run_id,
+                    metadata=metadata,
+                )
+            )
+        bulk_data = BulkMemoryCreate(
             tenant_id=request.tenant_id,
             fleet_id=request.fleet_id,
             agent_id=request.agent_id,
-            memory_type=fact.suggested_type,
-            content=fact.content,
-            source_uri=effective_source,
-            run_id=run_id,
-            write_mode="strong",
-            metadata=metadata,
+            items=bulk_items,
         )
-        async with sem:
-            try:
-                await create_memory(db, mem_data)
-                return _OUTCOME_CREATED
-            except HTTPException as e:
-                if e.status_code == 409:
-                    return _OUTCOME_DUPLICATE
-                logger.exception(
-                    "ingest_commit: fact[%d] write failed with HTTP %d "
-                    "(run_id=%s) — tagged for manual cleanup",
-                    idx,
-                    e.status_code,
-                    run_id,
-                )
-                return _OUTCOME_ERRORED
-            except Exception:
-                logger.exception(
-                    "ingest_commit: fact[%d] write raised (run_id=%s) — tagged for manual cleanup",
-                    idx,
-                    run_id,
-                )
-                return _OUTCOME_ERRORED
+        try:
+            bulk_response = await create_memories_bulk(db, bulk_data, bulk_attempt_id=run_id)
+            created = bulk_response.created
+            skipped_in_loop = bulk_response.duplicates
+            errored = bulk_response.errors
+            # Surface per-item error reasons in the logs so the cleanup
+            # message at the bottom of this function still points at the
+            # offending facts.
+            for item in bulk_response.results:
+                if item.status == "error":
+                    # Mirror the legacy "fact[N]" log format the
+                    # P1.C-lite runbook + operator greps depend on.
+                    logger.warning(
+                        "ingest_commit: fact[%d] write failed (run_id=%s): %s",
+                        item.index,
+                        run_id,
+                        item.error,
+                    )
+        except HTTPException as e:
+            # A 4xx/5xx from the bulk endpoint aborts the whole batch
+            # (e.g. 504 from the bulk-embedding timeout). Mirror the
+            # prior behaviour where a non-409 escape raised through
+            # gather and aborted the run — but now the run_id is still
+            # logged so the operator can locate any partial rows.
+            logger.exception(
+                "ingest_commit: bulk write failed with HTTP %d (run_id=%s) — "
+                "0 facts persisted on this attempt; safe to retry",
+                e.status_code,
+                run_id,
+            )
+            created = 0
+            skipped_in_loop = 0
+            errored = len(survivors)
+    else:
+        # All facts pre-deduped by the content-hash sweep above; nothing
+        # to do here.
+        created = 0
+        skipped_in_loop = 0
+        errored = 0
 
-    results = await asyncio.gather(*(_write_one(i, f) for i, f in enumerate(survivors)))
-    created = sum(1 for r in results if r == _OUTCOME_CREATED)
-    skipped_in_loop = sum(1 for r in results if r == _OUTCOME_DUPLICATE)
-    errored = sum(1 for r in results if r == _OUTCOME_ERRORED)
     skipped = pre_dedup_skipped + skipped_in_loop
     ingest_ms = int((time.perf_counter() - t0) * 1000)
 

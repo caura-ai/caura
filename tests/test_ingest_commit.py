@@ -34,25 +34,37 @@ def _request(tenant_id: str = "t1", *facts: str, **kwargs) -> IngestCommitReques
 def captured(monkeypatch):
     """Patch the external collaborators of ``ingest_commit`` and capture all calls.
 
+    The ingest commit path now routes survivors through
+    ``create_memories_bulk`` (one batched call per attempt) rather than
+    fanning out per-fact ``create_memory`` calls. The fixture unfolds
+    each bulk item into ``state.writes`` so the legacy
+    ``len(writes) == N`` assertions keep working — each entry exposes a
+    ``MemoryCreate``-shaped namespace (tenant_id, content, metadata,
+    run_id, write_mode, etc.) compatible with the prior contract.
+
     Returns a SimpleNamespace exposing:
-      - ``writes``: list[MemoryCreate]   facts passed to create_memory
+      - ``writes``: list of MemoryCreate-shaped namespaces (one per item
+        sent through ``create_memories_bulk``)
+      - ``bulk_calls``: raw ``BulkMemoryCreate`` payloads (one entry per
+        batch — typically one per ``ingest_commit`` call)
       - ``bulk_find_calls``: list[(tenant_id, hashes)]
       - ``resolve_config_calls``: list[tenant_id]
       - ``bulk_find_result``: dict[str, dict]  what bulk_find_by_content_hashes returns (configurable)
-      - ``write_delay_ms``: per-write artificial latency
-      - ``write_409_for``: set[content_hash]   simulate 409 from create_memory for those facts
+      - ``write_delay_ms``: per-batch artificial latency
+      - ``write_409_for``: set[content_hash]   simulate per-item duplicate_content
+      - ``write_raise_for``: dict[content_hash, Exception] simulate per-item errors
     """
     state = SimpleNamespace(
         writes=[],
+        bulk_calls=[],
         bulk_find_calls=[],
         resolve_config_calls=[],
         bulk_find_result={},
         write_delay_ms=0,
         write_409_for=set(),
-        # P1.C-lite (PR #4): map of content_hash → exception_to_raise. Lets a
-        # test simulate non-409 failures on specific facts. Use HTTPException
-        # for HTTP-coded errors, or any other Exception subclass for generic
-        # runtime errors.
+        # Per-content-hash error injection. The bulk path surfaces these
+        # as per-item ``status="error"`` results rather than raising
+        # through ``asyncio.gather``.
         write_raise_for={},
     )
 
@@ -76,25 +88,104 @@ def captured(monkeypatch):
             if h in state.bulk_find_result
         }
 
-    async def fake_create_memory(db, data):
-        state.writes.append(data)
-        if state.write_delay_ms:
-            await asyncio.sleep(state.write_delay_ms / 1000.0)
+    async def fake_create_memories_bulk(db, data, *, bulk_attempt_id):
+        """Stand-in for ``create_memories_bulk`` — translates the audit
+        scenarios the legacy per-fact tests modelled (409 from
+        create_memory, generic raise from create_memory) into the bulk
+        response shape (per-item ``BulkItemResult`` with ``status`` in
+        {created, duplicate_content, error}).
+        """
         from fastapi import HTTPException
 
+        from core_api.schemas import BulkItemResult, BulkMemoryResponse
         from core_api.services.memory_service import _content_hash as ch_fn
 
-        h = ch_fn(data.tenant_id, data.fleet_id, data.content)
-        # Configured generic / non-409 error → raise it (P1.C-lite test path)
-        if h in state.write_raise_for:
-            raise state.write_raise_for[h]
-        # Simulate 409 from inside create_memory when configured
-        if h in state.write_409_for:
-            raise HTTPException(status_code=409, detail="duplicate")
-        return SimpleNamespace(id="00000000-0000-0000-0000-000000000000")
+        state.bulk_calls.append(data)
+        if state.write_delay_ms:
+            await asyncio.sleep(state.write_delay_ms / 1000.0)
+
+        results = []
+        created = 0
+        duplicates = 0
+        errors = 0
+        for idx, item in enumerate(data.items):
+            # Surface each item as a MemoryCreate-shaped namespace so
+            # legacy assertions on ``writes[i].run_id`` / ``.metadata``
+            # / ``.content`` / ``.write_mode`` keep working.
+            state.writes.append(
+                SimpleNamespace(
+                    tenant_id=data.tenant_id,
+                    fleet_id=data.fleet_id,
+                    agent_id=data.agent_id,
+                    memory_type=item.memory_type,
+                    content=item.content,
+                    source_uri=item.source_uri,
+                    run_id=item.run_id,
+                    metadata=item.metadata,
+                    # ``write_mode`` doesn't exist on ``BulkMemoryItem``
+                    # (the bulk path is implicitly strong-mode for
+                    # ingest), so surface "strong" to keep the legacy
+                    # assertion contract.
+                    write_mode="strong",
+                )
+            )
+            h = ch_fn(data.tenant_id, data.fleet_id, item.content)
+            if h in state.write_raise_for:
+                exc = state.write_raise_for[h]
+                if isinstance(exc, HTTPException) and exc.status_code == 409:
+                    results.append(
+                        BulkItemResult(
+                            index=idx,
+                            client_request_id=f"{bulk_attempt_id}:{idx}",
+                            status="duplicate_content",
+                            id=uuid.UUID(int=0),
+                            duplicate_of=uuid.UUID(int=0),
+                        )
+                    )
+                    duplicates += 1
+                else:
+                    results.append(
+                        BulkItemResult(
+                            index=idx,
+                            client_request_id=f"{bulk_attempt_id}:{idx}",
+                            status="error",
+                            error=str(exc),
+                        )
+                    )
+                    errors += 1
+                continue
+            if h in state.write_409_for:
+                results.append(
+                    BulkItemResult(
+                        index=idx,
+                        client_request_id=f"{bulk_attempt_id}:{idx}",
+                        status="duplicate_content",
+                        id=uuid.UUID(int=0),
+                        duplicate_of=uuid.UUID(int=0),
+                    )
+                )
+                duplicates += 1
+                continue
+            results.append(
+                BulkItemResult(
+                    index=idx,
+                    client_request_id=f"{bulk_attempt_id}:{idx}",
+                    status="created",
+                    id=uuid.UUID(int=0),
+                )
+            )
+            created += 1
+
+        return BulkMemoryResponse(
+            created=created,
+            duplicates=duplicates,
+            errors=errors,
+            results=results,
+            bulk_ms=1,
+        )
 
     # ``upsert_document`` is called by ``_write_parent_ingest_document``
-    # after the per-fact loop. Capture the payload + give callers access
+    # after the bulk write. Capture the payload + give callers access
     # via ``state.parent_doc_writes`` so they can assert on it.
     state.parent_doc_writes = []  # list[dict]
 
@@ -102,9 +193,13 @@ def captured(monkeypatch):
         state.parent_doc_writes.append(payload)
         return {"id": "doc-id", "data": payload.get("data", {})}
 
+    import uuid
+
     # Patch the symbols *as imported into ingest_service*
     monkeypatch.setattr(ingest_service, "resolve_config", fake_resolve_config)
-    monkeypatch.setattr(ingest_service, "create_memory", fake_create_memory)
+    monkeypatch.setattr(
+        ingest_service, "create_memories_bulk", fake_create_memories_bulk
+    )
     mock_sc = MagicMock()
     mock_sc.bulk_find_by_content_hashes = AsyncMock(side_effect=fake_bulk_find)
     mock_sc.upsert_document = AsyncMock(side_effect=fake_upsert_document)
@@ -187,7 +282,9 @@ async def test_parent_document_skipped_when_zero_created(captured):
         "_ALL_": True,
     }
 
-    async def fake_bulk_find_all_existing(tenant_id, hashes, *, fleet_id=None, agent_id=None):
+    async def fake_bulk_find_all_existing(
+        tenant_id, hashes, *, fleet_id=None, agent_id=None
+    ):
         # Stage 5 added per-agent dedup; accept the new kwargs.
         return {h: {"id": "x", "client_request_id": None} for h in hashes}
 

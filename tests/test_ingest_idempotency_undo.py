@@ -61,7 +61,9 @@ def fake_tenant_config(monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_cache_hit_returns_cached_facts_without_llm(monkeypatch, fake_tenant_config):
+async def test_cache_hit_returns_cached_facts_without_llm(
+    monkeypatch, fake_tenant_config
+):
     """Two prior memories with this doc_hash → preview returns them as cached
     facts with cached=True, the prior run_id, and chunk_ms=0."""
     # Stand up two prior memories as if a previous ingest happened
@@ -134,7 +136,9 @@ async def test_cache_miss_runs_llm_normally(monkeypatch, fake_tenant_config):
 
     assert resp.get("cached") is not True
     assert "doc_hash" in resp
-    assert resp["doc_hash"] == ingest_service._doc_hash("t1", "Mercury orbits the Sun every 88 days.")
+    assert resp["doc_hash"] == ingest_service._doc_hash(
+        "t1", "Mercury orbits the Sun every 88 days."
+    )
     assert len(resp["facts"]) == 1
 
 
@@ -189,12 +193,31 @@ async def test_commit_stamps_doc_hash_in_metadata_when_echoed(monkeypatch):
             default_write_mode="fast",
         )
 
-    async def _fake_create(db, data):
-        writes.append(data)
-        return SimpleNamespace(id="00000000-0000-0000-0000-000000000001")
+    async def _fake_bulk(db, data, *, bulk_attempt_id):
+        from core_api.schemas import BulkItemResult, BulkMemoryResponse
+        import uuid as _uuid
+
+        for item in data.items:
+            writes.append(item)
+        results = [
+            BulkItemResult(
+                index=i,
+                client_request_id=f"{bulk_attempt_id}:{i}",
+                status="created",
+                id=_uuid.UUID(int=0),
+            )
+            for i in range(len(data.items))
+        ]
+        return BulkMemoryResponse(
+            created=len(data.items),
+            duplicates=0,
+            errors=0,
+            results=results,
+            bulk_ms=1,
+        )
 
     monkeypatch.setattr(ingest_service, "resolve_config", _fake_resolve_config)
-    monkeypatch.setattr(ingest_service, "create_memory", _fake_create)
+    monkeypatch.setattr(ingest_service, "create_memories_bulk", _fake_bulk)
     sc_mock = MagicMock()
     sc_mock.bulk_find_by_content_hashes = AsyncMock(return_value={})
     monkeypatch.setattr(ingest_service, "get_storage_client", lambda: sc_mock)
@@ -229,19 +252,42 @@ async def test_commit_does_not_stamp_doc_hash_when_omitted(monkeypatch):
             default_write_mode="fast",
         )
 
-    async def _fake_create(db, data):
-        writes.append(data)
-        return SimpleNamespace(id="00000000-0000-0000-0000-000000000001")
+    async def _fake_bulk(db, data, *, bulk_attempt_id):
+        from core_api.schemas import BulkItemResult, BulkMemoryResponse
+        import uuid as _uuid
+
+        for item in data.items:
+            writes.append(item)
+        results = [
+            BulkItemResult(
+                index=i,
+                client_request_id=f"{bulk_attempt_id}:{i}",
+                status="created",
+                id=_uuid.UUID(int=0),
+            )
+            for i in range(len(data.items))
+        ]
+        return BulkMemoryResponse(
+            created=len(data.items),
+            duplicates=0,
+            errors=0,
+            results=results,
+            bulk_ms=1,
+        )
 
     monkeypatch.setattr(ingest_service, "resolve_config", _fake_resolve_config)
-    monkeypatch.setattr(ingest_service, "create_memory", _fake_create)
+    monkeypatch.setattr(ingest_service, "create_memories_bulk", _fake_bulk)
     sc_mock = MagicMock()
     sc_mock.bulk_find_by_content_hashes = AsyncMock(return_value={})
     monkeypatch.setattr(ingest_service, "get_storage_client", lambda: sc_mock)
 
     req = IngestCommitRequest(
         tenant_id="t1",
-        facts=[IngestFact(content="Real fact without doc_hash echo.", suggested_type="fact")],
+        facts=[
+            IngestFact(
+                content="Real fact without doc_hash echo.", suggested_type="fact"
+            )
+        ],
     )
     await ingest_service.ingest_commit(db=None, request=req)
 
@@ -264,12 +310,31 @@ async def test_commit_stamps_salience_when_present_on_ingestfact(monkeypatch):
             default_write_mode="fast",
         )
 
-    async def _fake_create(db, data):
-        writes.append(data)
-        return SimpleNamespace(id="00000000-0000-0000-0000-000000000001")
+    async def _fake_bulk(db, data, *, bulk_attempt_id):
+        from core_api.schemas import BulkItemResult, BulkMemoryResponse
+        import uuid as _uuid
+
+        for item in data.items:
+            writes.append(item)
+        results = [
+            BulkItemResult(
+                index=i,
+                client_request_id=f"{bulk_attempt_id}:{i}",
+                status="created",
+                id=_uuid.UUID(int=0),
+            )
+            for i in range(len(data.items))
+        ]
+        return BulkMemoryResponse(
+            created=len(data.items),
+            duplicates=0,
+            errors=0,
+            results=results,
+            bulk_ms=1,
+        )
 
     monkeypatch.setattr(ingest_service, "resolve_config", _fake_resolve_config)
-    monkeypatch.setattr(ingest_service, "create_memory", _fake_create)
+    monkeypatch.setattr(ingest_service, "create_memories_bulk", _fake_bulk)
     sc_mock = MagicMock()
     sc_mock.bulk_find_by_content_hashes = AsyncMock(return_value={})
     monkeypatch.setattr(ingest_service, "get_storage_client", lambda: sc_mock)
