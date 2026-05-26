@@ -480,6 +480,100 @@ async def test_doc_search_embedding_provider_failure_aborts(mcp_env, monkeypatch
 
 
 # ---------------------------------------------------------------------------
+# Read-op widening: ``_readable_tenant_ids_var`` reaches the repo call
+# (audit T1)
+# ---------------------------------------------------------------------------
+#
+# Cross-tenant credentials surface as a non-empty
+# ``_readable_tenant_ids_var``; the tool reads it via
+# ``_get_readable_tenants()`` and passes the list as ``readable_tenant_ids``
+# to whichever ``document_repo`` function backs the requested op:
+#
+#   list_collections → document_repo.list_collections
+#   read             → document_repo.get_by_doc_id
+#   query            → document_repo.query
+#   search           → document_repo.search
+#
+# T1 locks in the wiring: a regression that silently drops the list on
+# any of those four paths would fail the corresponding test below.
+
+
+async def _capture_readable_tenant_ids(monkeypatch, repo_attr: str, return_value):
+    """Patch the named ``document_repo`` function with a capture stub
+    that records the ``readable_tenant_ids`` kwarg and returns the
+    given value."""
+    captured: dict = {}
+
+    async def fake(*args, **kwargs):  # noqa: ARG001
+        captured["readable_tenant_ids"] = kwargs.get("readable_tenant_ids")
+        return return_value
+
+    monkeypatch.setattr(f"core_api.repositories.document_repo.{repo_attr}", fake)
+    return captured
+
+
+async def test_doc_list_collections_passes_readable_tenants(mcp_env, monkeypatch):
+    """``op=list_collections`` widens to the readable set when the
+    caller's credential is cross-tenant."""
+    monkeypatch.setattr(
+        mcp_server, "_get_readable_tenants", lambda: ["home", "sibling"]
+    )
+    captured = await _capture_readable_tenant_ids(monkeypatch, "list_collections", [])
+    await mcp_server.memclaw_doc(op="list_collections")
+    assert captured["readable_tenant_ids"] == ["home", "sibling"]
+
+
+async def test_doc_list_collections_single_tenant_passes_none(mcp_env, monkeypatch):
+    """Single-tenant credential: ``_get_readable_tenants()`` returns
+    ``[]`` → the tool collapses it to ``None`` before calling the repo
+    (so the repo's single-tenant fast path runs)."""
+    monkeypatch.setattr(mcp_server, "_get_readable_tenants", lambda: [])
+    captured = await _capture_readable_tenant_ids(monkeypatch, "list_collections", [])
+    await mcp_server.memclaw_doc(op="list_collections")
+    assert captured["readable_tenant_ids"] is None
+
+
+async def test_doc_read_passes_readable_tenants(mcp_env, monkeypatch):
+    """``op=read`` widens via ``readable_tenant_ids``. The repo can
+    then resolve a doc that lives in a sibling tenant when the caller
+    is authorized to read from it."""
+    monkeypatch.setattr(
+        mcp_server, "_get_readable_tenants", lambda: ["home", "sibling"]
+    )
+    captured = await _capture_readable_tenant_ids(
+        monkeypatch, "get_by_doc_id", _DocRow()
+    )
+    await mcp_server.memclaw_doc(op="read", collection="customers", doc_id="acme")
+    assert captured["readable_tenant_ids"] == ["home", "sibling"]
+
+
+async def test_doc_query_passes_readable_tenants(mcp_env, monkeypatch):
+    """``op=query`` (filter-by-data) widens the same way."""
+    monkeypatch.setattr(
+        mcp_server, "_get_readable_tenants", lambda: ["home", "sibling"]
+    )
+    captured = await _capture_readable_tenant_ids(monkeypatch, "query", [])
+    await mcp_server.memclaw_doc(op="query", collection="customers", where={"k": 1})
+    assert captured["readable_tenant_ids"] == ["home", "sibling"]
+
+
+async def test_doc_search_passes_readable_tenants(mcp_env, monkeypatch):
+    """``op=search`` (vector recall) widens the same way. The audit
+    emission has its own assertion in
+    ``tests/test_cross_tenant_audit_surfaces.py``; this test only
+    confirms the wiring from the context var to the repo arg."""
+    monkeypatch.setattr(
+        mcp_server, "_get_readable_tenants", lambda: ["home", "sibling"]
+    )
+    monkeypatch.setattr(
+        "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
+    )
+    captured = await _capture_readable_tenant_ids(monkeypatch, "search", [])
+    await mcp_server.memclaw_doc(op="search", query="hello")
+    assert captured["readable_tenant_ids"] == ["home", "sibling"]
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
