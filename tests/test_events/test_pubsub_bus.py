@@ -203,11 +203,21 @@ async def test_stop_cancels_pending_pull_tasks_cleanly(bus: PubSubEventBus) -> N
     # bus's pull-task list. stop() must cancel + await it without
     # propagating CancelledError.
     async def long_sleep() -> None:
+        # 60s is intentional: it must exceed any conceivable test
+        # runtime so the task NEVER completes naturally — a regression
+        # in stop()'s cancellation path is detected by the outer
+        # ``wait_for`` timing out rather than the sleep completing.
         await asyncio.sleep(60)
 
     task = asyncio.create_task(long_sleep())
     bus._pull_tasks.append(task)
-    await bus.stop()
+    # Audit T4: bound the test's runtime against a regression in
+    # ``stop()`` cancellation. Without this, a future change that
+    # silently drops the cancel call would hang the test for the full
+    # ``sleep(60)`` duration instead of failing within seconds. The
+    # production contract is "stop() returns quickly after cancelling
+    # all pull tasks" — 2s is a generous ceiling on that.
+    await asyncio.wait_for(bus.stop(), timeout=2.0)
     assert task.cancelled() or task.done()
 
 
