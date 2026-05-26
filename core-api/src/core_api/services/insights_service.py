@@ -845,6 +845,91 @@ def _to_float(val, default: float = 0.5) -> float:
 # -- Public API ----------------------------------------------------------------
 
 
+async def synthesize_insights(
+    memories_or_clusters: list,
+    is_clustered: bool,
+    config,
+    *,
+    focus: str,
+    scope: str,
+) -> dict:
+    """LLM-only analysis step. No DB access.
+
+    Audit finding P3: ``memclaw_insights`` previously held its
+    ``_mcp_session()`` open across the multi-second ``_run_llm_analysis``
+    round-trip, pinning a pooled DB connection. This helper takes the
+    already-queried memories + resolved tenant config and produces the
+    same intermediate shape the legacy ``generate_insights`` body
+    produced in steps 3-5, so the MCP tool can exit the session block
+    before invoking it.
+
+    Returns
+    -------
+    dict with:
+      - ``findings``: list of sanitized finding dicts
+      - ``summary``: LLM-emitted overall summary string
+      - ``memories_analyzed``: count of memories that fed the prompt
+    """
+    prompt_template = _PROMPT_DISPATCH[focus]
+    if is_clustered:
+        memories_text, shown_ids = _format_clusters_for_analysis(memories_or_clusters)
+        count = sum(c.get("size", 0) for c in memories_or_clusters)
+    else:
+        memories_text, shown_ids = _format_memories_for_analysis(memories_or_clusters)
+        count = len(memories_or_clusters)
+        if focus == "discover":
+            prompt_template = _PROMPT_DISPATCH["patterns"]
+
+    # Escape literal braces in memories_text before .format(). Cluster mode
+    # always includes Python dict reprs (type_distribution); content mode can
+    # include user-controlled `{...}` strings. Without escaping, str.format
+    # raises KeyError on any stray `{word}`.
+    safe_memories = memories_text.replace("{", "{{").replace("}", "}}")
+    prompt = prompt_template.format(memories=safe_memories, count=count)
+
+    analysis = await _run_llm_analysis(prompt, config)
+
+    findings = analysis.get("findings", [])
+    if not isinstance(findings, list):
+        findings = []
+    sanitized = []
+    total_dropped = 0
+    findings_with_drops = 0
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        raw_related = [str(rid) for rid in f.get("related_memory_ids", []) if rid]
+        kept_related = [rid for rid in raw_related if rid in shown_ids]
+        dropped = len(raw_related) - len(kept_related)
+        if dropped > 0:
+            total_dropped += dropped
+            findings_with_drops += 1
+        sanitized.append(
+            {
+                "type": str(f.get("type", focus))[:50],
+                "title": str(f.get("title", "Untitled"))[:80],
+                "description": str(f.get("description", "")),
+                "confidence": max(0.0, min(1.0, _to_float(f.get("confidence", 0.5)))),
+                "related_memory_ids": kept_related,
+                "recommendation": str(f.get("recommendation", "")),
+            }
+        )
+    if total_dropped > 0:
+        logger.info(
+            "insights: dropped %d hallucinated related_memory_ids across %d findings (focus=%s, scope=%s)",
+            total_dropped,
+            findings_with_drops,
+            focus,
+            scope,
+        )
+
+    return {
+        "findings": sanitized,
+        "summary": analysis.get("summary", ""),
+        "memories_analyzed": count,
+    }
+
+
 async def generate_insights(
     db: AsyncSession,
     tenant_id: str,
@@ -923,65 +1008,17 @@ async def generate_insights(
 
     config = await resolve_config(db, tenant_id)
 
-    # 3. Build prompt -- discover mode formats clusters differently.
-    # The format functions also return the set of IDs actually rendered into
-    # the prompt, so hallucination filtering stays in sync with what the LLM
-    # saw (not just what we intended to send).
-    prompt_template = _PROMPT_DISPATCH[focus]
-    if is_clustered:
-        memories_text, shown_ids = _format_clusters_for_analysis(memories_or_clusters)
-        count = sum(c.get("size", 0) for c in memories_or_clusters)
-    else:
-        memories_text, shown_ids = _format_memories_for_analysis(memories_or_clusters)
-        count = len(memories_or_clusters)
-        if focus == "discover":
-            prompt_template = _PROMPT_DISPATCH["patterns"]
-
-    # Escape literal braces in memories_text before .format(). Cluster mode
-    # always includes Python dict reprs (type_distribution); content mode can
-    # include user-controlled `{...}` strings. Without escaping, str.format
-    # raises KeyError on any stray `{word}`.
-    safe_memories = memories_text.replace("{", "{{").replace("}", "}}")
-    prompt = prompt_template.format(memories=safe_memories, count=count)
-
-    # 4. Run LLM analysis
-    analysis = await _run_llm_analysis(prompt, config)
-
-    # 5. Validate and sanitize findings
-    findings = analysis.get("findings", [])
-    if not isinstance(findings, list):
-        findings = []
-    sanitized = []
-    total_dropped = 0
-    findings_with_drops = 0
-    for f in findings:
-        if not isinstance(f, dict):
-            continue
-        raw_related = [str(rid) for rid in f.get("related_memory_ids", []) if rid]
-        kept_related = [rid for rid in raw_related if rid in shown_ids]
-        dropped = len(raw_related) - len(kept_related)
-        if dropped > 0:
-            total_dropped += dropped
-            findings_with_drops += 1
-        sanitized.append(
-            {
-                "type": str(f.get("type", focus))[:50],
-                "title": str(f.get("title", "Untitled"))[:80],
-                "description": str(f.get("description", "")),
-                "confidence": max(0.0, min(1.0, _to_float(f.get("confidence", 0.5)))),
-                "related_memory_ids": kept_related,
-                "recommendation": str(f.get("recommendation", "")),
-            }
-        )
-    findings = sanitized
-    if total_dropped > 0:
-        logger.info(
-            "insights: dropped %d hallucinated related_memory_ids across %d findings (focus=%s, scope=%s)",
-            total_dropped,
-            findings_with_drops,
-            focus,
-            scope,
-        )
+    # 3-5. LLM analysis (no DB). Delegated to ``synthesize_insights`` so
+    # MCP callers that want to release their session before the LLM
+    # round-trip can do so independently (see ``memclaw_insights``).
+    synth = await synthesize_insights(
+        memories_or_clusters,
+        is_clustered,
+        config,
+        focus=focus,
+        scope=scope,
+    )
+    findings = synth["findings"]
 
     # 6. Persist findings as insight memories
     insight_ids = await _persist_findings(db, tenant_id, agent_id, fleet_id, focus, scope, findings)
@@ -990,9 +1027,9 @@ async def generate_insights(
     return {
         "focus": focus,
         "scope": scope,
-        "memories_analyzed": count,
+        "memories_analyzed": synth["memories_analyzed"],
         "findings": [{**f, "insight_memory_id": mid} for f, mid in zip(findings, insight_ids)],
-        "summary": analysis.get("summary", ""),
+        "summary": synth["summary"],
         "insight_memory_ids": [mid for mid in insight_ids if mid],
         "insights_ms": int((time.perf_counter() - t0) * 1000),
     }

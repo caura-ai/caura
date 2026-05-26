@@ -1683,45 +1683,102 @@ async def memclaw_insights(
     # Dynamic trust: scope='agent' requires trust ≥ 1, 'fleet'/'all' requires ≥ 2.
     min_level = 1 if scope == "agent" else 2
 
-    async with _mcp_session() as db:
-        # Mirror the REST insights gate: ``require_trust`` soft-passes a
-        # missing Agent row at ``DEFAULT_TRUST_LEVEL`` (read-only ergonomics
-        # — see ``memclaw_list`` below for the intended consumer), but
-        # this handler persists insight memories + audit-log rows keyed
-        # to ``agent_id``. Without a registered row backing the name,
-        # attribution becomes unverifiable, so re-block unregistered
-        # agents on the write path. ``terr`` is None for the soft-pass
-        # case, so without the explicit ``not_found`` check below the
-        # fabricated id would fall through and write.
-        _, not_found, terr = await _require_trust(db, tenant_id, agent_id, min_level=min_level)
-        if not_found:
-            return _with_latency(
-                _error_response(
-                    "FORBIDDEN",
-                    f"Agent '{agent_id}' is not registered. Register the agent by writing one memory first.",
-                ),
-                t0,
-            )
-        if terr:
-            return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
-        try:
-            await check_and_increment(db, tenant_id, "insights")
-            from core_api.services.insights_service import generate_insights
+    # Audit finding P3 (insights portion): prior implementation held a
+    # single ``_mcp_session()`` open across the multi-second LLM
+    # analysis round-trip, pinning a pooled DB connection during work
+    # that is entirely network-bound to the LLM provider. Restructured
+    # into three phases so the connection is released during the LLM:
+    #   1. session 1 — trust + usage gates, query memories, resolve config
+    #   2. no DB     — synthesize_insights (LLM)
+    #   3. session 2 — persist findings + commit
+    from core_api.services.insights_service import (
+        _QUERY_DISPATCH,
+        _DiscoverResult,
+        _persist_findings,
+        synthesize_insights,
+    )
+    from core_api.services.organization_settings import resolve_config
 
-            result = await generate_insights(
-                db,
-                tenant_id=tenant_id,
-                focus=focus,
-                scope=scope,
-                fleet_id=fleet_id,
-                agent_id=agent_id,
-            )
-            return _with_latency(json.dumps(result, indent=2, default=str), t0)
-        except HTTPException as e:
-            return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
-        except Exception as e:
-            logger.exception("Unhandled error in memclaw_insights")
-            return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
+    try:
+        # ── Phase 1: DB reads ──────────────────────────────────────
+        async with _mcp_session() as db:
+            # Mirror the REST insights gate: ``require_trust`` soft-passes
+            # a missing Agent row at ``DEFAULT_TRUST_LEVEL`` (read-only
+            # ergonomics — see ``memclaw_list`` below for the intended
+            # consumer), but this handler persists insight memories +
+            # audit-log rows keyed to ``agent_id``. Without a registered
+            # row backing the name, attribution becomes unverifiable, so
+            # re-block unregistered agents on the write path.
+            _, not_found, terr = await _require_trust(db, tenant_id, agent_id, min_level=min_level)
+            if not_found:
+                return _with_latency(
+                    _error_response(
+                        "FORBIDDEN",
+                        f"Agent '{agent_id}' is not registered. Register the agent by writing one memory first.",
+                    ),
+                    t0,
+                )
+            if terr:
+                return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
+            await check_and_increment(db, tenant_id, "insights")
+            memories_or_clusters = await _QUERY_DISPATCH[focus](db, tenant_id, fleet_id, agent_id, scope)
+            if focus == "discover" and isinstance(memories_or_clusters, _DiscoverResult):
+                is_clustered = memories_or_clusters.is_clustered
+                memories_or_clusters = memories_or_clusters.data
+            else:
+                is_clustered = False
+            # Short-circuit when the query found no candidate memories —
+            # no LLM work, no second session, just a stable empty result.
+            if not memories_or_clusters:
+                return _with_latency(
+                    json.dumps(
+                        {
+                            "focus": focus,
+                            "scope": scope,
+                            "memories_analyzed": 0,
+                            "findings": [],
+                            "summary": "No relevant memories found for this analysis.",
+                            "insight_memory_ids": [],
+                            "insights_ms": int((time.perf_counter() - t0) * 1000),
+                        },
+                        indent=2,
+                        default=str,
+                    ),
+                    t0,
+                )
+            config = await resolve_config(db, tenant_id)
+        # ── Session closed. The LLM analysis runs with no DB held. ──
+
+        # ── Phase 2: LLM (no DB) ───────────────────────────────────
+        synth = await synthesize_insights(
+            memories_or_clusters,
+            is_clustered,
+            config,
+            focus=focus,
+            scope=scope,
+        )
+        findings = synth["findings"]
+
+        # ── Phase 3: persist findings + commit ─────────────────────
+        async with _mcp_session() as db:
+            insight_ids = await _persist_findings(db, tenant_id, agent_id, fleet_id, focus, scope, findings)
+            await db.commit()
+
+        result = {
+            "focus": focus,
+            "scope": scope,
+            "memories_analyzed": synth["memories_analyzed"],
+            "findings": [{**f, "insight_memory_id": mid} for f, mid in zip(findings, insight_ids)],
+            "summary": synth["summary"],
+            "insight_memory_ids": [mid for mid in insight_ids if mid],
+            "insights_ms": int((time.perf_counter() - t0) * 1000),
+        }
+        return _with_latency(json.dumps(result, indent=2, default=str), t0)
+    except HTTPException as e:
+        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+    except Exception as e:
+        logger.exception("Unhandled error in memclaw_insights")
+        return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
 
 
 async def memclaw_evolve(
