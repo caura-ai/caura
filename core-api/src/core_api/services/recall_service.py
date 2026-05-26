@@ -65,49 +65,34 @@ def _format_memories_for_prompt(memories: list) -> str:
     return _json.dumps(items, indent=2, ensure_ascii=False)
 
 
-async def recall(
-    db: AsyncSession,
-    tenant_id: str,
+async def summarize_memories(
+    memories: list,
     query: str,
-    fleet_ids: list[str] | None = None,
-    filter_agent_id: str | None = None,
-    caller_agent_id: str | None = None,
-    memory_type_filter: str | None = None,
-    status_filter: str | None = None,
-    top_k: int = DEFAULT_SEARCH_TOP_K,
+    config,
+    *,
     valid_at: datetime | None = None,
     diagnostic: bool = False,
-    readable_tenant_ids: list[str] | None = None,
+    diagnostic_ctx: dict | None = None,
+    top_k: int = DEFAULT_SEARCH_TOP_K,
+    t0: float | None = None,
 ) -> dict:
-    """Search memories and synthesize a context summary.
+    """LLM-only summarization step. No DB access.
 
-    Returns: {"query": ..., "summary": ..., "memory_count": ..., "memories": [...], "recall_ms": ...}
+    Audit finding P3: ``memclaw_recall`` previously held the
+    ``_mcp_session()`` open across the multi-second LLM round-trip,
+    pinning a pooled DB connection. This helper takes already-fetched
+    memories + the resolved tenant config and produces the same dict
+    shape the legacy ``recall()`` wrapper returned, so the MCP tool can
+    exit the session block before invoking it.
+
+    ``t0`` is the caller's ``time.perf_counter()`` checkpoint for the
+    surrounding handler — passing it preserves the original "recall_ms
+    measures end-to-end from auth-pass" semantics. Omitted callers get
+    a fresh checkpoint that only times the summary itself.
     """
-    t0 = time.perf_counter()
-
-    # Search for relevant memories
-    from core_api.services.organization_settings import resolve_config
-
-    config = await resolve_config(db, tenant_id)
-    diagnostic_ctx: dict = {} if diagnostic else {}
-    memories = await search_memories(
-        db,
-        tenant_id=tenant_id,
-        query=query,
-        fleet_ids=fleet_ids,
-        filter_agent_id=filter_agent_id,
-        caller_agent_id=caller_agent_id,
-        memory_type_filter=memory_type_filter,
-        status_filter=status_filter,
-        top_k=top_k,
-        valid_at=valid_at,
-        recall_boost=config.recall_boost,
-        graph_expand=config.graph_expand,
-        tenant_config=config,
-        diagnostic=diagnostic,
-        diagnostic_ctx=diagnostic_ctx if diagnostic else None,
-        readable_tenant_ids=readable_tenant_ids,
-    )
+    if t0 is None:
+        t0 = time.perf_counter()
+    diagnostic_ctx = diagnostic_ctx or {}
 
     if not memories:
         resp = {
@@ -132,11 +117,11 @@ async def recall(
             }
         return resp
 
-    # Sort chronologically so the LLM sees a natural timeline
+    # Sort chronologically so the LLM sees a natural timeline. Callers
+    # may have already sorted; the operation is idempotent.
     _DT_MIN_UTC = datetime.min.replace(tzinfo=UTC)
     memories.sort(key=lambda m: getattr(m, "ts_valid_start", None) or _DT_MIN_UTC)
 
-    # Format memories for the LLM
     memories_text = _format_memories_for_prompt(memories)
     if valid_at:
         reference_date_line = f"Current Date: {valid_at.strftime('%Y-%m-%d')}\n"
@@ -205,7 +190,6 @@ async def recall(
     }
 
     if diagnostic:
-        recall_model = getattr(config, "recall_model", None)
         result["diagnostic"] = {
             "recall_prompt": prompt,
             "recall_model": recall_model or "default",
@@ -220,3 +204,64 @@ async def recall(
         }
 
     return result
+
+
+async def recall(
+    db: AsyncSession,
+    tenant_id: str,
+    query: str,
+    fleet_ids: list[str] | None = None,
+    filter_agent_id: str | None = None,
+    caller_agent_id: str | None = None,
+    memory_type_filter: str | None = None,
+    status_filter: str | None = None,
+    top_k: int = DEFAULT_SEARCH_TOP_K,
+    valid_at: datetime | None = None,
+    diagnostic: bool = False,
+    readable_tenant_ids: list[str] | None = None,
+) -> dict:
+    """Search memories and synthesize a context summary.
+
+    Returns: {"query": ..., "summary": ..., "memory_count": ..., "memories": [...], "recall_ms": ...}
+
+    Thin wrapper over ``search_memories`` + ``summarize_memories``. MCP
+    tool callers that already hold the search results and tenant config
+    should invoke ``summarize_memories`` directly so they can close
+    their DB session before the LLM round-trip (audit P3). This wrapper
+    is retained for the REST surface and other callers that prefer the
+    one-shot ergonomics.
+    """
+    t0 = time.perf_counter()
+
+    from core_api.services.organization_settings import resolve_config
+
+    config = await resolve_config(db, tenant_id)
+    diagnostic_ctx: dict = {} if diagnostic else {}
+    memories = await search_memories(
+        db,
+        tenant_id=tenant_id,
+        query=query,
+        fleet_ids=fleet_ids,
+        filter_agent_id=filter_agent_id,
+        caller_agent_id=caller_agent_id,
+        memory_type_filter=memory_type_filter,
+        status_filter=status_filter,
+        top_k=top_k,
+        valid_at=valid_at,
+        recall_boost=config.recall_boost,
+        graph_expand=config.graph_expand,
+        tenant_config=config,
+        diagnostic=diagnostic,
+        diagnostic_ctx=diagnostic_ctx if diagnostic else None,
+        readable_tenant_ids=readable_tenant_ids,
+    )
+    return await summarize_memories(
+        memories,
+        query,
+        config,
+        valid_at=valid_at,
+        diagnostic=diagnostic,
+        diagnostic_ctx=diagnostic_ctx,
+        top_k=top_k,
+        t0=t0,
+    )

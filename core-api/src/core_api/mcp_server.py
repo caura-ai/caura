@@ -449,8 +449,17 @@ async def memclaw_recall(
     agent_id = _get_agent_id() or agent_id  # prefer gateway-verified identity
     capped_top_k = min(top_k, MAX_SEARCH_TOP_K)
 
-    async with _mcp_session() as db:
-        try:
+    # Audit finding P3: prior implementation held ``_mcp_session()``
+    # open across the brief-generation LLM round-trip (~5-30s), pinning
+    # a pooled DB connection during work that is entirely network-bound
+    # to the LLM provider. The brief path also issued a duplicate
+    # ``search_memories`` call (once here, once inside ``recall()``).
+    # Both are fixed by doing all DB-bound work inside the session,
+    # capturing the search results + config + readable-tenant set, then
+    # closing the session before invoking ``summarize_memories`` for
+    # the LLM brief.
+    try:
+        async with _mcp_session() as db:
             await check_and_increment(db, tenant_id, "search")
             from core_api.repositories import agent_repo
             from core_api.services.organization_settings import resolve_config
@@ -483,25 +492,6 @@ async def memclaw_recall(
                 search_profile=agent_profile,
                 readable_tenant_ids=_get_readable_tenants() or None,
             )
-            payload: dict = {
-                "results": [r.model_dump(mode="json") for r in results] if results else [],
-            }
-            if include_brief:
-                from core_api.services.recall_service import recall as _recall
-
-                brief = await _recall(
-                    db,
-                    tenant_id=tenant_id,
-                    query=query,
-                    fleet_ids=fleet_ids,
-                    filter_agent_id=filter_agent_id,
-                    caller_agent_id=agent_id,
-                    memory_type_filter=memory_type,
-                    status_filter=status,
-                    top_k=capped_top_k,
-                    readable_tenant_ids=_get_readable_tenants() or None,
-                )
-                payload["brief"] = brief
             # Cross-tenant read audit (F2): emit one event per source
             # tenant when the credential widened beyond home. Async
             # queue — does not block the response.
@@ -516,10 +506,24 @@ async def memclaw_recall(
                     surface="memclaw_recall",
                     query_summary=(query or "")[:200],
                 )
-            return _with_latency(json.dumps(payload, indent=2, default=str), t0)
-        except HTTPException as e:
-            logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
-            return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+        # ── Session closed; the LLM brief (when requested) runs without
+        # holding a DB connection.
+        payload: dict = {
+            "results": [r.model_dump(mode="json") for r in results] if results else [],
+        }
+        if include_brief:
+            from core_api.services.recall_service import summarize_memories
+
+            payload["brief"] = await summarize_memories(
+                results,
+                query,
+                config,
+                top_k=capped_top_k,
+            )
+        return _with_latency(json.dumps(payload, indent=2, default=str), t0)
+    except HTTPException as e:
+        logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
+        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
 
 
 async def memclaw_write(

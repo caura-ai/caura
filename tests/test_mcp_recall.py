@@ -9,6 +9,7 @@ Covers:
 - ``HTTPException`` from the service → ``Error (…)`` envelope.
 - Auth failure short-circuits.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -52,19 +53,25 @@ async def test_recall_happy_path(mcp_env, monkeypatch):
 
 
 async def test_recall_with_include_brief(mcp_env, monkeypatch):
-    """`include_brief=True` runs the brief call and merges it."""
+    """`include_brief=True` runs the brief call and merges it.
+
+    Audit P3: ``memclaw_recall`` now closes its DB session before
+    invoking the brief LLM step. Patch ``summarize_memories`` (the
+    LLM-only helper) rather than the legacy ``recall()`` wrapper —
+    the tool no longer reaches the wrapper path.
+    """
     mcp_env["service"]("search_memories").return_value = [_MemoryStub("m-1")]
 
     brief_mock = _fake_async_return({"summary": "alice onboarded last quarter"})
-    monkeypatch.setattr("core_api.services.recall_service.recall", brief_mock)
+    monkeypatch.setattr(
+        "core_api.services.recall_service.summarize_memories", brief_mock
+    )
     monkeypatch.setattr(
         "core_api.services.organization_settings.resolve_config", _fake_resolve_config
     )
     monkeypatch.setattr("core_api.repositories.agent_repo.get_by_id", _async_none)
 
-    out = await mcp_server.memclaw_recall(
-        query="status?", include_brief=True
-    )
+    out = await mcp_server.memclaw_recall(query="status?", include_brief=True)
     payload = parse_envelope(out)
     assert "brief" in payload
     assert payload["brief"]["summary"].startswith("alice")
@@ -131,6 +138,74 @@ async def test_recall_auth_failure_shortcircuits(monkeypatch):
 
     out = await mcp_server.memclaw_recall(query="x")
     assert out == mcp_server._AUTH_ERROR
+
+
+async def test_recall_closes_session_before_brief_llm_call(mcp_env, monkeypatch):
+    """Audit P3: the DB session must be closed before the LLM brief
+    fires, otherwise a pooled connection is pinned across the multi-
+    second OpenAI round-trip. We assert this by patching
+    ``_mcp_session`` to track its enter/exit timestamps and patching
+    ``summarize_memories`` to record when it ran, then comparing the
+    timestamps."""
+    import time as _time
+    from contextlib import asynccontextmanager
+    from unittest.mock import MagicMock
+
+    mcp_env["service"]("search_memories").return_value = [_MemoryStub("m-1")]
+
+    session_exited_at: dict = {"t": None}
+    brief_started_at: dict = {"t": None}
+
+    @asynccontextmanager
+    async def _tracking_session():
+        db = MagicMock()
+        try:
+            yield db
+        finally:
+            session_exited_at["t"] = _time.perf_counter()
+
+    async def _tracking_summarize(*_args, **_kwargs):
+        brief_started_at["t"] = _time.perf_counter()
+        return {"summary": "anything"}
+
+    monkeypatch.setattr(mcp_server, "_mcp_session", _tracking_session)
+    monkeypatch.setattr(
+        "core_api.services.recall_service.summarize_memories", _tracking_summarize
+    )
+    monkeypatch.setattr(
+        "core_api.services.organization_settings.resolve_config", _fake_resolve_config
+    )
+    monkeypatch.setattr("core_api.repositories.agent_repo.get_by_id", _async_none)
+
+    await mcp_server.memclaw_recall(query="x", include_brief=True)
+
+    assert session_exited_at["t"] is not None, "session never exited"
+    assert brief_started_at["t"] is not None, "brief never ran"
+    assert brief_started_at["t"] >= session_exited_at["t"], (
+        "brief LLM call started while session was still open — P3 fix regressed"
+    )
+
+
+async def test_recall_brief_skipped_when_include_brief_false(mcp_env, monkeypatch):
+    """When ``include_brief=False`` (default), ``summarize_memories``
+    must NOT be invoked at all — no LLM cost on the bare-recall path."""
+    mcp_env["service"]("search_memories").return_value = [_MemoryStub("m-1")]
+    calls: list = []
+
+    async def _spy(*args, **kwargs):  # noqa: ARG001
+        calls.append(1)
+        return {"summary": "should not run"}
+
+    monkeypatch.setattr("core_api.services.recall_service.summarize_memories", _spy)
+    monkeypatch.setattr(
+        "core_api.services.organization_settings.resolve_config", _fake_resolve_config
+    )
+    monkeypatch.setattr("core_api.repositories.agent_repo.get_by_id", _async_none)
+
+    out = await mcp_server.memclaw_recall(query="x")
+    payload = parse_envelope(out)
+    assert calls == []
+    assert "brief" not in payload
 
 
 # ---------------------------------------------------------------------------
