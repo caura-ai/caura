@@ -1832,44 +1832,88 @@ async def memclaw_evolve(
     # Dynamic trust: scope='agent' requires trust ≥ 1, 'fleet'/'all' requires ≥ 2.
     min_level = 1 if scope == "agent" else 2
 
-    async with _mcp_session() as db:
-        # Mirror the REST evolve gate (and ``memclaw_insights`` above):
-        # block unregistered agents on the write path so the
-        # outcome/rule memories + audit-log rows have a real registered
-        # ``agent_id`` backing them. Soft-pass remains in
-        # ``require_trust`` itself for the read-only ``memclaw_list``
-        # below.
-        _, not_found, terr = await _require_trust(db, tenant_id, agent_id, min_level=min_level)
-        if not_found:
-            return _with_latency(
-                _error_response(
-                    "FORBIDDEN",
-                    f"Agent '{agent_id}' is not registered. Register the agent by writing one memory first.",
-                ),
-                t0,
-            )
-        if terr:
-            return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
-        try:
-            await check_and_increment(db, tenant_id, "evolve")
-            from core_api.services.evolve_service import report_outcome
+    # Audit finding P3 (evolve portion): prior implementation held a
+    # single ``_mcp_session()`` open across the rule-generation LLM
+    # round-trip — multiple seconds during which a pooled DB connection
+    # was pinned for work that is entirely network-bound to the LLM
+    # provider. Three-phase restructure (same pattern as insights):
+    #   1. session 1 — trust + usage gates, filter_by_scope, resolve_config
+    #   2. no DB     — _maybe_generate_rule (LLM)
+    #   3. session 2 — _apply_outcome_to_db (weights + persist + backfill + commit)
+    from core_api.services.evolve_service import (
+        _apply_outcome_to_db,
+        _filter_by_scope,
+        _maybe_generate_rule,
+    )
+    from core_api.services.organization_settings import resolve_config
 
-            result = await report_outcome(
+    try:
+        # ── Phase 1: DB reads ──────────────────────────────────────
+        async with _mcp_session() as db:
+            # Mirror the REST evolve gate (and ``memclaw_insights`` above):
+            # block unregistered agents on the write path so the
+            # outcome/rule memories + audit-log rows have a real
+            # registered ``agent_id`` backing them.
+            _, not_found, terr = await _require_trust(db, tenant_id, agent_id, min_level=min_level)
+            if not_found:
+                return _with_latency(
+                    _error_response(
+                        "FORBIDDEN",
+                        f"Agent '{agent_id}' is not registered. Register the agent by writing one memory first.",
+                    ),
+                    t0,
+                )
+            if terr:
+                return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
+            await check_and_increment(db, tenant_id, "evolve")
+
+            in_scope_ids = related_ids or []
+            out_of_scope_count = 0
+            if in_scope_ids:
+                in_scope_ids, out_of_scope_count = await _filter_by_scope(
+                    db,
+                    tenant_id=tenant_id,
+                    caller_agent_id=agent_id,
+                    fleet_id=fleet_id,
+                    scope=scope,
+                    related_ids=in_scope_ids,
+                )
+            config = await resolve_config(db, tenant_id)
+        # ── Session closed. The LLM rule generation runs with no DB held. ──
+
+        # ── Phase 2: LLM (no DB) ───────────────────────────────────
+        rule_result, rule_skipped_reason = await _maybe_generate_rule(
+            tenant_id,
+            outcome,
+            outcome_type,
+            in_scope_ids,
+            config,
+            agent_id,
+            fleet_id,
+        )
+
+        # ── Phase 3: persist + commit ──────────────────────────────
+        async with _mcp_session() as db:
+            result = await _apply_outcome_to_db(
                 db,
                 tenant_id=tenant_id,
-                outcome=outcome,
-                outcome_type=outcome_type,
-                related_ids=related_ids,
-                scope=scope,
                 agent_id=agent_id,
                 fleet_id=fleet_id,
+                outcome=outcome,
+                outcome_type=outcome_type,
+                related_ids=in_scope_ids,
+                rule_result=rule_result,
+                rule_skipped_reason=rule_skipped_reason,
+                scope=scope,
+                out_of_scope_count=out_of_scope_count,
+                t0=t0,
             )
-            return _with_latency(json.dumps(result, indent=2, default=str), t0)
-        except HTTPException as e:
-            return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
-        except Exception as e:
-            logger.exception("Unhandled error in memclaw_evolve")
-            return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
+        return _with_latency(json.dumps(result, indent=2, default=str), t0)
+    except HTTPException as e:
+        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+    except Exception as e:
+        logger.exception("Unhandled error in memclaw_evolve")
+        return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
 
 
 # ──────────────────────────────────────────────────────────────────────

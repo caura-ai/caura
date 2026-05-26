@@ -358,11 +358,11 @@ def _fake_rule() -> dict:
 
 
 async def _generate_rule(
-    db: AsyncSession,
     tenant_id: str,
     outcome: str,
     outcome_type: str,
     related_ids: list[str],
+    config,
     agent_id: str,
     fleet_id: str | None,
 ) -> tuple[str | None, dict | None]:
@@ -376,13 +376,23 @@ async def _generate_rule(
     (``report_outcome``) can propagate the specific reason out to the
     response + structured log instead of conflating "no candidates",
     "LLM blew up", and "fetched zero memories" into a single None.
+
+    Audit P3 (evolve): ``db`` was removed from this signature. The
+    function only used it to resolve tenant config; callers now do
+    that themselves and pass ``config`` in. This lets the MCP tool
+    (``memclaw_evolve``) close its DB session before invoking the
+    LLM round-trip — which can take multiple seconds and would
+    otherwise pin a pooled connection.
+
+    ``agent_id`` and ``fleet_id`` are reserved arguments; the body
+    does not use them today but they're preserved so future
+    rule-generation strategies (per-agent prompts, fleet-scoped
+    examples) can light up without a signature break.
     """
     from core_api.clients.storage_client import get_storage_client
     from core_api.providers._retry import call_with_fallback
-    from core_api.services.organization_settings import resolve_config
 
     sc = get_storage_client()
-    config = await resolve_config(db, tenant_id)
 
     # Fetch related memories for context (cap at 10 for prompt size).
     # Parallelize HTTP fetches so latency is O(1) instead of O(n) round trips.
@@ -652,6 +662,8 @@ async def report_outcome(
     if scope == "fleet" and not fleet_id:
         raise ValueError("fleet_id is required when scope is 'fleet'.")
 
+    from core_api.services.organization_settings import resolve_config
+
     # Phase 0: Filter related_ids by scope. Runs before rule generation so the
     # LLM prompt never sees memory content the caller shouldn't access (e.g.,
     # a scope='agent' caller passing another agent's memory IDs). Dropped IDs
@@ -667,37 +679,111 @@ async def report_outcome(
             related_ids=related_ids,
         )
 
-    # Phase 1: Generate rule BEFORE touching weights. Rule generation makes
-    # HTTP calls to the storage client and an LLM that can take several seconds;
-    # doing it first means Phase 2's row locks are held for DB round-trips only,
-    # never across HTTP/LLM I/O. The rule prompt only needs memory content for
-    # context — it has no dependency on the updated weights.
-    #
-    # A10 — track the specific skip reason through every silent-exit
-    # branch so the response carries it back to the caller (and a
-    # structured log line lets operators bisect by reason).
-    rule_result: dict | None = None
-    rule_skipped_reason: str | None = None
-    if outcome_type not in ("failure", "partial"):
-        rule_skipped_reason = "not_failure_or_partial"
-        _log_rule_skip(rule_skipped_reason, tenant_id, outcome_type)
-    elif not related_ids:
-        rule_skipped_reason = "no_related_ids"
-        _log_rule_skip(rule_skipped_reason, tenant_id, outcome_type)
-    else:
-        gen_reason, rule_result = await _generate_rule(
-            db,
-            tenant_id,
-            outcome,
-            outcome_type,
-            related_ids,
-            agent_id,
-            fleet_id,
-        )
-        if gen_reason is not None:
-            rule_skipped_reason = gen_reason
-            _log_rule_skip(rule_skipped_reason, tenant_id, outcome_type)
+    # Resolve tenant config up front so ``_maybe_generate_rule`` can be
+    # called without any DB dependency. Both REST (here) and MCP
+    # (``memclaw_evolve``) feed config in the same way.
+    config = await resolve_config(db, tenant_id)
 
+    # Phase 1: Generate rule BEFORE touching weights. The MCP tool
+    # closes its DB session between this phase and ``_apply_outcome_to_db``
+    # so the LLM round-trip (which can take several seconds) doesn't
+    # pin a pooled connection. REST callers run the whole chain in one
+    # session — same total latency, just no pool relief.
+    rule_result, rule_skipped_reason = await _maybe_generate_rule(
+        tenant_id,
+        outcome,
+        outcome_type,
+        related_ids,
+        config,
+        agent_id,
+        fleet_id,
+    )
+
+    return await _apply_outcome_to_db(
+        db,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        fleet_id=fleet_id,
+        outcome=outcome,
+        outcome_type=outcome_type,
+        related_ids=related_ids,
+        rule_result=rule_result,
+        rule_skipped_reason=rule_skipped_reason,
+        scope=scope,
+        out_of_scope_count=out_of_scope_count,
+        t0=t0,
+    )
+
+
+async def _maybe_generate_rule(
+    tenant_id: str,
+    outcome: str,
+    outcome_type: str,
+    related_ids: list[str],
+    config,
+    agent_id: str,
+    fleet_id: str | None,
+) -> tuple[dict | None, str | None]:
+    """Decide whether to invoke ``_generate_rule`` and return ``(rule, skip_reason)``.
+
+    Pure compute + LLM call, NO DB access. Callers resolve tenant config
+    first and pass it in. Lets the MCP tool fire this between two
+    independent DB sessions so the multi-second LLM round-trip doesn't
+    pin a pooled connection (audit P3).
+
+    Returns:
+      - ``(rule_dict, None)`` on a successful generation.
+      - ``(None, slug)`` for any silent-exit path; ``slug`` names the
+        reason (one of ``RULE_SKIP_REASONS``).
+    """
+    if outcome_type not in ("failure", "partial"):
+        reason = "not_failure_or_partial"
+        _log_rule_skip(reason, tenant_id, outcome_type)
+        return None, reason
+    if not related_ids:
+        reason = "no_related_ids"
+        _log_rule_skip(reason, tenant_id, outcome_type)
+        return None, reason
+    gen_reason, rule_result = await _generate_rule(
+        tenant_id,
+        outcome,
+        outcome_type,
+        related_ids,
+        config,
+        agent_id,
+        fleet_id,
+    )
+    if gen_reason is not None:
+        _log_rule_skip(gen_reason, tenant_id, outcome_type)
+        return None, gen_reason
+    return rule_result, None
+
+
+async def _apply_outcome_to_db(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    agent_id: str,
+    fleet_id: str | None,
+    outcome: str,
+    outcome_type: str,
+    related_ids: list[str],
+    rule_result: dict | None,
+    rule_skipped_reason: str | None,
+    scope: str,
+    out_of_scope_count: int,
+    t0: float,
+) -> dict:
+    """Phases 2-5 + commit: the entire DB-bound write side of evolve.
+
+    Audit P3 (evolve): split out of ``report_outcome`` so the MCP tool
+    can call it from a fresh DB session, opened AFTER the LLM rule
+    generation. Atomicity contract is preserved — every local write
+    (weight UPDATEs, backfill UPDATE) commits in this one session;
+    the storage-api writes (rule + outcome memories) commit eagerly
+    via HTTP and are not rolled back if the local commit fails, same
+    as before.
+    """
     # Phase 2: Adjust weights atomically. Row locks are acquired and released
     # entirely within this block — no long-running work runs while locks are held.
     processed_ids: list[str] = []

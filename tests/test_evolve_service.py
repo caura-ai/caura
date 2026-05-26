@@ -444,14 +444,20 @@ async def test_evolve_generate_rule_returns_valid_structure(db, sc):
     mid, _ = await _create_test_memory_via_sc(sc, tenant_id, weight=0.5)
 
     from core_api.services.evolve_service import _generate_rule
+    from core_api.services.organization_settings import resolve_config
+
+    # Audit P3 (evolve): ``_generate_rule`` no longer takes ``db`` —
+    # callers resolve the tenant config first and pass it in. This
+    # lets the MCP tool close its session before the LLM round-trip.
+    config = await resolve_config(db, tenant_id)
 
     # A10: _generate_rule now returns (skip_reason, rule_dict) tuple.
     reason, rule = await _generate_rule(
-        db,
         tenant_id=tenant_id,
         outcome=f"Failed because of bad info [{tag}]",
         outcome_type="failure",
         related_ids=[mid],
+        config=config,
         agent_id="evolve-test-agent",
         fleet_id=None,
     )
