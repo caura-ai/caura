@@ -55,6 +55,7 @@ from core_api.routes.keystones import router as keystones_router
 from core_api.routes.lifecycle import router as lifecycle_router
 from core_api.routes.memories import admin_memories_router
 from core_api.routes.memories import router as memories_router
+from core_api.routes.org_deletion import router as org_deletion_router
 from core_api.routes.plugin import plugin_bootstrap_router
 from core_api.routes.plugin import router as plugin_router
 from core_api.routes.settings import router as settings_router
@@ -595,6 +596,7 @@ app.include_router(stm_router, prefix="/api/v1")
 app.include_router(insights_router, prefix="/api/v1")
 app.include_router(evolve_router, prefix="/api/v1")
 app.include_router(lifecycle_router, prefix="/api/v1")
+app.include_router(org_deletion_router, prefix="/api/v1")
 
 # Test-only endpoints (time-warp, etc.) — only registered when TESTING=1
 if _os.getenv("TESTING") == "1":

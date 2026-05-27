@@ -33,7 +33,13 @@ logger = logging.getLogger(__name__)
 # silent-create regression in loadtest-1777301515 — the route now wraps
 # its own ``asyncio.wait_for`` and surfaces the 504 with the retry
 # contract intact.
-_TIMEOUT_OPT_OUT_PATHS: frozenset[str] = frozenset({"/api/v1/memories/bulk"})
+# ``/admin/org/purge-data`` (CAURA-689) hard-deletes every row of a
+# soft-deleted org across the OSS schema — a terminal admin batch op
+# driven by the daily sweep, not a user request. A large org can take
+# well past the hot-path budget; cancelling it mid-flight is pointless
+# (the purge is one transaction per tenant and idempotent on retry), so
+# it opts out and is bounded by the storage client's own timeout instead.
+_TIMEOUT_OPT_OUT_PATHS: frozenset[str] = frozenset({"/api/v1/memories/bulk", "/api/v1/admin/org/purge-data"})
 
 
 def _is_opted_out(path: str) -> bool:

@@ -646,6 +646,15 @@ class CoreStorageClient:
         result = await self._post("/memories/purge-soft-deleted", data)
         return result.get("deleted", 0)  # type: ignore[union-attr]
 
+    async def purge_tenant_data(self, tenant_id: str) -> dict[str, int]:
+        """Hard-delete ALL OSS data for ``tenant_id`` (CAURA-689 org delete).
+
+        Returns the per-table deleted counts. Idempotent at the storage
+        layer — a repeat call for an already-purged tenant returns zeros.
+        """
+        result = await self._post("/purge/tenant-data", {"tenant_id": tenant_id})
+        return result.get("deleted", {})  # type: ignore[union-attr,return-value]
+
     async def count_active(self, tenant_id: str, fleet_id: str | None = None) -> int:
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if fleet_id is not None:

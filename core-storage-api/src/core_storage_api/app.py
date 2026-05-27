@@ -37,6 +37,7 @@ from core_storage_api.routers import (
     keystones_router,
     lifecycle_audit_router,
     memories_router,
+    purge_router,
     reports_router,
     tasks_router,
 )
@@ -120,6 +121,7 @@ def create_app() -> FastAPI:
     app.include_router(tasks_router, prefix=prefix)
     app.include_router(idempotency_router, prefix=prefix)
     app.include_router(lifecycle_audit_router, prefix=prefix)
+    app.include_router(purge_router, prefix=prefix)
     # CAURA-686: ``GET /api/v1/storage/_debug/pg_locks`` for live
     # pg_locks / pg_stat_activity snapshots during contention triage.
     # Behind the same private-VPC posture as everything else here —

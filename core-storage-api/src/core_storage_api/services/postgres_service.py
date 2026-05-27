@@ -159,6 +159,40 @@ _MEMORY_VALID_FIELDS = frozenset(
 )
 
 
+# ── Org hard-delete purge (CAURA-689) ──
+#
+# Tables wiped when an organization is permanently deleted. Ordered
+# children-before-parents so the per-table DELETEs never trip a foreign
+# key. Tables WITHOUT their own ``tenant_id`` column (``memory_entity_links``)
+# are not listed — they're removed by the ON DELETE CASCADE from
+# ``memories`` / ``entities``. ``relations`` and ``fleet_commands`` are
+# listed explicitly (ahead of their parents) so their per-table counts are
+# reported rather than hidden inside a cascade.
+_PURGE_TENANT_TABLES: tuple[str, ...] = (
+    "relations",
+    "fleet_commands",
+    "memories",
+    "entities",
+    "agents",
+    "fleet_nodes",
+    "audit_log",
+    "documents",
+    "analysis_reports",
+    "dedup_reviews",
+    "background_task_log",
+    "idempotency_responses",
+)
+# OSS keys these by ``org_id``, which equals the tenant id in the
+# single-key-per-tenant OSS model (CAURA-654). ``lifecycle_audit`` is
+# deliberately NOT purged: it's the operational audit trail (including
+# the hard-delete-org row itself), so wiping it would erase the record
+# of the very deletion being performed.
+_PURGE_ORG_KEYED_TABLES: tuple[str, ...] = (
+    "organization_settings",
+    "organization_settings_audit",
+)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PostgresService
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1621,6 +1655,46 @@ class PostgresService:
                 params,
             )
             return len(result.all())
+
+    async def purge_tenant_data(self, tenant_id: str) -> dict[str, int]:
+        """Permanently delete EVERY row scoped to ``tenant_id`` across the
+        OSS schema — the hard side of organization deletion (CAURA-689).
+
+        Runs in one transaction, children-before-parents, so a foreign key
+        never blocks a delete and a mid-purge failure rolls back cleanly.
+        Tables without their own ``tenant_id`` (``memory_entity_links``)
+        are removed by the CASCADE from ``memories`` / ``entities``;
+        ``organization_settings*`` are keyed by ``org_id`` (== tenant id in
+        OSS). ``lifecycle_audit`` is intentionally retained as the audit
+        trail. Returns per-table deleted counts.
+
+        Idempotent: re-running on an already-purged tenant deletes nothing
+        and returns zeros, so a retried org hard-delete is safe.
+
+        The enterprise ``enterprise.*`` rows (org, tenants, keys, …) are
+        purged separately by platform-storage-api; this owns the OSS
+        ``public.*`` schema only.
+        """
+        counts: dict[str, int] = {}
+        async with get_session() as session:
+            # One DELETE per table in the declared children-before-parents
+            # order (so a foreign key never blocks a delete) and one rowcount
+            # per table (the per-table breakdown is a reported feature). The
+            # two groups differ only in the scoping column: most tables carry
+            # ``tenant_id``; ``organization_settings*`` carry ``org_id``.
+            for tables, column in (
+                (_PURGE_TENANT_TABLES, "tenant_id"),
+                (_PURGE_ORG_KEYED_TABLES, "org_id"),
+            ):
+                for table_name in tables:
+                    # Schema-qualify (public.) so an irreversible hard-delete
+                    # can't be redirected by a non-default search_path.
+                    result = await session.execute(
+                        text(f"DELETE FROM public.{table_name} WHERE {column} = :tid"),
+                        {"tid": tenant_id},
+                    )
+                    counts[table_name] = result.rowcount  # type: ignore[attr-defined]
+        return counts
 
     async def memory_count_active(
         self,
