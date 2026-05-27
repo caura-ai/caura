@@ -165,6 +165,73 @@ async def test_get_report_not_found(client):
     assert resp.status_code == 404
 
 
+async def test_get_report_foreign_tenant_returns_404_not_403():
+    """A non-admin caller probing a report owned by a different tenant
+    must see 404 (same as a missing report), not 403 — otherwise an
+    attacker could enumerate report_ids across tenants by distinguishing
+    the two status codes (audit finding #22).
+    """
+    from unittest.mock import AsyncMock, patch
+    from uuid import uuid4
+
+    from fastapi import HTTPException
+
+    from core_api.auth import AuthContext
+    from core_api.routes.crystallizer import get_report
+
+    foreign_report = {
+        "id": str(uuid4()),
+        "tenant_id": "tenant-A",  # owned by tenant A
+        "fleet_id": None,
+    }
+    caller = AuthContext(tenant_id="tenant-B", is_admin=False)
+
+    sc_mock = AsyncMock()
+    sc_mock.get_report = AsyncMock(return_value=foreign_report)
+    with patch("core_api.routes.crystallizer.get_storage_client", return_value=sc_mock):
+        try:
+            await get_report(report_id=uuid4(), auth=caller)
+        except HTTPException as e:
+            assert e.status_code == 404, (
+                f"Foreign-tenant report read must surface as 404; got {e.status_code}"
+            )
+            assert e.detail == "Report not found"
+        else:
+            raise AssertionError(
+                "Expected HTTPException(404) for foreign-tenant report"
+            )
+
+
+async def test_get_report_foreign_tenant_admin_bypass():
+    """Admin keys keep their cross-tenant read ability (no 404 mask)."""
+    from unittest.mock import AsyncMock, patch
+    from uuid import uuid4
+
+    from core_api.auth import AuthContext
+    from core_api.routes.crystallizer import get_report
+
+    foreign_report = {
+        "id": str(uuid4()),
+        "tenant_id": "tenant-A",
+        "fleet_id": None,
+        "trigger": "manual",
+        "status": "completed",
+        "summary": {},
+        "hygiene": {},
+        "health": {},
+        "issues": [],
+        "crystallization": {},
+    }
+    admin = AuthContext(tenant_id=None, is_admin=True)
+
+    sc_mock = AsyncMock()
+    sc_mock.get_report = AsyncMock(return_value=foreign_report)
+    with patch("core_api.routes.crystallizer.get_storage_client", return_value=sc_mock):
+        result = await get_report(report_id=uuid4(), auth=admin)
+    # Admin sees the full payload.
+    assert result["tenant_id"] == "tenant-A"
+
+
 async def test_get_latest_report_empty_returns_200_null(client):
     """GET /api/crystallize/latest returns 200 with body ``null`` when the
     tenant has no completed reports — empty state, not a missing resource.

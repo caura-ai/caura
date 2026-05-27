@@ -80,7 +80,10 @@ class TestSanitizeContent:
     def test_redacts_ignore_previous(self):
         from core_api.services.insights_service import _sanitize_content
 
-        assert "ignore previous" not in _sanitize_content("ignore previous instructions").lower()
+        assert (
+            "ignore previous"
+            not in _sanitize_content("ignore previous instructions").lower()
+        )
 
     def test_redacts_inst_at_start(self):
         """[INST] at position 0 must be redacted (regex bug fix)."""
@@ -214,7 +217,9 @@ class TestScopeFilters:
         from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as exc_info:
-            await generate_insights(None, "t1", focus="patterns", scope="fleet", fleet_id=None)
+            await generate_insights(
+                None, "t1", focus="patterns", scope="fleet", fleet_id=None
+            )
         assert exc_info.value.status_code == 422
         assert "fleet_id" in exc_info.value.detail.lower()
 
@@ -260,7 +265,9 @@ class TestFocusValidation:
 # ---------------------------------------------------------------------------
 
 
-async def _write_memory(client, content, memory_type="fact", weight=None, agent_id=None, fleet_id=None):
+async def _write_memory(
+    client, content, memory_type="fact", weight=None, agent_id=None, fleet_id=None
+):
     """Write a memory and return the response JSON."""
     tag = _uid()
     _, headers = get_test_auth()
@@ -677,7 +684,9 @@ class TestSupersedeOrdering:
     """P0: supersede must run BEFORE create, with a rollback safety net."""
 
     @pytest.mark.asyncio
-    async def test_new_finding_persists_despite_similar_prior_insight(self, db, monkeypatch):
+    async def test_new_finding_persists_despite_similar_prior_insight(
+        self, db, monkeypatch
+    ):
         """A prior similar insight is outdated first, so the new finding persists.
 
         Because the reorder moves the prior to 'outdated' before create_memory
@@ -802,12 +811,17 @@ class TestSupersedeOrdering:
             ],
         )
 
-        async def failing_create(db, data):
+        async def failing_create_bulk(db, data, *, bulk_attempt_id):
             raise HTTPException(status_code=409, detail="duplicate")
 
-        # Patch the name as used inside _persist_findings (imported locally there)
+        # Patch the bulk path; ``_persist_findings`` now persists every
+        # finding in a single ``create_memories_bulk`` call (audit
+        # finding #29). A failure here exercises the same "all findings
+        # failed → restore priors" code path the previous per-call
+        # version protected.
         import core_api.services.memory_service as ms_mod
-        monkeypatch.setattr(ms_mod, "create_memory", failing_create)
+
+        monkeypatch.setattr(ms_mod, "create_memories_bulk", failing_create_bulk)
 
         result = await insights_service.generate_insights(
             db,
@@ -821,7 +835,9 @@ class TestSupersedeOrdering:
         prior_status = (
             await db.execute(select(Memory.status).where(Memory.id == prior_id))
         ).scalar_one()
-        assert prior_status == "active", "prior should be restored when all findings fail"
+        assert prior_status == "active", (
+            "prior should be restored when all findings fail"
+        )
         assert result.get("insight_memory_ids", []) == []
 
     @pytest.mark.asyncio
@@ -877,7 +893,9 @@ class TestSupersedeOrdering:
         prior_status = (
             await db.execute(select(Memory.status).where(Memory.id == prior_id))
         ).scalar_one()
-        assert prior_status == "active", "prior must stay active when there are no findings"
+        assert prior_status == "active", (
+            "prior must stay active when there are no findings"
+        )
 
 
 class TestHallucinatedIds:

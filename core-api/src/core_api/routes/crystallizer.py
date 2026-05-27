@@ -131,7 +131,16 @@ async def get_report(
     report = await sc.get_report(str(report_id))
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
-    auth.enforce_tenant(report.get("tenant_id", ""))
+    # Collapse foreign-tenant (403) into not-found (404) so callers
+    # can't probe for the existence of reports in other tenants by
+    # distinguishing 403 from 404 on random UUIDs (audit finding #22).
+    # Cross-tenant read keys (``readable_tenant_ids`` widened past the
+    # home tenant) are honoured here — the set always contains
+    # ``auth.tenant_id`` by construction (``AuthContext`` line 85-90),
+    # so the 404 mask still hides reports the caller has no read
+    # access to.
+    if not auth.is_admin and report.get("tenant_id") not in auth.readable_tenant_ids:
+        raise HTTPException(status_code=404, detail="Report not found")
     return {
         "id": str(report.get("id", "")),
         "tenant_id": report.get("tenant_id"),

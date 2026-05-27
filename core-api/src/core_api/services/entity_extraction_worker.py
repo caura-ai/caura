@@ -83,121 +83,118 @@ async def process_entity_extraction(
 
         sc = get_storage_client()
 
-        try:
-            blocklist = tenant_cfg.entity_blocklist
+        blocklist = tenant_cfg.entity_blocklist
 
-            # Embed entity names for fuzzy resolution
-            name_embeddings: dict[str, list[float]] = {}
-            for ent in graph.entities:
-                try:
-                    name_embeddings[ent.canonical_name] = await get_embedding(ent.canonical_name)
-                except Exception:
-                    logger.debug(
-                        "Failed to embed entity name '%s', skipping fuzzy resolution",
-                        ent.canonical_name,
-                    )
+        # Embed entity names for fuzzy resolution
+        name_embeddings: dict[str, list[float]] = {}
+        for ent in graph.entities:
+            try:
+                name_embeddings[ent.canonical_name] = await get_embedding(ent.canonical_name)
+            except Exception:
+                logger.debug(
+                    "Failed to embed entity name '%s', skipping fuzzy resolution",
+                    ent.canonical_name,
+                )
 
-            # Upsert entities and build name -> UUID map
-            name_to_id: dict[str, UUID] = {}
-            entity_roles: dict[str, str] = {}
+        # Upsert entities and build name -> UUID map
+        name_to_id: dict[str, UUID] = {}
+        entity_roles: dict[str, str] = {}
 
-            for ent in graph.entities:
-                if not _is_valid_entity(ent.canonical_name, blocklist):
-                    logger.debug(
-                        "Skipping invalid entity name '%s'",
-                        ent.canonical_name,
-                    )
-                    continue
-                # ``data`` is positional, ``name_embedding`` keyword-only
-                # under the CAURA-127 signature cleanup.
-                result = await upsert_entity(
-                    EntityUpsert(
+        for ent in graph.entities:
+            if not _is_valid_entity(ent.canonical_name, blocklist):
+                logger.debug(
+                    "Skipping invalid entity name '%s'",
+                    ent.canonical_name,
+                )
+                continue
+            # ``data`` is positional, ``name_embedding`` keyword-only
+            # under the CAURA-127 signature cleanup.
+            result = await upsert_entity(
+                EntityUpsert(
+                    tenant_id=tenant_id,
+                    fleet_id=fleet_id,
+                    entity_type=ent.entity_type,
+                    canonical_name=ent.canonical_name,
+                ),
+                name_embedding=name_embeddings.get(ent.canonical_name),
+            )
+            name_to_id[ent.canonical_name] = result.id
+            entity_roles[ent.canonical_name] = ent.role
+
+        # Create memory-entity links
+        for name, entity_id in name_to_id.items():
+            existing = await sc.find_entity_link(
+                str(memory_id),
+                str(entity_id),
+            )
+            if not existing:
+                await sc.create_entity_link(
+                    {
+                        "memory_id": str(memory_id),
+                        "entity_id": str(entity_id),
+                        "role": entity_roles.get(name, "mentioned"),
+                    }
+                )
+
+        # Upsert relations
+        rel_count = 0
+        for rel in graph.relations:
+            from_id = name_to_id.get(rel.from_entity)
+            to_id = name_to_id.get(rel.to_entity)
+            if from_id and to_id:
+                await upsert_relation(
+                    None,
+                    RelationUpsert(
                         tenant_id=tenant_id,
                         fleet_id=fleet_id,
-                        entity_type=ent.entity_type,
-                        canonical_name=ent.canonical_name,
+                        from_entity_id=from_id,
+                        relation_type=rel.relation_type,
+                        to_entity_id=to_id,
+                        evidence_memory_id=memory_id,
                     ),
-                    name_embedding=name_embeddings.get(ent.canonical_name),
                 )
-                name_to_id[ent.canonical_name] = result.id
-                entity_roles[ent.canonical_name] = ent.role
+                rel_count += 1
 
-            # Create memory-entity links
-            for name, entity_id in name_to_id.items():
-                existing = await sc.find_entity_link(
-                    str(memory_id),
-                    str(entity_id),
-                )
-                if not existing:
-                    await sc.create_entity_link(
-                        {
-                            "memory_id": str(memory_id),
-                            "entity_id": str(entity_id),
-                            "role": entity_roles.get(name, "mentioned"),
-                        }
-                    )
+        # Audit log
+        await log_action(
+            None,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            action="entity_extraction",
+            resource_type="memory",
+            resource_id=memory_id,
+            detail={
+                "entities_count": len(name_to_id),
+                "relations_count": rel_count,
+            },
+        )
 
-            # Upsert relations
-            rel_count = 0
-            for rel in graph.relations:
-                from_id = name_to_id.get(rel.from_entity)
-                to_id = name_to_id.get(rel.to_entity)
-                if from_id and to_id:
-                    await upsert_relation(
-                        None,
-                        RelationUpsert(
-                            tenant_id=tenant_id,
-                            fleet_id=fleet_id,
-                            from_entity_id=from_id,
-                            relation_type=rel.relation_type,
-                            to_entity_id=to_id,
-                            evidence_memory_id=memory_id,
-                        ),
-                    )
-                    rel_count += 1
+        logger.info(
+            "Entity extraction complete for memory %s: %d entities, %d relations",
+            memory_id,
+            len(name_to_id),
+            rel_count,
+        )
 
-            # Audit log
-            await log_action(
-                None,
-                tenant_id=tenant_id,
-                agent_id=agent_id,
-                action="entity_extraction",
-                resource_type="memory",
-                resource_id=memory_id,
-                detail={
-                    "entities_count": len(name_to_id),
-                    "relations_count": rel_count,
-                },
+        # Trigger entity-based contradiction detection now that entity links exist
+        if name_to_id:
+            from core_api.services.contradiction_detector import (
+                detect_contradictions_by_entities_async,
             )
+            from core_api.tasks import track_task
 
-            logger.info(
-                "Entity extraction complete for memory %s: %d entities, %d relations",
-                memory_id,
-                len(name_to_id),
-                rel_count,
-            )
+            track_task(detect_contradictions_by_entities_async(memory_id, tenant_id, fleet_id))
 
-            # Trigger entity-based contradiction detection now that entity links exist
-            if name_to_id:
-                from core_api.services.contradiction_detector import (
-                    detect_contradictions_by_entities_async,
+        # Cross-link discovery (non-fatal)
+        if tenant_cfg.auto_entity_linking_enabled:
+            try:
+                await _discover_cross_links_for_memory(memory_id, tenant_id, fleet_id)
+            except Exception:
+                logger.warning(
+                    "Cross-link discovery failed for memory %s (non-fatal)",
+                    memory_id,
+                    exc_info=True,
                 )
-                from core_api.tasks import track_task
-
-                track_task(detect_contradictions_by_entities_async(memory_id, tenant_id, fleet_id))
-
-            # Cross-link discovery (non-fatal)
-            if tenant_cfg.auto_entity_linking_enabled:
-                try:
-                    await _discover_cross_links_for_memory(memory_id, tenant_id, fleet_id)
-                except Exception:
-                    logger.warning(
-                        "Cross-link discovery failed for memory %s (non-fatal)",
-                        memory_id,
-                        exc_info=True,
-                    )
-        except Exception:
-            raise
 
     except Exception:
         logger.exception("Entity extraction failed for memory %s (non-fatal)", memory_id)

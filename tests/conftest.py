@@ -201,10 +201,18 @@ async def _patch_storage_client(_engine, _setup_schema):
             "http://test-storage:8002", _storage_asgi_http
         )
 
+    # Try/finally so a setup-time exception between the mutation and
+    # the yield (or anywhere in the test body) restores the original
+    # client. Without this guard, a failing setup or a teardown error
+    # would leak the ASGI-bridged client into subsequent tests via the
+    # module-level ``sc_mod._client`` singleton — caused intermittent
+    # cascade failures previously (audit T5).
     old_client = sc_mod._client
     sc_mod._client = _storage_sc
-    yield
-    sc_mod._client = old_client
+    try:
+        yield
+    finally:
+        sc_mod._client = old_client
 
 
 @pytest.fixture

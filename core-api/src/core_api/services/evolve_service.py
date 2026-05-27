@@ -10,7 +10,7 @@ import logging
 import time
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.constants import (
@@ -112,22 +112,25 @@ Respond with JSON:
 # -- Weight adjustment --------------------------------------------------------
 
 
-_ADJUST_WEIGHT_SQL = text(
+_ADJUST_WEIGHTS_BULK_SQL = text(
     """
-    WITH old_val AS (
-        SELECT weight AS old_weight
+    WITH old_vals AS (
+        SELECT id, weight AS old_weight
           FROM memories
-         WHERE id = :mid AND tenant_id = :tid AND deleted_at IS NULL
+         WHERE id IN :mids
+           AND tenant_id = :tid
+           AND deleted_at IS NULL
     )
     UPDATE memories
        SET weight = GREATEST(:floor, LEAST(:cap, weight + :delta))
-      FROM old_val
-     WHERE memories.id = :mid
+      FROM old_vals
+     WHERE memories.id = old_vals.id
        AND memories.tenant_id = :tid
        AND memories.deleted_at IS NULL
-    RETURNING old_val.old_weight AS old_weight, memories.weight AS new_weight
+    RETURNING memories.id AS id, old_vals.old_weight AS old_weight,
+              memories.weight AS new_weight
     """
-)
+).bindparams(bindparam("mids", expanding=True))
 
 
 # Backfill the rule memory's metadata.source_outcome_id after the outcome
@@ -299,38 +302,62 @@ async def _adjust_weights(
     adjustments: list[dict] = []
     successfully_adjusted: list[str] = []
 
+    # Parse all UUIDs up front. Invalid strings are logged + dropped
+    # before the SQL roundtrip rather than failing the whole batch.
+    parsed: list[tuple[str, UUID]] = []
     for mid_str in related_ids:
         try:
-            mid = UUID(mid_str)
+            parsed.append((mid_str, UUID(mid_str)))
         except ValueError:
             logger.warning("evolve: skipping invalid UUID: %s", mid_str)
-            continue
 
-        # Savepoint isolates a per-row UPDATE failure: without it, an asyncpg
-        # error here would put the connection in aborted-transaction state and
-        # the swallowed exception would only surface later as a confusing
-        # `RELEASE SAVEPOINT` failure on the final db.commit().
-        try:
-            async with db.begin_nested():
-                result = await db.execute(
-                    _ADJUST_WEIGHT_SQL,
-                    {
-                        "mid": mid,  # UUID object; asyncpg handles type
-                        "tid": tenant_id,
-                        "floor": EVOLVE_WEIGHT_FLOOR,
-                        "cap": EVOLVE_WEIGHT_CAP,
-                        "delta": delta,
-                    },
-                )
-                row = result.fetchone()
-        except Exception:
-            logger.warning("evolve: weight update failed for memory %s", mid, exc_info=True)
-            continue
+    if not parsed:
+        return [], []
 
-        if not row:
+    valid_uuids = [u for _, u in parsed]
+
+    # Single bulk UPDATE keyed by the validated UUID set; collapses the
+    # prior N+1 round-trips and N savepoint pairs into one statement
+    # (audit finding #25). Single savepoint isolates the entire weight-
+    # adjustment batch from the outer evolve transaction; per-row
+    # isolation is not preserved — a DB error aborts all weight updates
+    # as a unit. The outer evolve transaction still gets to persist the
+    # outcome / rule memory rows downstream regardless.
+    try:
+        async with db.begin_nested():
+            result = await db.execute(
+                _ADJUST_WEIGHTS_BULK_SQL,
+                {
+                    "mids": valid_uuids,
+                    "tid": tenant_id,
+                    "floor": EVOLVE_WEIGHT_FLOOR,
+                    "cap": EVOLVE_WEIGHT_CAP,
+                    "delta": delta,
+                },
+            )
+            rows = result.fetchall()
+    except Exception:
+        logger.warning("evolve: bulk weight update failed for %d memories", len(valid_uuids), exc_info=True)
+        return [], []
+
+    # Map returned rows by id so we can preserve the caller's input
+    # ordering when building the response. Rows missing from the
+    # result set correspond to ids not found (or filtered by the
+    # tenant + deleted_at predicate); skip them with the same
+    # warning the per-row path emitted previously.
+    #
+    # ``UUID(str(row.id))`` normalises the key — some DB drivers /
+    # cursor result shapes hand ``row.id`` back as ``str`` rather than
+    # ``uuid.UUID``. Without normalisation the lookup below
+    # (``row_by_id.get(mid)`` with a real ``UUID`` key) silently
+    # misses every row, falling through to the "not found" warning
+    # branch and dropping the whole batch from the response.
+    row_by_id = {UUID(str(row.id)): row for row in rows}
+    for mid_str, mid in parsed:
+        row = row_by_id.get(mid)
+        if row is None:
             logger.warning("evolve: memory %s not found for tenant %s, skipping", mid, tenant_id)
             continue
-
         successfully_adjusted.append(mid_str)
         adjustments.append(
             {

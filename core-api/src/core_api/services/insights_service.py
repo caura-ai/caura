@@ -718,11 +718,13 @@ async def _persist_findings(
     transitioning them to 'outdated', preventing duplicate pile-up on re-runs.
     """
     # Find existing active insights for this focus to supersede after creation
+    from uuid import uuid4
+
     from sqlalchemy import select
 
     from common.models.memory import Memory
-    from core_api.schemas import MemoryCreate
-    from core_api.services.memory_service import create_memory
+    from core_api.schemas import BulkMemoryCreate, BulkMemoryItem
+    from core_api.services.memory_service import create_memories_bulk
 
     prior_stmt = (
         select(Memory.id)
@@ -770,9 +772,53 @@ async def _persist_findings(
             logger.warning("Failed to supersede prior insights; skipping persist", exc_info=True)
             return [None] * len(findings)
 
-    insight_ids: list[str | None] = []
+    # Empty-findings short-circuit: ``BulkMemoryCreate.items`` enforces
+    # min_length=1, and the prior-supersede block above already returned
+    # `[None] * len(findings)` for the failure path. An empty findings
+    # list reaches here only when no priors existed either — return
+    # straight away without touching the bulk path.
+    if not findings:
+        return []
+
+    # Build one ``BulkMemoryItem`` per finding so the persist runs as a
+    # single ``create_memories_bulk`` call rather than N serial
+    # ``create_memory`` round-trips each in their own savepoint (audit
+    # finding #29). Per-item error isolation is preserved by the bulk
+    # contract — failed rows surface as ``BulkItemResult(status="error")``
+    # and become ``None`` in the returned ``insight_ids`` (same shape as
+    # the prior per-savepoint exception path).
+    #
+    # write_mode behaviour change vs the pre-#29 path
+    # -----------------------------------------------
+    # The previous serial path passed ``write_mode="strong"`` on every
+    # ``MemoryCreate``. ``BulkMemoryItem`` carries no ``write_mode``
+    # field, and ``create_memories_bulk`` doesn't pick the strong vs fast
+    # pipeline per item — so the bulk path effectively drops the strong
+    # mode override. The only behavioural delta between the strong and
+    # fast pipelines is the inline ``CheckSemanticDuplicate`` step (see
+    # ``core_api/pipeline/compositions/write.py``); everything else
+    # (embed, enrich, exact-dedup, write, schedule background tasks) is
+    # identical. The post-write fire-and-forget tasks — entity extraction,
+    # async contradiction detection, deferred enrichment — are still
+    # scheduled per memory by the bulk path's ``ScheduleBackgroundTasks``-
+    # equivalent loop, so contradiction detection coverage is intact.
+    #
+    # Why dropping inline semantic dedup is acceptable for insights
+    # specifically: the supersede-priors block above ALREADY transitions
+    # any prior active insight for this ``insight_focus`` + ``scope`` +
+    # ``agent_id`` to ``outdated`` before this persist runs. That handles
+    # the cross-run "same insight regenerated" dedup case at the
+    # type-aware level that matters for insights. Inline semantic dedup
+    # would compare each finding against EVERY memory in the tenant
+    # (not just insights), which risks blocking a genuinely-novel
+    # insight whose content happens to look semantically similar to an
+    # unrelated fact. Net: cheaper persist AND fewer false-positive
+    # rejections.
+    titles: list[str] = []
+    items: list[BulkMemoryItem] = []
     for finding in findings:
         title = str(finding.get("title", "Untitled insight"))[:80]
+        titles.append(title)
         description = str(finding.get("description", ""))[:1000]
         recommendation = str(finding.get("recommendation", ""))[:500]
         confidence = max(0.0, min(1.0, float(finding.get("confidence", 0.5))))
@@ -782,35 +828,67 @@ async def _persist_findings(
         if recommendation:
             content += f" Recommendation: {recommendation}"
 
-        # MemoryCreate has no `title` field — the title is already encoded in `content`
-        # as "[Insight/{type}] {title}: {description}".
-        data = MemoryCreate(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=fleet_id,
-            memory_type="insight",
-            content=content,
-            weight=confidence,
-            metadata={
-                "insight_focus": focus,
-                "insight_scope": scope,
-                "insight_type": finding.get("type", focus),
-                "related_memory_ids": [str(rid) for rid in related_ids],
-                "recommendation": recommendation,
-                "confidence": confidence,
-            },
-            visibility=_SCOPE_TO_VISIBILITY.get(scope, "scope_team"),
-            write_mode="strong",
+        # ``BulkMemoryItem`` has no ``title`` field — the title is encoded
+        # in ``content`` as "[Insight/{type}] {title}: {description}".
+        items.append(
+            BulkMemoryItem(
+                memory_type="insight",
+                content=content,
+                weight=confidence,
+                metadata={
+                    "insight_focus": focus,
+                    "insight_scope": scope,
+                    "insight_type": finding.get("type", focus),
+                    "related_memory_ids": [str(rid) for rid in related_ids],
+                    "recommendation": recommendation,
+                    "confidence": confidence,
+                },
+            )
         )
-        # Savepoint per finding so one failure doesn't corrupt the outer
-        # transaction and abort subsequent inserts.
-        try:
-            async with db.begin_nested():
-                result = await create_memory(db, data)
-            insight_ids.append(str(result.id))
-        except Exception:
-            logger.exception("Failed to persist insight finding: %s", title)
-            insight_ids.append(None)
+
+    bulk_data = BulkMemoryCreate(
+        tenant_id=tenant_id,
+        fleet_id=fleet_id,
+        agent_id=agent_id,
+        items=items,
+        visibility=_SCOPE_TO_VISIBILITY.get(scope, "scope_team"),
+    )
+    # Per-attempt id is required by the bulk contract for idempotent
+    # retries; insights persist is called from one place per
+    # generate_insights invocation, so a fresh uuid4 here is the right
+    # granularity (a retry would be a fresh generate_insights call with
+    # a new attempt id anyway).
+    bulk_attempt_id = f"insights:{uuid4()}"
+
+    insight_ids: list[str | None] = []
+    try:
+        response = await create_memories_bulk(db, bulk_data, bulk_attempt_id=bulk_attempt_id)
+    except Exception:
+        logger.exception("Bulk persist of insight findings failed entirely")
+        insight_ids = [None] * len(findings)
+    else:
+        # Bulk contract: ``results`` is aligned to input order, one
+        # entry per item. ``id`` is set for ``created`` /
+        # ``duplicate_attempt`` / ``duplicate_content``; absent for
+        # ``error``.
+        by_index = {r.index: r for r in response.results}
+        for i, finding_title in enumerate(titles):
+            r = by_index.get(i)
+            if r is None or r.id is None:
+                if r is not None and r.error:
+                    logger.warning(
+                        "Failed to persist insight finding %s: %s",
+                        finding_title,
+                        r.error,
+                    )
+                else:
+                    logger.warning(
+                        "Insight finding %s missing from bulk response",
+                        finding_title,
+                    )
+                insight_ids.append(None)
+            else:
+                insight_ids.append(str(r.id))
 
     # Safety net: if every finding failed to persist, restore the priors we
     # pre-emptively outdated so the user isn't left with nothing active.
