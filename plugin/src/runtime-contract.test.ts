@@ -572,3 +572,191 @@ describe("ContextEngine.assemble contract (OpenClaw AssembleResult)", () => {
     );
   });
 });
+
+// --- ContextEngine.compact + openclaw-sdk-bridge contract (v2.6.4 hotfix) ---
+//
+// Customer escalation 2026-05-26: WhatsApp group sessions stuck
+// running on plugin v2.6.3. ``openclaw status`` showed group
+// contexts over budget (312k/272k, 292k/272k tokens). Agent looped
+// on ``memclaw_keystones`` tool calls 3-5 times per turn, never
+// finalizing; final replies were silently dropped.
+//
+// Root cause: ``info.ownsCompaction: true`` (set in PR #212 with
+// the contextEngine slot auto-claim) told OpenClaw we owned
+// compaction, but our ``compact()`` returned ``undefined`` — not
+// a valid ``CompactResult`` per OpenClaw 2026.5.4
+// ``plugin-sdk/src/context-engine/types.d.ts``. Over-budget
+// sessions delegated to us, got nothing back, never shrank.
+//
+// The v2.6.4 fix: discover the ``openclaw/plugin-sdk`` runtime
+// helper ``delegateCompactionToRuntime`` via filesystem walk from
+// ``process.argv[1]`` (see ``openclaw-sdk-bridge.ts`` for the
+// rationale — bare-spec import fails for native-loaded plugins),
+// call it from ``compact()``, return the proper
+// ``{ok, compacted, reason, result}`` shape it produces.
+//
+// These tests pin:
+//   1. ``info.ownsCompaction === true`` (regression guard — flipping
+//      to ``false`` without implementing a real ``CompactResult``
+//      return would break compaction silently again).
+//   2. ``compact()`` returns a structured ``CompactResult`` shape
+//      regardless of whether the SDK is discoverable.
+//   3. ``compact()`` still persists the summary into MemClaw as a
+//      side effect (existing behavior preserved).
+//   4. The bridge's resolver cache works — second call doesn't
+//      repeat the filesystem walk.
+//   5. The bridge returns ``null`` gracefully when no openclaw
+//      install can be discovered (e.g., running under
+//      ``node --test`` where ``argv[1]`` is the test runner, not
+//      ``openclaw``).
+//
+// Note on test environment: under ``node --test``, ``process.argv[1]``
+// is the path to our compiled ``*.test.js`` file, NOT the openclaw
+// launcher. So the bridge's walk from that path will not find an
+// openclaw package.json, and ``getOpenClawSdk()`` returns ``null``.
+// That's the "graceful fallback" path we want to exercise here —
+// the wet test on the GCE VM exercises the success path against a
+// real openclaw install.
+
+// MemClawContextEngine already imported above for the assemble-contract
+// block. Import only what's new for the compaction-bridge contract.
+import { _resetSdkBridgeCache, getOpenClawSdk } from "./openclaw-sdk-bridge.js";
+
+describe("ContextEngine.info compaction-ownership (v2.6.4)", () => {
+  test("info.ownsCompaction === true (we own compaction by delegating to SDK)", () => {
+    const engine = new MemClawContextEngine({});
+    assert.equal(
+      engine.info.ownsCompaction,
+      true,
+      "ownsCompaction must stay true — compact() now delegates via " +
+        "delegateCompactionToRuntime, fulfilling the contract. Setting " +
+        "false does NOT auto-fall-back to legacy compaction per OpenClaw docs.",
+    );
+  });
+
+  test("info.id === 'memclaw' (slot resolver depends on this)", () => {
+    const engine = new MemClawContextEngine({});
+    assert.equal(engine.info.id, "memclaw");
+  });
+});
+
+describe("openclaw-sdk-bridge resolver", () => {
+  test("returns {sdk: null, pkgRoot: null} in test runtime (argv[1] is the test runner, not openclaw)", async () => {
+    _resetSdkBridgeCache();
+    const res = await getOpenClawSdk();
+    // We're running under `node --test path/to/dist/runtime-contract.test.js`,
+    // so the launcher walk won't find an openclaw package.json. Both fields
+    // null is the documented graceful-degradation return value for this
+    // failure mode (not "discovered but broken").
+    assert.equal(
+      res.sdk,
+      null,
+      "bridge must return sdk=null in non-openclaw runtimes",
+    );
+    assert.equal(
+      res.pkgRoot,
+      null,
+      "pkgRoot must be null when openclaw cannot be discovered — caller " +
+        "uses pkgRoot to distinguish 'never found' from 'found but broken'",
+    );
+  });
+
+  test("caches the negative result — second call does not re-walk filesystem", async () => {
+    // We can't directly observe filesystem calls without a spy, but we can
+    // observe that two successive calls return the same value with no
+    // throw — the function is idempotent and cheap on repeat invocation.
+    // The promise-cache pattern means both awaits resolve to the SAME
+    // object reference, which we check with strictEqual.
+    _resetSdkBridgeCache();
+    const first = await getOpenClawSdk();
+    const second = await getOpenClawSdk();
+    assert.strictEqual(first, second);
+  });
+});
+
+describe("ContextEngine.compact contract (delegation + persistence)", () => {
+  test("returns a CompactResult-shaped object (not undefined)", async () => {
+    _resetSdkBridgeCache();
+    const engine = new MemClawContextEngine({});
+    // In the test runtime, the bridge returns null, so compact() takes
+    // the structured-fallback path. We must still get the v2.6.4 shape
+    // — not a regression to v2.6.3's `undefined`.
+    const result = await engine.compact({});
+    assert.ok(result, "compact() must return an object (not undefined)");
+    assert.equal(typeof result.ok, "boolean", "result.ok is boolean");
+    assert.equal(
+      typeof result.compacted,
+      "boolean",
+      "result.compacted is boolean",
+    );
+    assert.equal(
+      result.ok,
+      false,
+      "ok=false in test env (SDK not discoverable)",
+    );
+    assert.equal(
+      result.compacted,
+      false,
+      "compacted=false in test env (delegation didn't run)",
+    );
+    assert.ok(
+      typeof result.reason === "string" && result.reason.length > 0,
+      "result.reason names why compaction did not occur",
+    );
+  });
+
+  test("compact() with no summary returns the fallback without throwing", async () => {
+    _resetSdkBridgeCache();
+    const engine = new MemClawContextEngine({});
+    const result = await engine.compact({ sessionId: "test-session" });
+    assert.equal(result.ok, false);
+    assert.equal(result.compacted, false);
+  });
+
+  test("compact() with missing sessionId skips SDK delegation entirely (defensive guard)", async () => {
+    // The defensive pre-check in compact() short-circuits to a
+    // structured fallback when sessionId/sessionFile aren't both
+    // present. This protects against gateway-RPC test probes and
+    // future degenerate callers that could otherwise trigger
+    // ``compactEmbeddedPiSessionDirect`` to crash the host
+    // process. OpenClaw production compaction (per
+    // ``pi-embedded-X0afS0ip.js:2447``) ALWAYS provides both
+    // fields, so this guard never fires on the happy path.
+    _resetSdkBridgeCache();
+    const engine = new MemClawContextEngine({});
+    const result = await engine.compact({ sessionFile: "/tmp/test.jsonl" }); // no sessionId
+    assert.equal(result.ok, false);
+    assert.equal(result.compacted, false);
+    assert.match(
+      String(result.reason || ""),
+      /sessionId\/sessionFile/,
+      "fallback reason must name the missing field for operator diagnosis",
+    );
+  });
+
+  test("compact() with missing sessionFile skips SDK delegation entirely (defensive guard)", async () => {
+    _resetSdkBridgeCache();
+    const engine = new MemClawContextEngine({});
+    const result = await engine.compact({ sessionId: "test-id" }); // no sessionFile
+    assert.equal(result.ok, false);
+    assert.equal(result.compacted, false);
+    assert.match(String(result.reason || ""), /sessionId\/sessionFile/);
+  });
+
+  test("compact() with a summary attempts MemClaw persist but does not throw on failure", async () => {
+    // Persistence target is unconfigured (no MEMCLAW_API_KEY in test env),
+    // so the POST /memories call fails. compact() must catch that and still
+    // return a CompactResult. This is the production-safety contract:
+    // compaction must NEVER break a turn just because the memory write
+    // failed.
+    _resetSdkBridgeCache();
+    const engine = new MemClawContextEngine({});
+    const result = await engine.compact({
+      summary: "synthetic compaction summary for the contract test",
+      sessionId: "test-session",
+    });
+    assert.ok(result);
+    assert.equal(typeof result.ok, "boolean");
+    assert.equal(typeof result.compacted, "boolean");
+  });
+});

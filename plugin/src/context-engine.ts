@@ -1,9 +1,10 @@
 /**
  * MemClaw ContextEngine — lifecycle hooks for OpenClaw memory integration.
  *
- * Provides: bootstrap (smoke test), ingest (message buffering + persistence),
- * assemble (token-budget-aware recall injection), afterTurn (auto-write),
- * compact (persist compaction summaries).
+ * Provides: bootstrap (smoke test), ingest (message buffering +
+ * persistence), assemble (token-budget-aware recall injection),
+ * afterTurn (auto-write), compact (persist summary + delegate to
+ * OpenClaw runtime via ``openclaw-sdk-bridge``).
  *
  * Security:
  * - afterTurn enabled by default; opt out with MEMCLAW_AUTO_WRITE_TURNS=false
@@ -33,6 +34,7 @@ import { MEMCLAW_TOOLS } from "./tools.js";
 import { resolveAgentId } from "./resolve-agent.js";
 import { logError, logErrorCritical } from "./logger.js";
 import { fetchKeystonesBlock } from "./keystones.js";
+import { getOpenClawSdk } from "./openclaw-sdk-bridge.js";
 
 // --- Typed interfaces for ContextEngine hooks ---
 
@@ -396,7 +398,19 @@ export class MemClawContextEngine {
   private _bootstrapped = false;
   private _bootstrapPromise: Promise<void> | null = null;
 
-  /** Engine metadata — tells OpenClaw this engine owns compaction. */
+  /**
+   * Engine metadata — declares to OpenClaw that we own compaction.
+   *
+   * "Own" means we are the receiver of ``compact()`` calls and the
+   * caller has no fallback path if we don't compact. As of v2.6.4 we
+   * fulfill that contract by delegating to OpenClaw's runtime helper
+   * ``delegateCompactionToRuntime`` (same bridge the legacy engine
+   * uses internally — see ``compact()`` below). Setting this to
+   * ``false`` would NOT auto-fall-back to legacy behavior per the
+   * SDK docs (``docs/concepts/context-engine.md:241``); it would
+   * just disable compaction entirely. So we stay truthful and keep
+   * it ``true``.
+   */
   readonly info = {
     id: "memclaw",
     name: "MemClaw Context Engine",
@@ -847,7 +861,75 @@ export class MemClawContextEngine {
     // compaction is `compact()`'s job.
   }
 
-  async compact(context: CompactContext): Promise<undefined> {
+  /**
+   * Compact an over-budget session.
+   *
+   * Two responsibilities, in order:
+   *
+   *   1. **Persist** any pre-computed summary (passed in by OpenClaw
+   *      when its compaction pipeline ran the summarization step
+   *      before invoking us) as a MemClaw episode memory tagged
+   *      ``auto-compaction``. This is the long-standing
+   *      observability side-effect — surviving summaries get
+   *      recallable later via ``memclaw_recall``.
+   *
+   *   2. **Delegate** the actual transcript-reduction work to
+   *      ``delegateCompactionToRuntime`` from
+   *      ``openclaw/plugin-sdk``. This is the same bridge OpenClaw's
+   *      own legacy engine uses internally (see
+   *      ``delegate-DzhryVAO.js`` in the installed runtime). It
+   *      invokes ``compactEmbeddedPiSessionDirect`` which performs
+   *      summarization + transcript rotation + writes the result
+   *      to the session file. Returns a properly-shaped
+   *      ``CompactResult`` (``{ok, compacted, reason, result?}``) per
+   *      ``plugin-sdk/src/context-engine/types.d.ts``.
+   *
+   * # Why this shape (CAURA-000-hotfix, v2.6.4)
+   *
+   * Pre-v2.6.4, ``compact()`` returned ``undefined`` — not even a
+   * valid ``CompactResult``. With ``info.ownsCompaction: true`` (PR
+   * #212), this told OpenClaw "we own compaction" and the runtime
+   * delegated to us — but we returned nothing, so the over-budget
+   * session never shrank. The first deployments to hit this were
+   * WhatsApp group chats (transcript-per-participant pushes them
+   * past the 272k token budget); direct chats stayed under budget
+   * and never tripped the wedge. Agent looped on
+   * ``memclaw_keystones`` calls trying to make any progress, and
+   * eventual final replies were silently dropped (``Skipping
+   * auto-reply: final-only`` runtime warning).
+   *
+   * # Why we don't just return a "declined" CompactResult
+   *
+   * Inspection of OpenClaw 2026.5.4's pi-embedded overflow recovery
+   * loop (``pi-embedded-X0afS0ip.js:2466-2477``) shows that
+   * ``{compacted: false}`` does NOT trigger a safeguard fallback —
+   * it falls through to "normal handling" which leaves the session
+   * over-budget. The `compactionSafeguardExtension` listener on
+   * ``session_before_compact`` fires from a different code path
+   * (the LLM-driven summarization pipeline), not from a declined
+   * engine compact. The only reliable way for our engine to "let
+   * OpenClaw handle compaction" while still owning the slot is to
+   * call ``delegateCompactionToRuntime`` ourselves.
+   *
+   * # SDK resolution
+   *
+   * The ``openclaw/plugin-sdk`` package cannot be imported via
+   * bare-spec from our native-loaded ``.js`` plugin — see
+   * ``openclaw-sdk-bridge.ts`` for the runtime-discovery dance that
+   * works around this. If the bridge returns ``null`` (e.g.,
+   * exotic install layout, embedded test runner), we return a
+   * structured "declined" ``CompactResult`` so OpenClaw at least
+   * has a well-shaped response — same regression behavior as
+   * v2.6.3, no worse.
+   */
+  async compact(
+    context: CompactContext,
+  ): Promise<{ ok: boolean; compacted: boolean; reason?: string; result?: unknown }> {
+    // 1. Persist OpenClaw's summary into MemClaw as an episode
+    // memory. This runs regardless of whether the delegation
+    // succeeds below — even on a degraded environment the summary
+    // is worth keeping if we can. Failure here is logged and
+    // swallowed; never let it cascade into "compaction failed."
     const summary = context?.summary || context?.compactionSummary;
     if (summary && typeof summary === "string") {
       try {
@@ -868,7 +950,161 @@ export class MemClawContextEngine {
         logError("Failed to persist compaction summary", e);
       }
     }
-    return undefined;
+
+    // 2. Defensive pre-check: only delegate when we have the
+    // minimum params the runtime helper needs. The
+    // ``compactEmbeddedPiSessionDirect`` path inside
+    // ``delegateCompactionToRuntime`` requires a real session id
+    // and file to acquire locks and read transcript bytes —
+    // calling it with synthetic / empty input has been observed
+    // to crash the gateway process in ways our outer ``try``
+    // cannot catch (unhandled rejection inside the runtime
+    // helper's own async chain). OpenClaw's production
+    // compaction call site
+    // (``pi-embedded-X0afS0ip.js:2447`` and friends) ALWAYS
+    // passes both fields per ``ContextEngine.compact``'s
+    // type signature, so this guard is invisible in the
+    // happy path; it only blocks degenerate calls
+    // (gateway-RPC test probes, admin tools, future
+    // refactors).
+    const ctx = context as Record<string, unknown> | undefined;
+    const hasSessionId =
+      typeof ctx?.sessionId === "string" && (ctx.sessionId as string).length > 0;
+    const hasSessionFile =
+      typeof ctx?.sessionFile === "string" && (ctx.sessionFile as string).length > 0;
+    if (!hasSessionId || !hasSessionFile) {
+      return {
+        ok: false,
+        compacted: false,
+        reason:
+          "compact called without sessionId/sessionFile — runtime " +
+          "delegation skipped to avoid an unsafe call into " +
+          "delegateCompactionToRuntime. Production callers always supply both " +
+          "per the ContextEngine.compact contract.",
+      };
+    }
+
+    // 3. Delegate the actual compaction work to OpenClaw's runtime
+    // helper. ``getOpenClawSdk`` is cached, so this is a hot-path
+    // dictionary lookup after the first call.
+    //
+    // Two distinct try/catch scopes — one for the bridge resolution,
+    // one for the delegate call. Both ``getOpenClawSdk`` and the
+    // helper are documented as never-throw, but defensive code is
+    // wise here. Splitting the catches keeps the log label
+    // accurate: an operator seeing "delegateCompactionToRuntime
+    // threw" should know the throw came from inside the runtime
+    // helper, not from the resolver walk.
+    let sdk: Awaited<ReturnType<typeof getOpenClawSdk>>["sdk"];
+    let pkgRoot: Awaited<ReturnType<typeof getOpenClawSdk>>["pkgRoot"];
+    try {
+      ({ sdk, pkgRoot } = await getOpenClawSdk());
+    } catch (e: unknown) {
+      logError("openclaw-sdk-bridge resolution failed", e);
+      return {
+        ok: false,
+        compacted: false,
+        reason: e instanceof Error ? e.message : String(e),
+      };
+    }
+
+    if (sdk?.delegateCompactionToRuntime) {
+      try {
+        const raw = await sdk.delegateCompactionToRuntime(context as unknown);
+        // Defensive shape check against SDK contract drift / version
+        // skew. The two required ``CompactResult`` fields are
+        // ``ok: boolean`` and ``compacted: boolean`` per
+        // ``plugin-sdk/src/context-engine/types.d.ts``; if the helper
+        // returns anything else (null, undefined, primitive, an
+        // object with wrong-typed fields), downstream consumers
+        // (OpenClaw runtime accessing ``result.ok`` /
+        // ``result.compacted``) would NPE or branch on truthy strings
+        // — the same class of bug v2.6.3's ``undefined`` return
+        // caused. Surface contract violations with a named reason.
+        if (
+          !raw ||
+          typeof raw !== "object" ||
+          typeof (raw as Record<string, unknown>).ok !== "boolean" ||
+          typeof (raw as Record<string, unknown>).compacted !== "boolean"
+        ) {
+          return {
+            ok: false,
+            compacted: false,
+            reason:
+              "delegateCompactionToRuntime returned invalid CompactResult shape — SDK contract violation",
+          };
+        }
+        // Pass the runtime's verdict through verbatim. Touching
+        // its fields would risk drift from the SDK contract.
+        return raw as {
+          ok: boolean;
+          compacted: boolean;
+          reason?: string;
+          result?: unknown;
+        };
+      } catch (e: unknown) {
+        logError("delegateCompactionToRuntime threw", e);
+        return {
+          ok: false,
+          compacted: false,
+          reason: e instanceof Error ? e.message : String(e),
+        };
+      }
+    }
+
+    // Bridge found the openclaw package on disk but the plugin-sdk
+    // it exports did not include ``delegateCompactionToRuntime``.
+    // Most likely cause is OpenClaw older than 2026.5.x — the
+    // helper landed in CHANGELOG line 4940 ("expose
+    // ``delegateCompactionToRuntime(...)`` on the public plugin
+    // SDK"). Including the discovered ``pkgRoot`` in the log lets
+    // operators run ``ls -la $pkgRoot`` and verify the actual
+    // version on disk without guessing the install location.
+    if (pkgRoot !== null) {
+      // The discovered ``pkgRoot`` IS valuable to operators (they can
+      // ``ls -la $pkgRoot`` to verify the install), so keep it in
+      // the gateway-log line above via ``logError``. But the
+      // returned ``CompactResult.reason`` flows downstream through
+      // OpenClaw into runtime metrics, surface dashboards, and
+      // possibly cross-system error reports — places where leaking
+      // an absolute filesystem path is undesirable. Use a static
+      // remediation hint there; operators with log access already
+      // have the path.
+      logError(
+        "openclaw-sdk-bridge",
+        new Error(
+          `delegateCompactionToRuntime not exported by the openclaw plugin-sdk at "${pkgRoot}" — ` +
+            "OpenClaw may be too old (or the install is corrupted). Update openclaw to 2026.5.x or later.",
+        ),
+      );
+      return {
+        ok: false,
+        compacted: false,
+        reason:
+          "delegateCompactionToRuntime not available in openclaw plugin-sdk " +
+          "(version too old or corrupted? Run: openclaw --version)",
+      };
+    }
+
+    // Bridge did not discover openclaw at all — the launcher's
+    // parent path didn't contain a ``package.json`` with
+    // ``name: "openclaw"`` within MAX_WALK_DEPTH. Log once so
+    // operators can see this in the gateway log, then return a
+    // structured fallback.
+    logError(
+      "openclaw-sdk-bridge",
+      new Error(
+        "delegateCompactionToRuntime unavailable — openclaw could not be discovered from " +
+          "the plugin's runtime path. Check that openclaw is installed at a discoverable " +
+          "location (global npm, brew, nvm, asdf, or a source checkout) and that the gateway " +
+          "is launched via the openclaw script.",
+      ),
+    );
+    return {
+      ok: false,
+      compacted: false,
+      reason: "openclaw plugin-sdk not discoverable from plugin runtime",
+    };
   }
 
   /** afterTurn — auto-write turn summary. Enabled by default; opt out with MEMCLAW_AUTO_WRITE_TURNS=false. */
