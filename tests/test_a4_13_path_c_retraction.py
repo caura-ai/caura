@@ -55,6 +55,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +109,7 @@ def _mock_sc_with_retraction_setup(
     sc.get_memory = AsyncMock(side_effect=get_memory)
     sc.find_entity_overlap_candidates = AsyncMock(return_value=[])
     sc.update_memory_status = AsyncMock()
+    install_batch_status_replay_shim(sc)
     return sc
 
 
@@ -355,6 +357,7 @@ async def test_no_retraction_when_new_memory_has_no_supersedes_id():
     )
     sc.find_entity_overlap_candidates = AsyncMock(return_value=[])
     sc.update_memory_status = AsyncMock()
+    install_batch_status_replay_shim(sc)
 
     judge = AsyncMock()
     with (

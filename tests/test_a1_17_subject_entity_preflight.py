@@ -32,6 +32,7 @@ judge runs as before.
 from __future__ import annotations
 
 import pytest
+from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 
 pytestmark = pytest.mark.unit
@@ -331,6 +332,7 @@ async def test_path_c_filters_candidates_with_distinct_subject():
         return_value=[distinct_subject_candidate]
     )
     sc.update_memory_status = AsyncMock()
+    install_batch_status_replay_shim(sc)
 
     judge = AsyncMock()
     with (
@@ -403,6 +405,7 @@ async def test_path_c_calls_judge_when_subjects_match():
         return_value=[matching_subject_candidate]
     )
     sc.update_memory_status = AsyncMock()
+    install_batch_status_replay_shim(sc)
 
     judge = AsyncMock(return_value=(False, 0.90))
     with (
@@ -468,6 +471,7 @@ async def test_path_c_falls_through_when_new_memory_has_no_subject():
     sc.get_memory = AsyncMock(return_value=new_memory)
     sc.find_entity_overlap_candidates = AsyncMock(return_value=[candidate])
     sc.update_memory_status = AsyncMock()
+    install_batch_status_replay_shim(sc)
 
     judge = AsyncMock(return_value=(False, 0.90))
     with (

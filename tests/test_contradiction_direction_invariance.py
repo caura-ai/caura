@@ -25,6 +25,7 @@ import pytest
 
 from core_api.constants import VECTOR_DIM
 from core_api.services.contradiction_detector import _detect, _pick_older
+from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,7 @@ class TestRdfAttributionDirection:
         mock_sc = AsyncMock()
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[cand])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -180,6 +182,7 @@ class TestRdfAttributionDirection:
         mock_sc = AsyncMock()
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[cand])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -221,6 +224,7 @@ class TestRdfAttributionDirection:
         mock_sc = AsyncMock()
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[cand])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -265,6 +269,7 @@ class TestRdfAttributionDirection:
             mock_sc = AsyncMock()
             mock_sc.find_rdf_conflicts = AsyncMock(return_value=[cand])
             mock_sc.update_memory_status = AsyncMock()
+            install_batch_status_replay_shim(mock_sc)
 
             with patch(
                 "core_api.services.contradiction_detector.get_storage_client",
@@ -312,6 +317,7 @@ class TestSemanticAttributionDirection:
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[])
         mock_sc.find_similar_candidates = AsyncMock(return_value=[cand])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with (
             patch(
@@ -352,6 +358,7 @@ class TestSemanticAttributionDirection:
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[])
         mock_sc.find_similar_candidates = AsyncMock(return_value=[cand])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with (
             patch(
@@ -392,6 +399,7 @@ class TestNoConflictNoSupersession:
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[])
         mock_sc.find_similar_candidates = AsyncMock(return_value=[])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -414,6 +422,7 @@ class TestNoConflictNoSupersession:
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[])
         mock_sc.find_similar_candidates = AsyncMock(return_value=[cand])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with (
             patch(
@@ -465,6 +474,7 @@ class TestMixedDirectionStateGuard:
         # the just-set "outdated" status.
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[newer_cand, older_cand])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -532,6 +542,7 @@ class TestMixedDirectionStateGuard:
         # Order matters: flipped iteration fires FIRST.
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[newer_cand, older_cand])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -600,6 +611,7 @@ class TestMixedDirectionStateGuard:
         mock_sc = AsyncMock()
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[older_cand, newer_cand])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -646,6 +658,7 @@ class TestFlippedSkipsExistingSupersedesId:
         mock_sc = AsyncMock()
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[cand])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -694,6 +707,7 @@ class TestFlippedSkipsExistingSupersedesId:
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[])  # force semantic path
         mock_sc.find_similar_candidates = AsyncMock(return_value=[cand])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with (
             patch(
@@ -738,6 +752,7 @@ class TestContradictionInfoSemantics:
         mock_sc = AsyncMock()
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[cand])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -763,6 +778,7 @@ class TestContradictionInfoSemantics:
         mock_sc = AsyncMock()
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[cand])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",

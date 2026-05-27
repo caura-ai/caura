@@ -23,6 +23,7 @@ from core_api.constants import (
     CONTRADICTION_CANDIDATE_MAX,
     CONTRADICTION_SIMILARITY_THRESHOLD,
 )
+from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +139,7 @@ class TestSupersessionSemantics:
         mock_sc = AsyncMock()
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[old_memory])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -193,6 +195,7 @@ class TestSupersessionSemantics:
         mock_sc = AsyncMock()
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[old_mem_1, old_mem_2])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -207,7 +210,8 @@ class TestSupersessionSemantics:
         # First contradicted memory wins for supersession
         # Verify supersedes_id was set to old_id_1 (first conflict)
         supersession_calls = [
-            c for c in mock_sc.update_memory_status.call_args_list
+            c
+            for c in mock_sc.update_memory_status.call_args_list
             if c.kwargs.get("supersedes_id")
         ]
         assert len(supersession_calls) == 1
@@ -243,15 +247,19 @@ class TestSupersessionSemantics:
         mock_sc = AsyncMock()
         mock_sc.find_similar_candidates = AsyncMock(return_value=[old_memory])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
-        with patch(
-            "core_api.services.contradiction_detector.get_storage_client",
-            return_value=mock_sc,
-        ), patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
-            new_callable=AsyncMock,
-            # A4 #12 — judge returns (verdict, confidence) tuple.
-            return_value=(True, 0.90),
+        with (
+            patch(
+                "core_api.services.contradiction_detector.get_storage_client",
+                return_value=mock_sc,
+            ),
+            patch(
+                "core_api.services.contradiction_detector._llm_contradiction_check",
+                new_callable=AsyncMock,
+                # A4 #12 — judge returns (verdict, confidence) tuple.
+                return_value=(True, 0.90),
+            ),
         ):
             contradictions = await _detect(new_memory, [0.1] * 10)
 
@@ -299,6 +307,7 @@ class TestSupersessionSemantics:
         mock_sc = AsyncMock()
         mock_sc.find_similar_candidates = AsyncMock(return_value=[old_mem_1, old_mem_2])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with (
             patch(
@@ -320,7 +329,8 @@ class TestSupersessionSemantics:
         mock_sc.update_memory_status.assert_any_call(old_id_2, "conflicted")
         # First contradicted memory wins for supersession
         supersession_calls = [
-            c for c in mock_sc.update_memory_status.call_args_list
+            c
+            for c in mock_sc.update_memory_status.call_args_list
             if c.kwargs.get("supersedes_id")
         ]
         assert len(supersession_calls) == 1
@@ -484,11 +494,13 @@ class TestContradictionIntegration:
         from core_api.services.contradiction_detector import detect_contradictions
 
         sc = get_storage_client()
-        entity = await sc.create_entity({
-            "tenant_id": tenant_id,
-            "entity_type": "person",
-            "canonical_name": "Alice",
-        })
+        entity = await sc.create_entity(
+            {
+                "tenant_id": tenant_id,
+                "entity_type": "person",
+                "canonical_name": "Alice",
+            }
+        )
         entity_id = entity["id"]
 
         old = await self._insert_memory(
@@ -538,7 +550,9 @@ class TestContradictionIntegration:
         )
         emb = fake_embedding(new["content"])
 
-        with patch("core_api.services.contradiction_detector.settings") as mock_settings:
+        with patch(
+            "core_api.services.contradiction_detector.settings"
+        ) as mock_settings:
             mock_settings.entity_extraction_provider = "fake"
             contradictions = await detect_contradictions(db, new, emb)
 
@@ -555,7 +569,9 @@ class TestContradictionIntegration:
         new = await self._insert_memory(db, tenant_id, "The weather is sunny today")
         emb = fake_embedding(new["content"])
 
-        with patch("core_api.services.contradiction_detector.settings") as mock_settings:
+        with patch(
+            "core_api.services.contradiction_detector.settings"
+        ) as mock_settings:
             mock_settings.entity_extraction_provider = "fake"
             contradictions = await detect_contradictions(db, new, emb)
 
@@ -572,33 +588,37 @@ class TestContradictionIntegration:
             content = f"{base_content} for endpoint {i}"
             emb_i = fake_embedding(content)
             ch = hashlib.sha256(f"{tenant_id}:None:{content}".encode()).hexdigest()
-            await sc.create_memory({
-                "tenant_id": tenant_id,
-                "agent_id": "test-agent",
-                "memory_type": "fact",
-                "content": content,
-                "embedding": emb_i,
-                "content_hash": ch,
-                "weight": 0.5,
-                "status": "active",
-                "visibility": "scope_team",
-            })
+            await sc.create_memory(
+                {
+                    "tenant_id": tenant_id,
+                    "agent_id": "test-agent",
+                    "memory_type": "fact",
+                    "content": content,
+                    "embedding": emb_i,
+                    "content_hash": ch,
+                    "weight": 0.5,
+                    "status": "active",
+                    "visibility": "scope_team",
+                }
+            )
 
         # Create the "new" memory via storage client too
         new_content = base_content
         emb = fake_embedding(new_content)
         ch_new = hashlib.sha256(f"{tenant_id}:None:{new_content}".encode()).hexdigest()
-        new_mem = await sc.create_memory({
-            "tenant_id": tenant_id,
-            "agent_id": "test-agent",
-            "memory_type": "fact",
-            "content": new_content,
-            "embedding": emb,
-            "content_hash": ch_new,
-            "weight": 0.5,
-            "status": "active",
-            "visibility": "scope_team",
-        })
+        new_mem = await sc.create_memory(
+            {
+                "tenant_id": tenant_id,
+                "agent_id": "test-agent",
+                "memory_type": "fact",
+                "content": new_content,
+                "embedding": emb,
+                "content_hash": ch_new,
+                "weight": 0.5,
+                "status": "active",
+                "visibility": "scope_team",
+            }
+        )
 
         # Build a lightweight stand-in with the attributes find_similar_candidates needs
         new_proxy = MagicMock()

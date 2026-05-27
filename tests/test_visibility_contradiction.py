@@ -13,6 +13,7 @@ from uuid import uuid4
 import pytest
 
 from core_api.constants import VECTOR_DIM
+from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +217,7 @@ class TestContradictionVisibilityScoping:
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[])
         mock_sc.find_similar_candidates = AsyncMock(return_value=[])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -228,9 +230,7 @@ class TestContradictionVisibilityScoping:
         mock_sc.find_rdf_conflicts.assert_called_once()
         # Verify tenant_id was passed (fleet scoping is handled by storage client)
         call_args = mock_sc.find_rdf_conflicts.call_args
-        assert call_args[0][0] == "t1", (
-            "RDF query must include tenant_id"
-        )
+        assert call_args[0][0] == "t1", "RDF query must include tenant_id"
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +289,7 @@ class TestSupersessionFirstMatchOnly:
         mock_sc = AsyncMock()
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[old_mem_1, old_mem_2])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -306,7 +307,8 @@ class TestSupersessionFirstMatchOnly:
 
         # supersedes_id should point to the first contradicted memory
         supersession_calls = [
-            c for c in mock_sc.update_memory_status.call_args_list
+            c
+            for c in mock_sc.update_memory_status.call_args_list
             if c.kwargs.get("supersedes_id")
         ]
         assert len(supersession_calls) == 1, (
@@ -358,15 +360,19 @@ class TestSupersessionFirstMatchOnly:
         mock_sc = AsyncMock()
         mock_sc.find_similar_candidates = AsyncMock(return_value=[old_mem_1, old_mem_2])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
-        with patch(
-            "core_api.services.contradiction_detector.get_storage_client",
-            return_value=mock_sc,
-        ), patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
-            new_callable=AsyncMock,
-            # A4 #12 — judge returns (verdict, confidence) tuple.
-            return_value=(True, 0.90),
+        with (
+            patch(
+                "core_api.services.contradiction_detector.get_storage_client",
+                return_value=mock_sc,
+            ),
+            patch(
+                "core_api.services.contradiction_detector._llm_contradiction_check",
+                new_callable=AsyncMock,
+                # A4 #12 — judge returns (verdict, confidence) tuple.
+                return_value=(True, 0.90),
+            ),
         ):
             embedding = [0.1] * VECTOR_DIM
             contradictions = await _detect(new_memory, embedding)
@@ -376,8 +382,10 @@ class TestSupersessionFirstMatchOnly:
         # supersedes_id should point to the first contradicted memory.
         # Verify via the update_memory_status calls that set supersedes_id
         supersession_calls = [
-            c for c in mock_sc.update_memory_status.call_args_list
-            if c.kwargs.get("supersedes_id") or (len(c.args) > 1 and "supersedes_id" in str(c))
+            c
+            for c in mock_sc.update_memory_status.call_args_list
+            if c.kwargs.get("supersedes_id")
+            or (len(c.args) > 1 and "supersedes_id" in str(c))
         ]
         # The first status update with supersedes_id should reference old_id_1
         assert any(
@@ -386,7 +394,10 @@ class TestSupersessionFirstMatchOnly:
 
         # Verify both old memories were marked conflicted
         conflicted_calls = [
-            c for c in mock_sc.update_memory_status.call_args_list
+            c
+            for c in mock_sc.update_memory_status.call_args_list
             if "conflicted" in str(c)
         ]
-        assert len(conflicted_calls) >= 2, "Both old memories should be marked conflicted"
+        assert len(conflicted_calls) >= 2, (
+            "Both old memories should be marked conflicted"
+        )

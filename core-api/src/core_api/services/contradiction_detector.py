@@ -111,6 +111,39 @@ def _pick_older(a: dict, b: dict) -> dict:
     return a
 
 
+def _merge_status_update(acc: dict[str, dict], row: dict) -> None:
+    """Merge a per-row update into the accumulator keyed by ``memory_id``.
+
+    The contradiction-detection loops can append two writes for the same
+    ``memory_id`` in a mixed canonical/flipped run — one bare
+    ``{status: ...}`` from the top-of-loop "older → outdated" branch and
+    one ``{status: ..., supersedes_id: ...}`` from the inner attribution
+    branch. The old serial code relied on those two writes landing in
+    iteration order and the second one's ``supersedes_id`` taking
+    effect; the new batched code passes both rows in one
+    ``batch_update_status`` payload, where last-write-wins semantics
+    inside the endpoint are an implementation detail, not part of the
+    contract (a future ``UPDATE FROM VALUES`` optimisation would make
+    order undefined). Dedupe per ``memory_id`` here so the wire payload
+    carries one merged row per memory and the storage endpoint can be
+    optimised freely without changing the resulting DB state.
+
+    Later writes override earlier writes on a per-field basis (plain
+    ``dict.update``) — preserving today's last-write-wins semantics
+    on the fields the inner branch sets (``status``, ``supersedes_id``)
+    while keeping any earlier fields that the later write doesn't touch.
+    This matches the existing ``TestMixedDirectionStateGuard`` invariant
+    in ``test_contradiction_direction_invariance.py``: both the
+    canonical iteration's ``supersedes_id`` chain link AND the flipped
+    iteration's status update must land for the same ``memory_id``.
+    """
+    mid = row["memory_id"]
+    if mid in acc:
+        acc[mid].update(row)
+    else:
+        acc[mid] = dict(row)
+
+
 # ---------------------------------------------------------------------------
 # Public API: async post-commit entry point (P1-1)
 # ---------------------------------------------------------------------------
@@ -284,6 +317,13 @@ async def _detect(
         # ``new_memory`` back to its previous status ("active") while
         # setting ``supersedes_id``.
         new_memory_is_outdated = False
+        # Collapsed-write accumulator — folded in per audit P2 even
+        # though the RDF loop isn't gather-prefaced; same N+1 shape and
+        # keeps the file consistent with semantic / Path C. Keyed by
+        # ``memory_id`` so a mixed canonical/flipped run that touches
+        # ``new_memory`` twice collapses into one merged row (see
+        # ``_merge_status_update`` for the ordering rationale).
+        rdf_updates: dict[str, dict] = {}
         for old in rdf_conflicts:
             # CAURA-125 — decide attribution direction AFTER confirming
             # the conflict, not before. ``_pick_older`` chooses which
@@ -297,7 +337,7 @@ async def _detect(
             older_id = older.get("id")
             newer_id = newer.get("id")
 
-            await sc.update_memory_status(str(older_id), "outdated")
+            _merge_status_update(rdf_updates, {"memory_id": str(older_id), "status": "outdated"})
             if newer is new_memory:
                 # Canonical case (candidate is older). Track via local
                 # ``supersedes_id`` so multiple conflict candidates in
@@ -319,10 +359,13 @@ async def _detect(
                     target_status = (
                         "outdated" if new_memory_is_outdated else new_memory.get("status", "active")
                     )
-                    await sc.update_memory_status(
-                        str(memory_id),
-                        target_status,
-                        supersedes_id=str(older_id),
+                    _merge_status_update(
+                        rdf_updates,
+                        {
+                            "memory_id": str(memory_id),
+                            "status": target_status,
+                            "supersedes_id": str(older_id),
+                        },
                     )
             else:
                 # Flipped case (candidate is newer). The just-written
@@ -344,10 +387,13 @@ async def _detect(
                         newer.get("supersedes_id"),
                     )
                 else:
-                    await sc.update_memory_status(
-                        str(newer_id),
-                        newer.get("status", "active"),
-                        supersedes_id=str(older_id),
+                    _merge_status_update(
+                        rdf_updates,
+                        {
+                            "memory_id": str(newer_id),
+                            "status": newer.get("status", "active"),
+                            "supersedes_id": str(older_id),
+                        },
                     )
 
             # ``ContradictionInfo.old_memory_id`` is documented as the
@@ -380,6 +426,26 @@ async def _detect(
                 direction,
             )
 
+        if rdf_updates:
+            rdf_result = await sc.batch_update_status({"updates": list(rdf_updates.values())})
+            if rdf_result.get("skipped"):
+                # ``skipped`` carries rows the storage-side dropped — CAS
+                # gate fail (caller-supplied ``expected_supersedes_id``
+                # mismatch) or row already deleted. Pre-batch, the single-
+                # row PATCH route surfaced 404 as a hard error; the batch
+                # route returns the list instead so we don't abort the
+                # whole detection cycle. Log so the dropped writes are
+                # visible in tracing — the contradiction detector itself
+                # doesn't use ``expected_supersedes_id`` today, so a
+                # non-empty list usually means the target row was
+                # soft-deleted between detect-and-flush.
+                logger.warning(
+                    "batch_update_status (RDF path) skipped %d row(s) (trigger memory %s): %s",
+                    len(rdf_result["skipped"]),
+                    memory_id,
+                    rdf_result["skipped"],
+                )
+
     # --- Path 2: Semantic contradiction (vector similarity + batch LLM check) ---
     if not contradictions:
         candidates = await sc.find_similar_candidates(
@@ -408,6 +474,15 @@ async def _detect(
             # CAURA-125 — state-corruption guard, same rationale as the
             # RDF path above.
             new_memory_is_outdated = False
+            # Collect per-row status updates and flush them with one
+            # ``batch_update_status`` HTTP after the loop. The prior shape
+            # (one ``update_memory_status`` per row) issued up to 3K
+            # writes per detection cycle — same wire effect, ~Kx the
+            # round-trips (audit P2). All branches that set status here
+            # share one batch; the post-loop call is a no-op when
+            # ``updates`` is empty. Keyed by ``memory_id`` — see
+            # ``_merge_status_update`` for the dedupe rationale.
+            updates: dict[str, dict] = {}
             for candidate, result in zip(candidates, results):
                 if isinstance(result, Exception):
                     logger.warning(
@@ -430,7 +505,7 @@ async def _detect(
                     older_id = older.get("id")
                     newer_id = newer.get("id")
 
-                    await sc.update_memory_status(str(older_id), "conflicted")
+                    _merge_status_update(updates, {"memory_id": str(older_id), "status": "conflicted"})
                     if newer is new_memory:
                         if not supersedes_id:
                             supersedes_id = older_id
@@ -443,10 +518,13 @@ async def _detect(
                             target_status = (
                                 "conflicted" if new_memory_is_outdated else new_memory.get("status", "active")
                             )
-                            await sc.update_memory_status(
-                                str(memory_id),
-                                target_status,
-                                supersedes_id=str(older_id),
+                            _merge_status_update(
+                                updates,
+                                {
+                                    "memory_id": str(memory_id),
+                                    "status": target_status,
+                                    "supersedes_id": str(older_id),
+                                },
                             )
                     else:
                         new_memory_is_outdated = True
@@ -460,10 +538,13 @@ async def _detect(
                                 newer.get("supersedes_id"),
                             )
                         else:
-                            await sc.update_memory_status(
-                                str(newer_id),
-                                newer.get("status", "active"),
-                                supersedes_id=str(older_id),
+                            _merge_status_update(
+                                updates,
+                                {
+                                    "memory_id": str(newer_id),
+                                    "status": newer.get("status", "active"),
+                                    "supersedes_id": str(older_id),
+                                },
                             )
 
                     direction = "canonical" if newer is new_memory else "flipped"
@@ -483,6 +564,17 @@ async def _detect(
                         older_id,
                         newer_id,
                         direction,
+                    )
+
+            if updates:
+                sem_result = await sc.batch_update_status({"updates": list(updates.values())})
+                if sem_result.get("skipped"):
+                    # See RDF path above for the ``skipped`` semantics.
+                    logger.warning(
+                        "batch_update_status (semantic path) skipped %d row(s) (trigger memory %s): %s",
+                        len(sem_result["skipped"]),
+                        memory_id,
+                        sem_result["skipped"],
                     )
 
     return contradictions
@@ -1037,6 +1129,11 @@ async def detect_contradictions_by_entities_async(
         # CAURA-125 — state-corruption guard; mirrors the RDF and
         # semantic paths in ``_detect()``.
         new_memory_is_outdated = False
+        # Collapsed-write accumulator — same rationale as the semantic
+        # path's ``updates`` dict (audit P2 Path C). Keyed by
+        # ``memory_id`` so a mixed canonical/flipped run produces one
+        # merged row per memory; see ``_merge_status_update``.
+        updates: dict[str, dict] = {}
         for candidate, result in zip(candidates, results):
             if isinstance(result, Exception):
                 logger.warning(
@@ -1061,7 +1158,7 @@ async def detect_contradictions_by_entities_async(
                 older_id = older.get("id")
                 newer_id = newer.get("id")
 
-                await sc.update_memory_status(str(older_id), "conflicted")
+                _merge_status_update(updates, {"memory_id": str(older_id), "status": "conflicted"})
                 if not found:
                     if newer is new_memory:
                         # See RDF path above for the rationale of
@@ -1072,10 +1169,13 @@ async def detect_contradictions_by_entities_async(
                         target_status = (
                             "conflicted" if new_memory_is_outdated else new_memory.get("status", "active")
                         )
-                        await sc.update_memory_status(
-                            str(memory_id),
-                            target_status,
-                            supersedes_id=str(older_id),
+                        _merge_status_update(
+                            updates,
+                            {
+                                "memory_id": str(memory_id),
+                                "status": target_status,
+                                "supersedes_id": str(older_id),
+                            },
                         )
                     else:
                         new_memory_is_outdated = True
@@ -1089,10 +1189,13 @@ async def detect_contradictions_by_entities_async(
                                 newer.get("supersedes_id"),
                             )
                         else:
-                            await sc.update_memory_status(
-                                str(newer_id),
-                                newer.get("status", "active"),
-                                supersedes_id=str(older_id),
+                            _merge_status_update(
+                                updates,
+                                {
+                                    "memory_id": str(newer_id),
+                                    "status": newer.get("status", "active"),
+                                    "supersedes_id": str(older_id),
+                                },
                             )
                 found = True
                 n_conflicts += 1
@@ -1101,6 +1204,17 @@ async def detect_contradictions_by_entities_async(
                     older_id,
                     newer_id,
                     "canonical" if newer is new_memory else "flipped",
+                )
+
+        if updates:
+            path_c_result = await sc.batch_update_status({"updates": list(updates.values())})
+            if path_c_result.get("skipped"):
+                # See RDF path in ``_detect`` for the ``skipped`` semantics.
+                logger.warning(
+                    "batch_update_status (Path C entity-overlap) skipped %d row(s) (trigger memory %s): %s",
+                    len(path_c_result["skipped"]),
+                    memory_id,
+                    path_c_result["skipped"],
                 )
     except Exception:
         logger.exception("Entity-based contradiction detection failed for %s", memory_id)

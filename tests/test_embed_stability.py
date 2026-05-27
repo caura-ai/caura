@@ -35,6 +35,7 @@ from core_api.constants import VECTOR_DIM
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.steps.write.parallel_embed_enrich import ParallelEmbedEnrich
 from core_api.schemas import MemoryCreate
+from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 pytestmark = pytest.mark.asyncio
 
@@ -181,6 +182,7 @@ async def test_atomic_fact_children_embed_raw_fact_content() -> None:
     sc.get_memory = AsyncMock(return_value=mem_row)
     sc.update_embedding = AsyncMock()
     sc.update_memory_status = AsyncMock()
+    install_batch_status_replay_shim(sc)
     sc.create_memory = AsyncMock()
     sc._patch = AsyncMock()
 

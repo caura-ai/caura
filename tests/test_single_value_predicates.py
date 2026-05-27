@@ -16,6 +16,7 @@ from core_api.constants import (
     SINGLE_VALUE_PREDICATES,
     VECTOR_DIM,
 )
+from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +199,7 @@ class TestRdfPathGating:
         mock_sc = AsyncMock()
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[old_mem])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -227,6 +229,7 @@ class TestRdfPathGating:
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[])
         mock_sc.find_similar_candidates = AsyncMock(return_value=[])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -258,6 +261,7 @@ class TestRdfPathGating:
         mock_sc = AsyncMock()
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[old_mem])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -284,6 +288,7 @@ class TestRdfPathGating:
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[])
         mock_sc.find_similar_candidates = AsyncMock(return_value=[])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",
@@ -315,6 +320,7 @@ class TestRdfPathGating:
         mock_sc = AsyncMock()
         mock_sc.find_rdf_conflicts = AsyncMock(return_value=[old_mem])
         mock_sc.update_memory_status = AsyncMock()
+        install_batch_status_replay_shim(mock_sc)
 
         with patch(
             "core_api.services.contradiction_detector.get_storage_client",

@@ -46,6 +46,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 
 pytestmark = pytest.mark.unit
@@ -150,6 +151,7 @@ async def test_path_c_second_call_skips_when_lock_already_held():
     sc.get_memory = AsyncMock(return_value=_make_memory(mid))
     sc.find_entity_overlap_candidates = AsyncMock(return_value=[])
     sc.update_memory_status = AsyncMock()
+    install_batch_status_replay_shim(sc)
 
     with (
         patch(
@@ -181,6 +183,7 @@ async def test_path_c_first_call_runs_when_lock_acquired():
     sc.get_memory = AsyncMock(return_value=_make_memory(mid))
     sc.find_entity_overlap_candidates = AsyncMock(return_value=[])
     sc.update_memory_status = AsyncMock()
+    install_batch_status_replay_shim(sc)
 
     with (
         patch(
