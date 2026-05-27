@@ -308,11 +308,15 @@ async def _run_crystallization(
     if not total_ids:
         return result
 
-    # Fetch full memory content for all candidates via storage client
+    # Fetch full memory content for all candidates in one round-trip.
+    # ``bulk_get_memories`` returns a list aligned to input ``ids`` with
+    # ``None`` in the slots whose memory doesn't exist (or was soft-
+    # deleted) — same per-row "skip missing" semantics the old loop's
+    # ``if mem:`` gate provided, just with Nx fewer HTTPs (audit P5).
     memories_by_id: dict[UUID, dict] = {}
-    for mid in total_ids:
-        mem = await sc.get_memory(str(mid))
-        if mem:
+    bulk_rows = await sc.bulk_get_memories([str(mid) for mid in total_ids])
+    for mid, mem in zip(total_ids, bulk_rows):
+        if mem is not None:
             memories_by_id[mid] = mem
 
     # Process each cluster
@@ -350,15 +354,38 @@ async def _run_crystallization(
             except (SQLAlchemyError, ValueError, GoogleAPIError):
                 logger.exception("Failed to create crystallized memory")
 
-        # Archive source memories via storage client
-        archived_ids = []
-        for mem in cluster_memories:
-            try:
-                mem_id = str(mem.get("id"))
-                await sc.update_memory_status(mem_id, "archived")
-                archived_ids.append(mem_id)
-            except Exception:
-                logger.exception("Failed to archive memory %s", mem.get("id"))
+        # Archive source memories via a single per-cluster batch HTTP
+        # (audit P5). Preserves the prior shape: ``archived_ids`` lists
+        # only the ids the storage layer actually flipped to
+        # ``archived``. Rows the batch endpoint reports back in
+        # ``skipped`` (CAS miss, soft-deleted, or nonexistent id) are
+        # left out of the count, same as the per-row try/except path
+        # used to drop on exception. The whole-batch try/except keeps
+        # one cluster's archive failure from killing the rest of the
+        # sweep — same isolation the per-row loop gave us, just at
+        # cluster granularity (K HTTPs instead of K x M).
+        archived_ids: list[str] = []
+        cluster_ids_to_archive = [
+            {"memory_id": str(mem.get("id")), "status": "archived"} for mem in cluster_memories
+        ]
+        try:
+            batch_result = await sc.batch_update_status({"updates": cluster_ids_to_archive})
+            skipped_set = set(batch_result.get("skipped") or [])
+            for item in cluster_ids_to_archive:
+                if item["memory_id"] not in skipped_set:
+                    archived_ids.append(item["memory_id"])
+            if skipped_set:
+                # Surface the dropped ids so an operator can grep by
+                # cluster — the cluster's source_ids appear in the
+                # ``clusters`` result below, so combining both lists
+                # locates the affected sweep cycle.
+                logger.warning(
+                    "Crystallizer archive batch skipped %d row(s): %s",
+                    len(skipped_set),
+                    sorted(skipped_set),
+                )
+        except Exception:
+            logger.exception("Failed to archive %d-memory cluster (rolled back)", len(cluster_ids_to_archive))
 
         result["clusters"].append(
             {
