@@ -99,3 +99,15 @@ async def run_entity_link_tick() -> None:
     consumer-side dedup window as crystallize.
     """
     await _fire_fanout("entity-link")
+
+
+async def run_insights_tick() -> None:
+    """Trigger insights discovery per active org. Same shape as the
+    crystallize / entity-link ticks — POST the fanout endpoint and
+    let core-api enumerate orgs + publish per-org events. The
+    consumer is opt-in (``auto_insights_enabled`` default off) and
+    short-circuits via an activity gate when the corpus hasn't grown
+    since the last insights run, so firing daily is safe even for
+    quiet tenants.
+    """
+    await _fire_fanout("insights")

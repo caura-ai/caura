@@ -29,6 +29,7 @@ from common.events import (
     publish_archive_stale_request,
     publish_crystallize_request,
     publish_entity_link_request,
+    publish_insights_request,
     publish_purge_soft_deleted_request,
 )
 from common.events.lifecycle_purge_request import (
@@ -56,6 +57,9 @@ _ACTION_PUBLISHERS: dict[str, _PublisherFn] = {
     # CAURA-657: pipeline ops — consumer is core-api itself.
     "crystallize": publish_crystallize_request,
     "entity-link": publish_entity_link_request,
+    # Periodic discovery insights. Consumer also lives in core-api and
+    # short-circuits via the activity gate + opt-in org flag.
+    "insights": publish_insights_request,
 }
 
 # Cap on concurrent per-org ``audit_begin + publish`` pairs in the

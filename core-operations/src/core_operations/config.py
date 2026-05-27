@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     # cycle (cost) or different schedule (off-peak). Default daily;
     # the consumer-side dedup gate filters double-fires within 23h.
     lifecycle_pipeline_interval_seconds: float = 24 * 3600
+    # Insights discovery (focus='discover') cadence. Separate knob
+    # because it's opt-in per-org (``auto_insights_enabled``, default
+    # off) and individual operators may want a longer cycle than the
+    # crystallize/entity-link pair. The consumer's activity gate also
+    # short-circuits to a no-op when no non-insight memories landed
+    # since the last run, so re-firing more aggressively is mostly
+    # harmless. Daily default.
+    lifecycle_insights_interval_seconds: float = 24 * 3600
 
 
 settings = Settings()  # type: ignore[call-arg]

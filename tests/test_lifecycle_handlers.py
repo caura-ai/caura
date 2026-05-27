@@ -30,6 +30,7 @@ class _FakeAdapter:
         purged_count: int = 5,
         crystallized_count: int = 1,
         entity_linked_count: int = 12,
+        insights_count: int = 3,
         raise_on_op: Exception | None = None,
         has_recent_success: bool = False,
         raise_on_dedup_check: Exception | None = None,
@@ -39,6 +40,7 @@ class _FakeAdapter:
         self.purged_count = purged_count
         self.crystallized_count = crystallized_count
         self.entity_linked_count = entity_linked_count
+        self.insights_count = insights_count
         self.raise_on_op = raise_on_op
         self.has_recent_success_value = has_recent_success
         self.raise_on_dedup_check = raise_on_dedup_check
@@ -77,6 +79,12 @@ class _FakeAdapter:
         if self.raise_on_op is not None:
             raise self.raise_on_op
         return self.entity_linked_count
+
+    async def insights(self, *, org_id: str, fleet_id: str | None) -> int:
+        self.archive_calls.append(("insights", org_id, fleet_id, None))
+        if self.raise_on_op is not None:
+            raise self.raise_on_op
+        return self.insights_count
 
     async def has_recent_lifecycle_success(
         self, *, org_id: str, action: str, since_hours: int
@@ -180,6 +188,13 @@ def _bind(adapter: _FakeAdapter, *, action: str, dedup_window_hours: int | None 
 
         payload_cls = LifecycleArchiveRequest
         stats_key = "links_created"
+    elif action == "insights":
+
+        async def _op(req: LifecycleArchiveRequest) -> int:
+            return await adapter.insights(org_id=req.org_id, fleet_id=req.fleet_id)
+
+        payload_cls = LifecycleArchiveRequest
+        stats_key = "insights_created"
     else:
         raise ValueError(f"unknown action {action!r}")
 
@@ -346,6 +361,38 @@ async def test_entity_link_runs_when_no_recent_success():
     await handler(_archive_event(Topics.Lifecycle.ENTITY_LINK_REQUESTED))
     assert adapter.archive_calls == [("entity-link", "tenant-x", None, None)]
     assert adapter.audit_calls[-1][2] == {"links_created": 42}
+
+
+@pytest.mark.asyncio
+async def test_insights_runs_when_no_recent_success():
+    adapter = _FakeAdapter(insights_count=7, has_recent_success=False)
+    handler = _bind(adapter, action="insights", dedup_window_hours=23)
+    await handler(_archive_event(Topics.Lifecycle.INSIGHTS_REQUESTED))
+    # Dedup gate consulted with the same 23h window the pipeline ops use.
+    assert adapter.dedup_calls == [("tenant-x", "insights", 23)]
+    # Primitive invoked with the published payload.
+    assert adapter.archive_calls == [("insights", "tenant-x", None, None)]
+    # Audit transitions: in_progress → success carrying the new stats key.
+    statuses = [c[1] for c in adapter.audit_calls]
+    assert statuses == ["in_progress", "success"]
+    assert adapter.audit_calls[-1][2] == {"insights_created": 7}
+
+
+@pytest.mark.asyncio
+async def test_insights_dedup_gate_skips_when_recent_success_exists():
+    """Insights inherits the 23h pipeline dedup gate: a successful
+    run in the window short-circuits to a no-op success record with
+    ``stats={skipped: True}`` and the adapter primitive is never invoked.
+    """
+    adapter = _FakeAdapter(has_recent_success=True)
+    handler = _bind(adapter, action="insights", dedup_window_hours=23)
+    await handler(_archive_event(Topics.Lifecycle.INSIGHTS_REQUESTED))
+    assert adapter.archive_calls == []
+    assert len(adapter.audit_calls) == 1
+    _, status, stats, error = adapter.audit_calls[0]
+    assert status == "success"
+    assert stats == {"skipped": True, "reason": "recent_success"}
+    assert error is None
 
 
 @pytest.mark.asyncio

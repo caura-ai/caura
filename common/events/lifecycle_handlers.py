@@ -74,6 +74,8 @@ class PipelineStorageAdapter(Protocol):
 
     async def entity_link(self, *, org_id: str, fleet_id: str | None) -> int: ...
 
+    async def insights(self, *, org_id: str, fleet_id: str | None) -> int: ...
+
     async def has_recent_lifecycle_success(
         self, *, org_id: str, action: str, since_hours: int
     ) -> bool: ...
@@ -326,6 +328,9 @@ def register_pipeline_consumers(adapter: PipelineStorageAdapter) -> None:
     async def entity_link_op(req: LifecycleArchiveRequest) -> int:
         return await adapter.entity_link(org_id=req.org_id, fleet_id=req.fleet_id)
 
+    async def insights_op(req: LifecycleArchiveRequest) -> int:
+        return await adapter.insights(org_id=req.org_id, fleet_id=req.fleet_id)
+
     bus = get_event_bus()
     bus.subscribe(
         Topics.Lifecycle.CRYSTALLIZE_REQUESTED,
@@ -348,6 +353,18 @@ def register_pipeline_consumers(adapter: PipelineStorageAdapter) -> None:
             run_op=entity_link_op,
             stats_key="links_created",
             action="entity-link",
+            dedup_window_hours=_PIPELINE_DEDUP_WINDOW_HOURS,
+        ),
+    )
+    bus.subscribe(
+        Topics.Lifecycle.INSIGHTS_REQUESTED,
+        partial(
+            _run_action,
+            adapter=adapter,
+            payload_cls=LifecycleArchiveRequest,
+            run_op=insights_op,
+            stats_key="insights_created",
+            action="insights",
             dedup_window_hours=_PIPELINE_DEDUP_WINDOW_HOURS,
         ),
     )

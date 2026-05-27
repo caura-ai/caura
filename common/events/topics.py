@@ -48,6 +48,7 @@ class Lifecycle(enum.StrEnum):
     # both live there and have transitive deps the worker doesn't carry.
     CRYSTALLIZE_REQUESTED = "memclaw.lifecycle.crystallize-requested"
     ENTITY_LINK_REQUESTED = "memclaw.lifecycle.entity-link-requested"
+    INSIGHTS_REQUESTED = "memclaw.lifecycle.insights-requested"
 
 
 class Topics:

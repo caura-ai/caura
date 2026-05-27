@@ -94,6 +94,72 @@ class _CoreApiLifecycleAdapter:
         report_id = await run_crystallization(None, org_id, fleet_id, trigger="lifecycle")
         return 1 if report_id is not None else 0
 
+    async def insights(self, *, org_id: str, fleet_id: str | None) -> int:
+        """Lifecycle-driven insights discovery (focus='discover') for one org.
+
+        Two gates:
+
+        1. ``config.auto_insights_enabled`` — opt-in flag (default
+           **False**, unlike crystallize / entity-link which default
+           True). Each tenant must flip this explicitly because the
+           reflection LLM call is expensive and not all corpuses
+           benefit from periodic discovery.
+        2. Activity gate — skip if no non-insight memories have been
+           created since the most-recent insight memory in the same
+           scope. Cheap two-query check; saves an LLM round-trip when
+           the corpus hasn't grown.
+
+        Scope: ``fleet`` when a ``fleet_id`` is supplied, else ``all``.
+        Returns the number of insight memories produced (audit row's
+        ``stats.insights_created``).
+        """
+        config = await resolve_config(None, org_id)
+        if not config.auto_insights_enabled:
+            return 0
+
+        # Lazy imports — insights_service has heavy transitive deps
+        # (LLM clients, embedding providers) we don't want loading at
+        # core-api startup just for the lifecycle adapter wiring.
+        from sqlalchemy import func, select
+
+        from common.models.memory import Memory
+        from core_api.db.session import async_session
+        from core_api.services.insights_service import generate_insights
+
+        # Single session covers both the cheap activity gate and the
+        # heavier ``generate_insights`` pass — mirrors entity_link's
+        # pattern of one session per adapter call, explicit commit.
+        async with async_session() as db:
+            scope_filter = [
+                Memory.tenant_id == org_id,
+                Memory.deleted_at.is_(None),
+            ]
+            if fleet_id:
+                scope_filter.append(Memory.fleet_id == fleet_id)
+
+            latest_non_insight = await db.scalar(
+                select(func.max(Memory.created_at)).where(*scope_filter, Memory.memory_type != "insight")
+            )
+            if latest_non_insight is None:
+                return 0
+
+            latest_insight = await db.scalar(
+                select(func.max(Memory.created_at)).where(*scope_filter, Memory.memory_type == "insight")
+            )
+            if latest_insight is not None and latest_non_insight <= latest_insight:
+                return 0
+
+            result = await generate_insights(
+                db,
+                org_id,
+                focus="discover",
+                scope="fleet" if fleet_id else "all",
+                fleet_id=fleet_id,
+            )
+            await db.commit()
+
+        return len(result.get("insight_memory_ids", []))
+
     async def entity_link(self, *, org_id: str, fleet_id: str | None) -> int:
         """CAURA-657: run the entity-linking pipeline for one org.
 

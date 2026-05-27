@@ -87,6 +87,10 @@ class TestLifecycleTopics:
             Topics.Lifecycle.ENTITY_LINK_REQUESTED
             == "memclaw.lifecycle.entity-link-requested"
         )
+        assert (
+            Topics.Lifecycle.INSIGHTS_REQUESTED
+            == "memclaw.lifecycle.insights-requested"
+        )
 
     def test_topic_strenum_format(self):
         from common.events.topics import Topics

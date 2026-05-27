@@ -32,6 +32,7 @@ from core_operations.tasks import (
     run_archive_stale_tick,
     run_crystallize_tick,
     run_entity_link_tick,
+    run_insights_tick,
     run_purge_soft_deleted_tick,
 )
 
@@ -66,6 +67,11 @@ def _register_scheduled_tasks() -> None:
         "lifecycle-entity-link",
         settings.lifecycle_pipeline_interval_seconds,
         run_entity_link_tick,
+    )
+    scheduler.register(
+        "lifecycle-insights",
+        settings.lifecycle_insights_interval_seconds,
+        run_insights_tick,
     )
 
 

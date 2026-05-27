@@ -128,3 +128,27 @@ async def publish_entity_link_request(
             fleet_id=fleet_id,
         ),
     )
+
+
+async def publish_insights_request(
+    *,
+    audit_id: int,
+    org_id: str,
+    triggered_by: str,
+    fleet_id: str | None = None,
+) -> None:
+    """Trigger insights discovery (focus='discover') for one org.
+    Same payload shape as the other pipeline ops. ``auto_insights_enabled``
+    is consulted by the consumer (opt-in, default off); fanout fires
+    blanket and the consumer no-ops orgs that have it disabled or whose
+    corpus hasn't grown since the last insights run.
+    """
+    await _publish(
+        Topics.Lifecycle.INSIGHTS_REQUESTED,
+        LifecycleArchiveRequest(
+            audit_id=audit_id,
+            org_id=org_id,
+            triggered_by=triggered_by,
+            fleet_id=fleet_id,
+        ),
+    )

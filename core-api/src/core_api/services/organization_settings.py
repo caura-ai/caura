@@ -90,6 +90,18 @@ DEFAULT_SETTINGS: dict = {
     "entity_linking": {
         "auto_entity_linking_enabled": None,
     },
+    # Periodic discovery insights (lifecycle-insights cron). Opt-in:
+    # default is False because each tick runs an LLM reasoning pass
+    # per fleet (or per tenant when fleet-less) and that cost is not
+    # justified for every corpus. An org flips this to True when it
+    # wants the daily ``generate_insights(focus='discover')`` pass.
+    # The activity gate inside the consumer additionally skips ticks
+    # where no non-insight memories have been written since the last
+    # insights run, so even an enabled tenant pays only when the
+    # corpus has grown.
+    "insights": {
+        "auto_insights_enabled": None,
+    },
     "chunking": {
         "auto_chunk_enabled": None,
     },
@@ -309,6 +321,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "lifecycle.lifecycle_automation_enabled": bool,
     "lifecycle.memory_retention_days": int,
     "entity_linking.auto_entity_linking_enabled": bool,
+    "insights.auto_insights_enabled": bool,
     "chunking.auto_chunk_enabled": bool,
     "agents.require_agent_approval": bool,
     "entity_blocklist": list,
@@ -529,6 +542,14 @@ class ResolvedConfig:
     def auto_entity_linking_enabled(self) -> bool:
         val = self._ts.get("entity_linking", {}).get("auto_entity_linking_enabled")
         return val if val is not None else True
+
+    # Insights — opt-in (default False). Sibling of auto_crystallize /
+    # auto_entity_linking but with the inverse default because the
+    # discovery LLM pass is expensive and not universally useful.
+    @property
+    def auto_insights_enabled(self) -> bool:
+        val = self._ts.get("insights", {}).get("auto_insights_enabled")
+        return val if val is not None else False
 
     # Chunking
     @property

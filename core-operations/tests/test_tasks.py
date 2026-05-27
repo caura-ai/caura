@@ -155,3 +155,15 @@ async def test_entity_link_tick_hits_correct_path(monkeypatch: pytest.MonkeyPatc
         await tasks.run_entity_link_tick()
 
     assert stub.calls[0][0].endswith("/admin/lifecycle/fanout/entity-link")
+
+
+@pytest.mark.asyncio
+async def test_insights_tick_hits_correct_path(monkeypatch: pytest.MonkeyPatch):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    response = _StubResponse(200, {"action": "insights", "published": 1, "failed": 0})
+    async with _patch_client(monkeypatch, response=response) as stub:
+        await tasks.run_insights_tick()
+
+    assert stub.calls[0][0].endswith("/admin/lifecycle/fanout/insights")
