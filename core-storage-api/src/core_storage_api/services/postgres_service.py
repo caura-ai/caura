@@ -1169,6 +1169,112 @@ class PostgresService:
         return list(grouped.values())
 
     # ------------------------------------------------------------------
+    # C-2) Load specific memories by ID (ENTITY_LOOKUP short-circuit)
+    # ------------------------------------------------------------------
+
+    async def memory_load_by_ids(
+        self,
+        memory_ids: list[UUID],
+        tenant_id: str,
+        *,
+        fleet_ids: list[str] | None = None,
+        caller_agent_id: str | None = None,
+        filter_agent_id: str | None = None,
+        memory_type_filter: str | None = None,
+        status_filter: str | None = None,
+        valid_at: datetime | None = None,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> list[Memory]:
+        """Load memories by ID with visibility/fleet/agent filters applied.
+
+        Used by the ENTITY_LOOKUP short-circuit in ``ClassifyQuery._collect_memories``,
+        which already chose the specific memory IDs based on entity graph
+        expansion and just needs them loaded — no vector cosine, no FTS,
+        no freshness scoring.
+
+        No server-side ``top_k`` LIMIT: the caller has already capped the
+        ID set at ``GRAPH_MAX_BOOSTED_MEMORIES`` (=50) and will apply the
+        user-facing ``top_k`` AFTER sorting by hop-distance boost. A SQL
+        LIMIT here would return an arbitrary subset (no ORDER BY in this
+        query) and silently discard high-boost rows before the sort.
+
+        CAURA-687: the short-circuit previously POSTed to ``/memories/
+        scored-search`` with a ``memory_ids`` key + ``entity_lookup: True``
+        flag the route never read, so storage hard-indexed ``body["embedding"]``
+        and 500'd. The broad except at classify_query.py:123 swallowed it,
+        and the path silently fell through to keyword/semantic.
+
+        Filter semantics MUST match ``memory_scored_search`` exactly so the
+        short-circuit and the scored-search fallthrough surface identical
+        rows when given the same filter args. Any drift is a cross-tenant
+        leak risk — keep these two WHERE-clause blocks in sync.
+        """
+        if not memory_ids:
+            return []
+        async with get_read_session() as session:
+            stmt = select(Memory).where(
+                Memory.id.in_(memory_ids),
+                Memory.tenant_id.in_(readable_tenant_ids)
+                if readable_tenant_ids
+                else Memory.tenant_id == tenant_id,
+                Memory.deleted_at.is_(None),
+            )
+            if fleet_ids:
+                stmt = stmt.where(
+                    or_(
+                        Memory.fleet_id.in_(fleet_ids),
+                        Memory.fleet_id.is_(None),
+                        Memory.visibility == "scope_org",
+                    )
+                )
+            if caller_agent_id:
+                stmt = stmt.where(
+                    or_(
+                        Memory.visibility == "scope_org",
+                        Memory.visibility == "scope_team",
+                        and_(
+                            Memory.visibility == "scope_agent",
+                            Memory.agent_id == caller_agent_id,
+                        ),
+                    )
+                )
+            else:
+                stmt = stmt.where(Memory.visibility != "scope_agent")
+            if filter_agent_id:
+                stmt = stmt.where(Memory.agent_id == filter_agent_id)
+            if memory_type_filter:
+                stmt = stmt.where(Memory.memory_type == memory_type_filter)
+            if status_filter:
+                stmt = stmt.where(Memory.status == status_filter)
+            else:
+                # Mirrors scored_search: exclude superseded memories from
+                # default results. Callers wanting them pass status_filter.
+                stmt = stmt.where(Memory.status.notin_(("outdated", "conflicted")))
+            if valid_at:
+                from datetime import date as _date_type
+
+                from sqlalchemy import Date as _Date
+                from sqlalchemy import cast as _cast
+                from sqlalchemy import literal as _literal
+
+                # DATE-cast comparison matches scored_search semantics
+                # (same-day-later memories pass). End side is intentionally
+                # NOT a hard filter — see scored_search currency_factor.
+                _valid_at_date = (
+                    valid_at.date()
+                    if hasattr(valid_at, "date")
+                    else _date_type.fromisoformat(str(valid_at)[:10])
+                )
+                stmt = stmt.where(
+                    or_(
+                        Memory.ts_valid_start.is_(None),
+                        _cast(Memory.ts_valid_start, _Date) <= _cast(_literal(_valid_at_date), _Date),
+                    ),
+                )
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+    # ------------------------------------------------------------------
     # D-0) Supersedes chain: find successor memories
     # ------------------------------------------------------------------
 

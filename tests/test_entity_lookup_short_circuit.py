@@ -62,11 +62,9 @@ async def test_entity_lookup_short_circuit_fires_with_dict_shaped_expand_graph()
             }
         ]
     )
-    # _collect_memories' scored_search call is mocked to return rows
-    # directly. The deeper bug — payload missing embedding/query/
-    # search_params — is tracked separately; isolating this test from
-    # that contract gap lets the line-214 fix be asserted alone.
-    fake_storage.scored_search = AsyncMock(
+    # CAURA-687: _collect_memories now calls the dedicated
+    # load_memories_by_ids endpoint instead of scored_search.
+    fake_storage.load_memories_by_ids = AsyncMock(
         return_value=[
             {
                 "id": matched_memory_id,
@@ -144,4 +142,208 @@ async def test_expand_per_fleet_parses_dict_shape_directly():
 
     assert merged == {eid1: (0, 1.0), eid2: (1, 0.8)}, (
         f"Expected merged hop/weight tuples; got {merged}"
+    )
+
+
+async def test_collect_memories_forwards_valid_at_and_readable_tenant_ids():
+    """CAURA-687: _collect_memories must forward valid_at and
+    readable_tenant_ids to the load-by-ids endpoint. Pre-687 these were
+    dropped — the short-circuit's visibility behaviour silently diverged
+    from the scored-search fallthrough's (cross-tenant read widening and
+    historical-question filtering both broken).
+    """
+    from datetime import datetime, timezone
+
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.search.classify_query import ClassifyQuery
+    from core_api.pipeline.steps.search.retrieval_types import RetrievalStrategy
+
+    matched_entity_id = uuid4()
+    matched_memory_id = str(uuid4())
+    valid_at_dt = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+
+    fake_storage = AsyncMock()
+    fake_storage.fts_search_entities = AsyncMock(return_value=[str(matched_entity_id)])
+    fake_storage.expand_graph = AsyncMock(
+        return_value={str(matched_entity_id): {"hop": 0, "weight": 1.0}}
+    )
+    fake_storage.get_memory_ids_by_entity_ids = AsyncMock(
+        return_value=[
+            {"memory_id": matched_memory_id, "entity_id": str(matched_entity_id), "role": "subject"}
+        ]
+    )
+    fake_storage.load_memories_by_ids = AsyncMock(
+        return_value=[
+            {
+                "id": matched_memory_id,
+                "tenant_id": "home-tenant",
+                "content": "x",
+                "memory_type": "task",
+                "weight": 0.5,
+                "status": "active",
+                "ts_valid_start": None,
+                "ts_valid_end": None,
+                "metadata_": {},
+                "fleet_id": None,
+            }
+        ]
+    )
+
+    ctx = PipelineContext()
+    ctx.data = {
+        "query": "central control",
+        "tenant_id": "home-tenant",
+        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": 5},
+        "temporal_window": None,
+        "valid_at": valid_at_dt,
+        "readable_tenant_ids": ["home-tenant", "source-tenant-a"],
+    }
+
+    with patch(
+        "core_api.pipeline.steps.search.classify_query.get_storage_client",
+        return_value=fake_storage,
+    ):
+        await ClassifyQuery().execute(ctx)
+
+    assert ctx.data["retrieval_plan"].strategy == RetrievalStrategy.ENTITY_LOOKUP
+    fake_storage.load_memories_by_ids.assert_awaited_once()
+    sent = fake_storage.load_memories_by_ids.await_args.args[0]
+    assert sent["valid_at"] == str(valid_at_dt), (
+        f"valid_at must be forwarded as string; got {sent.get('valid_at')!r}"
+    )
+    assert sent["readable_tenant_ids"] == ["home-tenant", "source-tenant-a"], (
+        f"readable_tenant_ids must be forwarded for cross-tenant reads; "
+        f"got {sent.get('readable_tenant_ids')!r}"
+    )
+    # Sanity: the old stale keys (embedding/query/search_params/entity_lookup)
+    # MUST NOT be present — they were the original payload-contract bug.
+    assert "embedding" not in sent
+    assert "query" not in sent
+    assert "search_params" not in sent
+    assert "entity_lookup" not in sent
+
+
+async def test_collect_memories_omits_readable_tenant_ids_when_single_tenant():
+    """Single-tenant callers (the common case) leave readable_tenant_ids
+    absent from the payload so storage uses the cheap single-tenant
+    WHERE predicate. Mirrors execute_scored_search.py:79-81.
+    """
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.search.classify_query import ClassifyQuery
+
+    matched_entity_id = uuid4()
+    matched_memory_id = str(uuid4())
+
+    fake_storage = AsyncMock()
+    fake_storage.fts_search_entities = AsyncMock(return_value=[str(matched_entity_id)])
+    fake_storage.expand_graph = AsyncMock(
+        return_value={str(matched_entity_id): {"hop": 0, "weight": 1.0}}
+    )
+    fake_storage.get_memory_ids_by_entity_ids = AsyncMock(
+        return_value=[
+            {"memory_id": matched_memory_id, "entity_id": str(matched_entity_id), "role": "subject"}
+        ]
+    )
+    fake_storage.load_memories_by_ids = AsyncMock(
+        return_value=[
+            {
+                "id": matched_memory_id,
+                "tenant_id": "home-tenant",
+                "content": "x",
+                "memory_type": "task",
+                "weight": 0.5,
+                "status": "active",
+                "ts_valid_start": None,
+                "ts_valid_end": None,
+                "metadata_": {},
+                "fleet_id": None,
+            }
+        ]
+    )
+
+    ctx = PipelineContext()
+    ctx.data = {
+        "query": "central control",
+        "tenant_id": "home-tenant",
+        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": 5},
+        "temporal_window": None,
+        # Single-tenant: readable_tenant_ids unset OR equals [tenant_id]
+        "readable_tenant_ids": ["home-tenant"],
+    }
+
+    with patch(
+        "core_api.pipeline.steps.search.classify_query.get_storage_client",
+        return_value=fake_storage,
+    ):
+        await ClassifyQuery().execute(ctx)
+
+    sent = fake_storage.load_memories_by_ids.await_args.args[0]
+    assert "readable_tenant_ids" not in sent, (
+        "Single-tenant calls should not send readable_tenant_ids — "
+        "storage falls back to the cheaper tenant_id == X predicate."
+    )
+
+
+async def test_collect_memories_forwards_single_element_when_different_from_home():
+    """Edge case (PR 237 review): a single-element ``readable_tenant_ids``
+    that names a tenant OTHER than ``tenant_id`` must still be forwarded.
+
+    Previous guard ``len(readable_tenant_ids) > 1`` silently dropped this
+    case, degrading to home-tenant-only reads with no error or log if the
+    upstream middleware ever broke its "single element always == home"
+    invariant. The replacement guard ``!= [tenant_id]`` handles it.
+    """
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.search.classify_query import ClassifyQuery
+
+    matched_entity_id = uuid4()
+    matched_memory_id = str(uuid4())
+
+    fake_storage = AsyncMock()
+    fake_storage.fts_search_entities = AsyncMock(return_value=[str(matched_entity_id)])
+    fake_storage.expand_graph = AsyncMock(
+        return_value={str(matched_entity_id): {"hop": 0, "weight": 1.0}}
+    )
+    fake_storage.get_memory_ids_by_entity_ids = AsyncMock(
+        return_value=[
+            {"memory_id": matched_memory_id, "entity_id": str(matched_entity_id), "role": "subject"}
+        ]
+    )
+    fake_storage.load_memories_by_ids = AsyncMock(
+        return_value=[
+            {
+                "id": matched_memory_id,
+                "tenant_id": "source-tenant",
+                "content": "x",
+                "memory_type": "task",
+                "weight": 0.5,
+                "status": "active",
+                "ts_valid_start": None,
+                "ts_valid_end": None,
+                "metadata_": {},
+                "fleet_id": None,
+            }
+        ]
+    )
+
+    ctx = PipelineContext()
+    ctx.data = {
+        "query": "central control",
+        "tenant_id": "home-tenant",
+        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": 5},
+        "temporal_window": None,
+        # Single element, but NOT the home tenant — must still be forwarded.
+        "readable_tenant_ids": ["source-tenant"],
+    }
+
+    with patch(
+        "core_api.pipeline.steps.search.classify_query.get_storage_client",
+        return_value=fake_storage,
+    ):
+        await ClassifyQuery().execute(ctx)
+
+    sent = fake_storage.load_memories_by_ids.await_args.args[0]
+    assert sent.get("readable_tenant_ids") == ["source-tenant"], (
+        f"single-element readable_tenant_ids that differs from tenant_id "
+        f"must be forwarded; got {sent.get('readable_tenant_ids')!r}"
     )

@@ -189,6 +189,79 @@ async def scored_search(request: Request) -> list[dict]:
     return out
 
 
+@router.post("/load-by-ids")
+async def load_by_ids(request: Request) -> list[dict]:
+    """Load memories by ID with visibility/fleet/agent filters applied.
+
+    CAURA-687: dedicated endpoint for the ENTITY_LOOKUP short-circuit.
+    Bypasses vector cosine + FTS + freshness scoring — the caller (
+    ClassifyQuery._collect_memories in core-api) already picked the
+    memory IDs via entity graph expansion and just needs them loaded
+    with the standard visibility filters applied server-side.
+
+    Previously this caller POSTed to ``/scored-search`` with a
+    ``memory_ids`` key that route never read; the route hard-indexed
+    ``body["embedding"]`` and 500'd, the broad except in classify_query
+    swallowed it, and the short-circuit silently fell through to
+    keyword/semantic search on every entity-token query.
+    """
+    body: dict = await request.json()
+
+    t_start = time.perf_counter()
+    db_timer = None
+    out: list[dict] = []
+    success = True
+    # Parsed inside try so malformed-input failures (bad UUID, non-ISO
+    # date) get captured by log_request in the finally rather than
+    # bubbling up unlogged. Pre-declared so the finally can read them
+    # safely even if the parse raised.
+    memory_ids: list[UUID] = []
+    try:
+        memory_ids = [UUID(mid) for mid in body.get("memory_ids", [])]
+        if not memory_ids:
+            return []
+
+        # Explicit 422 on missing tenant_id rather than letting body["tenant_id"]
+        # raise a bare KeyError that the broad except below turns into an opaque
+        # 500. Callers should know the difference between "I sent a bad payload"
+        # and "the server blew up".
+        tenant_id: str | None = body.get("tenant_id")
+        if not tenant_id:
+            raise HTTPException(status_code=422, detail="tenant_id is required")
+
+        valid_at = body.get("valid_at")
+        if isinstance(valid_at, str):
+            valid_at = datetime.fromisoformat(valid_at)
+
+        with bind_timer() as db_timer:
+            memories = await _svc.memory_load_by_ids(
+                memory_ids=memory_ids,
+                tenant_id=tenant_id,
+                fleet_ids=body.get("fleet_ids"),
+                caller_agent_id=body.get("caller_agent_id"),
+                filter_agent_id=body.get("filter_agent_id"),
+                memory_type_filter=body.get("memory_type_filter"),
+                status_filter=body.get("status_filter"),
+                valid_at=valid_at,
+                readable_tenant_ids=body.get("readable_tenant_ids") or None,
+            )
+        out = [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+    except Exception:
+        success = False
+        raise
+    finally:
+        log_request(
+            "load-by-ids",
+            tenant_id=body.get("tenant_id"),
+            total_ms=(time.perf_counter() - t_start) * 1000,
+            db_ms=db_timer.total_ms if db_timer is not None else 0.0,
+            row_count=len(out),
+            id_count=len(memory_ids),
+            error=not success,
+        )
+    return out
+
+
 # ------------------------------------------------------------------
 # Dedup / content hash
 # ------------------------------------------------------------------

@@ -13,6 +13,7 @@ import asyncio
 import logging
 import re
 import types
+from datetime import datetime
 from uuid import UUID
 
 from core_api.clients.storage_client import get_storage_client
@@ -65,6 +66,8 @@ class ClassifyQuery:
         filter_agent_id: str | None = ctx.data.get("filter_agent_id")
         memory_type_filter: str | None = ctx.data.get("memory_type_filter")
         status_filter: str | None = ctx.data.get("status_filter")
+        valid_at = ctx.data.get("valid_at")
+        readable_tenant_ids: list[str] | None = ctx.data.get("readable_tenant_ids")
         graph_max_hops: int = sp["graph_max_hops"]
         top_k: int = sp["top_k"]
 
@@ -95,6 +98,8 @@ class ClassifyQuery:
                         filter_agent_id=filter_agent_id,
                         memory_type_filter=memory_type_filter,
                         status_filter=status_filter,
+                        valid_at=valid_at,
+                        readable_tenant_ids=readable_tenant_ids,
                     )
 
                     if filtered_rows:
@@ -252,6 +257,8 @@ class ClassifyQuery:
         filter_agent_id: str | None = None,
         memory_type_filter: str | None = None,
         status_filter: str | None = None,
+        valid_at: datetime | None = None,
+        readable_tenant_ids: list[str] | None = None,
     ) -> list[types.SimpleNamespace]:
         """Load memories linked to graph-expanded entities, scored by hop distance."""
         all_entity_ids = list(entity_hops.keys())
@@ -299,10 +306,21 @@ class ClassifyQuery:
             ]
             memory_boost = {mid: memory_boost[mid] for mid in memory_ids_sorted}
 
-        # Use scored_search with entity-lookup mode to load and filter memories.
-        # We pass memory_ids as a filter to get only the linked memories,
-        # with visibility/fleet/agent filters applied server-side.
-        search_data = {
+        # CAURA-687: load memories by ID via the dedicated short-circuit
+        # endpoint. Pre-CAURA-687 this POSTed to /memories/scored-search
+        # with a ``memory_ids`` key + ``entity_lookup: True`` flag that
+        # route never read; storage hard-indexed body["embedding"], 500'd,
+        # and the broad except below swallowed it. The path silently fell
+        # through to keyword/semantic on every entity-token query.
+        # ``valid_at`` / ``readable_tenant_ids`` are forwarded so this
+        # short-circuit's visibility behaviour matches the scored-search
+        # fallthrough exactly — drift is a cross-tenant leak risk.
+        # top_k is intentionally NOT forwarded: storage returns ALL matching
+        # IDs (capped client-side at GRAPH_MAX_BOOSTED_MEMORIES = 50), and
+        # the user-facing top_k is applied below AFTER sorting by hop boost.
+        # A server-side LIMIT here would discard high-boost rows non-
+        # deterministically because the storage query has no ORDER BY.
+        search_data: dict = {
             "tenant_id": tenant_id,
             "memory_ids": list(memory_boost.keys()),
             "fleet_ids": fleet_ids,
@@ -310,9 +328,16 @@ class ClassifyQuery:
             "filter_agent_id": filter_agent_id,
             "memory_type_filter": memory_type_filter,
             "status_filter": status_filter,
-            "top_k": top_k,
-            "entity_lookup": True,
         }
+        if valid_at is not None:
+            search_data["valid_at"] = str(valid_at)
+        # Forward readable_tenant_ids whenever the caller's authorised set
+        # differs from home-tenant-only. The explicit comparison (rather
+        # than `len > 1`) handles the edge case where a single-element
+        # list names a tenant other than ``tenant_id``: silently dropping
+        # it would degrade to home-tenant reads with no error or log.
+        if readable_tenant_ids and readable_tenant_ids != [tenant_id]:
+            search_data["readable_tenant_ids"] = readable_tenant_ids
         # Per-tenant storage bulkhead (CAURA-602 follow-up). Same key as
         # the main scored-search step in execute_scored_search.py — a
         # single classify-then-execute pipeline acquires the slot twice
@@ -320,7 +345,7 @@ class ClassifyQuery:
         # to its own storage roundtrip, so there's no deadlock or
         # cumulative latency beyond the time storage actually spends.
         async with per_tenant_storage_slot("storage_search", tenant_id):
-            memories = await sc.scored_search(search_data)
+            memories = await sc.load_memories_by_ids(search_data)
 
         # Build result rows with boost scores.
         memories_by_id = {m["id"]: m for m in memories}

@@ -606,6 +606,15 @@ class CoreStorageClient:
     async def scored_search(self, data: dict) -> list[dict]:
         return await self._post("/memories/scored-search", data, read=True)  # type: ignore[return-value]
 
+    async def load_memories_by_ids(self, data: dict) -> list[dict]:
+        """ENTITY_LOOKUP short-circuit endpoint (CAURA-687).
+
+        Skips vector/FTS/freshness scoring — caller supplies memory IDs,
+        server applies visibility/fleet/agent filters and returns raw
+        memory rows. Pairs with PostgresService.memory_load_by_ids.
+        """
+        return await self._post("/memories/load-by-ids", data, read=True)  # type: ignore[return-value]
+
     async def archive_expired(self, tenant_id: str, fleet_id: str | None = None) -> int:
         data: dict[str, Any] = {"tenant_id": tenant_id}
         if fleet_id is not None:

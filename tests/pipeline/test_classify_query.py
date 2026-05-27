@@ -50,6 +50,10 @@ def _mock_sc(**overrides) -> AsyncMock:
     sc.fts_search_entities = AsyncMock(return_value=[])
     sc.expand_graph = AsyncMock(return_value={})
     sc.get_memory_ids_by_entity_ids = AsyncMock(return_value=[])
+    # CAURA-687: ENTITY_LOOKUP short-circuit now calls load_memories_by_ids
+    # (dedicated endpoint) instead of scored_search. scored_search default
+    # kept for legacy test paths that may still reference it.
+    sc.load_memories_by_ids = AsyncMock(return_value=[])
     sc.scored_search = AsyncMock(return_value=[])
     for k, v in overrides.items():
         setattr(sc, k, v)
@@ -110,7 +114,8 @@ async def test_entity_lookup_with_match(mock_get_sc):
     sc.get_memory_ids_by_entity_ids = AsyncMock(
         return_value=[{"memory_id": mid_str, "entity_id": eid_str, "role": "subject"}]
     )
-    sc.scored_search = AsyncMock(
+    # CAURA-687: ENTITY_LOOKUP path now calls load_memories_by_ids.
+    sc.load_memories_by_ids = AsyncMock(
         return_value=[
             {
                 "id": mid_str,
@@ -295,7 +300,7 @@ async def test_entity_lookup_takes_priority_over_temporal(mock_get_sc):
     sc.get_memory_ids_by_entity_ids = AsyncMock(
         return_value=[{"memory_id": mid_str, "entity_id": eid_str, "role": "subject"}]
     )
-    sc.scored_search = AsyncMock(
+    sc.load_memories_by_ids = AsyncMock(
         return_value=[
             {
                 "id": mid_str,
@@ -399,7 +404,7 @@ async def test_entity_lookup_takes_priority_over_recent(mock_get_sc):
     sc.get_memory_ids_by_entity_ids = AsyncMock(
         return_value=[{"memory_id": mid_str, "entity_id": eid_str, "role": "subject"}]
     )
-    sc.scored_search = AsyncMock(
+    sc.load_memories_by_ids = AsyncMock(
         return_value=[
             {
                 "id": mid_str,
@@ -512,7 +517,7 @@ async def test_collect_memories_caps_entity_ids():
 
     sc = AsyncMock()
     sc.get_memory_ids_by_entity_ids = AsyncMock(return_value=[])
-    sc.scored_search = AsyncMock(return_value=[])
+    sc.load_memories_by_ids = AsyncMock(return_value=[])
 
     result = await ClassifyQuery._collect_memories(
         sc=sc,
