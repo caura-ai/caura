@@ -35,6 +35,19 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Node.js (for plugin version-sync check)
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: Check plugin version-sync (gen-version.sh → src/version.ts)
+        # Fails fast if plugin/src/version.ts has drifted from
+        # plugin/package.json's "version" field — i.e., someone bumped
+        # package.json but didn't run scripts/gen-version.sh, or hand-
+        # edited version.ts. The drift-prevention guarantee documented
+        # in scripts/gen-version.sh is enforced here.
+        run: cd plugin && npm run check:version
+
       - name: Install uv
         uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5.4.2
         with:
