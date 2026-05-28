@@ -44,9 +44,6 @@ def _fake_config(**overrides):
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_entity", new_callable=AsyncMock
-)
-@patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
@@ -60,7 +57,6 @@ async def test_extraction_triggers_cross_links_when_enabled(
     mock_extract,
     mock_sc_factory,
     mock_embed,
-    mock_upsert_entity,
     mock_upsert_relation,
     mock_log,
     mock_discover,
@@ -85,9 +81,19 @@ async def test_extraction_triggers_cross_links_when_enabled(
 
     mock_embed.return_value = [0.1] * 10
 
-    upsert_result = MagicMock()
-    upsert_result.id = uuid.uuid4()
-    mock_upsert_entity.return_value = upsert_result
+    # Plumb the post-P1 bulk flow: resolve returns ``None`` (no
+    # existing match), so the worker takes the create path. The
+    # resulting entity_id is what populates ``name_to_id`` and
+    # gates the downstream cross-link discovery trigger.
+    sc.bulk_resolve_entities = AsyncMock(return_value=[None])
+    sc.bulk_upsert_entities = AsyncMock(
+        return_value=[
+            {"input_idx": 0, "entity_id": str(uuid.uuid4()), "action": "created"}
+        ]
+    )
+    sc.bulk_upsert_entity_links = AsyncMock(
+        return_value=[{"input_idx": 0, "created": True}]
+    )
 
     memory_id = uuid.uuid4()
 
@@ -114,9 +120,6 @@ async def test_extraction_triggers_cross_links_when_enabled(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_entity", new_callable=AsyncMock
-)
-@patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
@@ -130,7 +133,6 @@ async def test_extraction_skips_cross_links_when_disabled(
     mock_extract,
     mock_sc_factory,
     mock_embed,
-    mock_upsert_entity,
     mock_upsert_relation,
     mock_log,
     mock_discover,
@@ -154,9 +156,19 @@ async def test_extraction_skips_cross_links_when_disabled(
 
     mock_embed.return_value = [0.1] * 10
 
-    upsert_result = MagicMock()
-    upsert_result.id = uuid.uuid4()
-    mock_upsert_entity.return_value = upsert_result
+    # Plumb the post-P1 bulk flow: resolve returns ``None`` (no
+    # existing match), so the worker takes the create path. The
+    # resulting entity_id is what populates ``name_to_id`` and
+    # gates the downstream cross-link discovery trigger.
+    sc.bulk_resolve_entities = AsyncMock(return_value=[None])
+    sc.bulk_upsert_entities = AsyncMock(
+        return_value=[
+            {"input_idx": 0, "entity_id": str(uuid.uuid4()), "action": "created"}
+        ]
+    )
+    sc.bulk_upsert_entity_links = AsyncMock(
+        return_value=[{"input_idx": 0, "created": True}]
+    )
 
     memory_id = uuid.uuid4()
 
@@ -183,9 +195,6 @@ async def test_extraction_skips_cross_links_when_disabled(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_entity", new_callable=AsyncMock
-)
-@patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
@@ -199,7 +208,6 @@ async def test_extraction_cross_link_failure_is_nonfatal(
     mock_extract,
     mock_sc_factory,
     mock_embed,
-    mock_upsert_entity,
     mock_upsert_relation,
     mock_log,
     mock_discover,
@@ -223,9 +231,19 @@ async def test_extraction_cross_link_failure_is_nonfatal(
 
     mock_embed.return_value = [0.1] * 10
 
-    upsert_result = MagicMock()
-    upsert_result.id = uuid.uuid4()
-    mock_upsert_entity.return_value = upsert_result
+    # Plumb the post-P1 bulk flow: resolve returns ``None`` (no
+    # existing match), so the worker takes the create path. The
+    # resulting entity_id is what populates ``name_to_id`` and
+    # gates the downstream cross-link discovery trigger.
+    sc.bulk_resolve_entities = AsyncMock(return_value=[None])
+    sc.bulk_upsert_entities = AsyncMock(
+        return_value=[
+            {"input_idx": 0, "entity_id": str(uuid.uuid4()), "action": "created"}
+        ]
+    )
+    sc.bulk_upsert_entity_links = AsyncMock(
+        return_value=[{"input_idx": 0, "created": True}]
+    )
 
     mock_discover.side_effect = RuntimeError("boom")
 

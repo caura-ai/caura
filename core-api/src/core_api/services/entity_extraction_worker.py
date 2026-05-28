@@ -1,15 +1,20 @@
 """Background worker: extract entities from a memory and upsert them."""
 
+import asyncio
 import logging
 from uuid import UUID
 
 from common.embedding import get_embedding
 from core_api.clients.storage_client import get_storage_client
-from core_api.constants import ENTITY_NAME_BLOCKLIST, MIN_ENTITY_NAME_LENGTH
-from core_api.schemas import EntityUpsert, RelationUpsert
+from core_api.constants import (
+    ENTITY_NAME_BLOCKLIST,
+    ENTITY_RESOLUTION_THRESHOLD,
+    MIN_ENTITY_NAME_LENGTH,
+)
+from core_api.schemas import RelationUpsert
 from core_api.services.audit_service import log_action
 from core_api.services.entity_extraction import extract_entities_from_content
-from core_api.services.entity_service import upsert_entity, upsert_relation
+from core_api.services.entity_service import upsert_relation
 
 logger = logging.getLogger(__name__)
 
@@ -85,56 +90,268 @@ async def process_entity_extraction(
 
         blocklist = tenant_cfg.entity_blocklist
 
-        # Embed entity names for fuzzy resolution
-        name_embeddings: dict[str, list[float]] = {}
-        for ent in graph.entities:
-            try:
-                name_embeddings[ent.canonical_name] = await get_embedding(ent.canonical_name)
-            except Exception:
-                logger.debug(
-                    "Failed to embed entity name '%s', skipping fuzzy resolution",
-                    ent.canonical_name,
-                )
-
-        # Upsert entities and build name -> UUID map
-        name_to_id: dict[str, UUID] = {}
-        entity_roles: dict[str, str] = {}
-
+        # ---- Filter + dedupe entities up-front ----
+        #
+        # The old serial path interleaved blocklist filtering with
+        # per-entity HTTPs. Collapsing into the bulk path means filtering
+        # first so the resolve / upsert / link batches don't carry
+        # already-rejected names. Duplicate ``canonical_name`` values in
+        # ``graph.entities`` (the LLM occasionally repeats them across
+        # mentions) collapse to the FIRST occurrence here — preserves
+        # today's role binding (``entity_roles[ent.canonical_name] =
+        # ent.role`` in the old serial path also picked first-wins).
+        filtered: list[tuple[str, str, str]] = []  # (canonical_name, entity_type, role)
+        seen_names: set[str] = set()
         for ent in graph.entities:
             if not _is_valid_entity(ent.canonical_name, blocklist):
-                logger.debug(
-                    "Skipping invalid entity name '%s'",
-                    ent.canonical_name,
-                )
+                logger.debug("Skipping invalid entity name '%s'", ent.canonical_name)
                 continue
-            # ``data`` is positional, ``name_embedding`` keyword-only
-            # under the CAURA-127 signature cleanup.
-            result = await upsert_entity(
-                EntityUpsert(
-                    tenant_id=tenant_id,
-                    fleet_id=fleet_id,
-                    entity_type=ent.entity_type,
-                    canonical_name=ent.canonical_name,
-                ),
-                name_embedding=name_embeddings.get(ent.canonical_name),
-            )
-            name_to_id[ent.canonical_name] = result.id
-            entity_roles[ent.canonical_name] = ent.role
+            if ent.canonical_name in seen_names:
+                continue
+            seen_names.add(ent.canonical_name)
+            filtered.append((ent.canonical_name, ent.entity_type, ent.role))
 
-        # Create memory-entity links
-        for name, entity_id in name_to_id.items():
-            existing = await sc.find_entity_link(
-                str(memory_id),
-                str(entity_id),
+        if not filtered:
+            # Nothing to persist; skip the bulk flow but keep the
+            # downstream audit-log + contradiction-trigger paths so a
+            # zero-entity memory still records the run.
+            name_to_id: dict[str, UUID] = {}
+        else:
+            # ---- Step 1: parallel embeddings (audit P1) ----
+            #
+            # Replaces the per-entity ``await get_embedding(...)`` loop
+            # with one ``asyncio.gather`` round. ``return_exceptions=True``
+            # carries the prior skip-on-failure semantics — a single
+            # entity that fails to embed becomes ``None`` in its slot
+            # rather than aborting the whole batch.
+            embed_results = await asyncio.gather(
+                *(get_embedding(name) for name, _et, _role in filtered),
+                return_exceptions=True,
             )
-            if not existing:
-                await sc.create_entity_link(
+            name_embeddings: dict[str, list[float] | None] = {}
+            for (name, _et, _role), emb in zip(filtered, embed_results):
+                # ``BaseException`` — ``asyncio.gather(return_exceptions=
+                # True)`` captures ALL ``BaseException`` subclasses as
+                # result values, not just ``Exception``. The narrower
+                # ``isinstance(emb, Exception)`` check would silently
+                # store ``CancelledError`` (and other ``BaseException``
+                # subclasses) as if it were a valid embedding, since
+                # ``CancelledError`` inherits directly from
+                # ``BaseException`` in Python 3.8+. Trade-off vs the
+                # pre-P1 per-entity ``try/except Exception`` shape: we
+                # now drop cancellations to ``None`` and continue
+                # instead of letting them propagate; preferable to
+                # corrupting the embedding payload with an exception
+                # instance.
+                if isinstance(emb, BaseException):
+                    logger.debug(
+                        "Failed to embed entity name '%s', skipping fuzzy resolution",
+                        name,
+                    )
+                    name_embeddings[name] = None
+                else:
+                    name_embeddings[name] = emb
+
+            # ---- Step 2a: bulk resolve ----
+            #
+            # One HTTP replaces N x (find_exact + optional similarity).
+            # Storage-side ``/entities/bulk-resolve`` mirrors the
+            # ``upsert_entity`` precedence: exact match first, then
+            # cosine similarity (Phase 2) only when ``name_embedding``
+            # is non-null and no exact match was found.
+            resolve_items = [
+                {
+                    "input_idx": i,
+                    "fleet_id": fleet_id,
+                    "canonical_name": name,
+                    "entity_type": entity_type,
+                    "name_embedding": name_embeddings.get(name),
+                }
+                for i, (name, entity_type, _role) in enumerate(filtered)
+            ]
+            resolved = await sc.bulk_resolve_entities(
+                tenant_id=tenant_id,
+                items=resolve_items,
+                threshold=ENTITY_RESOLUTION_THRESHOLD,
+            )
+
+            # Storage-side contract: ``bulk_resolve_entities`` returns
+            # one slot per input item (``None`` for no-match,
+            # match-dict otherwise). A shorter response indicates a
+            # storage-layer partial failure — surface it explicitly so
+            # the implicit "items beyond ``len(resolved)`` fall through
+            # to the create branch" behaviour below isn't a silent
+            # data-divergence path. The ``resolved[i] if i <
+            # len(resolved) else None`` guard a few lines down still
+            # carries the safe default.
+            if len(resolved) != len(filtered):
+                logger.warning(
+                    "bulk_resolve_entities returned %d result(s) for %d input(s); "
+                    "items beyond index %d treated as no-match (create path) — "
+                    "check for storage-layer partial failures",
+                    len(resolved),
+                    len(filtered),
+                    # ``max(0, ...)`` avoids a confusing "beyond index -1"
+                    # when storage returns an empty list (all items
+                    # treated as no-match starting from index 0).
+                    max(0, len(resolved) - 1),
+                )
+
+            # ---- Step 2b: client-side merge — first-seen-wins canonical ----
+            #
+            # CRITICAL correctness gate. Mirrors ``entity_service.upsert_entity``
+            # lines 74-100 exactly: when an existing entity is found
+            # (exact or similarity), the EXISTING ``canonical_name`` wins
+            # ("first-seen-wins"), and the new surface form is added to
+            # ``_aliases``. Comment at entity_service.py:91-100 warns
+            # about the prior "longest-wins" regression that turned LLM
+            # hallucinations into canonical rows — this preservation is
+            # the audit P1 fix's correctness gate.
+            upsert_items: list[dict] = []
+            for i, (name, entity_type, _role) in enumerate(filtered):
+                match = resolved[i] if i < len(resolved) else None
+                item: dict = {
+                    "input_idx": i,
+                    "tenant_id": tenant_id,
+                    "fleet_id": fleet_id,
+                    "entity_type": entity_type,
+                }
+                emb = name_embeddings.get(name)
+                if emb is not None:
+                    item["name_embedding"] = emb
+
+                if match:
+                    # Existing row found — merge into it.
+                    existing_attrs = match.get("attributes") or {}
+                    merged_attrs = dict(existing_attrs)
+                    # NOTE: ``ExtractedEntity`` currently emits no extra
+                    # attributes (only ``canonical_name`` / ``entity_type``
+                    # / ``role`` come back from the LLM). If the
+                    # extraction schema later grows attribute fields,
+                    # add ``merged_attrs.update(<new fields>)`` here to
+                    # match ``entity_service.upsert_entity`` (line 79:
+                    # ``if data.attributes: merged_attrs.update(data.attributes)``)
+                    # and keep the bulk path's merge semantics
+                    # equivalent to the single-row serial path.
+                    aliases = list(merged_attrs.get("_aliases") or [])
+                    # Defensive fallback: storage-side ``bulk_resolve_entities``
+                    # SHOULD always carry a non-empty ``canonical_name`` on a
+                    # match (the row had to exist for a match to fire). An
+                    # empty / missing value here would degenerately become
+                    # the new canonical under first-seen-wins, which is
+                    # worse than just using the incoming name. Log + fall
+                    # back so a malformed resolve response gets surfaced
+                    # rather than silently corrupting the entity row.
+                    existing_name = match.get("canonical_name") or ""
+                    if not existing_name:
+                        logger.warning(
+                            "bulk_resolve_entities match for '%s' has no canonical_name; "
+                            "falling back to incoming name",
+                            name,
+                        )
+                        existing_name = name
+                    if existing_name and existing_name not in aliases:
+                        aliases.append(existing_name)
+                    if name not in aliases:
+                        aliases.append(name)
+                    merged_attrs["_aliases"] = aliases
+                    # Defensive guard mirroring the ``canonical_name``
+                    # fallback above: a malformed resolve match without
+                    # ``entity_id`` would otherwise crash with KeyError
+                    # inside the upsert payload. Fall through to the
+                    # create path so the row still lands; log so the
+                    # storage-side data hygiene issue is surfaced.
+                    match_entity_id = match.get("entity_id")
+                    if not match_entity_id:
+                        logger.warning(
+                            "bulk_resolve_entities match for '%s' has no entity_id; "
+                            "falling back to create path",
+                            name,
+                        )
+                        item["action"] = "create"
+                        item["canonical_name"] = name
+                        item["attributes"] = {}
+                    else:
+                        item["action"] = "update"
+                        item["entity_id"] = match_entity_id
+                        item["canonical_name"] = existing_name  # first-seen wins
+                        item["attributes"] = merged_attrs
+                else:
+                    # No match — create.
+                    item["action"] = "create"
+                    item["canonical_name"] = name
+                    item["attributes"] = {}
+                upsert_items.append(item)
+
+            # ---- Step 2c: bulk upsert ----
+            #
+            # Returns ``{input_idx, entity_id, action}`` per row, where
+            # ``action`` may be ``"created" | "updated" | "merged" |
+            # "missing"`` (see /entities/bulk-upsert). ``merged`` covers
+            # the TOCTOU race where another writer created the natural-
+            # key match between our resolve and our upsert — semantically
+            # equivalent to ``updated`` for the worker.
+            upserted = await sc.bulk_upsert_entities(items=upsert_items)
+            # Explicit loop (not a comprehension) so an out-of-range
+            # ``input_idx`` from a misbehaving storage response surfaces
+            # as a WARN log instead of an IndexError → 500. Mirrors the
+            # length-mismatch warning above on ``bulk_resolve_entities``
+            # — same "treat malformed responses defensively" pattern.
+            name_to_id: dict[str, UUID] = {}
+            for r in upserted:
+                if not r.get("entity_id"):
+                    continue
+                idx = r["input_idx"]
+                if idx >= len(filtered):
+                    logger.warning(
+                        "bulk_upsert_entities returned out-of-range input_idx %d (filtered len=%d); skipping",
+                        idx,
+                        len(filtered),
+                    )
+                    continue
+                name_to_id[filtered[idx][0]] = UUID(r["entity_id"])
+
+            # ---- Step 3: bulk entity-link upsert ----
+            #
+            # Idempotent (memory_id, entity_id) writes — pre-existing
+            # rows have their role preserved, matching today's
+            # ``find_entity_link → skip-if-exists`` flow.
+            # ``input_idx`` must be contiguous in ``[0, len(link_items))``
+            # for the storage-side ``_validate_input_idxs`` check —
+            # otherwise gaps in the source ``filtered`` list (entries
+            # filtered out because their upsert came back as ``missing``
+            # / no entity_id) would produce non-contiguous indexes and
+            # trip the 422. Use a dedicated ``link_idx`` counter so the
+            # response idxs always tile the payload contiguously.
+            link_items = []
+            link_idx = 0
+            for name, _et, role in filtered:
+                if name not in name_to_id:
+                    continue
+                link_items.append(
                     {
+                        "input_idx": link_idx,
                         "memory_id": str(memory_id),
-                        "entity_id": str(entity_id),
-                        "role": entity_roles.get(name, "mentioned"),
+                        "entity_id": str(name_to_id[name]),
+                        "role": role,
                     }
                 )
+                link_idx += 1
+            if link_items:
+                link_result = await sc.bulk_upsert_entity_links(items=link_items)
+                # Surface any FK violations from the per-item path
+                # (storage-side reports ``error="fk_violation"`` for rows
+                # whose memory_id or entity_id no longer exists). Same
+                # observability shape we added on the contradiction
+                # detector's batch path.
+                fk_errors = [r for r in link_result if r.get("error")]
+                if fk_errors:
+                    logger.warning(
+                        "Entity link upsert: %d/%d row(s) failed with FK violation for memory %s",
+                        len(fk_errors),
+                        len(link_items),
+                        memory_id,
+                    )
 
         # Upsert relations
         rel_count = 0

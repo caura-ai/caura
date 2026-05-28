@@ -562,7 +562,12 @@ class ResolvedConfig:
     def entity_blocklist(self) -> frozenset[str]:
         custom = self._ts.get("entity_blocklist")
         if custom is not None:
-            return frozenset(custom)
+            # Lower-case normalisation so this is symmetric with the
+            # ``name.lower() not in bl`` check in
+            # ``entity_extraction_worker._is_valid_entity``. Tenant-
+            # supplied entries with mixed case (``"Team"``,
+            # ``"SYSTEM"``) would otherwise silently miss the filter.
+            return frozenset(entry.lower() for entry in custom)
         return frozenset(DEFAULT_SETTINGS["entity_blocklist"])
 
     # Write mode
