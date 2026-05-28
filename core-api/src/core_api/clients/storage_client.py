@@ -1414,3 +1414,31 @@ class CoreStorageClient:
 
     async def add_task_failure(self, data: dict) -> dict:
         return await self._post("/tasks/failures", data)  # type: ignore[return-value]
+
+    # =====================================================================
+    # Tenant suppression (CAURA-694)
+    # =====================================================================
+
+    async def is_tenant_suppressed(self, tenant_id: str) -> bool:
+        """Boundary-guard read for the auth layer.
+
+        Hot path: called on every authenticated request (behind a small
+        in-process TTL cache in ``core_api.suppression``). The storage
+        endpoint returns ``{tenant_id, is_suppressed}``; a missing /
+        unknown tenant is the same as ``False`` (live), which matches
+        the pure-OSS shape where the table is empty.
+
+        Re-raises on transport failure rather than failing open here —
+        the caller decides whether the open-fail-or-block trade-off is
+        appropriate. The boundary cache currently fails open with a
+        warning (preserve uptime over hardening) but a different
+        caller (e.g. an admin pre-check) might want the raise.
+        """
+        result = await self._get(f"/tenant-suppression/{tenant_id}")
+        if result is None:
+            # Storage routes return 200 with ``is_suppressed: False`` for
+            # unknown tenants, so ``None`` here means a 404 only the
+            # ``_get`` wrapper recognises — treat it as ``live`` rather
+            # than blocking, so a bad URL doesn't cause a global outage.
+            return False
+        return bool(result.get("is_suppressed", False))

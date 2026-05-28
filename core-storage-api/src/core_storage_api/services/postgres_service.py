@@ -1696,6 +1696,84 @@ class PostgresService:
                     counts[table_name] = result.rowcount  # type: ignore[attr-defined]
         return counts
 
+    async def set_tenant_suppression(
+        self,
+        tenant_id: str,
+        *,
+        action: str,
+        updated_by: str | None = None,
+    ) -> dict:
+        """Upsert one row in ``public.tenant_suppression`` (CAURA-694).
+
+        ``action='suppress'`` sets ``suppressed_at = now()``;
+        ``action='restore'`` clears it. Returns the resulting row so the
+        consumer can log the post-state without an extra round-trip.
+
+        Idempotent: a duplicate ``suppress`` keeps the original
+        ``suppressed_at`` (we DO NOT overwrite — the first suppression
+        time is the meaningful one) but still bumps ``updated_at`` /
+        ``updated_by``. A duplicate ``restore`` is a no-op-shaped
+        update that still leaves the row in the ``live`` state.
+        """
+        if action not in {"suppress", "restore"}:
+            raise ValueError(f"unknown suppression action: {action!r}")
+        async with get_session() as session:
+            if action == "suppress":
+                # ON CONFLICT: keep the original suppressed_at (first one
+                # wins) so we record WHEN the suppression actually began,
+                # not the latest re-publish of the same decision.
+                result = await session.execute(
+                    text("""
+                        INSERT INTO public.tenant_suppression
+                            (tenant_id, suppressed_at, updated_at, updated_by)
+                        VALUES (:tid, now(), now(), :who)
+                        ON CONFLICT (tenant_id) DO UPDATE
+                          SET suppressed_at = COALESCE(
+                                public.tenant_suppression.suppressed_at,
+                                EXCLUDED.suppressed_at
+                              ),
+                              updated_at = now(),
+                              updated_by = EXCLUDED.updated_by
+                        RETURNING tenant_id, suppressed_at, updated_at, updated_by
+                    """),
+                    {"tid": tenant_id, "who": updated_by},
+                )
+            else:  # restore
+                result = await session.execute(
+                    text("""
+                        INSERT INTO public.tenant_suppression
+                            (tenant_id, suppressed_at, updated_at, updated_by)
+                        VALUES (:tid, NULL, now(), :who)
+                        ON CONFLICT (tenant_id) DO UPDATE
+                          SET suppressed_at = NULL,
+                              updated_at = now(),
+                              updated_by = EXCLUDED.updated_by
+                        RETURNING tenant_id, suppressed_at, updated_at, updated_by
+                    """),
+                    {"tid": tenant_id, "who": updated_by},
+                )
+            row = result.mappings().one()
+            return dict(row)
+
+    async def is_tenant_suppressed(self, tenant_id: str) -> bool:
+        """Boundary-guard primitive used by core-api auth (CAURA-694).
+
+        Returns ``True`` iff a row exists with ``suppressed_at IS NOT
+        NULL``. A missing row (never touched by the lifecycle) is the
+        same as "live" — that's the standalone-OSS and pre-CAURA-694
+        deployment shape. Hot path: one indexed PK lookup per
+        authenticated request.
+        """
+        async with get_read_session() as session:
+            result = await session.execute(
+                text(
+                    "SELECT 1 FROM public.tenant_suppression "
+                    "WHERE tenant_id = :tid AND suppressed_at IS NOT NULL"
+                ),
+                {"tid": tenant_id},
+            )
+            return result.first() is not None
+
     async def memory_count_active(
         self,
         tenant_id: str,

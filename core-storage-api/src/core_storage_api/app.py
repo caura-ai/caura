@@ -40,6 +40,7 @@ from core_storage_api.routers import (
     purge_router,
     reports_router,
     tasks_router,
+    tenant_suppression_router,
 )
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,10 @@ def create_app() -> FastAPI:
     app.include_router(idempotency_router, prefix=prefix)
     app.include_router(lifecycle_audit_router, prefix=prefix)
     app.include_router(purge_router, prefix=prefix)
+    # CAURA-694: tenant-suppression mirror. POST upsert for the OSS
+    # suppression consumer (core-worker); GET is the boundary-guard
+    # read used by core-api on every authenticated request.
+    app.include_router(tenant_suppression_router, prefix=prefix)
     # CAURA-686: ``GET /api/v1/storage/_debug/pg_locks`` for live
     # pg_locks / pg_stat_activity snapshots during contention triage.
     # Behind the same private-VPC posture as everything else here —

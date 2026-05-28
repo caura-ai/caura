@@ -395,6 +395,31 @@ async def purge_soft_deleted(
     return resp.json().get("deleted", 0)
 
 
+async def upsert_tenant_suppression(
+    client: httpx.AsyncClient,
+    *,
+    tenant_id: str,
+    action: str,
+    updated_by: str | None,
+) -> None:
+    """POST one tenant_suppression upsert (CAURA-694).
+
+    ``action`` is ``"suppress"`` | ``"restore"``; the storage service
+    validates the value and ours stays a pass-through so the wire shape
+    has one source of truth. ``updated_by`` propagates the
+    correlation id from the bus event for audit-trail use.
+    """
+    body: dict[str, Any] = {"tenant_id": tenant_id, "action": action}
+    if updated_by is not None:
+        body["updated_by"] = updated_by
+    resp = await _signed_call(
+        client.post,
+        f"{_PREFIX}/tenant-suppression",
+        json=body,
+    )
+    resp.raise_for_status()
+
+
 async def update_lifecycle_audit_row(
     client: httpx.AsyncClient,
     audit_id: int,

@@ -58,11 +58,16 @@ from common.events.memory_embed_request import MemoryEmbedRequest
 from common.events.memory_embedded_publisher import publish_memory_embedded
 from common.events.memory_enrich_request import MemoryEnrichRequest
 from common.events.memory_enriched_publisher import publish_memory_enriched
+from common.events.suppression_handlers import (
+    SuppressionStorageAdapter,
+    register_suppression_consumer,
+)
 from common.events.topics import Topics
 from core_worker.clients.storage_client import (
     find_embedding_by_content_hash,
     update_memory_embedding,
     update_memory_enrichment,
+    upsert_tenant_suppression,
 )
 from core_worker.per_tenant_concurrency import per_tenant_storage_slot
 
@@ -581,6 +586,28 @@ async def handle_enrich_request(event: Event) -> None:
     )
 
 
+class _SuppressionAdapter(SuppressionStorageAdapter):
+    """Thin adapter wiring :func:`upsert_tenant_suppression` into the
+    shared :class:`SuppressionStorageAdapter` contract (CAURA-694).
+
+    Lives in the consumer module rather than ``clients/`` so the lazy
+    storage-client lookup (``_storage_client_factory``) stays bound to
+    the consumer's ``configure`` entry point — same pattern the embed
+    + enrich handlers use to reach the storage client.
+    """
+
+    async def set_tenant_suppression(self, *, tenant_id: str, action: str, updated_by: str | None) -> None:
+        if _storage_client_factory is None:
+            raise RuntimeError("consumer.configure() must run before register_consumers()")
+        client = _storage_client_factory()
+        await upsert_tenant_suppression(
+            client,
+            tenant_id=tenant_id,
+            action=action,
+            updated_by=updated_by,
+        )
+
+
 def register_consumers() -> None:
     """Wire the consumers into the event bus.
 
@@ -592,3 +619,7 @@ def register_consumers() -> None:
     bus = get_event_bus()
     bus.subscribe(Topics.Memory.EMBED_REQUESTED, handle_embed_request)
     bus.subscribe(Topics.Memory.ENRICH_REQUESTED, handle_enrich_request)
+    # CAURA-694: register the org-suppression mirror handler. Subscribing
+    # here keeps the registration order single-file rather than scattered
+    # across multiple ``register_*`` entry points.
+    register_suppression_consumer(_SuppressionAdapter())

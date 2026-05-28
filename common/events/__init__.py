@@ -30,7 +30,12 @@ from common.events.lifecycle_publishers import (
 from common.events.memory_embed_publisher import publish_memory_embed_request
 from common.events.memory_enrich_publisher import publish_memory_enrich_request
 from common.events.memory_enriched_publisher import publish_memory_enriched
+from common.events.org_suppression_event import OrgSuppressionEvent
 from common.events.pubsub import PubSubEventBus
+from common.events.suppression_handlers import (
+    SuppressionStorageAdapter,
+    register_suppression_consumer,
+)
 from common.events.topics import Topics
 
 # Intentionally NOT re-exported:
@@ -43,7 +48,9 @@ __all__ = [
     "EventBus",
     "EventHandler",
     "InProcessEventBus",
+    "OrgSuppressionEvent",
     "PubSubEventBus",
+    "SuppressionStorageAdapter",
     "Topics",
     "get_event_bus",
     "publish_archive_expired_request",
@@ -55,4 +62,5 @@ __all__ = [
     "publish_memory_embed_request",
     "publish_memory_enrich_request",
     "publish_memory_enriched",
+    "register_suppression_consumer",
 ]

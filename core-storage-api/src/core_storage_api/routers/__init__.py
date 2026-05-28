@@ -12,6 +12,7 @@ from core_storage_api.routers.memories import router as memories_router
 from core_storage_api.routers.purge import router as purge_router
 from core_storage_api.routers.reports import router as reports_router
 from core_storage_api.routers.tasks import router as tasks_router
+from core_storage_api.routers.tenant_suppression import router as tenant_suppression_router
 
 __all__ = [
     "agents_router",
@@ -28,4 +29,5 @@ __all__ = [
     "purge_router",
     "reports_router",
     "tasks_router",
+    "tenant_suppression_router",
 ]

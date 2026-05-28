@@ -34,6 +34,17 @@ class Pipeline(enum.StrEnum):
     ENTITY_EXTRACTED = "memclaw.pipeline.entity-extracted"
 
 
+class Org(enum.StrEnum):
+    # CAURA-694: enterprise platform-admin-api publishes one event per
+    # soft-delete + restore, the payload carries the affected tenant_ids
+    # and an ``action: suppress | restore`` discriminator. Core-worker
+    # subscribes and mirrors the decision into ``public.tenant_suppression``
+    # so the OSS boundary guard (core-api) can reject reads/writes for
+    # affected tenants synchronously, even while the durable mirror
+    # eventually catches up.
+    SUPPRESSION_CHANGED = "memclaw.org.suppression-changed"
+
+
 class Lifecycle(enum.StrEnum):
     # One topic per action — matches the `memclaw.memory.embed-requested`
     # vs `memclaw.memory.enrich-requested` convention. Keeping each
@@ -59,3 +70,4 @@ class Topics:
     Audit = Audit
     Pipeline = Pipeline
     Lifecycle = Lifecycle
+    Org = Org

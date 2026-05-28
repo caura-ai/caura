@@ -8,6 +8,7 @@ from fastapi.security import APIKeyHeader
 from core_api.config import settings
 from core_api.constants import API_KEY_HEADER
 from core_api.db.session import set_current_tenant, set_readable_tenants
+from core_api.suppression import is_tenant_suppressed
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +244,45 @@ def _parse_csv_header(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+async def _block_if_suppressed(tenant_id: str | None) -> None:
+    """Raise 403 if the tenant's enterprise org has been soft-deleted.
+
+    CAURA-694 boundary guard. The check is cached (30 s TTL, see
+    :mod:`core_api.suppression`) so the hot-path cost is one dict lookup
+    per request. Admin and tenant-less paths are skipped by the
+    ``tenant_id`` guard.
+
+    The 403 message is intentionally generic — surfacing
+    "soft-deleted" to the caller risks leaking org lifecycle state to
+    a partner whose key was provisioned under that org. "Suspended"
+    is the user-visible posture the dashboard already shows.
+    """
+    if not tenant_id:
+        return
+    if await is_tenant_suppressed(tenant_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Organization is suspended; access denied.",
+        )
+
+
+async def _block_if_any_readable_suppressed(tenant_id: str | None, readable_tenants: list[str]) -> None:
+    """Apply :func:`_block_if_suppressed` to every cross-tenant read in
+    ``readable_tenants``, skipping the home ``tenant_id`` (which the
+    caller already checked).
+
+    Bot review round 2 on PR #244 (🟢 Low): a multi-tenant credential
+    whose readable set spans a suppressed org would otherwise pass the
+    home-only guard. The enterprise ingress should already exclude
+    suppressed tenants from this list, but defence-in-depth at the OSS
+    boundary means we don't rely on that. The cache makes each extra
+    check one dict lookup per tenant per 30 s.
+    """
+    for rt in readable_tenants:
+        if rt and rt != tenant_id:
+            await _block_if_suppressed(rt)
+
+
 async def get_auth_context(
     request: Request,
     key: str | None = Security(api_key_header),
@@ -285,10 +325,18 @@ async def get_auth_context(
                 from core_api.standalone import get_standalone_tenant_id
 
                 tenant_id = get_standalone_tenant_id()
+                await _block_if_suppressed(tenant_id)
                 set_current_tenant(tenant_id)
                 return AuthContext(tenant_id=tenant_id, org_role="admin", agent_id=agent_id)
             tenant_id = request.headers.get("x-tenant-id")
             if tenant_id:
+                await _block_if_suppressed(tenant_id)
+                # ``readable_tenants`` is typically not set on this
+                # branch today, but apply the cross-tenant guard for
+                # symmetry with Path 4 so a future widening of this
+                # path picks up the protection automatically. Bot
+                # review round 2 on PR #244.
+                await _block_if_any_readable_suppressed(tenant_id, readable_tenants)
                 set_current_tenant(tenant_id)
                 return AuthContext(
                     tenant_id=tenant_id,
@@ -310,12 +358,20 @@ async def get_auth_context(
         from core_api.standalone import get_standalone_tenant_id
 
         tenant_id = get_standalone_tenant_id()
+        await _block_if_suppressed(tenant_id)
         set_current_tenant(tenant_id)
         return AuthContext(tenant_id=tenant_id, org_role="admin")
 
     # ── Path 4: X-Tenant-ID header (set by enterprise nginx / ingress) ──
     tenant_id = request.headers.get("x-tenant-id")
     if tenant_id:
+        await _block_if_suppressed(tenant_id)
+        # Cross-tenant credentials carry a list of readable tenants via
+        # ``X-Readable-Tenant-IDs``. The home tenant was just checked
+        # above; verify each additional readable tenant is also live
+        # so a partner key whose readable set spans a suppressed org
+        # can't reach that org's data. Bot review round 2 on PR #244.
+        await _block_if_any_readable_suppressed(tenant_id, readable_tenants)
         # The gateway's /_auth subrequest plumbs the api_key's ``kind``
         # so this layer can branch on credential provenance without
         # an extra DB hop. ``install_credential`` is what memclawd
