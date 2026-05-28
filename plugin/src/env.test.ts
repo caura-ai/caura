@@ -117,3 +117,44 @@ describe("resolveTenantId — network failure handling", () => {
     }
   });
 });
+
+// --- Default-value source-pin tests ---
+//
+// We don't pin defaults via runtime import because other test files in
+// this suite override env vars at their module-load time (e.g.
+// ``keystones.test.ts:26`` sets ``MEMCLAW_KEYSTONES_TOKEN_CAP=120``),
+// and ``node --test`` shares process env across files — so any
+// runtime read could see a polluted value. Reading the source TS
+// file's literal value is robust to that, and also documents the
+// chosen default in a way that fails CI loudly if someone bumps it
+// without intent.
+
+describe("env.ts default-value source pins", () => {
+  test("MEMCLAW_KEYSTONES_TOKEN_CAP default literal is 1500 (CAURA-000)", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+    // The dist/env.test.js sits next to dist/env.js but we need the
+    // SOURCE env.ts. Resolve via project structure: dist/env.test.js
+    // → plugin/dist/ → plugin/src/env.ts.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const envSrc = await readFile(join(here, "..", "src", "env.ts"), "utf8");
+    // Match the exact ``_readIntEnv`` call site to avoid colliding with
+    // doc-comment occurrences of the number 1500.
+    const re = /_readIntEnv\(\s*"MEMCLAW_KEYSTONES_TOKEN_CAP"\s*,\s*(\d+)\s*,/;
+    const match = envSrc.match(re);
+    assert.ok(
+      match,
+      "could not locate MEMCLAW_KEYSTONES_TOKEN_CAP _readIntEnv call in env.ts",
+    );
+    assert.equal(
+      match![1],
+      "1500",
+      "MEMCLAW_KEYSTONES_TOKEN_CAP default must be 1500 — bumped from 500 " +
+        "after CAURA-000 customer with 16 rules saw 4 dropped at every turn. " +
+        "If you intend to change it, also update the doc comment in env.ts " +
+        "and review the keystones formatter's truncation behavior in " +
+        "keystones.test.ts.",
+    );
+  });
+});

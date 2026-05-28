@@ -223,10 +223,15 @@ export const MAX_RECALL_CONTENT_LENGTH = 300;
 // - ``MEMCLAW_KEYSTONES_ENABLED`` (default ``"true"``) — kill switch so
 //   ops can disable the auto-inject without redeploying if something
 //   misfires. Set to ``"false"`` to turn it off.
-// - ``MEMCLAW_KEYSTONES_TOKEN_CAP`` (default 500 tokens, ~2000 chars)
+// - ``MEMCLAW_KEYSTONES_TOKEN_CAP`` (default 1500 tokens, ~6000 chars)
 //   — hard ceiling on the injected block. Lowest-weight rules are
 //   dropped first when the cap is hit so a runaway rule set can't crowd
-//   out recall or the operator prompt.
+//   out recall or the operator prompt. The default of 1500 comfortably
+//   fits ~20-30 medium-length rules (~120 chars each) with header /
+//   footer / truncation-reserve overhead; operators with very large
+//   rule sets can raise it further, and operators on small-context
+//   models can lower it. Previously 500 — bumped after a customer
+//   with 16 rules saw 4 dropped at every turn (CAURA-000).
 // - ``MEMCLAW_KEYSTONES_CACHE_TTL_MS`` (default 5 minutes) — per-identity
 //   cache TTL. ``memclaw_keystones_set`` invocations bust the cache for
 //   the current session so a freshly authored rule takes effect on the
@@ -266,7 +271,7 @@ export const MEMCLAW_KEYSTONES_ENABLED: boolean = _readBoolEnv(
 );
 export const MEMCLAW_KEYSTONES_TOKEN_CAP: number = _readIntEnv(
   "MEMCLAW_KEYSTONES_TOKEN_CAP",
-  500,
+  1500,
   1,
 );
 export const MEMCLAW_KEYSTONES_CACHE_TTL_MS: number = _readIntEnv(
