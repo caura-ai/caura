@@ -1,4 +1,4 @@
-"""Admin org-deletion endpoint (CAURA-689).
+"""Admin org-deletion endpoints (CAURA-689 + CAURA-696).
 
 ``POST /admin/org/purge-data`` — permanently purge all OSS (``public.*``)
 data for a set of ``tenant_ids`` (every tenant of an enterprise org being
@@ -11,6 +11,12 @@ One ``lifecycle_audit`` row is written per tenant_id (action
 ``hard-delete-org``): a ``pending`` row before the purge, flipped to
 ``success`` (with per-table counts) or ``failure``. ``lifecycle_audit``
 itself is never purged, so this trail survives the deletion it records.
+
+``POST /admin/org/preview-data`` — read-only per-tenant row counts that
+mirror exactly what a subsequent purge would delete. Powers the
+"what will be deleted?" panel the OPS UI (and the customer self-delete
+flow, CAURA-697) shows before the destructive action. No audit row;
+this is a forecast, not an event.
 
 Auth: admin-key only (``auth.enforce_admin``).
 """
@@ -123,3 +129,71 @@ async def purge_org_data(
     )
     status_code = 207 if failed else 200
     return JSONResponse(status_code=status_code, content={"purged": purged, "failed": failed})
+
+
+@router.post("/admin/org/preview-data")
+async def preview_org_data(
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+) -> JSONResponse:
+    """Per-tenant row-count forecast for a set of ``tenant_ids`` (CAURA-696).
+
+    Body: ``{tenant_ids}``. Returns
+    ``{"counts": {tenant_id: {table: row_count}}, "failed": {tenant_id: error}}``.
+
+    Status code contract mirrors ``purge_org_data``: **200** on a fully
+    clean preview (``failed`` empty), **207 Multi-Status** when any
+    tenant's count round-trip failed — so the orchestrator's display
+    layer can decide whether to render partial data with an "incomplete"
+    badge or surface the failure outright.
+
+    Read-only. Per-tenant isolation: one storage hiccup on tenant A
+    does not abort the read for tenant B. No ``lifecycle_audit`` row
+    written — a preview is a query, not a lifecycle event.
+    """
+    auth.enforce_admin()
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # Match the hardened tenant-suppression / preview routers — a
+        # malformed UTF-8 body would otherwise surface as 500.
+        raise HTTPException(status_code=422, detail="request body must be valid JSON") from exc
+    # Reject non-object JSON bodies — ``request.json()`` succeeds for
+    # arrays / strings / numbers, and ``.get`` on those raises
+    # ``AttributeError`` → 500. The storage-layer preview router has
+    # the same defence; mirror it here so the public surface stays
+    # consistent. Bot review round 1 on PR #246.
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="request body must be a JSON object")
+
+    tenant_ids = body.get("tenant_ids")
+    if (
+        not isinstance(tenant_ids, list)
+        or not tenant_ids
+        or not all(isinstance(t, str) and t for t in tenant_ids)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="'tenant_ids' must be a non-empty list of non-empty strings",
+        )
+    if len(tenant_ids) > _MAX_TENANT_IDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"'tenant_ids' must contain at most {_MAX_TENANT_IDS} entries per call",
+        )
+    if len(tenant_ids) != len(set(tenant_ids)):
+        raise HTTPException(status_code=422, detail="'tenant_ids' must not contain duplicates")
+
+    storage = get_storage_client()
+    counts: dict[str, dict[str, int]] = {}
+    failed: dict[str, str] = {}
+
+    for tenant_id in tenant_ids:
+        try:
+            counts[tenant_id] = await storage.count_tenant_data(tenant_id)
+        except Exception as exc:
+            logger.exception("count_tenant_data failed for tenant %s", tenant_id)
+            failed[tenant_id] = str(exc)
+
+    status_code = 207 if failed else 200
+    return JSONResponse(status_code=status_code, content={"counts": counts, "failed": failed})

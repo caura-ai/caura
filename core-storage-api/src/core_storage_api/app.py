@@ -37,6 +37,7 @@ from core_storage_api.routers import (
     keystones_router,
     lifecycle_audit_router,
     memories_router,
+    preview_router,
     purge_router,
     reports_router,
     tasks_router,
@@ -123,6 +124,11 @@ def create_app() -> FastAPI:
     app.include_router(idempotency_router, prefix=prefix)
     app.include_router(lifecycle_audit_router, prefix=prefix)
     app.include_router(purge_router, prefix=prefix)
+    # CAURA-696: per-tenant row counts for the deletion-preview panel.
+    # Mirrors ``purge``'s VPC-only trust model: no router-level auth,
+    # trusted callers only reach storage via core-api which applies
+    # the admin check.
+    app.include_router(preview_router, prefix=prefix)
     # CAURA-694: tenant-suppression mirror. POST upsert for the OSS
     # suppression consumer (core-worker); GET is the boundary-guard
     # read used by core-api on every authenticated request.

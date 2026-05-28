@@ -1696,6 +1696,39 @@ class PostgresService:
                     counts[table_name] = result.rowcount  # type: ignore[attr-defined]
         return counts
 
+    async def count_tenant_data(self, tenant_id: str) -> dict[str, int]:
+        """Per-table row count for a ``tenant_id`` across the OSS schema
+        (CAURA-696). Mirrors ``purge_tenant_data``'s table set + column
+        layout so the preview is an accurate forecast of what the
+        purge would delete — adding a new table to the purge list
+        means adding it here too (one source of truth would be nice
+        but the two ops have different read/write modes, so we
+        accept the parallel constants and call out the invariant in
+        comments on both).
+
+        Cheap, read-only: one ``SELECT count(*)`` per table, all
+        keyed off the same indexed ``tenant_id`` / ``org_id``
+        columns. Reports zeros for tables with no rows so the caller
+        gets the full breakdown without a follow-up round-trip.
+        """
+        counts: dict[str, int] = {}
+        async with get_read_session() as session:
+            for tables, column in (
+                (_PURGE_TENANT_TABLES, "tenant_id"),
+                (_PURGE_ORG_KEYED_TABLES, "org_id"),
+            ):
+                for table_name in tables:
+                    # Schema-qualify (``public.``) for the same reason
+                    # ``purge_tenant_data`` does — a non-default
+                    # ``search_path`` could otherwise target the wrong
+                    # rows / mask drift between preview and purge.
+                    result = await session.execute(
+                        text(f"SELECT count(*) FROM public.{table_name} WHERE {column} = :tid"),
+                        {"tid": tenant_id},
+                    )
+                    counts[table_name] = int(result.scalar() or 0)
+        return counts
+
     async def set_tenant_suppression(
         self,
         tenant_id: str,

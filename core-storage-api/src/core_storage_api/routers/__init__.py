@@ -9,6 +9,7 @@ from core_storage_api.routers.idempotency import router as idempotency_router
 from core_storage_api.routers.keystones import router as keystones_router
 from core_storage_api.routers.lifecycle_audit import router as lifecycle_audit_router
 from core_storage_api.routers.memories import router as memories_router
+from core_storage_api.routers.preview import router as preview_router
 from core_storage_api.routers.purge import router as purge_router
 from core_storage_api.routers.reports import router as reports_router
 from core_storage_api.routers.tasks import router as tasks_router
@@ -26,6 +27,7 @@ __all__ = [
     "keystones_router",
     "lifecycle_audit_router",
     "memories_router",
+    "preview_router",
     "purge_router",
     "reports_router",
     "tasks_router",

@@ -655,6 +655,15 @@ class CoreStorageClient:
         result = await self._post("/purge/tenant-data", {"tenant_id": tenant_id})
         return result.get("deleted", {})  # type: ignore[union-attr,return-value]
 
+    async def count_tenant_data(self, tenant_id: str) -> dict[str, int]:
+        """Per-table row count for ``tenant_id`` — drives the
+        deletion-preview panel (CAURA-696). Same table set + scoping
+        as ``purge_tenant_data`` so the preview is a faithful forecast.
+        Read-only.
+        """
+        result = await self._post("/preview/tenant-counts", {"tenant_id": tenant_id})
+        return result.get("counts", {})  # type: ignore[union-attr,return-value]
+
     async def count_active(self, tenant_id: str, fleet_id: str | None = None) -> int:
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if fleet_id is not None:
