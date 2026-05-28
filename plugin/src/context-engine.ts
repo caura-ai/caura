@@ -67,17 +67,22 @@ const MAX_INGEST_WRITES_PER_SESSION = 10;
 const sessionBuffers = new Map<string, IngestMessage[]>();
 const sessionIngestCounts = new Map<string, number>();
 
-function getTenantPrefix(config: Record<string, unknown>): string {
-  return (config.tenantId as string) || MEMCLAW_TENANT_ID || "default";
+function getTenantPrefix(
+  config: Record<string, unknown> | undefined | null,
+): string {
+  // Optional chaining — config may be missing entirely (CAURA-000).
+  return ((config?.tenantId as string) || MEMCLAW_TENANT_ID || "default");
 }
 
-function getSessionKey(config: Record<string, unknown>): string {
+function getSessionKey(
+  config: Record<string, unknown> | undefined | null,
+): string {
   const tenantPrefix = getTenantPrefix(config);
   // Always prefix with tenant to prevent cross-tenant buffer sharing,
   // even when config.sessionKey is provided.
   const sessionPart =
-    (config.sessionKey as string) ||
-    resolveAgentId(config) + ":" + (config.sessionId || "default");
+    (config?.sessionKey as string) ||
+    resolveAgentId(config) + ":" + ((config?.sessionId as string) || "default");
   return tenantPrefix + ":" + sessionPart;
 }
 
@@ -417,8 +422,24 @@ export class MemClawContextEngine {
     ownsCompaction: true,
   };
 
-  constructor(config: Record<string, unknown>) {
-    this.config = config;
+  constructor(config: Record<string, unknown> | undefined | null) {
+    // Defensive coercion — callers may omit config (CAURA-000). Inject
+    // a synthetic, per-instance ``sessionId`` so multiple legacy-compat
+    // engines on the same process don't collide on the module-level
+    // ``sessionBuffers`` Map (without this, both would compute the same
+    // ``getSessionKey({}) = "default:main-<installId>:default"`` key
+    // and share an ingest buffer, cross-polluting recall queries).
+    if (config == null) {
+      logError(
+        "ContextEngine constructed without config — using env-var/install defaults (CAURA-000)",
+        undefined,
+      );
+      this.config = {
+        sessionId: `legacycompat-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      };
+    } else {
+      this.config = config;
+    }
   }
 
   async bootstrap(): Promise<void> {
@@ -884,7 +905,7 @@ export class MemClawContextEngine {
    *      ``CompactResult`` (``{ok, compacted, reason, result?}``) per
    *      ``plugin-sdk/src/context-engine/types.d.ts``.
    *
-   * # Why this shape (CAURA-000-hotfix, v2.6.4)
+   * # Why this shape (CAURA-000-hotfix, v2.6.5)
    *
    * Pre-v2.6.4, ``compact()`` returned ``undefined`` — not even a
    * valid ``CompactResult``. With ``info.ownsCompaction: true`` (PR

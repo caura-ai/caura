@@ -730,7 +730,7 @@ const memclawPlugin = {
     // --- Context engine ---
     try {
       if (typeof api.registerContextEngine === "function") {
-        api.registerContextEngine("memclaw", (config: Record<string, unknown>) => {
+        api.registerContextEngine("memclaw", (config: Record<string, unknown> | undefined | null) => {
           return new MemClawContextEngine(config);
         });
         console.log("[memclaw] ContextEngine 'memclaw' registered");

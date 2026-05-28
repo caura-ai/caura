@@ -573,6 +573,88 @@ describe("ContextEngine.assemble contract (OpenClaw AssembleResult)", () => {
   });
 });
 
+// --- Undefined-config tolerance contract (v2.6.5 hotfix) ---
+//
+// Customer escalation 2026-05-28: a different agent (``dbaclaw``)
+// on the same gateway emitted:
+//
+//     [memclaw] assemble: unexpected error (returning safe fallback)
+//     TypeError: Cannot read properties of undefined (reading 'tenantId')
+//         at getTenantPrefix (...context-engine.js:29:19)
+//         at getSessionKey   (...context-engine.js:32:26)
+//         at _assembleInner  (...context-engine.js:519:28)
+//         at ...invokeWithLegacyCompat (registry-hc1-G3yP.js:103:10)
+//         at mutableAgent.transformContext (model-context-tokens-z5hvDVkk.js:2679:22)
+//
+// The outer try/catch from PR #212 caught the throw and returned the
+// safe-fallback shape, so OpenClaw didn't crash — but every turn
+// that hit this path bypassed keystones, recall, and afterTurn
+// completely. Investigation against the OpenClaw 2026.5.4 source
+// (``registry-DFFgCbcm.js:241-289 resolveContextEngine``) showed
+// the standard factory call always passes a populated
+// ``factoryCtx``, but a custom-build or legacy-compat invocation
+// observed in production reaches us with ``undefined``. Regardless
+// of the upstream cause, the helpers must tolerate it.
+//
+// These tests pin:
+//   1. Constructor coerces ``undefined`` / ``null`` config to ``{}``.
+//   2. ``assemble`` returns a well-shaped ``AssembleResult`` instead
+//      of running the outer-catch fallback when the engine was
+//      constructed with no config — the inner path now completes
+//      cleanly, so future turns get full keystones + recall instead
+//      of silent degradation.
+
+describe("MemClawContextEngine.constructor — undefined-config tolerance (v2.6.5)", () => {
+  test("constructed with undefined: assemble does NOT throw and does NOT take the safe-fallback path", async () => {
+    // Pass undefined where the type-system expects a config object —
+    // exactly the shape that triggered the dbaclaw production
+    // TypeError. Without the constructor coercion, this turn would
+    // surface ``[memclaw] assemble: unexpected error (returning safe
+    // fallback)`` in the log; with it, the inner code completes and
+    // we get the normal AssembleResult.
+    const engine = new MemClawContextEngine(
+      undefined as unknown as Record<string, unknown>,
+    );
+    const result = await engine.assemble({
+      messages: [{ role: "user", content: "hi" }],
+      prompt: "hi",
+      tokenBudget: 4000,
+    });
+    assert.ok(result, "assemble must return a result");
+    assert.ok(
+      Array.isArray(result.messages),
+      "messages must be an array (no exception, no safe-fallback shape)",
+    );
+    assert.equal(
+      typeof result.estimatedTokens,
+      "number",
+      "estimatedTokens must be a number",
+    );
+    // The safe-fallback path returns ``systemPromptAddition: ""``;
+    // a successful inner run produces the education + identity
+    // composition. The presence of non-trivial content proves the
+    // helpers tolerated the undefined config without throwing.
+    assert.ok(
+      (result.systemPromptAddition ?? "").length > 0,
+      "systemPromptAddition must be populated — the helpers did NOT throw",
+    );
+  });
+
+  test("constructed with null: same tolerance (defense-in-depth)", async () => {
+    const engine = new MemClawContextEngine(
+      null as unknown as Record<string, unknown>,
+    );
+    const result = await engine.assemble({
+      messages: [],
+      prompt: "",
+      tokenBudget: 4000,
+    });
+    assert.ok(result);
+    assert.ok(Array.isArray(result.messages));
+    assert.equal(typeof result.estimatedTokens, "number");
+  });
+});
+
 // --- ContextEngine.compact + openclaw-sdk-bridge contract (v2.6.4 hotfix) ---
 //
 // Customer escalation 2026-05-26: WhatsApp group sessions stuck
