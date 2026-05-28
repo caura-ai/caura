@@ -1,6 +1,6 @@
 [project]
 name = "core-storage-api"
-version = "2.10.0"
+version = "2.11.0"
 description = "MemClaw Core Storage API — PostgreSQL CRUD service"
 license = "Apache-2.0"
 requires-python = ">=3.12"

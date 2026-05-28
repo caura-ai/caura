@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.6.3](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.6.2...plugin-v2.6.3) (2026-05-28)
+
+
+### Bug Fixes
+
+* **plugin:** delegate compaction to OpenClaw runtime SDK to unwedge over-budget groups (CAURA-000) ([#234](https://github.com/caura-ai/caura-memclaw/issues/234)) ([6e70d3f](https://github.com/caura-ai/caura-memclaw/commit/6e70d3f677cfec4029edbada88fe4f1e88cd4732))
+* **plugin:** wire keystones into WhatsApp system prompts end-to-end (CAURA-000) ([#212](https://github.com/caura-ai/caura-memclaw/issues/212)) ([cb54bda](https://github.com/caura-ai/caura-memclaw/commit/cb54bda929e9f45744c6baea485e00aede9c682e))
+
 ## [2.6.2](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.6.1...plugin-v2.6.2) (2026-05-24)
 
 

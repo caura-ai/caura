@@ -6,6 +6,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.11.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.10.0...backend-v2.11.0) (2026-05-28)
+
+
+### Features
+
+* **events:** subscription manifest to guard infra provisioning ([#240](https://github.com/caura-ai/caura-memclaw/issues/240)) ([6332c25](https://github.com/caura-ai/caura-memclaw/commit/6332c25a675b14eb4bd9ba17041b534e4c1c1750))
+* **lifecycle:** add insights daily cron ([#238](https://github.com/caura-ai/caura-memclaw/issues/238)) ([b17482d](https://github.com/caura-ai/caura-memclaw/commit/b17482d06fdfdea0bf3ea1f497f46b17f5d9767e))
+* **plugin-manifest:** include min_auto_deploy_plugin_version ([#225](https://github.com/caura-ai/caura-memclaw/issues/225)) ([09bac0a](https://github.com/caura-ai/caura-memclaw/commit/09bac0acda3e62d904f6b97dcab8cc70ae21744f))
+* **storage-api:** add /_debug/pg_locks endpoint for live lock investigation (CAURA-686) ([#219](https://github.com/caura-ai/caura-memclaw/issues/219)) ([80b2eed](https://github.com/caura-ai/caura-memclaw/commit/80b2eed9b4256c8562d8e49c3992ea6fb9f1d983))
+
+
+### Bug Fixes
+
+* **core-api:** bump storage_client httpx pool limits 100/50 -&gt; 200/150 (CAURA-682) ([#224](https://github.com/caura-ai/caura-memclaw/issues/224)) ([240e0b3](https://github.com/caura-ai/caura-memclaw/commit/240e0b31ec7230af30c059b8f7ad1c021dae22e6))
+* **logging:** propagate stdlib logger extras into structlog JSON ([#209](https://github.com/caura-ai/caura-memclaw/issues/209)) ([43240ca](https://github.com/caura-ai/caura-memclaw/commit/43240caf4aea9815b6bf2101ebc606978a74f41a))
+* **mcp:** wire read-only scope gate and reset ContextVars per request ([#210](https://github.com/caura-ai/caura-memclaw/issues/210)) ([7f21f14](https://github.com/caura-ai/caura-memclaw/commit/7f21f14f902cc415982cd8cb2a81c1f5e042021f))
+* **plugin:** delegate compaction to OpenClaw runtime SDK to unwedge over-budget groups (CAURA-000) ([#234](https://github.com/caura-ai/caura-memclaw/issues/234)) ([6e70d3f](https://github.com/caura-ai/caura-memclaw/commit/6e70d3f677cfec4029edbada88fe4f1e88cd4732))
+* **plugin:** wire keystones into WhatsApp system prompts end-to-end (CAURA-000) ([#212](https://github.com/caura-ai/caura-memclaw/issues/212)) ([cb54bda](https://github.com/caura-ai/caura-memclaw/commit/cb54bda929e9f45744c6baea485e00aede9c682e))
+* **storage-api:** bulk-insert memory_entity_links with ON CONFLICT DO NOTHING (CAURA-686) ([#220](https://github.com/caura-ai/caura-memclaw/issues/220)) ([7ab127a](https://github.com/caura-ai/caura-memclaw/commit/7ab127aeac2b61c3f923b6570c2de8e1b42b70e1))
+* **storage:** drop name_embedding/search_vector from entity payloads ([#206](https://github.com/caura-ai/caura-memclaw/issues/206)) ([731ec6c](https://github.com/caura-ai/caura-memclaw/commit/731ec6cd1d65279de31e2441236f463b8ad84583))
+* **version-compat:** bump MIN_RECOMMENDED_PLUGIN_VERSION to 2.6.3 ([#226](https://github.com/caura-ai/caura-memclaw/issues/226)) ([bf9021c](https://github.com/caura-ai/caura-memclaw/commit/bf9021ccb6910753c02c6fc754d30f3015a05405))
+* **version-compat:** bump MIN_RECOMMENDED_PLUGIN_VERSION to 2.6.4 ([#242](https://github.com/caura-ai/caura-memclaw/issues/242)) ([f5668f6](https://github.com/caura-ai/caura-memclaw/commit/f5668f6d0e99ee4f3d4612c8dbdafcaff2a8bb13))
+* **write:** skip embedding-cache lookup when embedding is deferred (CAURA-682) ([#216](https://github.com/caura-ai/caura-memclaw/issues/216)) ([195176d](https://github.com/caura-ai/caura-memclaw/commit/195176da129d02d2e409b2f6754b67e78d46544e))
+
+
+### Performance
+
+* **contradiction:** collapse N+1 status updates into batch_update_status per path (P2) ([#236](https://github.com/caura-ai/caura-memclaw/issues/236)) ([2c8942c](https://github.com/caura-ai/caura-memclaw/commit/2c8942c0b88039aa6cc7b8990420ea39a3de26c1))
+* **crystallizer:** collapse archive-sweep N+1 storage HTTPs (P5) ([#239](https://github.com/caura-ai/caura-memclaw/issues/239)) ([751108c](https://github.com/caura-ai/caura-memclaw/commit/751108c7bf320841105d85a06cf117341e86b913))
+* **ingest:** route ingest_commit through create_memories_bulk ([#227](https://github.com/caura-ai/caura-memclaw/issues/227)) ([245b947](https://github.com/caura-ai/caura-memclaw/commit/245b947e9ccf22bd6bd55a64c125c2a3511bb940))
+* **mcp:** close DB session before evolve LLM round-trip ([#232](https://github.com/caura-ai/caura-memclaw/issues/232)) ([d652777](https://github.com/caura-ai/caura-memclaw/commit/d6527775485fe7cfe135479860037eac85a6a437))
+* **mcp:** close DB session before insights LLM round-trip ([#231](https://github.com/caura-ai/caura-memclaw/issues/231)) ([a8af687](https://github.com/caura-ai/caura-memclaw/commit/a8af687ec0626f1fdc460b26736aaa548844bc7c))
+* **mcp:** close DB session before recall brief LLM round-trip ([#228](https://github.com/caura-ai/caura-memclaw/issues/228)) ([13f09b6](https://github.com/caura-ai/caura-memclaw/commit/13f09b6bb6d70641f0b86d3d843076771b063cfd))
+* **recall:** add stampede guard to query-embedding cache ([#213](https://github.com/caura-ai/caura-memclaw/issues/213)) ([677032f](https://github.com/caura-ai/caura-memclaw/commit/677032ff2d4f7d60bccf53f3c8298c72b1aba46a))
+* **recall:** close DB session before LLM brief on REST /recall ([#233](https://github.com/caura-ai/caura-memclaw/issues/233)) ([21f8434](https://github.com/caura-ai/caura-memclaw/commit/21f84341cfdfa2f9228fc7859d81930be8cbe9b2))
+* **stats:** collapse compute_memory_stats into one GROUPING SETS query ([#214](https://github.com/caura-ai/caura-memclaw/issues/214)) ([63310a1](https://github.com/caura-ai/caura-memclaw/commit/63310a18fcfa77628c3eeb0a2301824a319ec8ab))
+
+
+### Documentation
+
+* **memories:** document PATCH concurrency contract ([#208](https://github.com/caura-ai/caura-memclaw/issues/208)) ([d2c452c](https://github.com/caura-ai/caura-memclaw/commit/d2c452ccdd284ff2d71ddb597bde7ba79bc1a84a))
+
 ## [2.10.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.9.0...backend-v2.10.0) (2026-05-25)
 
 
