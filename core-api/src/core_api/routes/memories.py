@@ -61,9 +61,11 @@ from core_api.schemas import (
     UsageSummary,
 )
 from core_api.services.agent_service import (
+    authorize_memory_access,
     enforce_delete,
     enforce_fleet_read,
     enforce_fleet_write,
+    enforce_memory_read,
     get_or_create_agent,
     lookup_agent,
 )
@@ -252,8 +254,15 @@ async def list_memories(
         if not auth.tenant_id:
             raise HTTPException(status_code=400, detail="tenant_id is required")
         tenant_id = auth.tenant_id
-    if auth.tenant_id and tenant_id and agent_id and fleet_id:
-        await enforce_fleet_read(db, tenant_id, agent_id, fleet_id)
+    # Visibility/fleet identity: prefer the gateway-authenticated agent over the
+    # caller-supplied query param so an agent credential can't widen its view by
+    # passing a peer's agent_id (which would expose that peer's scope_agent rows)
+    # or by omitting it. The query param stays the AUTHOR filter (written_by).
+    # A tenant/user credential (auth.agent_id None) keeps using the param, as the
+    # dashboard intends.
+    caller_agent_id = auth.agent_id or agent_id
+    if auth.tenant_id and tenant_id and caller_agent_id and fleet_id:
+        await enforce_fleet_read(db, tenant_id, caller_agent_id, fleet_id)
 
     # Cursor-based pagination (only applies to created_at descending sort)
     if cursor and (sort != "created_at" or order != "desc"):
@@ -282,9 +291,9 @@ async def list_memories(
     rows = await _repo.list_by_filters(
         db,
         tenant_id=tenant_id or "",
-        caller_agent_id=agent_id,  # visibility scoping
+        caller_agent_id=caller_agent_id,  # visibility scoping (authenticated identity)
         fleet_id=fleet_id,
-        written_by=agent_id,  # author filter (same param)
+        written_by=agent_id,  # author filter (query param)
         memory_type=memory_type,
         status=status,
         run_id=run_id,
@@ -548,6 +557,11 @@ async def get_memory(
         if not memory or memory.tenant_id != tenant_id or memory.deleted_at is not None:
             raise HTTPException(status_code=404, detail="Memory not found")
 
+        # Fleet/agent-scope authorization: a by-id read must honor the same
+        # scope_agent + cross-fleet trust ladder the list/search paths enforce,
+        # so a same-tenant agent credential can't read a peer's scoped row by id.
+        await enforce_memory_read(db, tenant_id, auth.agent_id, memory)
+
         # Get entity links with entity details
         entity_links = []
         try:
@@ -685,6 +699,11 @@ async def get_contradictions(
     memory = await db.get(Memory, memory_id)
     if not memory or memory.tenant_id != tenant_id or memory.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Memory not found")
+
+    # Fleet/agent-scope authorization (mirrors GET /memories/{id}): the
+    # supersession chain below would otherwise leak a scoped row's contradiction
+    # metadata to a same-tenant caller outside its fleet/agent scope.
+    await enforce_memory_read(db, tenant_id, auth.agent_id, memory)
 
     # Newer rows that point at this one as the row they replace
     # (i.e. detector found a contradiction and this memory was the
@@ -1169,8 +1188,29 @@ async def delete_memory(
 ):
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
-    if auth.tenant_id and agent_id:
-        await enforce_delete(db, tenant_id, agent_id)
+    # Authenticated agent identity (gateway X-Agent-ID) takes precedence over
+    # the caller-supplied query param so an agent credential can't skip the
+    # trust gate by omitting/spoofing ``agent_id``.
+    caller_agent_id = auth.agent_id or agent_id
+    if auth.tenant_id and caller_agent_id:
+        await enforce_delete(db, tenant_id, caller_agent_id)
+        # Cross-fleet / scope_agent row authorization (write threshold).
+        target = await db.get(Memory, memory_id)
+        if target and target.tenant_id == tenant_id and target.deleted_at is None:
+            allowed = await authorize_memory_access(
+                db,
+                tenant_id,
+                caller_agent_id,
+                visibility=target.visibility,
+                owner_agent_id=target.agent_id,
+                fleet_id=target.fleet_id,
+                write=True,
+            )
+            if not allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(f"Agent '{caller_agent_id}' cannot delete memory in fleet '{target.fleet_id}'."),
+                )
     await soft_delete_memory(db, memory_id, tenant_id)
     await log_action(
         db,
@@ -1206,6 +1246,23 @@ async def update_memory_status(
     memory = await db.get(Memory, memory_id)
     if not memory or memory.tenant_id != tenant_id or memory.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Memory not found")
+    # Cross-fleet / scope_agent row authorization for the authenticated agent
+    # (no-op for tenant-scoped dashboard credentials, where auth.agent_id is None).
+    if auth.agent_id:
+        allowed = await authorize_memory_access(
+            db,
+            tenant_id,
+            auth.agent_id,
+            visibility=memory.visibility,
+            owner_agent_id=memory.agent_id,
+            fleet_id=memory.fleet_id,
+            write=True,
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Agent '{auth.agent_id}' cannot modify memory in fleet '{memory.fleet_id}'.",
+            )
     old_status = memory.status
     memory.status = status
 
@@ -1252,12 +1309,14 @@ async def update_memory_endpoint(
     auth.enforce_tenant(tenant_id)
     if auth.tenant_id:  # skip usage metering for admin
         await check_and_increment(db, tenant_id, "write")
+    # Authenticated agent identity (gateway X-Agent-ID) takes precedence over
+    # the caller-supplied query param for trust/fleet enforcement.
     return await update_memory(
         db,
         memory_id,
         tenant_id,
         body,
-        agent_id=agent_id if auth.tenant_id else None,
+        agent_id=(auth.agent_id or agent_id) if auth.tenant_id else None,
     )
 
 
@@ -1287,14 +1346,23 @@ async def _search_inner(
 ):
     usage = None
     _agent = None
+    # Effective caller identity for scope/fleet enforcement: an explicit
+    # filter_agent_id, else the gateway-authenticated agent (auth.agent_id).
+    # Falling back to auth.agent_id closes the search side of the BOLA chain —
+    # a constrained agent that OMITS filter_agent_id must still be fleet- and
+    # scope_agent-bound, not handed tenant-wide content (search returns full
+    # content, so this is a direct disclosure, not just id harvesting). A
+    # tenant/user credential (auth.agent_id None, no filter) keeps full-tenant
+    # search, unchanged.
+    eff_agent_id = body.filter_agent_id or auth.agent_id
     if auth.tenant_id:  # skip for admin
-        if body.filter_agent_id:
+        if eff_agent_id:
             fleet_id_hint = body.fleet_ids[0] if body.fleet_ids and len(body.fleet_ids) == 1 else None
-            _agent = await get_or_create_agent(db, body.tenant_id, body.filter_agent_id, fleet_id_hint)
+            _agent = await get_or_create_agent(db, body.tenant_id, eff_agent_id, fleet_id_hint)
             if not body.fleet_ids and _agent.get("fleet_id") and _agent.get("trust_level", 0) < 2:
                 body.fleet_ids = [_agent["fleet_id"]]  # Force fleet scoping for trust < 2
             if body.fleet_ids and len(body.fleet_ids) == 1:
-                await enforce_fleet_read(db, body.tenant_id, body.filter_agent_id, body.fleet_ids[0])
+                await enforce_fleet_read(db, body.tenant_id, eff_agent_id, body.fleet_ids[0])
         usage = await check_and_increment(db, body.tenant_id, "search")
     if usage:
         response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
@@ -1315,7 +1383,10 @@ async def _search_inner(
             query=body.query,
             fleet_ids=body.fleet_ids,
             filter_agent_id=body.filter_agent_id,
-            caller_agent_id=body.filter_agent_id,
+            # Visibility identity is the authenticated agent (not just an
+            # explicit filter) so the caller sees its own scope_agent rows and
+            # nobody else's, even when filter_agent_id is omitted.
+            caller_agent_id=eff_agent_id,
             memory_type_filter=body.memory_type_filter,
             status_filter=body.status_filter,
             valid_at=body.valid_at,

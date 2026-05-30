@@ -41,7 +41,12 @@ from core_api.db.session import async_session
 from core_api.errors import code_for_status
 from core_api.repositories import memory_repo
 from core_api.schemas import BulkMemoryCreate, BulkMemoryItem, MemoryCreate, MemoryUpdate
-from core_api.services.agent_service import enforce_fleet_write
+from core_api.services.agent_service import (
+    authorize_memory_access,
+    enforce_delete,
+    enforce_fleet_read,
+    enforce_fleet_write,
+)
 from core_api.services.audit_service import log_action, log_cross_tenant_read
 from core_api.services.entity_service import get_entity
 from core_api.services.memory_service import (
@@ -469,6 +474,19 @@ async def memclaw_recall(
             agent_profile = None
             if _ag:
                 agent_profile = _ag.get("search_profile") if isinstance(_ag, dict) else _ag.search_profile
+            # Fleet scope enforcement (parity with REST /search): a constrained
+            # agent that omits fleet_ids is scoped to its own fleet, and a single
+            # explicit fleet goes through the cross-fleet trust ladder. Closes the
+            # recall side of the cross-fleet content leak.
+            if _ag is not None and not fleet_ids:
+                ag_fleet = _ag.get("fleet_id") if isinstance(_ag, dict) else getattr(_ag, "fleet_id", None)
+                ag_trust = (
+                    _ag.get("trust_level", 0) if isinstance(_ag, dict) else getattr(_ag, "trust_level", 0)
+                )
+                if ag_fleet and ag_trust < 2:
+                    fleet_ids = [ag_fleet]
+            if fleet_ids and len(fleet_ids) == 1:
+                await enforce_fleet_read(db, tenant_id, agent_id, fleet_ids[0])
             # Cross-tenant recall widens via readable_tenant_ids when
             # the caller authenticated with a cross-tenant credential
             # (kind=cross_tenant) — the gateway plumbs
@@ -725,7 +743,12 @@ async def memclaw_manage(
                 t0,
             )
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    # Raw authenticated identity (gateway-resolved). Used for fleet/scope
+    # authorization — must NOT fall back to the ``mcp-agent`` default, or an
+    # unauthenticated caller would inherit that identity's scope. ``None`` ⇒
+    # no agent context (OSS/standalone) ⇒ tenant-scoped, no agent isolation.
+    caller_agent_id = _get_agent_id()
+    agent_id = caller_agent_id or agent_id
 
     async with _mcp_session() as db:
         try:
@@ -750,6 +773,12 @@ async def memclaw_manage(
                     return _with_latency(
                         _error_response("INVALID_ARGUMENTS", f"invalid UUID in memory_ids — {e}"), t0
                     )
+                # Trust gate (>= 3), mirroring single delete / REST DELETE. Blocks
+                # the cross-fleet bulk-delete-by-id IDOR for sub-admin agents; a
+                # trust>=3 admin agent retains tenant-wide delete (parity with
+                # enforce_fleet_write). No-op for tenant-scoped credentials.
+                if caller_agent_id:
+                    await enforce_delete(db, tenant_id, caller_agent_id)
                 from datetime import UTC
                 from datetime import datetime as _dt
 
@@ -784,6 +813,17 @@ async def memclaw_manage(
 
                 this = await memory_repo.get_by_id_for_tenant(db, uid, tenant_id)
                 if not this:
+                    return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
+                # Fleet/agent-scope authorization (mirrors op=read): the
+                # supersession chain would otherwise leak a scoped row by id.
+                if not await authorize_memory_access(
+                    db,
+                    tenant_id,
+                    caller_agent_id,
+                    visibility=this.visibility,
+                    owner_agent_id=this.agent_id,
+                    fleet_id=this.fleet_id,
+                ):
                     return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
 
                 # The older memory this row replaced (if any). The
@@ -839,6 +879,19 @@ async def memclaw_manage(
                 memory = await memory_repo.get_by_id_for_tenant(db, uid, tenant_id)
                 if not memory:
                     return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
+                # Fleet/agent-scope authorization: honor the same scope_agent +
+                # cross-fleet trust ladder the search/list paths enforce, so an
+                # agent can't read a peer's scoped row by id. NOT_FOUND (not
+                # PERMISSION_DENIED) to avoid confirming the id exists.
+                if not await authorize_memory_access(
+                    db,
+                    tenant_id,
+                    caller_agent_id,
+                    visibility=memory.visibility,
+                    owner_agent_id=memory.agent_id,
+                    fleet_id=memory.fleet_id,
+                ):
+                    return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
                 return _with_latency(
                     json.dumps(
                         {
@@ -883,6 +936,23 @@ async def memclaw_manage(
                 memory = await memory_repo.get_by_id_for_tenant(db, uid, tenant_id)
                 if not memory:
                     return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
+                # Cross-fleet / scope_agent authorization (write threshold).
+                if not await authorize_memory_access(
+                    db,
+                    tenant_id,
+                    caller_agent_id,
+                    visibility=memory.visibility,
+                    owner_agent_id=memory.agent_id,
+                    fleet_id=memory.fleet_id,
+                    write=True,
+                ):
+                    return _with_latency(
+                        _error_response(
+                            "PERMISSION_DENIED",
+                            f"Agent cannot modify memory in fleet '{memory.fleet_id}'.",
+                        ),
+                        t0,
+                    )
                 old_status = memory.status
                 await memory_repo.update_status(db, uid, status)
                 await log_action(
@@ -924,6 +994,27 @@ async def memclaw_manage(
                 result = await update_memory(db, uid, tenant_id, MemoryUpdate(**fields), agent_id=agent_id)
                 return _with_latency(_serialize(result), t0)
             # op == "delete"
+            if caller_agent_id:
+                # Trust gate (>= 3) + cross-fleet / scope_agent row authorization,
+                # mirroring REST DELETE /memories/{id}.
+                await enforce_delete(db, tenant_id, caller_agent_id)
+                target = await memory_repo.get_by_id_for_tenant(db, uid, tenant_id)
+                if target and not await authorize_memory_access(
+                    db,
+                    tenant_id,
+                    caller_agent_id,
+                    visibility=target.visibility,
+                    owner_agent_id=target.agent_id,
+                    fleet_id=target.fleet_id,
+                    write=True,
+                ):
+                    return _with_latency(
+                        _error_response(
+                            "PERMISSION_DENIED",
+                            f"Agent cannot delete memory in fleet '{target.fleet_id}'.",
+                        ),
+                        t0,
+                    )
             await soft_delete_memory(db, uid, tenant_id)
             return _with_latency(f"Memory {memory_id} deleted.", t0)
         except HTTPException as e:

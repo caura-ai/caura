@@ -2253,9 +2253,26 @@ async def update_memory(
 
     # Trust enforcement -- always runs (access control, not a platform feature)
     if agent_id:
-        from core_api.services.agent_service import enforce_update
+        from core_api.services.agent_service import authorize_memory_access, enforce_update
 
         await enforce_update(db, tenant_id, agent_id, mem.get("agent_id"))
+        # Cross-fleet / scope_agent row authorization (write threshold) — the
+        # same fleet/scope contract the list/search paths enforce, so a by-id
+        # PATCH can't mutate a peer fleet's row.
+        allowed = await authorize_memory_access(
+            db,
+            tenant_id,
+            agent_id,
+            visibility=mem.get("visibility"),
+            owner_agent_id=mem.get("agent_id"),
+            fleet_id=mem.get("fleet_id"),
+            write=True,
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Agent '{agent_id}' cannot modify memory in fleet '{mem.get('fleet_id')}'.",
+            )
 
     fields_set = data.model_fields_set
     if not fields_set:

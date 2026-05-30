@@ -172,6 +172,81 @@ async def enforce_fleet_read(
         )
 
 
+async def authorize_memory_access(
+    db: AsyncSession,
+    tenant_id: str,
+    caller_agent_id: str | None,
+    *,
+    visibility: str | None,
+    owner_agent_id: str | None,
+    fleet_id: str | None,
+    write: bool = False,
+) -> bool:
+    """Authorize a *by-id* memory access against the fleet/scope contract.
+
+    By-id handlers (``GET/PATCH/DELETE /memories/{id}`` and the MCP
+    ``read``/``lineage``/``transition``/``update``/``delete`` ops) historically
+    authorized on ``tenant_id`` alone, while the list/search paths additionally
+    enforce ``scope_agent`` ownership (``memory_repository`` visibility
+    predicate) and the cross-fleet trust ladder (``enforce_fleet_read``). That
+    asymmetry let any same-tenant agent credential read or mutate a peer's
+    fleet/agent-scoped row by id (BOLA/IDOR). This helper restores parity so
+    every surface enforces the same contract.
+
+    Returns ``True`` if ``caller_agent_id`` may access the row.
+
+    - ``caller_agent_id is None`` → a tenant-scoped user/dashboard credential
+      (no gateway ``X-Agent-ID``) → full tenant access, unchanged. The agent
+      isolation boundary only applies to agent-scoped credentials.
+    - ``scope_agent`` → author-only.
+    - ``scope_org`` → tenant-global (mirrors ``scored_search``'s rule that
+      org-scoped rows escape fleet scoping).
+    - ``scope_team`` / default → fleet-gated: own fleet (or fleet-less rows)
+      always; cross-fleet requires ``trust_level >= 2`` for reads, ``>= 3`` for
+      writes (mirrors ``enforce_fleet_read`` / ``enforce_fleet_write``).
+    """
+    if not caller_agent_id:
+        return True
+    if visibility == "scope_agent":
+        return owner_agent_id == caller_agent_id
+    if visibility == "scope_org":
+        return True
+    # scope_team / unknown visibility: fleet-gated by the trust ladder.
+    agent = await lookup_agent(db, tenant_id, caller_agent_id)
+    if not agent:
+        # Unknown agent — mirror enforce_fleet_read's allow-on-unknown
+        # (registration happens on writes; reads of an unregistered identity
+        # are not the isolation boundary this helper guards).
+        return True
+    if fleet_id is None or fleet_id == agent.get("fleet_id"):
+        return True
+    return agent.get("trust_level", 0) >= (3 if write else 2)
+
+
+async def enforce_memory_read(
+    db: AsyncSession,
+    tenant_id: str,
+    caller_agent_id: str | None,
+    memory: Any,
+) -> None:
+    """Raise 404 if ``caller_agent_id`` may not read ``memory`` (an ORM row).
+
+    404 (not 403) is deliberate: it mirrors the list/search contract where an
+    out-of-scope row simply does not appear, and avoids confirming the
+    existence of another fleet's/agent's memory_id to an unauthorized caller.
+    """
+    allowed = await authorize_memory_access(
+        db,
+        tenant_id,
+        caller_agent_id,
+        visibility=getattr(memory, "visibility", None),
+        owner_agent_id=getattr(memory, "agent_id", None),
+        fleet_id=getattr(memory, "fleet_id", None),
+    )
+    if not allowed:
+        raise HTTPException(status_code=404, detail="Memory not found")
+
+
 async def enforce_delete(
     db: AsyncSession,
     tenant_id: str,
