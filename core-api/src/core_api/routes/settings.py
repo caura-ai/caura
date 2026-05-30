@@ -52,6 +52,10 @@ async def update_tenant_settings(
     tid = _resolve_tenant(auth, tenant_id)
     if auth.is_demo:
         raise HTTPException(status_code=403, detail="Demo sandbox is read-only")
+    # Tenant settings include security-relevant toggles (e.g. require_agent_approval,
+    # which governs whether new agents start quarantined). An agent-scoped
+    # credential must not be able to flip them.
+    auth.enforce_not_agent_credential("change tenant settings")
     # Only trust X-Changed-By from admin-key callers (the enterprise proxy).
     # Regular users could forge this header otherwise.
     changed_by: str | None
