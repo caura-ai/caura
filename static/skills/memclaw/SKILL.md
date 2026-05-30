@@ -57,7 +57,7 @@ Auto-registered at trust 1 on your first write.
 
 Scope-based escalation:
 - browsing or reflecting with `scope="fleet"` / `"all"` → trust 2
-- reporting outcomes (`memclaw_evolve`) → trust 2
+- reporting outcomes (`memclaw_evolve`) at `scope="fleet"` / `"all"` → trust 2 (default `scope="agent"` needs only trust 1)
 - authoring your OWN `scope=agent` keystone (`memclaw_keystones_set`) → trust 1
 - authoring `scope=fleet` / `scope=tenant` / another agent's keystone → trust 2
 - `memclaw_manage op=delete` → trust 3
@@ -137,7 +137,7 @@ document why) when it genuinely shouldn't be shared.
 1. Recall — "what is known about this?" / "what happened since last session?"
 2. Work — act on the recalled context.
 3. Write — at checkpoints and session end.
-4. Evolve — if you acted on specific memories, report the outcome (trust 2).
+4. Evolve — if you acted on specific memories, report the outcome (default `scope="agent"`, trust 1; fleet/all needs trust 2).
 
 ---
 
@@ -222,10 +222,11 @@ patterns, discover}. Results saved as `insight` memories. Run at
 boundaries, not every turn. `scope="fleet"` / `"all"` → trust 2;
 `focus="divergence"` requires non-agent scope.
 
-**`memclaw_evolve(outcome, outcome_type, related_ids=?)`**
+**`memclaw_evolve(outcome, outcome_type, related_ids=?, scope="agent", fleet_id=?)`**
 Close the loop. `outcome_type` ∈ {success, failure, partial}.
 `related_ids` = the recall IDs you acted on. Success reinforces weights;
-failure auto-creates `rule` memories. Trust 2.
+failure auto-creates `rule` memories. Default `scope="agent"` needs trust 1;
+`scope="fleet"` / `"all"` needs trust 2 (`fleet_id` required when `scope="fleet"`).
 
 **`memclaw_keystones(fleet_id=?, agent_id=?)`**
 Read mandatory governance rules for the current scope (tenant + fleet +
@@ -287,7 +288,7 @@ do not swallow.
 ---
 
 *Direct-MCP adapter for Claude Code and Codex. Install via the installer
-at `https://memclaw.dev/install/skill` or by copying this file to
+at `https://memclaw.dev/api/v1/install-skill` or by copying this file to
 `~/.claude/skills/memclaw/SKILL.md` (Claude Code) or
 `~/.agents/skills/memclaw/SKILL.md` (Codex). Per-workspace override: place
 a copy under your project's `.claude/skills/memclaw/` or `.agents/skills/memclaw/`.

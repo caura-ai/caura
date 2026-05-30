@@ -558,7 +558,7 @@ explicitly downgrade:
 ```bash
 docker compose run --rm \
   -e MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS=true \
-  core-storage-api alembic downgrade 009
+  core-storage-api alembic downgrade 011
 ```
 
 This NULLs any 1024-dim embeddings written since the upgrade and widens the

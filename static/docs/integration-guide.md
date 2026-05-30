@@ -30,7 +30,7 @@ Browser (UI)    → HTTP             → MemClaw API → Postgres + pgvector
 
 ### Tools available to agents
 
-Tool descriptions are derived from the tool registry (`core-api/src/core_api/tools/_registry.py`) and served at `GET /api/tool-descriptions`. Both MCP and OpenClaw plugin read from this canonical source.
+Tool descriptions are derived from the tool registry (`core-api/src/core_api/tools/_registry.py`) and served at `GET /api/v1/tool-descriptions`. Both MCP and OpenClaw plugin read from this canonical source.
 
 | Tool | MCP | OpenClaw | Purpose |
 |---|---|---|---|
@@ -112,7 +112,7 @@ Options:
 
 Restart your agent after installing — skills are loaded at startup.
 
-Why this matters: without the skill, an agent can discover the 10 tool
+Why this matters: without the skill, an agent can discover the 12 tool
 names and their arg schemas via MCP `tools/list`, but it has no
 mental model for the two-store design (memory vs doc), the trust
 levels, or which op to reach for in an ambiguous situation. With the
@@ -124,7 +124,7 @@ in the first place.
 
 ### Available tools
 
-The MCP server exposes 12 tools that clients discover automatically. Descriptions are canonical — served from `GET /api/tool-descriptions`, derived from the tool registry (`core-api/src/core_api/tools/_registry.py`).
+The MCP server exposes 12 tools that clients discover automatically. Descriptions are canonical — served from `GET /api/v1/tool-descriptions`, derived from the tool registry (`core-api/src/core_api/tools/_registry.py`).
 
 | Tool | Purpose |
 |---|---|
@@ -170,7 +170,7 @@ Once configured, the MCP client handles tool discovery. Agents can use MemClaw t
 |---|---|---|
 | Setup | Add URL + key to config | Install plugin on gateway VM |
 | Works with | Any MCP client | OpenClaw agents only |
-| Tools | 9 (write, recall, manage, list, doc, entity_get, tune, insights, evolve) | 9 (same) |
+| Tools | 12 (write, recall, manage, list, doc, entity_get, tune, insights, evolve, stats, keystones, keystones_set) | 11 (all except `keystones_set`) |
 | RDF triples | Not exposed (contradiction detection via semantic similarity only) | Yes — `subject_entity_id`, `predicate`, `object_value` on write |
 | Temporal filter | Not exposed | Yes — `valid_at` on search |
 | Visibility | Passed per-call (`scope_agent` / `scope_team` / `scope_org`) | Passed per-call (`scope_agent` / `scope_team` / `scope_org`) |
@@ -296,7 +296,7 @@ The plugin registers 11 tools (the MCP surface minus the MCP-only `memclaw_keyst
 
 - **ContextEngine** — 7 lifecycle hooks: `bootstrap` (smoke test), `ingest` (message buffering + persistence), `assemble` (token-budget-aware recall injection), `compact` (persist summaries), `afterTurn` (auto-write turn summaries), `prepareSubagentSpawn`, `onSubagentEnded`
 - **Memory runtime** — API-backed `search()` and `get()` replacing file-based `memory-core`
-- **Heartbeat** — every 60 seconds, POSTs node status (agents, tools, OS, IP, plugin version, setup_status) to `/api/fleet/heartbeat`. MemClaw responds with any pending commands
+- **Heartbeat** — every 60 seconds, POSTs node status (agents, tools, OS, IP, plugin version, setup_status) to `/api/v1/fleet/heartbeat`. MemClaw responds with any pending commands
 - **Commands** — the plugin processes HMAC-verified commands from the heartbeat response:
   - `deploy` — fetch all source files to memory, backup originals, write + build, rollback on failure
   - `educate` — write prompts to agent HEARTBEAT.md files + write SKILL.md, TOOLS.md, AGENTS.md to workspaces
@@ -348,9 +348,9 @@ MemClaw enforces a 4-tier trust system for agents. Agents are auto-registered on
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/agents?tenant_id=` | GET | List all registered agents with trust levels |
-| `/api/agents/{agent_id}?tenant_id=` | GET | Single agent detail (trust level, home fleet, stats) |
-| `/api/agents/{agent_id}/trust?tenant_id=` | PATCH | Update trust level (body: `{"trust_level": 2}`) |
+| `/api/v1/agents?tenant_id=` | GET | List all registered agents with trust levels |
+| `/api/v1/agents/{agent_id}?tenant_id=` | GET | Single agent detail (trust level, home fleet, stats) |
+| `/api/v1/agents/{agent_id}/trust?tenant_id=` | PATCH | Update trust level (body: `{"trust_level": 2}`) |
 
 ### The Manage page
 
@@ -661,7 +661,7 @@ Togglable per tenant via `lifecycle_automation_enabled` setting.
 
 ### Batch Write
 
-Available as the batch form of the `memclaw_write` tool (MCP + OpenClaw plugin, pass `items=[...]`) and the `POST /api/memories/bulk` REST endpoint. Writes up to 100 memories in a single request. Optimized for throughput:
+Available as the batch form of the `memclaw_write` tool (MCP + OpenClaw plugin, pass `items=[...]`) and the `POST /api/v1/memories/bulk` REST endpoint. Writes up to 100 memories in a single request. Optimized for throughput:
 
 - **Batch embeddings** — single API call for all texts instead of N calls
 - **Parallel enrichment** — LLM enrichment runs concurrently (bounded at 10)

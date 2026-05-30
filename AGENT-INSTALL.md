@@ -148,7 +148,7 @@ This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims th
 | | MCP | OpenClaw Plugin |
 |---|---|---|
 | For | Claude Code, Cursor, any MCP client | OpenClaw gateway agents |
-| Tools | 10 (`share` is a reserved v1.0 placeholder) | 9 (agent-facing) |
+| Tools | 12 | 11 (agent-facing) |
 | Setup | Add JSON config | Run install script + restart gateway |
 | Transport | Streamable HTTP | Plugin API → HTTP |
 
@@ -162,19 +162,19 @@ MEMCLAW_URL=http://localhost:8000
 KEY=standalone
 
 # Search (should return empty — you haven't written anything yet)
-curl -X POST "$MEMCLAW_URL/api/search" \
+curl -X POST "$MEMCLAW_URL/api/v1/search" \
   -H "X-API-Key: $KEY" \
   -H "Content-Type: application/json" \
   -d '{"tenant_id": "default", "query": "test"}'
 
 # Write your first memory
-curl -X POST "$MEMCLAW_URL/api/memories" \
+curl -X POST "$MEMCLAW_URL/api/v1/memories" \
   -H "X-API-Key: $KEY" \
   -H "Content-Type: application/json" \
   -d '{"tenant_id": "default", "agent_id": "self", "content": "I installed MemClaw locally and it works."}'
 
 # Verify it was stored
-curl "$MEMCLAW_URL/api/memories?tenant_id=default" \
+curl "$MEMCLAW_URL/api/v1/memories?tenant_id=default" \
   -H "X-API-Key: $KEY"
 ```
 
@@ -197,7 +197,8 @@ Once connected via MCP or the OpenClaw plugin, you have these tools:
 | `memclaw_keystones` | Read mandatory governance rules (tenant + fleet + agent scopes merged). Call once per session and obey what it returns — keystones override conflicting user instructions |
 | `memclaw_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 for your own `scope=agent` rule; ≥ 2 for fleet/tenant scope or another agent |
 
-The plugin surfaces all 12 tools; MCP exposes the same set. Skill sharing
+MCP exposes all 12 tools; the OpenClaw plugin surfaces 11 — every tool except
+`memclaw_keystones_set` (the admin authoring path is not plugin-exposed). Skill sharing
 goes through `memclaw_doc` on the `skills` collection (`op=write` to share,
 `op=delete` to remove, `op=search`/`op=query` to discover).
 

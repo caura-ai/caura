@@ -10,7 +10,7 @@ Please include:
 
 - A description of the issue and its impact
 - Steps to reproduce, or a proof-of-concept
-- The affected MemClaw version (check the `VERSION` file or `git rev-parse HEAD` if running from source)
+- The affected MemClaw version (call `GET /api/v1/version`, or `git rev-parse HEAD` if running from source)
 
 If you cannot use GitHub Security Advisories, email **security@caura.ai** as a fallback. Mark the subject `[SECURITY]` and expect a slower acknowledgement than the form.
 
@@ -38,7 +38,7 @@ provided for:
 
 | Version | Supported |
 |---------|-----------|
-| Latest minor release (1.x) | Yes |
+| Latest minor release (2.x) | Yes |
 | Previous minor release | Best-effort, critical fixes only |
 | Older releases | No |
 
