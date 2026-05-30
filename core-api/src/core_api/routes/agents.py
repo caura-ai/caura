@@ -50,6 +50,9 @@ async def patch_agent_trust(
 ):
     """Update an agent's trust level (and optionally fleet)."""
     auth.enforce_tenant(tenant_id)
+    # Trust changes are the master key to the whole ladder — an agent must not
+    # be able to PATCH its own (or a peer's) trust_level to self-promote.
+    auth.enforce_not_agent_credential("change agent trust levels")
     agent = await update_trust_level(
         db,
         tenant_id,
@@ -72,6 +75,9 @@ async def update_agent_fleet(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(tenant_id)
+    # Fleet reassignment grants home-fleet access to the target fleet — an agent
+    # must not be able to relocate itself/a peer to reach another fleet's data.
+    auth.enforce_not_agent_credential("reassign agent fleets")
     fleet_id = body.get("fleet_id")
     if not fleet_id:
         raise HTTPException(status_code=400, detail="fleet_id is required")
@@ -111,6 +117,10 @@ async def patch_agent_tune(
 ):
     """Update an agent's search profile (per-agent retrieval tuning). Pass ?reset=true to clear."""
     auth.enforce_tenant(tenant_id)
+    # An agent may tune ITS OWN profile (also exposed via MCP memclaw_tune), but
+    # not a peer's — block cross-agent tamper while leaving self-tune + admin keys.
+    if auth.agent_id and auth.agent_id != agent_id:
+        raise HTTPException(status_code=403, detail="Agents can only tune their own search profile.")
     sc = get_storage_client()
     agent = await sc.get_agent(agent_id, tenant_id)
     if not agent:
@@ -146,6 +156,10 @@ async def delete_agent(
     """Delete an agent. Memories written by this agent are NOT deleted."""
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
+    # Deleting an agent wipes its trust/profile/identity (and re-registration
+    # resets to DEFAULT_TRUST_LEVEL) — an agent must not delete itself/peers to
+    # evade controls.
+    auth.enforce_not_agent_credential("delete agents")
     sc = get_storage_client()
     agent = await sc.get_agent(agent_id, tenant_id)
     if not agent:

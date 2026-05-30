@@ -195,6 +195,26 @@ class AuthContext:
         if self.org_role != "admin":
             raise HTTPException(status_code=403, detail="Org admin access required")
 
+    def enforce_not_agent_credential(self, action: str = "perform this action") -> None:
+        """Raise 403 if the caller is an agent-scoped credential.
+
+        Agent management (trust level, fleet, deletion) and org settings are
+        admin-plane operations. An agent-scoped credential (the enterprise
+        gateway injects ``X-Agent-ID`` only for ``kind=agent_key``) must not be
+        able to escalate its own trust_level, relocate its fleet, delete peer
+        agents, or rewrite tenant settings — otherwise the trust ladder is
+        self-defeating. Tenant/user/admin credentials (no ``X-Agent-ID``) are
+        unaffected, so the dashboard and admin tooling keep working without
+        depending on ``org_role`` being plumbed on the gateway auth branch.
+        """
+        if self.is_admin:
+            return
+        if self.agent_id:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Agent-scoped credentials cannot {action}; use an admin credential.",
+            )
+
     def enforce_tenant(self, requested_tenant: str) -> None:
         """Raise 403 if the request tenant doesn't match the key's tenant."""
         if self.is_admin:
