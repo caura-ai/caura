@@ -385,6 +385,19 @@ async def get_auth_context(
     # ── Path 4: X-Tenant-ID header (set by enterprise nginx / ingress) ──
     tenant_id = request.headers.get("x-tenant-id")
     if tenant_id:
+        # Perimeter check: this path TRUSTS the X-Tenant-ID / X-Agent-ID /
+        # X-Readable-Tenant-IDs headers with no credential of its own — safe
+        # only when the request came through the gateway. When a shared secret
+        # is configured, require the gateway-injected ``X-Gateway-Secret`` so a
+        # caller hitting core-api directly (e.g. its public run.app URL) cannot
+        # impersonate a tenant by setting the identity headers itself. No-op
+        # when unset (OSS / standalone / dev).
+        gw_secret = settings.gateway_shared_secret
+        if gw_secret and not hmac.compare_digest(request.headers.get("x-gateway-secret") or "", gw_secret):
+            raise HTTPException(
+                status_code=401,
+                detail="Direct access to this service is not permitted.",
+            )
         await _block_if_suppressed(tenant_id)
         # Cross-tenant credentials carry a list of readable tenants via
         # ``X-Readable-Tenant-IDs``. The home tenant was just checked

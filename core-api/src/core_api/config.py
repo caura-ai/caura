@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     api_key: str | None = None  # legacy, deprecated
     admin_api_key: str | None = None
     memclaw_api_key: str | None = None  # Optional: when set, all non-admin requests must present this key
+    # Perimeter secret shared with the enterprise gateway. When set, the
+    # header-trust auth path (X-Tenant-ID) additionally requires a matching
+    # ``X-Gateway-Secret`` header — so a caller who reaches core-api directly
+    # (bypassing the gateway via its public run.app URL) cannot impersonate a
+    # tenant by setting identity headers itself. Unset (OSS/standalone/dev) = no-op.
+    gateway_shared_secret: str | None = None
     embedding_provider: str = "openai"  # fake | openai | local
     # Per-deploy control for where embedding + LLM enrichment run.
     #
