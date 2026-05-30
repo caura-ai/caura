@@ -433,6 +433,13 @@ async def delete_all_memories(
     """
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
+    # BFLA gate: a bulk/whole-tenant delete by an *agent* credential requires
+    # admin-trust (>= 3), matching single-delete (enforce_delete) and the trust
+    # ladder — a routine trust-1 write key must not be able to wipe a fleet or
+    # the tenant. Tenant/user credentials (no gateway X-Agent-ID → the tenant
+    # owner) keep full reach (dashboard reset, tagged cleanup) unchanged.
+    if auth.tenant_id and auth.agent_id:
+        await enforce_delete(db, tenant_id, auth.agent_id)
     from sqlalchemy import update
 
     stmt = update(Memory).where(Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None))
@@ -511,6 +518,11 @@ async def bulk_delete_by_ids(
         raise HTTPException(status_code=400, detail="tenant_id required")
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
+    # BFLA gate (parity with delete_all_memories / single-delete): an agent
+    # credential must be admin-trust (>= 3) to bulk-delete by id; this also
+    # closes the cross-fleet/agent delete (the ids are otherwise unscoped).
+    if auth.tenant_id and auth.agent_id:
+        await enforce_delete(db, tenant_id, auth.agent_id)
     if not ids or len(ids) > 1000:
         raise HTTPException(status_code=400, detail="ids must be 1-1000 items")
 

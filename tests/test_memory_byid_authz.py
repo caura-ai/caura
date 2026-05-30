@@ -347,3 +347,53 @@ async def test_rest_search_scope_agent_uses_authenticated_identity(client, as_ag
 
     as_agent(tenant_id, "alice")
     assert priv in await _search(marker), "author cannot see own scope_agent row in search"
+
+
+# ---------------------------------------------------------------------------
+# F2 — bulk/whole-tenant delete requires admin-trust for agent credentials (BFLA)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_rest_delete_all_blocked_for_low_trust_agent(client, as_agent, patch_lookup):
+    """A trust-1 agent key must not be able to wipe the tenant via DELETE /memories."""
+    from tests.conftest import get_test_auth
+
+    tenant_id, _ = get_test_auth()
+    as_agent(tenant_id, "bob")
+    patch_lookup(fleet_id="fleet-beta", trust_level=1)
+    r = await client.delete(f"/api/v1/memories?tenant_id={tenant_id}")
+    assert r.status_code == 403, r.text
+
+    # Admin-trust (>=3) agent is allowed (scoped to a non-existent fleet → deletes 0).
+    patch_lookup(fleet_id="fleet-beta", trust_level=3)
+    r = await client.delete(f"/api/v1/memories?tenant_id={tenant_id}&fleet_id=nonexistent-{uuid.uuid4().hex[:6]}")
+    assert r.status_code == 204, r.text
+
+
+@pytest.mark.integration
+async def test_rest_bulk_delete_by_ids_blocked_for_low_trust_agent(client, as_agent, patch_lookup):
+    from tests.conftest import get_test_auth
+
+    tenant_id, _ = get_test_auth()
+    as_agent(tenant_id, "bob")
+    patch_lookup(fleet_id="fleet-beta", trust_level=1)
+    r = await client.post(
+        "/api/v1/memories/bulk-delete",
+        json={"tenant_id": tenant_id, "ids": [str(uuid.uuid4())]},
+    )
+    assert r.status_code == 403, r.text
+
+
+@pytest.mark.integration
+async def test_rest_delete_all_tenant_key_unchanged(client):
+    """Tenant/admin credential (no X-Agent-ID) keeps full delete reach — no regression
+    to dashboard reset / tagged cleanup. Scoped to a non-existent fleet to stay inert."""
+    from tests.conftest import get_test_auth
+
+    tenant_id, headers = get_test_auth()
+    r = await client.delete(
+        f"/api/v1/memories?tenant_id={tenant_id}&fleet_id=nonexistent-{uuid.uuid4().hex[:6]}",
+        headers=headers,
+    )
+    assert r.status_code == 204, r.text
