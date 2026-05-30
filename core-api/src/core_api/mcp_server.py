@@ -1037,7 +1037,7 @@ async def memclaw_entity_get(
         )
 
     async with _mcp_session() as db:
-        result = await get_entity(db, uid, _get_tenant())
+        result = await get_entity(db, uid, _get_tenant(), caller_agent_id=_get_agent_id())
         text = "Entity not found." if not result else _serialize(result)
         return _with_latency(text, t0)
 
@@ -1168,7 +1168,10 @@ async def memclaw_doc(
     if op in {"write", "delete"} and (err := _check_write_scope()):
         return err
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    # Raw authenticated identity for the delete trust gate (None ⇒ no agent
+    # context). Must not fall back to the ``mcp-agent`` default.
+    caller_agent_id = _get_agent_id()
+    agent_id = caller_agent_id or agent_id
     # Refuse the default identity for write ops on the gateway path; read-only
     # ops don't carry the same attribution risk.
     if op == "write" and (refuse := _refuse_default_agent_on_gateway(agent_id)):
@@ -1402,6 +1405,10 @@ async def memclaw_doc(
             # op == "delete"
             if not doc_id:
                 return _with_latency(_error_response("INVALID_ARGUMENTS", "op=delete requires 'doc_id'."), t0)
+            # Admin-trust (>= 3) gate for agent credentials, parity with memory
+            # deletes — a routine trust-1 agent must not destroy tenant documents.
+            if caller_agent_id:
+                await enforce_delete(db, tenant_id, caller_agent_id)
             from sqlalchemy import delete as sa_delete
 
             from common.models.document import Document

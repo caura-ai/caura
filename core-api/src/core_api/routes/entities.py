@@ -171,7 +171,7 @@ async def get_entity_route(
     reads widen via ``readable_tenant_ids``; foreign-tenant reads are
     audited to the source tenant."""
     auth.enforce_readable_tenant(tenant_id)
-    entity = await get_entity(db, entity_id, tenant_id)
+    entity = await get_entity(db, entity_id, tenant_id, caller_agent_id=auth.agent_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
     if auth.is_cross_tenant_read and tenant_id != auth.tenant_id:

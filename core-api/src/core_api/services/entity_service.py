@@ -136,7 +136,9 @@ async def upsert_entity(
     )
 
 
-async def get_entity(db: AsyncSession, entity_id: UUID, tenant_id: str) -> EntityOut | None:
+async def get_entity(
+    db: AsyncSession, entity_id: UUID, tenant_id: str, caller_agent_id: str | None = None
+) -> EntityOut | None:
     sc = get_storage_client()
     result = await sc.get_entity_with_linked_memories(str(entity_id))
     if not result:
@@ -149,6 +151,27 @@ async def get_entity(db: AsyncSession, entity_id: UUID, tenant_id: str) -> Entit
     # Build linked memories from dict data
     raw_entries = result.get("linked_memories", [])
     linked_memories_raw = [entry.get("memory", entry) for entry in raw_entries]
+
+    # Fleet/agent-scope filter: an agent credential must only see the linked
+    # memories it may read (same scope_agent + cross-fleet trust contract as
+    # GET /memories/{id} and search). Without this the entity is a side-door
+    # that returns a peer agent's scope_agent secret / cross-fleet content by
+    # entity id. No-op for tenant/user/admin credentials (caller_agent_id None).
+    if caller_agent_id:
+        from core_api.services.agent_service import authorize_memory_access
+
+        scoped: list[dict] = []
+        for mem in linked_memories_raw:
+            if await authorize_memory_access(
+                db,
+                tenant_id,
+                caller_agent_id,
+                visibility=mem.get("visibility"),
+                owner_agent_id=mem.get("agent_id"),
+                fleet_id=mem.get("fleet_id"),
+            ):
+                scoped.append(mem)
+        linked_memories_raw = scoped
     linked_memories = []
     for mem in linked_memories_raw:
         entity_links_raw = mem.get("entity_links", [])

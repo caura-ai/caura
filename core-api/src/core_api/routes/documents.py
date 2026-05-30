@@ -14,6 +14,7 @@ from core_api.clients.storage_client import get_storage_client
 from core_api.db.session import get_db
 from core_api.middleware.idempotency import IDEMPOTENCY_HEADER, idempotency_for
 from core_api.middleware.rate_limit import write_limit
+from core_api.services.agent_service import enforce_delete
 from core_api.services.audit_service import log_action, log_cross_tenant_read
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
 
@@ -345,6 +346,11 @@ async def delete_document(
     """Delete a document by collection + doc_id."""
     auth.enforce_tenant(tenant_id)
     auth.enforce_read_only()
+    # Bulk/destructive parity with memory deletes: an agent credential needs
+    # admin-trust (>= 3) to delete documents (which carry customer records /
+    # configs). Tenant/user credentials (no X-Agent-ID) are unaffected.
+    if auth.tenant_id and auth.agent_id:
+        await enforce_delete(db, tenant_id, auth.agent_id)
     sc = get_storage_client()
     deleted = await sc.delete_document(tenant_id=tenant_id, collection=collection, doc_id=doc_id)
     if not deleted:
