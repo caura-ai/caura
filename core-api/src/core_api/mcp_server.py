@@ -749,6 +749,10 @@ async def memclaw_manage(
     # no agent context (OSS/standalone) ⇒ tenant-scoped, no agent isolation.
     caller_agent_id = _get_agent_id()
     agent_id = caller_agent_id or agent_id
+    if op in {"update", "transition", "delete", "bulk_delete"} and (
+        refuse := _refuse_default_agent_on_gateway(agent_id)
+    ):
+        return _with_latency(refuse, t0)
 
     async with _mcp_session() as db:
         try:
@@ -1061,6 +1065,8 @@ async def memclaw_tune(
         return err
     tenant_id = _get_tenant()
     agent_id = _get_agent_id() or agent_id
+    if refuse := _refuse_default_agent_on_gateway(agent_id):
+        return _with_latency(refuse, t0)
 
     from core_api.schemas import SearchProfileUpdate
 
@@ -1904,6 +1910,8 @@ async def memclaw_evolve(
         return err
     tenant_id = _get_tenant()
     agent_id = _get_agent_id() or agent_id
+    if refuse := _refuse_default_agent_on_gateway(agent_id):
+        return _with_latency(refuse, t0)
 
     # Pre-validate inputs before consuming rate-limit budget.
     if outcome_type not in EVOLVE_OUTCOME_TYPES:
@@ -2171,6 +2179,8 @@ async def memclaw_keystones_set(
 
     tenant_id = _get_tenant()
     caller_agent_id = _get_agent_id() or "mcp-agent"
+    if refuse := _refuse_default_agent_on_gateway(caller_agent_id):
+        return _with_latency(refuse, t0)
 
     async with _mcp_session() as db:
         # The whole body sits inside the try so the catch-all also covers
