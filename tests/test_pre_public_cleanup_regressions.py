@@ -242,11 +242,35 @@ async def test_insights_rerun_supersedes_prior(client):
 
 # ---------------------------------------------------------------------------
 # d3168b7 — MEMORY_TYPES include "insight" (was missing from enum)
+# Updated by C3/C8 (PR #261 era): "insight" is server-reserved and rejected
+# at the route boundary. Enum-sync coverage moves to a schema-level check;
+# boundary behaviour is asserted via the 422 path below.
 # ---------------------------------------------------------------------------
 
 
-async def test_memory_type_insight_accepted(client):
-    """Writing with memory_type='insight' must be accepted (not rejected by enum)."""
+async def test_memory_type_insight_known_to_schema_but_rejected_at_boundary(client):
+    """Two assertions in one place to keep the original intent (enum-sync)
+    while reflecting the C3/C8 contract (server-reserved types rejected
+    at the API boundary):
+
+    1. ``"insight"`` must still be a recognised type at the Pydantic
+       schema level so internal callers (``insights_service``) can
+       construct ``MemoryCreate(memory_type="insight", ...)`` without
+       a validation error.
+    2. The agent-facing ``POST /api/v1/memories`` must reject explicit
+       ``memory_type="insight"`` with a 422 — this is the C3/C8 fix.
+    """
+    # (1) Schema-level recognition — proves the enum still carries the slug.
+    from core_api.schemas import MemoryCreate
+
+    _ = MemoryCreate(
+        tenant_id="t-x",
+        agent_id="a-x",
+        content="schema-level recognition probe",
+        memory_type="insight",
+    )
+
+    # (2) Route-level rejection — the C3/C8 boundary.
     tenant_id, headers = get_test_auth()
     tag = _uid()
 
@@ -261,10 +285,13 @@ async def test_memory_type_insight_accepted(client):
         },
         headers=headers,
     )
-    assert resp.status_code == 201, (
-        f"memory_type='insight' rejected — enum may be out of sync: {resp.text}"
+    assert resp.status_code == 422, (
+        f"agent-supplied memory_type='insight' must be rejected by the C3 boundary; "
+        f"got {resp.status_code}: {resp.text}"
     )
-    assert resp.json()["memory_type"] == "insight"
+    assert "insight" in str(resp.json().get("detail", "")), (
+        f"422 detail should name the reserved type 'insight': {resp.text}"
+    )
 
 
 # ---------------------------------------------------------------------------

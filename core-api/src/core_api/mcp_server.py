@@ -25,6 +25,7 @@ from pydantic import Field, ValidationError
 from sqlalchemy import text as sa_text
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api.auth import get_admin_key
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.constants import (
@@ -275,6 +276,38 @@ def _refuse_default_agent_on_gateway(agent_id: str) -> str | None:
         "those have agent identity bound at mint time and the gateway "
         "injects X-Agent-ID for them.",
     )
+
+
+def _refuse_reserved_memory_type(memory_type: str | None, *, index: int | None = None) -> str | None:
+    """C3/C8 — reject agent-supplied reserved memory types on writes.
+
+    Reserved types (``outcome``, ``rule``, ``insight``) are emitted by the
+    server's internal write paths — evolve_service for outcome/rule,
+    insights_service for insight. Letting agents author them directly via
+    the MCP write tool produces rows that downstream queries treat as
+    system-generated, polluting insights / RL signals. Internal callers
+    bypass naturally (they go through ``services.memory_service.create_memory``
+    directly, not through this tool).
+
+    Returns an error envelope when the type is reserved; ``None`` to
+    proceed. Mirrors the shape of ``_refuse_default_agent_on_gateway``
+    so callsites compose the same way.
+    """
+    if memory_type is None or memory_type not in SERVER_RESERVED_MEMORY_TYPES:
+        return None
+    # See REST counterpart in routes/memories.py: ``!r`` on a str-Enum
+    # would leak the wrapper repr into the user-visible message.
+    slug = memory_type.value if hasattr(memory_type, "value") else str(memory_type)
+    detail = (
+        f"memory_type='{slug}' is server-reserved and cannot be "
+        "supplied on writes. Use memclaw_evolve for outcome/rule or "
+        "memclaw_insights for insight; for agent-authored reflections, "
+        "use memory_type='semantic' or 'fact' (or omit memory_type to "
+        "auto-classify)."
+    )
+    if index is not None:
+        detail = f"items[{index}]: {detail}"
+    return _error_response("INVALID_ARGUMENTS", detail)
 
 
 _DUPLICATE_DETAIL_RE = re.compile(r"^Duplicate memory exists:\s*(?P<id>[0-9a-fA-F-]{36})\s*$")
@@ -587,6 +620,11 @@ async def memclaw_write(
     agent_id = _get_agent_id() or agent_id
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
+    # C3/C8 — reject reserved memory_types at the boundary before we
+    # touch the DB. Single-write checks the top-level kwarg; the batch
+    # path below loops over BulkMemoryItem after validation.
+    if content is not None and (refuse := _refuse_reserved_memory_type(memory_type)):
+        return _with_latency(refuse, t0)
 
     async with _mcp_session() as db:
         try:
@@ -645,6 +683,11 @@ async def memclaw_write(
                     ),
                     t0,
                 )
+            # C3/C8 — reject reserved memory_types per-item so the
+            # offending index is named in the error message.
+            for _idx, _item in enumerate(bulk_items):
+                if refuse := _refuse_reserved_memory_type(_item.memory_type, index=_idx):
+                    return _with_latency(refuse, t0)
             bulk_data = BulkMemoryCreate(
                 tenant_id=tenant_id,
                 fleet_id=fleet_id,

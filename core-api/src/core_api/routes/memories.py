@@ -25,6 +25,7 @@ from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as SQLATimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from common.models.memory import Memory
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
@@ -95,6 +96,39 @@ from core_api.services.usage_service import bulk_check_and_increment, check_and_
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Memory"])
+
+
+def _reject_reserved_memory_type(memory_type: str | None, *, index: int | None = None) -> None:
+    """C3/C8 — reject agent-supplied reserved memory types at the API boundary.
+
+    Reserved types (``outcome``, ``rule``, ``insight``) are emitted by the
+    server's internal write paths — evolve_service for outcome/rule,
+    insights_service for insight. Agents writing them explicitly creates
+    rows that downstream queries treat as system-authored, polluting
+    insights / RL signals. Internal callers go through
+    ``services.memory_service.create_memory`` directly and bypass this
+    check; only the REST + MCP entry points are gated.
+
+    ``index`` names the offending row in a bulk request so the operator
+    can find it; absent on the single-write path.
+    """
+    if memory_type is None or memory_type not in SERVER_RESERVED_MEMORY_TYPES:
+        return
+    # ``memory_type`` is a ``MemoryType`` str-Enum value; ``!r`` would render
+    # ``<MemoryType.INSIGHT: 'insight'>`` which leaks the wrapper into the
+    # operator-facing message. ``.value`` (when present) gives the raw slug
+    # the API actually accepts; plain ``str(...)`` is the fallback.
+    slug = memory_type.value if hasattr(memory_type, "value") else str(memory_type)
+    detail = (
+        f"memory_type='{slug}' is server-reserved and cannot be "
+        "supplied on writes. Use memclaw_evolve for outcome/rule or "
+        "memclaw_insights for insight; for agent-authored reflections, "
+        "use memory_type='semantic' or 'fact' (or omit memory_type to "
+        "auto-classify)."
+    )
+    if index is not None:
+        detail = f"items[{index}]: {detail}"
+    raise HTTPException(status_code=422, detail=detail)
 
 
 async def _stats_fallback(tenant_id: str, fleet_id: str | None) -> dict:
@@ -836,6 +870,7 @@ async def write_memory(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
+    _reject_reserved_memory_type(body.memory_type)
     # Idempotency replay is short-circuited BEFORE the per-tenant slot —
     # a cached retry must not consume a write-concurrency slot, or a
     # tenant retry storm starves its own legitimate new writes.
@@ -988,6 +1023,8 @@ async def write_memories_bulk(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
+    for _idx, _item in enumerate(body.items):
+        _reject_reserved_memory_type(_item.memory_type, index=_idx)
 
     # Broker (kind=install_credential, ``mci_v1_…`` wire prefix) calls
     # don't carry an attempt id header or an ``agent_id`` body field
