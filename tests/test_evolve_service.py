@@ -209,7 +209,7 @@ async def test_evolve_success_increases_weight(db, sc):
 
     from core_api.services.evolve_service import _adjust_weights
 
-    _, adjustments = await _adjust_weights(
+    _, _, adjustments = await _adjust_weights(
         db, tenant_id, [mid], "success", "evolve-test-agent"
     )
 
@@ -232,7 +232,7 @@ async def test_evolve_failure_decreases_weight(db, sc):
 
     from core_api.services.evolve_service import _adjust_weights
 
-    _, adjustments = await _adjust_weights(
+    _, _, adjustments = await _adjust_weights(
         db, tenant_id, [mid], "failure", "evolve-test-agent"
     )
 
@@ -254,7 +254,7 @@ async def test_evolve_partial_slight_increase(db, sc):
 
     from core_api.services.evolve_service import _adjust_weights
 
-    _, adjustments = await _adjust_weights(
+    _, _, adjustments = await _adjust_weights(
         db, tenant_id, [mid], "partial", "evolve-test-agent"
     )
 
@@ -275,7 +275,7 @@ async def test_evolve_weight_floor(db, sc):
 
     from core_api.services.evolve_service import _adjust_weights
 
-    _, adjustments = await _adjust_weights(
+    _, _, adjustments = await _adjust_weights(
         db, tenant_id, [mid], "failure", "evolve-test-agent"
     )
 
@@ -294,7 +294,7 @@ async def test_evolve_weight_cap(db, sc):
 
     from core_api.services.evolve_service import _adjust_weights
 
-    _, adjustments = await _adjust_weights(
+    _, _, adjustments = await _adjust_weights(
         db, tenant_id, [mid], "success", "evolve-test-agent"
     )
 
@@ -311,7 +311,7 @@ async def test_evolve_nonexistent_memory_skipped(db):
 
     from core_api.services.evolve_service import _adjust_weights
 
-    _, adjustments = await _adjust_weights(
+    _, _, adjustments = await _adjust_weights(
         db, tenant_id, [fake_id], "success", "test-agent"
     )
     assert len(adjustments) == 0
@@ -325,7 +325,7 @@ async def test_evolve_invalid_uuid_skipped(db):
 
     from core_api.services.evolve_service import _adjust_weights
 
-    _, adjustments = await _adjust_weights(
+    _, _, adjustments = await _adjust_weights(
         db, tenant_id, ["not-a-uuid"], "success", "test-agent"
     )
     assert len(adjustments) == 0
@@ -345,7 +345,7 @@ async def test_evolve_truncates_related_ids_above_cap(db, caplog):
     oversized = [f"not-a-uuid-{i}" for i in range(EVOLVE_MAX_RELATED_IDS + 10)]
 
     with caplog.at_level(logging.WARNING, logger="core_api.services.evolve_service"):
-        _, adjustments = await _adjust_weights(
+        _, _, adjustments = await _adjust_weights(
             db, tenant_id, oversized, "success", "test-agent"
         )
 

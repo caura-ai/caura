@@ -63,6 +63,38 @@ def _log_rule_skip(reason: str, tenant_id: str, outcome_type: str, **extra) -> N
     )
 
 
+# A15 — slugs identifying every silent-exit path on the weight-adjustment
+# flow. Mirrors RULE_SKIP_REASONS for the parallel observability story
+# on ``weight_adjustment_skipped_reason`` in the report_outcome response.
+# An evolve call that returns 200 OK with ``weight_adjustments=[]`` now
+# also carries the reason — callers can distinguish "no rows moved
+# because nothing was supplied" from "no rows moved because every ID was
+# out of scope" without parsing out_of_scope_count.
+WEIGHT_ADJUSTMENT_SKIP_REASONS: tuple[str, ...] = (
+    "no_related_ids",  # caller supplied no related_ids
+    "agent_id_mismatch",  # scope=agent, every related_id dropped by scope filter
+    "fleet_id_mismatch",  # scope=fleet, every related_id dropped by scope filter
+    "all_out_of_scope",  # scope=all, every related_id invalid UUID or missing row
+    "no_rows_updated",  # bulk UPDATE matched 0 rows (race: row deleted between filter and update)
+)
+
+
+def _log_weight_adjustment_skip(reason: str, tenant_id: str, scope: str, **extra) -> None:
+    """Always-fire log line for an evolve weight-adjustment skip.
+
+    Same grep-friendly shape as ``_log_rule_skip``: the slug lives in
+    the message itself so ``grep evolve_weight_adjustment_skipped <reason>``
+    works regardless of structlog ``extra={}`` handling."""
+    extras = " ".join(f"{k}={v}" for k, v in extra.items() if v is not None)
+    logger.info(
+        "evolve_weight_adjustment_skipped reason=%s tenant_id=%s scope=%s %s",
+        reason,
+        tenant_id,
+        scope,
+        extras,
+    )
+
+
 # -- Delta map ----------------------------------------------------------------
 
 _DELTA_MAP = {
@@ -259,7 +291,7 @@ async def _adjust_weights(
     related_ids: list[str],
     outcome_type: str,
     agent_id: str,
-) -> tuple[list[str], list[dict]]:
+) -> tuple[str | None, list[str], list[dict]]:
     """Adjust weights on related memories atomically.
 
     Executes a CTE-based UPDATE per memory so each row is read, clamped, and
@@ -276,7 +308,14 @@ async def _adjust_weights(
     Audit: update_memory's audit hook is bypassed; the outcome memory's
     metadata (`weight_adjustments`) records the change as a compensating trail.
 
-    Returns a tuple of (processed_ids, adjustments):
+    Returns a tuple of (skip_reason, processed_ids, adjustments):
+    - skip_reason: A15 — ``None`` when at least one row was updated;
+      ``"no_rows_updated"`` when every supplied id failed UUID parsing,
+      the bulk UPDATE returned no rows (row deleted between filter and
+      update), or the bulk UPDATE raised an exception. Callers feed this
+      into ``report_outcome``'s ``weight_adjustment_skipped_reason``
+      response field so a 200 OK with empty adjustments is no longer
+      indistinguishable from success.
     - processed_ids: IDs whose weights were actually updated in the DB.
       Excludes invalid UUIDs, missing rows, and rows whose UPDATE raised.
       Callers persist this in the outcome metadata so it reflects reality
@@ -312,7 +351,7 @@ async def _adjust_weights(
             logger.warning("evolve: skipping invalid UUID: %s", mid_str)
 
     if not parsed:
-        return [], []
+        return "no_rows_updated", [], []
 
     valid_uuids = [u for _, u in parsed]
 
@@ -338,7 +377,7 @@ async def _adjust_weights(
             rows = result.fetchall()
     except Exception:
         logger.warning("evolve: bulk weight update failed for %d memories", len(valid_uuids), exc_info=True)
-        return [], []
+        return "no_rows_updated", [], []
 
     # Map returned rows by id so we can preserve the caller's input
     # ordering when building the response. Rows missing from the
@@ -368,7 +407,12 @@ async def _adjust_weights(
             }
         )
 
-    return successfully_adjusted, adjustments
+    # Race / no-match path: parse + UPDATE succeeded but no rows came back
+    # (a row was deleted between _filter_by_scope and the UPDATE, or every
+    # id failed the tenant+deleted_at predicate). Surface as a slug so the
+    # caller can distinguish from a success.
+    skip_reason = "no_rows_updated" if not successfully_adjusted else None
+    return skip_reason, successfully_adjusted, adjustments
 
 
 # -- Rule generation ----------------------------------------------------------
@@ -669,7 +713,8 @@ async def report_outcome(
     Returns
     -------
     dict with outcome_id, outcome_type, scope, weight_adjustments,
-    rules_generated, out_of_scope_count, evolve_ms.
+    rules_generated, rule_skipped_reason, weight_adjustment_skipped_reason,
+    out_of_scope_count, evolve_ms.
     """
     t0 = time.perf_counter()
 
@@ -695,8 +740,18 @@ async def report_outcome(
     # LLM prompt never sees memory content the caller shouldn't access (e.g.,
     # a scope='agent' caller passing another agent's memory IDs). Dropped IDs
     # are tallied into out_of_scope_count for observability.
+    #
+    # A15: alongside the count, classify why no weights will move when the
+    # filter returns an empty set. The slug is the first thing populated;
+    # downstream paths (``_adjust_weights`` race / DB-failure) may override
+    # it. Mirrors the A10 rule_skipped_reason flow: pre-compute upstream,
+    # let the deeper stage override on a more-specific failure.
     out_of_scope_count = 0
-    if related_ids:
+    weight_adjustment_skipped_reason: str | None = None
+    if not related_ids:
+        weight_adjustment_skipped_reason = "no_related_ids"
+    else:
+        original_count = len(related_ids)
         related_ids, out_of_scope_count = await _filter_by_scope(
             db,
             tenant_id=tenant_id,
@@ -705,6 +760,21 @@ async def report_outcome(
             scope=scope,
             related_ids=related_ids,
         )
+        if not related_ids and out_of_scope_count >= original_count:
+            # Filter dropped everything. Map scope → slug.
+            weight_adjustment_skipped_reason = {
+                "agent": "agent_id_mismatch",
+                "fleet": "fleet_id_mismatch",
+                "all": "all_out_of_scope",
+            }.get(scope, "all_out_of_scope")
+            _log_weight_adjustment_skip(
+                weight_adjustment_skipped_reason,
+                tenant_id,
+                scope,
+                out_of_scope_count=out_of_scope_count,
+                caller_agent_id=agent_id,
+                fleet_id=fleet_id,
+            )
 
     # Resolve tenant config up front so ``_maybe_generate_rule`` can be
     # called without any DB dependency. Both REST (here) and MCP
@@ -738,6 +808,7 @@ async def report_outcome(
         rule_skipped_reason=rule_skipped_reason,
         scope=scope,
         out_of_scope_count=out_of_scope_count,
+        weight_adjustment_skipped_reason=weight_adjustment_skipped_reason,
         t0=t0,
     )
 
@@ -799,6 +870,7 @@ async def _apply_outcome_to_db(
     rule_skipped_reason: str | None,
     scope: str,
     out_of_scope_count: int,
+    weight_adjustment_skipped_reason: str | None,
     t0: float,
 ) -> dict:
     """Phases 2-5 + commit: the entire DB-bound write side of evolve.
@@ -816,9 +888,18 @@ async def _apply_outcome_to_db(
     processed_ids: list[str] = []
     weight_adjustments: list[dict] = []
     if related_ids:
-        processed_ids, weight_adjustments = await _adjust_weights(
+        adjust_skip_reason, processed_ids, weight_adjustments = await _adjust_weights(
             db, tenant_id, related_ids, outcome_type, agent_id
         )
+        # A15: the deeper stage's slug wins. The upstream slug from
+        # ``report_outcome`` only fires when the scope filter dropped
+        # every id; if we got here, the filter passed at least one
+        # but the bulk UPDATE didn't update any (race / parse error).
+        if adjust_skip_reason is not None:
+            weight_adjustment_skipped_reason = adjust_skip_reason
+            _log_weight_adjustment_skip(
+                adjust_skip_reason, tenant_id, scope, related_ids_count=len(related_ids)
+            )
 
     # Phase 3: Persist rule memory if confidence meets threshold. outcome_id
     # is not known yet; it is backfilled in Phase 5 after the outcome exists.
@@ -916,6 +997,11 @@ async def _apply_outcome_to_db(
         # path that fired. Mirrors the always-fire log line emitted
         # alongside.
         "rule_skipped_reason": rule_skipped_reason,
+        # A15 — see ``WEIGHT_ADJUSTMENT_SKIP_REASONS``. None when at
+        # least one weight moved; a slug otherwise. Distinguishes the
+        # silent-noop shape A15 reported (200 OK + ``weight_adjustments=[]``
+        # masquerading as success) into a contract callers can inspect.
+        "weight_adjustment_skipped_reason": weight_adjustment_skipped_reason,
         "out_of_scope_count": out_of_scope_count,
         "evolve_ms": int((time.perf_counter() - t0) * 1000),
     }

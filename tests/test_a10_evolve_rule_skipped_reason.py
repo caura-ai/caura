@@ -75,7 +75,7 @@ async def test_response_includes_rule_skipped_reason_field():
     with (
         patch(
             "core_api.services.evolve_service._adjust_weights",
-            new=AsyncMock(return_value=([], [])),
+            new=AsyncMock(return_value=(None, [], [])),
         ),
         patch(
             "core_api.services.evolve_service._persist_outcome",
@@ -107,7 +107,7 @@ async def _run(outcome_type, related_ids=None, **patches):
     db = AsyncMock()
     base_patches = {
         "_filter_by_scope": AsyncMock(return_value=(related_ids or [], 0)),
-        "_adjust_weights": AsyncMock(return_value=([], [])),
+        "_adjust_weights": AsyncMock(return_value=(None, [], [])),
         "_persist_outcome": AsyncMock(
             return_value="00000000-0000-0000-0000-000000000001"
         ),
