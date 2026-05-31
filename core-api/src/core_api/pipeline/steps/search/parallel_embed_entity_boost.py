@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -24,6 +25,14 @@ from core_api.services.entity_tokens import extract_entity_tokens
 from core_api.services.memory_service import _get_or_cache_embedding
 
 logger = logging.getLogger(__name__)
+
+# Overall wall-clock budget for the embedding + entity-boost step. Embedding
+# uses the full budget; entity boost runs in parallel and gets whatever
+# remains after the embedding resolves (clamped below by
+# ``_MIN_ENTITY_BUDGET_S`` so a near-instant embedding still gives the
+# in-flight entity task a moment to finish).
+_OVERALL_TIMEOUT_S = 15.0
+_MIN_ENTITY_BUDGET_S = 0.1
 
 
 async def _entity_boost_via_storage(
@@ -156,23 +165,48 @@ class ParallelEmbedAndEntityBoost:
                 precomputed_hops=data.pop("_classified_entity_hops", None),
             )
         )
+        # D7 — split the prior shared ``gather`` timeout into per-task budgets.
+        # Embedding is the critical path: a missing vector means the search
+        # can't run, so a timeout there still raises 504. Entity boost is a
+        # supplementary signal — a slow lookup should NOT cancel a completed
+        # embedding; degrade to vector-only search and log instead. Total
+        # budget stays at ``_OVERALL_TIMEOUT_S`` so a slow entity task can't
+        # double the step's wall-clock budget.
+        t0 = time.perf_counter()
         try:
-            embedding, (boosted_memory_ids, memory_boost_factor) = await asyncio.wait_for(
-                asyncio.gather(emb_task, ent_task),
-                timeout=15.0,
-            )
+            embedding = await asyncio.wait_for(emb_task, timeout=_OVERALL_TIMEOUT_S)
         except TimeoutError:
-            emb_task.cancel()
             ent_task.cancel()
             raise HTTPException(status_code=504, detail="Search embedding timed out")
         except ValueError as exc:
-            emb_task.cancel()
             ent_task.cancel()
             raise HTTPException(status_code=503, detail=str(exc))
-        except Exception:
-            emb_task.cancel()
+        except BaseException:
             ent_task.cancel()
             raise
+
+        # ent_task has been running in parallel with emb_task since the
+        # ``ensure_future`` calls above, so the remaining-budget wait_for
+        # below is usually trivial — the task is already done. The guard
+        # only fires when entity_boost outlasts the embedding.
+        remaining = max(_MIN_ENTITY_BUDGET_S, _OVERALL_TIMEOUT_S - (time.perf_counter() - t0))
+        try:
+            boosted_memory_ids, memory_boost_factor = await asyncio.wait_for(ent_task, timeout=remaining)
+        except TimeoutError:
+            logger.warning(
+                "entity_boost timed out after %.2fs remaining budget; continuing with vector-only search",
+                remaining,
+            )
+            boosted_memory_ids, memory_boost_factor = set(), {}
+        except BaseException as exc:
+            # ``_entity_boost_via_storage`` swallows most exceptions internally
+            # and returns ``(set(), {})``; anything that escapes is unexpected
+            # but still non-fatal for the search — fall back to vector-only.
+            logger.warning(
+                "entity_boost raised after embedding ready; continuing with vector-only search: %r",
+                exc,
+            )
+            boosted_memory_ids, memory_boost_factor = set(), {}
 
         data["embedding"] = embedding
         data["boosted_memory_ids"] = boosted_memory_ids
