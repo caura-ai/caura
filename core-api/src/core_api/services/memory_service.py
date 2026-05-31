@@ -2620,25 +2620,45 @@ async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
     old entries with a mismatched dim become unreachable under the new
     key and expire naturally via ``EMBEDDING_CACHE_TTL``.
 
+    The cache key also includes ``EMBEDDING_QUERY_INSTRUCTION`` (C9):
+    instruction-aware models (Qwen3-Embedding, e5-instruct, KaLM) prepend
+    the resolved instruction to the query before encoding, so the SAME
+    raw query under TWO different instructions produces TWO different
+    embeddings. Omitting the instruction from the key meant an env-var
+    change (or set / unset) served stale embeddings until the TTL
+    expired. The registry-level provider cache already keys on this —
+    we mirror it at the search-cache layer.
+
     Concurrent cold-cache callers for the same key share a single
     ``get_query_embedding`` round-trip via ``_inflight_embeddings`` —
     measured 3-second tail spread on 5 parallel novel-query recalls
     pre-fix; post-fix all callers join the leader's future.
     """
+    import os
+
     from core_api.cache import cache_get, cache_set
 
     _model = (
         getattr(tenant_config, "embedding_model", None) if tenant_config is not None else None
     ) or OPENAI_EMBEDDING_MODEL
     _normalized = _normalize_query_for_cache(query)
-    _qhash = hashlib.sha256(f"{_model}:{VECTOR_DIM}:{tenant_id}:{_normalized}".encode()).hexdigest()
-    # Prefix bumped from ``qemb2:`` → ``qemb3:`` because the hash input
-    # changed (added ``VECTOR_DIM``). The bump makes the
+    # Resolved instruction — same env var the OpenAI provider reads at
+    # registry-construction time (common/embedding/_registry.py:218). When
+    # unset, we hash the empty string so the key stays stable across
+    # never-set vs explicitly-empty (both behave identically downstream:
+    # the provider's ``embed_query`` short-circuits the instruction
+    # prefix).
+    _instruction = os.environ.get("EMBEDDING_QUERY_INSTRUCTION") or ""
+    _qhash = hashlib.sha256(
+        f"{_model}:{VECTOR_DIM}:{_instruction}:{tenant_id}:{_normalized}".encode()
+    ).hexdigest()
+    # Prefix bumped from ``qemb3:`` → ``qemb4:`` because the hash input
+    # changed (added ``EMBEDDING_QUERY_INSTRUCTION``). The bump makes the
     # cache-generation boundary explicit in Redis key stats so an
     # operator can see the cold-start at deploy time and confirm the
     # embedding provider can absorb the working-set re-fetch. Old
-    # ``qemb2:*`` entries expire naturally via ``EMBEDDING_CACHE_TTL``.
-    _cache_key = f"qemb3:{_qhash}"
+    # ``qemb3:*`` entries expire naturally via ``EMBEDDING_CACHE_TTL``.
+    _cache_key = f"qemb4:{_qhash}"
     _cached_raw = await cache_get(_cache_key)
     if _cached_raw is not None:
         try:
