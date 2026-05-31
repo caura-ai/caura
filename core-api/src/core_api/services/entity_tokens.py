@@ -58,18 +58,29 @@ def _strip_possessive(s: str) -> str:
     return s
 
 
-def extract_entity_tokens(query: str) -> list[str]:
+def extract_entity_tokens(query: str, *, preserve_case: bool = False) -> list[str]:
     """Return entity-FTS-ready tokens from ``query``.
 
     Splits on whitespace and internal punctuation; drops short tokens,
     stopwords, and hex-only IDs; strips possessive ``'s``; lowercases
     each surviving token so callers don't have to.
+
+    ``preserve_case=True`` keeps the original casing of each surviving
+    token instead of lowercasing. Stopword / length / hex-id checks
+    still run on the lowercased form (so the filter set stays the
+    same), but the returned tokens preserve case. Callers that need
+    case for downstream signals (e.g. ``_adaptive_fts_weight``'s
+    proper-noun heuristic in ``memory_service``, A27) use this; the
+    default keeps the entity-FTS contract unchanged.
     """
-    return [
-        lower
-        for t in _TOKEN_SEP_RE.split(query)
-        if (stripped := _strip_possessive(t.strip(string.punctuation)))
-        and len(stripped) >= ENTITY_TOKEN_MIN_LENGTH
-        and (lower := stripped.lower()) not in ENTITY_STOPWORDS
-        and not _is_hex_id(stripped)
-    ]
+    out: list[str] = []
+    for t in _TOKEN_SEP_RE.split(query):
+        stripped = _strip_possessive(t.strip(string.punctuation))
+        if not stripped or len(stripped) < ENTITY_TOKEN_MIN_LENGTH:
+            continue
+        if stripped.lower() in ENTITY_STOPWORDS:
+            continue
+        if _is_hex_id(stripped):
+            continue
+        out.append(stripped if preserve_case else stripped.lower())
+    return out

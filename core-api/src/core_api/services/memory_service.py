@@ -46,8 +46,6 @@ from core_api.constants import (
     DEFAULT_MEMORY_WEIGHT,
     DEFAULT_SEARCH_TOP_K,
     EMBEDDING_CACHE_TTL,
-    ENTITY_STOPWORDS,
-    ENTITY_TOKEN_MIN_LENGTH,
     FRESHNESS_DECAY_DAYS,
     FRESHNESS_FLOOR,
     FTS_BOOST_MAX_TOKENS,
@@ -2555,18 +2553,39 @@ def _is_specific_token(token: str) -> bool:
 
 
 def _adaptive_fts_weight(query: str) -> float:
-    """Return a boosted FTS weight for short, specific queries."""
-    tokens = query.split()
-    if len(tokens) > FTS_BOOST_MAX_TOKENS:
-        return FTS_WEIGHT
-    meaningful = [
-        t for t in tokens if len(t) >= ENTITY_TOKEN_MIN_LENGTH and t.lower() not in ENTITY_STOPWORDS
-    ]
-    if not meaningful:
+    """Return a boosted FTS weight for short, specific queries.
+
+    A27 — shares the canonical tokenizer with the entity-FTS gate so a
+    hyphenated query like ``claude-opus-4-7`` no longer produces a
+    1-token view here but a 4-token view at ``extract_entity_tokens``.
+    Two behavioural details are preserved across the share:
+
+    1. ``MAX_TOKENS`` gates on RAW whitespace count, not on the
+       post-filter token count. A 4+ word natural-language sentence
+       should stay default-weight even when the shared filter would
+       collapse it to a single meaningful token (``"tell me about
+       NEXAI"`` → semantic-heavy, don't boost).
+    2. Sigil tokens (``$BTC`` / ``@karpathy`` / ``#trending``) are
+       detected on the RAW query before ``extract_entity_tokens``
+       strips leading punctuation, so the handle / ticker / hashtag
+       signal that ``_is_specific_token`` keys on still fires after
+       the share.
+    """
+    from core_api.services.entity_tokens import extract_entity_tokens
+
+    raw = query.split()
+    if len(raw) > FTS_BOOST_MAX_TOKENS:
         return FTS_WEIGHT
 
-    specific_count = sum(1 for t in meaningful if _is_specific_token(t))
-    if specific_count / len(meaningful) > FTS_BOOST_SPECIFICITY_RATIO:
+    tokens = extract_entity_tokens(query, preserve_case=True)
+    sigil_count = sum(1 for t in raw if t and t[0] in ("$", "@", "#") and len(t) > 1)
+
+    if not tokens and sigil_count == 0:
+        return FTS_WEIGHT
+
+    specific_count = sum(1 for t in tokens if _is_specific_token(t)) + sigil_count
+    denom = len(tokens) or 1
+    if specific_count / denom > FTS_BOOST_SPECIFICITY_RATIO:
         return FTS_WEIGHT_BOOSTED
 
     return FTS_WEIGHT
