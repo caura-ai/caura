@@ -99,7 +99,12 @@ async def summarize_memories(
             "query": query,
             "summary": "No relevant context found.",
             "memory_count": 0,
+            # C4 — ``items`` aliases ``memories`` so consumers that
+            # pattern-match on /search's shape don't silently get zero
+            # results when hitting /recall instead. Both keys point at
+            # the same list (here trivially empty).
             "memories": [],
+            "items": [],
             "recall_ms": int((time.perf_counter() - t0) * 1000),
         }
         if diagnostic:
@@ -131,11 +136,16 @@ async def summarize_memories(
     provider = config.recall_provider
 
     if not config.recall_enabled:
+        # C4 — materialise once; alias under both ``memories`` and
+        # ``items`` keys so consumers built against /search's shape see
+        # the same list.
+        _memories_dumps = [m.model_dump(mode="json") for m in memories]
         resp = {
             "query": query,
             "summary": "Recall summarization is disabled.",
             "memory_count": len(memories),
-            "memories": [m.model_dump(mode="json") for m in memories],
+            "memories": _memories_dumps,
+            "items": _memories_dumps,
             "recall_ms": int((time.perf_counter() - t0) * 1000),
         }
         if diagnostic:
@@ -181,11 +191,14 @@ async def summarize_memories(
 
     recall_ms = int((time.perf_counter() - t0) * 1000)
 
+    # C4 — materialise once; alias under both ``memories`` and ``items``.
+    _memories_dumps = [m.model_dump(mode="json") for m in memories]
     result = {
         "query": query,
         "summary": summary,
         "memory_count": len(memories),
-        "memories": [m.model_dump(mode="json") for m in memories],
+        "memories": _memories_dumps,
+        "items": _memories_dumps,
         "recall_ms": recall_ms,
     }
 
@@ -222,7 +235,12 @@ async def recall(
 ) -> dict:
     """Search memories and synthesize a context summary.
 
-    Returns: {"query": ..., "summary": ..., "memory_count": ..., "memories": [...], "recall_ms": ...}
+    Returns: {"query": ..., "summary": ..., "memory_count": ..., "memories": [...], "items": [...], "recall_ms": ...}
+
+    ``memories`` and ``items`` both reference the same list — the ``items``
+    alias was added by C4 so consumers built against ``/search``'s
+    response shape (which keys on ``items``) don't silently get zero
+    results when hitting ``/recall``.
 
     Thin wrapper over ``search_memories`` + ``summarize_memories``. MCP
     tool callers that already hold the search results and tenant config
