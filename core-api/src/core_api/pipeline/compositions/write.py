@@ -6,6 +6,7 @@ from core_api.pipeline.steps.write import (
     CheckExactDuplicate,
     CheckSemanticDuplicate,
     ComputeContentHash,
+    DetectNearDuplicate,
     EmitMemoryTriple,
     LoadTenantConfig,
     MergeEnrichmentFields,
@@ -48,7 +49,15 @@ def build_persist_pipeline() -> Pipeline:
 
 
 def build_fast_write_pipeline() -> Pipeline:
-    """Fast write mode: enrichment + exact-dedup + write (skips semantic dedup)."""
+    """Fast write mode: enrichment + exact-dedup + advisory near-dup detect + write.
+
+    Distinct from strong-mode: ``DetectNearDuplicate`` (A21) is advisory —
+    it stashes ``metadata["near_duplicate_of"]`` and ``metadata["near_duplicate_similarity"]``
+    on a high-similarity hit but does NOT 409-reject the write. Strong-mode
+    keeps its 409 contract via ``CheckSemanticDuplicate``. Net: agents
+    using fast-mode can now detect "I just re-stated the same fact"
+    without paying the strong-mode dedup latency / rejection.
+    """
     return Pipeline(
         "write_fast",
         [
@@ -59,6 +68,7 @@ def build_fast_write_pipeline() -> Pipeline:
             MergeEnrichmentFields(),
             EmitMemoryTriple(),
             CheckExactDuplicate(),
+            DetectNearDuplicate(),
             WriteMemoryRow(),
             ScheduleBackgroundTasks(),
         ],
