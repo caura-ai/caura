@@ -31,7 +31,6 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
-  id-token: write
 
 env:
   EXTRA_PROMPT: "This is a FastAPI + PostgreSQL (pgvector) backend with a TypeScript OpenClaw plugin. Uses requirements.txt (not uv/pyproject.toml). Tests are in tests/ directory."
@@ -170,7 +169,7 @@ jobs:
           gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
             -f body="**Claude Code Review** — skipped: ${REASON}" 2>/dev/null || true
 
-  # Runs on PR opened/reopened via claude-code-action (review mode).
+  # Runs on PR opened/reopened — reviews the diff via the shared script.
   # Gated on org membership transitively through ``pre-checks``: when
   # ``pre-checks`` skips a non-member PR, ``needs.pre-checks.result``
   # is ``'skipped'`` (not ``'success'``), so the ``== 'success'`` clause
@@ -188,66 +187,31 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
-      id-token: write
     steps:
+      # Checks out the PR merge ref, so the review runs THIS PR's version of the
+      # review script (lets a workflow/script change self-test on its own PR).
+      # Secrets are withheld from fork-PR runs and pre-checks gate the rest.
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Claude Code Review
-        id: claude-review
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ github.token }}
-          claude_args: "--model claude-sonnet-4-6"
-          trigger_phrase: "@claude"
-          assignee_trigger: "claude"
-          use_sticky_comment: true
-          show_full_output: true
-          prompt: |
-            ${{ env.EXTRA_PROMPT }}
-            ${{ env.REVIEW_PROMPT }}
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code@2.1.159 # pinned: reproducible reviews; bump deliberately
 
-      - name: Post confirmation if no comment was left
-        if: always() && steps.claude-review.outcome == 'success'
+      # Same script as the @claude retrigger job below — feed the real diff to
+      # `claude --print`. Replaces the claude-code-action agent, which never
+      # received the diff (it tried `gh`, hit the headless permission wall) and
+      # produced an empty result that got stamped "No issues found".
+      - name: Review PR diff
         env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-        shell: bash
-        run: |
-          BOT_COMMENTS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-            --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | contains("Claude Code Review")))] | length')
-
-          if [[ "$BOT_COMMENTS" -eq 0 ]]; then
-            gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-              -f body="**Claude Code Review** :white_check_mark: No issues found."
-          fi
-
-      - name: Log review cost
-        if: always() && steps.claude-review.outputs.execution_file
-        shell: bash
-        run: |
-          EXEC_FILE="${{ steps.claude-review.outputs.execution_file }}"
-          if [ -f "$EXEC_FILE" ]; then
-            RESULT=$(jq '.[] | select(.type == "result")' "$EXEC_FILE" 2>/dev/null || true)
-            if [ -n "$RESULT" ]; then
-              COST=$(echo "$RESULT" | jq -r '.total_cost_usd // empty')
-              TURNS=$(echo "$RESULT" | jq -r '.num_turns // empty')
-              DURATION=$(echo "$RESULT" | jq -r '.duration_ms // empty')
-              if [ -n "$COST" ]; then
-                DURATION_SEC=$(echo "scale=1; ${DURATION:-0} / 1000" | bc 2>/dev/null || echo "?")
-                echo "### Claude Code Review Cost" >> "$GITHUB_STEP_SUMMARY"
-                echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
-                echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
-                echo "| Cost | \$${COST} |" >> "$GITHUB_STEP_SUMMARY"
-                echo "| Turns | ${TURNS:-?} |" >> "$GITHUB_STEP_SUMMARY"
-                echo "| Duration | ${DURATION_SEC}s |" >> "$GITHUB_STEP_SUMMARY"
-              fi
-            fi
-          fi
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXTRA_PROMPT: ${{ env.EXTRA_PROMPT }}
+          REVIEW_PROMPT: ${{ env.REVIEW_PROMPT }}
+        run: bash .github/scripts/claude_pr_review.sh
 
   # Runs on @claude comment — only for public org members (MEMBER or OWNER).
   claude-retrigger:
@@ -318,64 +282,16 @@ jobs:
 
       - name: Install Claude CLI
         if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
-        run: npm install -g @anthropic-ai/claude-code@latest
+        run: npm install -g @anthropic-ai/claude-code@2.1.159 # pinned: reproducible reviews; bump deliberately
 
-      - name: Run review and post comment
+      # Same script as the on-open claude-review job above.
+      - name: Review PR diff
         if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          REPO=${{ github.repository }}
-
-          # Build the full prompt
-          PROMPT="${EXTRA_PROMPT}
-          ${REVIEW_PROMPT}
-
-          Review the PR diff provided on stdin."
-
-          # Get the PR diff
-          DIFF=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
-            -H "Accept: application/vnd.github.diff")
-
-          # Run Claude in print mode with JSON output to capture cost
-          RESULT=$(echo "$DIFF" | claude --print --model claude-sonnet-4-6 \
-            --output-format json \
-            "$PROMPT" 2>&1) || {
-            echo "ERROR: Claude CLI failed. Output:"
-            echo "$RESULT"
-            gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-              -f body="⚠️ Claude Code review failed (check workflow logs for details)"
-            exit 1
-          }
-
-          # Extract review text and post as PR comment
-          REVIEW=$(echo "$RESULT" | jq -r '.result // empty')
-          if [ -z "$REVIEW" ]; then
-            echo "ERROR: Could not extract review text from Claude output. Raw result:"
-            echo "$RESULT"
-            gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-              -f body="⚠️ Claude Code review failed: could not extract review text from response"
-            exit 1
-          fi
-          gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-            -f body="$REVIEW"
-
-          # Log cost to job summary
-          COST=$(echo "$RESULT" | jq -r '.total_cost_usd // empty')
-          DURATION=$(echo "$RESULT" | jq -r '.duration_ms // empty')
-          TOKENS_IN=$(echo "$RESULT" | jq -r '.usage.input_tokens // empty')
-          TOKENS_OUT=$(echo "$RESULT" | jq -r '.usage.output_tokens // empty')
-          if [ -n "$COST" ]; then
-            DURATION_SEC=$(echo "scale=1; ${DURATION:-0} / 1000" | bc 2>/dev/null || echo "?")
-            echo "### Claude Code Review Cost" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
-            echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Cost | \$${COST} |" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Input tokens | ${TOKENS_IN:-?} |" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Output tokens | ${TOKENS_OUT:-?} |" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Duration | ${DURATION_SEC}s |" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          EXTRA_PROMPT: ${{ env.EXTRA_PROMPT }}
+          REVIEW_PROMPT: ${{ env.REVIEW_PROMPT }}
+        run: bash .github/scripts/claude_pr_review.sh
