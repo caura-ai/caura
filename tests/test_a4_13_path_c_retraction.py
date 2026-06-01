@@ -31,10 +31,17 @@ Confidence rubric (A4 #12):
   0.60 — gate 1 fired (model said contradicts=True with same_subject=False)
   0.50 — malformed / heuristic fallback
 
-Retraction acts on every ``verdict=False`` case EXCEPT malformed
-(threshold ``RETRACTION_CONFIDENCE_THRESHOLD = 0.60``). Gate 1 is the
-canonical retraction signal — the model said "different subjects" but
-its own ``contradicts=True`` was wrong; the safety gate corrected it.
+CAURA-128 — threshold tightened from 0.60 to 0.90. The retraction
+judge calls ``_llm_contradiction_check`` with the SAME inputs as Path
+A's semantic judge; there is no extra entity context. Independent rolls
+of the same LLM call disagree non-deterministically on synthetic /
+unusual subjects, and at threshold 0.60 the parser-override gate (gate
+1) silently retracted genuine Path A verdicts. Wet-tested on net 2026-
+05-26 via ``scripts/repro_contradictions_race.py``. Retraction now
+fires only on clean LLM agreement (confidence ≥ 0.90); gate-1 (0.60)
+and gate-2 (0.85) leave Path A's verdict in place until the deeper fix
+lands (a separate entity-aware prompt that actually receives the
+resolved entity_links).
 
 Why direct lookup (not via A4 #11):
 A4 #11's ``include_supersedes=True`` filter was structurally inverted
@@ -174,9 +181,16 @@ async def test_retracts_when_judge_says_not_contradiction_clean_confidence():
 
 
 @pytest.mark.asyncio
-async def test_retracts_when_judge_says_not_contradiction_gate2_confidence():
-    """Gate 2 fired (e.g. ``refinement`` / ``temporal_supersession`` / etc.):
-    verdict=False at confidence 0.85. Retraction MUST fire."""
+async def test_no_retraction_at_gate2_below_threshold():
+    """CAURA-128 — Gate 2 fired (verdict=False, confidence 0.85) USED to
+    retract under the original threshold 0.60. The judge call is the
+    same LLM prompt + same inputs as Path A's semantic judge — no extra
+    entity context is passed — so a 0.85 disagreement is just a single
+    independent roll flipping. We tightened the floor to 0.90; gate-2
+    alone is no longer sufficient to silently revert Path A.
+
+    Wet-test evidence: scripts/repro_contradictions_race.py on net
+    2026-05-26 — see CAURA-128 PR body."""
     from core_api.services.contradiction_detector import (
         detect_contradictions_by_entities_async,
     )
@@ -203,19 +217,25 @@ async def test_retracts_when_judge_says_not_contradiction_gate2_confidence():
     ):
         await detect_contradictions_by_entities_async(new_id, "t1", "f1")
 
-    assert any(
-        c.args == (str(cand_id), "active")
+    revert_calls = [
+        c
         for c in sc.update_memory_status.call_args_list
+        if c.args == (str(cand_id), "active")
+    ]
+    assert revert_calls == [], (
+        f"verdict=False at 0.85 must NOT retract under the tightened "
+        f"CAURA-128 threshold (0.90); got {revert_calls}"
     )
 
 
 @pytest.mark.asyncio
-async def test_retracts_on_gate1_confidence_canonical_case():
-    """Gate 1 fired — model said ``contradicts=True`` with
-    ``same_subject=False``; parser overrode to False at confidence 0.60.
-    This is the **canonical retraction case**: Path A wrongly flagged
-    on similarity; the entity-aware re-judge says "different subjects"
-    via the safety gate. Retraction MUST fire."""
+async def test_no_retraction_on_gate1_stochastic_signal():
+    """CAURA-128 regression test — Gate 1 (verdict=False, confidence
+    0.60) is the **stochastic flip case**: model said
+    ``contradicts=True`` with ``same_subject=False`` and the parser
+    overrode to False. Under the original threshold 0.60 this silently
+    retracted genuine Path A flags on memclaw.net. Now it must NOT
+    retract."""
     from core_api.services.contradiction_detector import (
         detect_contradictions_by_entities_async,
     )
@@ -242,9 +262,14 @@ async def test_retracts_on_gate1_confidence_canonical_case():
     ):
         await detect_contradictions_by_entities_async(new_id, "t1", "f1")
 
-    assert any(
-        c.args == (str(cand_id), "active")
+    revert_calls = [
+        c
         for c in sc.update_memory_status.call_args_list
+        if c.args == (str(cand_id), "active")
+    ]
+    assert revert_calls == [], (
+        f"verdict=False at 0.60 (gate-1 stochastic flip) must NOT retract "
+        f"under the tightened CAURA-128 threshold (0.90); got {revert_calls}"
     )
 
 

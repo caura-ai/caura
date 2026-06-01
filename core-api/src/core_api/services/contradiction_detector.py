@@ -904,15 +904,40 @@ def _fake_contradiction_check(new_content: str, old_content: str) -> bool:
 
 # Minimum confidence the judge must report for a ``verdict=False`` to
 # trigger retraction. Above this we trust the "not a contradiction"
-# call; below this we leave Path A's verdict in place (the model's
-# response was malformed / unparseable — see ``_CONF_FALLBACK``).
+# call; below this we leave Path A's verdict in place.
 #
-# Gate 1 (0.60) is the canonical retraction signal: model said
-# ``contradicts=True`` with ``same_subject=False``, parser overrode
-# to False. Path A flagged on surface similarity; the entity-aware
-# judge confirmed they're different subjects. Acting on 0.60 is
-# exactly the bug A4 #13 fixes.
-RETRACTION_CONFIDENCE_THRESHOLD = 0.60
+# CAURA-128 — tightened from 0.60 → 0.90.
+#
+# The retraction code was originally written as "re-judge with full
+# entity context"; the comment block at A4 #13's introduction promised
+# the judge would see the resolved entity_links and answer a different,
+# entity-aware question than Path A's semantic similarity check. In
+# practice ``_attempt_path_c_retraction`` calls ``_llm_contradiction_check
+# (new_content, old_content, ...)`` with the SAME prompt and SAME inputs
+# as Path A's semantic judge. There is no entity context in the request
+# — it is the same LLM call rolled twice.
+#
+# Wet-tested on memclaw.net 2026-05-26 (S2 race probe, scripts/
+# repro_contradictions_race.py). Two memories with directly conflicting
+# release dates about a synthetic proper-noun subject. Path A correctly
+# flagged the conflict; Path C's independent roll returned
+# ``(verdict=False, confidence=0.60)`` on a non-trivial fraction of runs
+# and silently retracted the correct flag. Confidence rubric:
+#   0.90 — clean LLM agreement (both gates aligned on "not contradict")
+#   0.85 — gate 2 fired (model named a non_conflict_reason)
+#   0.60 — gate 1 fired (model said contradicts=True same_subject=False;
+#          parser overrode). THIS IS THE STOCHASTIC FLIP CASE.
+#   0.50 — malformed / heuristic fallback
+#
+# Raising the floor to 0.90 means retraction only fires on clean
+# agreement — both gates of the parser say "not a contradiction" with
+# no parser-override. Gate-1 (the stochastic-flip case) and gate-2
+# (single-gate non_conflict_reason) both now leave Path A's verdict in
+# place. This is the "quick fix" tier; the deeper fix (an entity-aware
+# prompt that actually receives entity_links + canonical names) is
+# tracked separately and will revisit this threshold once the judge has
+# a different question to answer.
+RETRACTION_CONFIDENCE_THRESHOLD = _CONF_CLEAN
 
 
 async def _attempt_path_c_retraction(
@@ -976,7 +1001,15 @@ async def _attempt_path_c_retraction(
         # Judge agrees with Path A — real contradiction, leave it.
         return False
     if confidence < RETRACTION_CONFIDENCE_THRESHOLD:
-        # Heuristic fallback / malformed — don't trust ``verdict=False``.
+        # Below the CAURA-128 floor (0.90). Covers gate-1 (0.60, the
+        # stochastic-flip case where parser overrode ``contradicts=True
+        # same_subject=False`` to False), gate-2 (0.85, single-gate
+        # ``non_conflict_reason``), and the heuristic / malformed
+        # fallback (0.50). None are trustworthy enough on their own —
+        # the judge call is the same prompt + same inputs as Path A's
+        # semantic judge, so a single-gate disagreement is just an
+        # independent LLM roll flipping. Leave Path A's verdict in
+        # place until the deeper entity-aware-prompt fix lands.
         logger.info(
             "Path C retraction skipped low-confidence verdict for memory %s "
             "candidate %s (confidence=%.2f < threshold=%.2f)",
