@@ -485,6 +485,8 @@ async def memclaw_recall(
         )
     tenant_id = _get_tenant()
     agent_id = _get_agent_id() or agent_id  # prefer gateway-verified identity
+    if refuse := _refuse_default_agent_on_gateway(agent_id):
+        return _with_latency(refuse, t0)
     capped_top_k = min(top_k, MAX_SEARCH_TOP_K)
 
     # Audit finding P3: prior implementation held ``_mcp_session()``
@@ -1221,9 +1223,12 @@ async def memclaw_doc(
     # context). Must not fall back to the ``mcp-agent`` default.
     caller_agent_id = _get_agent_id()
     agent_id = caller_agent_id or agent_id
-    # Refuse the default identity for write ops on the gateway path; read-only
-    # ops don't carry the same attribution risk.
-    if op == "write" and (refuse := _refuse_default_agent_on_gateway(agent_id)):
+    # A29 — refuse the default identity on every op. Was previously
+    # write-only (A14); reads inherit the same contract because the
+    # silent-empty-result UX is its own class of paper cut, and ``delete``
+    # is a destructive op that was inadvertently un-guarded under the
+    # earlier write-only scope.
+    if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
     from core_api.repositories import document_repo
@@ -1570,6 +1575,8 @@ async def memclaw_list(
 
     tenant_id = _get_tenant()
     agent_id = _get_agent_id() or agent_id
+    if refuse := _refuse_default_agent_on_gateway(agent_id):
+        return _with_latency(refuse, t0)
 
     if scope == "agent" and written_by is not None and written_by != agent_id:
         return _with_latency(
@@ -1728,6 +1735,8 @@ async def memclaw_stats(
 
     tenant_id = _get_tenant()
     agent_id = _get_agent_id() or agent_id
+    if refuse := _refuse_default_agent_on_gateway(agent_id):
+        return _with_latency(refuse, t0)
     min_level = 1 if scope == "agent" else 2
 
     async with _mcp_session() as db:
@@ -1803,6 +1812,8 @@ async def memclaw_insights(
         return err
     tenant_id = _get_tenant()
     agent_id = _get_agent_id() or agent_id
+    if refuse := _refuse_default_agent_on_gateway(agent_id):
+        return _with_latency(refuse, t0)
 
     # Pre-validate inputs before consuming rate-limit budget.
     if focus not in INSIGHTS_FOCUS_MODES:
@@ -2115,6 +2126,8 @@ async def memclaw_keystones(
         return err
     tenant_id = _get_tenant()
     agent_id_effective = _get_agent_id() or agent_id
+    if refuse := _refuse_default_agent_on_gateway(agent_id_effective):
+        return _with_latency(refuse, t0)
 
     sc = get_storage_client()
     try:
