@@ -119,9 +119,18 @@ class ExecuteScoredSearch:
         # ``memory_service._search_memories_legacy`` was applied to dead
         # code only. ``data["tenant_id"]`` is set upstream by
         # ``_search_memories_pipeline`` before this step runs.
+        #
+        # C10: if ``classify_query`` already entered + released the same
+        # slot for ``load_memories_by_ids`` (entity-lookup short-circuit
+        # that fell through), it sets ``_storage_slot_acquired=True`` on
+        # ctx.data. Don't re-charge — one logical search counts once
+        # against the per-tenant storage_search bucket.
         sc = get_storage_client()
-        async with per_tenant_storage_slot("storage_search", data["tenant_id"]):
+        if data.get("_storage_slot_acquired"):
             rows = await sc.scored_search(search_data)
+        else:
+            async with per_tenant_storage_slot("storage_search", data["tenant_id"]):
+                rows = await sc.scored_search(search_data)
 
         # Map response dicts to SimpleNamespace rows expected by downstream steps.
         grouped: OrderedDict[str, SimpleNamespace] = OrderedDict()

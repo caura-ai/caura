@@ -100,6 +100,7 @@ class ClassifyQuery:
                         status_filter=status_filter,
                         valid_at=valid_at,
                         readable_tenant_ids=readable_tenant_ids,
+                        slot_acquired_marker=ctx.data,
                     )
 
                     if filtered_rows:
@@ -259,6 +260,7 @@ class ClassifyQuery:
         status_filter: str | None = None,
         valid_at: datetime | None = None,
         readable_tenant_ids: list[str] | None = None,
+        slot_acquired_marker: dict | None = None,
     ) -> list[types.SimpleNamespace]:
         """Load memories linked to graph-expanded entities, scored by hop distance."""
         all_entity_ids = list(entity_hops.keys())
@@ -338,14 +340,19 @@ class ClassifyQuery:
         # it would degrade to home-tenant reads with no error or log.
         if readable_tenant_ids and readable_tenant_ids != [tenant_id]:
             search_data["readable_tenant_ids"] = readable_tenant_ids
-        # Per-tenant storage bulkhead (CAURA-602 follow-up). Same key as
-        # the main scored-search step in execute_scored_search.py — a
-        # single classify-then-execute pipeline acquires the slot twice
-        # (once here, once there) but each acquire/release is bounded
-        # to its own storage roundtrip, so there's no deadlock or
-        # cumulative latency beyond the time storage actually spends.
+        # Per-tenant storage bulkhead (CAURA-602 follow-up). C10: when
+        # this entity-lookup short-circuit acquires + releases the slot
+        # here, we mark the pipeline context so a downstream
+        # ``execute_scored_search`` running on the rare fall-through
+        # path (entity-lookup matched but produced no filtered rows)
+        # doesn't re-acquire and charge the tenant twice for one
+        # logical search. Same key as scored-search, intentional —
+        # the bucket counts request-level storage pressure, not
+        # call-level.
         async with per_tenant_storage_slot("storage_search", tenant_id):
             memories = await sc.load_memories_by_ids(search_data)
+        if slot_acquired_marker is not None:
+            slot_acquired_marker["_storage_slot_acquired"] = True
 
         # Build result rows with boost scores.
         memories_by_id = {m["id"]: m for m in memories}
