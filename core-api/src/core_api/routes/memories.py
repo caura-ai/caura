@@ -1334,6 +1334,18 @@ async def update_memory_endpoint(
     body: MemoryUpdate,
     tenant_id: str = Query(...),
     agent_id: str | None = Query(default=None),
+    metadata_mode: str | None = Query(
+        default=None,
+        pattern="^(merge|replace)$",
+        description=(
+            "C7: alias for the body field of the same name. Body wins on "
+            "conflict. When supplied as a query param without a matching "
+            "``metadata`` field in the body, returns 422 (same contract "
+            "as the body-side validator). Provided so SDK callers that "
+            "thread the toggle through a URL query don't silently get "
+            "the default merge behaviour."
+        ),
+    ),
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1356,6 +1368,21 @@ async def update_memory_endpoint(
       defined behaviour, not a partial-merge anomaly.
     """
     auth.enforce_tenant(tenant_id)
+    # C7: propagate ``?metadata_mode=...`` query param into the body when
+    # body didn't supply its own. Body wins on conflict, so a caller who
+    # sends both ?metadata_mode=replace AND {"metadata_mode": "merge"} in
+    # the body gets merge — the body field is the canonical write
+    # payload, the query is a convenience shim. Mirror the body-side
+    # validator (``metadata_mode_requires_metadata``) by rejecting the
+    # query param when body has no ``metadata`` patch — sending only the
+    # mode flag is a real-value no-op the validator already rejects.
+    if metadata_mode is not None and body.metadata_mode is None:
+        if "metadata" not in body.model_fields_set:
+            raise HTTPException(
+                status_code=422,
+                detail="metadata_mode is only valid when metadata is also provided",
+            )
+        body.metadata_mode = metadata_mode
     if auth.tenant_id:  # skip usage metering for admin
         await check_and_increment(db, tenant_id, "write")
     # Authenticated agent identity (gateway X-Agent-ID) takes precedence over
