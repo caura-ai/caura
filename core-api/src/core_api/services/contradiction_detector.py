@@ -683,6 +683,101 @@ Reply with ONLY a JSON object, no prose, no markdown fences:
 """
 
 
+# CAURA-129 — entity-aware retraction prompt. Path C's retraction judge
+# runs AFTER entity extraction has resolved the canonical entities for
+# both memories. This prompt is the "real fix" tier — it asks a
+# structurally different question than ``CONTRADICTION_PROMPT`` (which
+# Path A's semantic judge already used) by surfacing the resolved
+# entity rows authoritatively. Disagreement with Path A now carries
+# meaningful signal (the model is reasoning over RESOLVED entities,
+# not over the raw text NER it ran once already).
+#
+# JSON output schema is intentionally identical to ``CONTRADICTION_PROMPT``
+# so ``_judge_contradiction`` parses both unchanged. The new placeholders
+# are ``{new_entities}`` and ``{old_entities}`` — rendered by
+# ``_format_entity_context``.
+ENTITY_AWARE_CONTRADICTION_PROMPT = """\
+You are a contradiction detector for a business memory system, running
+the second-pass judgement after entity resolution has already linked
+both statements to their canonical entities.
+
+Two statements contradict ONLY IF they make incompatible claims about
+the SAME real-world subject. Different subjects -> NOT a contradiction,
+even if the predicates look opposite or the statements look semantically
+similar.
+
+CRITICAL: Resolved entities below are AUTHORITATIVE. If the subjects in
+the two RESOLVED-ENTITIES blocks are different entity rows (different
+canonical names or different entity IDs), same_subject MUST be false
+regardless of how similar the raw statement text looks. If the subjects
+are the SAME canonical entity row, treat same_subject as true even if
+the statement text refers to it by alias / role / pronoun.
+
+Statement A (NEW): {new_content}
+RESOLVED ENTITIES for Statement A:
+{new_entities}
+
+Statement B (EXISTING): {old_content}
+RESOLVED ENTITIES for Statement B:
+{old_entities}
+
+Follow these steps in order:
+
+1. Identify subject_a: from Statement A's resolved entities, the entity
+   with role="subject" (or the canonical subject if no role is marked).
+   Use its canonical name.
+2. Identify subject_b: same from Statement B's resolved entities.
+3. Decide same_subject. Set true ONLY when subject_a and subject_b are
+   the same resolved entity (same canonical name AND same entity_type).
+   Set false when:
+     - the resolved subjects are different entity rows
+     - either side has no resolved subject (degenerate input — this
+       prompt should not have been invoked, but if it is, prefer false)
+     - the canonical names match but entity_types differ (two
+       different real-world things that happen to share a name)
+4. Decide non_conflict_reason. Even when same_subject is true, certain
+   shapes describe two claims that BOTH hold and so are NOT a
+   contradiction. Pick at most one value; pick "none" when the two
+   statements really do assert mutually exclusive states.
+     - "temporal_supersession": sequential states of the same subject's
+       lifecycle (planned -> shipped, open -> closed, draft ->
+       published, beta -> GA, hired -> promoted). The newer state
+       supersedes the older one; both held in sequence.
+     - "list_valued_predicate": attributes that do not compete for a
+       single slot — multi-value predicates (supports English /
+       supports French) or two entirely different attributes of the
+       same subject (Alice's title vs Alice's team).
+     - "refinement": one statement is a more specific version of the
+       other (Europe vs Munich; Q3 vs September 15). Both hold.
+     - "scope_mismatch": same subject, different implicit qualifiers
+       (whole vs part, different time windows, different contexts).
+     - "same_name_distinct_subject": surface names match but the
+       resolved entities differ — choose this when you also set
+       same_subject=false because the entity blocks disambiguate.
+     - "conditional_unrealized": one statement is hypothetical /
+       irrealis; conditionals do not contradict realised states.
+     - "event_restatement": the two statements describe the SAME event
+       with different tense / aspect / synonyms.
+     - "none": none of the above; the two statements assert mutually
+       exclusive states about the same subject at the same time frame.
+5. Decide contradicts:
+   - If same_subject is false, contradicts MUST be false.
+   - If non_conflict_reason is not "none", contradicts MUST be false.
+   - Otherwise contradicts is true only when the two statements assert
+     mutually exclusive states about that subject in the same time
+     frame. Corrections / updates about the same subject ARE
+     contradictions.
+
+Reply with ONLY a JSON object, no prose, no markdown fences:
+{{"subject_a": "<canonical name from RESOLVED ENTITIES for A>",
+  "subject_b": "<canonical name from RESOLVED ENTITIES for B>",
+  "same_subject": true/false,
+  "non_conflict_reason": "none|temporal_supersession|list_valued_predicate|refinement|scope_mismatch|same_name_distinct_subject|conditional_unrealized|event_restatement",
+  "contradicts": true/false,
+  "reason": "one short phrase referencing the resolved subjects and the conflict (or its absence)"}}
+"""
+
+
 # CAURA-124 — within-subject false-positive shapes that hard-gate
 # ``contradicts=true`` to ``false``. ``none`` (or absent / unknown
 # value) is the only enum value that allows a contradiction to stand.
@@ -896,6 +991,162 @@ def _fake_contradiction_check(new_content: str, old_content: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# CAURA-129 — Entity-aware retraction judge.
+# ---------------------------------------------------------------------------
+#
+# Path C runs AFTER ``process_entity_extraction`` has resolved the
+# canonical entities and written ``MemoryEntityLink`` rows. The
+# retraction judge below leverages that — it fetches resolved entity
+# names for both memories and asks ``ENTITY_AWARE_CONTRADICTION_PROMPT``
+# which authoritatively grounds same_subject on entity identity rather
+# than on raw-text NER (Path A's semantic judge already did that, so
+# re-asking the same question gave us LLM-stochastic flips —
+# CAURA-128). Shape mirrors ``_llm_contradiction_check`` so the
+# retraction call site is a one-line swap.
+
+
+_ENTITY_CONTEXT_MAX_ENTITIES = 10
+_ENTITY_CONTEXT_NAME_MAX_CHARS = 100
+
+
+def _format_entity_context(entities: list[dict]) -> str:
+    """Render resolved entity rows into a readable block for the prompt.
+
+    ``entities`` is a list of dicts shaped ``{name, entity_type, role}``
+    (also accepts ``canonical_name`` as a primary alias for ``name``).
+    Returns one bullet per entity, e.g.
+
+        - "Project Helios" (type: project, role: subject)
+        - "2027-05-01" (type: date, role: object)
+
+    Bounds (mirror the ``[:500]`` content truncation in
+    ``_llm_entity_aware_contradiction_check`` — keep prompt token
+    cost bounded against runaway / adversarial inputs):
+
+      * At most ``_ENTITY_CONTEXT_MAX_ENTITIES`` (10) bullets rendered;
+        excess entities are dropped silently. The judge's signal
+        saturates well before 10 entities per memory; in practice we
+        see 1-5.
+      * Each ``name`` is truncated to
+        ``_ENTITY_CONTEXT_NAME_MAX_CHARS`` (100) characters. Canonical
+        names are short by construction (the entity extractor produces
+        ≤30-char names typically); 100 chars covers the long tail
+        without giving an attacker a runaway lever.
+
+    Returns the literal string ``"(none resolved)"`` when ``entities``
+    is empty — defensive; callers SHOULD have guarded earlier, but if
+    they didn't the prompt still reads as well-formed.
+    """
+    if not entities:
+        return "(none resolved)"
+    capped = entities[:_ENTITY_CONTEXT_MAX_ENTITIES]
+    lines: list[str] = []
+    for e in capped:
+        name = (e.get("canonical_name") or e.get("name") or "<unknown>")[:_ENTITY_CONTEXT_NAME_MAX_CHARS]
+        etype = e.get("entity_type") or "<unknown>"
+        role = e.get("role") or "<unspecified>"
+        lines.append(f'- "{name}" (type: {etype}, role: {role})')
+    return "\n".join(lines)
+
+
+async def _fetch_entity_context(sc, memory_id: str) -> list[dict]:
+    """Fetch and denormalise ``MemoryEntityLink`` rows for a single memory.
+
+    Two storage round-trips at worst:
+      1. ``get_entity_links_for_memories([memory_id])`` — batch endpoint;
+         returns ``{memory_id: [{entity_id, role}, ...]}``.
+      2. ``get_entity(entity_id)`` per link, fan-out via ``asyncio.gather``
+         — Path C is post-commit async so the round-trip parallelism is
+         latency-invisible to the write path.
+
+    Returns ``[]`` (not ``None``) when the memory has no resolved links;
+    the caller treats empty as the skip-retraction signal so this
+    function never raises on missing data.
+    """
+    try:
+        links_by_mem = await sc.get_entity_links_for_memories([memory_id])
+    except Exception as e:
+        logger.warning(
+            "Path C entity-context fetch failed (links) for memory %s: %s",
+            memory_id,
+            e,
+        )
+        return []
+    links = (links_by_mem or {}).get(memory_id, []) if isinstance(links_by_mem, dict) else []
+    if not links:
+        return []
+
+    async def _hydrate(link: dict) -> dict | None:
+        entity_id = link.get("entity_id")
+        if not entity_id:
+            return None
+        try:
+            entity = await sc.get_entity(str(entity_id))
+        except Exception as e:
+            logger.warning(
+                "Path C entity-context fetch failed (entity %s) for memory %s: %s",
+                entity_id,
+                memory_id,
+                e,
+            )
+            return None
+        if not entity:
+            return None
+        # ``canonical_name`` is the column on Entity; fall back to
+        # ``name`` for any future schema change / mocked-test data.
+        return {
+            "name": entity.get("canonical_name") or entity.get("name"),
+            "entity_type": entity.get("entity_type"),
+            "role": link.get("role"),
+        }
+
+    hydrated = await asyncio.gather(*(_hydrate(link) for link in links))
+    return [h for h in hydrated if h is not None]
+
+
+async def _llm_entity_aware_contradiction_check(
+    new_content: str,
+    old_content: str,
+    new_entities: list[dict],
+    old_entities: list[dict],
+    tenant_config=None,
+) -> tuple[bool, float]:
+    """Entity-aware variant of ``_llm_contradiction_check``.
+
+    Same return shape, same fallback chain, same ``_judge_contradiction``
+    parser; differs only in the prompt template (which receives resolved
+    entity context as ``{new_entities}`` / ``{old_entities}``). Callers
+    MUST have verified both ``new_entities`` and ``old_entities`` are
+    non-empty before invoking — see ``_attempt_path_c_retraction`` for
+    the guard.
+    """
+    provider_name = (
+        tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
+    )
+
+    prompt = ENTITY_AWARE_CONTRADICTION_PROMPT.format(
+        new_content=new_content[:500],
+        old_content=old_content[:500],
+        new_entities=_format_entity_context(new_entities),
+        old_entities=_format_entity_context(old_entities),
+    )
+
+    async def _do_check(llm) -> tuple[bool, float]:
+        raw = await llm.complete_json(prompt)
+        return _judge_contradiction(raw)
+
+    return await call_with_fallback(
+        primary_provider_name=provider_name,
+        call_fn=_do_check,
+        fake_fn=lambda: (_fake_contradiction_check(new_content, old_content), _CONF_FALLBACK),
+        tenant_config=tenant_config,
+        service_label="contradiction-entity-aware",
+        model_attr="entity_extraction_model",
+        timeout=10.0,
+    )
+
+
+# ---------------------------------------------------------------------------
 # A4 #13 — Retraction phase: re-judge a Path A verdict with full entity
 # context and undo it via the A4 #10 storage primitive when the re-judge
 # disagrees with sufficient confidence.
@@ -983,9 +1234,53 @@ async def _attempt_path_c_retraction(
     new_content = new_memory.get("content", "") or ""
     old_content = candidate.get("content", "") or ""
 
+    # CAURA-129 — fetch resolved entity context for BOTH memories. If
+    # either side has no resolved entities, the entity-aware judge has
+    # nothing to ground same_subject on, and we'd degenerate to the
+    # CAURA-128 pre-fix state (same prompt + same inputs as Path A,
+    # stochastically flipping). Empty on either side → skip retraction;
+    # Path A's verdict stands. This is correct for the common case (the
+    # entity-extraction worker that *enqueued* Path C populates the
+    # links by definition), and conservative for the edge case
+    # (degenerate inputs / extractor failure).
+    # Wrap the fetch in ``asyncio.wait_for`` so a hung storage
+    # round-trip cannot block Path C indefinitely (mirrors the LLM
+    # call's cancellation boundary below). 5s budget is ample for two
+    # parallel storage calls (~50-200ms p95 in practice); on failure
+    # (timeout, network, storage error), treat as "no context, leave
+    # Path A alone" rather than retrying.
+    try:
+        new_entities, old_entities = await asyncio.wait_for(
+            asyncio.gather(
+                _fetch_entity_context(sc, str(new_memory.get("id"))),
+                _fetch_entity_context(sc, str(candidate.get("id"))),
+            ),
+            timeout=5.0,
+        )
+    except Exception as e:
+        logger.warning(
+            "Path C entity-context fetch failed for memory %s candidate %s: %s. Path A's verdict stands.",
+            new_memory.get("id"),
+            candidate.get("id"),
+            e,
+        )
+        return False
+
+    if not new_entities or not old_entities:
+        logger.info(
+            "Path C retraction skipped — empty entity context for "
+            "memory %s (new_n=%d cand_n=%d). Path A's verdict stands.",
+            new_memory.get("id"),
+            len(new_entities),
+            len(old_entities),
+        )
+        return False
+
     try:
         verdict, confidence = await asyncio.wait_for(
-            _llm_contradiction_check(new_content, old_content, tenant_config),
+            _llm_entity_aware_contradiction_check(
+                new_content, old_content, new_entities, old_entities, tenant_config
+            ),
             timeout=10.0,
         )
     except (TimeoutError, Exception) as e:

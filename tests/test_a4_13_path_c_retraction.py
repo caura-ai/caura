@@ -31,17 +31,24 @@ Confidence rubric (A4 #12):
   0.60 — gate 1 fired (model said contradicts=True with same_subject=False)
   0.50 — malformed / heuristic fallback
 
-CAURA-128 — threshold tightened from 0.60 to 0.90. The retraction
-judge calls ``_llm_contradiction_check`` with the SAME inputs as Path
-A's semantic judge; there is no extra entity context. Independent rolls
-of the same LLM call disagree non-deterministically on synthetic /
-unusual subjects, and at threshold 0.60 the parser-override gate (gate
-1) silently retracted genuine Path A verdicts. Wet-tested on net 2026-
-05-26 via ``scripts/repro_contradictions_race.py``. Retraction now
-fires only on clean LLM agreement (confidence ≥ 0.90); gate-1 (0.60)
-and gate-2 (0.85) leave Path A's verdict in place until the deeper fix
-lands (a separate entity-aware prompt that actually receives the
-resolved entity_links).
+CAURA-128 — threshold tightened from 0.60 to 0.90. The original
+retraction judge called ``_llm_contradiction_check`` with the SAME
+inputs as Path A's semantic judge; there was no extra entity context.
+Independent rolls of the same LLM call disagreed non-deterministically
+on synthetic / unusual subjects, and at threshold 0.60 the
+parser-override gate (gate 1) silently retracted genuine Path A
+verdicts. Wet-tested on net 2026-05-26 via
+``scripts/repro_contradictions_race.py``.
+
+CAURA-129 — the retraction judge now calls
+``_llm_entity_aware_contradiction_check``, which renders the resolved
+``MemoryEntityLink`` rows for both memories into the prompt (canonical
+names + entity_type + role). The judge answers a structurally different
+question than Path A — grounded on entity identity rather than raw-text
+NER. Retraction is also skipped when either memory has no resolved
+entity_links (degenerate input → Path A's verdict stands; see the
+empty-context tests below). Threshold remains at ``_CONF_CLEAN`` (0.90)
+for the initial PR; revisit after production signal.
 
 Why direct lookup (not via A4 #11):
 A4 #11's ``include_supersedes=True`` filter was structurally inverted
@@ -116,6 +123,27 @@ def _mock_sc_with_retraction_setup(
     sc.get_memory = AsyncMock(side_effect=get_memory)
     sc.find_entity_overlap_candidates = AsyncMock(return_value=[])
     sc.update_memory_status = AsyncMock()
+    # CAURA-129 — Path C retraction now fetches entity context for both
+    # memories before the judge fires. Default mock returns one resolved
+    # link per memory so existing tests stay on the same code path; the
+    # empty-links guard is exercised by dedicated tests below.
+    _ent_new = str(uuid4())
+    _ent_cand = str(uuid4())
+    sc.get_entity_links_for_memories = AsyncMock(
+        return_value={
+            str(new_id): [{"entity_id": _ent_new, "role": "subject"}],
+            str(cand_id): [{"entity_id": _ent_cand, "role": "subject"}],
+        }
+    )
+
+    async def get_entity(eid: str) -> dict | None:
+        if eid == _ent_new:
+            return {"id": eid, "canonical_name": "Project X", "entity_type": "project"}
+        if eid == _ent_cand:
+            return {"id": eid, "canonical_name": "Project Y", "entity_type": "project"}
+        return None
+
+    sc.get_entity = AsyncMock(side_effect=get_entity)
     install_batch_status_replay_shim(sc)
     return sc
 
@@ -147,7 +175,7 @@ async def test_retracts_when_judge_says_not_contradiction_clean_confidence():
             return_value=sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
             new_callable=AsyncMock,
             return_value=(False, 0.90),
         ),
@@ -204,7 +232,7 @@ async def test_no_retraction_at_gate2_below_threshold():
             return_value=sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
             new_callable=AsyncMock,
             return_value=(False, 0.85),
         ),
@@ -249,7 +277,7 @@ async def test_no_retraction_on_gate1_stochastic_signal():
             return_value=sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
             new_callable=AsyncMock,
             return_value=(False, 0.60),
         ),
@@ -297,7 +325,7 @@ async def test_no_retraction_on_malformed_fallback_confidence():
             return_value=sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
             new_callable=AsyncMock,
             return_value=(False, 0.50),
         ),
@@ -338,7 +366,7 @@ async def test_no_retraction_when_judge_confirms_contradiction():
             return_value=sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
             new_callable=AsyncMock,
             return_value=(True, 0.90),
         ),
@@ -391,7 +419,7 @@ async def test_no_retraction_when_new_memory_has_no_supersedes_id():
             return_value=sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
             judge,
         ),
         patch(
@@ -428,7 +456,7 @@ async def test_no_retraction_when_candidate_already_active():
             return_value=sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
             judge,
         ),
         patch(
@@ -447,3 +475,107 @@ async def test_no_retraction_when_candidate_already_active():
         if c.args == (str(cand_id), "active")
     ]
     assert revert_calls == []
+
+
+# ---------------------------------------------------------------------------
+# CAURA-129 — empty-entity-context guards. The new entity-aware judge
+# has nothing to ground same_subject on if either memory has no resolved
+# entity_links; degenerating to raw-content judgement would reintroduce
+# the CAURA-128 stochastic-flip class. Empty on either side → skip
+# retraction and leave Path A's verdict in place.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_no_retraction_when_new_memory_has_no_entity_links():
+    """CAURA-129 — entity-extraction has not (yet?) populated links on
+    the new memory side. Skip retraction; do NOT fall back to raw-content
+    judging (that's what CAURA-128 raised the threshold against)."""
+    from core_api.services.contradiction_detector import (
+        detect_contradictions_by_entities_async,
+    )
+
+    new_id, cand_id = uuid4(), uuid4()
+    sc = _mock_sc_with_retraction_setup(new_id, cand_id)
+    # Override: new side has no links; candidate side keeps its default.
+    cand_links = sc.get_entity_links_for_memories.return_value[str(cand_id)]
+    sc.get_entity_links_for_memories = AsyncMock(
+        return_value={str(new_id): [], str(cand_id): cand_links}
+    )
+    judge = AsyncMock(return_value=(False, 0.95))
+
+    with (
+        patch(
+            "core_api.services.contradiction_detector.get_storage_client",
+            return_value=sc,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
+            judge,
+        ),
+        patch(
+            "core_api.services.contradiction_detector.resolve_config",
+            new_callable=AsyncMock,
+            return_value=None,
+            create=True,
+        ),
+    ):
+        await detect_contradictions_by_entities_async(new_id, "t1", "f1")
+
+    judge.assert_not_called()
+    revert_calls = [
+        c
+        for c in sc.update_memory_status.call_args_list
+        if c.args == (str(cand_id), "active")
+    ]
+    assert revert_calls == [], (
+        "empty entity_links on new memory must skip retraction without "
+        "invoking the judge"
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_retraction_when_candidate_has_no_entity_links():
+    """CAURA-129 — symmetric guard: candidate side has no resolved
+    entity_links. The empty-context guard fires regardless of which
+    side is degenerate."""
+    from core_api.services.contradiction_detector import (
+        detect_contradictions_by_entities_async,
+    )
+
+    new_id, cand_id = uuid4(), uuid4()
+    sc = _mock_sc_with_retraction_setup(new_id, cand_id)
+    new_links = sc.get_entity_links_for_memories.return_value[str(new_id)]
+    sc.get_entity_links_for_memories = AsyncMock(
+        return_value={str(new_id): new_links, str(cand_id): []}
+    )
+    judge = AsyncMock(return_value=(False, 0.95))
+
+    with (
+        patch(
+            "core_api.services.contradiction_detector.get_storage_client",
+            return_value=sc,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
+            judge,
+        ),
+        patch(
+            "core_api.services.contradiction_detector.resolve_config",
+            new_callable=AsyncMock,
+            return_value=None,
+            create=True,
+        ),
+    ):
+        await detect_contradictions_by_entities_async(new_id, "t1", "f1")
+
+    judge.assert_not_called()
+    revert_calls = [
+        c
+        for c in sc.update_memory_status.call_args_list
+        if c.args == (str(cand_id), "active")
+    ]
+    assert revert_calls == [], (
+        "empty entity_links on candidate must skip retraction without "
+        "invoking the judge"
+    )
