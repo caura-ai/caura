@@ -18,6 +18,7 @@ from uuid import UUID
 
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
+    ENTITY_LOOKUP_MAX_MATCHES,
     FTS_WEIGHT_BOOSTED,
     GRAPH_HOP_BOOST,
     GRAPH_MAX_BOOSTED_MEMORIES,
@@ -77,6 +78,23 @@ class ClassifyQuery:
             try:
                 sc = get_storage_client()
                 matched_ids = await self._entity_fts(sc, tokens, tenant_id, fleet_ids)
+
+                # CAURA-698: over-broad match → not a "name a specific entity"
+                # query. The precision argument for entity_lookup breaks down
+                # at high match counts: graph expansion + memory linking
+                # against a dense entity index return broadly-related-but-
+                # low-relevance results, and the rest of the pipeline (vector
+                # scoring, FTS rank, freshness) is skipped under the short-
+                # circuit so the noise can't be re-filtered. Bail to the
+                # keyword/semantic cascade instead.
+                if matched_ids and len(matched_ids) > ENTITY_LOOKUP_MAX_MATCHES:
+                    logger.info(
+                        "classify_query: entity_lookup short-circuit declined "
+                        "(%d matches > threshold %d), falling through",
+                        len(matched_ids),
+                        ENTITY_LOOKUP_MAX_MATCHES,
+                    )
+                    matched_ids = []
 
                 if matched_ids:
                     entity_hops = await self._expand_per_fleet(

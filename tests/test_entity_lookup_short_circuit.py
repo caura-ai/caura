@@ -347,3 +347,122 @@ async def test_collect_memories_forwards_single_element_when_different_from_home
         f"single-element readable_tenant_ids that differs from tenant_id "
         f"must be forwarded; got {sent.get('readable_tenant_ids')!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# CAURA-698: ENTITY_LOOKUP_MAX_MATCHES threshold gate
+# ---------------------------------------------------------------------------
+
+
+async def test_entity_lookup_fires_when_match_count_at_threshold():
+    """Match count exactly at the threshold is still allowed through —
+    the gate is `> threshold`, not `>= threshold`."""
+    import logging
+
+    from core_api.constants import ENTITY_LOOKUP_MAX_MATCHES
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.search.classify_query import ClassifyQuery
+    from core_api.pipeline.steps.search.retrieval_types import RetrievalStrategy
+
+    # Build exactly ENTITY_LOOKUP_MAX_MATCHES matched entity IDs.
+    matched_entity_ids = [uuid4() for _ in range(ENTITY_LOOKUP_MAX_MATCHES)]
+    matched_memory_id = str(uuid4())
+
+    fake_storage = AsyncMock()
+    fake_storage.fts_search_entities = AsyncMock(return_value=[str(e) for e in matched_entity_ids])
+    fake_storage.expand_graph = AsyncMock(
+        return_value={str(matched_entity_ids[0]): {"hop": 0, "weight": 1.0}}
+    )
+    fake_storage.get_memory_ids_by_entity_ids = AsyncMock(
+        return_value=[
+            {"memory_id": matched_memory_id, "entity_id": str(matched_entity_ids[0]), "role": "subject"}
+        ]
+    )
+    fake_storage.load_memories_by_ids = AsyncMock(
+        return_value=[
+            {
+                "id": matched_memory_id,
+                "tenant_id": "t1",
+                "content": "x",
+                "memory_type": "fact",
+                "weight": 0.5,
+                "status": "active",
+                "ts_valid_start": None,
+                "ts_valid_end": None,
+                "metadata_": {},
+                "fleet_id": None,
+            }
+        ]
+    )
+
+    ctx = PipelineContext()
+    ctx.data = {
+        "query": "ZenithCorp",
+        "tenant_id": "t1",
+        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": 5},
+        "temporal_window": None,
+    }
+
+    with patch(
+        "core_api.pipeline.steps.search.classify_query.get_storage_client",
+        return_value=fake_storage,
+    ):
+        await ClassifyQuery().execute(ctx)
+
+    assert ctx.data["retrieval_plan"].strategy == RetrievalStrategy.ENTITY_LOOKUP, (
+        "boundary case: exactly threshold matches should still fire entity_lookup"
+    )
+    fake_storage.expand_graph.assert_awaited()  # confirms downstream was reached
+
+
+async def test_entity_lookup_falls_through_when_match_count_exceeds_threshold(caplog):
+    """Match count > threshold → bail to semantic/keyword cascade, do NOT
+    run _expand_per_fleet / _collect_memories. Logs the decision."""
+    import logging
+
+    from core_api.constants import ENTITY_LOOKUP_MAX_MATCHES
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.search.classify_query import ClassifyQuery
+    from core_api.pipeline.steps.search.retrieval_types import RetrievalStrategy
+
+    # One more than the threshold — gate fires.
+    matched_entity_ids = [uuid4() for _ in range(ENTITY_LOOKUP_MAX_MATCHES + 1)]
+
+    fake_storage = AsyncMock()
+    fake_storage.fts_search_entities = AsyncMock(return_value=[str(e) for e in matched_entity_ids])
+    # These must NOT be called once the gate fires.
+    fake_storage.expand_graph = AsyncMock(return_value={})
+    fake_storage.get_memory_ids_by_entity_ids = AsyncMock(return_value=[])
+    fake_storage.load_memories_by_ids = AsyncMock(return_value=[])
+
+    ctx = PipelineContext()
+    ctx.data = {
+        "query": "long narrative query with many tokens that matched too many entities",
+        "tenant_id": "t1",
+        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": 5},
+        "temporal_window": None,
+    }
+
+    with patch(
+        "core_api.pipeline.steps.search.classify_query.get_storage_client",
+        return_value=fake_storage,
+    ), caplog.at_level(logging.INFO, logger="core_api.pipeline.steps.search.classify_query"):
+        await ClassifyQuery().execute(ctx)
+
+    # Downstream calls must NOT have happened — short-circuit was declined.
+    fake_storage.expand_graph.assert_not_awaited()
+    fake_storage.get_memory_ids_by_entity_ids.assert_not_awaited()
+    fake_storage.load_memories_by_ids.assert_not_awaited()
+
+    # Strategy must NOT be ENTITY_LOOKUP — should fall through.
+    plan = ctx.data["retrieval_plan"]
+    assert plan.strategy != RetrievalStrategy.ENTITY_LOOKUP, (
+        f"expected fallthrough strategy; got {plan.strategy}"
+    )
+
+    # The decline decision should be logged for ops visibility.
+    declined = [r for r in caplog.records if "short-circuit declined" in r.message]
+    assert declined, (
+        "decline decision must be logged at INFO so ops can see how often the gate fires; "
+        f"got: {[r.message for r in caplog.records]}"
+    )

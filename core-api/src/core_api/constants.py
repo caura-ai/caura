@@ -447,6 +447,23 @@ GRAPH_HOP_BOOST = {
     2: 1.1,
 }  # boost factor per hop distance (0 = direct match)
 GRAPH_MAX_BOOSTED_MEMORIES = 50  # cap on memories receiving graph boost (prevents popular-entity fan-out)
+# CAURA-698: cap on entity FTS matches that triggers the ENTITY_LOOKUP
+# short-circuit. Above this, the query almost certainly did not name a
+# specific entity (it matched broadly against a dense entity index); the
+# precision argument for entity_lookup breaks down at high match counts,
+# so fall through to keyword/semantic search instead.
+#
+# Calibrated against etoro prod data (2026-06-02, 6h, 98 user_or_assistant
+# queries). The distribution is bimodal with a wide empty gap between
+# ~75 and ~500 matches, so any threshold in that range is equivalent on
+# this dataset. Sampling the actual queries in each band revealed they
+# are all multi-keyword topical searches (e.g., "DeFi web3 smart contract",
+# "docker caddy dns", "marketing campaign email creative") — none name a
+# specific entity. T=20 lands the entity_lookup rate in the 20-30% target
+# band on user traffic while still allowing low-count cases that might
+# represent legitimate "name a thing" queries on other tenants' data.
+# Tune via prod measurement, not bench alone.
+ENTITY_LOOKUP_MAX_MATCHES = 20
 
 FTS_WEIGHT = 0.3  # blend: (1 - FTS_WEIGHT) * vector + FTS_WEIGHT * keyword
 FTS_WEIGHT_BOOSTED = 0.6  # for short specific queries (1-3 proper nouns / identifiers)
