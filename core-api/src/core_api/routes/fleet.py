@@ -217,6 +217,46 @@ async def delete_fleet(
     await db.commit()
 
 
+@router.post("/fleet/{fleet_id}/purge")
+async def purge_fleet(
+    fleet_id: str,
+    tenant_id: str = Query(...),
+    auth: AuthContext = Depends(get_auth_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Permanently purge a fleet's entire footprint within a tenant.
+
+    Unlike ``DELETE /fleet/{fleet_id}`` (which removes only the fleet's nodes +
+    commands and intentionally keeps memories for history), this HARD-deletes
+    everything scoped to ``(tenant_id, fleet_id)``: memories, entities,
+    relations, agents, documents, analysis/dedup rows, nodes, and commands.
+    Irreversible. Returns the per-table deleted counts.
+
+    Intended for test-tenant hygiene: the OpenClaw fleet-tester purges its
+    run-scoped ``nightly-<run_id>-fleet-NN`` fleets at teardown so the shared
+    dev tenant doesn't accumulate run data that confounds isolation/trust tests.
+
+    Auth: a write-capable tenant-owner key. Agent-scoped credentials are
+    blocked (BFLA) — a hard fleet purge is an admin-plane operation, on par
+    with bulk memory delete and agent deletion. Idempotent.
+    """
+    auth.enforce_read_only()
+    auth.enforce_tenant(tenant_id)
+    auth.enforce_not_agent_credential("purge fleet data")
+
+    sc = get_storage_client()
+    counts = await sc.purge_fleet_data(tenant_id, fleet_id)
+    await log_action(
+        db,
+        tenant_id=tenant_id,
+        action="purge",
+        resource_type="fleet",
+        detail={"fleet_id": fleet_id, "deleted": counts},
+    )
+    await db.commit()
+    return {"ok": True, "tenant_id": tenant_id, "fleet_id": fleet_id, "deleted": counts}
+
+
 # ── Heartbeat ──
 
 

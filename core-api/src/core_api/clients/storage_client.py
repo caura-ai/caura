@@ -655,6 +655,15 @@ class CoreStorageClient:
         result = await self._post("/purge/tenant-data", {"tenant_id": tenant_id})
         return result.get("deleted", {})  # type: ignore[union-attr,return-value]
 
+    async def purge_fleet_data(self, tenant_id: str, fleet_id: str) -> dict[str, int]:
+        """Hard-delete all OSS data scoped to ``(tenant_id, fleet_id)`` — the
+        per-fleet analogue of ``purge_tenant_data`` for run-scoped test-tenant
+        hygiene. Returns the per-table deleted counts. Idempotent at the
+        storage layer — a repeat call for an already-purged fleet returns zeros.
+        """
+        result = await self._post("/purge/fleet-data", {"tenant_id": tenant_id, "fleet_id": fleet_id})
+        return result.get("deleted", {})  # type: ignore[union-attr,return-value]
+
     async def count_tenant_data(self, tenant_id: str) -> dict[str, int]:
         """Per-table row count for ``tenant_id`` — drives the
         deletion-preview panel (CAURA-696). Same table set + scoping

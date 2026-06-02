@@ -46,3 +46,33 @@ async def purge_tenant_data(request: Request) -> dict:
         )
     counts = await _svc.purge_tenant_data(tenant_id)
     return {"tenant_id": tenant_id, "deleted": counts}
+
+
+@router.post("/fleet-data")
+async def purge_fleet_data(request: Request) -> dict:
+    """Hard-delete every row scoped to ``(tenant_id, fleet_id)``. Body:
+    ``{tenant_id, fleet_id}``.
+
+    Returns ``{tenant_id, fleet_id, deleted: {table: count}}``. Idempotent — a
+    second call for the same fleet deletes nothing. The per-fleet analogue of
+    ``/purge/tenant-data`` for run-scoped test-tenant hygiene; same VPC-only
+    trust model (no router auth — the upstream core-api route gates it).
+    """
+    try:
+        body: dict = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail="request body must be valid JSON") from exc
+    tenant_id = body.get("tenant_id")
+    fleet_id = body.get("fleet_id")
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise HTTPException(
+            status_code=422,
+            detail="'tenant_id' is required and must be a non-empty string",
+        )
+    if not isinstance(fleet_id, str) or not fleet_id:
+        raise HTTPException(
+            status_code=422,
+            detail="'fleet_id' is required and must be a non-empty string",
+        )
+    counts = await _svc.purge_fleet_data(tenant_id, fleet_id)
+    return {"tenant_id": tenant_id, "fleet_id": fleet_id, "deleted": counts}

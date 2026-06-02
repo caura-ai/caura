@@ -195,6 +195,47 @@ async def test_dispatch_command(client):
     assert any(c["command"] == "ping" and c["node_id"] == node_id for c in commands)
 
 
+async def test_purge_fleet_hard_deletes_nodes_and_memories(client):
+    """POST /fleet/{id}/purge removes the fleet's nodes AND memories (unlike
+    DELETE /fleet/{id}, which keeps memories)."""
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fid = f"fleet-purge-{tag}"
+
+    await _heartbeat(client, tenant_id, headers, f"node-purge-{tag}", fid)
+    mem = await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant_id,
+            "content": f"purge-me {tag}",
+            "agent_id": f"agent-{tag}",
+            "fleet_id": fid,
+            "memory_type": "fact",
+        },
+        headers=headers,
+    )
+    assert mem.status_code in (200, 201), mem.text
+    mem_id = mem.json()["id"]
+
+    resp = await client.post(
+        f"/api/v1/fleet/{fid}/purge?tenant_id={tenant_id}", headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["fleet_id"] == fid
+    assert body["deleted"]["memories"] >= 1
+    assert body["deleted"]["fleet_nodes"] >= 1
+
+    # Node is gone from the fleet listing.
+    nodes = await _get_nodes(client, tenant_id, headers)
+    assert not any(n["node_name"] == f"node-purge-{tag}" for n in nodes)
+    # Memory is hard-deleted.
+    got = await client.get(
+        f"/api/v1/memories/{mem_id}?tenant_id={tenant_id}", headers=headers
+    )
+    assert got.status_code == 404, got.text
+
+
 async def test_node_agents_from_heartbeat(client):
     """Heartbeat with agents list → GET nodes returns node with those agents."""
     tenant_id, headers = get_test_auth()
@@ -202,7 +243,9 @@ async def test_node_agents_from_heartbeat(client):
     fid = f"fleet-{tag}"
 
     agents = [f"agent-x-{tag}", f"agent-y-{tag}", f"agent-z-{tag}"]
-    await _heartbeat(client, tenant_id, headers, f"node-agents-{tag}", fid, agents=agents)
+    await _heartbeat(
+        client, tenant_id, headers, f"node-agents-{tag}", fid, agents=agents
+    )
 
     nodes = await _get_nodes(client, tenant_id, headers)
     node = next(n for n in nodes if n["node_name"] == f"node-agents-{tag}")

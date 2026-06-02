@@ -192,6 +192,36 @@ _PURGE_ORG_KEYED_TABLES: tuple[str, ...] = (
     "organization_settings_audit",
 )
 
+# ── Fleet-scoped hard-purge (test-tenant hygiene) ──
+#
+# The subset of ``_PURGE_TENANT_TABLES`` that carries its own ``fleet_id``
+# column, so a single fleet's footprint can be permanently removed from a
+# SHARED tenant without touching the rest of the tenant. Used by the
+# OpenClaw fleet-tester to clean up its run-scoped ``nightly-<run_id>-fleet-NN``
+# fleets at teardown (the dev tenant otherwise accumulates run data that
+# confounds isolation/trust tests). Ordered children-before-parents so the
+# per-table DELETEs never trip a foreign key.
+#
+# ``fleet_commands`` is intentionally NOT in this tuple — it has no
+# ``fleet_id`` of its own (it's keyed by ``node_id``); ``purge_fleet_data``
+# deletes it explicitly by the fleet's node ids before the nodes go, so its
+# count is reported rather than hidden inside the ``fleet_nodes`` ON DELETE
+# CASCADE. ``memory_entity_links`` (no ``fleet_id``) rides the CASCADE from
+# ``memories`` / ``entities``. Tenant-wide tables (``audit_log``,
+# ``background_task_log``, ``idempotency_responses``, ``organization_settings*``)
+# are excluded — they're tenant config or the retained audit trail, not
+# fleet-scoped run data.
+_PURGE_FLEET_TABLES: tuple[str, ...] = (
+    "relations",
+    "memories",
+    "entities",
+    "agents",
+    "fleet_nodes",
+    "documents",
+    "analysis_reports",
+    "dedup_reviews",
+)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PostgresService
@@ -1727,6 +1757,60 @@ class PostgresService:
                         {"tid": tenant_id},
                     )
                     counts[table_name] = int(result.scalar() or 0)
+        return counts
+
+    async def purge_fleet_data(self, tenant_id: str, fleet_id: str) -> dict[str, int]:
+        """Permanently delete every row scoped to ``(tenant_id, fleet_id)``
+        across the fleet-scoped OSS tables — the per-fleet analogue of
+        ``purge_tenant_data`` for test-tenant hygiene (run-scoped fleet
+        cleanup). Returns per-table deleted counts.
+
+        Runs in one transaction, children-before-parents, so a foreign key
+        never blocks a delete and a mid-purge failure rolls back cleanly.
+        ``fleet_commands`` has no ``fleet_id`` of its own, so it's deleted by
+        the fleet's ``node_id``s first (and counted) before the nodes go;
+        ``memory_entity_links`` rides the ON DELETE CASCADE from ``memories`` /
+        ``entities``. ``audit_log`` and the tenant-wide settings tables are
+        intentionally untouched.
+
+        Idempotent: re-running on an already-purged fleet deletes nothing and
+        returns zeros, so a retried teardown is safe.
+        """
+        counts: dict[str, int] = {}
+        async with get_session() as session:
+            # ``fleet_commands`` is keyed by ``node_id`` (FK to fleet_nodes),
+            # not ``fleet_id`` — resolve the fleet's node ids and delete its
+            # commands first so the count is explicit rather than hidden in
+            # the fleet_nodes CASCADE below.
+            node_ids = list(
+                (
+                    await session.execute(
+                        select(FleetNode.id).where(
+                            FleetNode.tenant_id == tenant_id,
+                            FleetNode.fleet_id == fleet_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if node_ids:
+                cmd_result = await session.execute(
+                    FleetCommand.__table__.delete().where(FleetCommand.node_id.in_(node_ids))
+                )
+                counts["fleet_commands"] = cmd_result.rowcount  # type: ignore[attr-defined]
+            else:
+                counts["fleet_commands"] = 0
+
+            for table_name in _PURGE_FLEET_TABLES:
+                # Schema-qualify (``public.``) so an irreversible hard-delete
+                # can't be redirected by a non-default search_path — same
+                # defence as ``purge_tenant_data``.
+                result = await session.execute(
+                    text(f"DELETE FROM public.{table_name} WHERE tenant_id = :tid AND fleet_id = :fid"),
+                    {"tid": tenant_id, "fid": fleet_id},
+                )
+                counts[table_name] = result.rowcount  # type: ignore[attr-defined]
         return counts
 
     async def set_tenant_suppression(

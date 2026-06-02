@@ -81,6 +81,9 @@ async def test_agent_cannot_change_fleet_or_delete_or_settings(client, as_agent)
     assert r.status_code == 403, r.text
     r = await client.put(f"/api/v1/settings?tenant_id={tenant_id}", json={"recall": {}})
     assert r.status_code == 403, r.text
+    # A hard fleet purge is admin-plane too — an agent key must not wipe a fleet.
+    r = await client.post(f"/api/v1/fleet/some-fleet/purge?tenant_id={tenant_id}")
+    assert r.status_code == 403, r.text
 
 
 @pytest.mark.integration
