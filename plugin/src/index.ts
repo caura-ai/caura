@@ -36,7 +36,7 @@ import {
   HEARTBEAT_INITIAL_DELAY_MS,
   MAX_SOURCE_SIZE,
 } from "./env.js";
-import { apiCall } from "./transport.js";
+import { apiCall, parseSearchItems } from "./transport.js";
 import { PLUGIN_VERSION } from "./version.js";
 import {
   memclawPromptSectionBuilder,
@@ -55,6 +55,7 @@ import {
   isMemclawPathLoaded,
   isMemclawFullyConfigured,
   isContextEngineSlotClaimed,
+  shouldRunAutoFix,
 } from "./config.js";
 import { createToolFromSpec } from "./tool-definitions.js";
 import { deployPlugin } from "./deploy.js";
@@ -101,9 +102,7 @@ async function searchMemories(
       "/search",
       { tenant_id: tid, query, top_k: limit },
     )) as Record<string, unknown> | Record<string, unknown>[];
-    const arr = Array.isArray(results)
-      ? results
-      : ((results as Record<string, unknown>)?.results as Record<string, unknown>[]) ?? [];
+    const arr = parseSearchItems(results);
     return arr.map((m: Record<string, unknown>) => ({
       content: (m.content as string) || "",
       path: `memclaw://${m.id}`,
@@ -401,9 +400,24 @@ const memclawPlugin = {
     const allowlistFlagPath = join(getPluginDir(), ".allowlist-applied");
     const autoFixEnv = process.env.MEMCLAW_AUTO_FIX_CONFIG;
     const flagExists = existsSync(allowlistFlagPath);
-    const shouldAutoFix =
-      autoFixEnv === "true" ||                    // explicit force
-      (!flagExists && autoFixEnv !== "false");     // first run, not opted out
+    // Read config once to detect drift so auto-fix re-runs even when the
+    // one-time flag is already present: a plugin upgrade that ADDS a tool
+    // to MEMCLAW_TOOLS (e.g. memclaw_keystones) would otherwise never land
+    // in tools.alsoAllow on an existing install, and a later OpenClaw
+    // tools.profile (core tools + alsoAllow only) silently strips it.
+    // autoFixAllowlist is idempotent (writes only on change), so a clean
+    // install with the flag present still no-ops.
+    const preFixConfig = readOpenClawConfig() as Record<string, any> | null;
+    const shouldAutoFix = shouldRunAutoFix({
+      autoFixEnv,
+      flagExists,
+      missingToolCount: preFixConfig
+        ? getMissingTools(preFixConfig).length
+        : MEMCLAW_TOOLS.length,
+      contextEngineSlotClaimed: preFixConfig
+        ? isContextEngineSlotClaimed(preFixConfig)
+        : false,
+    });
 
     if (shouldAutoFix) {
       try {

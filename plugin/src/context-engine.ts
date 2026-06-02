@@ -12,7 +12,7 @@
  */
 
 import { createHash } from "crypto";
-import { apiCall } from "./transport.js";
+import { apiCall, parseSearchItems } from "./transport.js";
 import {
   MEMCLAW_FLEET_ID,
   MEMCLAW_TENANT_ID,
@@ -463,8 +463,11 @@ export class MemClawContextEngine {
 
     const testContent = `memclaw-smoke-${Date.now()}`;
     let writtenId: string | null = null;
+    // Hoisted out of the try so the finally-block cleanup DELETE can pass
+    // the tenant_id the backend requires (see below).
+    let tid: string | null = null;
     try {
-      const tid = await ensureTenantId();
+      tid = await ensureTenantId();
       const wr = (await apiCall("POST", "/memories", {
         tenant_id: tid,
         agent_id: "__health_check__",
@@ -490,9 +493,7 @@ export class MemClawContextEngine {
           query: testContent,
           top_k: 1,
         })) as Record<string, unknown> | Record<string, unknown>[];
-        const firstResult = Array.isArray(sr)
-          ? sr[0]
-          : ((sr?.results as Record<string, unknown>[]) || [])[0];
+        const firstResult = parseSearchItems(sr)[0];
         top = firstResult as Record<string, unknown> | undefined;
         score = (top?.score as number) ?? (top?.similarity as number) ?? 0;
         if (top && score >= 0.7) break;
@@ -514,10 +515,15 @@ export class MemClawContextEngine {
     } catch (e: unknown) {
       logErrorCritical("SMOKE TEST ERROR", e);
     } finally {
-      if (writtenId) {
+      // DELETE /memories/{id} requires tenant_id as a query param
+      // (core-api ``tenant_id: str = Query(...)``); omitting it returns 422
+      // and the smoke-test memory leaks into the tenant on every restart.
+      if (writtenId && tid) {
         apiCall(
           "DELETE",
           `/memories/${encodeURIComponent(writtenId)}`,
+          undefined,
+          { tenant_id: tid },
         ).catch(() => {});
       }
     }
@@ -811,11 +817,7 @@ export class MemClawContextEngine {
           undefined,
           controller.signal,
         )) as Record<string, unknown> | Record<string, unknown>[];
-        const results = Array.isArray(sr)
-          ? sr
-          : ((sr as Record<string, unknown>)?.results as
-              | Record<string, unknown>[]
-              | undefined) || [];
+        const results = parseSearchItems(sr);
         if (results.length > 0) {
           const lines = results.map(
             (m: Record<string, unknown>) =>

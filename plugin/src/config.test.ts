@@ -4,6 +4,7 @@ import {
   isMemorySlotClaimed,
   isContextEngineSlotClaimed,
   isMemclawFullyConfigured,
+  shouldRunAutoFix,
 } from "./config.js";
 import { getPluginDir } from "./paths.js";
 
@@ -118,5 +119,52 @@ describe("isMemclawFullyConfigured — contextEngine slot is now required", () =
     const c = happyConfig();
     (c as any).plugins.slots.contextEngine = "legacy";
     assert.equal(isMemclawFullyConfigured(c), false);
+  });
+});
+
+describe("shouldRunAutoFix — allowlist drift gate", () => {
+  // The original gate ran auto-fix once (guarded by .allowlist-applied),
+  // so a plugin upgrade that ADDED a tool (memclaw_keystones) never landed
+  // it in tools.alsoAllow on existing installs — and a later OpenClaw
+  // tools.profile then stripped it. The gate now also re-runs on drift.
+  const clean = {
+    flagExists: true,
+    missingToolCount: 0,
+    contextEngineSlotClaimed: true,
+  };
+
+  test("MEMCLAW_AUTO_FIX_CONFIG=true always runs (explicit force)", () => {
+    assert.equal(shouldRunAutoFix({ ...clean, autoFixEnv: "true" }), true);
+  });
+
+  test("MEMCLAW_AUTO_FIX_CONFIG=false never runs, even with drift", () => {
+    assert.equal(
+      shouldRunAutoFix({
+        autoFixEnv: "false",
+        flagExists: false,
+        missingToolCount: 5,
+        contextEngineSlotClaimed: false,
+      }),
+      false,
+    );
+  });
+
+  test("first run (no flag) runs", () => {
+    assert.equal(shouldRunAutoFix({ ...clean, flagExists: false }), true);
+  });
+
+  test("re-runs when a tool is missing despite the flag (the keystones upgrade case)", () => {
+    assert.equal(shouldRunAutoFix({ ...clean, missingToolCount: 1 }), true);
+  });
+
+  test("re-runs when the contextEngine slot is unclaimed despite the flag", () => {
+    assert.equal(
+      shouldRunAutoFix({ ...clean, contextEngineSlotClaimed: false }),
+      true,
+    );
+  });
+
+  test("no-ops on a clean install with the flag present", () => {
+    assert.equal(shouldRunAutoFix(clean), false);
   });
 });

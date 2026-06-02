@@ -12,7 +12,7 @@ process.env.MEMCLAW_API_KEY = "mc_test_key_for_transport_tests";
 process.env.MEMCLAW_API_URL = "http://localhost:8000";
 process.env.MEMCLAW_TENANT_ID = "t_test";
 
-const { apiCall } = await import("./transport.js");
+const { apiCall, parseSearchItems } = await import("./transport.js");
 
 interface MockCall {
   url: string;
@@ -78,5 +78,51 @@ describe("apiCall — MEMCLAW_API_PREFIX handling", () => {
       calls[0].url,
       "http://localhost:8000/api/v1/memories?tenant_id=t1",
     );
+  });
+});
+
+describe("parseSearchItems — search-response shape handling", () => {
+  // Regression guard: the REST /search endpoint returns { items: [...] }
+  // (core-api SearchResponse), but the plugin historically read .results
+  // and silently got [] — breaking context-engine auto-recall and the
+  // bootstrap smoke test. items must win, with results + bare-array
+  // fallbacks for the MCP-shaped and legacy responses.
+  const m = (id: string) => ({ id, content: `c-${id}` });
+
+  test("reads the REST `items` array", () => {
+    const out = parseSearchItems({ items: [m("a"), m("b")] });
+    assert.deepEqual(out.map((r) => r.id), ["a", "b"]);
+  });
+
+  test("falls back to `results` (MCP-shaped response)", () => {
+    const out = parseSearchItems({ results: [m("a")] });
+    assert.deepEqual(out.map((r) => r.id), ["a"]);
+  });
+
+  test("prefers `items` over `results` when both present", () => {
+    const out = parseSearchItems({ items: [m("i")], results: [m("r")] });
+    assert.deepEqual(out.map((r) => r.id), ["i"]);
+  });
+
+  test("accepts a bare array", () => {
+    const out = parseSearchItems([m("a"), m("b")]);
+    assert.equal(out.length, 2);
+  });
+
+  test("returns [] for empty / null / primitive / missing keys", () => {
+    assert.deepEqual(parseSearchItems({}), []);
+    assert.deepEqual(parseSearchItems(null), []);
+    assert.deepEqual(parseSearchItems(undefined), []);
+    assert.deepEqual(parseSearchItems("nope"), []);
+    assert.deepEqual(parseSearchItems({ items: undefined }), []);
+  });
+
+  test("returns [] when items/results is present but NOT an array (never throws)", () => {
+    // Malformed server responses must not slip through the cast and make
+    // callers' .map/.length throw.
+    assert.deepEqual(parseSearchItems({ items: {} }), []);
+    assert.deepEqual(parseSearchItems({ items: "oops" }), []);
+    assert.deepEqual(parseSearchItems({ items: 42 }), []);
+    assert.deepEqual(parseSearchItems({ results: { nested: true } }), []);
   });
 });

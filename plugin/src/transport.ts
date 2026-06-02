@@ -101,6 +101,28 @@ export async function apiCall(
   }
 }
 
+/**
+ * Extract the memory array from a ``POST /search`` response.
+ *
+ * The REST search endpoint returns ``{ items: [...] }`` (core-api
+ * ``SearchResponse(items=...)``), while the MCP ``memclaw_recall`` path
+ * returns ``{ results: [...] }`` and some legacy/test shims return a bare
+ * array. Reading only ``.results`` (as we did pre-fix) silently yielded
+ * ``[]`` against the REST backend — breaking context-engine auto-recall
+ * and the bootstrap smoke test. Prefer ``items`` (the live REST contract),
+ * fall back to ``results``, and accept a bare array. Never throws.
+ */
+export function parseSearchItems(sr: unknown): Record<string, unknown>[] {
+  if (Array.isArray(sr)) return sr as Record<string, unknown>[];
+  const o = sr as Record<string, unknown> | null | undefined;
+  // Guard with Array.isArray: a malformed response like ``{ items: {} }``
+  // or ``{ items: "..." }`` would otherwise slip through the cast and make
+  // callers' ``.map`` / ``.length`` throw — breaking the "never throws"
+  // contract above. Non-array → ``[]``.
+  const arr = o?.items ?? o?.results;
+  return Array.isArray(arr) ? (arr as Record<string, unknown>[]) : [];
+}
+
 export function textResult(text: string): {
   content: Array<{ type: string; text: string }>;
   details: Record<string, unknown>;

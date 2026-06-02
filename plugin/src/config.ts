@@ -230,3 +230,35 @@ export function getMissingTools(config: Record<string, any>): string[] {
   if (!Array.isArray(alsoAllow)) return [...MEMCLAW_TOOLS];
   return MEMCLAW_TOOLS.filter((t) => !alsoAllow.includes(t));
 }
+
+/**
+ * Decide whether ``autoFixAllowlist`` should run on this registration.
+ *
+ * Pure so it can be unit-tested. The original gate ran auto-fix exactly
+ * once (guarded by the ``.allowlist-applied`` flag file), which meant a
+ * plugin upgrade that ADDED a tool to ``MEMCLAW_TOOLS`` (e.g.
+ * ``memclaw_keystones``) never got that tool into ``tools.alsoAllow`` on
+ * an existing install — so a later OpenClaw ``tools.profile`` (which only
+ * grants core tools + ``alsoAllow``) silently stripped it. We now also
+ * re-run when there is drift: a missing tool or an unclaimed contextEngine
+ * slot. ``autoFixAllowlist`` is idempotent (writes only on change) so a
+ * clean install with the flag present still no-ops.
+ *
+ *   - ``MEMCLAW_AUTO_FIX_CONFIG=true``  → always run (explicit force).
+ *   - ``MEMCLAW_AUTO_FIX_CONFIG=false`` → never run (explicit opt-out).
+ *   - unset → run on first registration (no flag) OR when drift exists.
+ */
+export function shouldRunAutoFix(params: {
+  autoFixEnv?: string;
+  flagExists: boolean;
+  missingToolCount: number;
+  contextEngineSlotClaimed: boolean;
+}): boolean {
+  if (params.autoFixEnv === "true") return true;
+  if (params.autoFixEnv === "false") return false;
+  return (
+    !params.flagExists ||
+    params.missingToolCount > 0 ||
+    !params.contextEngineSlotClaimed
+  );
+}
