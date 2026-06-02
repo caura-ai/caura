@@ -114,6 +114,13 @@ DEFAULT_SETTINGS: dict = {
         # instead of falling through to the LLM. ``None`` resolves to
         # the global default (true).
         "triple_emission_enabled": None,
+        # CAURA-130 (L3.8) — Path C retraction kill-switch. When true
+        # (the default), Path C's ``_attempt_path_c_retraction`` runs
+        # the entity-aware judge and may revert a Path A verdict. When
+        # false, Path C skips retraction entirely and Path A's verdict
+        # stands. Ops escape valve for tenants whose retraction
+        # misbehaves; flip per-tenant without a deploy.
+        "retraction_enabled": None,
     },
     "agents": {
         "require_agent_approval": None,
@@ -327,6 +334,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "entity_blocklist": list,
     "memclaw.auto_upgrade_enabled": bool,
     "write.triple_emission_enabled": bool,
+    "write.retraction_enabled": bool,
 }
 
 # Inclusive range constraints applied AFTER type validation. Listed
@@ -583,6 +591,15 @@ class ResolvedConfig:
         # CAURA-123 — default ON. Tenants can opt out per-org without
         # a deploy (instant rollback path).
         val = self._ts.get("write", {}).get("triple_emission_enabled")
+        return bool(val) if val is not None else True
+
+    @property
+    def retraction_enabled(self) -> bool:
+        # CAURA-130 (L3.8) — default ON. Per-tenant kill-switch for
+        # Path C's retraction phase. Flip to False to leave Path A's
+        # verdict in place unconditionally for this tenant; useful as
+        # an ops escape valve if a tenant's retraction misbehaves.
+        val = self._ts.get("write", {}).get("retraction_enabled")
         return bool(val) if val is not None else True
 
     # Agents

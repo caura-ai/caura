@@ -579,3 +579,95 @@ async def test_no_retraction_when_candidate_has_no_entity_links():
         "empty entity_links on candidate must skip retraction without "
         "invoking the judge"
     )
+
+
+# ---------------------------------------------------------------------------
+# CAURA-130 (L3.8) — Per-tenant retraction kill-switch.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_disabled_skips_retraction():
+    """CAURA-130 — when ``tenant_config.retraction_enabled`` is False
+    the judge MUST NOT be invoked and Path A's verdict stands. Ops
+    escape valve for misbehaving tenants."""
+    from types import SimpleNamespace
+    from core_api.services.contradiction_detector import (
+        detect_contradictions_by_entities_async,
+    )
+
+    new_id, cand_id = uuid4(), uuid4()
+    sc = _mock_sc_with_retraction_setup(new_id, cand_id)
+    judge = AsyncMock(return_value=(False, 0.95))
+    disabled_cfg = SimpleNamespace(retraction_enabled=False)
+
+    with (
+        patch(
+            "core_api.services.contradiction_detector.get_storage_client",
+            return_value=sc,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
+            judge,
+        ),
+        # Patch at the SOURCE module — ``resolve_config`` is imported
+        # function-local in ``detect_contradictions_by_entities_async``
+        # (line ~1422), so patching the consuming module is a no-op.
+        # Patching at the source intercepts the function-local
+        # ``from ... import resolve_config`` rebind on every call.
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new_callable=AsyncMock,
+            return_value=disabled_cfg,
+        ),
+    ):
+        await detect_contradictions_by_entities_async(new_id, "t1", "f1")
+
+    judge.assert_not_called()
+    revert_calls = [
+        c
+        for c in sc.update_memory_status.call_args_list
+        if c.args == (str(cand_id), "active")
+    ]
+    assert revert_calls == [], (
+        "retraction_enabled=False must skip retraction entirely without "
+        "invoking the judge"
+    )
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_enabled_default_allows_retraction():
+    """CAURA-130 — when ``tenant_config.retraction_enabled`` is True
+    (the default), retraction proceeds as normal. Sanity test that the
+    kill-switch only gates when explicitly off."""
+    from types import SimpleNamespace
+    from core_api.services.contradiction_detector import (
+        detect_contradictions_by_entities_async,
+    )
+
+    new_id, cand_id = uuid4(), uuid4()
+    sc = _mock_sc_with_retraction_setup(new_id, cand_id)
+    enabled_cfg = SimpleNamespace(retraction_enabled=True)
+
+    with (
+        patch(
+            "core_api.services.contradiction_detector.get_storage_client",
+            return_value=sc,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
+            new_callable=AsyncMock,
+            return_value=(False, 0.95),  # clean disagreement → retract
+        ),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new_callable=AsyncMock,
+            return_value=enabled_cfg,
+        ),
+    ):
+        await detect_contradictions_by_entities_async(new_id, "t1", "f1")
+
+    assert any(
+        c.args == (str(cand_id), "active")
+        for c in sc.update_memory_status.call_args_list
+    ), "retraction_enabled=True must still allow the canonical retract path"

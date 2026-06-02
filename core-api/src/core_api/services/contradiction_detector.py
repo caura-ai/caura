@@ -1008,6 +1008,17 @@ def _fake_contradiction_check(new_content: str, old_content: str) -> bool:
 _ENTITY_CONTEXT_MAX_ENTITIES = 10
 _ENTITY_CONTEXT_NAME_MAX_CHARS = 100
 
+# CAURA-130 (L3.4) — upper bound on the fall-through set size before
+# the entity-links subject preflight starts fetching. Each candidate
+# costs one parallel storage round-trip; ``find_entity_overlap_candidates``
+# can theoretically return many rows for a high-fanout subject (popular
+# entity referenced by hundreds of memories), so cap the fan-out before
+# it becomes a thundering-herd risk on the storage API. Above the cap
+# we fail open (skip the L3.4 stage, let the LLM judge decide) rather
+# than drop everything — the legacy A1 #17 gate has already done what
+# it can.
+_ENTITY_LINKS_PREFLIGHT_MAX_CANDIDATES = 20
+
 
 def _format_entity_context(entities: list[dict]) -> str:
     """Render resolved entity rows into a readable block for the prompt.
@@ -1047,6 +1058,41 @@ def _format_entity_context(entities: list[dict]) -> str:
         role = e.get("role") or "<unspecified>"
         lines.append(f'- "{name}" (type: {etype}, role: {role})')
     return "\n".join(lines)
+
+
+def _extract_subject_canonical_identity(
+    entities: list[dict],
+) -> tuple[str, str, str] | None:
+    """CAURA-130 (L3.4) — extract the canonical subject identity from a
+    list of resolved entity rows.
+
+    Returns ``(canonical_name, entity_type, entity_id)`` of the FIRST
+    entity with ``role == "subject"``, or ``None`` if no subject-role
+    entity is present (degenerate / object-only link sets, empty
+    lists, malformed data). Used by the forward-Path-C preflight to
+    catch first-name collisions when ``subject_entity_id`` is NULL on
+    either memory (the A1 #17 legacy gate can't decide those cases —
+    see the inline TODO at the preflight site for the original
+    ``priya``-collision write-up).
+
+    Identity is keyed on ``entity_id`` ONLY — two ``priya`` rows with
+    the same canonical name but different entity rows ARE distinct
+    subjects (that's the whole point). The canonical name + type are
+    returned for logging / debugging, not for equality.
+    """
+    if not entities:
+        return None
+    for e in entities:
+        if (e.get("role") or "").lower() == "subject":
+            name = e.get("canonical_name") or e.get("name") or "<unknown>"
+            etype = e.get("entity_type") or "<unknown>"
+            entity_id = e.get("entity_id") or e.get("id")
+            if not entity_id:
+                # No identity to key on — caller should treat as
+                # "unknown subject" rather than asserting mismatch.
+                continue
+            return (str(name), str(etype), str(entity_id))
+    return None
 
 
 async def _fetch_entity_context(sc, memory_id: str) -> list[dict]:
@@ -1094,10 +1140,14 @@ async def _fetch_entity_context(sc, memory_id: str) -> list[dict]:
             return None
         # ``canonical_name`` is the column on Entity; fall back to
         # ``name`` for any future schema change / mocked-test data.
+        # ``entity_id`` is preserved on the normalised shape (CAURA-
+        # 130 L3.4 — the forward-Path-C preflight uses it as the
+        # canonical-subject identity key).
         return {
             "name": entity.get("canonical_name") or entity.get("name"),
             "entity_type": entity.get("entity_type"),
             "role": link.get("role"),
+            "entity_id": str(entity_id),
         }
 
     hydrated = await asyncio.gather(*(_hydrate(link) for link in links))
@@ -1217,6 +1267,20 @@ async def _attempt_path_c_retraction(
          our read and our write; we treat that as "the retraction is
          no longer ours to do" and swallow it.
     """
+    # CAURA-130 (L3.8) — per-tenant retraction kill-switch. Ops escape
+    # valve: flip ``retraction_enabled`` to False on a misbehaving
+    # tenant to leave Path A's verdict in place unconditionally,
+    # without a deploy. Default ON (no behavior change for existing
+    # tenants — the resolver returns True when the JSONB key is
+    # absent / None). Check before any other work so the early exit
+    # is also cheap.
+    if tenant_config is not None and not getattr(tenant_config, "retraction_enabled", True):
+        logger.info(
+            "Path C retraction skipped — disabled by tenant config for memory %s",
+            new_memory.get("id"),
+        )
+        return False
+
     retraction_target_id = new_memory.get("supersedes_id")
     if not retraction_target_id:
         return False
@@ -1427,7 +1491,8 @@ async def detect_contradictions_by_entities_async(
         # "priya" but resolve to distinct entity rows (see
         # ``followup-path-c-judge-first-name-collisions``) and (2)
         # wasteful API spend regardless. Candidates with NULL
-        # ``subject_entity_id`` on either side fall through unchanged.
+        # ``subject_entity_id`` on either side fall through to the
+        # entity-links preflight below.
         new_subject = new_memory.get("subject_entity_id")
         filtered_candidates = [
             c
@@ -1440,6 +1505,93 @@ async def detect_contradictions_by_entities_async(
             logger.info(
                 "Path C preflight skipped all %d candidates for memory %s (distinct subject_entity_id)",
                 n_preflight_skipped,
+                memory_id,
+            )
+            return
+
+        # CAURA-130 (L3.4) — entity-links subject preflight. The A1 #17
+        # gate above only fires when BOTH sides have non-NULL
+        # ``subject_entity_id``. When one side is NULL (heuristic
+        # missed but entity-extraction worker populated entity_links
+        # with a subject-role entity), same-canonical-name distinct-
+        # entity pairs (the ``priya``-collision case in the original
+        # followup TODO) silently fell through to the LLM judge — which
+        # then mis-classified as a contradiction. Here we resolve the
+        # canonical subject identity from ``entity_links`` for the
+        # affected candidates and drop on identity mismatch.
+        #
+        # Cost: only fetch entity context for candidates whose legacy
+        # ``subject_entity_id`` gate fell through (at least one side
+        # NULL). When BOTH sides have non-NULL ids the A1 #17 gate
+        # already handled them — those candidates skip this stage.
+        # New memory's context fetched once (1 storage round-trip);
+        # remaining work scales with the size of the fall-through set.
+        # The whole stage is wrapped in ``asyncio.wait_for(timeout=
+        # 5.0)`` — on failure we fail-open (keep candidates) rather
+        # than dropping potentially-real contradictions.
+        # Track drops from THIS stage separately from the A1 #17
+        # legacy gate above — the final log message attributes the
+        # count to the entity-links stage, so mixing in the legacy
+        # drops would be misleading.
+        n_entity_links_skipped = 0
+        fallthrough = [c for c in candidates if new_subject is None or c.get("subject_entity_id") is None]
+        if len(fallthrough) > _ENTITY_LINKS_PREFLIGHT_MAX_CANDIDATES:
+            # Bound the storage fan-out. A popular entity can produce
+            # a large fall-through set; gathering N parallel fetches
+            # against the storage API risks a thundering herd. Above
+            # the cap we fail open: skip the L3.4 stage entirely and
+            # let the LLM judge handle the candidates. The legacy A1
+            # #17 gate has already done what it can; we don't drop
+            # candidates we couldn't verify.
+            logger.warning(
+                "Path C entity-links preflight skipped for memory %s — "
+                "fall-through set size %d > cap %d. Falling through to LLM judge.",
+                memory_id,
+                len(fallthrough),
+                _ENTITY_LINKS_PREFLIGHT_MAX_CANDIDATES,
+            )
+        elif fallthrough:
+            try:
+                new_ctx, *cand_ctxs = await asyncio.wait_for(
+                    asyncio.gather(
+                        _fetch_entity_context(sc, str(memory_id)),
+                        *(_fetch_entity_context(sc, str(c.get("id"))) for c in fallthrough),
+                    ),
+                    timeout=5.0,
+                )
+                new_identity = _extract_subject_canonical_identity(new_ctx)
+                if new_identity is not None:
+                    new_eid = new_identity[2]
+                    drop_ids: set[str] = set()
+                    for c, ctx in zip(fallthrough, cand_ctxs, strict=False):
+                        cand_identity = _extract_subject_canonical_identity(ctx)
+                        if cand_identity is None:
+                            continue  # No subject resolved — fail open.
+                        if cand_identity[2] != new_eid:
+                            drop_ids.add(str(c.get("id")))
+                    if drop_ids:
+                        before = len(candidates)
+                        candidates = [c for c in candidates if str(c.get("id")) not in drop_ids]
+                        n_entity_links_skipped = before - len(candidates)
+                        logger.info(
+                            "Path C entity-links preflight dropped %d candidate(s) "
+                            "for memory %s (canonical subjects differ by entity_id)",
+                            n_entity_links_skipped,
+                            memory_id,
+                        )
+            except Exception as e:
+                # Fail open — keep candidates and let the LLM judge
+                # decide. Conservative against losing real
+                # contradictions on a transient storage hiccup.
+                logger.warning(
+                    "Path C entity-links preflight failed for memory %s: %s. Falling through to LLM judge.",
+                    memory_id,
+                    e,
+                )
+        if not candidates:
+            logger.info(
+                "Path C preflight skipped all %d candidates for memory %s (entity-links subject mismatch)",
+                n_entity_links_skipped,
                 memory_id,
             )
             return
