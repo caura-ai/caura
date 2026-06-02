@@ -1019,6 +1019,18 @@ _ENTITY_CONTEXT_NAME_MAX_CHARS = 100
 # it can.
 _ENTITY_LINKS_PREFLIGHT_MAX_CANDIDATES = 20
 
+# CAURA-131 — absolute upper bound on the TOTAL candidate count we'll
+# issue parallel entity-context fetches for (fall-through PLUS A1 #17-
+# matched candidates). The fall-through cap above bounds the L3.4
+# preflight set; this constant additionally bounds the entity-aware
+# detection-judge fetch. Without it, a popular entity producing 500
+# A1-#17-matched candidates would issue 501 parallel storage calls
+# even though fall-through is tiny. Set to 2x the preflight cap on the
+# heuristic that the entity-aware lift is marginal for A1-#17-matched
+# rows (subject identity is already confirmed by the column match),
+# so we don't need to pay the full thundering-herd budget for them.
+_ENTITY_LINKS_DETECTION_FETCH_MAX_CANDIDATES = _ENTITY_LINKS_PREFLIGHT_MAX_CANDIDATES * 2
+
 
 def _format_entity_context(entities: list[dict]) -> str:
     """Render resolved entity rows into a readable block for the prompt.
@@ -1529,65 +1541,115 @@ async def detect_contradictions_by_entities_async(
         # The whole stage is wrapped in ``asyncio.wait_for(timeout=
         # 5.0)`` — on failure we fail-open (keep candidates) rather
         # than dropping potentially-real contradictions.
-        # Track drops from THIS stage separately from the A1 #17
-        # legacy gate above — the final log message attributes the
-        # count to the entity-links stage, so mixing in the legacy
-        # drops would be misleading.
+        # CAURA-131 — fetch resolved entity context once for the new
+        # memory + every surviving candidate, then reuse the same dict
+        # for BOTH the L3.4 preflight (canonical-subject mismatch drop)
+        # AND the detection LLM call (entity-aware judge — see below).
+        # Previously the preflight fetched and discarded; the detection
+        # loop ran the base ``_llm_contradiction_check`` which gets
+        # fooled by surface qualifiers ("Priya from AcmeCorp" vs
+        # "Priya from BetaIndustries" → "different subjects" → no
+        # flag, even when entity-extraction merged them to the same
+        # canonical entity row). Sharing the contexts closes that gap.
+        #
+        # Cost guard: cap on the FALL-THROUGH count (candidates where
+        # ``new_subject`` is NULL or the candidate's
+        # ``subject_entity_id`` is NULL) — the set that L3.4 actually
+        # needs the fetch for. A1-#17-matched rows (both sides
+        # non-NULL, same entity_id) don't need L3.4 treatment, so
+        # counting them toward the cap would silently disable both
+        # L3.4 AND the entity-aware judge for exactly the null-id
+        # candidates that benefit from them. When the cap is not
+        # exceeded, we fetch contexts for ALL candidates so the
+        # entity-aware detection judge can run on the matched rows
+        # too — bounded by the fall-through count, which is the real
+        # high-fanout risk surface.
+        contexts: dict[str, list[dict]] = {}
+        new_ctx: list[dict] = []
+        contexts_fetched = False
         n_entity_links_skipped = 0
-        fallthrough = [c for c in candidates if new_subject is None or c.get("subject_entity_id") is None]
-        if len(fallthrough) > _ENTITY_LINKS_PREFLIGHT_MAX_CANDIDATES:
-            # Bound the storage fan-out. A popular entity can produce
-            # a large fall-through set; gathering N parallel fetches
-            # against the storage API risks a thundering herd. Above
-            # the cap we fail open: skip the L3.4 stage entirely and
-            # let the LLM judge handle the candidates. The legacy A1
-            # #17 gate has already done what it can; we don't drop
-            # candidates we couldn't verify.
+        fallthrough_count = sum(
+            1 for c in candidates if new_subject is None or c.get("subject_entity_id") is None
+        )
+        if (
+            fallthrough_count > _ENTITY_LINKS_PREFLIGHT_MAX_CANDIDATES
+            or len(candidates) > _ENTITY_LINKS_DETECTION_FETCH_MAX_CANDIDATES
+        ):
+            # Two cost guards combined: the L3.4-specific fall-through
+            # cap, AND an absolute bound on parallel fetches so a
+            # popular entity with hundreds of A1-#17-matched
+            # candidates can't issue an unbounded thundering herd on
+            # the storage API (fall-through could be tiny while total
+            # is huge — see CAURA-131 follow-up).
             logger.warning(
-                "Path C entity-links preflight skipped for memory %s — "
-                "fall-through set size %d > cap %d. Falling through to LLM judge.",
+                "Path C entity-links context fetch skipped for memory %s — "
+                "fall-through %d > cap %d OR total %d > cap %d. "
+                "Falling through to base LLM judge.",
                 memory_id,
-                len(fallthrough),
+                fallthrough_count,
                 _ENTITY_LINKS_PREFLIGHT_MAX_CANDIDATES,
+                len(candidates),
+                _ENTITY_LINKS_DETECTION_FETCH_MAX_CANDIDATES,
             )
-        elif fallthrough:
+        else:
             try:
-                new_ctx, *cand_ctxs = await asyncio.wait_for(
+                fetched = await asyncio.wait_for(
                     asyncio.gather(
                         _fetch_entity_context(sc, str(memory_id)),
-                        *(_fetch_entity_context(sc, str(c.get("id"))) for c in fallthrough),
+                        *(_fetch_entity_context(sc, str(c.get("id"))) for c in candidates),
                     ),
                     timeout=5.0,
                 )
-                new_identity = _extract_subject_canonical_identity(new_ctx)
-                if new_identity is not None:
-                    new_eid = new_identity[2]
-                    drop_ids: set[str] = set()
-                    for c, ctx in zip(fallthrough, cand_ctxs, strict=False):
-                        cand_identity = _extract_subject_canonical_identity(ctx)
-                        if cand_identity is None:
-                            continue  # No subject resolved — fail open.
-                        if cand_identity[2] != new_eid:
-                            drop_ids.add(str(c.get("id")))
-                    if drop_ids:
-                        before = len(candidates)
-                        candidates = [c for c in candidates if str(c.get("id")) not in drop_ids]
-                        n_entity_links_skipped = before - len(candidates)
-                        logger.info(
-                            "Path C entity-links preflight dropped %d candidate(s) "
-                            "for memory %s (canonical subjects differ by entity_id)",
-                            n_entity_links_skipped,
-                            memory_id,
-                        )
+                new_ctx = fetched[0]
+                for c, ctx in zip(candidates, fetched[1:], strict=False):
+                    contexts[str(c.get("id"))] = ctx
+                contexts_fetched = True
             except Exception as e:
                 # Fail open — keep candidates and let the LLM judge
-                # decide. Conservative against losing real
-                # contradictions on a transient storage hiccup.
+                # decide via the base prompt. Conservative against
+                # losing real contradictions on a transient storage
+                # hiccup.
                 logger.warning(
-                    "Path C entity-links preflight failed for memory %s: %s. Falling through to LLM judge.",
+                    "Path C entity-links context fetch failed for memory %s: %s. "
+                    "Falling through to base LLM judge.",
                     memory_id,
                     e,
                 )
+
+        # L3.4 preflight (CAURA-130) — when the legacy A1 #17 gate fell
+        # through (NULL ``subject_entity_id`` on either side), use the
+        # fetched contexts to drop candidates whose canonical subject
+        # is a distinct entity row even though canonical names match
+        # (the ``priya``-collision class from the original followup
+        # TODO). Now that the contexts are fetched once above, the
+        # preflight is a cheap dict lookup.
+        if contexts_fetched and new_ctx:
+            new_identity = _extract_subject_canonical_identity(new_ctx)
+            if new_identity is not None:
+                new_eid = new_identity[2]
+                drop_ids: set[str] = set()
+                for c in candidates:
+                    if new_subject is not None and c.get("subject_entity_id") is not None:
+                        # Both sides had non-NULL subject_entity_id — A1
+                        # #17 already covered this row.
+                        continue
+                    cand_ctx = contexts.get(str(c.get("id")), [])
+                    cand_identity = _extract_subject_canonical_identity(cand_ctx)
+                    if cand_identity is None:
+                        continue  # No subject resolved — fail open.
+                    if cand_identity[2] != new_eid:
+                        drop_ids.add(str(c.get("id")))
+                if drop_ids:
+                    before = len(candidates)
+                    candidates = [c for c in candidates if str(c.get("id")) not in drop_ids]
+                    n_entity_links_skipped = before - len(candidates)
+                    logger.info(
+                        "Path C entity-links preflight dropped %d candidate(s) "
+                        "for memory %s (canonical subjects differ by entity_id)",
+                        n_entity_links_skipped,
+                        memory_id,
+                    )
+
         if not candidates:
             logger.info(
                 "Path C preflight skipped all %d candidates for memory %s (entity-links subject mismatch)",
@@ -1596,14 +1658,32 @@ async def detect_contradictions_by_entities_async(
             )
             return
 
+        # CAURA-131 — entity-aware judge for each surviving candidate
+        # when we have non-empty contexts on both sides. Otherwise fall
+        # back to the base ``_llm_contradiction_check`` (preserves
+        # pre-CAURA-131 behaviour for memories without populated
+        # entity_links yet — e.g. entity-extraction hasn't completed
+        # for the candidate at the time Path C runs).
         new_content = new_memory.get("content", "")
-        tasks = [
-            asyncio.wait_for(
-                _llm_contradiction_check(new_content, c.get("content", ""), tenant_config),
-                timeout=10.0,
-            )
-            for c in candidates
-        ]
+        tasks = []
+        for c in candidates:
+            cand_ctx = contexts.get(str(c.get("id")), []) if contexts_fetched else []
+            if contexts_fetched and new_ctx and cand_ctx:
+                tasks.append(
+                    asyncio.wait_for(
+                        _llm_entity_aware_contradiction_check(
+                            new_content, c.get("content", ""), new_ctx, cand_ctx, tenant_config
+                        ),
+                        timeout=10.0,
+                    )
+                )
+            else:
+                tasks.append(
+                    asyncio.wait_for(
+                        _llm_contradiction_check(new_content, c.get("content", ""), tenant_config),
+                        timeout=10.0,
+                    )
+                )
         results = await asyncio.gather(*tasks, return_exceptions=True)
         found = False
         # CAURA-125 — state-corruption guard; mirrors the RDF and

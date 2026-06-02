@@ -305,7 +305,13 @@ async def test_forward_preflight_drops_collision_when_subject_entity_id_null():
 @pytest.mark.asyncio
 async def test_forward_preflight_keeps_candidate_when_subjects_truly_match():
     """Same canonical name AND same entity_id → same subject → preflight
-    must NOT drop; let the LLM judge handle it."""
+    must NOT drop; the LLM judge runs.
+
+    Updated for CAURA-131: when both sides have non-empty entity
+    context, the entity-aware judge is invoked (not the base judge),
+    because CAURA-131 lifted the context fetch to also feed the
+    detection LLM call. We assert the entity-aware judge runs and
+    the base judge does NOT (regression guard for the wiring)."""
     from core_api.services.contradiction_detector import (
         detect_contradictions_by_entities_async,
     )
@@ -318,7 +324,8 @@ async def test_forward_preflight_keeps_candidate_when_subjects_truly_match():
         str(cand_id): [{"entity_id": "ent:project-helios", "role": "subject"}],
     }
     sc = _sc_for_forward_path(new_mem, [cand], links)
-    judge = AsyncMock(return_value=(False, 0.95))  # judge says not a contradiction
+    base_judge = AsyncMock(return_value=(False, 0.95))
+    entity_aware_judge = AsyncMock(return_value=(False, 0.95))
 
     with (
         patch(
@@ -327,7 +334,11 @@ async def test_forward_preflight_keeps_candidate_when_subjects_truly_match():
         ),
         patch(
             "core_api.services.contradiction_detector._llm_contradiction_check",
-            judge,
+            base_judge,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
+            entity_aware_judge,
         ),
         patch(
             "core_api.services.contradiction_detector.resolve_config",
@@ -343,26 +354,43 @@ async def test_forward_preflight_keeps_candidate_when_subjects_truly_match():
     ):
         await detect_contradictions_by_entities_async(new_id, "t1", "f1")
 
-    judge.assert_called_once()
+    entity_aware_judge.assert_called_once()
+    base_judge.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_forward_preflight_skipped_when_both_subject_ids_nonnull():
-    """Cost guard — when BOTH sides have non-NULL ``subject_entity_id``,
-    the legacy A1 #17 gate already covered it; the L3.4 entity-links
-    stage must NOT issue a fetch (saves the round-trips)."""
+async def test_l34_preflight_skips_drop_check_when_both_subject_ids_nonnull():
+    """When BOTH sides have non-NULL ``subject_entity_id``, the legacy
+    A1 #17 gate already covered the canonical-subject mismatch case;
+    the L3.4 preflight stage must NOT additionally drop these
+    candidates.
+
+    Updated for CAURA-131: the context fetch now runs for ALL
+    surviving post-A1-#17 candidates (so the detection LLM call can
+    use the entity-aware judge — that's the whole CAURA-131 fix).
+    The cost-guard is now the ``_ENTITY_LINKS_PREFLIGHT_MAX_CANDIDATES``
+    cap, not "skip the fetch when both ids non-NULL". This test
+    therefore verifies the L3.4 PREFLIGHT LOGIC (the per-candidate
+    drop check) skips these rows — not the fetch itself."""
     from core_api.services.contradiction_detector import (
         detect_contradictions_by_entities_async,
     )
 
     new_id, cand_id = uuid4(), uuid4()
-    # Same subject_entity_id on both sides — legacy gate passes them
-    # both through, and L3.4 stage must skip the fetch.
+    # Same subject_entity_id on both sides — legacy A1 #17 passes them
+    # through; L3.4 preflight per-row check should skip them too.
     same_sid = "sid-shared"
     new_mem = _make_new_memory(new_id, subject_entity_id=same_sid)
     cand = _make_candidate(cand_id, subject_entity_id=same_sid)
-    sc = _sc_for_forward_path(new_mem, [cand], {})
-    judge = AsyncMock(return_value=(False, 0.95))
+    # Provide non-empty entity context so the entity-aware judge has
+    # something to ground on (CAURA-131 detection path).
+    links = {
+        str(new_id): [{"entity_id": "ent:shared", "role": "subject"}],
+        str(cand_id): [{"entity_id": "ent:shared", "role": "subject"}],
+    }
+    sc = _sc_for_forward_path(new_mem, [cand], links)
+    base_judge = AsyncMock(return_value=(False, 0.95))
+    entity_aware_judge = AsyncMock(return_value=(False, 0.95))
 
     with (
         patch(
@@ -371,7 +399,11 @@ async def test_forward_preflight_skipped_when_both_subject_ids_nonnull():
         ),
         patch(
             "core_api.services.contradiction_detector._llm_contradiction_check",
-            judge,
+            base_judge,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
+            entity_aware_judge,
         ),
         patch(
             "core_api.services.contradiction_detector.resolve_config",
@@ -387,8 +419,11 @@ async def test_forward_preflight_skipped_when_both_subject_ids_nonnull():
     ):
         await detect_contradictions_by_entities_async(new_id, "t1", "f1")
 
-    # The fetch path must not run when both sides have non-NULL ids.
-    sc.get_entity_links_for_memories.assert_not_called()
+    # Candidate not dropped → the entity-aware judge runs on it
+    # (CAURA-131 path). The L3.4 preflight's per-row drop check
+    # correctly early-continues for non-NULL-on-both-sides rows.
+    entity_aware_judge.assert_called_once()
+    base_judge.assert_not_called()
 
 
 @pytest.mark.asyncio

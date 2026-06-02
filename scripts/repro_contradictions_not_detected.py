@@ -130,8 +130,12 @@ def main() -> int:
     qp = {"tenant_id": tenant or mem_a.get("tenant_id")}
     a_now = client.get(f"/api/v1/memories/{mem_a['id']}", params=qp).json()
     b_now = client.get(f"/api/v1/memories/{mem_b['id']}", params=qp).json()
-    a_contra = client.get(f"/api/v1/memories/{mem_a['id']}/contradictions", params=qp).json()
-    b_contra = client.get(f"/api/v1/memories/{mem_b['id']}/contradictions", params=qp).json()
+    a_contra = client.get(
+        f"/api/v1/memories/{mem_a['id']}/contradictions", params=qp
+    ).json()
+    b_contra = client.get(
+        f"/api/v1/memories/{mem_b['id']}/contradictions", params=qp
+    ).json()
 
     def _summary(label: str, mem: dict) -> None:
         print(f"  {label}.id              : {mem.get('id')}")
