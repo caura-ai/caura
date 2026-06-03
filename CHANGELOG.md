@@ -6,6 +6,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.12.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.11.0...backend-v2.12.0) (2026-06-03)
+
+
+### Features
+
+* **api:** reject server-reserved memory_types at write boundary (C3, C8) ([#261](https://github.com/caura-ai/caura-memclaw/issues/261)) ([0abd727](https://github.com/caura-ai/caura-memclaw/commit/0abd727f31b53430519054cc339c238f319489ba))
+* **api:** surface near_duplicate_of in default-mode write metadata (A21) ([#266](https://github.com/caura-ai/caura-memclaw/issues/266)) ([e7f9bc8](https://github.com/caura-ai/caura-memclaw/commit/e7f9bc8de184a99f3b97d0d17d54cd3094a28574))
+* **core-api:** add fleet-scoped hard-purge endpoint ([#275](https://github.com/caura-ai/caura-memclaw/issues/275)) ([cd9e2a6](https://github.com/caura-ai/caura-memclaw/commit/cd9e2a6a5a63e03f404797944d056025f8e53df0))
+* **core:** deletion-preview counts (CAURA-696 PR A — OSS half) ([#246](https://github.com/caura-ai/caura-memclaw/issues/246)) ([454a233](https://github.com/caura-ai/caura-memclaw/commit/454a233d6fdbaaad67053bf40e3e7b584c956f52))
+* **core:** OSS suppression mirror + boundary guard (CAURA-694) ([#244](https://github.com/caura-ai/caura-memclaw/issues/244)) ([64cf3e4](https://github.com/caura-ai/caura-memclaw/commit/64cf3e446cf26b634e3dee39197f2fcc76affe88))
+* **evolve:** surface weight-adjustment skip reason (A15) ([#257](https://github.com/caura-ai/caura-memclaw/issues/257)) ([5f314d9](https://github.com/caura-ai/caura-memclaw/commit/5f314d90c8e847b874a7d5fcd2c9e5218a4c0e1c))
+* **lifecycle:** align all lifecycle crons to a fixed UTC hour, not boot-relative intervals ([#278](https://github.com/caura-ai/caura-memclaw/issues/278)) ([6b73bba](https://github.com/caura-ai/caura-memclaw/commit/6b73bba5e95769247101a02a788f3e8de6ee7819))
+* **lifecycle:** run insights cron at a fixed UTC hour, not a boot-relative interval ([#277](https://github.com/caura-ai/caura-memclaw/issues/277)) ([bca3ddd](https://github.com/caura-ai/caura-memclaw/commit/bca3dddadf5f439ce00585c2df23a992b39f550e))
+* **plugin:** bump MEMCLAW_KEYSTONES_TOKEN_CAP default 500 → 1500 (CAURA-000) ([#249](https://github.com/caura-ai/caura-memclaw/issues/249)) ([6c3b021](https://github.com/caura-ai/caura-memclaw/commit/6c3b021e4e011e1d1ada5e811b4e3ca68065e615))
+* **storage:** purge_org_data primitive for org hard-delete (CAURA-689) ([#241](https://github.com/caura-ai/caura-memclaw/issues/241)) ([f3d896b](https://github.com/caura-ai/caura-memclaw/commit/f3d896b1890e5e2e46e166afdf225d475046ebf0))
+
+
+### Bug Fixes
+
+* **api:** accept metadata_mode as a query param on PATCH /memories/{id} (C7) ([#265](https://github.com/caura-ai/caura-memclaw/issues/265)) ([808f4c5](https://github.com/caura-ai/caura-memclaw/commit/808f4c564e413ee9822fad08acf1cc2b72c02727))
+* **mcp:** extend mcp-agent default refusal to all read tools (A29) ([#263](https://github.com/caura-ai/caura-memclaw/issues/263)) ([1cccbe3](https://github.com/caura-ai/caura-memclaw/commit/1cccbe37a1c312978085fecf59a1753b5eb06b4b))
+* **mcp:** extend mcp-agent default refusal to all write tools (A14) ([#256](https://github.com/caura-ai/caura-memclaw/issues/256)) ([887c702](https://github.com/caura-ai/caura-memclaw/commit/887c7021d6e00bab844a893005f723cda55f96c0))
+* **plugin:** context-engine auto-recall, smoke cleanup & post-upgrade allowlist drift ([#274](https://github.com/caura-ai/caura-memclaw/issues/274)) ([573857c](https://github.com/caura-ai/caura-memclaw/commit/573857c70867541069d4f8e8157864b19372f5d1))
+* **plugin:** tolerate undefined config in ContextEngine constructor (CAURA-000) ([#247](https://github.com/caura-ai/caura-memclaw/issues/247)) ([78e10fb](https://github.com/caura-ai/caura-memclaw/commit/78e10fb3cc21021883798d43d8e09f55bb33890d))
+* **recall:** add items alias key to /recall response (C4) ([#262](https://github.com/caura-ai/caura-memclaw/issues/262)) ([88ca5a8](https://github.com/caura-ai/caura-memclaw/commit/88ca5a8f33008370bfb720695582c190c39c1207))
+* **search:** dedup per-tenant storage_search slot on entity-lookup fall-through (C10) ([#264](https://github.com/caura-ai/caura-memclaw/issues/264)) ([905db5c](https://github.com/caura-ai/caura-memclaw/commit/905db5c6874a5dbcaa1a387d3730caca87da0656))
+* **search:** include EMBEDDING_QUERY_INSTRUCTION in embedding cache key (C9) ([#259](https://github.com/caura-ai/caura-memclaw/issues/259)) ([595300a](https://github.com/caura-ai/caura-memclaw/commit/595300aae3e51d14d183a1f52a6461e3244e98ec))
+* **search:** per-task timeout for parallel_embed_entity_boost (D7) ([#260](https://github.com/caura-ai/caura-memclaw/issues/260)) ([68f1977](https://github.com/caura-ai/caura-memclaw/commit/68f19773ecd0d840048b046071e42a813eb68d50))
+* **search:** share entity tokenizer between FTS-weight + entity-FTS gates (A27) ([#258](https://github.com/caura-ai/caura-memclaw/issues/258)) ([71fd841](https://github.com/caura-ai/caura-memclaw/commit/71fd8412086f426519a401038f9954242c41e120))
+* **security:** block agent credentials from agent-management & settings (trust self-escalation) ([#252](https://github.com/caura-ai/caura-memclaw/issues/252)) ([8475901](https://github.com/caura-ai/caura-memclaw/commit/8475901603d52438638bb890c562017d3ea42fa1))
+* **security:** enforce fleet/agent scope on by-id memory access ([#250](https://github.com/caura-ai/caura-memclaw/issues/250)) ([fde5ceb](https://github.com/caura-ai/caura-memclaw/commit/fde5cebe569e1fdb5c7cab101d60a4bc857719a8))
+* **security:** enforce fleet/agent scope on entity reads + document deletes ([#253](https://github.com/caura-ai/caura-memclaw/issues/253)) ([dab6b71](https://github.com/caura-ai/caura-memclaw/commit/dab6b711921a5bba568a083eb6d8c09b2545870a))
+* **security:** gateway-shared-secret gate on the X-Tenant-ID auth path (CRITICAL-1, app side) ([#254](https://github.com/caura-ai/caura-memclaw/issues/254)) ([045039f](https://github.com/caura-ai/caura-memclaw/commit/045039f341ba54fe080d0e83f04e84fdc961750b))
+* **security:** require admin-trust for bulk/whole-tenant memory deletes ([#251](https://github.com/caura-ai/caura-memclaw/issues/251)) ([9fcac01](https://github.com/caura-ai/caura-memclaw/commit/9fcac01685dee45072b809cb45d9366e63898e13))
+* **version-compat:** bump MIN_RECOMMENDED_PLUGIN_VERSION to 2.7.0 ([#279](https://github.com/caura-ai/caura-memclaw/issues/279)) ([7238180](https://github.com/caura-ai/caura-memclaw/commit/7238180a4f451838e3e4e7c71c85609d08aa58b3))
+
+
+### Performance
+
+* **entity-extraction:** collapse worker N+1 storage HTTPs (P1) ([#245](https://github.com/caura-ai/caura-memclaw/issues/245)) ([e2d805e](https://github.com/caura-ai/caura-memclaw/commit/e2d805e8b80aa24ba22312e4c9ee35b6381c56ce))
+
+
+### Documentation
+
+* fix stale API paths, tool counts, and version references ([#255](https://github.com/caura-ai/caura-memclaw/issues/255)) ([496717e](https://github.com/caura-ai/caura-memclaw/commit/496717eeeb28cabdf07d8b690c07e2d03ac7aa2f))
+
 ## [2.11.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.10.0...backend-v2.11.0) (2026-05-28)
 
 
