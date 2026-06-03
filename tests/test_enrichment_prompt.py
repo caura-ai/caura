@@ -34,11 +34,13 @@ class TestEnrichmentPromptSignalPhrases:
         assert "committed to" in prompt
         assert "pledged" in prompt
 
-    def test_rule_has_signal_phrases(self):
-        prompt = self._get_prompt()
-        # Rule line should mention key directive words
-        assert "always" in prompt.lower()
-        assert "never" in prompt.lower()
+    def test_rule_signal_phrases_absent(self):
+        """CAURA-699: ``rule`` is server-reserved and no longer offered to the
+        classifier, so its directive cues ("always"/"never") — which only ever
+        lived in the rule bullet — must be gone from the prompt."""
+        prompt = self._get_prompt().lower()
+        assert "always" not in prompt
+        assert "never" not in prompt
 
     def test_prompt_token_count_reasonable(self):
         """Prompt ceiling — keeps cost bounded while leaving room for small additions.
@@ -64,14 +66,19 @@ class TestEnrichmentPromptSignalPhrases:
 
 @pytest.mark.unit
 class TestEnrichmentPromptVocabularySync:
-    """Prompt vocabulary must stay in lock-step with ``MEMORY_TYPES``.
+    """Prompt vocabulary must stay in lock-step with the *classifiable* types.
 
     Lives here because the prompt was the original drift site: ``insight``
     was added to the tuple but missed in the prompt's hardcoded list,
     causing the LLM to never emit that type. The renderer in
     ``common/enrichment/_prompts.py`` now derives both the inline list
-    and the bullet descriptions from ``MEMORY_TYPE_DESCRIPTIONS``, and
-    these tests guard that contract.
+    and the bullet descriptions from ``MEMORY_TYPE_DESCRIPTIONS``.
+
+    CAURA-699: the server-reserved types (insight/outcome/rule) are
+    deliberately EXCLUDED from the classifier vocabulary — they are authored
+    only by internal flows (insights_service / evolve_service). The renderer
+    filters them out, and these tests guard both halves of that contract:
+    every agent-writable type is present, and no reserved type leaks in.
     """
 
     def _get_prompt(self) -> str:
@@ -79,21 +86,44 @@ class TestEnrichmentPromptVocabularySync:
 
         return ENRICHMENT_PROMPT
 
-    def test_every_memory_type_appears_quoted_in_inline_list(self):
-        from common.enrichment.constants import MEMORY_TYPES
+    def test_every_classifiable_type_appears_quoted_in_inline_list(self):
+        from common.enrichment.constants import (
+            MEMORY_TYPES,
+            SERVER_RESERVED_MEMORY_TYPES,
+        )
 
         prompt = self._get_prompt()
         for t in MEMORY_TYPES:
+            if t in SERVER_RESERVED_MEMORY_TYPES:
+                continue
             assert f'"{t}"' in prompt, (
                 f"memory_type {t!r} missing from inline list — prompt vocabulary "
-                "drifted from MEMORY_TYPES"
+                "drifted from the classifiable types"
             )
 
-    def test_every_memory_type_has_a_bullet(self):
-        from common.enrichment.constants import MEMORY_TYPE_DESCRIPTIONS
+    def test_reserved_types_excluded_from_vocabulary(self):
+        """The classifier must never be OFFERED a server-reserved type."""
+        from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
+
+        prompt = self._get_prompt()
+        for t in sorted(SERVER_RESERVED_MEMORY_TYPES):
+            assert f'"{t}"' not in prompt, (
+                f"reserved memory_type {t!r} must not appear in the inline list"
+            )
+            assert f"   - {t}: " not in prompt, (
+                f"reserved memory_type {t!r} must not have a prompt bullet"
+            )
+
+    def test_every_classifiable_type_has_a_bullet(self):
+        from common.enrichment.constants import (
+            MEMORY_TYPE_DESCRIPTIONS,
+            SERVER_RESERVED_MEMORY_TYPES,
+        )
 
         prompt = self._get_prompt()
         for name, desc in MEMORY_TYPE_DESCRIPTIONS.items():
+            if name in SERVER_RESERVED_MEMORY_TYPES:
+                continue
             assert f"   - {name}: " in prompt, f"{name!r} bullet missing from prompt"
             # First clause of the description should also land verbatim
             first_clause = desc.split(".")[0].split(",")[0].strip()

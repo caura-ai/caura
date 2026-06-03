@@ -249,7 +249,10 @@ an LLM-summarized paragraph. Superseded memories (`status` ∈
 Provide exactly one of `content` / `items`. Server auto-classifies.
 `items` batches up to 100. `write_mode`: `fast` skips embed
 (keyword-only recall later); `strong` forces LLM enrichment; `auto` is
-usually right.
+usually right. `insight` / `outcome` / `rule` are server-generated only
+(via `memclaw_insights` / `memclaw_evolve`) — you cannot write them, and
+auto-classify will never assign them; record reflections as `semantic` or
+`fact` (or omit `memory_type`).
 
 **`memclaw_manage(op, memory_id, ...)`** — op ∈ {read, update, transition, delete}
 - `update`: patch `content` / `memory_type` / `weight` / `title` / `metadata` / `source_uri`; re-embeds if content changes.

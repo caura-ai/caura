@@ -158,7 +158,10 @@ an LLM-summarized paragraph.
 Provide exactly one of `content` / `items`. Server auto-classifies.
 `items` batches up to 100. `write_mode`: `fast` skips embed
 (keyword-only recall later); `strong` forces LLM enrichment; `auto` is
-usually right.
+usually right. `insight` / `outcome` / `rule` are server-generated only
+(via `memclaw_insights` / `memclaw_evolve`) — you cannot write them, and
+auto-classify will never assign them; record reflections as `semantic` or
+`fact` (or omit `memory_type`).
 
 **`fleet_id` MUST be passed explicitly when the write should land in a
 fleet.** The MCP connection URL's `?fleet_id=…` query param is used for

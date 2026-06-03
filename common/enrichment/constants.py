@@ -99,10 +99,14 @@ MEMORY_TYPES = tuple(t.value for t in MemoryType)
 # ``rule`` come out of evolve_service; ``insight`` comes out of
 # insights_service. Each is still a valid value at the storage layer
 # (the schema enum is unchanged) — only the route + MCP boundaries
-# reject explicit agent-supplied values. The LLM auto-classifier can
-# still emit these types when content genuinely looks insight-/rule-
-# /outcome-shaped; that path goes through the same internal write
-# helpers and is intentionally allowed.
+# reject explicit agent-supplied values.
+#
+# CAURA-699 — the LLM auto-classifier must NOT mint these from agent
+# content either: the enrichment prompt omits them from the offered
+# vocabulary (see ``common.enrichment._prompts``) and ``_validate_enrichment``
+# demotes any reserved type that slips through to ``DEFAULT_MEMORY_TYPE``.
+# The reserved types only ever reach storage via the internal flows above,
+# which set ``memory_type`` explicitly and bypass the classifier path.
 SERVER_RESERVED_MEMORY_TYPES: frozenset[str] = frozenset({"outcome", "rule", "insight"})
 
 # Import-time guard: enum and description dict must agree, otherwise

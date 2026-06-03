@@ -12,11 +12,23 @@ import time, so adding a type there propagates here automatically.
 
 from __future__ import annotations
 
-from common.enrichment.constants import MEMORY_TYPE_DESCRIPTIONS, MEMORY_TYPES
+from common.enrichment.constants import (
+    MEMORY_TYPE_DESCRIPTIONS,
+    MEMORY_TYPES,
+    SERVER_RESERVED_MEMORY_TYPES,
+)
 
-_TYPES_INLINE = ", ".join(f'"{name}"' for name in MEMORY_TYPES)
+# The auto-classifier is only ever offered the agent-writable types. The
+# server-reserved types (insight/outcome/rule) are authored exclusively by
+# internal flows (insights_service / evolve_service) with the type set
+# explicitly, so they never travel through this prompt. Offering them here
+# is what let agent writes leak into the insight space (CAURA-699).
+_CLASSIFIABLE_TYPES = tuple(
+    t for t in MEMORY_TYPES if t not in SERVER_RESERVED_MEMORY_TYPES
+)
+_TYPES_INLINE = ", ".join(f'"{name}"' for name in _CLASSIFIABLE_TYPES)
 _TYPE_BULLETS = "\n".join(
-    f"   - {name}: {desc}" for name, desc in MEMORY_TYPE_DESCRIPTIONS.items()
+    f"   - {name}: {MEMORY_TYPE_DESCRIPTIONS[name]}" for name in _CLASSIFIABLE_TYPES
 )
 
 ENRICHMENT_PROMPT = (

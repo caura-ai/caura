@@ -24,7 +24,13 @@ from dateutil import parser as dateutil_parser
 from dateutil.parser import ParserError
 
 from common.enrichment._prompts import ENRICHMENT_PROMPT
-from common.enrichment.constants import MEMORY_STATUSES, MEMORY_TYPES
+from common.enrichment.constants import (
+    DEFAULT_MEMORY_TYPE,
+    MEMORY_STATUSES,
+    MEMORY_TYPES,
+    SERVER_RESERVED_MEMORY_TYPES,
+    MemoryType,
+)
 from common.enrichment.schema import EnrichmentResult
 from common.llm.protocols import LLMProvider
 from common.llm.retry import call_with_fallback
@@ -67,8 +73,15 @@ def _validate_enrichment(raw: dict, llm_ms: int) -> EnrichmentResult:
         raise ValueError(
             f"enrichment LLM returned a JSON {type(raw).__name__} where a dict was expected"
         )
-    if raw.get("memory_type") not in MEMORY_TYPES:
-        raw["memory_type"] = "fact"
+    # Backstop for CAURA-699: the prompt no longer offers the server-reserved
+    # types (insight/outcome/rule), so a reserved value here means a
+    # hallucinated/out-of-vocab classification — treat it like any other
+    # invalid type and fall to the default. Reserved types are authored only
+    # by internal flows that set ``memory_type`` explicitly and bypass this
+    # classifier path entirely.
+    mt = raw.get("memory_type")
+    if mt not in MEMORY_TYPES or mt in SERVER_RESERVED_MEMORY_TYPES:
+        raw["memory_type"] = DEFAULT_MEMORY_TYPE
     if raw.get("status") not in MEMORY_STATUSES:
         raw["status"] = "active"
     # Guard against the LLM emitting either a JSON null
@@ -131,8 +144,12 @@ def _validate_enrichment(raw: dict, llm_ms: int) -> EnrichmentResult:
             if not isinstance(fc, str) or not fc.strip():
                 continue
             st = f.get("suggested_type")
-            if not isinstance(st, str) or st not in MEMORY_TYPES:
-                st = "fact"
+            if (
+                not isinstance(st, str)
+                or st not in MEMORY_TYPES
+                or st in SERVER_RESERVED_MEMORY_TYPES
+            ):
+                st = DEFAULT_MEMORY_TYPE
             fh = f.get("retrieval_hint")
             if not isinstance(fh, str):
                 fh = ""
@@ -234,6 +251,24 @@ def fake_enrich(content: str) -> EnrichmentResult:
     )
 
 
+def _demote_reserved_enrichment(result: EnrichmentResult) -> EnrichmentResult:
+    """CAURA-699 — the auto-classifier must never mint a server-reserved type.
+
+    ``insight`` / ``outcome`` / ``rule`` reach storage only via internal flows
+    (insights_service / evolve_service) that set ``memory_type`` explicitly.
+    The LLM path is already guarded in ``_validate_enrichment`` (the prompt
+    omits these types and any hallucinated value is demoted); this is the
+    matching guard for the keyword-heuristic fallback (:func:`fake_enrich`),
+    whose primitive vocabulary still recognises rule/outcome shapes. Demoting
+    here, rather than in the primitive, keeps ``fake_enrich`` reusable.
+    """
+    if result.memory_type in SERVER_RESERVED_MEMORY_TYPES:
+        return result.model_copy(
+            update={"memory_type": MemoryType(DEFAULT_MEMORY_TYPE)}
+        )
+    return result
+
+
 async def enrich_memory(
     content: str,
     tenant_config: object | None = None,
@@ -261,7 +296,7 @@ async def enrich_memory(
         )
 
     if provider_name == ProviderName.FAKE:
-        return fake_enrich(content)
+        return _demote_reserved_enrichment(fake_enrich(content))
     if provider_name == ProviderName.NONE:
         return EnrichmentResult()
 
@@ -292,7 +327,7 @@ async def enrich_memory(
     return await call_with_fallback(
         primary_provider_name=provider_name,
         call_fn=_do_enrich,
-        fake_fn=lambda: fake_enrich(content),
+        fake_fn=lambda: _demote_reserved_enrichment(fake_enrich(content)),
         tenant_config=tenant_config,
         service_label="enrichment",
         model_override=enrichment_model,
