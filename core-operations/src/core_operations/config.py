@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,38 +37,42 @@ class Settings(BaseSettings):
     core_api_url: str = "http://oss-core-api:8000"
     core_api_admin_api_key: str = ""
 
-    # Daily cadence for the SQL-only archive operations. Per-org
-    # scheduling isn't supported here (single global tick fans out to
-    # every active org); enterprise's per-org configurable cadences
-    # — e.g. ``security_audit.schedule_cron`` — still live on the
-    # enterprise scheduler.
-    lifecycle_archive_interval_seconds: float = 24 * 3600
-    # Separate cadence for purge — operationally a different concern
-    # (compliance-driven retention vs. staleness archival), so an
-    # operator can dial purge less frequently or to a different cycle
-    # without touching archive. Default matches archive (daily).
-    lifecycle_purge_interval_seconds: float = 24 * 3600
-    # Cadence for the pipeline ops (crystallize + entity-link).
-    # Independent because these are LLM-heavy and may want a longer
-    # cycle (cost) or different schedule (off-peak). Default daily;
-    # the consumer-side dedup gate filters double-fires within 23h.
-    lifecycle_pipeline_interval_seconds: float = 24 * 3600
-    # Insights discovery (focus='discover') schedule. Unlike the other
-    # lifecycle ops — which run on a fixed interval measured from service
-    # boot and so drift with each redeploy — insights is wall-clock
-    # aligned to a fixed UTC hour, so it lands in a predictable off-peak
-    # window regardless of when core-operations last started. Default
-    # 02:00 UTC. It's opt-in per-org (``auto_insights_enabled``, default
-    # off) and the consumer's activity gate further no-ops ticks where no
-    # non-insight memories landed since the last run, so a once-a-day
-    # fire is plenty.
+    # All lifecycle crons are wall-clock aligned to a fixed UTC hour
+    # rather than a boot-relative interval: each runs once a day at its
+    # configured hour, so it lands in a predictable off-peak window and
+    # never drifts with redeploys (and never fires an immediate tick at
+    # startup). Each knob is independently tunable so an operator can
+    # stagger the jobs across the night; they all default to 02:00 UTC.
+    # Per-org scheduling isn't supported here — a single global tick fans
+    # out to every active org; enterprise's per-org configurable cadences
+    # (e.g. ``security_audit.schedule_cron``) still live on its scheduler.
+
+    # SQL-only archive ops (expired + stale share this hour).
+    lifecycle_archive_run_at_hour: int = 2
+    # Purge is operationally a different concern (compliance-driven
+    # retention vs. staleness archival), so it gets its own hour and can
+    # be moved off the archive slot.
+    lifecycle_purge_run_at_hour: int = 2
+    # Pipeline ops (crystallize + entity-link) — LLM-heavy, so an operator
+    # may want these in their own off-peak slot away from the lighter SQL
+    # ops. The consumer-side dedup gate still filters double-fires.
+    lifecycle_pipeline_run_at_hour: int = 2
+    # Insights discovery (focus='discover'). Opt-in per-org
+    # (``auto_insights_enabled``, default off); the consumer's activity
+    # gate further no-ops ticks where no non-insight memories landed since
+    # the last run, so a once-a-day fire is plenty.
     lifecycle_insights_run_at_hour: int = 2
 
-    @field_validator("lifecycle_insights_run_at_hour")
+    @field_validator(
+        "lifecycle_archive_run_at_hour",
+        "lifecycle_purge_run_at_hour",
+        "lifecycle_pipeline_run_at_hour",
+        "lifecycle_insights_run_at_hour",
+    )
     @classmethod
-    def _validate_insights_hour(cls, v: int) -> int:
+    def _validate_run_at_hour(cls, v: int, info: ValidationInfo) -> int:
         if not 0 <= v <= 23:
-            raise ValueError("lifecycle_insights_run_at_hour must be in 0..23 (UTC hour)")
+            raise ValueError(f"{info.field_name} must be in 0..23 (UTC hour)")
         return v
 
 

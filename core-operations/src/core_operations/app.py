@@ -40,45 +40,54 @@ logger = logging.getLogger(__name__)
 
 
 def _register_scheduled_tasks() -> None:
-    # Each lifecycle op gets its own registration so an outage on one
-    # can't silently mask the others; their audit rows stay
-    # independent.
+    # Every lifecycle op is wall-clock aligned to a fixed UTC hour via
+    # delay_provider: it fires once a day at its configured hour, never at
+    # startup, and never drifts from the boot time. The ``24 * 3600`` arg
+    # is the nominal daily period (documentation only — the delay_provider
+    # drives the actual firing). Each op gets its own registration so an
+    # outage on one can't silently mask the others; their audit rows stay
+    # independent. Hours are independently configurable so operators can
+    # stagger the jobs; they all default to 02:00 UTC.
+    def _daily_at(hour_attr: str):
+        # Bind the setting lookup lazily so an operator override applied
+        # before start() is still picked up, and recompute each cycle.
+        return lambda: seconds_until_next_utc_hour(getattr(settings, hour_attr))
+
     scheduler.register(
         "lifecycle-archive-expired",
-        settings.lifecycle_archive_interval_seconds,
+        24 * 3600,
         run_archive_expired_tick,
+        delay_provider=_daily_at("lifecycle_archive_run_at_hour"),
     )
     scheduler.register(
         "lifecycle-archive-stale",
-        settings.lifecycle_archive_interval_seconds,
+        24 * 3600,
         run_archive_stale_tick,
+        delay_provider=_daily_at("lifecycle_archive_run_at_hour"),
     )
     scheduler.register(
         "lifecycle-purge-soft-deleted",
-        settings.lifecycle_purge_interval_seconds,
+        24 * 3600,
         run_purge_soft_deleted_tick,
+        delay_provider=_daily_at("lifecycle_purge_run_at_hour"),
     )
     scheduler.register(
         "lifecycle-crystallize",
-        settings.lifecycle_pipeline_interval_seconds,
+        24 * 3600,
         run_crystallize_tick,
+        delay_provider=_daily_at("lifecycle_pipeline_run_at_hour"),
     )
     scheduler.register(
         "lifecycle-entity-link",
-        settings.lifecycle_pipeline_interval_seconds,
+        24 * 3600,
         run_entity_link_tick,
+        delay_provider=_daily_at("lifecycle_pipeline_run_at_hour"),
     )
-    # Insights is the one lifecycle op pinned to a wall-clock hour rather
-    # than a boot-relative interval: it runs a fixed off-peak nightly slot
-    # (``lifecycle_insights_run_at_hour``, default 02:00 UTC) via
-    # delay_provider, so it never fires at startup and never drifts. The
-    # interval arg below is the nominal daily period (documentation only;
-    # the delay_provider drives the actual firing).
     scheduler.register(
         "lifecycle-insights",
         24 * 3600,
         run_insights_tick,
-        delay_provider=lambda: seconds_until_next_utc_hour(settings.lifecycle_insights_run_at_hour),
+        delay_provider=_daily_at("lifecycle_insights_run_at_hour"),
     )
 
 
