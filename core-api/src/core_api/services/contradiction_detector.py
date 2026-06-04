@@ -460,6 +460,16 @@ async def _detect(
                 "visibility": new_memory.get("visibility", "scope_team"),
             }
         )
+        # CAURA-132 diag — Path A semantic invocation + candidate count.
+        # Symmetric to PATH_C_DETECTION entry log; lets us tell apart
+        # "Path A ran but found no semantic candidates" from "Path A
+        # ran, found candidates, and the LLM judge said no".
+        logger.info(
+            "PATH_A_SEMANTIC entry memory=%s tenant=%s candidates_initial=%d",
+            memory_id,
+            tenant_id,
+            len(candidates) if candidates else 0,
+        )
         if candidates:
             # Fire all LLM checks concurrently instead of serially
             tasks = [
@@ -496,6 +506,14 @@ async def _detect(
                 # A4 #13 will introduce confidence-weighted vetoes on
                 # Path C's else-branch.
                 verdict, _confidence = result  # type: ignore[misc]
+                # CAURA-132 diag — Path A semantic per-candidate verdict.
+                logger.info(
+                    "PATH_A_SEMANTIC verdict memory=%s candidate=%s verdict=%s confidence=%.2f",
+                    memory_id,
+                    candidate.get("id"),
+                    verdict,
+                    _confidence,
+                )
                 if verdict:
                     # CAURA-125 — symmetric attribution; see RDF path
                     # above for the rationale.
@@ -1492,6 +1510,18 @@ async def detect_contradictions_by_entities_async(
             }
         )
         n_candidates = len(candidates) if candidates else 0
+        # CAURA-132 diag — surface Path C invocation + initial candidate
+        # count. The wet-test miss class (links=2/2, no contradiction)
+        # could be either (a) zero candidates returned even though the
+        # entity overlap exists, or (b) candidates returned but dropped
+        # downstream. Without this log we can't distinguish them.
+        logger.info(
+            "PATH_C_DETECTION entry memory=%s tenant=%s fleet=%s candidates_initial=%d",
+            memory_id,
+            tenant_id,
+            fleet_id,
+            n_candidates,
+        )
         if not candidates:
             return
 
@@ -1513,6 +1543,13 @@ async def detect_contradictions_by_entities_async(
         ]
         n_preflight_skipped = len(candidates) - len(filtered_candidates)
         candidates = filtered_candidates
+        # CAURA-132 diag — A1 #17 outcome.
+        logger.info(
+            "PATH_C_DETECTION after_a1_17 memory=%s preflight_skipped=%d remaining=%d",
+            memory_id,
+            n_preflight_skipped,
+            len(candidates),
+        )
         if not candidates:
             logger.info(
                 "Path C preflight skipped all %d candidates for memory %s (distinct subject_entity_id)",
@@ -1604,6 +1641,17 @@ async def detect_contradictions_by_entities_async(
                 for c, ctx in zip(candidates, fetched[1:], strict=False):
                     contexts[str(c.get("id"))] = ctx
                 contexts_fetched = True
+                # CAURA-132 diag — context-fetch outcome. Per-candidate
+                # context sizes show which candidates have populated
+                # entity_links (eligible for the entity-aware judge) vs
+                # which are still in cold extraction (will fall back).
+                ctx_sizes = {cid: len(ctx) for cid, ctx in contexts.items()}
+                logger.info(
+                    "PATH_C_DETECTION context_fetched memory=%s new_ctx_size=%d cand_ctx_sizes=%s",
+                    memory_id,
+                    len(new_ctx),
+                    ctx_sizes,
+                )
             except Exception as e:
                 # Fail open — keep candidates and let the LLM judge
                 # decide via the base prompt. Conservative against
@@ -1666,9 +1714,14 @@ async def detect_contradictions_by_entities_async(
         # for the candidate at the time Path C runs).
         new_content = new_memory.get("content", "")
         tasks = []
+        # CAURA-132 diag — record which judge was selected for each
+        # candidate so the post-hoc analysis can correlate
+        # judge_kind → verdict.
+        judge_kinds: list[str] = []
         for c in candidates:
             cand_ctx = contexts.get(str(c.get("id")), []) if contexts_fetched else []
             if contexts_fetched and new_ctx and cand_ctx:
+                judge_kinds.append("entity_aware")
                 tasks.append(
                     asyncio.wait_for(
                         _llm_entity_aware_contradiction_check(
@@ -1678,12 +1731,20 @@ async def detect_contradictions_by_entities_async(
                     )
                 )
             else:
+                judge_kinds.append("base")
                 tasks.append(
                     asyncio.wait_for(
                         _llm_contradiction_check(new_content, c.get("content", ""), tenant_config),
                         timeout=10.0,
                     )
                 )
+        logger.info(
+            "PATH_C_DETECTION judge_selection memory=%s candidates=%d entity_aware=%d base=%d",
+            memory_id,
+            len(candidates),
+            judge_kinds.count("entity_aware"),
+            judge_kinds.count("base"),
+        )
         results = await asyncio.gather(*tasks, return_exceptions=True)
         found = False
         # CAURA-125 — state-corruption guard; mirrors the RDF and
@@ -1694,7 +1755,7 @@ async def detect_contradictions_by_entities_async(
         # ``memory_id`` so a mixed canonical/flipped run produces one
         # merged row per memory; see ``_merge_status_update``.
         updates: dict[str, dict] = {}
-        for candidate, result in zip(candidates, results):
+        for idx, (candidate, result) in enumerate(zip(candidates, results, strict=False)):
             if isinstance(result, Exception):
                 logger.warning(
                     "Entity contradiction check failed for candidate %s: %s",
@@ -1706,6 +1767,18 @@ async def detect_contradictions_by_entities_async(
             # Path C continues to gate only on verdict at this site;
             # A4 #13 will introduce confidence-weighted vetoes here.
             verdict, _confidence = result  # type: ignore[misc]
+            # CAURA-132 diag — per-candidate verdict log. Tagged with
+            # the judge_kind so we can see whether the entity-aware
+            # judge returns verdict=False when both contexts are
+            # populated but no flag fires (the wet-test miss class).
+            logger.info(
+                "PATH_C_DETECTION verdict memory=%s candidate=%s judge=%s verdict=%s confidence=%.2f",
+                memory_id,
+                candidate.get("id"),
+                judge_kinds[idx] if idx < len(judge_kinds) else "unknown",
+                verdict,
+                _confidence,
+            )
             if verdict:
                 # CAURA-125 — symmetric attribution; see RDF path for
                 # the rationale. First match sets supersedes_id on the
