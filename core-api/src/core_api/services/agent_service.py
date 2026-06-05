@@ -141,7 +141,7 @@ async def enforce_fleet_write(
     if trust < 3:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{agent_id}' (trust_level={trust}) cannot write to fleet '{fleet_id}'. Requires trust_level >= 3.",
+            detail=f"fleet-scope policy: fleet '{fleet_id}' is not writable by principals of fleet '{agent.get('fleet_id') or 'none'}'.",
         )
     return agent
 
@@ -168,7 +168,7 @@ async def enforce_fleet_read(
     if trust < 2:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{agent_id}' (trust_level={trust}) cannot read fleet '{fleet_id}'. Requires trust_level >= 2.",
+            detail=f"fleet-scope policy: fleet '{fleet_id}' is not readable by principals of fleet '{agent.get('fleet_id') or 'none'}'.",
         )
 
 
@@ -264,7 +264,7 @@ async def enforce_delete(
     if trust < 3:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{agent_id}' (trust_level={trust}) cannot delete memories. Requires trust_level >= 3.",
+            detail=f"access policy: principals of fleet '{agent.get('fleet_id') or 'none'}' are not permitted to delete memories.",
         )
 
 
@@ -285,12 +285,12 @@ async def enforce_update(
     if trust == 0:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{agent_id}' (trust_level=0) is restricted from updates.",
+            detail=f"access policy: agent '{agent_id}' is restricted from updates.",
         )
     if trust < 3 and agent_id != memory_owner_agent_id:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{agent_id}' (trust_level={trust}) can only update own memories. Requires trust_level >= 3.",
+            detail=f"access policy: agent '{agent_id}' may only update its own memories.",
         )
 
 
