@@ -29,6 +29,19 @@ _platform_embedding: EmbeddingProvider | None = None
 _platform_init_errors: list[str] = []
 
 
+def _reject_openai_config(msg: str, *args: object) -> None:
+    """Record a platform OpenAI-embedding misconfiguration and warn.
+
+    Single-sources the ``"openai-embedding-config"`` error tag shared by
+    every config-rejection arm. The caller must ``return`` after calling
+    this — the singleton is left ``None`` so the worker fails loud (drops
+    embed requests with a visible log) rather than silently embedding
+    against the wrong endpoint.
+    """
+    logger.warning(msg, *args)
+    _platform_init_errors.append("openai-embedding-config")
+
+
 def init_platform_embedding() -> None:
     """Build the singleton from ``PLATFORM_EMBEDDING_*`` env vars.
 
@@ -48,19 +61,90 @@ def init_platform_embedding() -> None:
     if provider == ProviderName.OPENAI:
         api_key = os.environ.get("PLATFORM_EMBEDDING_API_KEY", "")
         if not api_key:
-            logger.warning(
+            _reject_openai_config(
                 "PLATFORM_EMBEDDING_PROVIDER=openai but no PLATFORM_EMBEDDING_API_KEY"
             )
-            _platform_init_errors.append("openai-embedding-config")
             return
+
+        # Self-hosted OpenAI-compatible endpoint support (TEI, vLLM, ...).
+        # The core-worker embeds *documents* exclusively through THIS
+        # singleton (core_worker/consumer.py::handle_embed_request →
+        # get_platform_embedding), never the registry. Without threading a
+        # base_url through here, the worker's write path can only ever reach
+        # api.openai.com — so pointing core-api at a self-hosted endpoint via
+        # the registry's OPENAI_EMBEDDING_BASE_URL would silently leave the
+        # write path (and the stored corpus) on the old vendor. These knobs
+        # mirror the registry's in common/embedding/_registry.py so the
+        # platform tier can target the same self-hosted endpoint.
+        base_url = os.environ.get("PLATFORM_EMBEDDING_BASE_URL") or None
+        _send_dim_raw = os.environ.get(
+            "PLATFORM_EMBEDDING_SEND_DIMENSIONS", "true"
+        ).lower()
+        if _send_dim_raw not in ("true", "false"):
+            _reject_openai_config(
+                "PLATFORM_EMBEDDING_SEND_DIMENSIONS=%r must be 'true' or 'false'",
+                _send_dim_raw,
+            )
+            return
+        send_dimensions = _send_dim_raw == "true"
+
+        # The same two guaranteed-failure misconfigurations the registry
+        # rejects. Fail loud at init (None singleton → worker drops embed
+        # requests with a visible log) rather than 4xx'ing every embed call
+        # and silently persisting embedding=NULL.
+        if base_url and send_dimensions:
+            _reject_openai_config(
+                "PLATFORM_EMBEDDING_BASE_URL=%r is set but "
+                "PLATFORM_EMBEDDING_SEND_DIMENSIONS is true. Self-hosted "
+                "OpenAI-compatible endpoints (TEI, vLLM, ...) reject the "
+                "``dimensions=`` kwarg. Set PLATFORM_EMBEDDING_SEND_DIMENSIONS"
+                "=false for TEI/vLLM, or unset PLATFORM_EMBEDDING_BASE_URL to "
+                "use hosted OpenAI.",
+                base_url,
+            )
+            return
+        if not base_url and not send_dimensions:
+            _reject_openai_config(
+                "PLATFORM_EMBEDDING_SEND_DIMENSIONS=false but "
+                "PLATFORM_EMBEDDING_BASE_URL is unset (hosted OpenAI). Hosted "
+                "OpenAI returns the model's native dim without the "
+                "``dimensions=`` kwarg, which pgvector rejects at write time. "
+                "Set PLATFORM_EMBEDDING_SEND_DIMENSIONS=true (or unset it) for "
+                "the hosted OpenAI path, or set PLATFORM_EMBEDDING_BASE_URL to "
+                "a self-hosted endpoint producing VECTOR_DIM-sized vectors."
+            )
+            return
+
+        # Matryoshka truncation for models whose native dim > VECTOR_DIM
+        # (e.g. Qwen3-Embedding-4B). Constructor re-validates it equals
+        # VECTOR_DIM and renormalizes; surface the env-var name on parse error.
+        truncate_raw = os.environ.get("PLATFORM_EMBEDDING_TRUNCATE_TO_DIM")
+        try:
+            truncate_to_dim = int(truncate_raw) if truncate_raw else None
+        except ValueError:
+            _reject_openai_config(
+                "PLATFORM_EMBEDDING_TRUNCATE_TO_DIM=%r must be an integer",
+                truncate_raw,
+            )
+            return
+
         try:
             embed_model = (
                 os.environ.get("PLATFORM_EMBEDDING_MODEL") or OPENAI_EMBEDDING_MODEL
             )
             _platform_embedding = OpenAIEmbeddingProvider(
-                api_key=api_key, model=embed_model
+                api_key=api_key,
+                model=embed_model,
+                base_url=base_url,
+                send_dimensions=send_dimensions,
+                truncate_to_dim=truncate_to_dim,
             )
-            logger.info("Platform embedding: openai/%s", embed_model)
+            logger.info(
+                "Platform embedding: openai/%s (base_url=%s, send_dimensions=%s)",
+                embed_model,
+                base_url or "api.openai.com",
+                send_dimensions,
+            )
         except Exception:
             logger.exception("Failed to initialize platform OpenAI embedding provider")
             _platform_init_errors.append("openai-embedding")

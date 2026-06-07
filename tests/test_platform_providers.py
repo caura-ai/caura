@@ -24,6 +24,15 @@ def _reset_platform_singletons():
 
     llm_mod._platform_llm = None
     embedding_mod._platform_embedding = None
+    # Also clear the init-error lists. They are module-global and feed the
+    # /health "degraded" signal (core_api/routes/health.py: a non-empty
+    # get_platform_init_errors() → status "degraded"). A leftover
+    # "openai-embedding-config" entry from a rejection test below otherwise
+    # leaks across files into later integration health assertions
+    # (e.g. test_security_tenant_isolation::test_health_no_tenant_stats).
+    embedding_mod._platform_init_errors.clear()
+    if hasattr(llm_mod, "_platform_init_errors"):
+        llm_mod._platform_init_errors.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -527,3 +536,121 @@ class _FakeTenantConfig:
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
             setattr(self, k, v)
+
+
+# ---------------------------------------------------------------------------
+# Group 6: Platform embedding against a self-hosted endpoint (TEI/vLLM)
+# ---------------------------------------------------------------------------
+
+
+def _init_and_assert_rejected():
+    """Run ``init_platform_embedding`` and assert it rejected the config.
+
+    A rejected config leaves the singleton ``None`` and records the
+    ``openai-embedding-config`` tag (which surfaces as health="degraded").
+    Deferred import is intentional — see the singleton-reset note in
+    ``_reset_platform_singletons``.
+    """
+    from common.embedding._platform import (
+        get_platform_embedding,
+        get_platform_init_errors,
+        init_platform_embedding,
+    )
+
+    init_platform_embedding()
+    assert get_platform_embedding() is None
+    assert "openai-embedding-config" in get_platform_init_errors()
+
+
+class TestPlatformEmbeddingSelfHosted:
+    """``init_platform_embedding`` honours ``PLATFORM_EMBEDDING_BASE_URL`` so the
+    core-worker write path (which only ever uses the platform singleton) can be
+    pointed at a self-hosted OpenAI-compatible endpoint such as TEI/bge-m3.
+
+    Calls ``common.embedding._platform.init_platform_embedding`` directly — the
+    exact entry point the worker lifespan uses — rather than the core-api
+    ``init_platform_providers`` wrapper.
+    """
+
+    def test_base_url_and_send_dimensions_false_builds_tei_provider(self, monkeypatch):
+        monkeypatch.setenv("PLATFORM_EMBEDDING_PROVIDER", "openai")
+        monkeypatch.setenv("PLATFORM_EMBEDDING_API_KEY", "sk-tei-noauth")
+        monkeypatch.setenv("PLATFORM_EMBEDDING_MODEL", "BAAI/bge-m3")
+        monkeypatch.setenv(
+            "PLATFORM_EMBEDDING_BASE_URL", "http://tei.staging.internal:80/v1"
+        )
+        monkeypatch.setenv("PLATFORM_EMBEDDING_SEND_DIMENSIONS", "false")
+
+        from common.embedding._platform import (
+            get_platform_embedding,
+            init_platform_embedding,
+        )
+        from common.embedding.providers.openai import OpenAIEmbeddingProvider
+
+        init_platform_embedding()
+        emb = get_platform_embedding()
+        assert isinstance(emb, OpenAIEmbeddingProvider)
+        assert emb._send_dimensions is False
+        assert emb.model == "BAAI/bge-m3"
+        assert "tei.staging.internal" in str(emb._client.base_url)
+
+    def test_hosted_openai_default_unchanged(self, monkeypatch):
+        """No base_url + default send_dimensions → identical to the old
+        behaviour: hosted api.openai.com with ``dimensions=`` enabled."""
+        monkeypatch.setenv("PLATFORM_EMBEDDING_PROVIDER", "openai")
+        monkeypatch.setenv("PLATFORM_EMBEDDING_API_KEY", "sk-hosted")
+        monkeypatch.setenv("PLATFORM_EMBEDDING_MODEL", "text-embedding-3-small")
+        monkeypatch.delenv("PLATFORM_EMBEDDING_BASE_URL", raising=False)
+        monkeypatch.delenv("PLATFORM_EMBEDDING_SEND_DIMENSIONS", raising=False)
+
+        from common.embedding._platform import (
+            get_platform_embedding,
+            init_platform_embedding,
+        )
+
+        init_platform_embedding()
+        emb = get_platform_embedding()
+        assert emb is not None
+        assert emb._send_dimensions is True
+        assert "api.openai.com" in str(emb._client.base_url)
+
+    def test_base_url_with_send_dimensions_true_is_rejected(self, monkeypatch, caplog):
+        monkeypatch.setenv("PLATFORM_EMBEDDING_PROVIDER", "openai")
+        monkeypatch.setenv("PLATFORM_EMBEDDING_API_KEY", "sk-tei")
+        monkeypatch.setenv(
+            "PLATFORM_EMBEDDING_BASE_URL", "http://tei.staging.internal:80/v1"
+        )
+        # send_dimensions defaults to "true" — guaranteed-failure combo.
+        monkeypatch.delenv("PLATFORM_EMBEDDING_SEND_DIMENSIONS", raising=False)
+
+        _init_and_assert_rejected()
+        assert "reject the" in caplog.text
+
+    def test_send_dimensions_false_without_base_url_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("PLATFORM_EMBEDDING_PROVIDER", "openai")
+        monkeypatch.setenv("PLATFORM_EMBEDDING_API_KEY", "sk-hosted")
+        monkeypatch.delenv("PLATFORM_EMBEDDING_BASE_URL", raising=False)
+        monkeypatch.setenv("PLATFORM_EMBEDDING_SEND_DIMENSIONS", "false")
+
+        _init_and_assert_rejected()
+
+    def test_invalid_send_dimensions_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("PLATFORM_EMBEDDING_PROVIDER", "openai")
+        monkeypatch.setenv("PLATFORM_EMBEDDING_API_KEY", "sk-tei")
+        monkeypatch.setenv(
+            "PLATFORM_EMBEDDING_BASE_URL", "http://tei.staging.internal:80/v1"
+        )
+        monkeypatch.setenv("PLATFORM_EMBEDDING_SEND_DIMENSIONS", "yes")
+
+        _init_and_assert_rejected()
+
+    def test_non_integer_truncate_to_dim_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("PLATFORM_EMBEDDING_PROVIDER", "openai")
+        monkeypatch.setenv("PLATFORM_EMBEDDING_API_KEY", "sk-tei")
+        monkeypatch.setenv(
+            "PLATFORM_EMBEDDING_BASE_URL", "http://tei.staging.internal:80/v1"
+        )
+        monkeypatch.setenv("PLATFORM_EMBEDDING_SEND_DIMENSIONS", "false")
+        monkeypatch.setenv("PLATFORM_EMBEDDING_TRUNCATE_TO_DIM", "not-an-int")
+
+        _init_and_assert_rejected()
