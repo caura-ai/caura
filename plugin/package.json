@@ -20,7 +20,7 @@
     "check:version": "bash -c 'V=$(node -p \"require(\\\"./package.json\\\").version\"); grep -qF \"PLUGIN_VERSION = \\\"$V\\\"\" src/version.ts || (echo \"version.ts out of sync with package.json ($V): run bash ../scripts/gen-version.sh\" >&2 && exit 1) && echo \"check:version ok: $V\"'"
   },
   "devDependencies": {
-    "@types/node": "^25.4.0",
+    "@types/node": "^25.9.2",
     "typescript": "^5.4"
   }
 }
