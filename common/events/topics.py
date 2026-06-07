@@ -60,6 +60,11 @@ class Lifecycle(enum.StrEnum):
     CRYSTALLIZE_REQUESTED = "memclaw.lifecycle.crystallize-requested"
     ENTITY_LINK_REQUESTED = "memclaw.lifecycle.entity-link-requested"
     INSIGHTS_REQUESTED = "memclaw.lifecycle.insights-requested"
+    # Skill Factory SF-007: Forge resident publishes one of these per
+    # scheduled distillation run. Stub handler in Phase 0 (just logs);
+    # real handler arrives in Phase 1 with the cluster fingerprint and
+    # distillation pipeline. See ``common.events.lifecycle_forge_request``.
+    FORGE_DISTILL_REQUESTED = "memclaw.lifecycle.forge-distill-requested"
 
 
 class Topics:
