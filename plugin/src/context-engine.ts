@@ -32,6 +32,7 @@ import {
 import { memclawPromptSectionText } from "./prompt-section.js";
 import { MEMCLAW_TOOLS } from "./tools.js";
 import { resolveAgentId } from "./resolve-agent.js";
+import { getTenantPrefix, getSessionKey } from "./context-engine.internal.js";
 import { logError, logErrorCritical } from "./logger.js";
 import { fetchKeystonesBlock } from "./keystones.js";
 import { getOpenClawSdk } from "./openclaw-sdk-bridge.js";
@@ -66,25 +67,6 @@ const MAX_SESSIONS = 100;
 const MAX_INGEST_WRITES_PER_SESSION = 10;
 const sessionBuffers = new Map<string, IngestMessage[]>();
 const sessionIngestCounts = new Map<string, number>();
-
-function getTenantPrefix(
-  config: Record<string, unknown> | undefined | null,
-): string {
-  // Optional chaining — config may be missing entirely (CAURA-000).
-  return ((config?.tenantId as string) || MEMCLAW_TENANT_ID || "default");
-}
-
-function getSessionKey(
-  config: Record<string, unknown> | undefined | null,
-): string {
-  const tenantPrefix = getTenantPrefix(config);
-  // Always prefix with tenant to prevent cross-tenant buffer sharing,
-  // even when config.sessionKey is provided.
-  const sessionPart =
-    (config?.sessionKey as string) ||
-    resolveAgentId(config) + ":" + ((config?.sessionId as string) || "default");
-  return tenantPrefix + ":" + sessionPart;
-}
 
 function pushToBuffer(sessionKey: string, message: IngestMessage): void {
   let buffer = sessionBuffers.get(sessionKey);
@@ -538,7 +520,10 @@ export class MemClawContextEngine {
     await this.bootstrap();
     if (!message || !message.content) return;
 
-    const sessionKey = getSessionKey(this.config);
+    const sessionKey = getSessionKey(
+      this.config,
+      message as unknown as Record<string, unknown>,
+    );
     pushToBuffer(sessionKey, message);
 
     // Persist user messages as episode memories (async, non-blocking).
@@ -556,7 +541,16 @@ export class MemClawContextEngine {
 
       try {
         const tid = await ensureTenantId();
-        const agentId = resolveAgentId(this.config);
+        // Per-call ``message`` (or the wrapper OpenClaw passes around
+        // it) carries the agent identity via ``sessionKey``; the
+        // factory-time ``this.config`` doesn't. Thread ``message``
+        // first so the resolver can extract agent name from
+        // ``"agent:NAME:CHANNEL:..."`` instead of falling back to
+        // the install-default. (CAURA-000)
+        const agentId = resolveAgentId(
+          message as unknown as Record<string, unknown>,
+          this.config,
+        );
         const truncated =
           content.length > MAX_TURN_SUMMARY_LENGTH
             ? content.slice(0, MAX_TURN_SUMMARY_LENGTH) + "..."
@@ -681,7 +675,17 @@ export class MemClawContextEngine {
     const incomingMessages = safeMessages;
     const prompt = (params?.prompt as string | undefined) ?? legacyPrompt;
 
-    const agentId = resolveAgentId(this.config);
+    // OpenClaw 2026.5.4 invokes ``assemble({sessionId, sessionKey, ...})``
+    // — ``sessionKey`` is the canonical agent identity source
+    // (``"agent:NAME:CHANNEL:..."``). Thread ``params`` first so the
+    // resolver extracts the real agent name instead of falling back to
+    // the install-default. Without this, the identity block below
+    // carries ``main-<installId>`` and every downstream LLM tool call
+    // propagates the wrong agent_id. (CAURA-000)
+    const agentId = resolveAgentId(
+      params as unknown as Record<string, unknown>,
+      this.config,
+    );
     const fleetId = MEMCLAW_FLEET_ID || undefined;
 
     // --- Section 1: Education (always emitted; cheap, static) ---
@@ -723,7 +727,10 @@ export class MemClawContextEngine {
       fleetId,
     });
 
-    const sessionKey = getSessionKey(this.config);
+    const sessionKey = getSessionKey(
+      this.config,
+      params as unknown as Record<string, unknown>,
+    );
     const sessionHash = createHashShort(sessionKey);
 
     // --- Recall gate ---
@@ -1179,3 +1186,4 @@ export class MemClawContextEngine {
 
   async onSubagentEnded(_context: unknown): Promise<void> {}
 }
+

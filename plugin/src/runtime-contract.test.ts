@@ -573,7 +573,199 @@ describe("ContextEngine.assemble contract (OpenClaw AssembleResult)", () => {
   });
 });
 
-// --- Undefined-config tolerance contract (v2.6.5 hotfix) ---
+// --- Per-call agent-id resolution contract (v2.8.1 hotfix) ---
+//
+// Customer report 2026-06-02: webclaw agent's gateway log emitted
+// ``[memclaw] Could not resolve agent ID — using install-default
+// 'main-e5366d79a926'`` 4-5 times per turn. Root cause: 3 of our 6
+// ``resolveAgentId`` call sites passed only ``this.config`` (the
+// factory-time ``factoryCtx`` wrapper, containing only
+// ``{config, agentDir, workspaceDir}`` — no agent identity). The
+// per-call ``params`` object — which OpenClaw 2026.5.4 populates
+// with ``sessionKey: "agent:NAME:CHANNEL:..."`` — was being
+// dropped on the floor.
+//
+// User-visible consequence: the identity block injected by
+// ``assemble`` carried the bogus install-default
+// (``main-<installId>``) instead of the real agent name. The LLM
+// saw the wrong ``agent_id`` every turn and propagated it into
+// downstream tool calls, scoping memory writes/recalls under a
+// phantom agent. Cross-session recall silently broke.
+//
+// Earlier wet tests missed this because:
+//   1. probes asserted only structural shape (``messages`` is an
+//      array, ``estimatedTokens`` is a number), never SEMANTIC
+//      content (``agent_id=<expected>``).
+//   2. ``main-<installId>`` is visually similar to a real
+//      ``--agent main`` value in test logs; the fallback wasn't
+//      obviously wrong.
+//
+// These tests pin BOTH the structural contract AND the resolved
+// agent_id content, so the same class of bug cannot slip through
+// again. Positive-content assertions on agent identity belong with
+// the structural assertions above; this is intentional.
+
+describe("ContextEngine.assemble agent-id resolution (v2.8.1)", () => {
+  function makeEngine(): MemClawContextEngine {
+    return new MemClawContextEngine({});
+  }
+
+  test("resolves agent_id from params.sessionKey 'agent:NAME:...' format", async () => {
+    const engine = makeEngine();
+    const result = await engine.assemble({
+      messages: [{ role: "user", content: "hi" }],
+      sessionKey: "agent:bankingclaw:whatsapp:group:test-group",
+      tokenBudget: 4000,
+    });
+    assert.match(
+      result.systemPromptAddition ?? "",
+      /agent_id=`bankingclaw`/,
+      "assemble's identity block must extract agent_id from " +
+        "sessionKey (per OpenClaw 2026.5.4 contract), not fall back " +
+        "to install-default. If this fails, the LLM is being told " +
+        "the WRONG agent_id every turn — see CAURA-000.",
+    );
+  });
+
+  test("resolves agent_id from params.agentId explicit form", async () => {
+    const engine = makeEngine();
+    const result = await engine.assemble({
+      messages: [{ role: "user", content: "hi" }],
+      agentId: "explicit-agent-name",
+      tokenBudget: 4000,
+    } as unknown as Parameters<typeof engine.assemble>[0]);
+    assert.match(
+      result.systemPromptAddition ?? "",
+      /agent_id=`explicit-agent-name`/,
+      "explicit ``agentId`` on params must take precedence",
+    );
+  });
+
+  test("falls back to install-default ONLY when no per-call context provides agent identity", async () => {
+    // Regression guard: when params lacks sessionKey/agentId AND
+    // this.config has nothing useful, the install-default fallback
+    // path must still work — we don't want to introduce a hard
+    // failure here, just a documented fallback.
+    const engine = makeEngine();
+    const result = await engine.assemble({
+      messages: [{ role: "user", content: "hi" }],
+      tokenBudget: 4000,
+    });
+    // Either "main-<12-hex>" (install-default) OR whatever
+    // MEMCLAW_AGENT_ID env var is set to. Don't pin the exact
+    // value; just assert the contract still produces SOMETHING.
+    assert.match(
+      result.systemPromptAddition ?? "",
+      /agent_id=`[^`]+`/,
+      "fallback path must still produce a non-empty agent_id",
+    );
+  });
+
+  test("malformed sessionKey (not 'agent:NAME:...') falls through to other sources", async () => {
+    const engine = makeEngine();
+    const result = await engine.assemble({
+      messages: [{ role: "user", content: "hi" }],
+      // Not the "agent:NAME:..." format the resolver parses.
+      sessionKey: "some-arbitrary-session-id",
+      tokenBudget: 4000,
+    });
+    // Should fall through past the sessionKey path; no specific
+    // agent name extracted. Acceptable to land on install-default.
+    assert.match(result.systemPromptAddition ?? "", /agent_id=`[^`]+`/);
+  });
+});
+
+// --- Session-buffer key consistency contract (v2.8.1 review follow-up) ---
+//
+// Code-review concern: ``ingest`` and ``assemble`` both compute a
+// per-session ``sessionKey`` to index the module-level
+// ``sessionBuffers`` Map. If the two compute DIFFERENT keys for the
+// same logical session, the messages ``ingest`` writes are invisible
+// to ``assemble``'s ``buildQueryFromMessages`` lookup — recall
+// quality degrades silently. The fix in v2.8.1 threads per-call
+// context into both call sites, but nothing structurally pins the
+// guarantee that they remain consistent.
+//
+// This test imports the module-private ``getSessionKey`` from
+// ``context-engine.internal.ts`` (kept out of the production
+// ``context-engine.ts`` module to avoid a public ``_internal``
+// export) and asserts that calls shaped
+// like OpenClaw's actual ingest / assemble invocations produce
+// identical keys when given the same session identity. If a future
+// refactor regresses one but not the other, this test fails
+// loudly.
+
+import * as contextEngineInternal from "./context-engine.internal.js";
+
+describe("ContextEngine session-key consistency (ingest ↔ assemble)", () => {
+  test("identical sessionKey on ingest-shape and assemble-shape calls produces identical session-buffer keys", () => {
+    const config = {};
+
+    // OpenClaw 2026.5.4 invokes ``contextEngine.ingest({sessionId, sessionKey, message})``
+    // — the wrapper. Our plugin's ``ingest(message)`` receives this whole
+    // wrapper as ``message``. ``getSessionKey`` reads from ``message?.sessionKey``.
+    const ingestArg = {
+      sessionId: "session-abc-123",
+      sessionKey: "agent:webclaw:whatsapp:group:test",
+      message: { role: "user", content: "needle" },
+    };
+
+    // OpenClaw invokes ``contextEngine.assemble({sessionId, sessionKey, messages, ...})``
+    // — distinct params shape, same session identity.
+    const assembleParams = {
+      sessionId: "session-abc-123",
+      sessionKey: "agent:webclaw:whatsapp:group:test",
+      messages: [],
+      tokenBudget: 4000,
+    };
+
+    const ingestKey = contextEngineInternal.getSessionKey(config, ingestArg);
+    const assembleKey = contextEngineInternal.getSessionKey(config, assembleParams);
+
+    assert.strictEqual(
+      ingestKey,
+      assembleKey,
+      "ingest and assemble must derive the same session-buffer key for " +
+        "the same session identity. If this fails, the in-memory " +
+        "buffer ingest writes will be invisible to assemble's " +
+        "buildQueryFromMessages lookup and recall quality degrades " +
+        "silently. See CAURA-000 v2.8.1 review follow-up.",
+    );
+    // The key must also embed the session-identifying sessionKey
+    // (not be a content-free default), to prove we're actually
+    // using per-call context — not just coincidentally producing
+    // the same fallback key in both calls.
+    assert.ok(
+      ingestKey.includes("agent:webclaw:whatsapp:group:test"),
+      `expected session-buffer key to embed the wrapper sessionKey, got ${ingestKey}`,
+    );
+  });
+
+  test("when sessionKey is absent from BOTH the per-call source and config, ingest and assemble still produce identical keys (consistent fallback)", () => {
+    // Without sessionKey, both calls fall through to the
+    // ``resolveAgentId(perCall, config) + ":" + sessionId`` path.
+    // We assert that path is identical for matching identity even
+    // when sessionKey is missing — important because a non-OpenClaw
+    // caller might omit it.
+    const config = {};
+    const ingestArg = {
+      sessionId: "sid",
+      message: { role: "user", content: "x" },
+    };
+    const assembleParams = {
+      sessionId: "sid",
+      messages: [],
+      tokenBudget: 4000,
+    };
+    const ingestKey = contextEngineInternal.getSessionKey(config, ingestArg);
+    const assembleKey = contextEngineInternal.getSessionKey(config, assembleParams);
+    assert.strictEqual(
+      ingestKey,
+      assembleKey,
+      "ingest/assemble fallback paths must produce identical keys when no sessionKey is provided",
+    );
+  });
+});
 //
 // Customer escalation 2026-05-28: a different agent (``dbaclaw``)
 // on the same gateway emitted:
