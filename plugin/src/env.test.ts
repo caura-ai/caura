@@ -82,6 +82,36 @@ describe("resolveTenantId — network failure handling", () => {
     assert.equal(errorLines.length, 0, "no error-level output for network failures");
   });
 
+  test("passes an AbortSignal to fetch on every attempt (bounds per-attempt latency — CAURA-000)", async () => {
+    // Pins the contract that the ``/auth/verify`` fetch in
+    // ``resolveTenantId`` MUST be invoked with an AbortSignal — without
+    // it, a backend that accepts the TCP connection but never replies
+    // hangs ``ensureTenantId`` forever, which in turn stalls every
+    // lifecycle hook (ingest / assemble / afterTurn) sitting behind the
+    // memoized ``_tenantPromise``. Observed downstream in a customer
+    // install as an OpenClaw ``stalled_agent_run`` diagnostic
+    // (``embedded_run age=156s, queueDepth=4``). A structural assertion
+    // is enough here — we don't need to wait for the actual timeout to
+    // fire, just verify the signal is present and reaches the fetch on
+    // every retry attempt.
+    let signalsCount = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      if (init?.signal instanceof AbortSignal) signalsCount++;
+      // Short-circuit via TypeError so the test doesn't loop through
+      // the full retry backoff.
+      throw new TypeError("fetch failed");
+    }) as typeof fetch;
+
+    await resolveTenantId();
+
+    assert.equal(
+      signalsCount,
+      1,
+      "fetch must be invoked with an AbortSignal on every attempt — got " +
+        `${signalsCount} signal(s) on 1 attempt`,
+    );
+  });
+
   test("non-TypeError errors still follow the retry path (preserves 5xx/timeout behavior)", async () => {
     // Use a non-TypeError Error to exercise the else branch. We stub
     // setTimeout to fire immediately, collapsing the 14s backoff into

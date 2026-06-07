@@ -82,6 +82,25 @@ warnIfInsecureUrl(MEMCLAW_API_URL, MEMCLAW_API_KEY);
 
 // --- Tenant resolution ---
 
+/**
+ * Per-attempt wall-clock ceiling on the ``/auth/verify`` fetch in
+ * ``resolveTenantId``. Without this, a backend that accepts the TCP
+ * connection but never replies (slow proxy, half-open conn, etc.) hangs
+ * the call forever — and because ``ensureTenantId`` is on the hot path
+ * of every lifecycle hook (``ingest`` / ``assemble`` / ``afterTurn``)
+ * via the memoized ``_tenantPromise``, every concurrent caller stalls
+ * behind the one in-flight fetch. Observed downstream as a
+ * ``stalled_agent_run`` (``embedded_run age=156s, queueDepth=4``)
+ * diagnostic from OpenClaw on a customer install. The retry loop's
+ * ``TypeError`` short-circuit only catches DNS / ECONNREFUSED — accepted
+ * but unanswered connections require a deadline. (CAURA-000)
+ *
+ * 10s matches the other raw-fetch sites (``agent-auth.ts`` provision,
+ * ``heartbeat.ts`` manifest) so the plugin's outbound stack has a
+ * consistent worst-case per-attempt latency.
+ */
+const TENANT_RESOLVE_TIMEOUT_MS = 10_000;
+
 export async function resolveTenantId(): Promise<string> {
   if (MEMCLAW_TENANT_ID) return MEMCLAW_TENANT_ID;
   if (!MEMCLAW_API_KEY) return "";
@@ -97,6 +116,9 @@ export async function resolveTenantId(): Promise<string> {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ key: MEMCLAW_API_KEY }),
+          // Bound per-attempt wall-clock; see TENANT_RESOLVE_TIMEOUT_MS
+          // docstring above for why this is critical to liveness.
+          signal: AbortSignal.timeout(TENANT_RESOLVE_TIMEOUT_MS),
         },
       );
       if (res.ok) {
@@ -139,15 +161,32 @@ export async function resolveTenantId(): Promise<string> {
         );
         break;
       }
+      // Our own per-attempt timeout fired (TENANT_RESOLVE_TIMEOUT_MS).
+      // The connection was accepted but the server didn't respond in
+      // time — distinct from "unreachable" (TypeError above). Worth a
+      // clearer log line so operators don't chase phantom DNS /
+      // network issues. Retry path unchanged: a transient slow response
+      // could heal on the next attempt.
+      //
+      // ``AbortSignal.timeout()`` aborts with a DOMException whose name
+      // is ``"TimeoutError"``. Some platforms / older Node versions may
+      // surface plain ``"AbortError"`` — accept both. (Confirmed against
+      // Node 22 on the wet-test VM: name is ``"TimeoutError"``.)
+      const isTimeout =
+        e instanceof Error &&
+        (e.name === "TimeoutError" || e.name === "AbortError");
+      const reason = isTimeout
+        ? `timed out after ${TENANT_RESOLVE_TIMEOUT_MS}ms (backend at ${MEMCLAW_API_URL} accepted the connection but did not respond)`
+        : msg;
       if (attempt < MAX_RETRIES) {
         const delay = BASE_DELAY_MS * Math.pow(2, attempt);
         console.warn(
-          `[memclaw] tenant_id resolution attempt ${attempt + 1}/${MAX_RETRIES + 1} failed: ${msg} — retrying in ${delay}ms`,
+          `[memclaw] tenant_id resolution attempt ${attempt + 1}/${MAX_RETRIES + 1} failed: ${reason} — retrying in ${delay}ms`,
         );
         await new Promise((r) => setTimeout(r, delay));
       } else {
         console.error(
-          `[memclaw] tenant_id resolution failed after ${MAX_RETRIES + 1} attempts: ${msg}`,
+          `[memclaw] tenant_id resolution failed after ${MAX_RETRIES + 1} attempts: ${reason}`,
         );
       }
     }
@@ -182,7 +221,10 @@ export async function fetchToolDescriptions(): Promise<void> {
     if (MEMCLAW_API_KEY) headers["X-API-Key"] = MEMCLAW_API_KEY;
     const res = await fetch(
       new URL(`${MEMCLAW_API_PREFIX}/tool-descriptions`, MEMCLAW_API_URL).toString(),
-      { headers },
+      // Bound the fetch — same rationale as resolveTenantId. Less
+      // critical here (cold path, called at registration not per-turn)
+      // but a hung registration still blocks plugin load.
+      { headers, signal: AbortSignal.timeout(TENANT_RESOLVE_TIMEOUT_MS) },
     );
     if (res.ok) {
       toolDescriptions = (await res.json()) as Record<string, string>;
