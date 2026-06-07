@@ -47,6 +47,31 @@ async def test_publish_encodes_envelope_as_json(bus: PubSubEventBus) -> None:
     assert parsed["payload"] == {"memory_id": "abc"}
 
 
+async def test_topic_prefix_scopes_publish(bus: PubSubEventBus) -> None:
+    # With an env-scoped topic prefix set, publish targets the prefixed topic id —
+    # so an env's publishers/subscribers stay isolated from another env sharing the
+    # GCP project (cross-env fan-out fix).
+    bus._topic_prefix = "prod"
+    event = Event(
+        event_type=Topics.Memory.EMBEDDED, tenant_id="t1", payload={"memory_id": "abc"}
+    )
+    await bus.publish(Topics.Memory.EMBEDDED, event)
+    topic_path, _ = bus._publisher.publish.call_args[0]
+    assert topic_path == "projects/proj/topics/prod--memclaw.memory.embedded"
+
+
+def test_topic_name_prefix_and_no_op() -> None:
+    scoped = PubSubEventBus(
+        project_id="proj", subscription_prefix="prod-core-api", topic_prefix="prod"
+    )
+    assert (
+        scoped._topic_name("memclaw.memory.embedded") == "prod--memclaw.memory.embedded"
+    )
+    # Empty/unset prefix ⇒ the raw topic name (byte-identical to today's behaviour).
+    noop = PubSubEventBus(project_id="proj", subscription_prefix="test")
+    assert noop._topic_name("memclaw.memory.embedded") == "memclaw.memory.embedded"
+
+
 async def test_decode_accepts_well_formed_envelope() -> None:
     src = Event(event_type=Topics.Memory.CREATED, tenant_id="t1", payload={"k": "v"})
     bytes_ = src.model_dump_json().encode("utf-8")

@@ -49,6 +49,14 @@ def get_event_bus() -> EventBus:
                     "EVENT_BUS_BACKEND=pubsub requires GCP_PROJECT_ID (or "
                     "EVENT_BUS_PROJECT_ID) and EVENT_BUS_SUBSCRIPTION_PREFIX"
                 )
+            kwargs: dict[str, Any] = {}
+            # Env-scoped topic prefix. Unset/empty ⇒ raw topic names (today's
+            # behaviour) — a strict no-op. Set EVENT_BUS_TOPIC_PREFIX per-env (e.g.
+            # "prod"/"staging") to isolate Pub/Sub topics across environments that
+            # share one GCP project, eliminating cross-env message fan-out.
+            topic_prefix = os.getenv("EVENT_BUS_TOPIC_PREFIX")
+            if topic_prefix:
+                kwargs["topic_prefix"] = topic_prefix
             # Environment identity for the cross-env fan-out guard. Two
             # environments sharing one GCP project also share its topic
             # namespace, so Pub/Sub delivers every published message to
@@ -75,7 +83,7 @@ def get_event_bus() -> EventBus:
                     "is DISABLED; messages from sibling environments sharing "
                     "this project's topics will not be dropped."
                 )
-            kwargs: dict[str, Any] = {"env": env}
+            kwargs["env"] = env
             raw_max = os.getenv("EVENT_BUS_PUBSUB_MAX_MESSAGES")
             if raw_max:
                 try:

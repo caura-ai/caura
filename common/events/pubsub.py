@@ -100,6 +100,7 @@ class PubSubEventBus(EventBus):
         pull_timeout: float = 20.0,
         error_backoff: float = 5.0,
         publish_concurrency: int = 32,
+        topic_prefix: str = "",
     ) -> None:
         # No SDK import at construction: the factory can return this
         # instance even in environments where google-cloud-pubsub isn't
@@ -111,6 +112,11 @@ class PubSubEventBus(EventBus):
         # publisher's stamp mismatch a subscriber's comparison. Empty
         # string collapses to None so it behaves identically to "unset".
         self._env = env.strip() if env and env.strip() else None
+        # Env-scoped TOPIC prefix, mirroring subscription_prefix. Empty ("") ⇒ raw
+        # topic names — byte-identical to today. Set EVENT_BUS_TOPIC_PREFIX per-env
+        # (via the factory) to isolate topics across environments that share one GCP
+        # project, eliminating cross-env message fan-out. See _topic_name().
+        self._topic_prefix = topic_prefix
         self._max_messages = max_messages
         self._pull_timeout = pull_timeout
         self._error_backoff = error_backoff
@@ -340,6 +346,13 @@ class PubSubEventBus(EventBus):
             return False
         return not self._failed_subscriptions
 
+    def _topic_name(self, topic: str) -> str:
+        """Apply the env-scoped topic prefix, if configured. Empty prefix returns
+        the raw topic name (today's behaviour) — so this is a strict no-op until
+        EVENT_BUS_TOPIC_PREFIX is set. Used at BOTH the publish and subscribe sites
+        so an env's publishers and subscribers always agree on the topic id."""
+        return f"{self._topic_prefix}--{topic}" if self._topic_prefix else topic
+
     def _get_publish_executor(self) -> concurrent.futures.ThreadPoolExecutor:
         # Refuse to spin up a fresh executor during stop()'s teardown
         # window — otherwise a concurrent publish() could create a pool
@@ -373,7 +386,7 @@ class PubSubEventBus(EventBus):
                 "events. Call `await bus.start()` at service startup."
             )
         publisher = await self._ensure_publisher()
-        topic_path = publisher.topic_path(self._project_id, topic)
+        topic_path = publisher.topic_path(self._project_id, self._topic_name(topic))
         payload = event.model_dump_json().encode("utf-8")
         # Fire the publish into the client's internal batch queue and
         # return — do NOT block on the returned Future. .result(timeout=30)
@@ -515,7 +528,7 @@ class PubSubEventBus(EventBus):
                 thread_name_prefix="pubsub-pull",
             )
             for topic, handlers in self._handlers.items():
-                sub_name = f"{self._subscription_prefix}--{topic}"
+                sub_name = f"{self._subscription_prefix}--{self._topic_name(topic)}"
                 task = asyncio.create_task(self._pull_loop(sub_name, handlers))
                 self._pull_tasks.append(task)
         self._started = True
