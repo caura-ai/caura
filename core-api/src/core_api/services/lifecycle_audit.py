@@ -195,6 +195,28 @@ class _CoreApiLifecycleAdapter:
             links_created = ctx.data.get("links_created", 0)
         return int(links_created)
 
+    async def forge_distill(self, *, org_id: str, fleet_id: str | None) -> int:
+        """Skill Factory SF-007 — Forge distillation run. Phase 0 STUB.
+
+        Logs the invocation and returns 0 (no candidates produced).
+        The real worker — outcome inference → session-trace clustering
+        → fingerprint stability → LLM distill → Sentinel scan →
+        skills-collection write — lands in Phase 1 inside
+        ``core_api.services.forge.forge_service``. Until then the
+        topic + payload + handler wiring is exercisable end-to-end so
+        the Phase 1 swap is a body-only change.
+        """
+        logger.info(
+            "forge_distill stub invoked (Phase 0; no-op)",
+            extra={
+                "org_id": org_id,
+                "fleet_id": fleet_id,
+                "stub": True,
+                "phase": "0",
+            },
+        )
+        return 0
+
     async def has_recent_lifecycle_success(self, *, org_id: str, action: str, since_hours: int) -> bool:
         return await self._storage.has_recent_lifecycle_success(
             org_id=org_id, action=action, since_hours=since_hours

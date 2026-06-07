@@ -4,6 +4,7 @@
     "core-api": [
       "memclaw.lifecycle.crystallize-requested",
       "memclaw.lifecycle.entity-link-requested",
+      "memclaw.lifecycle.forge-distill-requested",
       "memclaw.lifecycle.insights-requested",
       "memclaw.memory.embedded",
       "memclaw.memory.enriched"
