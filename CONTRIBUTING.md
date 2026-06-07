@@ -123,9 +123,25 @@ as minor (`bump-minor-pre-major: true` in `release-please-config.json`).
 - Include context in the body when the change is non-obvious.
 - One logical change per commit.
 
+**Common parser breakers — avoid in subject lines:**
+
+- **Leading ticket identifier** (e.g. `CAURA-129 feat(contradiction): …`).
+  The conventional-commit parser expects the subject to *start* with a
+  type token; anything before `feat`/`fix`/etc. fails with
+  `unexpected token ' '`. Put the ticket id in the **body**
+  (`Closes CAURA-129.`) instead.
+- **Unicode ellipsis `…` (U+2026)** anywhere in the subject. The
+  parser rejects it with the same error class. If GitHub's squash-merge
+  UI truncates a long title with `…`, rewrite the title before merging.
+- **Non-ASCII punctuation generally** (em-dashes `—`, smart quotes
+  `“ ”`). `ruff` will also flag these in code comments; the parser
+  is even less forgiving in commit titles. Use plain `-` and `"`.
+
 **Squash-merge note:** PR titles must themselves be Conventional Commits,
 because the squash-merge commit on `main` is what release-please reads.
-Reviewers will rename PR titles before merging if needed.
+Reviewers will rename PR titles before merging if needed. A single
+un-parseable subject line in the post-tag window can block the entire
+next release from being opened — when in doubt, lean strict.
 
 ## Sign-off (DCO)
 
