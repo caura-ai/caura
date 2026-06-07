@@ -1,0 +1,150 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" font-family="'Kalam','Caveat','Patrick Hand','Comic Sans MS',cursive">
+  <defs>
+    <radialGradient id="cluster" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#FFE066"/>
+      <stop offset="60%" stop-color="#FF6B35"/>
+      <stop offset="100%" stop-color="#6A040F"/>
+    </radialGradient>
+    <linearGradient id="inboxGrad" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#FFF8E7"/>
+      <stop offset="100%" stop-color="#FFE9B0"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L8,5 L0,10 Z" fill="#FFE066"/>
+    </marker>
+    <marker id="loopArrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L8,5 L0,10 Z" fill="#06B6D4"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="600" fill="#0B1020"/>
+
+  <!-- title -->
+  <text x="600" y="56" text-anchor="middle" font-size="36" fill="#FFF8E7" font-weight="700">Skill Factory</text>
+  <text x="600" y="88" text-anchor="middle" font-size="20" fill="#F7B538" font-style="italic">the fleet writes the playbooks nobody had time to write</text>
+
+  <!-- STAGE 1: Memory cluster in the lake -->
+  <g transform="translate(40,150)">
+    <ellipse cx="120" cy="160" rx="120" ry="100" fill="url(#cluster)" stroke="#4A0E0E" stroke-width="3"/>
+    <!-- memory dots in cluster -->
+    <g>
+      <circle cx="80"  cy="120" r="9" fill="#FFF8E7" stroke="#1A1A1A"/>
+      <circle cx="130" cy="105" r="9" fill="#FFF8E7" stroke="#1A1A1A"/>
+      <circle cx="170" cy="135" r="9" fill="#FFF8E7" stroke="#1A1A1A"/>
+      <circle cx="95"  cy="170" r="9" fill="#10B981" stroke="#1A1A1A"/>
+      <circle cx="140" cy="160" r="9" fill="#10B981" stroke="#1A1A1A"/>
+      <circle cx="180" cy="190" r="9" fill="#EF4444" stroke="#1A1A1A"/>
+      <circle cx="105" cy="210" r="9" fill="#10B981" stroke="#1A1A1A"/>
+      <circle cx="155" cy="220" r="9" fill="#EF4444" stroke="#1A1A1A"/>
+      <circle cx="80"  cy="240" r="9" fill="#10B981" stroke="#1A1A1A"/>
+    </g>
+    <text x="120" y="40" text-anchor="middle" font-size="20" fill="#FFE066" font-weight="700">1 · Cluster</text>
+    <text x="120" y="298" text-anchor="middle" font-size="13" fill="#FFF8E7">memories sharing a goal pattern</text>
+    <text x="120" y="316" text-anchor="middle" font-size="11" fill="#94A3B8">● outcome=success ● outcome=failure</text>
+  </g>
+
+  <!-- arrow 1 -->
+  <line x1="290" y1="310" x2="350" y2="310" stroke="#FFE066" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <!-- STAGE 2: Forge at the anvil -->
+  <g transform="translate(360,150)">
+    <rect width="240" height="320" rx="14" fill="#15182E" stroke="#F7B538" stroke-width="2"/>
+    <text x="120" y="36" text-anchor="middle" font-size="20" fill="#F7B538" font-weight="700">2 · Forge distills</text>
+    <!-- portrait -->
+    <circle cx="120" cy="100" r="38" fill="#F7B538" stroke="#1A1A1A" stroke-width="2"/>
+    <text x="120" y="113" text-anchor="middle" font-size="40" fill="#1A1A1A">⚒</text>
+    <!-- mini procedure preview -->
+    <g font-family="'Inter',sans-serif">
+      <rect x="22" y="160" width="196" height="140" rx="6" fill="#0B1020" stroke="#475569"/>
+      <text x="32" y="178" font-size="11" fill="#FFE066" font-weight="700">PROCEDURE · v1 (draft)</text>
+      <text x="32" y="198" font-size="10" fill="#FFF8E7">when: deploy + region=eu-west</text>
+      <line x1="32" y1="206" x2="208" y2="206" stroke="#334155"/>
+      <text x="32" y="222" font-size="10" fill="#FFF8E7">1. preflight DNS check</text>
+      <text x="32" y="238" font-size="10" fill="#FFF8E7">2. run script v4</text>
+      <text x="32" y="254" font-size="10" fill="#FFF8E7">3a. on hang → fallback resolver  ▸ 87%</text>
+      <text x="32" y="270" font-size="10" fill="#FFF8E7">3b. retry step 7              ▸ 41%</text>
+      <text x="32" y="290" font-size="9" fill="#94A3B8" font-style="italic">cites: 23 memories · 7 agents</text>
+    </g>
+  </g>
+
+  <!-- arrow 2 -->
+  <line x1="610" y1="310" x2="680" y2="310" stroke="#FFE066" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <!-- STAGE 3: Skills Inbox card -->
+  <g transform="translate(690,150)">
+    <rect width="240" height="320" rx="14" fill="url(#inboxGrad)" stroke="#1A1A1A" stroke-width="2"/>
+    <rect width="240" height="34" rx="14" fill="#FF6B35"/>
+    <text x="120" y="22" text-anchor="middle" font-size="14" fill="#FFF8E7" font-weight="700">📥 SKILLS INBOX</text>
+    <text x="120" y="60" text-anchor="middle" font-size="18" fill="#1A1A1A" font-weight="700">3 · Human-in-the-loop</text>
+
+    <g transform="translate(16,76)" font-family="'Inter',sans-serif">
+      <rect width="208" height="166" rx="6" fill="#FFF8E7" stroke="#475569"/>
+      <text x="12" y="22" font-size="13" fill="#1A1A1A" font-weight="700">Deploy in eu-west · v1</text>
+      <text x="12" y="40" font-size="11" fill="#475569">when: deploy + region=eu-west</text>
+      <line x1="12" y1="50" x2="196" y2="50" stroke="#94A3B8"/>
+      <text x="12" y="68" font-size="11" fill="#1A1A1A">success rate: <tspan fill="#10B981" font-weight="700">87%</tspan></text>
+      <text x="12" y="86" font-size="11" fill="#1A1A1A">sample: 23 runs · 7 agents</text>
+      <text x="12" y="104" font-size="11" fill="#1A1A1A">freshness: 4d · variance: low</text>
+      <text x="12" y="122" font-size="10" fill="#64748B" font-style="italic">replay (3) ▸ provenance ▸</text>
+      <!-- buttons -->
+      <g transform="translate(12,134)">
+        <rect width="58" height="22" rx="4" fill="#10B981"/>
+        <text x="29" y="16" text-anchor="middle" font-size="11" fill="#FFF8E7" font-weight="700">Approve</text>
+      </g>
+      <g transform="translate(74,134)">
+        <rect width="46" height="22" rx="4" fill="#06B6D4"/>
+        <text x="23" y="16" text-anchor="middle" font-size="11" fill="#0B1020" font-weight="700">Edit</text>
+      </g>
+      <g transform="translate(124,134)">
+        <rect width="46" height="22" rx="4" fill="#94A3B8"/>
+        <text x="23" y="16" text-anchor="middle" font-size="11" fill="#0B1020" font-weight="700">Defer</text>
+      </g>
+      <g transform="translate(174,134)">
+        <rect width="22" height="22" rx="4" fill="#EF4444"/>
+        <text x="11" y="16" text-anchor="middle" font-size="13" fill="#FFF8E7" font-weight="700">✕</text>
+      </g>
+    </g>
+
+    <text x="120" y="270" text-anchor="middle" font-size="11" fill="#1A1A1A" font-style="italic">auto-gates: vol≥10, agents≥3,</text>
+    <text x="120" y="285" text-anchor="middle" font-size="11" fill="#1A1A1A" font-style="italic">convergence, freshness, coverage</text>
+    <text x="120" y="306" text-anchor="middle" font-size="10" fill="#6A040F">(scope_org skills require dual-approval)</text>
+  </g>
+
+  <!-- arrow 3 -->
+  <line x1="940" y1="310" x2="1000" y2="310" stroke="#FFE066" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <!-- STAGE 4: Harness install -->
+  <g transform="translate(1010,150)">
+    <rect width="160" height="320" rx="14" fill="#15182E" stroke="#67E8F9" stroke-width="2"/>
+    <text x="80" y="34" text-anchor="middle" font-size="18" fill="#67E8F9" font-weight="700">4 · Install</text>
+    <text x="80" y="54" text-anchor="middle" font-size="12" fill="#A5F3FC" font-style="italic">to the harness</text>
+
+    <g font-family="'Inter',sans-serif" font-size="11" fill="#FFF8E7">
+      <g transform="translate(16,80)">
+        <rect width="128" height="44" rx="6" fill="#0B1020" stroke="#67E8F9"/>
+        <text x="64" y="20" text-anchor="middle" font-weight="700">Claude Code</text>
+        <text x="64" y="34" text-anchor="middle" font-size="9" fill="#94A3B8">~/.claude/skills/</text>
+      </g>
+      <g transform="translate(16,134)">
+        <rect width="128" height="44" rx="6" fill="#0B1020" stroke="#67E8F9"/>
+        <text x="64" y="20" text-anchor="middle" font-weight="700">OpenClaw</text>
+        <text x="64" y="34" text-anchor="middle" font-size="9" fill="#94A3B8">plugin slot</text>
+      </g>
+      <g transform="translate(16,188)">
+        <rect width="128" height="44" rx="6" fill="#0B1020" stroke="#67E8F9"/>
+        <text x="64" y="20" text-anchor="middle" font-weight="700">MCP tool</text>
+        <text x="64" y="34" text-anchor="middle" font-size="9" fill="#94A3B8">memclaw_skill_*</text>
+      </g>
+      <g transform="translate(16,242)">
+        <rect width="128" height="44" rx="6" fill="#0B1020" stroke="#67E8F9"/>
+        <text x="64" y="20" text-anchor="middle" font-weight="700">Cursor / IDE</text>
+        <text x="64" y="34" text-anchor="middle" font-size="9" fill="#94A3B8">skill files</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- big loop-back arrow: harness → cluster (outcomes flow back) -->
+  <path d="M 1090,490 C 1090,540 600,560 160,490"
+        fill="none" stroke="#06B6D4" stroke-width="3" stroke-dasharray="6 5" marker-end="url(#loopArrow)"/>
+  <text x="600" y="568" text-anchor="middle" font-size="16" fill="#06B6D4" font-style="italic">↻ outcomes flow back · v2 proposed when branches drift</text>
+</svg>

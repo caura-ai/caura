@@ -191,7 +191,10 @@ async def _wire_memory_fetcher(db):
                 {"ids": list(memory_ids)},
             )
         ).fetchall()
-        return {row.id: row.content for row in rows}
+        # NULL-safe: memories.content is nullable, but downstream
+        # ``_distill_cluster`` slices the value as a string. Returning
+        # None would TypeError and get swallowed into the io_error bucket.
+        return {row.id: row.content if row.content is not None else "" for row in rows}
 
     return fetcher
 

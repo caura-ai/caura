@@ -49,6 +49,7 @@ from core_api.services.forge.distill_prompt import (
     parse_distill_response,
 )
 from core_api.services.forge.fingerprint import (
+    ENTITY_TOP_K,
     ClusterFingerprintInputs,
     compute_fingerprint,
 )
@@ -509,7 +510,11 @@ async def _distill_cluster(
         tenant_id=tenant_id,
         fleet_id=fleet_id,
         traces=snapshots,
-        top_entity_labels=sorted({e for trace in cluster_traces for e in trace.entity_ids}),
+        # Cap at ENTITY_TOP_K to bound prompt size and to mirror the
+        # fingerprint's centrality cut — the LLM sees the same top-K
+        # entities the fingerprint stamps, so prompt and fp agree on
+        # cluster identity.
+        top_entity_labels=sorted({e for trace in cluster_traces for e in trace.entity_ids})[:ENTITY_TOP_K],
         hint_domain=None,
     )
 

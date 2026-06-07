@@ -1,0 +1,154 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" font-family="'Kalam','Caveat','Patrick Hand','Comic Sans MS',cursive">
+  <defs>
+    <linearGradient id="lane-agent" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0%" stop-color="#1F2937"/>
+      <stop offset="100%" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="lane-lake" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0%" stop-color="#3D0E0E"/>
+      <stop offset="100%" stop-color="#1A0808"/>
+    </linearGradient>
+    <radialGradient id="lensGrad" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#FFE066" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#FF6B35" stop-opacity="0"/>
+    </radialGradient>
+    <marker id="ai-arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L8,5 L0,10 Z" fill="#FFE066"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="640" fill="#0B1020"/>
+
+  <!-- title -->
+  <text x="600" y="56" text-anchor="middle" font-size="36" fill="#FFF8E7" font-weight="700">Outcomes without asking</text>
+  <text x="600" y="90" text-anchor="middle" font-size="20" fill="#F7B538" font-style="italic">the memory stream IS the feedback signal — no <tspan font-family="'Inter',monospace">memclaw_evolve</tspan> required</text>
+
+  <!-- TIMELINE AXIS -->
+  <line x1="80" y1="320" x2="1120" y2="320" stroke="#475569" stroke-width="1.5" stroke-dasharray="2 4"/>
+  <text x="80" y="340" font-size="11" fill="#64748B">t=0</text>
+  <text x="1100" y="340" font-size="11" fill="#64748B">t→</text>
+
+  <!-- AGENT LANE (top) -->
+  <rect x="60" y="140" width="1080" height="100" rx="10" fill="url(#lane-agent)" stroke="#334155" stroke-width="1.5"/>
+  <text x="78" y="166" font-size="16" fill="#94A3B8" font-weight="700">Agent stream</text>
+  <text x="78" y="184" font-size="11" fill="#64748B" font-style="italic">normal recall + write activity (untouched)</text>
+
+  <!-- agent avatar at left -->
+  <g transform="translate(28,180)">
+    <circle r="22" fill="#06B6D4" stroke="#1A1A1A" stroke-width="2"/>
+    <text y="6" text-anchor="middle" font-size="22" fill="#0B1020">🧑</text>
+  </g>
+
+  <!-- agent events along the timeline -->
+  <!-- Event 1: recall M -->
+  <g transform="translate(180,200)">
+    <circle r="14" fill="#06B6D4" stroke="#1A1A1A" stroke-width="2"/>
+    <text y="5" text-anchor="middle" font-size="12" fill="#0B1020" font-weight="700">R</text>
+    <text x="0" y="-22" text-anchor="middle" font-size="11" fill="#A5F3FC">recall(M)</text>
+  </g>
+  <!-- Event 2: write contradiction -->
+  <g transform="translate(310,200)">
+    <rect x="-13" y="-13" width="26" height="26" rx="3" fill="#EF4444" stroke="#1A1A1A" stroke-width="2"/>
+    <text y="5" text-anchor="middle" font-size="12" fill="#FFF8E7" font-weight="700">W</text>
+    <text x="0" y="-22" text-anchor="middle" font-size="11" fill="#FCA5A5">contradicts(M)</text>
+  </g>
+  <!-- Event 3: repeat recall -->
+  <g transform="translate(450,200)">
+    <circle r="14" fill="#06B6D4" stroke="#1A1A1A" stroke-width="2"/>
+    <text y="5" text-anchor="middle" font-size="12" fill="#0B1020" font-weight="700">R</text>
+    <text x="0" y="-22" text-anchor="middle" font-size="11" fill="#A5F3FC">recall(N) ~M</text>
+  </g>
+  <!-- Event 4: supersede -->
+  <g transform="translate(580,200)">
+    <rect x="-13" y="-13" width="26" height="26" rx="3" fill="#F59E0B" stroke="#1A1A1A" stroke-width="2"/>
+    <text y="5" text-anchor="middle" font-size="12" fill="#0B1020" font-weight="700">W</text>
+    <text x="0" y="-22" text-anchor="middle" font-size="11" fill="#FCD34D">supersedes(M)</text>
+  </g>
+  <!-- Event 5: recall N -->
+  <g transform="translate(720,200)">
+    <circle r="14" fill="#06B6D4" stroke="#1A1A1A" stroke-width="2"/>
+    <text y="5" text-anchor="middle" font-size="12" fill="#0B1020" font-weight="700">R</text>
+    <text x="0" y="-22" text-anchor="middle" font-size="11" fill="#A5F3FC">recall(P)</text>
+  </g>
+  <!-- Event 6: write success -->
+  <g transform="translate(870,200)">
+    <rect x="-13" y="-13" width="26" height="26" rx="3" fill="#10B981" stroke="#1A1A1A" stroke-width="2"/>
+    <text y="5" text-anchor="middle" font-size="12" fill="#FFF8E7" font-weight="700">W</text>
+    <text x="0" y="-22" text-anchor="middle" font-size="11" fill="#6EE7B7">"shipped ✓"</text>
+  </g>
+  <!-- Event 7: write next-task open -->
+  <g transform="translate(1020,200)">
+    <rect x="-13" y="-13" width="26" height="26" rx="3" fill="#94A3B8" stroke="#1A1A1A" stroke-width="2"/>
+    <text y="5" text-anchor="middle" font-size="12" fill="#0B1020" font-weight="700">W</text>
+    <text x="0" y="-22" text-anchor="middle" font-size="11" fill="#CBD5E1">opens new task</text>
+  </g>
+
+  <!-- THE LENS: inference layer (the lake reads the stream) -->
+  <g>
+    <ellipse cx="600" cy="320" rx="540" ry="22" fill="url(#lensGrad)" opacity="0.5"/>
+  </g>
+  <text x="600" y="305" text-anchor="middle" font-size="13" fill="#FFE066" font-style="italic">the lake reads between events</text>
+
+  <!-- LAKE LANE (bottom): inference outputs -->
+  <rect x="60" y="370" width="1080" height="180" rx="10" fill="url(#lane-lake)" stroke="#6A040F" stroke-width="1.5"/>
+  <text x="78" y="396" font-size="16" fill="#FFE066" font-weight="700">Lake inference (passive)</text>
+  <text x="78" y="414" font-size="11" fill="#FCA5A5" font-style="italic">no agent action — Sentinel + Dreamer reading the natural stream</text>
+
+  <!-- inference signals tied to timeline events -->
+  <!-- M: failed -->
+  <g transform="translate(245,470)">
+    <rect x="-90" y="-30" width="180" height="64" rx="8" fill="#3B0810" stroke="#EF4444" stroke-width="1.5"/>
+    <text x="0" y="-12" text-anchor="middle" font-size="13" fill="#FCA5A5" font-weight="700">memory M → FAILED</text>
+    <text x="0" y="6" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="#FFF8E7">contradicted within window</text>
+    <text x="0" y="20" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="#FFF8E7">+ superseded shortly after</text>
+  </g>
+  <!-- repeat-recall = first answer didn't land -->
+  <g transform="translate(450,470)">
+    <rect x="-72" y="-30" width="144" height="64" rx="8" fill="#3B2410" stroke="#F59E0B" stroke-width="1.5"/>
+    <text x="0" y="-12" text-anchor="middle" font-size="13" fill="#FCD34D" font-weight="700">repeat-recall</text>
+    <text x="0" y="6" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="#FFF8E7">first answer didn't land</text>
+    <text x="0" y="20" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="#FFF8E7">→ tune retrieval profile</text>
+  </g>
+  <!-- P: succeeded -->
+  <g transform="translate(795,470)">
+    <rect x="-90" y="-30" width="180" height="64" rx="8" fill="#0F2E22" stroke="#10B981" stroke-width="1.5"/>
+    <text x="0" y="-12" text-anchor="middle" font-size="13" fill="#6EE7B7" font-weight="700">memory P → SUCCEEDED</text>
+    <text x="0" y="6" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="#FFF8E7">terminal "shipped" memory</text>
+    <text x="0" y="20" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="#FFF8E7">in the same session window</text>
+  </g>
+  <!-- carry-forward / load-bearing -->
+  <g transform="translate(1010,470)">
+    <rect x="-80" y="-30" width="160" height="64" rx="8" fill="#1F1A3D" stroke="#A78BFA" stroke-width="1.5"/>
+    <text x="0" y="-12" text-anchor="middle" font-size="13" fill="#DDD6FE" font-weight="700">cross-agent reuse</text>
+    <text x="0" y="6" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="#FFF8E7">P recalled by ≥3 agents</text>
+    <text x="0" y="20" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="#FFF8E7">→ load-bearing skill candidate</text>
+  </g>
+
+  <!-- thin vertical lines connecting events to inferences -->
+  <g stroke="#FFE066" stroke-width="1" stroke-dasharray="2 3" opacity="0.55">
+    <line x1="245" y1="220" x2="245" y2="440"/>
+    <line x1="450" y1="220" x2="450" y2="440"/>
+    <line x1="795" y1="220" x2="795" y2="440"/>
+    <line x1="1010" y1="220" x2="1010" y2="440"/>
+  </g>
+
+  <!-- signal legend at the bottom -->
+  <g transform="translate(60,580)">
+    <text x="0" y="0" font-size="14" fill="#FFE066" font-weight="700">Six free signals — none require agent cooperation:</text>
+    <g font-family="'Inter',sans-serif" font-size="12" fill="#FFF8E7">
+      <text x="0"   y="22">●  contradiction event</text>
+      <text x="200" y="22">●  supersession event</text>
+      <text x="400" y="22">●  repeat-recall on same query</text>
+      <text x="630" y="22">●  session terminal memory ("shipped" / "blocked")</text>
+      <text x="0"   y="44">●  cross-agent reuse depth</text>
+      <text x="200" y="44">●  external hooks (git, CI, PR merge) tied to session_id</text>
+    </g>
+  </g>
+
+  <!-- soft-force optional -->
+  <g transform="translate(900,140)">
+    <rect width="220" height="40" rx="8" fill="#0B1020" stroke="#67E8F9" stroke-dasharray="4 3" stroke-width="1.5"/>
+    <text x="110" y="17" text-anchor="middle" font-size="11" fill="#67E8F9" font-weight="700">optional soft-force:</text>
+    <text x="110" y="32" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="#A5F3FC">recall_id auto-attached to next write</text>
+  </g>
+</svg>
