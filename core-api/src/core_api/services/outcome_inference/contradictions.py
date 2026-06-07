@@ -62,17 +62,18 @@ async def extract(query: SignalQuery, db: Any) -> list[SignalEvidence]:
     memory (``run_id``, ``agent_id``) is the one that pays the
     FAILURE polarity.
 
-    Idempotency: each memory only emits one firing per scan — multiple
-    bumps to ``updated_at`` after the initial status flip do not
-    multiply the signal (we de-duplicate at the (memory_id) level via
-    SELECT DISTINCT).
+    Idempotency: each memory only emits one firing per scan because
+    ``m.id`` is the primary key — a plain SELECT already returns at
+    most one row per memory. The previous ``DISTINCT ON (m.id)``
+    without an ``ORDER BY`` was both a no-op (PK uniqueness) AND
+    technically undefined per Postgres docs; removed for clarity.
     """
     weight = DEFAULT_SIGNAL_WEIGHTS[SignalKind.CONTRADICTION]
 
     # Bind the status list explicitly rather than inlining the tuple
     # so Postgres can use the existing tenant-status indexes.
     sql = """
-        SELECT DISTINCT ON (m.id)
+        SELECT
             m.id          AS memory_id,
             m.run_id      AS run_id,
             m.agent_id    AS agent_id,

@@ -165,7 +165,7 @@ async def publish_forge_distill_request(
     freshness_window_days: int | None = None,
     min_cluster_size: int | None = None,
     min_distinct_agents: int | None = None,
-    llm_tokens_budget: int | None = None,
+    llm_tokens_per_run: int | None = None,
     max_writes_per_run: int | None = None,
     dry_run: bool = False,
 ) -> None:
@@ -188,7 +188,7 @@ async def publish_forge_distill_request(
             freshness_window_days=freshness_window_days,
             min_cluster_size=min_cluster_size,
             min_distinct_agents=min_distinct_agents,
-            llm_tokens_budget=llm_tokens_budget,
+            llm_tokens_per_run=llm_tokens_per_run,
             max_writes_per_run=max_writes_per_run,
             dry_run=dry_run,
         ),

@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 620" font-family="'Kalam','Caveat','Patrick Hand','Comic Sans MS',cursive">
+  <defs>
+    <radialGradient id="lavaPool" cx="50%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#FFE066"/>
+      <stop offset="50%" stop-color="#FF6B35"/>
+      <stop offset="100%" stop-color="#6A040F"/>
+    </radialGradient>
+    <radialGradient id="newCard" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#FFF8E7"/>
+      <stop offset="80%" stop-color="#FFE066"/>
+      <stop offset="100%" stop-color="#F7B538"/>
+    </radialGradient>
+    <filter id="cardGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="980" height="620" fill="#0B1020"/>
+
+  <text x="490" y="58" text-anchor="middle" font-size="36" fill="#FFF8E7" font-weight="700">Fusion</text>
+  <text x="490" y="92" text-anchor="middle" font-size="20" fill="#F7B538" font-style="italic">two memories collide. a third emerges. nobody on the fleet had it.</text>
+
+  <!-- Memory A card -->
+  <g transform="translate(110,150) rotate(-4)">
+    <rect width="290" height="140" rx="6" fill="#FFF8E7" stroke="#1A1A1A" stroke-width="2"/>
+    <rect width="290" height="28" rx="6" fill="#06B6D4"/>
+    <text x="14" y="20" font-size="14" fill="#0B1020" font-weight="700">Agent: Sasha</text>
+    <text x="232" y="20" font-size="11" fill="#0B1020">2026-04-22 · ops</text>
+    <text x="14" y="56" font-family="'Inter',sans-serif" font-size="13" fill="#1A1A1A">"Deploy script v4 hangs on</text>
+    <text x="14" y="76" font-family="'Inter',sans-serif" font-size="13" fill="#1A1A1A">step 7, but only in eu-west.</text>
+    <text x="14" y="96" font-family="'Inter',sans-serif" font-size="13" fill="#1A1A1A">us-east + ap-south are fine."</text>
+    <text x="14" y="124" font-size="12" fill="#64748B" font-style="italic">type: incident · region: eu-west</text>
+  </g>
+
+  <!-- Memory B card -->
+  <g transform="translate(580,150) rotate(4)">
+    <rect width="290" height="140" rx="6" fill="#FFF8E7" stroke="#1A1A1A" stroke-width="2"/>
+    <rect width="290" height="28" rx="6" fill="#8B5CF6"/>
+    <text x="14" y="20" font-size="14" fill="#FFF8E7" font-weight="700">Agent: Mira</text>
+    <text x="225" y="20" font-size="11" fill="#FFF8E7">2026-04-23 · platform</text>
+    <text x="14" y="56" font-family="'Inter',sans-serif" font-size="13" fill="#1A1A1A">"Step 7 of the deploy script</text>
+    <text x="14" y="76" font-family="'Inter',sans-serif" font-size="13" fill="#1A1A1A">calls a deprecated DNS</text>
+    <text x="14" y="96" font-family="'Inter',sans-serif" font-size="13" fill="#1A1A1A">resolver — flagged in audit."</text>
+    <text x="14" y="124" font-size="12" fill="#64748B" font-style="italic">type: audit-finding · scope: dns</text>
+  </g>
+
+  <!-- arrows funneling into lake -->
+  <g fill="none" stroke="#FF6B35" stroke-width="3" stroke-linecap="round" opacity="0.85">
+    <path d="M 250,300 Q 360,360 460,400"/>
+    <path d="M 730,300 Q 620,360 520,400"/>
+  </g>
+
+  <!-- lake / fusion crucible -->
+  <ellipse cx="490" cy="430" rx="180" ry="44" fill="url(#lavaPool)" stroke="#4A0E0E" stroke-width="3"/>
+  <text x="490" y="436" text-anchor="middle" font-size="16" fill="#1A1A1A" font-weight="700">↯ the lake fuses ↯</text>
+
+  <!-- collision sparks -->
+  <g stroke="#FFE066" stroke-width="2" fill="#FFE066">
+    <path d="M 460,400 l 8,-12 l -3,12 l 12,-2 l -12,8 z" opacity="0.85"/>
+    <path d="M 520,400 l -8,-12 l 3,12 l -12,-2 l 12,8 z" opacity="0.85"/>
+    <circle cx="490" cy="395" r="2"/><circle cx="475" cy="408" r="1.6"/><circle cx="505" cy="408" r="1.6"/>
+  </g>
+
+  <!-- Fused output card erupting upward (placed below to suggest it RISES from the lake) -->
+  <g transform="translate(285,490)" filter="url(#cardGlow)">
+    <rect width="410" height="110" rx="8" fill="url(#newCard)" stroke="#4A0E0E" stroke-width="2.5"/>
+    <text x="205" y="28" text-anchor="middle" font-size="14" fill="#6A040F" font-weight="700">⚡ FUSED · author=resident:dreamer</text>
+    <text x="205" y="58" text-anchor="middle" font-family="'Inter',sans-serif" font-size="14" fill="#1A1A1A" font-weight="600">"Deploy hangs in eu-west are caused by</text>
+    <text x="205" y="78" text-anchor="middle" font-family="'Inter',sans-serif" font-size="14" fill="#1A1A1A" font-weight="600">deprecated DNS resolver in step 7."</text>
+    <text x="205" y="100" text-anchor="middle" font-size="12" fill="#6A040F" font-style="italic">cites: Sasha (incident), Mira (audit) · confidence: 0.78 · status: hypothesis</text>
+  </g>
+
+  <!-- vertical eruption arrow -->
+  <g fill="none" stroke="#FFE066" stroke-width="2" stroke-linecap="round" stroke-dasharray="3 5">
+    <path d="M 490,425 L 490,488"/>
+  </g>
+
+  <!-- footer caption -->
+  <text x="490" y="600" text-anchor="middle" font-size="16" fill="#FFE066" font-style="italic">RAG vendors literally cannot do this — they have no fleet to collide.</text>
+</svg>

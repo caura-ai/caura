@@ -42,7 +42,7 @@ class LifecycleForgeDistillRequest(LifecycleRequestBase):
     freshness_window_days: int | None = None
     min_cluster_size: int | None = None
     min_distinct_agents: int | None = None
-    llm_tokens_budget: int | None = None
+    llm_tokens_per_run: int | None = None
     max_writes_per_run: int | None = None
     # ``dry_run=True`` ⇒ produce candidates with ``status=candidate``
     # only; do not run the staged-promotion auto-gates. Used by the

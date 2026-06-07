@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" font-family="'Kalam','Caveat','Patrick Hand','Comic Sans MS',cursive">
+  <defs>
+    <radialGradient id="organism" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#FFE066"/>
+      <stop offset="55%" stop-color="#FF6B35"/>
+      <stop offset="100%" stop-color="#6A040F"/>
+    </radialGradient>
+    <linearGradient id="dust" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#1F2937"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1000" height="560" fill="#0B1020"/>
+
+  <!-- title bar -->
+  <text x="500" y="56" text-anchor="middle" font-size="34" fill="#FFF8E7" font-weight="700">Most memory products are libraries.</text>
+  <text x="500" y="92" text-anchor="middle" font-size="34" fill="#F7B538" font-weight="700">MemClaw is a metabolism.</text>
+
+  <!-- divider lava strip -->
+  <path d="M 500,130 Q 510,260 495,400 Q 510,490 500,540"
+        stroke="#FF6B35" stroke-width="3" fill="none" stroke-dasharray="4 6" opacity="0.6"/>
+
+  <!-- LEFT: Library -->
+  <g>
+    <text x="240" y="148" text-anchor="middle" font-size="26" fill="#94A3B8" font-weight="700">Library</text>
+    <text x="240" y="172" text-anchor="middle" font-size="16" fill="#64748B" font-style="italic">stores facts. gets bigger.</text>
+
+    <!-- shelves -->
+    <g stroke="#475569" stroke-width="2" fill="url(#dust)">
+      <rect x="80" y="200" width="320" height="56" rx="2"/>
+      <rect x="80" y="266" width="320" height="56" rx="2"/>
+      <rect x="80" y="332" width="320" height="56" rx="2"/>
+      <rect x="80" y="398" width="320" height="56" rx="2"/>
+    </g>
+
+    <!-- books on shelves -->
+    <g font-family="'Inter',sans-serif" font-size="9" fill="#CBD5E1">
+      <g>
+        <rect x="92"  y="208" width="22" height="40" fill="#475569"/>
+        <rect x="118" y="208" width="22" height="40" fill="#64748B"/>
+        <rect x="144" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="170" y="208" width="22" height="40" fill="#94A3B8"/>
+        <rect x="196" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="222" y="208" width="22" height="40" fill="#64748B"/>
+        <rect x="248" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="274" y="208" width="22" height="40" fill="#94A3B8"/>
+        <rect x="300" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="326" y="208" width="22" height="40" fill="#64748B"/>
+        <rect x="352" y="208" width="22" height="40" fill="#475569"/>
+      </g>
+      <g transform="translate(0,66)">
+        <rect x="92"  y="208" width="22" height="40" fill="#64748B"/>
+        <rect x="118" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="144" y="208" width="22" height="40" fill="#94A3B8"/>
+        <rect x="170" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="196" y="208" width="22" height="40" fill="#64748B"/>
+        <rect x="222" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="248" y="208" width="22" height="40" fill="#94A3B8"/>
+        <rect x="274" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="300" y="208" width="22" height="40" fill="#64748B"/>
+        <rect x="326" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="352" y="208" width="22" height="40" fill="#94A3B8"/>
+      </g>
+      <g transform="translate(0,132)">
+        <rect x="92"  y="208" width="22" height="40" fill="#475569"/>
+        <rect x="118" y="208" width="22" height="40" fill="#64748B"/>
+        <rect x="144" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="170" y="208" width="22" height="40" fill="#94A3B8"/>
+        <rect x="196" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="222" y="208" width="22" height="40" fill="#64748B"/>
+        <rect x="248" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="274" y="208" width="22" height="40" fill="#94A3B8"/>
+        <rect x="300" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="326" y="208" width="22" height="40" fill="#64748B"/>
+        <rect x="352" y="208" width="22" height="40" fill="#475569"/>
+      </g>
+      <g transform="translate(0,198)">
+        <rect x="92"  y="208" width="22" height="40" fill="#64748B"/>
+        <rect x="118" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="144" y="208" width="22" height="40" fill="#94A3B8"/>
+        <rect x="170" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="196" y="208" width="22" height="40" fill="#64748B"/>
+        <rect x="222" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="248" y="208" width="22" height="40" fill="#94A3B8"/>
+        <rect x="274" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="300" y="208" width="22" height="40" fill="#64748B"/>
+        <rect x="326" y="208" width="22" height="40" fill="#475569"/>
+        <rect x="352" y="208" width="22" height="40" fill="#94A3B8"/>
+      </g>
+    </g>
+
+    <!-- tiny figure pulling a book -->
+    <g transform="translate(60,420)">
+      <circle cx="0" cy="0" r="8" fill="#CBD5E1" stroke="#1A1A1A"/>
+      <line x1="0" y1="8" x2="0" y2="22" stroke="#CBD5E1" stroke-width="2"/>
+      <line x1="0" y1="14" x2="14" y2="10" stroke="#CBD5E1" stroke-width="2"/>
+      <line x1="0" y1="22" x2="-6" y2="34" stroke="#CBD5E1" stroke-width="2"/>
+      <line x1="0" y1="22" x2="6"  y2="34" stroke="#CBD5E1" stroke-width="2"/>
+    </g>
+
+    <!-- caption -->
+    <text x="240" y="500" text-anchor="middle" font-size="16" fill="#94A3B8">read → write → read → write</text>
+    <text x="240" y="524" text-anchor="middle" font-size="14" fill="#64748B" font-style="italic">no surprises. no growth.</text>
+  </g>
+
+  <!-- RIGHT: Metabolism -->
+  <g>
+    <text x="760" y="148" text-anchor="middle" font-size="26" fill="#F7B538" font-weight="700">Metabolism</text>
+    <text x="760" y="172" text-anchor="middle" font-size="16" fill="#FFE066" font-style="italic">fuses, dreams, heals. gets smarter.</text>
+
+    <!-- pulsing organism -->
+    <path d="M 600,300
+             C 590,230 670,200 760,210
+             C 860,220 920,260 920,330
+             C 920,400 850,440 760,440
+             C 670,440 610,400 600,330 Z"
+          fill="url(#organism)" stroke="#4A0E0E" stroke-width="3"/>
+
+    <!-- internal verbs orbiting -->
+    <g font-size="15" fill="#1A1A1A" font-weight="700">
+      <g transform="translate(670,260)">
+        <ellipse cx="0" cy="0" rx="36" ry="18" fill="#FFF8E7" stroke="#1A1A1A"/>
+        <text x="0" y="5" text-anchor="middle">fuse</text>
+      </g>
+      <g transform="translate(840,260)">
+        <ellipse cx="0" cy="0" rx="42" ry="18" fill="#FFF8E7" stroke="#1A1A1A"/>
+        <text x="0" y="5" text-anchor="middle">dream</text>
+      </g>
+      <g transform="translate(670,400)">
+        <ellipse cx="0" cy="0" rx="36" ry="18" fill="#FFF8E7" stroke="#1A1A1A"/>
+        <text x="0" y="5" text-anchor="middle">erupt</text>
+      </g>
+      <g transform="translate(840,400)">
+        <ellipse cx="0" cy="0" rx="36" ry="18" fill="#FFF8E7" stroke="#1A1A1A"/>
+        <text x="0" y="5" text-anchor="middle">heal</text>
+      </g>
+      <g transform="translate(760,330)">
+        <ellipse cx="0" cy="0" rx="40" ry="18" fill="#FFE066" stroke="#1A1A1A"/>
+        <text x="0" y="5" text-anchor="middle">live</text>
+      </g>
+    </g>
+
+    <!-- looping arrows -->
+    <g fill="none" stroke="#FFF8E7" stroke-width="2" stroke-linecap="round">
+      <path d="M 706,260 Q 730,235 800,260" marker-end="url(#a1)"/>
+      <path d="M 798,275 Q 820,330 798,385" marker-end="url(#a1)"/>
+      <path d="M 800,400 Q 730,420 706,400" marker-end="url(#a1)"/>
+      <path d="M 670,385 Q 650,330 670,278" marker-end="url(#a1)"/>
+    </g>
+    <defs>
+      <marker id="a1" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+        <path d="M0,0 L6,4 L0,8 Z" fill="#FFF8E7"/>
+      </marker>
+    </defs>
+
+    <!-- caption -->
+    <text x="760" y="500" text-anchor="middle" font-size="16" fill="#FFE066">read → fuse → dream → erupt → heal</text>
+    <text x="760" y="524" text-anchor="middle" font-size="14" fill="#FFF8E7" font-style="italic">surprises emerge. value compounds.</text>
+  </g>
+</svg>

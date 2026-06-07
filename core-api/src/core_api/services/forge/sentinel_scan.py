@@ -90,7 +90,9 @@ class ScanResult:
                     "code": f.code,
                     "severity": f.severity,
                     "message": f.message,
-                    **({"fatal": True} if f.fatal else {}),
+                    # Always emit ``fatal`` so Phase 2 consumers can
+                    # index ``finding["fatal"]`` directly — uniform schema.
+                    "fatal": f.fatal,
                     **({"locator": f.locator} if f.locator else {}),
                 }
                 for f in self.findings
