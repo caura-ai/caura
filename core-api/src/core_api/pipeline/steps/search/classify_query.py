@@ -59,7 +59,7 @@ class ClassifyQuery:
 
     async def execute(self, ctx: PipelineContext) -> StepResult | None:
         query: str = ctx.data["query"]
-        sp: dict = ctx.data["search_params"]
+        search_params: dict = ctx.data["search_params"]
         tenant_id: str = ctx.data["tenant_id"]
         fleet_ids: list[str] | None = ctx.data.get("fleet_ids")
         fleet_ids = fleet_ids or None  # normalise [] → None for consistent fleet filtering
@@ -69,8 +69,8 @@ class ClassifyQuery:
         status_filter: str | None = ctx.data.get("status_filter")
         valid_at = ctx.data.get("valid_at")
         readable_tenant_ids: list[str] | None = ctx.data.get("readable_tenant_ids")
-        graph_max_hops: int = sp["graph_max_hops"]
-        top_k: int = sp["top_k"]
+        graph_max_hops: int = search_params["graph_max_hops"]
+        top_k: int = search_params["top_k"]
 
         tokens = extract_entity_tokens(query)
 
@@ -173,7 +173,7 @@ class ClassifyQuery:
             overrides = {
                 "freshness_decay_days": 7,
                 "freshness_floor": 0.2,
-                "top_k": min(sp["top_k"], 5),
+                "top_k": min(search_params["top_k"], 5),
             }
             plan = RetrievalPlan(
                 strategy=RetrievalStrategy.RECENT_CONTEXT,
@@ -184,12 +184,12 @@ class ClassifyQuery:
             return None
 
         # No entity / temporal / recency match — keyword vs semantic search.
-        if sp["fts_weight"] >= FTS_WEIGHT_BOOSTED:
+        if search_params["fts_weight"] >= FTS_WEIGHT_BOOSTED:
             plan = RetrievalPlan(strategy=RetrievalStrategy.KEYWORD_SEARCH)
-            logger.info("classify_query: keyword_search (fts_weight=%.2f)", sp["fts_weight"])
+            logger.info("classify_query: keyword_search (fts_weight=%.2f)", search_params["fts_weight"])
         else:
             plan = RetrievalPlan(strategy=RetrievalStrategy.SEMANTIC_SEARCH)
-            logger.info("classify_query: semantic_search (fts_weight=%.2f)", sp["fts_weight"])
+            logger.info("classify_query: semantic_search (fts_weight=%.2f)", search_params["fts_weight"])
 
         ctx.data["retrieval_plan"] = plan
         return None
