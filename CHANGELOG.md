@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.12.1](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.12.0...backend-v2.12.1) (2026-06-07)
+
+
+### Documentation
+
+* **contributing:** warn about commit subjects that break release-please ([#285](https://github.com/caura-ai/caura-memclaw/issues/285)) ([ea829db](https://github.com/caura-ai/caura-memclaw/commit/ea829db0bd8d21b359c418d14b43e3ea0e29d5c3))
+
+
+### Code Refactoring
+
+* rename cryptic sp to search_params in ClassifyQuery ([#287](https://github.com/caura-ai/caura-memclaw/issues/287)) ([bad3109](https://github.com/caura-ai/caura-memclaw/commit/bad3109da265f13507532484f2c9dd892f8dd8af))
+
 ## [2.12.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.11.0...backend-v2.12.0) (2026-06-03)
 
 
