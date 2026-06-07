@@ -48,7 +48,7 @@ fleet?":
     WHERE tenant_id = :t
       AND (fleet_id = :f OR fleet_id IS NULL)
       AND cluster_fingerprint = :fp
-      AND rejected_at + (cooloff_days || ' days')::interval > now()
+      AND rejected_at + (interval '1 day' * cooloff_days) > now()
   )
 
 The ``idx_forge_rejected_fp_lookup`` index covers it directly. The

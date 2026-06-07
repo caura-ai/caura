@@ -353,3 +353,221 @@ async def validate_and_normalize_skill_write(
     out["scan"] = scan_result.as_doc_field()
 
     return out, scan_result
+
+
+# ── SF-204 — Auto-gate evaluator (candidate → staged) ─────────────
+
+
+@dataclass(frozen=True)
+class GateOutcome:
+    """One gate's verdict. ``passed=False`` carries a human-readable
+    ``reason`` so the audit log can pin which gate blocked promotion.
+    """
+
+    name: str
+    passed: bool
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class AutoGateResult:
+    """Aggregate of the 6 gates. ``promote=True`` means *all* gates
+    passed and the lifecycle worker may transition
+    ``candidate → staged``. The per-gate breakdown is preserved so the
+    Inbox UI can surface ``"blocked by: freshness"`` etc.
+    """
+
+    promote: bool
+    gates: tuple[GateOutcome, ...]
+
+    def fail_reasons(self) -> list[str]:
+        return [f"{g.name}: {g.reason}" for g in self.gates if not g.passed]
+
+
+# Default knobs — mirrored from ``org_settings.skills_factory.forge.*``.
+# These are the FALLBACK constants for direct unit tests. The lifecycle
+# worker resolves per-tenant overrides and passes them in.
+_DEFAULT_MIN_CLUSTER_SIZE = 3
+_DEFAULT_MIN_DISTINCT_AGENTS = 3
+_DEFAULT_FRESHNESS_WINDOW_DAYS = 14
+
+
+# Signature: (tenant_id, fleet_id, fingerprint) → bool (True = poisoned).
+# The lifecycle worker injects a real implementation that hits the
+# ``forge_rejected_fingerprints`` table; unit tests inject a fake.
+PoisonChecker = Any  # Callable[[str, str | None, str], Awaitable[bool]]
+# Signature: (tenant_id, collection, doc_id) → live_data dict | None.
+# Used to resolve the live ``content_hash`` for hash-binding gate (G6).
+LiveDataFetcher = Any  # Callable[[str, str, str], Awaitable[dict | None]]
+
+
+async def evaluate_auto_gates(
+    doc: dict,
+    *,
+    tenant_id: str,
+    fleet_id: str | None,
+    now: datetime,
+    poison_checker: PoisonChecker | None = None,
+    live_data_fetcher: LiveDataFetcher | None = None,
+    min_cluster_size: int = _DEFAULT_MIN_CLUSTER_SIZE,
+    min_distinct_agents: int = _DEFAULT_MIN_DISTINCT_AGENTS,
+    freshness_window_days: int = _DEFAULT_FRESHNESS_WINDOW_DAYS,
+) -> AutoGateResult:
+    """Evaluate the 6 auto-promotion gates against a candidate doc.
+
+    The candidate must have been produced by Forge (so it already
+    carries ``origin``, ``fingerprint``, ``evidence``, ``scan``). We
+    RE-CHECK the volume + diversity + poison gates because between the
+    Forge write and the lifecycle worker run:
+      - new rejects may have landed in the poison table,
+      - the cluster window may have aged out (freshness),
+      - the doc may have been edited via Inbox (G5 re-fires off
+        ``data.scan.state``).
+
+    Gates (plan §15 Phase 2 acceptance):
+
+      G1 ``volume``         — ``origin.cluster_size >= min_cluster_size``
+      G2 ``diversity``      — ``origin.distinct_agents >= min_distinct_agents``
+      G3 ``freshness``      — cluster window end is within
+                              ``freshness_window_days`` of ``now``
+      G4 ``poison``         — ``poison_checker(fingerprint)`` returns False
+      G5 ``scan``           — ``data.scan.state == 'clean'``  (no quarantine)
+      G6 ``hash_binding``   — for ``kind='update'`` docs, the
+                              ``target.target_content_hash`` still
+                              matches the live skill's ``content_hash``
+
+    Inputs that the gate is uncomfortable evaluating (missing
+    ``origin`` block, missing ``fingerprint``, …) cause that gate to
+    FAIL CLOSED — we'd rather hold a candidate in the inbox than
+    auto-promote one we can't verify.
+    """
+    gates: list[GateOutcome] = []
+    origin = doc.get("origin") or {}
+
+    # G1 — volume
+    cluster_size = origin.get("cluster_size")
+    if not isinstance(cluster_size, int):
+        gates.append(GateOutcome("volume", False, "missing origin.cluster_size"))
+    elif cluster_size < min_cluster_size:
+        gates.append(
+            GateOutcome(
+                "volume",
+                False,
+                f"cluster_size={cluster_size} < min_cluster_size={min_cluster_size}",
+            )
+        )
+    else:
+        gates.append(GateOutcome("volume", True))
+
+    # G2 — diversity
+    distinct_agents = origin.get("distinct_agents")
+    if not isinstance(distinct_agents, int):
+        gates.append(GateOutcome("diversity", False, "missing origin.distinct_agents"))
+    elif distinct_agents < min_distinct_agents:
+        gates.append(
+            GateOutcome(
+                "diversity",
+                False,
+                f"distinct_agents={distinct_agents} < min_distinct_agents={min_distinct_agents}",
+            )
+        )
+    else:
+        gates.append(GateOutcome("diversity", True))
+
+    # G3 — freshness (cluster window end within N days of now)
+    window_end_raw = origin.get("window_end")
+    window_end_dt: datetime | None = None
+    if isinstance(window_end_raw, str):
+        try:
+            window_end_dt = datetime.fromisoformat(window_end_raw.replace("Z", "+00:00"))
+        except ValueError:
+            window_end_dt = None
+    elif isinstance(window_end_raw, datetime):
+        window_end_dt = window_end_raw
+    if window_end_dt is None:
+        gates.append(GateOutcome("freshness", False, "missing/unparseable origin.window_end"))
+    else:
+        # Normalize to aware UTC so the subtraction is safe.
+        if window_end_dt.tzinfo is None:
+            window_end_dt = window_end_dt.replace(tzinfo=UTC)
+        # Same naive-datetime guard on ``now`` — callers occasionally
+        # pass ``datetime.utcnow()`` (returns naive), which would
+        # TypeError on the subtraction below since ``window_end_dt``
+        # is now always aware.
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        age_days = (now - window_end_dt).total_seconds() / 86400.0
+        if age_days > freshness_window_days:
+            gates.append(
+                GateOutcome(
+                    "freshness",
+                    False,
+                    f"window_end is {age_days:.1f}d old (> {freshness_window_days}d)",
+                )
+            )
+        else:
+            gates.append(GateOutcome("freshness", True))
+
+    # G4 — poison check
+    fingerprint = doc.get("fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint:
+        gates.append(GateOutcome("poison", False, "missing fingerprint"))
+    elif poison_checker is None:
+        # No checker injected — fail closed. The worker is expected to
+        # always inject one; direct unit tests pass an explicit fake.
+        gates.append(GateOutcome("poison", False, "no poison_checker available"))
+    else:
+        try:
+            poisoned = await poison_checker(tenant_id, fleet_id, fingerprint)
+        except Exception as e:
+            gates.append(GateOutcome("poison", False, f"poison_checker raised: {type(e).__name__}"))
+        else:
+            if poisoned:
+                gates.append(GateOutcome("poison", False, f"fingerprint {fingerprint} is poisoned"))
+            else:
+                gates.append(GateOutcome("poison", True))
+
+    # G5 — scan
+    scan = doc.get("scan") or {}
+    scan_state = scan.get("state")
+    if scan_state == "clean":
+        gates.append(GateOutcome("scan", True))
+    else:
+        gates.append(GateOutcome("scan", False, f"scan.state={scan_state!r} (expected 'clean')"))
+
+    # G6 — hash binding (only relevant for kind='update' docs)
+    kind = doc.get("kind", "create")
+    if kind != "update":
+        gates.append(GateOutcome("hash_binding", True, "n/a (kind=create)"))
+    else:
+        target = doc.get("target") or {}
+        target_hash = target.get("target_content_hash") if isinstance(target, dict) else None
+        slug = doc.get("slug")
+        if not isinstance(target_hash, str) or not isinstance(slug, str):
+            gates.append(
+                GateOutcome("hash_binding", False, "kind=update missing target.target_content_hash or slug")
+            )
+        elif live_data_fetcher is None:
+            gates.append(GateOutcome("hash_binding", False, "no live_data_fetcher available"))
+        else:
+            try:
+                live = await live_data_fetcher(tenant_id, "skills", slug)
+            except Exception as e:
+                gates.append(
+                    GateOutcome("hash_binding", False, f"live_data_fetcher raised: {type(e).__name__}")
+                )
+            else:
+                live_hash = (live or {}).get("content_hash") if isinstance(live, dict) else None
+                if live_hash == target_hash:
+                    gates.append(GateOutcome("hash_binding", True))
+                else:
+                    gates.append(
+                        GateOutcome(
+                            "hash_binding",
+                            False,
+                            f"target_hash={target_hash!r} != live_hash={live_hash!r}",
+                        )
+                    )
+
+    promote = all(g.passed for g in gates)
+    return AutoGateResult(promote=promote, gates=tuple(gates))
