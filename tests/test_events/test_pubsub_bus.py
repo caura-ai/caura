@@ -932,3 +932,184 @@ async def test_decode_handles_pydantic_validation_error() -> None:
         {"event_type": "memclaw.memory.created", "occurred_at": "not-a-date"}
     ).encode()
     assert PubSubEventBus._decode(bad_ts) is None
+
+
+# ---------------------------------------------------------------------------
+# Cross-environment fan-out guard
+#
+# Two environments sharing one GCP project share its topic namespace, so
+# Pub/Sub fans every message out to *both* envs' subscriptions. The bus
+# stamps a ``source_env`` attribute on publish and drops foreign-env copies
+# in ``_pull_loop`` before they reach a handler.
+# ---------------------------------------------------------------------------
+
+
+def _make_received(data: bytes, ack_id: str, attributes: dict[str, str]) -> Any:
+    """Build a fake Pub/Sub ReceivedMessage with real-dict attributes.
+
+    A bare ``MagicMock`` would make ``message.attributes.get(...)`` return a
+    truthy mock, defeating the guard's "attribute absent" branch — so the
+    attributes must be a real mapping.
+    """
+    received = MagicMock()
+    received.ack_id = ack_id
+    received.message.data = data
+    received.message.attributes = attributes
+    return received
+
+
+async def _drive_one_batch(bus: PubSubEventBus, received: list[Any]) -> dict[str, Any]:
+    """Run ``_pull_loop`` for exactly one batch and return what happened.
+
+    Returns ``{"dispatched": [...events], "acked": [...ack_ids],
+    "nacked": [...ack_ids]}``. The first pull yields *received*; the second
+    flips ``_stopping`` and returns nothing so the loop exits cleanly.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    dispatched: list[Event] = []
+
+    async def recording_dispatch(_handlers: Any, event: Event) -> bool:
+        dispatched.append(event)
+        return True
+
+    acked: list[str] = []
+    nacked: list[str] = []
+
+    fake_subscriber = MagicMock()
+    fake_subscriber.subscription_path = lambda proj, sub: (
+        f"projects/{proj}/subscriptions/{sub}"
+    )
+
+    calls = {"n": 0}
+
+    def fake_pull(request: Any = None, timeout: Any = None) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return MagicMock(received_messages=received)
+        bus._stopping = True
+        return MagicMock(received_messages=[])
+
+    fake_subscriber.pull = MagicMock(side_effect=fake_pull)
+    fake_subscriber.acknowledge = MagicMock(
+        side_effect=lambda request: acked.extend(request["ack_ids"])
+    )
+    fake_subscriber.modify_ack_deadline = MagicMock(
+        side_effect=lambda request: nacked.extend(request["ack_ids"])
+    )
+
+    bus._subscriber = fake_subscriber
+    bus._pull_executor = MagicMock()
+
+    loop = asyncio.get_running_loop()
+
+    async def _direct_run(_executor: Any, fn: Any, *args: Any) -> Any:
+        return fn(*args)
+
+    with (
+        patch.object(bus, "_dispatch_all", new=recording_dispatch),
+        patch.object(loop, "run_in_executor", new=AsyncMock(side_effect=_direct_run)),
+    ):
+        await bus._pull_loop("test-sub", [lambda _e: None])
+
+    return {"dispatched": dispatched, "acked": acked, "nacked": nacked}
+
+
+async def test_publish_stamps_source_env_attribute() -> None:
+    bus = PubSubEventBus(project_id="proj", subscription_prefix="test", env="production")
+    fake_publisher = MagicMock()
+    fake_publisher.topic_path = lambda proj, topic: f"projects/{proj}/topics/{topic}"
+    fake_publisher.publish = MagicMock(return_value=MagicMock())
+    bus._publisher = fake_publisher
+
+    await bus.publish(
+        Topics.Memory.EMBED_REQUESTED,
+        Event(event_type=Topics.Memory.EMBED_REQUESTED, payload={"memory_id": "abc"}),
+    )
+
+    # Attribute rides as a kwarg, leaving the positional (topic, data)
+    # wire format intact.
+    assert fake_publisher.publish.call_args.kwargs == {"source_env": "production"}
+
+
+async def test_publish_omits_source_env_when_env_unset(bus: PubSubEventBus) -> None:
+    # The shared fixture constructs the bus without an env.
+    await bus.publish(
+        Topics.Memory.EMBED_REQUESTED,
+        Event(event_type=Topics.Memory.EMBED_REQUESTED),
+    )
+    assert "source_env" not in bus._publisher.publish.call_args.kwargs
+
+
+async def test_env_is_normalised_and_empty_collapses_to_none() -> None:
+    assert (
+        PubSubEventBus(project_id="p", subscription_prefix="s", env=" production ")._env
+        == "production"
+    )
+    assert PubSubEventBus(project_id="p", subscription_prefix="s", env="   ")._env is None
+    assert PubSubEventBus(project_id="p", subscription_prefix="s", env="")._env is None
+    assert PubSubEventBus(project_id="p", subscription_prefix="s")._env is None
+
+
+async def test_foreign_source_env_decision_matrix() -> None:
+    prod = PubSubEventBus(project_id="p", subscription_prefix="s", env="production")
+    # Guard disabled when this bus has no env.
+    no_env = PubSubEventBus(project_id="p", subscription_prefix="s")
+
+    def msg(attrs: dict[str, str]) -> Any:
+        m = MagicMock()
+        m.attributes = attrs
+        return m
+
+    # Foreign → returns the offending env (drop).
+    assert prod._foreign_source_env(msg({"source_env": "sandbox"})) == "sandbox"
+    # Same env → None (process).
+    assert prod._foreign_source_env(msg({"source_env": "production"})) is None
+    # Attribute absent → None (backward-compatible, process).
+    assert prod._foreign_source_env(msg({})) is None
+    # Bus has no env → None regardless of the attribute.
+    assert no_env._foreign_source_env(msg({"source_env": "sandbox"})) is None
+
+
+async def test_pull_loop_drops_foreign_env_message_before_dispatch() -> None:
+    bus = PubSubEventBus(project_id="proj", subscription_prefix="test", env="production")
+    foreign = _make_received(
+        b'{"event_type": "memclaw.memory.embedded"}',
+        "ack-foreign",
+        {"source_env": "sandbox"},
+    )
+
+    result = await _drive_one_batch(bus, [foreign])
+
+    # Never handled (no wasted provider call), acked so it isn't redelivered.
+    assert result["dispatched"] == []
+    assert result["acked"] == ["ack-foreign"]
+    assert result["nacked"] == []
+
+
+async def test_pull_loop_processes_same_env_message() -> None:
+    bus = PubSubEventBus(project_id="proj", subscription_prefix="test", env="production")
+    local = _make_received(
+        b'{"event_type": "memclaw.memory.embedded"}',
+        "ack-local",
+        {"source_env": "production"},
+    )
+
+    result = await _drive_one_batch(bus, [local])
+
+    assert len(result["dispatched"]) == 1
+    assert result["acked"] == ["ack-local"]
+
+
+async def test_pull_loop_processes_message_without_source_env_attribute() -> None:
+    # A publisher that predates the attribute (or an external producer) must
+    # still be processed — the guard only drops *provably* foreign messages.
+    bus = PubSubEventBus(project_id="proj", subscription_prefix="test", env="production")
+    legacy = _make_received(
+        b'{"event_type": "memclaw.memory.embedded"}', "ack-legacy", {}
+    )
+
+    result = await _drive_one_batch(bus, [legacy])
+
+    assert len(result["dispatched"]) == 1
+    assert result["acked"] == ["ack-legacy"]

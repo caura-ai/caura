@@ -11,6 +11,22 @@ with infra. This class assumes the topics/subscriptions already exist.
 
 Import is lazy so `common.events` can be imported in OSS standalone
 installs that don't have `google-cloud-pubsub` installed.
+
+**Cross-environment isolation.** When two environments (e.g. production
+and a sandbox/staging) share one GCP project, they also share the topic
+namespace — topic names are not env-scoped. Each env gets its *own*
+subscription per topic, so Pub/Sub fans every published message out to
+*both* environments' subscribers. The foreign-env subscriber then does
+real work (a worker re-runs the embed/enrich provider call on the payload
+content) before its tenant-scoped DB write no-ops, wasting spend and
+emitting `target row missing` noise. To prevent this, the bus stamps each
+message with a `source_env` attribute (see ``SOURCE_ENV_ATTRIBUTE``) and
+``_pull_loop`` ack-drops any message whose `source_env` differs from this
+process's ``env`` *before* decode/dispatch. The guard is a no-op when
+``env`` is unset or the attribute is absent (backward-compatible with
+publishers that predate the attribute), so it is safe to roll out in any
+order. A follow-up moves the same drop server-side via a subscription
+`filter` on the attribute.
 """
 
 from __future__ import annotations
@@ -28,6 +44,15 @@ from pydantic import ValidationError
 from common.events.base import Event, EventBus, EventHandler
 
 logger = logging.getLogger(__name__)
+
+# Pub/Sub message attribute carrying the publishing environment's identity
+# (e.g. "production" / "sandbox"). Stamped on every publish when the bus is
+# constructed with an ``env`` and used by ``_pull_loop`` to drop foreign-env
+# messages. It is a Pub/Sub *attribute* (not a field in the JSON envelope) so
+# a future subscription ``filter`` can drop foreign messages server-side —
+# filters can only match attributes, never the message body. See the
+# cross-environment leakage note in the module docstring.
+SOURCE_ENV_ATTRIBUTE = "source_env"
 
 
 class PubSubEventBus(EventBus):
@@ -57,6 +82,15 @@ class PubSubEventBus(EventBus):
         project_id: str,
         subscription_prefix: str,
         *,
+        # Identity of the publishing environment ("production" /
+        # "sandbox" / ...). Stamped onto every published message as the
+        # ``SOURCE_ENV_ATTRIBUTE`` Pub/Sub attribute and used by
+        # ``_pull_loop`` to drop foreign-env messages that fanned out
+        # from a sibling environment sharing this project's topics. When
+        # None the cross-env guard is disabled (no stamping, no
+        # filtering) — preserves the pre-guard behaviour for single-env
+        # deployments and in-process tests.
+        env: str | None = None,
         # Batch size per pull. Caps ``workers × max_messages``
         # concurrent embed calls across the deployed pool, so 25
         # balances drain throughput against the OpenAI per-org
@@ -73,6 +107,10 @@ class PubSubEventBus(EventBus):
         # `start` — see `_ensure_pubsub_sdk` below.
         self._project_id = project_id
         self._subscription_prefix = subscription_prefix
+        # Normalise so a stray trailing space in the env var can't make a
+        # publisher's stamp mismatch a subscriber's comparison. Empty
+        # string collapses to None so it behaves identically to "unset".
+        self._env = env.strip() if env and env.strip() else None
         self._max_messages = max_messages
         self._pull_timeout = pull_timeout
         self._error_backoff = error_backoff
@@ -351,10 +389,18 @@ class PubSubEventBus(EventBus):
         # per-message publish errors to the caller — publisher-side
         # failures land in the SDK's background-thread log instead.
         # For a fire-and-forget audit path that is the right shape.
+        # Stamp the publishing environment so sibling environments that
+        # share this project's topics can drop our fan-out copies (see
+        # ``_pull_loop`` and the module docstring). Passed as a Pub/Sub
+        # *attribute* (kwarg to ``publish``) rather than folded into the
+        # JSON body so a subscription ``filter`` can later match it
+        # server-side. Omitted entirely when ``env`` is unset so the wire
+        # format is unchanged for single-env deployments.
+        attributes = {SOURCE_ENV_ATTRIBUTE: self._env} if self._env else {}
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             self._get_publish_executor(),
-            functools.partial(publisher.publish, topic_path, payload),
+            functools.partial(publisher.publish, topic_path, payload, **attributes),
         )
 
     # ── subscriber ─────────────────────────────────────────────────
@@ -474,6 +520,33 @@ class PubSubEventBus(EventBus):
                 self._pull_tasks.append(task)
         self._started = True
 
+    def _foreign_source_env(self, message: Any) -> str | None:
+        """Return the message's ``source_env`` when it was published by a
+        *different* environment than this bus — i.e. the message should be
+        dropped — otherwise ``None`` (process it normally).
+
+        Returns ``None`` (= process) in every backward-compatible case:
+
+        - this bus has no ``env`` configured, so the guard is disabled;
+        - the message carries no ``source_env`` attribute (the publisher
+          predates the attribute, or it came from outside this bus —
+          e.g. a Google-originated push), so we can't prove it's foreign;
+        - the attribute equals this bus's ``env``.
+
+        Only a *present* attribute that *differs* from ``self._env`` is
+        treated as foreign. This keeps the guard safe to deploy in any
+        order: until every publisher stamps the attribute, unstamped
+        messages keep their pre-guard fan-out behaviour rather than being
+        silently dropped.
+        """
+        if self._env is None:
+            return None
+        attributes = getattr(message, "attributes", None) or {}
+        source_env = attributes.get(SOURCE_ENV_ATTRIBUTE)
+        if not source_env or source_env == self._env:
+            return None
+        return source_env
+
     async def _pull_loop(
         self, subscription_name: str, handlers: list[EventHandler]
     ) -> None:
@@ -526,6 +599,27 @@ class PubSubEventBus(EventBus):
                 ack_ids: list[str] = []
                 nack_ids: list[str] = []
                 for received in response.received_messages:
+                    foreign_env = self._foreign_source_env(received.message)
+                    if foreign_env is not None:
+                        # Fan-out copy from a sibling environment sharing
+                        # this project's topics. Ack-drop *before* decode
+                        # and dispatch — running the handler would re-run a
+                        # provider (embed/enrich) call on the payload and
+                        # then no-op against a tenant row that doesn't exist
+                        # in this env's DB, wasting spend and emitting
+                        # `target row missing` noise. Ack (not nack) so it
+                        # isn't redelivered; the owning env has its own
+                        # subscription and processes its own copy.
+                        ack_ids.append(received.ack_id)
+                        logger.info(
+                            "event-bus: dropping foreign-env message",
+                            extra={
+                                "subscription": subscription_name,
+                                "source_env": foreign_env,
+                                "env": self._env,
+                            },
+                        )
+                        continue
                     event = self._decode(received.message.data)
                     if event is None:
                         # Malformed message — ack so we don't redeliver
