@@ -91,6 +91,43 @@ function _failureCooldownHours(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 24;
 }
 
+/**
+ * Schedule a graceful restart of the openclaw-gateway. Module-level
+ * helper extracted from three (previously duplicated) inline blocks
+ * inside ``processCommand``. Overridable via ``__DEPLOY_INTERNALS__``
+ * for tests — the production path runs ``systemctl --user restart``
+ * with a fallback ``process.exit(0)`` when systemctl is unavailable.
+ *
+ * The 2-second delay is intentional grace: it gives any in-flight
+ * heartbeat/log/network I/O a chance to drain before SIGTERM. Pre-
+ * CAURA-000 the result POST was racing with this delay (POST was
+ * issued AFTER the setTimeout was scheduled, so a slow POST got
+ * killed mid-flight). The fix moves the restart scheduling to AFTER
+ * the result POST resolves, so the 2-second delay now only covers
+ * any minor post-POST tidy-up rather than the POST itself.
+ *
+ * The production implementation is kept in a ``const`` so test seams
+ * can RESTORE it via ``setScheduleRestartForTests(null)`` after they
+ * swap in a spy — without this an ``afterEach`` could only LEAVE the
+ * module in test-spy state, and any subsequent code (in the same
+ * process) that reached ``processCommand`` with a restart command
+ * would silently skip the systemctl call.
+ */
+const _originalScheduleGracefulRestart = (): void => {
+  setTimeout(() => {
+    try {
+      execSync("systemctl --user restart openclaw-gateway 2>&1", {
+        encoding: "utf-8",
+        timeout: 10_000,
+      });
+    } catch {
+      process.exit(0);
+    }
+  }, 2000);
+};
+
+let _scheduleGracefulRestart: () => void = _originalScheduleGracefulRestart;
+
 // Exported for tests. Public surface is intentionally small.
 export const __DEPLOY_INTERNALS__ = {
   get DEPLOY_PENDING_FILE() { return DEPLOY_PENDING_FILE; },
@@ -113,6 +150,44 @@ export const __DEPLOY_INTERNALS__ = {
     postRestartCheckDone = false;
   },
   verifyPostRestart: () => verifyDeployPostRestart(),
+  // Test-only: drive ``processCommand`` directly and substitute the
+  // restart scheduler. The substitution seam exists for CAURA-000
+  // race-test coverage — the production restart fires
+  // ``systemctl --user restart`` which would kill the test process.
+  // Gated to ``NODE_ENV === "test"`` so a production import surface
+  // can't accidentally disable real restarts (a "deploy" or "restart"
+  // command would then succeed silently — backend would see status=done
+  // but the gateway would never actually restart, leaving the node
+  // permanently behind).
+  processCommand: (cmd: Parameters<typeof processCommand>[0]) =>
+    processCommand(cmd),
+  // Pass a function to install a spy; pass ``null`` to restore the
+  // production scheduler (use in ``afterEach`` so subsequent tests in
+  // the same process don't inherit the spy state — without this, a
+  // later test that reaches ``processCommand`` with a restart command
+  // would silently skip the systemctl call and any assertion downstream
+  // would mis-attribute the cause).
+  //
+  // Calls from outside NODE_ENV=test are REJECTED LOUDLY (warn line):
+  // a silent no-op meant a misconfigured test runner would let the real
+  // ``systemctl --user restart`` fire 2 seconds AFTER assertions passed,
+  // killing the test process and turning a green CI run into a confused
+  // post-mortem. The plugin's ``package.json:test`` script already sets
+  // NODE_ENV=test; this warn is the safety net for anyone running tests
+  // through other harnesses.
+  setScheduleRestartForTests: (fn: (() => void) | null) => {
+    if (process.env.NODE_ENV !== "test") {
+      console.warn(
+        "[memclaw] __DEPLOY_INTERNALS__.setScheduleRestartForTests called " +
+          "outside NODE_ENV=test — ignored. The production restart scheduler " +
+          "is still active; tests using this seam must set NODE_ENV=test " +
+          "(the plugin's npm test script already does) or the real " +
+          "systemctl --user restart will fire after the test completes.",
+      );
+      return;
+    }
+    _scheduleGracefulRestart = fn ?? _originalScheduleGracefulRestart;
+  },
 };
 
 function readDeployCooldown(): { failed_version?: string; blocked_until?: number } {
@@ -574,6 +649,14 @@ async function processCommand(cmd: {
 
   let status = "done";
   let result: Record<string, unknown> = {};
+  // CAURA-000: set inside the deploy/restart success branches; the
+  // restart MUST be scheduled AFTER the result POST resolves so a
+  // slow POST isn't killed mid-flight by the systemctl SIGTERM.
+  // Customer prod-data: 1,381 commands stuck at ``acked`` because of
+  // exactly this race — the pre-fix code scheduled
+  // ``setTimeout(systemctl restart, 2000)`` BEFORE awaiting the POST,
+  // so the POST + SIGTERM raced and the backend never saw "done".
+  let shouldRestart = false;
 
   try {
     if (cmd.command === "deploy" || cmd.command === "update_plugin") {
@@ -879,7 +962,7 @@ async function processCommand(cmd: {
                 encoding: "utf-8",
                 timeout: BUILD_TIMEOUT_MS,
               });
-              console.log(`[memclaw] deploy: build succeeded, scheduling restart`);
+              console.log(`[memclaw] deploy: build succeeded, restart will be scheduled after result POST`);
               result = {
                 ok: true,
                 // Report the version that the cooldown / verifier path
@@ -889,16 +972,7 @@ async function processCommand(cmd: {
                 buildOutput: buildOutput.slice(-2000),
                 restarting: true,
               };
-              setTimeout(() => {
-                try {
-                  execSync("systemctl --user restart openclaw-gateway 2>&1", {
-                    encoding: "utf-8",
-                    timeout: 10_000,
-                  });
-                } catch {
-                  process.exit(0);
-                }
-              }, 2000);
+              shouldRestart = true;
             } catch (e: unknown) {
               const errMsg = e instanceof Error ? e.message : String(e);
               console.warn(`[memclaw] deploy: build failed — ${errMsg.slice(0, 200)}`);
@@ -936,16 +1010,7 @@ async function processCommand(cmd: {
         const deployResult = await deployPlugin(sourceCode, env_vars);
         if (deployResult.ok) {
           result = { ok: true, buildOutput: (deployResult.buildOutput || "").slice(-2000), restarting: true };
-          setTimeout(() => {
-            try {
-              execSync("systemctl --user restart openclaw-gateway 2>&1", {
-                encoding: "utf-8",
-                timeout: 10_000,
-              });
-            } catch {
-              process.exit(0);
-            }
-          }, 2000);
+          shouldRestart = true;
         } else {
           status = "failed";
           result = { error: deployResult.error, buildOutput: deployResult.buildOutput };
@@ -1011,16 +1076,7 @@ async function processCommand(cmd: {
       };
     } else if (cmd.command === "restart") {
       result = { ok: true, restarting: true };
-      setTimeout(() => {
-        try {
-          execSync("systemctl --user restart openclaw-gateway 2>&1", {
-            encoding: "utf-8",
-            timeout: 10_000,
-          });
-        } catch {
-          process.exit(0);
-        }
-      }, 2000);
+      shouldRestart = true;
     } else {
       status = "failed";
       result = { error: `Unknown command: ${cmd.command}` };
@@ -1046,5 +1102,20 @@ async function processCommand(cmd: {
     console.warn(
       `[memclaw] command ${cmd.command} result POST failed: ${(re as Error).message}`,
     );
+  }
+
+  // CAURA-000: schedule the gateway restart AFTER the result POST
+  // resolves. Pre-fix this was three duplicated ``setTimeout`` blocks
+  // scheduled INSIDE the deploy/restart branches above (before the
+  // POST), so a slow POST got killed mid-flight by the systemctl
+  // SIGTERM and the backend never saw "done" — every node that hit
+  // this race accumulated stuck-``acked`` deploy commands at 1/heartbeat
+  // (customer prod: 1,381 across the fleet, 1,223 on one node, the
+  // exact source of the "SIGTERM every 60s" cycle the customer
+  // reported). The restart still happens whether the POST succeeded
+  // or failed — the deploy/restart command itself completed; the POST
+  // is only the bookkeeping channel to the backend.
+  if (shouldRestart) {
+    _scheduleGracefulRestart();
   }
 }
