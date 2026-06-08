@@ -1,6 +1,6 @@
 {
   "name": "@caura/memclaw",
-  "version": "2.8.2",
+  "version": "2.8.3",
   "description": "OpenClaw plugin for MemClaw central memory",
   "license": "Apache-2.0",
   "private": true,
@@ -16,7 +16,7 @@
     "pretest": "bash ../scripts/gen-version.sh",
     "build": "tsc",
     "dev": "bash ../scripts/gen-version.sh && tsc --watch",
-    "test": "tsc && NODE_ENV=test node --test dist/educate.test.js dist/tool-definitions.test.js dist/env.test.js dist/transport.test.js dist/health.test.js dist/config.test.js dist/runtime-contract.test.js dist/identity.test.js dist/install-id.test.js dist/validation.test.js dist/reconcile-skills.test.js dist/context-engine.test.js dist/heartbeat.test.js dist/keystones.test.js",
+    "test": "tsc && NODE_ENV=test node --test dist/educate.test.js dist/tool-definitions.test.js dist/env.test.js dist/transport.test.js dist/health.test.js dist/config.test.js dist/runtime-contract.test.js dist/identity.test.js dist/install-id.test.js dist/validation.test.js dist/reconcile-skills.test.js dist/context-engine.test.js dist/heartbeat.test.js dist/keystones.test.js dist/resolve-agent.test.js",
     "check:version": "bash -c 'V=$(node -p \"require(\\\"./package.json\\\").version\"); grep -qF \"PLUGIN_VERSION = \\\"$V\\\"\" src/version.ts || (echo \"version.ts out of sync with package.json ($V): run bash ../scripts/gen-version.sh\" >&2 && exit 1) && echo \"check:version ok: $V\"'"
   },
   "devDependencies": {

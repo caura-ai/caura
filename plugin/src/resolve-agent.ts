@@ -16,8 +16,9 @@
 import { MEMCLAW_AGENT_ID } from "./env.js";
 import { getInstallId } from "./install-id.js";
 
-export function resolveAgentId(
-  ...sources: Array<Record<string, unknown> | undefined | null>
+function resolveAgentIdInner(
+  sources: Array<Record<string, unknown> | undefined | null>,
+  quiet: boolean,
 ): string {
   for (const src of sources) {
     if (!src || typeof src !== "object") continue;
@@ -41,18 +42,49 @@ export function resolveAgentId(
   }
 
   if (MEMCLAW_AGENT_ID) {
-    console.warn(
-      "[memclaw] Agent ID resolved from MEMCLAW_AGENT_ID env var — consider passing agent_id explicitly",
-    );
+    if (!quiet) {
+      console.warn(
+        "[memclaw] Agent ID resolved from MEMCLAW_AGENT_ID env var — consider passing agent_id explicitly",
+      );
+    }
     return MEMCLAW_AGENT_ID;
   }
 
   // Per-install fallback. Was ``"unknown-agent"`` pre-Task6 — every
   // install collided on a single row.
   const fallback = `main-${getInstallId()}`;
-  console.warn(
-    `[memclaw] Could not resolve agent ID — using install-default '${fallback}'. ` +
-      `Pass agent_id explicitly (or set MEMCLAW_AGENT_ID) for clarity.`,
-  );
+  if (!quiet) {
+    console.warn(
+      `[memclaw] Could not resolve agent ID — using install-default '${fallback}'. ` +
+        `Pass agent_id explicitly (or set MEMCLAW_AGENT_ID) for clarity.`,
+    );
+  }
   return fallback;
+}
+
+export function resolveAgentId(
+  ...sources: Array<Record<string, unknown> | undefined | null>
+): string {
+  return resolveAgentIdInner(sources, false);
+}
+
+/**
+ * Same resolution as ``resolveAgentId`` but suppresses the install-default
+ * fallback warning. Use ONLY at call sites where the fallback is the design
+ * (e.g. ``ContextEngine`` bootstrap, where the ``factoryCtx`` wrapper
+ * legitimately carries no per-call session info — see CAURA-000 PR #286).
+ *
+ * Per-turn paths (``assemble`` / ``ingest`` / ``afterTurn`` /
+ * ``prepareSubagentSpawn``) MUST continue using the loud ``resolveAgentId``
+ * — a fall-through there is a real bug (it means OpenClaw's per-call
+ * context did not carry an agent identity), and silencing it would mask
+ * the next regression. The customer's 18h goodclaw window post-2.8.1
+ * shows exactly 1.00 warns per ``ContextEngine bootstrap`` event — i.e.
+ * 100% of the residual warn noise is from the bootstrap fallback, which
+ * is exactly the case this helper exists to silence.
+ */
+export function resolveAgentIdQuiet(
+  ...sources: Array<Record<string, unknown> | undefined | null>
+): string {
+  return resolveAgentIdInner(sources, true);
 }

@@ -2,7 +2,7 @@
   "id": "memclaw",
   "name": "MemClaw",
   "kind": "memory",
-  "version": "2.8.2",
+  "version": "2.8.3",
   "description": "Central persistent memory for OpenClaw agents — write, search, and entity lookup tools.",
   "entry": "dist/index.js",
   "skills": [

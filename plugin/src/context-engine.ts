@@ -31,7 +31,7 @@ import {
 } from "./env.js";
 import { memclawPromptSectionText } from "./prompt-section.js";
 import { MEMCLAW_TOOLS } from "./tools.js";
-import { resolveAgentId } from "./resolve-agent.js";
+import { resolveAgentId, resolveAgentIdQuiet } from "./resolve-agent.js";
 import { getTenantPrefix, getSessionKey } from "./context-engine.internal.js";
 import { logError, logErrorCritical } from "./logger.js";
 import { fetchKeystonesBlock } from "./keystones.js";
@@ -67,6 +67,28 @@ const MAX_SESSIONS = 100;
 const MAX_INGEST_WRITES_PER_SESSION = 10;
 const sessionBuffers = new Map<string, IngestMessage[]>();
 const sessionIngestCounts = new Map<string, number>();
+
+/**
+ * True iff the error is the content-hash dedup rejection from
+ * ``POST /memories`` (the backend's idempotency guard against re-writing
+ * identical content under the same ``(tenant_id, fleet_id, agent_id)``
+ * triple — see ``CheckExactDuplicate`` step in the write pipeline).
+ *
+ * Used by ``afterTurn`` to swallow this specific shape silently: the same
+ * agent emitting an identical short reply on consecutive turns ("Got it.",
+ * "ok", "thanks") is the common case, and the existing memory is what
+ * ``afterTurn`` would have written — so a 409 here is a soft no-op, not a
+ * failure. Pre-fix it produced ~5 warn/hr in the customer's goodclaw
+ * gateway, drowning real signal in the operator log. Anything that's NOT a
+ * 409 (5xx, network, auth) still routes to the normal error logger.
+ *
+ * Matches the error message format from ``transport.ts:82``:
+ *   ``new Error("MemClaw API " + status + ": " + body)``
+ */
+export function isDuplicateMemoryError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  return /\bMemClaw API 409\b/.test(e.message);
+}
 
 function pushToBuffer(sessionKey: string, message: IngestMessage): void {
   let buffer = sessionBuffers.get(sessionKey);
@@ -436,7 +458,14 @@ export class MemClawContextEngine {
   }
 
   private async _doBootstrap(): Promise<void> {
-    const bootAgentId = resolveAgentId(this.config);
+    // ``Quiet`` variant: the factoryCtx wrapper that OpenClaw passes at
+    // construction has no per-call session identity, so the install-default
+    // fallback IS the bootstrap design — the warn was pure noise. Per-turn
+    // call sites (assemble/ingest/afterTurn/prepareSubagentSpawn) still use
+    // the loud ``resolveAgentId`` so a real per-turn regression remains
+    // visible. (CAURA-000 — customer's 18h goodclaw 2.8.1 window shows
+    // 100% of residual warn noise comes from this exact bootstrap path.)
+    const bootAgentId = resolveAgentIdQuiet(this.config);
     console.log(
       `[memclaw] ContextEngine bootstrap: agent=${bootAgentId}, ` +
         `fleet=${MEMCLAW_FLEET_ID || "(unset)"}, ` +
@@ -1171,6 +1200,11 @@ export class MemClawContextEngine {
         tags: ["auto-turn-summary"],
       });
     } catch (e: unknown) {
+      // 409 dedup rejection is expected when the same agent emits identical
+      // content twice (very common for short replies). The existing memory
+      // already encodes what we'd have written → soft no-op. Swallow to
+      // keep operator-log signal-to-noise high; non-409 errors still log.
+      if (isDuplicateMemoryError(e)) return;
       logError("Failed to persist turn summary", e);
     }
   }
