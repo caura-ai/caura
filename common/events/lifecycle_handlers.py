@@ -34,6 +34,7 @@ from common.events.lifecycle_archive_request import (
     LifecycleArchiveRequest,
     LifecycleRequestBase,
 )
+from common.events.lifecycle_forge_request import LifecycleForgeDistillRequest
 from common.events.lifecycle_purge_request import LifecyclePurgeRequest
 from common.events.topics import Topics
 
@@ -75,6 +76,16 @@ class PipelineStorageAdapter(Protocol):
     async def entity_link(self, *, org_id: str, fleet_id: str | None) -> int: ...
 
     async def insights(self, *, org_id: str, fleet_id: str | None) -> int: ...
+
+    # Skill Factory SF-007: Forge distillation run. Phase 0 ships a
+    # no-op adapter (returns 0, logs); Phase 1 swaps in the real
+    # cluster fingerprint + LLM distill pipeline. Method signature
+    # mirrors the other pipeline ops (org_id/fleet_id only) — extra
+    # run-knobs on :class:`LifecycleForgeDistillRequest` are
+    # intentionally NOT plumbed through the adapter for the Phase 0
+    # stub; Phase 1 will either fatten this signature or thread the
+    # full request object.
+    async def forge_distill(self, *, org_id: str, fleet_id: str | None) -> int: ...
 
     async def has_recent_lifecycle_success(
         self, *, org_id: str, action: str, since_hours: int
@@ -331,6 +342,13 @@ def register_pipeline_consumers(adapter: PipelineStorageAdapter) -> None:
     async def insights_op(req: LifecycleArchiveRequest) -> int:
         return await adapter.insights(org_id=req.org_id, fleet_id=req.fleet_id)
 
+    async def forge_distill_op(req: LifecycleForgeDistillRequest) -> int:
+        # Phase 0 stub: the adapter's no-op returns 0. The full
+        # request (run_label, dry_run, freshness_window_days, etc.)
+        # is preserved on the event payload for Phase 1 — only
+        # org_id + fleet_id are threaded through the adapter today.
+        return await adapter.forge_distill(org_id=req.org_id, fleet_id=req.fleet_id)
+
     bus = get_event_bus()
     bus.subscribe(
         Topics.Lifecycle.CRYSTALLIZE_REQUESTED,
@@ -365,6 +383,22 @@ def register_pipeline_consumers(adapter: PipelineStorageAdapter) -> None:
             run_op=insights_op,
             stats_key="insights_created",
             action="insights",
+            dedup_window_hours=_PIPELINE_DEDUP_WINDOW_HOURS,
+        ),
+    )
+    # Skill Factory SF-007: Forge distill consumer. Phase 0 stub — the
+    # adapter's no-op returns 0 and logs; the dedup window stays at
+    # _PIPELINE_DEDUP_WINDOW_HOURS so a redeploy can't double-fire a
+    # legitimate Forge run within the same day.
+    bus.subscribe(
+        Topics.Lifecycle.FORGE_DISTILL_REQUESTED,
+        partial(
+            _run_action,
+            adapter=adapter,
+            payload_cls=LifecycleForgeDistillRequest,
+            run_op=forge_distill_op,
+            stats_key="candidates_produced",
+            action="forge-distill",
             dedup_window_hours=_PIPELINE_DEDUP_WINDOW_HOURS,
         ),
     )

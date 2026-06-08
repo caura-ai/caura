@@ -16,6 +16,19 @@ from core_api.middleware.idempotency import IDEMPOTENCY_HEADER, idempotency_for
 from core_api.middleware.rate_limit import write_limit
 from core_api.services.agent_service import enforce_delete
 from core_api.services.audit_service import log_action, log_cross_tenant_read
+
+# Skill Factory SF-002 — imported at module scope (rather than lazily
+# inside the handler) so a broken import surfaces at server startup
+# rather than on the first skills-collection write. The flag-gate
+# below still ensures non-skills writes pay zero settings-fetch cost.
+from core_api.services.organization_settings import (
+    get_raw_settings,
+    get_settings_for_display,
+)
+from core_api.services.skill_lifecycle import (
+    SkillWriteContext,
+    validate_and_normalize_skill_write,
+)
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
 
 logger = logging.getLogger(__name__)
@@ -31,7 +44,42 @@ router = APIRouter(tags=["Document Store"])
 # data["description"] for the skills collection only — see
 # core_api.services.doc_indexing).
 SKILLS_COLLECTION = "skills"
-_SKILL_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
+# Optional ``forge/`` or ``agent/`` prefix supports the Skill Factory's
+# doc_id namespacing (plan §3): Forge candidates land as ``forge/<slug>``
+# and synchronous agent-direct writes via ``memclaw_doc`` land as
+# ``agent/<slug>``. Without this, Forge's own writes 422 themselves at
+# the route boundary. ``manual``/``imported`` rows keep the plain
+# ``<slug>`` shape — the prefix is opt-in, not required.
+_SKILL_SLUG_RE = re.compile(r"^(?:forge/|agent/)?[a-z0-9][a-z0-9._-]{0,99}$")
+
+# Skill Factory SF-005 — Rollback metadata for applied skills.
+#
+# Reuses the existing ``documents`` table; no schema migration needed.
+# One doc per Skill Factory apply event, written BEFORE the apply
+# mutates a live SKILL.md (Phase 3 install path), so a one-click
+# revert can restore the prior state byte-for-byte.
+#
+# Doc-id shape (Phase 3 will adopt):
+#   ``<skill_slug>/<apply_iso_timestamp>``
+# Slashes are permitted by the generic ``DocumentWriteBody`` validator
+# (``doc_id`` only enforces 1-500 chars - the strict slug regex above
+# is scoped to the ``skills`` collection only).
+#
+# Data shape (informational; not yet enforced — Phase 3 adds the
+# validator):
+#
+#   {
+#     "schema":               "memclaw.skill-factory.rollback.v1",
+#     "skill_slug":           "<slug>",
+#     "written_at":           "<iso>",
+#     "target_path":          "<absolute target file path>",
+#     "action":               "create" | "update",
+#     "previous_content_hash": "<sha256>" | null,
+#     "previous_content":     "<utf8 bytes>" | null,
+#     "support_files":        [ {path, existed, previous_content_hash,
+#                                previous_content}, ... ]
+#   }
+SKILLS_ROLLBACK_COLLECTION = "skills_rollback"
 
 
 # ── Schemas ──
@@ -125,7 +173,9 @@ async def upsert_document(
         return JSONResponse(content=_body, status_code=_status)
 
     # Skills slug rule — doc_id becomes a directory name on plugin-side
-    # reconciliation, so it must be filesystem-safe.
+    # reconciliation, so it must be filesystem-safe. Note: the slug
+    # rule is permissive enough to allow ``forge/<slug>`` / ``agent/<slug>``
+    # namespaced doc_ids per the Skill Factory plan (Phase 0 OQ-2).
     if body.collection == SKILLS_COLLECTION and not _SKILL_SLUG_RE.fullmatch(body.doc_id):
         raise HTTPException(
             status_code=422,
@@ -135,6 +185,68 @@ async def upsert_document(
                 "Slugs become directory names on each plugin node."
             ),
         )
+
+    # ── Skill Factory SF-002: 7 adjustments on every skills-collection
+    # write, gated by ``org_settings.skills_factory.enabled`` (default
+    # False). Existing tenants that have never opted in see ZERO behavior
+    # change.
+    #
+    # Hot-path note: we check the flag via ``get_raw_settings`` (returns
+    # just the tenant's override dict — typically ``{}`` for never-
+    # configured tenants, cheap to load and aggressively cached). Only
+    # when the flag is true do we materialize the full merged settings
+    # via ``get_settings_for_display`` to read the per-tenant caps.
+    # Disabled tenants pay one TTL-cached lookup + one dict-get, not
+    # the full DEFAULT_SETTINGS deep-merge per write.
+    if body.collection == SKILLS_COLLECTION:
+        raw_settings = await get_raw_settings(db, body.tenant_id)
+        sf_enabled = raw_settings.get("skills_factory", {}).get("enabled") is True
+        if sf_enabled:
+            settings_display = await get_settings_for_display(db, body.tenant_id)
+            sf_settings = settings_display.get("skills_factory", {})
+            # ``forge`` source is reserved for the internal lifecycle
+            # worker; no external HTTP caller is treated as internal in
+            # Phase 0 — the Forge resident lands in Phase 1 with its
+            # own auth identity. Until then the validator will 403 any
+            # external source='forge' attempt.
+            is_internal_forge = False
+            sf_ctx = SkillWriteContext(
+                caller_agent_id=getattr(auth, "agent_id", None),
+                is_admin=bool(getattr(auth, "is_admin", False))
+                or (getattr(auth, "org_role", None) == "admin"),
+                is_internal_forge=is_internal_forge,
+                description_max_bytes=int(sf_settings.get("description_max_bytes", 160)),
+                body_max_bytes=int(sf_settings.get("body_max_bytes", 40_000)),
+            )
+
+            # For ``kind='update'`` we must fetch the live skill so the
+            # hash-binding check can compare against the current
+            # content_hash. Read-through storage; the validator handles
+            # the not-found case.
+            #
+            # Guarded by ``isinstance(body.data, dict)`` — a non-dict
+            # body.data is a legitimate input (the validator below
+            # rejects it with 422), but calling ``.get`` on it would
+            # AttributeError into a 500 first. Cleanly punt that
+            # rejection to the validator instead of crashing.
+            live_doc: dict | None = None
+            if isinstance(body.data, dict) and body.data.get("kind") == "update":
+                sc_live = get_storage_client()
+                live_doc = await sc_live.get_document(
+                    tenant_id=body.tenant_id,
+                    collection=SKILLS_COLLECTION,
+                    doc_id=body.doc_id,
+                )
+
+            normalized, _scan = await validate_and_normalize_skill_write(
+                body.data,
+                ctx=sf_ctx,
+                live_skill_doc=live_doc,
+            )
+            # Swap the normalized body in for the rest of the flow
+            # (embedding + storage round-trip). Sentinel scan and
+            # server-controlled fields are already merged inside.
+            body.data = normalized
 
     if auth.tenant_id:
         await check_and_increment(db, body.tenant_id, "write")

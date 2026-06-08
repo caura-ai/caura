@@ -1,0 +1,403 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 1000" font-family="'Inter','Helvetica Neue',sans-serif">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#0B1020"/>
+      <stop offset="100%" stop-color="#13182E"/>
+    </linearGradient>
+    <radialGradient id="lakeGrad" cx="50%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#FFE066"/>
+      <stop offset="55%" stop-color="#FF6B35"/>
+      <stop offset="100%" stop-color="#6A040F"/>
+    </radialGradient>
+
+    <!-- Arrow markers (one per flow color) -->
+    <marker id="arrow-amber" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L10,6 L0,12 Z" fill="#F7B538"/>
+    </marker>
+    <marker id="arrow-cyan" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L10,6 L0,12 Z" fill="#67E8F9"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L10,6 L0,12 Z" fill="#6EE7B7"/>
+    </marker>
+    <marker id="arrow-red" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L10,6 L0,12 Z" fill="#FCA5A5"/>
+    </marker>
+
+    <!-- Block fill styles -->
+    <linearGradient id="newBlock" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#1F2942"/>
+      <stop offset="100%" stop-color="#172033"/>
+    </linearGradient>
+    <linearGradient id="existingBlock" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#1B2F3A"/>
+      <stop offset="100%" stop-color="#142531"/>
+    </linearGradient>
+    <linearGradient id="storageBlock" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#2B1208"/>
+      <stop offset="100%" stop-color="#1F0E08"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1500" height="1000" fill="url(#bgGrad)"/>
+
+  <!-- ─────────────────────────  TITLE  ───────────────────────── -->
+  <text x="750" y="50" text-anchor="middle" font-size="30" fill="#FFF8E7" font-weight="700">Skill Factory — End-to-End Architecture</text>
+  <text x="750" y="76" text-anchor="middle" font-size="15" fill="#F7B538" font-style="italic">producers → outcome inference → cluster · fingerprint → Forge distill → Sentinel scan → skills collection (lifecycle) → HITL Inbox → harness install → outcomes loop back</text>
+
+  <!-- legend -->
+  <g transform="translate(30,90)" font-size="11" fill="#CBD5E1">
+    <rect x="0" y="0" width="14" height="14" rx="2" fill="url(#existingBlock)" stroke="#67E8F9" stroke-width="1.5"/>
+    <text x="22" y="11">existing in code</text>
+    <rect x="140" y="0" width="14" height="14" rx="2" fill="url(#newBlock)" stroke="#F7B538" stroke-width="1.5" stroke-dasharray="3 2"/>
+    <text x="162" y="11">NEW in this plan</text>
+    <rect x="280" y="0" width="14" height="14" rx="2" fill="url(#storageBlock)" stroke="#FB7185" stroke-width="1.5"/>
+    <text x="302" y="11">storage / data plane</text>
+    <line x1="430" y1="7" x2="455" y2="7" stroke="#F7B538" stroke-width="2"/>
+    <text x="465" y="11">data flow (forward)</text>
+    <line x1="600" y1="7" x2="625" y2="7" stroke="#FCA5A5" stroke-width="2" stroke-dasharray="4 3"/>
+    <text x="635" y="11">feedback / outcome loopback</text>
+    <line x1="820" y1="7" x2="845" y2="7" stroke="#6EE7B7" stroke-width="2"/>
+    <text x="855" y="11">control / lifecycle transition</text>
+  </g>
+
+  <!-- ─────────────────────────  ROW 1: PRODUCERS  ───────────────────────── -->
+  <text x="40" y="142" font-size="14" fill="#94A3B8" font-weight="700" letter-spacing="1">① PRODUCERS</text>
+
+  <!-- agents (memories) -->
+  <g transform="translate(30,150)">
+    <rect width="280" height="86" rx="10" fill="url(#existingBlock)" stroke="#67E8F9" stroke-width="1.8"/>
+    <text x="20" y="26" font-size="14" fill="#A5F3FC" font-weight="700">Agents · write memories</text>
+    <text x="20" y="48" font-size="11" fill="#CBD5E1">memclaw_write · memclaw_recall</text>
+    <text x="20" y="66" font-size="11" fill="#CBD5E1">→ memory stream (fact / outcome / rule / ...)</text>
+    <text x="270" y="80" text-anchor="end" font-size="10" fill="#67E8F9" font-style="italic">existing</text>
+  </g>
+
+  <!-- agents (direct skill via memclaw_doc) -->
+  <g transform="translate(330,150)">
+    <rect width="280" height="86" rx="10" fill="url(#existingBlock)" stroke="#67E8F9" stroke-width="1.8"/>
+    <text x="20" y="26" font-size="14" fill="#A5F3FC" font-weight="700">Agents · write skills directly</text>
+    <text x="20" y="48" font-size="11" fill="#CBD5E1">memclaw_doc op=write collection=skills</text>
+    <text x="20" y="66" font-size="11" fill="#CBD5E1">source: agent · lifecycle-gated</text>
+    <text x="270" y="80" text-anchor="end" font-size="10" fill="#F7B538" font-style="italic">existing + adjustments (§4)</text>
+  </g>
+
+  <!-- humans / bulk import -->
+  <g transform="translate(630,150)">
+    <rect width="240" height="86" rx="10" fill="url(#existingBlock)" stroke="#67E8F9" stroke-width="1.8"/>
+    <text x="20" y="26" font-size="14" fill="#A5F3FC" font-weight="700">Humans / Bulk import</text>
+    <text x="20" y="48" font-size="11" fill="#CBD5E1">manual SKILL.md authoring,</text>
+    <text x="20" y="66" font-size="11" fill="#CBD5E1">CI imports → source: manual / imported</text>
+  </g>
+
+  <!-- arrow legend for row 1 -->
+  <g transform="translate(890,150)" font-size="10" fill="#94A3B8">
+    <rect width="240" height="86" rx="10" fill="none" stroke="#334155" stroke-dasharray="3 3" stroke-width="1"/>
+    <text x="12" y="22" font-size="12" fill="#94A3B8" font-weight="700">producers all end in →</text>
+    <text x="12" y="44" font-size="11" fill="#CBD5E1">memories table (left flow)</text>
+    <text x="12" y="62" font-size="11" fill="#CBD5E1">skills collection (right flow)</text>
+    <text x="12" y="78" font-size="10" fill="#64748B" font-style="italic">same DB, different tables</text>
+  </g>
+
+  <!-- ─────────────────────────  ROW 2: SIGNAL EXTRACTION  ───────────────────────── -->
+  <text x="40" y="282" font-size="14" fill="#94A3B8" font-weight="700" letter-spacing="1">② OUTCOME INFERENCE — six free signals (no memclaw_evolve required)</text>
+
+  <g transform="translate(30,290)">
+    <rect width="1160" height="86" rx="10" fill="url(#newBlock)" stroke="#F7B538" stroke-dasharray="4 3" stroke-width="1.8"/>
+    <text x="20" y="26" font-size="13" fill="#FFE066" font-weight="700">outcome_inference/  (§6, 6 signals → labels each session-trace success/failure)</text>
+
+    <!-- 6 signal chips -->
+    <g font-size="10" fill="#FFF8E7">
+      <g transform="translate(20,42)">
+        <rect width="170" height="32" rx="6" fill="#0B1428" stroke="#475569"/>
+        <text x="10" y="14" font-weight="700" fill="#FCA5A5">1 · contradiction</text>
+        <text x="10" y="27" fill="#94A3B8">contradiction_detector (existing)</text>
+      </g>
+      <g transform="translate(200,42)">
+        <rect width="170" height="32" rx="6" fill="#0B1428" stroke="#475569"/>
+        <text x="10" y="14" font-weight="700" fill="#FCA5A5">2 · supersession</text>
+        <text x="10" y="27" fill="#94A3B8">memories.supersedes_id</text>
+      </g>
+      <g transform="translate(380,42)">
+        <rect width="170" height="32" rx="6" fill="#0B1428" stroke="#475569"/>
+        <text x="10" y="14" font-weight="700" fill="#FCD34D">3 · repeat-recall</text>
+        <text x="10" y="27" fill="#94A3B8">recall log + sim</text>
+      </g>
+      <g transform="translate(560,42)">
+        <rect width="170" height="32" rx="6" fill="#0B1428" stroke="#475569"/>
+        <text x="10" y="14" font-weight="700" fill="#6EE7B7">4 · terminal memory</text>
+        <text x="10" y="27" fill="#94A3B8">"shipped" / "blocked" classifier</text>
+      </g>
+      <g transform="translate(740,42)">
+        <rect width="190" height="32" rx="6" fill="#0B1428" stroke="#475569"/>
+        <text x="10" y="14" font-weight="700" fill="#DDD6FE">5 · cross-agent reuse</text>
+        <text x="10" y="27" fill="#94A3B8">recall counter × distinct agents</text>
+      </g>
+      <g transform="translate(940,42)">
+        <rect width="200" height="32" rx="6" fill="#0B1428" stroke="#475569"/>
+        <text x="10" y="14" font-weight="700" fill="#A5F3FC">6 · external hooks</text>
+        <text x="10" y="27" fill="#94A3B8">git / PR / CI tied to run_id</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- writes to session_traces table -->
+  <g transform="translate(1210,290)">
+    <rect width="260" height="86" rx="10" fill="url(#storageBlock)" stroke="#FB7185" stroke-width="1.8"/>
+    <text x="20" y="26" font-size="13" fill="#FDA4AF" font-weight="700">session_traces (NEW table)</text>
+    <text x="20" y="48" font-size="11" fill="#FFE9B0">run_id · agent_id · outcome label</text>
+    <text x="20" y="66" font-size="11" fill="#FFE9B0">memory_ids · timestamps · entities</text>
+    <text x="248" y="80" text-anchor="end" font-size="10" fill="#FB7185" font-style="italic">data plane</text>
+  </g>
+
+  <!-- ─────────────────────────  ROW 3: FORGE PIPELINE  ───────────────────────── -->
+  <text x="40" y="416" font-size="14" fill="#94A3B8" font-weight="700" letter-spacing="1">③ FORGE — cluster · fingerprint · distill · scan</text>
+
+  <!-- session-trace builder -->
+  <g transform="translate(30,424)">
+    <rect width="220" height="120" rx="10" fill="url(#newBlock)" stroke="#F7B538" stroke-dasharray="4 3" stroke-width="1.8"/>
+    <text x="16" y="22" font-size="13" fill="#FFE066" font-weight="700">session-trace builder</text>
+    <text x="16" y="42" font-size="10" fill="#CBD5E1">group memories by run_id +</text>
+    <text x="16" y="56" font-size="10" fill="#CBD5E1">agent + time window</text>
+    <text x="16" y="76" font-size="10" fill="#94A3B8">labels outcome (success / fail)</text>
+    <text x="16" y="90" font-size="10" fill="#94A3B8">via §6 signals</text>
+    <text x="16" y="110" font-size="10" fill="#67E8F9" font-style="italic">core-api/services/session_trace.py</text>
+  </g>
+
+  <!-- clusterer -->
+  <g transform="translate(270,424)">
+    <rect width="220" height="120" rx="10" fill="url(#newBlock)" stroke="#F7B538" stroke-dasharray="4 3" stroke-width="1.8"/>
+    <text x="16" y="22" font-size="13" fill="#FFE066" font-weight="700">cluster + fingerprint</text>
+    <text x="16" y="42" font-size="10" fill="#CBD5E1">k-means + entity overlap</text>
+    <text x="16" y="56" font-size="10" fill="#CBD5E1">fp:v1:&lt;hash&gt; canonical id</text>
+    <text x="16" y="76" font-size="10" fill="#94A3B8">stability test ≥ 99%</text>
+    <text x="16" y="90" font-size="10" fill="#94A3B8">→ Phase-1 prerequisite</text>
+    <text x="16" y="110" font-size="10" fill="#67E8F9" font-style="italic">forge/fingerprint.py · §8</text>
+  </g>
+
+  <!-- Forge distill -->
+  <g transform="translate(510,424)">
+    <rect width="240" height="120" rx="10" fill="url(#newBlock)" stroke="#F7B538" stroke-dasharray="4 3" stroke-width="1.8"/>
+    <text x="16" y="22" font-size="13" fill="#FFE066" font-weight="700">Forge · distill (LLM)</text>
+    <text x="16" y="42" font-size="10" fill="#CBD5E1">cluster → skill candidate doc</text>
+    <text x="16" y="56" font-size="10" fill="#CBD5E1">name · description (≤160B)</text>
+    <text x="16" y="70" font-size="10" fill="#CBD5E1">content · tags · cites · evidence</text>
+    <text x="16" y="86" font-size="10" fill="#94A3B8">cron 6h · trust 2 · 50k tok/run</text>
+    <text x="16" y="110" font-size="10" fill="#67E8F9" font-style="italic">forge/forge_service.py · §7</text>
+  </g>
+
+  <!-- Sentinel scanner -->
+  <g transform="translate(770,424)">
+    <rect width="240" height="120" rx="10" fill="url(#newBlock)" stroke="#F7B538" stroke-dasharray="4 3" stroke-width="1.8"/>
+    <text x="16" y="22" font-size="13" fill="#FFE066" font-weight="700">Sentinel · pre-scan</text>
+    <text x="16" y="42" font-size="10" fill="#CBD5E1">prompt-injection · shell-inject</text>
+    <text x="16" y="56" font-size="10" fill="#CBD5E1">PII · path violations · size caps</text>
+    <text x="16" y="76" font-size="10" fill="#94A3B8">→ clean / warn / quarantined</text>
+    <text x="16" y="90" font-size="10" fill="#94A3B8">re-runs on apply</text>
+    <text x="16" y="110" font-size="10" fill="#67E8F9" font-style="italic">forge/sentinel_scan.py · §9</text>
+  </g>
+
+  <!-- auto-gates -->
+  <g transform="translate(1030,424)">
+    <rect width="180" height="120" rx="10" fill="url(#newBlock)" stroke="#F7B538" stroke-dasharray="4 3" stroke-width="1.8"/>
+    <text x="14" y="22" font-size="13" fill="#FFE066" font-weight="700">auto-gates</text>
+    <text x="14" y="40" font-size="10" fill="#CBD5E1">volume ≥ 10</text>
+    <text x="14" y="54" font-size="10" fill="#CBD5E1">diversity ≥ 3 agents</text>
+    <text x="14" y="68" font-size="10" fill="#CBD5E1">convergence (variance ↓)</text>
+    <text x="14" y="82" font-size="10" fill="#CBD5E1">freshness ≤ 14d</text>
+    <text x="14" y="96" font-size="10" fill="#CBD5E1">coverage ≥ 1 match</text>
+    <text x="14" y="110" font-size="10" fill="#94A3B8" font-style="italic">candidate → staged</text>
+  </g>
+
+  <!-- rejected fingerprints poison memory -->
+  <g transform="translate(1230,424)">
+    <rect width="240" height="120" rx="10" fill="url(#storageBlock)" stroke="#FB7185" stroke-width="1.8"/>
+    <text x="14" y="22" font-size="13" fill="#FDA4AF" font-weight="700">forge_rejected_fingerprints</text>
+    <text x="14" y="42" font-size="10" fill="#FFE9B0">cluster_fingerprint · rejected_at</text>
+    <text x="14" y="56" font-size="10" fill="#FFE9B0">cooloff_days (default 30)</text>
+    <text x="14" y="76" font-size="10" fill="#94A3B8">→ Forge won't re-propose</text>
+    <text x="14" y="90" font-size="10" fill="#94A3B8">until cooloff expires</text>
+    <text x="14" y="110" font-size="10" fill="#FB7185" font-style="italic">data plane · NEW table</text>
+  </g>
+
+  <!-- ─────────────────────────  ROW 4: SKILLS COLLECTION (storage + lifecycle)  ───────────────────────── -->
+  <text x="40" y="584" font-size="14" fill="#94A3B8" font-weight="700" letter-spacing="1">④ SKILLS COLLECTION — same table, source discriminator, status lifecycle (§3, §5)</text>
+
+  <g transform="translate(30,594)">
+    <rect width="1110" height="160" rx="14" fill="url(#storageBlock)" stroke="#FB7185" stroke-width="2"/>
+    <text x="20" y="28" font-size="14" fill="#FDA4AF" font-weight="700">documents WHERE collection='skills'</text>
+    <text x="20" y="48" font-size="11" fill="#FFE9B0">jsonb (`data`) holds: name · slug · version · kind · source · status · description · content · cites · scan · target.target_content_hash · …</text>
+
+    <!-- source rail -->
+    <g font-size="10" fill="#FFF8E7">
+      <text x="20" y="74" font-weight="700" fill="#FDA4AF">source:</text>
+      <g transform="translate(80,62)">
+        <rect width="78" height="22" rx="4" fill="#F7B538"/><text x="39" y="15" text-anchor="middle" fill="#1A1A1A" font-weight="700">forge</text>
+      </g>
+      <g transform="translate(166,62)">
+        <rect width="86" height="22" rx="4" fill="#06B6D4"/><text x="43" y="15" text-anchor="middle" fill="#0B1020" font-weight="700">agent</text>
+      </g>
+      <g transform="translate(260,62)">
+        <rect width="74" height="22" rx="4" fill="#8B5CF6"/><text x="37" y="15" text-anchor="middle" fill="#FFF8E7" font-weight="700">manual</text>
+      </g>
+      <g transform="translate(342,62)">
+        <rect width="80" height="22" rx="4" fill="#475569"/><text x="40" y="15" text-anchor="middle" fill="#FFF8E7" font-weight="700">imported</text>
+      </g>
+    </g>
+
+    <!-- status rail -->
+    <g font-size="10" fill="#FFF8E7">
+      <text x="20" y="116" font-weight="700" fill="#FDA4AF">status:</text>
+      <g transform="translate(80,104)">
+        <rect width="80" height="22" rx="4" fill="#334155"/><text x="40" y="15" text-anchor="middle" fill="#CBD5E1" font-weight="700">candidate</text>
+      </g>
+      <text x="167" y="119" font-size="14" fill="#FFE066">→</text>
+      <g transform="translate(184,104)">
+        <rect width="64" height="22" rx="4" fill="#F7B538"/><text x="32" y="15" text-anchor="middle" fill="#1A1A1A" font-weight="700">staged</text>
+      </g>
+      <text x="255" y="119" font-size="14" fill="#6EE7B7">→</text>
+      <g transform="translate(272,104)">
+        <rect width="58" height="22" rx="4" fill="#10B981"/><text x="29" y="15" text-anchor="middle" fill="#FFF8E7" font-weight="700">active</text>
+      </g>
+      <text x="337" y="119" font-size="14" fill="#94A3B8">→</text>
+      <g transform="translate(354,104)">
+        <rect width="88" height="22" rx="4" fill="#64748B"/><text x="44" y="15" text-anchor="middle" fill="#FFF8E7" font-weight="700">deprecated</text>
+      </g>
+
+      <text x="464" y="119" font-size="10" fill="#94A3B8">side states:</text>
+      <g transform="translate(534,104)">
+        <rect width="72" height="22" rx="4" fill="#EF4444"/><text x="36" y="15" text-anchor="middle" fill="#FFF8E7" font-weight="700">rejected</text>
+      </g>
+      <g transform="translate(614,104)">
+        <rect width="92" height="22" rx="4" fill="#B45309"/><text x="46" y="15" text-anchor="middle" fill="#FFF8E7" font-weight="700">quarantined</text>
+      </g>
+      <g transform="translate(714,104)">
+        <rect width="48" height="22" rx="4" fill="#A78BFA"/><text x="24" y="15" text-anchor="middle" fill="#1A1A1A" font-weight="700">stale</text>
+      </g>
+    </g>
+
+    <text x="20" y="148" font-size="10" fill="#94A3B8" font-style="italic">hash-binding: target.target_content_hash bound at staged · mismatch on apply → stale (§3, §5)</text>
+  </g>
+
+  <!-- Skills Inbox (right side panel) -->
+  <g transform="translate(1160,594)">
+    <rect width="310" height="160" rx="14" fill="url(#newBlock)" stroke="#F7B538" stroke-width="2" stroke-dasharray="4 3"/>
+    <text x="20" y="26" font-size="14" fill="#FFE066" font-weight="700">⑤ HITL · Skills Inbox</text>
+    <text x="20" y="46" font-size="11" fill="#CBD5E1">filter: status=staged AND source IN (forge, agent)</text>
+
+    <text x="20" y="70" font-size="11" fill="#FFF8E7" font-weight="700">Card shows:</text>
+    <text x="20" y="86" font-size="10" fill="#CBD5E1">title · description · content (md) ·</text>
+    <text x="20" y="100" font-size="10" fill="#CBD5E1">evidence · cites · replay strip</text>
+    <text x="20" y="114" font-size="10" fill="#CBD5E1">scan badge · hash binding · fingerprint</text>
+
+    <!-- 5 action chips -->
+    <g transform="translate(20,124)" font-size="9">
+      <g><rect width="46" height="20" rx="3" fill="#10B981"/><text x="23" y="14" text-anchor="middle" fill="#FFF8E7" font-weight="700">Approve</text></g>
+      <g transform="translate(52,0)"><rect width="34" height="20" rx="3" fill="#06B6D4"/><text x="17" y="14" text-anchor="middle" fill="#0B1020" font-weight="700">Edit</text></g>
+      <g transform="translate(92,0)"><rect width="42" height="20" rx="3" fill="#EF4444"/><text x="21" y="14" text-anchor="middle" fill="#FFF8E7" font-weight="700">Reject</text></g>
+      <g transform="translate(140,0)"><rect width="64" height="20" rx="3" fill="#B45309"/><text x="32" y="14" text-anchor="middle" fill="#FFF8E7" font-weight="700">Quarantine</text></g>
+      <g transform="translate(210,0)"><rect width="36" height="20" rx="3" fill="#475569"/><text x="18" y="14" text-anchor="middle" fill="#FFF8E7" font-weight="700">Defer</text></g>
+    </g>
+  </g>
+
+  <!-- ─────────────────────────  ROW 5: DISTRIBUTION / HARNESS  ───────────────────────── -->
+  <text x="40" y="794" font-size="14" fill="#94A3B8" font-weight="700" letter-spacing="1">⑥ DISTRIBUTION — on status=active (§11)</text>
+
+  <g transform="translate(30,802)">
+    <rect width="260" height="110" rx="10" fill="url(#existingBlock)" stroke="#67E8F9" stroke-width="1.8"/>
+    <text x="16" y="24" font-size="13" fill="#A5F3FC" font-weight="700">OpenClaw plugin</text>
+    <text x="16" y="44" font-size="10" fill="#CBD5E1">plugin/skills/&lt;slug&gt;/SKILL.md</text>
+    <text x="16" y="60" font-size="10" fill="#CBD5E1">core-api/routes/plugin.py</text>
+    <text x="16" y="80" font-size="10" fill="#94A3B8" font-style="italic">existing path · becomes lifecycle-aware</text>
+    <text x="16" y="96" font-size="10" fill="#67E8F9">(filter by status=active)</text>
+  </g>
+
+  <g transform="translate(310,802)">
+    <rect width="260" height="110" rx="10" fill="url(#newBlock)" stroke="#F7B538" stroke-dasharray="4 3" stroke-width="1.8"/>
+    <text x="16" y="24" font-size="13" fill="#FFE066" font-weight="700">Direct-MCP (Claude Code / Codex)</text>
+    <text x="16" y="44" font-size="10" fill="#CBD5E1">static/skills/memclaw/&lt;slug&gt;/SKILL.md</text>
+    <text x="16" y="60" font-size="10" fill="#CBD5E1">strip-on-apply: status/version/date</text>
+    <text x="16" y="80" font-size="10" fill="#94A3B8" font-style="italic">forge/harness_install.py</text>
+  </g>
+
+  <g transform="translate(590,802)">
+    <rect width="260" height="110" rx="10" fill="url(#newBlock)" stroke="#F7B538" stroke-dasharray="4 3" stroke-width="1.8"/>
+    <text x="16" y="24" font-size="13" fill="#FFE066" font-weight="700">Claude Code (local install)</text>
+    <text x="16" y="44" font-size="10" fill="#CBD5E1">~/.claude/skills/&lt;slug&gt;/SKILL.md</text>
+    <text x="16" y="60" font-size="10" fill="#CBD5E1">memclawctl skill install &lt;slug&gt;</text>
+    <text x="16" y="80" font-size="10" fill="#94A3B8" font-style="italic">writes rollback metadata first</text>
+  </g>
+
+  <g transform="translate(870,802)">
+    <rect width="260" height="110" rx="10" fill="url(#newBlock)" stroke="#F7B538" stroke-dasharray="4 3" stroke-width="1.8"/>
+    <text x="16" y="24" font-size="13" fill="#FFE066" font-weight="700">OpenClaw workspace bridge</text>
+    <text x="16" y="44" font-size="10" fill="#CBD5E1">&lt;workspace&gt;/skills/&lt;slug&gt;/PROPOSAL.md</text>
+    <text x="16" y="60" font-size="10" fill="#CBD5E1">openclaw_bridge.enabled (default off)</text>
+    <text x="16" y="80" font-size="10" fill="#94A3B8" font-style="italic">Phase 5 · ≤1 eng-week budget · §13</text>
+  </g>
+
+  <!-- rollback storage -->
+  <g transform="translate(1150,802)">
+    <rect width="320" height="110" rx="10" fill="url(#storageBlock)" stroke="#FB7185" stroke-width="1.8"/>
+    <text x="16" y="24" font-size="13" fill="#FDA4AF" font-weight="700">skills_rollback (NEW collection)</text>
+    <text x="16" y="44" font-size="10" fill="#FFE9B0">previous_content + hash captured</text>
+    <text x="16" y="60" font-size="10" fill="#FFE9B0">BEFORE any apply mutates a target</text>
+    <text x="16" y="80" font-size="10" fill="#94A3B8">→ one-click revert in UI · §11</text>
+    <text x="16" y="98" font-size="10" fill="#FB7185" font-style="italic">data plane · doc per apply</text>
+  </g>
+
+  <!-- ─────────────────────────  FLOW ARROWS (forward)  ───────────────────────── -->
+
+  <!-- producers row → memories table (just visual, implied) -->
+
+  <!-- row 1 (left) → row 2 (signal extraction) -->
+  <path d="M 170,236 V 290" stroke="#F7B538" stroke-width="2" fill="none" marker-end="url(#arrow-amber)"/>
+
+  <!-- signal extraction → session_traces -->
+  <path d="M 1190,332 H 1210" stroke="#F7B538" stroke-width="2" fill="none" marker-end="url(#arrow-amber)"/>
+
+  <!-- session_traces → session-trace builder block -->
+  <path d="M 1340,376 V 410 Q 1340,420 1320,420 H 140 Q 140,420 140,424" stroke="#F7B538" stroke-width="2" fill="none" marker-end="url(#arrow-amber)"/>
+
+  <!-- session-trace builder → cluster -->
+  <path d="M 250,484 H 270" stroke="#F7B538" stroke-width="2" fill="none" marker-end="url(#arrow-amber)"/>
+  <!-- cluster → distill -->
+  <path d="M 490,484 H 510" stroke="#F7B538" stroke-width="2" fill="none" marker-end="url(#arrow-amber)"/>
+  <!-- distill → scanner -->
+  <path d="M 750,484 H 770" stroke="#F7B538" stroke-width="2" fill="none" marker-end="url(#arrow-amber)"/>
+  <!-- scanner → auto-gates -->
+  <path d="M 1010,484 H 1030" stroke="#F7B538" stroke-width="2" fill="none" marker-end="url(#arrow-amber)"/>
+
+  <!-- auto-gates → skills collection (drop down + curl) -->
+  <path d="M 1120,544 V 570 Q 1120,594 1100,594" stroke="#6EE7B7" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+
+  <!-- row 1 right (direct doc writes) → skills collection directly -->
+  <path d="M 470,236 V 570 Q 470,594 460,594" stroke="#67E8F9" stroke-width="2" fill="none" marker-end="url(#arrow-cyan)" stroke-dasharray="6 4"/>
+  <text x="478" y="380" font-size="10" fill="#67E8F9" font-style="italic">direct skill writes via memclaw_doc — same lifecycle, source=agent</text>
+
+  <!-- row 1 humans → skills collection -->
+  <path d="M 750,236 V 570 Q 750,594 740,594" stroke="#67E8F9" stroke-width="2" fill="none" marker-end="url(#arrow-cyan)" stroke-dasharray="6 4"/>
+
+  <!-- scanner -fail-> rejected fingerprints (poison memory) -->
+  <path d="M 1010,468 Q 1170,468 1230,468" stroke="#FCA5A5" stroke-width="2" fill="none" marker-end="url(#arrow-red)" stroke-dasharray="4 3"/>
+
+  <!-- skills collection → inbox -->
+  <path d="M 1140,674 H 1160" stroke="#6EE7B7" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+
+  <!-- inbox → distribution (down) -->
+  <path d="M 1315,754 V 780 Q 1315,802 1100,802 H 1010" stroke="#6EE7B7" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+
+  <!-- distribution arrows: from inbox/active down to each target (already covered above; add visual connectors from collection) -->
+  <path d="M 160,754 V 802" stroke="#6EE7B7" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+  <path d="M 440,754 V 802" stroke="#6EE7B7" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+  <path d="M 720,754 V 802" stroke="#6EE7B7" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+  <path d="M 1000,754 V 802" stroke="#6EE7B7" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+
+  <!-- ───── FEEDBACK LOOP (red dashed) ───── -->
+  <!-- distribution → outcome inference (via skill fires → memory writes → contradiction detector etc) -->
+  <path d="M 1310,912 Q 1480,920 1480,500 Q 1480,260 1340,260 Q 1100,260 600,260 Q 200,260 50,260 Q 14,260 14,260" stroke="#FCA5A5" stroke-width="2.5" fill="none" stroke-dasharray="7 5" marker-end="url(#arrow-red)"/>
+  <text x="1480" y="540" text-anchor="middle" font-size="12" fill="#FCA5A5" font-weight="700" transform="rotate(90,1480,540)">⟲ skill fires → outcomes → feedback</text>
+
+  <!-- caption at bottom -->
+  <text x="750" y="970" text-anchor="middle" font-size="12" fill="#FFE066" font-style="italic">all phases gated by §15 acceptance criteria · Phase-0 prereq for everything · v0.1 demo lights every box end-to-end</text>
+</svg>

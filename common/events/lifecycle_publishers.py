@@ -15,6 +15,7 @@ from common.events.lifecycle_archive_request import (
     LifecycleArchiveRequest,
     LifecycleRequestBase,
 )
+from common.events.lifecycle_forge_request import LifecycleForgeDistillRequest
 from common.events.lifecycle_purge_request import LifecyclePurgeRequest
 from common.events.topics import Topics
 
@@ -150,5 +151,45 @@ async def publish_insights_request(
             org_id=org_id,
             triggered_by=triggered_by,
             fleet_id=fleet_id,
+        ),
+    )
+
+
+async def publish_forge_distill_request(
+    *,
+    audit_id: int,
+    org_id: str,
+    triggered_by: str,
+    run_label: str,
+    fleet_id: str | None = None,
+    freshness_window_days: int | None = None,
+    min_cluster_size: int | None = None,
+    min_distinct_agents: int | None = None,
+    llm_tokens_per_run: int | None = None,
+    max_writes_per_run: int | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Skill Factory SF-007: trigger one Forge distillation run for an
+    org/fleet. Per-run override knobs default to ``None`` so the
+    consumer falls through to
+    ``org_settings.skills_factory.forge.*``. Phase 0 ships only the
+    publisher + a no-op handler; the real worker (cluster fingerprint,
+    LLM distill, gating, scan) arrives in Phase 1. See
+    :class:`~common.events.lifecycle_forge_request.LifecycleForgeDistillRequest`.
+    """
+    await _publish(
+        Topics.Lifecycle.FORGE_DISTILL_REQUESTED,
+        LifecycleForgeDistillRequest(
+            audit_id=audit_id,
+            org_id=org_id,
+            triggered_by=triggered_by,
+            fleet_id=fleet_id,
+            run_label=run_label,
+            freshness_window_days=freshness_window_days,
+            min_cluster_size=min_cluster_size,
+            min_distinct_agents=min_distinct_agents,
+            llm_tokens_per_run=llm_tokens_per_run,
+            max_writes_per_run=max_writes_per_run,
+            dry_run=dry_run,
         ),
     )

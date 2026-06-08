@@ -1,0 +1,174 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" font-family="'Kalam','Caveat','Patrick Hand','Comic Sans MS',cursive">
+  <defs>
+    <radialGradient id="lake-mini" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#FFE066"/>
+      <stop offset="55%" stop-color="#FF6B35"/>
+      <stop offset="100%" stop-color="#6A040F"/>
+    </radialGradient>
+    <marker id="grow-arrow" markerWidth="14" markerHeight="14" refX="10" refY="7" orient="auto">
+      <path d="M0,0 L12,7 L0,14 Z" fill="#FFE066"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="720" fill="#0B1020"/>
+
+  <!-- title -->
+  <text x="600" y="56" text-anchor="middle" font-size="36" fill="#FFF8E7" font-weight="700">Residents ≠ Insights</text>
+  <text x="600" y="90" text-anchor="middle" font-size="20" fill="#F7B538" font-style="italic">same plumbing. different contract. an evolution, not a replacement.</text>
+
+  <!-- middle "matures into" arrow (vertical center between halves) -->
+  <g transform="translate(540,388)">
+    <line x1="0" y1="0" x2="120" y2="0" stroke="#FFE066" stroke-width="4" marker-end="url(#grow-arrow)"/>
+    <text x="60" y="-22" text-anchor="middle" font-size="16" fill="#FFE066" font-weight="700">matures into</text>
+  </g>
+
+  <!-- ========== LEFT: TODAY ========== -->
+  <g>
+    <text x="270" y="138" text-anchor="middle" font-size="26" fill="#94A3B8" font-weight="700">Today · memclaw_insights</text>
+    <text x="270" y="162" text-anchor="middle" font-size="14" fill="#64748B" font-style="italic">a tool an agent calls when it remembers to</text>
+
+    <!-- agent -->
+    <g transform="translate(80,210)">
+      <circle cx="40" cy="40" r="32" fill="#06B6D4" stroke="#1A1A1A" stroke-width="2"/>
+      <text x="40" y="50" text-anchor="middle" font-size="30" fill="#0B1020">🧑</text>
+      <text x="40" y="100" text-anchor="middle" font-size="13" fill="#A5F3FC">Agent</text>
+    </g>
+
+    <!-- tool call (pull) arrow -->
+    <line x1="160" y1="250" x2="220" y2="250" stroke="#94A3B8" stroke-width="2" stroke-dasharray="4 3"/>
+    <text x="190" y="242" text-anchor="middle" font-size="11" fill="#94A3B8">pull</text>
+
+    <!-- the tool box -->
+    <g transform="translate(220,200)">
+      <rect width="200" height="100" rx="8" fill="#15182E" stroke="#94A3B8" stroke-width="2"/>
+      <text x="100" y="24" text-anchor="middle" font-family="'Inter',monospace" font-size="13" fill="#FFF8E7" font-weight="700">memclaw_insights</text>
+      <text x="100" y="44" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="#94A3B8">focus = patterns | discover |</text>
+      <text x="100" y="58" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="#94A3B8">contradictions | failures | …</text>
+      <text x="100" y="84" text-anchor="middle" font-size="11" fill="#FFE066" font-style="italic">single call · one-shot reflection</text>
+    </g>
+
+    <!-- output arrow -->
+    <line x1="320" y1="310" x2="320" y2="360" stroke="#94A3B8" stroke-width="2" stroke-dasharray="4 3"/>
+
+    <!-- output: insight memory card -->
+    <g transform="translate(220,360)">
+      <rect width="200" height="84" rx="6" fill="#FFF8E7" stroke="#1A1A1A" stroke-width="1.5"/>
+      <rect width="200" height="22" rx="6" fill="#94A3B8"/>
+      <text x="100" y="16" text-anchor="middle" font-size="11" fill="#0B1020" font-weight="700">type: insight</text>
+      <text x="12" y="40" font-family="'Inter',sans-serif" font-size="11" fill="#1A1A1A">"I notice 3 memories about</text>
+      <text x="12" y="56" font-family="'Inter',sans-serif" font-size="11" fill="#1A1A1A">deploys to eu-west failing."</text>
+      <text x="12" y="74" font-size="10" fill="#64748B" font-style="italic">a meta-observation</text>
+    </g>
+
+    <!-- properties side-card -->
+    <g transform="translate(60,478)" font-family="'Inter',sans-serif">
+      <rect width="420" height="180" rx="10" fill="#0F1428" stroke="#334155" stroke-width="1.5"/>
+      <text x="20" y="28" font-size="14" fill="#94A3B8" font-weight="700">Properties</text>
+      <g font-size="12" fill="#CBD5E1">
+        <text x="20" y="56">▸ <tspan fill="#FFF8E7" font-weight="700">Trigger:</tspan> agent pulls (reactive)</text>
+        <text x="20" y="80">▸ <tspan fill="#FFF8E7" font-weight="700">Output:</tspan> <tspan font-family="'Inter',monospace">insight</tspan>-type memory (meta)</text>
+        <text x="20" y="104">▸ <tspan fill="#FFF8E7" font-weight="700">Recallability:</tspan> only when querying about the lake</text>
+        <text x="20" y="128">▸ <tspan fill="#FFF8E7" font-weight="700">Lifecycle:</tspan> static (no parent binding)</text>
+        <text x="20" y="152">▸ <tspan fill="#FFF8E7" font-weight="700">Verification:</tspan> none</text>
+        <text x="20" y="172" fill="#94A3B8" font-style="italic">a mirror — "here's what you look like"</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ========== RIGHT: TOMORROW ========== -->
+  <g>
+    <text x="930" y="138" text-anchor="middle" font-size="26" fill="#F7B538" font-weight="700">Tomorrow · Residents</text>
+    <text x="930" y="162" text-anchor="middle" font-size="14" fill="#FFE066" font-style="italic">colleagues that live in the lake and work continuously</text>
+
+    <!-- mini lake with residents around (lake group bumped UP to clear cards below) -->
+    <g transform="translate(710,180)">
+      <ellipse cx="220" cy="110" rx="200" ry="74" fill="url(#lake-mini)" stroke="#4A0E0E" stroke-width="2.5"/>
+      <text x="220" y="114" text-anchor="middle" font-size="14" fill="#1A1A1A" font-weight="700">the lake</text>
+
+      <!-- residents around the rim. labels OFFSET-INWARD-and-SIDEWAYS to avoid card lane below -->
+      <!-- Forge (left rim) -->
+      <g transform="translate(60,90)">
+        <circle r="18" fill="#F7B538" stroke="#1A1A1A" stroke-width="2"/>
+        <text y="6" text-anchor="middle" font-size="18" fill="#1A1A1A">⚒</text>
+        <text x="0" y="-26" text-anchor="middle" font-size="11" fill="#FFE066" font-weight="700">Forge</text>
+      </g>
+      <!-- Oracle (top-left) -->
+      <g transform="translate(150,32)">
+        <circle r="18" fill="#8B5CF6" stroke="#1A1A1A" stroke-width="2"/>
+        <text y="6" text-anchor="middle" font-size="16" fill="#FFF8E7">👁</text>
+        <text x="0" y="-26" text-anchor="middle" font-size="11" fill="#C4B5FD" font-weight="700">Oracle</text>
+      </g>
+      <!-- Dreamer (top-right) -->
+      <g transform="translate(290,32)">
+        <circle r="18" fill="#06B6D4" stroke="#1A1A1A" stroke-width="2"/>
+        <text y="6" text-anchor="middle" font-size="16" fill="#FFF8E7">☾</text>
+        <text x="0" y="-26" text-anchor="middle" font-size="11" fill="#67E8F9" font-weight="700">Dreamer</text>
+      </g>
+      <!-- Sentinel (right rim) -->
+      <g transform="translate(380,90)">
+        <circle r="18" fill="#10B981" stroke="#1A1A1A" stroke-width="2"/>
+        <text y="6" text-anchor="middle" font-size="16" fill="#1A1A1A">🛡</text>
+        <text x="0" y="-26" text-anchor="middle" font-size="11" fill="#6EE7B7" font-weight="700">Sentinel</text>
+      </g>
+      <!-- Hunter (bottom-left) - label to the LEFT (outside lake) -->
+      <g transform="translate(110,184)">
+        <circle r="18" fill="#F87171" stroke="#1A1A1A" stroke-width="2"/>
+        <text y="5" text-anchor="middle" font-size="16" fill="#1A1A1A">◎</text>
+        <text x="-24" y="4" text-anchor="end" font-size="11" fill="#FCA5A5" font-weight="700">Hunter</text>
+      </g>
+      <!-- Cartographer (bottom-right) - label to the RIGHT (outside lake) -->
+      <g transform="translate(330,184)">
+        <circle r="18" fill="#FB7185" stroke="#1A1A1A" stroke-width="2"/>
+        <text y="4" text-anchor="middle" font-size="16" fill="#1A1A1A">⌖</text>
+        <text x="24" y="4" text-anchor="start" font-size="11" fill="#FDA4AF" font-weight="700">Cartographer</text>
+      </g>
+    </g>
+
+    <!-- caption above output cards -->
+    <text x="930" y="430" text-anchor="middle" font-size="13" fill="#FFE066" font-style="italic">writes ↓ first-class memories (recallable like any other)</text>
+
+    <!-- output: first-class memory cards -->
+    <g transform="translate(720,442)">
+      <g transform="translate(0,0)">
+        <rect width="125" height="64" rx="6" fill="#FFF8E7" stroke="#1A1A1A" stroke-width="1.5"/>
+        <rect width="125" height="18" rx="6" fill="#F7B538"/>
+        <text x="62" y="13" text-anchor="middle" font-size="9" fill="#1A1A1A" font-weight="700">skill candidate</text>
+        <text x="8"  y="34" font-family="'Inter',sans-serif" font-size="9" fill="#1A1A1A">resident: forge</text>
+        <text x="8"  y="48" font-family="'Inter',sans-serif" font-size="9" fill="#1A1A1A">trust: 2 · scope: team</text>
+        <text x="8"  y="60" font-family="'Inter',sans-serif" font-size="8" fill="#64748B">cites: 23 mems</text>
+      </g>
+      <g transform="translate(140,0)">
+        <rect width="125" height="64" rx="6" fill="#FFF8E7" stroke="#1A1A1A" stroke-width="1.5"/>
+        <rect width="125" height="18" rx="6" fill="#06B6D4"/>
+        <text x="62" y="13" text-anchor="middle" font-size="9" fill="#0B1020" font-weight="700">fused claim</text>
+        <text x="8"  y="34" font-family="'Inter',sans-serif" font-size="9" fill="#1A1A1A">resident: dreamer</text>
+        <text x="8"  y="48" font-family="'Inter',sans-serif" font-size="9" fill="#1A1A1A">parents: A, B (bound)</text>
+        <text x="8"  y="60" font-family="'Inter',sans-serif" font-size="8" fill="#64748B">conf: 0.78 · hypothesis</text>
+      </g>
+      <g transform="translate(280,0)">
+        <rect width="125" height="64" rx="6" fill="#FFF8E7" stroke="#1A1A1A" stroke-width="1.5"/>
+        <rect width="125" height="18" rx="6" fill="#10B981"/>
+        <text x="62" y="13" text-anchor="middle" font-size="9" fill="#FFF8E7" font-weight="700">antibody</text>
+        <text x="8"  y="34" font-family="'Inter',sans-serif" font-size="9" fill="#1A1A1A">resident: sentinel</text>
+        <text x="8"  y="48" font-family="'Inter',sans-serif" font-size="9" fill="#1A1A1A">inoculates: poison-3a</text>
+        <text x="8"  y="60" font-family="'Inter',sans-serif" font-size="8" fill="#64748B">trust: 3 · scope: team</text>
+      </g>
+    </g>
+
+    <!-- properties side-card -->
+    <g transform="translate(720,528)" font-family="'Inter',sans-serif">
+      <rect width="420" height="130" rx="10" fill="#1F1108" stroke="#F7B538" stroke-width="1.5"/>
+      <text x="20" y="24" font-size="14" fill="#F7B538" font-weight="700">Properties</text>
+      <g font-size="12" fill="#FFE9B0">
+        <text x="20" y="48">▸ <tspan fill="#FFF8E7" font-weight="700">Trigger:</tspan> push (cron / on-event / continuous)</text>
+        <text x="20" y="68">▸ <tspan fill="#FFF8E7" font-weight="700">Output:</tspan> normal memories — recallable for ANY query</text>
+        <text x="20" y="88">▸ <tspan fill="#FFF8E7" font-weight="700">Lifecycle:</tspan> bound to parents — auto-retracts on supersession</text>
+        <text x="20" y="108">▸ <tspan fill="#FFF8E7" font-weight="700">Verification:</tspan> hypothesis → confirmed via downstream traces</text>
+        <text x="20" y="124" fill="#FFE066" font-style="italic">a mouth — "here's something I now claim"</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- footer ribbon: full-width, well clear of both Properties cards -->
+  <text x="600" y="700" text-anchor="middle" font-size="13" fill="#94A3B8" font-style="italic">today, focus=discover already does ~30% of this — the seed is in the box.</text>
+</svg>

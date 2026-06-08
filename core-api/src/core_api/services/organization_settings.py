@@ -147,6 +147,51 @@ DEFAULT_SETTINGS: dict = {
         "alert_critical_findings_min": None,
         "alert_score_drop_delta": None,
     },
+    # Skill Factory SF-006 — per-tenant knobs for the lake-side skill
+    # production pipeline (Forge resident + HITL Inbox + Sentinel scan +
+    # harness install). Defaults are CONCRETE here (not None) so the
+    # OSS resolver and tests have predictable values; tenants override
+    # by writing a partial dict (existing _deep_merge + _check_keys
+    # plumbing). See docs/live-memory-pitch/skill-factory-implementation-plan.md §12.
+    "skills_factory": {
+        # Feature flag gating the SF-002 ``memclaw_doc`` skills-write
+        # adjustments. OSS default ``False`` so existing eToro and
+        # caura-dev-fleet tenants see ZERO behavior change until they
+        # explicitly opt in. Phase 0 ships the plumbing; per-tenant
+        # rollout flips this true.
+        "enabled": False,
+        # Hard caps. ``_check_keys`` and ``_LEAF_TYPES`` enforce shape;
+        # the routes/documents.py write path enforces values.
+        "description_max_bytes": 160,
+        "body_max_bytes": 40_000,
+        "inbox_max_pending": 50,
+        # Days a rejected cluster_fingerprint stays poison-flagged in
+        # forge_rejected_fingerprints before Forge may re-propose it.
+        "rejection_cooloff_days": 30,
+        # Sentinel scanner behavior. ``fail_on_critical=true`` → any
+        # critical finding flips the doc to ``status=quarantined``
+        # instead of letting it surface in the inbox.
+        "sentinel": {
+            "fail_on_critical": True,
+        },
+        # Forge resident knobs. Phase 0 publishes the topic + stub
+        # handler; Phase 1 lands the real worker that reads these.
+        # ``min_cluster_size`` default 3 is the demo value (plan §5);
+        # production tenants flip to 10 once outcome volume justifies.
+        "forge": {
+            "cron_interval_hours": 6,
+            "min_cluster_size": 3,
+            "min_distinct_agents": 3,
+            "freshness_window_days": 14,
+            "llm_tokens_per_run": 50_000,
+            "max_writes_per_run": 20,
+        },
+        # OpenClaw PROPOSAL.md bridge (Phase 5). Default OFF — turning
+        # it on only matters once the OpenClaw workspace emitter ships.
+        "openclaw_bridge": {
+            "enabled": False,
+        },
+    },
     "entity_blocklist": [
         "team",
         "meeting",
@@ -335,6 +380,20 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "memclaw.auto_upgrade_enabled": bool,
     "write.triple_emission_enabled": bool,
     "write.retraction_enabled": bool,
+    # Skill Factory SF-006 — type validators for the skills_factory namespace.
+    "skills_factory.enabled": bool,
+    "skills_factory.description_max_bytes": int,
+    "skills_factory.body_max_bytes": int,
+    "skills_factory.inbox_max_pending": int,
+    "skills_factory.rejection_cooloff_days": int,
+    "skills_factory.sentinel.fail_on_critical": bool,
+    "skills_factory.forge.cron_interval_hours": int,
+    "skills_factory.forge.min_cluster_size": int,
+    "skills_factory.forge.min_distinct_agents": int,
+    "skills_factory.forge.freshness_window_days": int,
+    "skills_factory.forge.llm_tokens_per_run": int,
+    "skills_factory.forge.max_writes_per_run": int,
+    "skills_factory.openclaw_bridge.enabled": bool,
 }
 
 # Inclusive range constraints applied AFTER type validation. Listed
@@ -347,6 +406,21 @@ _LEAF_RANGES: dict[str, tuple[int, int]] = {
         MEMORY_RETENTION_MIN_DAYS,
         MEMORY_RETENTION_MAX_DAYS,
     ),
+    # ``rejection_cooloff_days`` must be >= 1: the poison-table
+    # writer (``services/forge/poison.py:write_rejected_fingerprint``)
+    # raises ValueError on < 1, which the inbox reject endpoint now
+    # surfaces as 422. Capping at 365 prevents a tenant from
+    # accidentally writing a near-permanent poison entry.
+    "skills_factory.rejection_cooloff_days": (1, 365),
+    # Size caps must be > 0: a tenant misconfiguring these to 0 or
+    # negative would silently break ALL skills writes (every doc
+    # would trip BODY_TOO_LARGE / DESCRIPTION_TOO_LARGE in Sentinel's
+    # size check). Upper bounds chosen well above any realistic
+    # SKILL.md (10 MB body, 10 KB description) — high enough that
+    # legitimate tenants never hit them, low enough that an operator
+    # typo can't pin a DoS-shaped write through the validator.
+    "skills_factory.body_max_bytes": (1, 10_000_000),
+    "skills_factory.description_max_bytes": (1, 10_000),
 }
 
 
