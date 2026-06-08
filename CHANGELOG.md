@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.13.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.12.1...backend-v2.13.0) (2026-06-08)
+
+
+### Features
+
+* **embedding:** let the platform singleton target a self-hosted endpoint ([#291](https://github.com/caura-ai/caura-memclaw/issues/291)) ([0991cef](https://github.com/caura-ai/caura-memclaw/commit/0991cef1c9aa001af6557d38ee7098e3b9f20b5a))
+* **graph-build:** drop literal/attr entity nodes, block suffix-distinct merges, rerank entity_lookup by query overlap ([#304](https://github.com/caura-ai/caura-memclaw/issues/304)) ([f3a0f7c](https://github.com/caura-ai/caura-memclaw/commit/f3a0f7c7084d2eef4fbe8d0484d53b2997f527c3))
+* **skills:** Skill Factory · Phases 0, 1, and 2 (partial — backend only) ([#293](https://github.com/caura-ai/caura-memclaw/issues/293)) ([f654ddb](https://github.com/caura-ai/caura-memclaw/commit/f654ddb9b2c8eb1956e8f9e73b75572ddf65f012))
+
+
+### Bug Fixes
+
+* **events:** drop cross-environment Pub/Sub fan-out messages ([#297](https://github.com/caura-ai/caura-memclaw/issues/297)) ([4f03679](https://github.com/caura-ai/caura-memclaw/commit/4f03679ef389c7c31e1ef6c3d31792881eccb600))
+* **events:** env-scoped topic prefix for PubSubEventBus (no-op default) ([#295](https://github.com/caura-ai/caura-memclaw/issues/295)) ([0864274](https://github.com/caura-ai/caura-memclaw/commit/086427407b08df8475a29927882b01c5c76cb026))
+* **evolve:** pass weight_adjustment_skipped_reason from MCP evolve path ([#299](https://github.com/caura-ai/caura-memclaw/issues/299)) ([b7d0f2f](https://github.com/caura-ai/caura-memclaw/commit/b7d0f2f864eee3e16f3df40c10b71c7f2e3c0dc9))
+* **fleet:** bound deploy-queue runaway when a previous deploy is acked (CAURA-000) ([#305](https://github.com/caura-ai/caura-memclaw/issues/305)) ([a94d0ab](https://github.com/caura-ai/caura-memclaw/commit/a94d0ab0664c4a1f36c28713b929e8489a5103cc))
+* **plugin:** bound resolveTenantId fetch with AbortSignal timeout (CAURA-000) ([#292](https://github.com/caura-ai/caura-memclaw/issues/292)) ([a3532a4](https://github.com/caura-ai/caura-memclaw/commit/a3532a433ab4ef5032304a2c125251c7c4bfdea5))
+* **plugin:** don't create plugins.allow from nothing on autoFix (CAURA-000) ([#307](https://github.com/caura-ai/caura-memclaw/issues/307)) ([2aab828](https://github.com/caura-ai/caura-memclaw/commit/2aab828324ca054024ba075a2bbc682f749c6f8a))
+* **plugin:** memoize bootstrap at process level (CAURA-000) ([#303](https://github.com/caura-ai/caura-memclaw/issues/303)) ([3bbb559](https://github.com/caura-ai/caura-memclaw/commit/3bbb559ea8cf397a0a49f3b00db37d5978e9b3df))
+* **plugin:** schedule restart AFTER result POST resolves (CAURA-000) ([#306](https://github.com/caura-ai/caura-memclaw/issues/306)) ([fe8ad26](https://github.com/caura-ai/caura-memclaw/commit/fe8ad26df789c60f65d38ea64b2fff5a3f82f210))
+* **plugin:** suppress bootstrap agent-id warn + swallow afterTurn 409 (CAURA-000) ([#300](https://github.com/caura-ai/caura-memclaw/issues/300)) ([6705315](https://github.com/caura-ai/caura-memclaw/commit/67053152428d55d2e93f9a552ddd0724d1a73393))
+* return real columns from cross-link insert instead of nonexistent id ([#298](https://github.com/caura-ai/caura-memclaw/issues/298)) ([7ddb78b](https://github.com/caura-ai/caura-memclaw/commit/7ddb78b20de6a3f111e935f888a186ff1fa9b880))
+* **search:** bound graph BFS frontier to prevent unbounded IN-clause (CAURA-000 F4) ([#301](https://github.com/caura-ai/caura-memclaw/issues/301)) ([b7d73d4](https://github.com/caura-ai/caura-memclaw/commit/b7d73d4465ee01ca9360728c44b68925c58648e6))
+
 ## [2.12.1](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.12.0...backend-v2.12.1) (2026-06-07)
 
 
