@@ -59,8 +59,12 @@ def get_event_bus() -> EventBus:
             # the broader ``ENVIRONMENT`` if needed; falling back to
             # ``ENVIRONMENT`` means existing deployments (already set to a
             # per-environment value) get the guard with no infra change.
-            env = os.getenv("EVENT_BUS_ENV") or os.getenv("ENVIRONMENT")
-            if not env or not env.strip():
+            # Strip before the fallback so a whitespace-only EVENT_BUS_ENV
+            # (truthy) doesn't short-circuit the ``or`` and block the
+            # ENVIRONMENT fallback; empty collapses to None (guard disabled).
+            event_bus_env = os.getenv("EVENT_BUS_ENV", "").strip()
+            env = event_bus_env or os.getenv("ENVIRONMENT", "").strip() or None
+            if not env:
                 # Fail-soft: the guard stays disabled (every message is
                 # treated as same-env, i.e. today's behaviour). Warn so a
                 # misconfigured multi-env deploy is visible rather than
