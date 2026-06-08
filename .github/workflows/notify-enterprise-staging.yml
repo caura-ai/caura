@@ -1,0 +1,131 @@
+name: notify-enterprise-staging
+
+# Cross-repo trigger: every push to ``main`` fires a
+# ``repository_dispatch`` event at caura-ai/caura-memclaw-enterprise so
+# that repo's ``deploy-to-staging.yml`` orchestrator picks up the new
+# OSS commit and deploys to staging without a manual escape hatch
+# (no-op enterprise PR or ``workflow_dispatch``).
+#
+# Closes the gap the enterprise orchestrator documents in its own
+# comment: "OSS-only changes still don't trigger anything … Migrating
+# that to a cross-repo webhook is a separate ticket." That ticket is
+# CAURA-683.
+#
+# Auth: ``ENTERPRISE_DEPLOY_TOKEN`` is a fine-grained PAT scoped to
+# caura-ai/caura-memclaw-enterprise with ``Contents: write`` (required
+# for the ``/dispatches`` endpoint) + ``Metadata: read``. NOT the
+# default ``GITHUB_TOKEN`` — that token's scope is bounded to the
+# repository it ran in, so it cannot dispatch to a sibling repo.
+#
+# A workflow_dispatch escape hatch is provided for manual re-trigger
+# (e.g., transient failure on the receiving side, or testing the
+# dispatch wiring against a specific SHA without a fresh push).
+
+on:
+  push:
+    branches: [main]
+    # No paths filter: matches the enterprise orchestrator's "zero
+    # drift, zero path-filter maintenance" posture. A doc-only commit
+    # still produces a full 13-service deploy — the cost of CI minutes
+    # on a README change is acceptable insurance against "edited X
+    # but it didn't deploy" surprises.
+  workflow_dispatch:
+    inputs:
+      oss_ref:
+        description: "OSS SHA to deploy (defaults to this run's SHA — i.e., current main tip when triggered from main)."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# Serialise concurrent dispatches against the same downstream
+# orchestrator. ``cancel-in-progress: true`` because a newer OSS
+# commit supersedes the dispatch a slightly-older one was sending —
+# the enterprise orchestrator's own ``staging-deploy`` concurrency
+# group then queues / serialises the actual deploys.
+#
+# Edge case (accepted): if the ``gh api`` POST is in-flight when a
+# newer push cancels the runner, that HTTP request may be abandoned
+# before GitHub acknowledges it — the dispatch is silently dropped.
+# Tolerable because ``main`` is linear: the newer push's SHA contains
+# all prior commits, so the next successful dispatch deploys
+# everything the dropped one would have.
+concurrency:
+  group: notify-enterprise-staging
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    # Tight ceiling — this job is a single ``gh api`` POST that should
+    # complete in well under 30s. Without an explicit timeout the
+    # default is 6 hours, and ``cancel-in-progress: true`` only
+    # unblocks the slot when the NEXT push arrives. A lone push with
+    # no follow-up (e.g., a Friday hotfix) would otherwise leave the
+    # concurrency group held indefinitely with no visible failure.
+    # ``timeout-minutes: 5`` is the per-job cap; the retry loop below
+    # uses ~30s total worst case so headroom is comfortable.
+    timeout-minutes: 5
+    steps:
+      - name: Warn on non-main manual dispatch
+        # Surface the case where an operator triggers workflow_dispatch
+        # from a feature branch and lets ``oss_ref`` default to the
+        # branch tip — that deploys a pre-merge commit to staging.
+        # Doesn't block (legitimate "test the wiring from a branch"
+        # use case stays), but the warning makes the non-main
+        # dispatch visible in the run log.
+        if: github.event_name == 'workflow_dispatch' && inputs.oss_ref == ''
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$WORKFLOW_REF" != "refs/heads/main" ]; then
+            echo "::warning::workflow_dispatch from $WORKFLOW_REF (not main) with empty oss_ref — defaulting to this run's SHA ($DISPATCH_SHA). Pass an explicit oss_ref if you intend a different ref."
+          fi
+      - name: POST repository_dispatch to enterprise
+        env:
+          # ``gh`` uses GH_TOKEN by default. The fine-grained PAT
+          # carries the cross-repo permissions GITHUB_TOKEN lacks.
+          GH_TOKEN: ${{ secrets.ENTERPRISE_DEPLOY_TOKEN }}
+          OSS_REF: ${{ inputs.oss_ref || github.sha }}
+          TRIGGERED_BY: ${{ github.actor }}
+          EVENT_NAME: ${{ github.event_name }}
+        # Inputs propagate through ``env:`` (not template
+        # substitution into the script body) so an operator-supplied
+        # ``oss_ref`` value can't escape into shell. Same posture
+        # promote-to-prod uses for override_sha.
+        run: |
+          set -euo pipefail
+          echo "::notice::Dispatching oss-main-pushed to enterprise: oss_ref=$OSS_REF triggered_by=$TRIGGERED_BY event=$EVENT_NAME"
+          # Three-attempt retry to absorb transient GitHub API
+          # failures (rate limit, momentary 5xx). Total worst-case
+          # ~30s — well under the job-level timeout. The accepted
+          # mid-flight-cancel edge case (documented on the concurrency
+          # block above) is orthogonal to this retry: cancel-in-
+          # progress would terminate the whole step including any
+          # in-flight retry. ``&& break`` alone would silently exit
+          # 0 if all attempts fail (compound statements bypass
+          # ``set -e``), so the final-attempt path explicitly
+          # ``exit 1``s to surface the failure.
+          for attempt in 1 2 3; do
+            if gh api \
+              --method POST \
+              -H "Accept: application/vnd.github+json" \
+              /repos/caura-ai/caura-memclaw-enterprise/dispatches \
+              -f event_type=oss-main-pushed \
+              -f client_payload[oss_ref]="$OSS_REF" \
+              -f client_payload[triggered_by]="$TRIGGERED_BY" \
+              -f client_payload[event_name]="$EVENT_NAME"; then
+              echo "::notice::Dispatch succeeded on attempt $attempt"
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::Dispatch attempt $attempt/3 failed; retrying in 10s..."
+              sleep 10
+            fi
+          done
+          echo "::error::All 3 dispatch attempts failed."
+          exit 1

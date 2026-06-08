@@ -1,0 +1,204 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 900" font-family="'Kalam','Caveat','Patrick Hand','Comic Sans MS',cursive">
+  <defs>
+    <radialGradient id="gold11" cx="50%" cy="50%" r="60%">
+      <stop offset="0%"   stop-color="#FFF7B0"/>
+      <stop offset="60%"  stop-color="#F7B538"/>
+      <stop offset="100%" stop-color="#92400E"/>
+    </radialGradient>
+    <radialGradient id="lake11" cx="50%" cy="55%" r="65%">
+      <stop offset="0%"   stop-color="#22D3EE" stop-opacity="0.9"/>
+      <stop offset="60%"  stop-color="#0EA5E9"/>
+      <stop offset="100%" stop-color="#0C4A6E"/>
+    </radialGradient>
+    <radialGradient id="forge11" cx="50%" cy="50%" r="60%">
+      <stop offset="0%"   stop-color="#FFE066"/>
+      <stop offset="60%"  stop-color="#F97316"/>
+      <stop offset="100%" stop-color="#7C2D12"/>
+    </radialGradient>
+    <linearGradient id="card11" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#FFF8E7"/>
+      <stop offset="100%" stop-color="#FFE9B0"/>
+    </linearGradient>
+    <marker id="arr11" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L10,6 L0,12 Z" fill="#F7B538"/>
+    </marker>
+    <marker id="reinforce11" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L8,5 L0,10 Z" fill="#22C55E"/>
+    </marker>
+  </defs>
+
+  <rect width="1400" height="900" fill="#0B1020"/>
+
+  <!-- Title -->
+  <text x="700" y="58" text-anchor="middle" font-size="40" fill="#FFF8E7" font-weight="700">How a Skill Grows</text>
+  <text x="700" y="92" text-anchor="middle" font-size="22" fill="#F7B538" font-style="italic">an active skill keeps getting smarter — version by version</text>
+
+  <!-- =================== Top row — three versions over time =================== -->
+  <g transform="translate(0,140)">
+    <!-- timeline arrow -->
+    <line x1="120" y1="120" x2="1280" y2="120" stroke="#334155" stroke-width="2" stroke-dasharray="6 6"/>
+    <text x="1300" y="125" font-size="14" fill="#64748B" font-style="italic">time →</text>
+
+    <!-- ===== v1 ===== -->
+    <g transform="translate(120,40)">
+      <rect x="0" y="0" width="100" height="140" rx="6" fill="url(#gold11)" stroke="#7C2D12" stroke-width="3"/>
+      <line x1="0" y1="38" x2="100" y2="38" stroke="#7C2D12" stroke-width="1.5"/>
+      <text x="50" y="28" text-anchor="middle" font-size="15" font-weight="700" fill="#7C2D12">deploy-</text>
+      <text x="50" y="62" text-anchor="middle" font-size="14" font-weight="700" fill="#7C2D12">eu-west</text>
+      <text x="50" y="98" text-anchor="middle" font-size="38" fill="#7C2D12" font-weight="700">★</text>
+      <text x="50" y="128" text-anchor="middle" font-size="14" font-weight="700" fill="#7C2D12">v1</text>
+      <!-- pill -->
+      <rect x="-10" y="160" width="120" height="28" rx="14" fill="#1E293B" stroke="#FFE066"/>
+      <text x="50" y="180" text-anchor="middle" font-size="13" fill="#FFE066" font-style="italic">active · Jan</text>
+    </g>
+
+    <!-- ===== v2 ===== -->
+    <g transform="translate(620,40)">
+      <rect x="0" y="0" width="100" height="140" rx="6" fill="url(#gold11)" stroke="#7C2D12" stroke-width="3"/>
+      <line x1="0" y1="38" x2="100" y2="38" stroke="#7C2D12" stroke-width="1.5"/>
+      <text x="50" y="28" text-anchor="middle" font-size="15" font-weight="700" fill="#7C2D12">deploy-</text>
+      <text x="50" y="62" text-anchor="middle" font-size="14" font-weight="700" fill="#7C2D12">eu-west</text>
+      <text x="50" y="98" text-anchor="middle" font-size="38" fill="#7C2D12" font-weight="700">★</text>
+      <text x="50" y="128" text-anchor="middle" font-size="14" font-weight="700" fill="#7C2D12">v2</text>
+      <rect x="-10" y="160" width="120" height="28" rx="14" fill="#1E293B" stroke="#FFE066"/>
+      <text x="50" y="180" text-anchor="middle" font-size="13" fill="#FFE066" font-style="italic">active · Mar</text>
+    </g>
+
+    <!-- ===== v3 ===== -->
+    <g transform="translate(1140,40)">
+      <rect x="0" y="0" width="100" height="140" rx="6" fill="url(#gold11)" stroke="#7C2D12" stroke-width="3"/>
+      <line x1="0" y1="38" x2="100" y2="38" stroke="#7C2D12" stroke-width="1.5"/>
+      <text x="50" y="28" text-anchor="middle" font-size="15" font-weight="700" fill="#7C2D12">deploy-</text>
+      <text x="50" y="62" text-anchor="middle" font-size="14" font-weight="700" fill="#7C2D12">eu-west</text>
+      <text x="50" y="98" text-anchor="middle" font-size="38" fill="#7C2D12" font-weight="700">★</text>
+      <text x="50" y="128" text-anchor="middle" font-size="14" font-weight="700" fill="#7C2D12">v3</text>
+      <rect x="-10" y="160" width="120" height="28" rx="14" fill="#1E293B" stroke="#FFE066"/>
+      <text x="50" y="180" text-anchor="middle" font-size="13" fill="#FFE066" font-style="italic">active · May</text>
+    </g>
+
+    <!-- Arrows between versions -->
+    <path d="M 230 110 Q 425 70 615 110" stroke="#F7B538" stroke-width="3" fill="none" marker-end="url(#arr11)"/>
+    <path d="M 730 110 Q 925 70 1135 110" stroke="#F7B538" stroke-width="3" fill="none" marker-end="url(#arr11)"/>
+
+    <!-- Triggers above arrows -->
+    <g font-size="14" fill="#94A3B8">
+      <text x="425" y="50" text-anchor="middle" font-weight="700" fill="#FB923C">trigger: re-mine</text>
+      <text x="425" y="70" text-anchor="middle">3 new traces · added a rollback-DNS step</text>
+
+      <text x="925" y="50" text-anchor="middle" font-weight="700" fill="#0EA5E9">trigger: edit</text>
+      <text x="925" y="70" text-anchor="middle">operator inline-edit · clarified pre-checks</text>
+    </g>
+  </g>
+
+  <!-- =================== Bottom half — what feeds growth =================== -->
+  <g transform="translate(0,420)">
+    <text x="700" y="0" text-anchor="middle" font-size="26" fill="#FFE066" font-weight="700">Four growth feedback loops</text>
+
+    <!-- LOOP 1: Re-mining (new traces) -->
+    <g transform="translate(60,40)">
+      <rect x="0" y="0" width="290" height="200" rx="14" fill="#0F172A" stroke="#FB923C" stroke-width="3"/>
+      <text x="145" y="32" text-anchor="middle" font-size="18" fill="#FB923C" font-weight="700">① Re-mining</text>
+      <text x="145" y="54" text-anchor="middle" font-size="13" fill="#94A3B8" font-style="italic">Forge keeps watching</text>
+
+      <!-- mini lake -->
+      <ellipse cx="60" cy="115" rx="40" ry="32" fill="url(#lake11)" stroke="#0C4A6E"/>
+      <circle cx="48" cy="105" r="5" fill="#FFF8E7"/>
+      <circle cx="70" cy="120" r="5" fill="#FFF8E7"/>
+      <circle cx="55" cy="128" r="5" fill="#FFF8E7"/>
+
+      <!-- arrow -->
+      <line x1="105" y1="115" x2="155" y2="115" stroke="#FB923C" stroke-width="2.5" marker-end="url(#arr11)"/>
+
+      <!-- forge -->
+      <ellipse cx="200" cy="115" rx="40" ry="32" fill="url(#forge11)" stroke="#7C2D12"/>
+      <polygon points="200,100 207,118 226,120 212,132 218,150 200,140 182,150 188,132 174,120 193,118"
+               fill="#FFE066" stroke="#7C2D12"/>
+
+      <text x="145" y="172" text-anchor="middle" font-size="13" fill="#FFF8E7">new cluster · same fingerprint family</text>
+      <text x="145" y="188" text-anchor="middle" font-size="13" fill="#FB923C" font-weight="700">→ kind="update" candidate</text>
+    </g>
+
+    <!-- LOOP 2: Recall + reinforce -->
+    <g transform="translate(390,40)">
+      <rect x="0" y="0" width="290" height="200" rx="14" fill="#0F172A" stroke="#22C55E" stroke-width="3"/>
+      <text x="145" y="32" text-anchor="middle" font-size="18" fill="#22C55E" font-weight="700">② Recall + Reinforce</text>
+      <text x="145" y="54" text-anchor="middle" font-size="13" fill="#94A3B8" font-style="italic">each successful use bumps weight</text>
+
+      <!-- arrows looping back to a star -->
+      <circle cx="50" cy="125" r="14" fill="#A78BFA"/>
+      <circle cx="100" cy="125" r="14" fill="#F472B6"/>
+      <circle cx="150" cy="125" r="14" fill="#34D399"/>
+
+      <line x1="50"  y1="111" x2="195" y2="100" stroke="#22C55E" stroke-width="2" marker-end="url(#reinforce11)"/>
+      <line x1="100" y1="111" x2="195" y2="100" stroke="#22C55E" stroke-width="2" marker-end="url(#reinforce11)"/>
+      <line x1="150" y1="111" x2="195" y2="100" stroke="#22C55E" stroke-width="2" marker-end="url(#reinforce11)"/>
+
+      <polygon points="210,100 216,115 232,116 220,127 224,142 210,134 196,142 200,127 188,116 204,115"
+               fill="url(#gold11)" stroke="#92400E"/>
+      <text x="210" y="160" text-anchor="middle" font-size="13" fill="#FFE066" font-weight="700">weight ↑</text>
+
+      <text x="145" y="188" text-anchor="middle" font-size="13" fill="#22C55E" font-weight="700">memclaw_evolve(success)</text>
+    </g>
+
+    <!-- LOOP 3: Inbox edit -->
+    <g transform="translate(720,40)">
+      <rect x="0" y="0" width="290" height="200" rx="14" fill="#0F172A" stroke="#0EA5E9" stroke-width="3"/>
+      <text x="145" y="32" text-anchor="middle" font-size="18" fill="#0EA5E9" font-weight="700">③ Operator Edit</text>
+      <text x="145" y="54" text-anchor="middle" font-size="13" fill="#94A3B8" font-style="italic">a teammate refines the wording</text>
+
+      <!-- editor -->
+      <rect x="60" y="80" width="170" height="80" rx="8" fill="url(#card11)" stroke="#5B21B6" stroke-width="2"/>
+      <text x="70" y="100" font-size="11" fill="#1F2937">first run `terraform plan`</text>
+      <text x="70" y="116" font-size="11" fill="#16A34A">+ then verify EU-West region</text>
+      <text x="70" y="132" font-size="11" fill="#16A34A">+ before flipping DNS</text>
+      <text x="70" y="148" font-size="11" fill="#1F2937">then run `terraform apply`</text>
+
+      <text x="145" y="188" text-anchor="middle" font-size="13" fill="#0EA5E9" font-weight="700">new content_hash · Sentinel rescans</text>
+    </g>
+
+    <!-- LOOP 4: Hash-bind safe write -->
+    <g transform="translate(1050,40)">
+      <rect x="0" y="0" width="290" height="200" rx="14" fill="#0F172A" stroke="#A78BFA" stroke-width="3"/>
+      <text x="145" y="32" text-anchor="middle" font-size="18" fill="#A78BFA" font-weight="700">④ Hash-binding</text>
+      <text x="145" y="54" text-anchor="middle" font-size="13" fill="#94A3B8" font-style="italic">guards against stale overwrites</text>
+
+      <!-- live hash vs target hash -->
+      <g font-size="13">
+        <rect x="30" y="80" width="230" height="36" rx="8" fill="#1E293B" stroke="#FFE066"/>
+        <text x="40" y="103" fill="#FFE066" font-weight="700">live:</text>
+        <text x="90" y="103" fill="#FFF8E7" font-family="monospace">sha256:a3f9e2…</text>
+
+        <rect x="30" y="126" width="230" height="36" rx="8" fill="#1E293B" stroke="#22C55E"/>
+        <text x="40" y="149" fill="#22C55E" font-weight="700">target:</text>
+        <text x="100" y="149" fill="#FFF8E7" font-family="monospace">sha256:a3f9e2…</text>
+      </g>
+
+      <text x="145" y="188" text-anchor="middle" font-size="13" fill="#22C55E" font-weight="700">✓ matches → write proceeds</text>
+    </g>
+  </g>
+
+  <!-- =================== Rollback safety net =================== -->
+  <g transform="translate(0,690)">
+    <rect x="60" y="0" width="1280" height="120" rx="14" fill="#0F172A" stroke="#7C3AED" stroke-width="2"/>
+    <text x="700" y="32" text-anchor="middle" font-size="20" fill="#C4B5FD" font-weight="700">Safety net: every version preserved</text>
+
+    <g transform="translate(150,55)">
+      <!-- stack of past versions -->
+      <rect x="0"  y="14" width="40" height="50" rx="3" fill="#7C3AED" opacity="0.5"/>
+      <rect x="44" y="10" width="40" height="50" rx="3" fill="#7C3AED" opacity="0.7"/>
+      <rect x="88" y="6"  width="40" height="50" rx="3" fill="#7C3AED" opacity="0.9"/>
+      <text x="64" y="84" text-anchor="middle" font-size="13" fill="#C4B5FD" font-weight="700">skills_rollback</text>
+    </g>
+
+    <g transform="translate(330,55)">
+      <text x="0" y="22" font-size="15" fill="#FFF8E7">↳ every active write snapshots the prior content + hash</text>
+      <text x="0" y="44" font-size="15" fill="#FFF8E7">↳ one-click revert in the inbox restores the exact prior bytes</text>
+      <text x="0" y="66" font-size="15" fill="#FFF8E7">↳ a "growth" gone wrong is never permanent — undo is durable</text>
+    </g>
+  </g>
+
+  <!-- footer -->
+  <text x="700" y="876" text-anchor="middle" font-size="14" fill="#64748B" font-style="italic">
+    skills don't go stale by accident — they grow because the lake keeps feeding the forge
+  </text>
+</svg>

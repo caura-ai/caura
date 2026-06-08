@@ -1,0 +1,65 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/v17.6.0/schemas/config.json",
+  "signoff": "release-please[bot] <release-please[bot]@users.noreply.github.com>",
+  "release-type": "simple",
+  "include-component-in-tag": true,
+  "include-v-in-tag": true,
+  "separate-pull-requests": false,
+  "bootstrap-sha": "868da80d108573f259dae74f7c4330f23f614e86",
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": false,
+  "draft": false,
+  "prerelease": false,
+  "changelog-path": "CHANGELOG.md",
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "package-name": "caura-memclaw",
+      "component": "backend",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "core-api/pyproject.toml",
+          "jsonpath": "$.project.version"
+        },
+        {
+          "type": "toml",
+          "path": "core-worker/pyproject.toml",
+          "jsonpath": "$.project.version"
+        },
+        {
+          "type": "toml",
+          "path": "core-storage-api/pyproject.toml",
+          "jsonpath": "$.project.version"
+        }
+      ]
+    },
+    "plugin": {
+      "release-type": "node",
+      "package-name": "memclaw-plugin",
+      "component": "plugin",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "openclaw.plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    }
+  },
+  "changelog-sections": [
+    { "type": "feat", "section": "Features" },
+    { "type": "fix", "section": "Bug Fixes" },
+    { "type": "perf", "section": "Performance" },
+    { "type": "deps", "section": "Dependencies" },
+    { "type": "revert", "section": "Reverts" },
+    { "type": "docs", "section": "Documentation", "hidden": false },
+    { "type": "refactor", "section": "Code Refactoring", "hidden": false },
+    { "type": "test", "section": "Tests", "hidden": true },
+    { "type": "build", "section": "Build System", "hidden": true },
+    { "type": "ci", "section": "Continuous Integration", "hidden": true },
+    { "type": "chore", "section": "Miscellaneous", "hidden": true }
+  ]
+}

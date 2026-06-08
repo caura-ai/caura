@@ -1,0 +1,122 @@
+[project]
+name = "core-storage-api"
+version = "2.12.1"
+description = "MemClaw Core Storage API — PostgreSQL CRUD service"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+    "sqlalchemy[asyncio]>=2.0,<3",
+    # SQLAlchemy[asyncio] pulls in greenlet. Pin <3.5.0 — greenlet 3.5.0
+    # shipped wheels for macOS/Windows ARM only, no Linux x86_64, so CI
+    # (which uses ``uv pip install`` and re-resolves rather than reading
+    # the lockfile) breaks on the Linux runner. Drop once 3.5.x has full
+    # platform coverage.
+    "greenlet<3.5.0",
+    "asyncpg>=0.30,<1",
+    "pgvector>=0.3,<1",
+    "pydantic>=2.0,<3",
+    "pydantic-settings>=2.0,<3",
+    "alembic>=1.14,<2",
+    "httpx>=0.27,<1",
+    "structlog>=25.4,<26",
+    # OpenAI SDK. NOT used by the live core-storage-api request path
+    # (which talks DB only) — added so the standalone backfill CLI at
+    # ``core_storage_api.scripts.backfill_embeddings`` can
+    # ``from common.embedding import get_embedding`` without a
+    # ``ModuleNotFoundError``. The CLI runs inside this image (per
+    # its docstring: "Run inside the docker-compose stack so envs are
+    # wired up correctly"). Pin matches ``core-worker``'s pin so the
+    # OpenAI SDK version is consistent across services.
+    "openai>=2.1,<3",
+]
+
+[project.optional-dependencies]
+# Optional: required only when EVENT_BUS_BACKEND=pubsub (SaaS deployments).
+# Standalone installs default to the in-process bus and don't need this.
+pubsub = ["google-cloud-pubsub>=2.23,<3"]
+dev = [
+    "core-storage-api[test,pubsub]",
+    "mypy>=1.13,<2.0",
+    "ruff>=0.8,<1.0",
+]
+test = [
+    "pytest>=8.3,<9.0",
+    "pytest-asyncio>=0.24,<1.0",
+    "pytest-cov>=6.0,<7.0",
+    "httpx>=0.27,<1.0",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+exclude = [
+    ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    ".venv", "__pycache__", "build", "dist",
+]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "B", "C4", "UP", "ARG",
+    "SIM", "TCH", "PTH", "RUF", "ASYNC",
+]
+ignore = [
+    "E501", "TC001", "TC002", "TC003", "ARG001", "ARG002",
+    "B008", "B904", "RUF022", "PTH123", "RUF006", "SIM117",
+    "RUF012", "RUF009",
+]
+fixable = ["ALL"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["ARG", "S101", "F841"]
+"__init__.py" = ["F401", "E402"]
+"**/app.py" = ["E402"]
+"**/migrations/env.py" = ["E402", "I001"]  # alembic env.py legitimately imports models after fileConfig()
+
+[tool.ruff.lint.isort]
+known-first-party = ["core_storage_api", "common"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+exclude = ["**/migrations/env.py"]  # late-import pattern; lint-only via per-file-ignores above
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+explicit_package_bases = true
+warn_return_any = false
+warn_unused_ignores = false
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = ["*/tests/*", "*/__init__.py", "*/services/postgres_service.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+fail_under = 50
+show_missing = true

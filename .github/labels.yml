@@ -1,0 +1,98 @@
+# Source of truth for repository labels. Synced to GitHub by
+# .github/workflows/labels-sync.yml on every push to main that touches
+# this file.
+#
+# Taxonomy: 4 axes (kind, status, priority, area) plus a small set of
+# free-form labels for common cross-cutting needs. Within each axis the
+# labels are intended to be mutually exclusive — apply one, not several.
+
+# ── kind/* — what is this issue/PR about? ──────────────────────────────
+- name: kind/bug
+  color: "d73a4a"
+  description: Something isn't working as documented.
+- name: kind/feature
+  color: "a2eeef"
+  description: New capability or enhancement to an existing one.
+- name: kind/docs
+  color: "0075ca"
+  description: Documentation only — README, CONTRIBUTING, code comments, ADRs.
+- name: kind/chore
+  color: "cccccc"
+  description: Tooling, CI, dependencies, or other maintenance with no user-visible behavior change.
+- name: kind/security
+  color: "b60205"
+  description: Security-related — exempt from stale-bot. Use Private Vulnerability Reporting for new vulns.
+- name: kind/breaking
+  color: "b60205"
+  description: Introduces a breaking change to a SemVer-stable surface (must include BREAKING CHANGE trailer).
+
+# ── status/* — where is this in the triage flow? ───────────────────────
+- name: status/needs-triage
+  color: "fbca04"
+  description: Awaiting initial triage. Auto-applied by issue templates.
+- name: status/needs-info
+  color: "fef2c0"
+  description: Waiting on the reporter for more information. Stale-closes after 60+14 days.
+- name: status/accepted
+  color: "0e8a16"
+  description: Triaged and accepted. Exempt from stale-bot.
+- name: status/blocked
+  color: "5319e7"
+  description: Cannot proceed — depends on something external (upstream, decision, design).
+- name: status/wontfix
+  color: "ffffff"
+  description: Considered and explicitly declined. Triage decision; closes the conversation.
+- name: status/stale
+  color: "c2e0c6"
+  description: Auto-applied by the stale-bot. Will close in 14 days unless a human responds.
+- name: status/stale-closed
+  color: "c2e0c6"
+  description: Auto-closed after 74d of reporter inactivity. Reopen or file a fresh issue.
+
+# ── priority/* — how urgent? Three levels intentionally. ───────────────
+- name: priority/p0
+  color: "b60205"
+  description: Drop everything — production-impacting or critical security.
+- name: priority/p1
+  color: "d93f0b"
+  description: Next release.
+- name: priority/p2
+  color: "fbca04"
+  description: When bandwidth allows.
+
+# ── area/* — which subsystem? ──────────────────────────────────────────
+- name: area/core-api
+  color: "1d76db"
+  description: REST API, MCP server, route handlers, providers, pipelines.
+- name: area/core-storage-api
+  color: "1d76db"
+  description: PostgreSQL CRUD microservice, ORM, migrations.
+- name: area/core-worker
+  color: "1d76db"
+  description: Background worker — embeddings, enrichment, contradiction detection.
+- name: area/plugin
+  color: "1d76db"
+  description: OpenClaw plugin (TypeScript) — heartbeat, context-engine, agent-auth.
+- name: area/mcp
+  color: "1d76db"
+  description: MCP server, tool implementations, tool descriptions.
+- name: area/skill
+  color: "1d76db"
+  description: SKILL.md and direct-MCP skill installer.
+- name: area/docs
+  color: "1d76db"
+  description: README, AGENT-INSTALL, integration-guide, ADRs.
+- name: area/infra
+  color: "1d76db"
+  description: Docker, CI/CD, deployment scripts, dependabot.
+
+# ── cross-cutting ──────────────────────────────────────────────────────
+- name: good-first-issue
+  color: "7057ff"
+  description: Suitable entry point for new contributors. Scope-bounded; mentor available.
+- name: help-wanted
+  color: "008672"
+  description: Maintainers welcome a contribution here. Not gated on a triage decision.
+- name: dependencies
+  color: "0366d6"
+  description: Dependency updates (auto-applied by Dependabot).

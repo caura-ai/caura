@@ -1,0 +1,42 @@
+MemClaw
+Copyright 2026 Caura (https://caura.ai)
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+"MemClaw" and "Caura" are trademarks of Caura. See the README for details.
+
+================================================================================
+Third-Party Software
+================================================================================
+
+This product includes software developed by third parties. All dependencies are
+distributed under permissive licenses compatible with Apache-2.0:
+
+    Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, MPL-2.0, ISC, PSF-2.0,
+    0BSD, Zlib, CC0-1.0, Unlicense
+
+At the time of this release, no AGPL-3.0, SSPL, or Business Source License
+(BSL) dependencies are included. To verify the current dependency set, run the
+commands below.
+
+To regenerate the full dependency inventory:
+
+    # Python (from the project venv)
+    pip install pip-licenses
+    pip-licenses --format=markdown --with-urls --from=mixed
+
+    # Node (from repo root and plugin/)
+    npx license-checker --production --summary
+
+Notable third-party components:
+
+    - FastAPI, Starlette, Uvicorn                    (MIT, BSD-3-Clause)
+    - Pydantic, SQLAlchemy, Alembic                  (MIT)
+    - google-cloud-aiplatform, vertexai, openai      (Apache-2.0)
+    - cryptography, argon2-cffi, python-jose, pyotp  (Apache-2.0, MIT)
+    - redis, hiredis, asyncpg, pgvector              (MIT, Apache-2.0)
+    - mcp (Model Context Protocol SDK)               (MIT)
+    - sentry-sdk (optional, opt-in via SENTRY_DSN)   (MIT)
+
+See the individual package distributions for full license texts.

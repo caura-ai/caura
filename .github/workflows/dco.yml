@@ -1,0 +1,66 @@
+name: DCO
+
+# Verifies every commit on a pull request carries a `Signed-off-by:`
+# trailer asserting the Developer Certificate of Origin
+# (https://developercertificate.org/). DCO is our lightweight
+# alternative to a CLA — see CONTRIBUTING.md § Sign-off (DCO).
+#
+# This is the gate. Branch protection on main should require this
+# check. PRs without sign-off on each commit will fail and cannot
+# be merged.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+      - name: Check DCO sign-off on every commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          BASE="$BASE_SHA"
+          HEAD="$HEAD_SHA"
+          FAILED=()
+          while IFS= read -r sha; do
+            if ! git log -1 --format=%B "$sha" | grep -qE '^Signed-off-by: .+ <.+@.+>$'; then
+              FAILED+=("$sha")
+            fi
+          done < <(git rev-list --no-merges "$BASE..$HEAD")
+
+          if [ "${#FAILED[@]}" -ne 0 ]; then
+            echo "::error::The following commits are missing a Signed-off-by trailer:"
+            for sha in "${FAILED[@]}"; do
+              SUBJECT=$(git log -1 --format=%s "$sha")
+              echo "  $sha  $SUBJECT"
+            done
+            cat <<EOF
+
+          ── How to fix ──
+          For the most-recent commit:
+            git commit --amend -s --no-edit && git push --force-with-lease
+
+          For multiple older commits, rebase to add sign-off to each:
+            git rebase --signoff "$BASE"
+            git push --force-with-lease
+
+          Configure your local git to sign off automatically going forward:
+            git config --global format.signoff true
+
+          See CONTRIBUTING.md § Sign-off (DCO) for context.
+          EOF
+            exit 1
+          fi
+
+          echo "All commits signed off ✓"

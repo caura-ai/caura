@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 580" font-family="'Kalam','Caveat','Patrick Hand','Comic Sans MS',cursive">
+  <defs>
+    <radialGradient id="lava" cx="50%" cy="55%" r="55%">
+      <stop offset="0%" stop-color="#FFE066"/>
+      <stop offset="35%" stop-color="#FF9F1C"/>
+      <stop offset="70%" stop-color="#E63946"/>
+      <stop offset="100%" stop-color="#6A040F"/>
+    </radialGradient>
+    <radialGradient id="bubble" cx="35%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#FFF8E7" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#FFE9B0" stop-opacity="0.6"/>
+    </radialGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="900" height="580" fill="#0B1020"/>
+  <!-- subtle stars -->
+  <g fill="#FFF8E7" opacity="0.55">
+    <circle cx="80" cy="60" r="1.4"/><circle cx="220" cy="40" r="1"/><circle cx="380" cy="70" r="1.6"/>
+    <circle cx="540" cy="55" r="1"/><circle cx="700" cy="80" r="1.3"/><circle cx="820" cy="50" r="1.1"/>
+    <circle cx="120" cy="180" r="1"/><circle cx="780" cy="180" r="1"/><circle cx="60" cy="500" r="1.2"/>
+    <circle cx="850" cy="510" r="1"/>
+  </g>
+
+  <!-- title -->
+  <text x="450" y="70" text-anchor="middle" font-size="46" fill="#FFF8E7" font-weight="700">MemClaw — Live Memory</text>
+  <text x="450" y="102" text-anchor="middle" font-size="22" fill="#F7B538" font-style="italic">a boiling lake of fleet intelligence</text>
+
+  <!-- caldera rim shadow ring -->
+  <ellipse cx="450" cy="370" rx="330" ry="135" fill="#1A1F3A" stroke="#2A2F50" stroke-width="2"/>
+
+  <!-- lava lake (organic blob) -->
+  <path d="M 180,360
+           C 200,300 260,265 330,260
+           C 410,255 460,235 540,250
+           C 620,260 700,295 720,360
+           C 730,415 670,460 580,470
+           C 500,478 430,455 360,468
+           C 280,478 195,440 180,360 Z"
+        fill="url(#lava)" stroke="#4A0E0E" stroke-width="3"/>
+
+  <!-- molten cracks -->
+  <g stroke="#FFE066" stroke-width="2" fill="none" opacity="0.65" stroke-linecap="round">
+    <path d="M 270,360 Q 320,345 380,365 T 480,355"/>
+    <path d="M 430,400 Q 490,395 540,410 T 640,400"/>
+    <path d="M 320,420 Q 360,430 400,420"/>
+  </g>
+
+  <!-- floating memory notes inside lava -->
+  <g font-family="'Inter',sans-serif" font-size="9" fill="#1A1A1A">
+    <g transform="translate(290,340) rotate(-8)"><rect width="36" height="26" rx="2" fill="#FFF8E7" stroke="#1A1A1A"/><text x="4" y="11">deploy</text><text x="4" y="21">log</text></g>
+    <g transform="translate(420,330) rotate(5)"><rect width="36" height="26" rx="2" fill="#FFF8E7" stroke="#1A1A1A"/><text x="4" y="11">DNS</text><text x="4" y="21">note</text></g>
+    <g transform="translate(540,360) rotate(-3)"><rect width="36" height="26" rx="2" fill="#FFF8E7" stroke="#1A1A1A"/><text x="4" y="11">incident</text><text x="4" y="21">postmortem</text></g>
+    <g transform="translate(370,420) rotate(7)"><rect width="36" height="26" rx="2" fill="#FFF8E7" stroke="#1A1A1A"/><text x="4" y="11">user</text><text x="4" y="21">pref</text></g>
+    <g transform="translate(620,400) rotate(-6)"><rect width="36" height="26" rx="2" fill="#FFF8E7" stroke="#1A1A1A"/><text x="4" y="11">runbook</text><text x="4" y="21">step</text></g>
+  </g>
+
+  <!-- bubbles erupting upward, each labeled (a verb of the lake) -->
+  <g filter="url(#glow)">
+    <circle cx="290" cy="220" r="34" fill="url(#bubble)"/>
+    <text x="290" y="218" text-anchor="middle" font-size="14" fill="#1A1A1A" font-weight="700">Fusion</text>
+    <text x="290" y="234" text-anchor="middle" font-size="10" fill="#1A1A1A">new claim</text>
+
+    <circle cx="430" cy="180" r="40" fill="url(#bubble)"/>
+    <text x="430" y="180" text-anchor="middle" font-size="15" fill="#1A1A1A" font-weight="700">Skills</text>
+    <text x="430" y="198" text-anchor="middle" font-size="10" fill="#1A1A1A">distilled procedure</text>
+
+    <circle cx="580" cy="210" r="34" fill="url(#bubble)"/>
+    <text x="580" y="208" text-anchor="middle" font-size="13" fill="#1A1A1A" font-weight="700">Hypothesis</text>
+    <text x="580" y="224" text-anchor="middle" font-size="10" fill="#1A1A1A">unprompted</text>
+
+    <circle cx="700" cy="260" r="28" fill="url(#bubble)"/>
+    <text x="700" y="260" text-anchor="middle" font-size="12" fill="#1A1A1A" font-weight="700">Antibody</text>
+    <text x="700" y="274" text-anchor="middle" font-size="10" fill="#1A1A1A">immune</text>
+  </g>
+
+  <!-- residents on the rim -->
+  <g font-size="13" fill="#FFF8E7">
+    <!-- Forge -->
+    <g transform="translate(120,335)">
+      <circle cx="0" cy="0" r="18" fill="#F7B538" stroke="#1A1A1A" stroke-width="2"/>
+      <text x="0" y="4" text-anchor="middle" font-size="18" fill="#1A1A1A">⚒</text>
+      <text x="0" y="35" text-anchor="middle" fill="#F7B538" font-weight="700">Forge</text>
+      <text x="0" y="50" text-anchor="middle" font-size="10" fill="#FFF8E7">skill miner</text>
+    </g>
+    <!-- Oracle -->
+    <g transform="translate(220,200)">
+      <circle cx="0" cy="0" r="18" fill="#8B5CF6" stroke="#1A1A1A" stroke-width="2"/>
+      <text x="0" y="5" text-anchor="middle" font-size="18" fill="#FFF8E7">👁</text>
+      <text x="0" y="-26" text-anchor="middle" fill="#C4B5FD" font-weight="700">Oracle</text>
+      <text x="0" y="-12" text-anchor="middle" font-size="10" fill="#FFF8E7">hypotheses</text>
+    </g>
+    <!-- Dreamer -->
+    <g transform="translate(450,140)">
+      <circle cx="0" cy="0" r="18" fill="#06B6D4" stroke="#1A1A1A" stroke-width="2"/>
+      <text x="0" y="5" text-anchor="middle" font-size="16" fill="#FFF8E7">☾</text>
+      <text x="0" y="-26" text-anchor="middle" fill="#67E8F9" font-weight="700">Dreamer</text>
+      <text x="0" y="-12" text-anchor="middle" font-size="10" fill="#FFF8E7">consolidator</text>
+    </g>
+    <!-- Sentinel -->
+    <g transform="translate(680,180)">
+      <circle cx="0" cy="0" r="18" fill="#10B981" stroke="#1A1A1A" stroke-width="2"/>
+      <text x="0" y="5" text-anchor="middle" font-size="16" fill="#1A1A1A">🛡</text>
+      <text x="0" y="-26" text-anchor="middle" fill="#6EE7B7" font-weight="700">Sentinel</text>
+      <text x="0" y="-12" text-anchor="middle" font-size="10" fill="#FFF8E7">immune system</text>
+    </g>
+    <!-- Cartographer -->
+    <g transform="translate(790,335)">
+      <circle cx="0" cy="0" r="18" fill="#FB7185" stroke="#1A1A1A" stroke-width="2"/>
+      <text x="0" y="5" text-anchor="middle" font-size="16" fill="#1A1A1A">⌖</text>
+      <text x="0" y="35" text-anchor="middle" fill="#FDA4AF" font-weight="700">Cartographer</text>
+      <text x="0" y="50" text-anchor="middle" font-size="10" fill="#FFF8E7">maps the mind</text>
+    </g>
+    <!-- Hunter -->
+    <g transform="translate(450,500)">
+      <circle cx="0" cy="0" r="18" fill="#F87171" stroke="#1A1A1A" stroke-width="2"/>
+      <text x="0" y="5" text-anchor="middle" font-size="16" fill="#1A1A1A">◎</text>
+      <text x="0" y="36" text-anchor="middle" fill="#FCA5A5" font-weight="700">Hunter</text>
+      <text x="0" y="50" text-anchor="middle" font-size="10" fill="#FFF8E7">finds blind spots</text>
+    </g>
+  </g>
+
+  <!-- tagline -->
+  <text x="450" y="555" text-anchor="middle" font-size="20" fill="#FFE066" font-style="italic">every interaction makes the next one smarter</text>
+</svg>

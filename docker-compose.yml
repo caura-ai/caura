@@ -1,0 +1,186 @@
+# MemClaw Local Development Stack
+# Usage: docker compose up -d
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────
+
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: memclaw
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: memclaw
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memclaw"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Core Storage API (PostgreSQL CRUD) ──────────────────────────
+
+  core-storage-api:
+    # Pulls the published multi-arch image from ghcr.io.
+    #
+    # ``pull_policy: missing`` is required because Compose's default
+    # when both ``image:`` and ``build:`` are present is to BUILD
+    # locally and ignore the registry — the opposite of what we want.
+    # ``missing`` pulls only when the image is absent from the local
+    # cache: first ``docker compose up`` fetches; subsequent ``up``
+    # commands re-use the cached image (fast, no registry round-trip,
+    # works offline). Crucially, this means a moving tag like
+    # ``:latest`` does NOT silently upgrade on every ``up`` — version
+    # changes are explicit. Upgrade path:
+    #
+    #     docker compose pull && docker compose up -d
+    #
+    # The ``build:`` block is for ``docker compose up --build
+    # --no-pull`` (``--no-pull`` is needed when no local image is
+    # cached and you want to build from source without network: without
+    # it, ``pull_policy: missing`` triggers a pull attempt before the
+    # build starts and fails if the registry is unreachable. When the
+    # image already exists locally, ``--build`` alone is sufficient to
+    # force a rebuild.) Compose does NOT auto-fall-back to ``build:``
+    # on pull failure; an unreachable registry hard-fails ``up`` only
+    # when no local image is cached.
+    #
+    # Pin a specific version with ``MEMCLAW_VERSION=v1.2.3`` in your
+    # ``.env``; defaults to ``latest`` for the most recent stable.
+    image: ghcr.io/caura-ai/caura-memclaw-core-storage-api:${MEMCLAW_VERSION:-latest}
+    pull_policy: missing
+    build:
+      context: .
+      dockerfile: core-storage-api/Dockerfile
+    ports:
+      - "${STORAGE_API_PORT:-8002}:8002"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://memclaw:changeme@db:5432/memclaw
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: memclaw
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: memclaw
+      POSTGRES_REQUIRE_SSL: "false"
+      ENVIRONMENT: development
+      LOG_FORMAT_JSON: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Core API (main application) ─────────────────────────────────
+
+  core-api:
+    # Same pull-on-first-up + ``pull_policy: missing`` pattern as
+    # core-storage-api above. See its block for the full rationale.
+    image: ghcr.io/caura-ai/caura-memclaw-core-api:${MEMCLAW_VERSION:-latest}
+    pull_policy: missing
+    build:
+      context: .
+      dockerfile: core-api/Dockerfile
+    ports:
+      - "${API_PORT:-8000}:8000"
+    env_file:
+      - env.dev
+      - path: .env
+        required: false
+    environment:
+      # Override DB host for Docker network
+      POSTGRES_HOST: db
+      CORE_STORAGE_API_URL: http://core-storage-api:8002
+      REDIS_URL: redis://redis:6379/0
+      # Pass through provider keys from host (set in .env or shell)
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      # Local-embedder envs (consumed when ``--profile embed-local``
+      # is active; harmless when unset). See ``docs/local-embedder.md``.
+      OPENAI_EMBEDDING_BASE_URL: "${OPENAI_EMBEDDING_BASE_URL:-}"
+      OPENAI_EMBEDDING_SEND_DIMENSIONS: "${OPENAI_EMBEDDING_SEND_DIMENSIONS:-true}"
+      OPENAI_EMBEDDING_MODEL: "${OPENAI_EMBEDDING_MODEL:-}"
+      OPENAI_EMBEDDING_TRUNCATE_TO_DIM: "${OPENAI_EMBEDDING_TRUNCATE_TO_DIM:-}"
+      EMBEDDING_QUERY_INSTRUCTION: "${EMBEDDING_QUERY_INSTRUCTION:-}"
+    depends_on:
+      core-storage-api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      tei:
+        condition: service_healthy
+        required: false  # only enforced when --profile embed-local is active
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Local Embedder (opt-in via ``--profile embed-local``) ───────
+  #
+  # HuggingFace Text Embeddings Inference server. Drop-in replacement
+  # for the OpenAI embeddings API: ``OPENAI_EMBEDDING_BASE_URL=
+  # http://tei:80/v1`` on ``core-api`` routes embeddings here instead
+  # of api.openai.com. Default model is ``BAAI/bge-m3`` (1024-dim,
+  # MIT, multilingual, no instruction prefix needed) — matches the
+  # schema set in alembic migration 012.
+  #
+  # Default image is the CPU build (``cpu-1.7``); for an L4-class
+  # GPU box, set ``TEI_IMAGE_TAG=89-1.7`` and add the deploy/gpu
+  # block (commented at the bottom of this service). See
+  # ``docs/local-embedder.md`` for hardware sizing and model swaps.
+
+  tei:
+    image: ghcr.io/huggingface/text-embeddings-inference:${TEI_IMAGE_TAG:-cpu-1.7}
+    profiles: ["embed-local"]
+    command:
+      - --model-id
+      - "${TEI_MODEL_ID:-BAAI/bge-m3}"
+      - --auto-truncate
+    environment:
+      HUGGINGFACE_HUB_CACHE: /data
+    volumes:
+      - tei_cache:/data
+    healthcheck:
+      # Generous retries: first-time model download (~2 GB for
+      # bge-m3) can take several minutes on a cold cache.
+      test: ["CMD", "curl", "-fs", "http://localhost:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    # Uncomment to attach a GPU (L4, A10, etc) — requires
+    # nvidia-container-toolkit on the host. Verified on L4
+    # (``g2-standard-8``) in the local-embedder bench.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+volumes:
+  pgdata:
+  redis_data:
+  tei_cache:

@@ -1,0 +1,174 @@
+# Full local development stack — hot-reload, mirrors staging architecture
+# Usage: docker compose -f docker-compose.dev.yml up -d
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────
+
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: memclaw
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: memclaw
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memclaw"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Core Storage API (hot-reload) ───────────────────────────────
+
+  core-storage-api:
+    build:
+      context: .
+      dockerfile: core-storage-api/Dockerfile
+    # Run as the host user so __pycache__ files written next to
+    # bind-mounted source land with host-matching ownership. Without
+    # this, on Linux hosts where id -u != 1000 (the appuser uid baked
+    # into the production Dockerfile) Python hits PermissionError on
+    # every reload. Defaults to 1000:1000, which matches the image's
+    # appuser and keeps current behaviour on hosts where it already
+    # works (macOS Docker Desktop, Linux at uid 1000). Override via
+    # ``UID=$(id -u) GID=$(id -g) docker compose up`` or .env entries.
+    user: "${UID:-1000}:${GID:-1000}"
+    command: >
+      uvicorn core_storage_api.app:app
+      --host 0.0.0.0 --port 8002 --reload
+      --reload-dir /app/core-storage-api/src
+      --reload-dir /app/common
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./common:/app/common
+      - ./core-storage-api/src:/app/core-storage-api/src
+    environment:
+      PYTHONPATH: /app/core-storage-api/src:/app
+      DATABASE_URL: postgresql+asyncpg://memclaw:changeme@db:5432/memclaw
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: memclaw
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: memclaw
+      POSTGRES_REQUIRE_SSL: "false"
+      ENVIRONMENT: development
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Core API (hot-reload) ───────────────────────────────────────
+
+  core-api:
+    build:
+      context: .
+      dockerfile: core-api/Dockerfile
+    # See core-storage-api above for the rationale on user mapping.
+    user: "${UID:-1000}:${GID:-1000}"
+    command: >
+      uvicorn core_api.app:app
+      --host 0.0.0.0 --port 8000 --reload
+      --reload-dir /app/core-api/src
+      --reload-dir /app/common
+    env_file:
+      - env.dev
+      - path: .env
+        required: false
+      - path: .env.local
+        required: false
+      - path: .env.test
+        required: false
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./common:/app/common
+      - ./core-api/src:/app/core-api/src
+      - ./migrations:/app/migrations
+      - ./plugin:/app/plugin
+      - ./static:/app/static
+    environment:
+      PYTHONPATH: /app/core-api/src:/app
+      POSTGRES_HOST: db
+      CORE_STORAGE_API_URL: http://core-storage-api:8002
+      REDIS_URL: redis://redis:6379/0
+      # Pass through provider keys from host
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      # Embedder experiment (A.5) — local TEI sidecar overrides
+      OPENAI_EMBEDDING_BASE_URL: "${OPENAI_EMBEDDING_BASE_URL:-}"
+      OPENAI_EMBEDDING_SEND_DIMENSIONS: "${OPENAI_EMBEDDING_SEND_DIMENSIONS:-true}"
+      OPENAI_EMBEDDING_MODEL: "${OPENAI_EMBEDDING_MODEL:-}"
+      # Option B (instruction-aware query encoding) and Matryoshka truncation.
+      # Default instruction applied to all /api/v1/search calls; ingest path
+      # unchanged. Truncate-to-dim lets us run native-1024/2560/4096-dim models
+      # against an unchanged 768-dim schema (Qwen3-Embedding family with MRL).
+      EMBEDDING_QUERY_INSTRUCTION: "${EMBEDDING_QUERY_INSTRUCTION:-}"
+      OPENAI_EMBEDDING_TRUNCATE_TO_DIM: "${OPENAI_EMBEDDING_TRUNCATE_TO_DIM:-}"
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-fake}"
+      ENTITY_EXTRACTION_PROVIDER: "${ENTITY_EXTRACTION_PROVIDER:-fake}"
+      USE_LLM_FOR_MEMORY_CREATION: "${USE_LLM_FOR_MEMORY_CREATION:-false}"
+    depends_on:
+      core-storage-api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      tei:
+        condition: service_healthy
+        required: false  # only enforced when --profile embed-local is active
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Local Embedder (opt-in via ``--profile embed-local``) ───────
+  # See docker-compose.yml for the full block + comments. This dev
+  # variant is identical so that ``--profile embed-local`` works the
+  # same way against the hot-reload stack.
+
+  tei:
+    image: ghcr.io/huggingface/text-embeddings-inference:${TEI_IMAGE_TAG:-cpu-1.7}
+    profiles: ["embed-local"]
+    command:
+      - --model-id
+      - "${TEI_MODEL_ID:-BAAI/bge-m3}"
+      - --auto-truncate
+    environment:
+      HUGGINGFACE_HUB_CACHE: /data
+    volumes:
+      - tei_cache:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    # See docker-compose.yml for the optional GPU deploy block.
+
+volumes:
+  pgdata:
+  redis_data:
+  tei_cache:

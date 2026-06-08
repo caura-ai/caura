@@ -1,0 +1,72 @@
+name: Feature request
+description: Suggest a new capability or enhancement
+title: "[Feature] "
+labels: ["kind/feature", "status/needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For open-ended brainstorming or "have you considered…" questions, prefer [Discussions](https://github.com/caura-ai/caura-memclaw/discussions). Use this form when you have a concrete proposal.
+
+        Before submitting, check the [Public API & Stability](https://github.com/caura-ai/caura-memclaw/blob/main/README.md#public-api--stability) section to understand which surfaces are SemVer-bound vs. internal.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: |
+        What problem are you trying to solve? Use-case framing works well here:
+        "As a [type of user], I want [capability], so that [outcome]."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like MemClaw to do? API shape, user-facing behavior, configuration changes.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you thought about and why they're less good.
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      description: Which surface from the Public API list does this touch? (Pick the closest; reviewers will retag if needed.)
+      options:
+        - MCP tool (one of the 9)
+        - REST endpoint (under /api/v1)
+        - Plugin env var or behavior
+        - Server configuration / env var
+        - Internal (not in the SemVer contract)
+        - New surface (not currently exposed)
+    validations:
+      required: true
+  - type: dropdown
+    id: contributing
+    attributes:
+      label: Are you willing to contribute?
+      options:
+        - Yes, I can open a PR
+        - Yes, with guidance from a maintainer
+        - No, but I'm available to discuss
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Related issues, links, example implementations from other projects.
+  - type: checkboxes
+    id: prereqs
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and Discussions for duplicates.
+          required: true
+        - label: I read the Public API & Stability section to understand the SemVer contract.
+          required: true

@@ -1,0 +1,31 @@
+{
+  "id": "memclaw",
+  "name": "MemClaw",
+  "kind": "memory",
+  "version": "2.8.6",
+  "description": "Central persistent memory for OpenClaw agents — write, search, and entity lookup tools.",
+  "entry": "dist/index.js",
+  "skills": [
+    "skills"
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "contracts": {
+    "tools": [
+      "memclaw_recall",
+      "memclaw_write",
+      "memclaw_manage",
+      "memclaw_doc",
+      "memclaw_list",
+      "memclaw_entity_get",
+      "memclaw_tune",
+      "memclaw_insights",
+      "memclaw_evolve",
+      "memclaw_stats",
+      "memclaw_keystones"
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4000 1000">
+  <rect width="100%" height="100%" fill="transparent"/>
+  <text x="50%" y="65%" text-anchor="middle"
+        font-family="Impact, Arial Black, Helvetica, sans-serif"
+        font-size="700" font-weight="900">
+    <tspan fill="#2FAF2F">mem</tspan><tspan fill="#9E2F05">CLAW</tspan>
+  </text>
+</svg>

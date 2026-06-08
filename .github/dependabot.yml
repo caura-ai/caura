@@ -1,0 +1,100 @@
+# Dependabot config — weekly security and version update PRs.
+# Docs: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Labels follow .github/labels.yml taxonomy: every PR is `kind/chore` +
+# `dependencies` + the relevant `area/*` so it routes through triage
+# and gets surfaced in release-please's Dependencies section.
+
+version: 2
+
+updates:
+  # --- Python: root requirements.txt ---
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "kind/chore"
+      - "area/infra"
+    commit-message:
+      prefix: "deps"
+
+  # --- Python: core-api ---
+  - package-ecosystem: "pip"
+    directory: "/core-api"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "kind/chore"
+      - "area/core-api"
+    commit-message:
+      prefix: "deps(core-api)"
+
+  # --- Python: core-storage-api ---
+  - package-ecosystem: "pip"
+    directory: "/core-storage-api"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "kind/chore"
+      - "area/core-storage-api"
+    commit-message:
+      prefix: "deps(core-storage-api)"
+
+  # --- npm: root (Playwright e2e) ---
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "kind/chore"
+      - "area/infra"
+    commit-message:
+      prefix: "deps"
+
+  # --- npm: plugin ---
+  - package-ecosystem: "npm"
+    directory: "/plugin"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "kind/chore"
+      - "area/plugin"
+    commit-message:
+      prefix: "deps(plugin)"
+
+  # --- GitHub Actions ---
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "kind/chore"
+      - "area/infra"
+    commit-message:
+      prefix: "deps(actions)"
+
+  # --- Docker ---
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "kind/chore"
+      - "area/infra"
+    commit-message:
+      prefix: "deps(docker)"

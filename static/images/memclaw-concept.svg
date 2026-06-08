@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 520" fill="none">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }
+  </style>
+
+  <defs>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <!-- Arrowhead marker for the feedback loop -->
+    <marker id="loopArrow" markerWidth="12" markerHeight="10" refX="12" refY="5" orient="auto">
+      <path d="M 0 0 L 12 5 L 0 10 L 3 5 Z" fill="#f7931e"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="720" height="520" rx="16" fill="#1a1a1a"/>
+
+  <!-- ─── TOP: Fleet Memory that Compounds ─── -->
+  <text x="360" y="40" text-anchor="middle" font-size="22" font-weight="700" fill="#ffffff" letter-spacing="1.5">FLEET MEMORY THAT COMPOUNDS</text>
+
+  <!-- ─── COMPOUND feedback loop: exits core top-left, arcs up, re-enters core top-right ─── -->
+  <path d="M 320 182 C 240 140, 240 70, 360 58 C 480 70, 480 140, 400 182"
+        stroke="#f7931e" stroke-width="2.5" fill="none" marker-end="url(#loopArrow)"/>
+
+  <!-- Labels inside the loop -->
+  <text x="360" y="105" text-anchor="middle" font-size="15" font-weight="700" fill="#f7931e" letter-spacing="1">COMPOUND</text>
+  <text x="360" y="128" text-anchor="middle" font-size="12" fill="#999999" font-style="italic">live, continuous refinement</text>
+
+  <!-- ─── CORE MEMORY box (x=160 to x=560, width=400) ─── -->
+  <rect x="160" y="182" width="400" height="100" rx="12" fill="#242424" stroke="#f7931e" stroke-width="2"/>
+  <rect x="160" y="182" width="400" height="100" rx="12" fill="none" stroke="#f7931e" stroke-width="1" opacity="0.25" filter="url(#glow)"/>
+  <text x="360" y="222" text-anchor="middle" font-size="20" font-weight="700" fill="#ffffff">MEMCLAW CORE MEMORY</text>
+  <text x="360" y="252" text-anchor="middle" font-size="14" fill="#cccccc">Write  ·  Recall  ·  Search</text>
+
+  <!-- ─── Bidirectional arrows (core ⇅ pillars, centers: 220, 360, 500) ─── -->
+  <!-- Left arrow pair (x=220) -->
+  <line x1="220" y1="292" x2="220" y2="330" stroke="#666666" stroke-width="1.5"/>
+  <polygon points="214,296 220,286 226,296" fill="#666666"/>
+  <polygon points="214,326 220,336 226,326" fill="#666666"/>
+
+  <!-- Center arrow pair (x=360) -->
+  <line x1="360" y1="292" x2="360" y2="330" stroke="#666666" stroke-width="1.5"/>
+  <polygon points="354,296 360,286 366,296" fill="#666666"/>
+  <polygon points="354,326 360,336 366,326" fill="#666666"/>
+
+  <!-- Right arrow pair (x=500) -->
+  <line x1="500" y1="292" x2="500" y2="330" stroke="#666666" stroke-width="1.5"/>
+  <polygon points="494,296 500,286 506,296" fill="#666666"/>
+  <polygon points="494,326 500,336 506,326" fill="#666666"/>
+
+  <!-- ─── THREE PILLARS ─── -->
+  <!-- Multi-Agent: x=160, width=120 -->
+  <rect x="160" y="340" width="120" height="64" rx="8" fill="#2a2a2a" stroke="#555555" stroke-width="1"/>
+  <text x="220" y="368" text-anchor="middle" font-size="11" font-weight="600" fill="#999999" letter-spacing="1">MULTI-</text>
+  <text x="220" y="386" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">AGENT</text>
+
+  <!-- Multi-Fleet: x=300, width=120 -->
+  <rect x="300" y="340" width="120" height="64" rx="8" fill="#2a2a2a" stroke="#555555" stroke-width="1"/>
+  <text x="360" y="368" text-anchor="middle" font-size="11" font-weight="600" fill="#999999" letter-spacing="1">MULTI-</text>
+  <text x="360" y="386" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">FLEET</text>
+
+  <!-- Multi-Tenant: x=440, width=120 -->
+  <rect x="440" y="340" width="120" height="64" rx="8" fill="#2a2a2a" stroke="#555555" stroke-width="1"/>
+  <text x="500" y="368" text-anchor="middle" font-size="11" font-weight="600" fill="#999999" letter-spacing="1">MULTI-</text>
+  <text x="500" y="386" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">TENANT</text>
+
+  <!-- ─── Bidirectional arrows between pillars ─── -->
+  <!-- Multi-Agent ⇄ Multi-Fleet -->
+  <line x1="286" y1="372" x2="294" y2="372" stroke="#666666" stroke-width="1.5"/>
+  <polygon points="282,372 290,368 290,376" fill="#666666"/>
+  <polygon points="298,372 290,368 290,376" fill="#666666"/>
+
+  <!-- Multi-Fleet ⇄ Multi-Tenant -->
+  <line x1="426" y1="372" x2="434" y2="372" stroke="#666666" stroke-width="1.5"/>
+  <polygon points="422,372 430,368 430,376" fill="#666666"/>
+  <polygon points="438,372 430,368 430,376" fill="#666666"/>
+
+  <!-- ─── GOVERNANCE foundation bar ─── -->
+  <rect x="160" y="440" width="400" height="52" rx="8" fill="#f7931e" opacity="0.12"/>
+  <rect x="160" y="440" width="400" height="52" rx="8" fill="none" stroke="#f7931e" stroke-width="1" opacity="0.4"/>
+  <text x="360" y="462" text-anchor="middle" font-size="11" font-weight="600" fill="#f7931e" letter-spacing="2">GOVERNANCE</text>
+  <text x="360" y="480" text-anchor="middle" font-size="12" fill="#bbbbbb">Trust : Authentication &amp; Permissions  ·  Audit  ·  PII Guard</text>
+
+</svg>

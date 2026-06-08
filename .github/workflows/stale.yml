@@ -1,0 +1,54 @@
+name: Mark stale
+
+# Runs daily. Targets only issues/PRs that are waiting on the *reporter*
+# (status/needs-info), never accepted ones — auto-closing accepted bugs
+# punishes maintainers for their own backlog and erodes trust.
+#
+# Cadence: 60 days idle → flag stale, 14 days more → close.
+
+on:
+  schedule:
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9.1.0
+        with:
+          # Targeting: only issues/PRs labelled status/needs-info.
+          # Anything else is invisible to this workflow.
+          only-labels: status/needs-info
+          # Exempt anything explicitly accepted, security-related, or
+          # priority-flagged. Belt-and-suspenders given the only-labels
+          # filter — if a future change makes this run on more labels,
+          # these stay safe.
+          exempt-issue-labels: status/accepted,kind/security,priority/p0,priority/p1
+          exempt-pr-labels: status/accepted,kind/security,priority/p0,priority/p1
+          # Timing
+          days-before-stale: 60
+          days-before-close: 14
+          # Labels applied on stale → close transitions
+          stale-issue-label: status/stale
+          stale-pr-label: status/stale
+          close-issue-label: status/stale-closed
+          close-pr-label: status/stale-closed
+          stale-issue-message: |
+            This issue has been open for 60 days waiting on more information from the reporter and hasn't seen activity. Marking as stale — it will close automatically in 14 days unless someone responds.
+
+            If the issue is still relevant, please reply with the requested information. If it's no longer relevant, you can close it yourself.
+          stale-pr-message: |
+            This pull request has been waiting on requested changes for 60 days without activity. Marking as stale — it will close automatically in 14 days unless there's a response.
+          close-issue-message: |
+            Closing as stale. If this is still happening on a recent version, please open a new issue with current reproduction steps — we'd rather have a fresh report than a re-opened thread with outdated context.
+          close-pr-message: |
+            Closing as stale. Feel free to reopen if you'd like to pick this up again.
+          # Operational
+          remove-stale-when-updated: true
+          operations-per-run: 100
+          ascending: true

@@ -1,0 +1,48 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.DS_Store
+
+# Environment files (secrets)
+.env
+.env.*
+!.env.test
+!.env.example
+env.*
+!env.dev
+!**/migrations/env.py
+!plugin/src/env.ts
+!plugin/src/env.test.ts
+
+# Python virtual environments
+.venv/
+venv/
+
+# Node / Frontend build
+node_modules/
+frontend/out/
+frontend/.next/
+frontend/site/.next/
+frontend/site/out/
+frontend/next-env.d.ts
+frontend/site/next-env.d.ts
+*.tsbuildinfo
+
+# Media
+Screenshot*.png
+*.jpg
+
+# GCP service account keys
+*-service-account.json
+*-credentials.json
+
+# IDE / tools
+.claude/settings.local.json
+.idea/
+reports/
+
+# Python package manager lockfiles — produced by uv, consumed only by
+# local dev (uv sync). Prod/CI Dockerfiles pip install from pyproject
+# directly, so committing these adds diff noise without a consumer.
+**/uv.lock

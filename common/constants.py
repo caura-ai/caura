@@ -1,0 +1,388 @@
+"""DB-query constants shared between core-api and core-storage-api."""
+
+# ── Embeddings ──
+# Native dim of the default embedder (BAAI/bge-m3, see local-embedder docs).
+# Schema upgrade lives in alembic migration 012_vector_dim_1024.py — keep
+# this constant in lock-step with that migration.
+VECTOR_DIM = 1024
+
+# ── Write-time semantic dedup ──
+SEMANTIC_DEDUP_THRESHOLD = 0.95  # cosine similarity above this -> near-duplicate
+SEMANTIC_DEDUP_CANDIDATE_LIMIT = 1  # only need to know if any match exists
+
+# Two-tier dedup constants (A1 #15). The dispatch that consumes them
+# lives in A1 #16. Today's single-tier code keeps using
+# ``SEMANTIC_DEDUP_THRESHOLD`` above — this PR adds the band cutoffs
+# without changing any call site.
+#
+# Decision band (cosine similarity to nearest existing memory):
+#   ≥ AUTO          → auto-reject (clear duplicate; no LLM)
+#   JUDGE ≤ s < AUTO → LLM judge decides (A1 #16; A4 #12 verdict+confidence)
+#   < JUDGE         → accept (not a dup)
+SEMANTIC_DEDUP_AUTO_THRESHOLD = 0.97  # auto-reject band — tighter than the
+# legacy 0.95 so refinements (same first sentence + extra detail) drop into
+# the judge band rather than getting silently rejected.
+SEMANTIC_DEDUP_JUDGE_THRESHOLD = 0.85  # broad enough to catch refinements,
+# tight enough that the LLM judge isn't swamped with unrelated memories that
+# happen to share vocabulary.
+
+# ── Contradiction detection ──
+CONTRADICTION_SIMILARITY_THRESHOLD = (
+    0.70  # cosine similarity above this triggers LLM check
+)
+CONTRADICTION_CANDIDATE_MAX = (
+    8  # max similar memories to check (LLM is the quality gate)
+)
+
+# ── Recall boost ──
+RECALL_BOOST_SCALE = 10  # recalls needed to reach half of max boost
+
+# ── Per-type decay windows ──
+TYPE_DECAY_DAYS: dict[str, int] = {
+    "preference": 365,
+    "decision": 180,
+    "fact": 120,
+    "semantic": 120,
+    "commitment": 120,
+    "outcome": 90,
+    "plan": 60,
+    "intention": 60,
+    "episode": 45,
+    "task": 30,
+    "action": 30,
+    "cancellation": 14,
+    "rule": 365,
+    "insight": 90,
+}
+
+# ── Entity resolution (embedding-based) ──
+ENTITY_RESOLUTION_CANDIDATE_LIMIT = 3  # max candidates to evaluate
+
+# ── Knowledge graph ──
+GRAPH_MAX_HOPS = 2  # max relation hops to expand during search
+GRAPH_MAX_EXPANDED_ENTITIES = (
+    200  # cap on entity IDs in the IN clause after graph expansion
+)
+
+# Relation-type weights: strong semantic relations boost more than structural ones.
+RELATION_TYPE_WEIGHTS: dict[str, float] = {
+    # Strong -- direct actionable connections
+    "manages": 1.0,
+    "works_on": 1.0,
+    "created_by": 1.0,
+    "authored_by": 1.0,
+    "owns": 1.0,
+    "leads": 1.0,
+    "reports_to": 1.0,
+    # Medium -- useful but weaker signal
+    "uses": 0.7,
+    "depends_on": 0.7,
+    "belongs_to": 0.7,
+    "part_of": 0.7,
+    "related_to": 0.5,
+    "mentions": 0.5,
+    # Weak -- structural/geographic, rarely query-relevant
+    "located_in": 0.3,
+    "contains": 0.3,
+    "instance_of": 0.3,
+}
+DEFAULT_RELATION_TYPE_WEIGHT = 0.5  # unknown relation types get neutral weight
+
+# Predicates where only one value can be true at a time for a given subject.
+SINGLE_VALUE_PREDICATES: frozenset[str] = frozenset(
+    {
+        # -- Identity & status --
+        "named",
+        "name",
+        "renamed_to",
+        "status",
+        "has_status",
+        "current_status",
+        "phase",
+        "current_phase",
+        "state",
+        "current_state",
+        "role",
+        "has_role",
+        "current_role",
+        "title",
+        "has_title",
+        "job_title",
+        "type",
+        "has_type",
+        "category",
+        "classified_as",
+        "identified_as",
+        "labeled_as",
+        # -- Location & position --
+        "lives_in",
+        "located_in",
+        "is_located_in",
+        "location",
+        "current_location",
+        "headquartered_in",
+        "hq_in",
+        "based_in",
+        "is_based_in",
+        "resides_in",
+        "resides_at",
+        "stationed_at",
+        "hosted_on",
+        "hosted_at",
+        "is_hosted_on",
+        "deployed_to",
+        "deployed_at",
+        "deployed_on",
+        "is_deployed_to",
+        "runs_on",
+        "running_on",
+        "stored_in",
+        "stored_at",
+        "registered_in",
+        "registered_at",
+        "country",
+        "city",
+        "region",
+        "address",
+        # -- Hierarchy & singular roles --
+        "reports_to",
+        "reporting_to",
+        "led_by",
+        "owned_by",
+        "managed_by",
+        "manager",
+        "manager_of",
+        "headed_by",
+        "head_of",
+        "ceo_of",
+        "ceo",
+        "cto_of",
+        "cto",
+        "cfo_of",
+        "cfo",
+        "assigned_to",
+        "assignee",
+        "is_assigned_to",
+        "maintained_by",
+        "maintainer",
+        "maintainer_of",
+        "supervised_by",
+        "supervisor",
+        # -- Metrics, scores & measurements --
+        "score",
+        "scored",
+        "has_score",
+        "rating",
+        "rated",
+        "has_rating",
+        "price",
+        "priced_at",
+        "has_price",
+        "current_price",
+        "cost",
+        "costs",
+        "has_cost",
+        "value",
+        "valued_at",
+        "has_value",
+        "net_worth",
+        "weight",
+        "weighs",
+        "has_weight",
+        "market_cap",
+        "has_market_cap",
+        "market_cap_rank",
+        "revenue",
+        "has_revenue",
+        "annual_revenue",
+        "monthly_revenue",
+        "salary",
+        "has_salary",
+        "compensation",
+        "budget",
+        "has_budget",
+        "funding",
+        "total_funding",
+        "valuation",
+        "has_valuation",
+        "count",
+        "count_of",
+        "has_count",
+        "total",
+        "size",
+        "has_size",
+        "percentage",
+        "percentage_of",
+        "estimated_at",
+        "estimate",
+        "measured_at",
+        "measurement",
+        "ranked",
+        "rank",
+        "ranking",
+        "has_rank",
+        "potential_score",
+        "risk_score",
+        "quality_score",
+        "health_score",
+        "sentiment",
+        "sentiment_score",
+        "confidence",
+        "confidence_score",
+        "probability",
+        "capacity",
+        "has_capacity",
+        "limit",
+        "has_limit",
+        "quota",
+        "has_quota",
+        "balance",
+        "has_balance",
+        "supply",
+        "total_supply",
+        "circulating_supply",
+        "volume",
+        "trading_volume",
+        "liquidity",
+        "all_time_high",
+        "all_time_low",
+        "burn_rate",
+        "runway",
+        "latency",
+        "uptime",
+        "availability",
+        "accuracy",
+        "precision",
+        "recall_metric",
+        "f1_score",
+        # -- Versioning & current state --
+        "version",
+        "has_version",
+        "latest_version",
+        "current_version",
+        "running_version",
+        "released_as",
+        "replaced_by",
+        "replaces",
+        "succeeded_by",
+        "succeeds",
+        "upgraded_to",
+        "upgraded_from",
+        "migrated_to",
+        "migrated_from",
+        "chosen_over",
+        "selected",
+        "preferred",
+        "switched_to",
+        "switched_from",
+        "deprecated_by",
+        "deprecated",
+        # -- Temporal & scheduling --
+        "scheduled_for",
+        "scheduled_at",
+        "rescheduled_to",
+        "due_by",
+        "due_date",
+        "due_on",
+        "starts_on",
+        "start_date",
+        "started_on",
+        "started_at",
+        "ends_on",
+        "end_date",
+        "ended_on",
+        "ended_at",
+        "expires_on",
+        "expiry_date",
+        "expiration",
+        "deadline",
+        "has_deadline",
+        "eta",
+        "has_eta",
+        "expected_by",
+        "next_review",
+        "next_meeting",
+        "next_milestone",
+        "last_updated",
+        "last_modified",
+        "last_seen",
+        "last_active",
+        "created_on",
+        "created_at",
+        "target_date",
+        "release_date",
+        "go_live_date",
+        "launch_date",
+        # -- Configuration & settings --
+        "configured_as",
+        "configuration",
+        "set_to",
+        "setting",
+        "limited_to",
+        "capped_at",
+        "defaults_to",
+        "default_value",
+        "backed_by",
+        "backend",
+        "powered_by",
+        "styled_with",
+        "licensed_under",
+        "license",
+        "instance_of",
+        "environment",
+        "env",
+        "tier",
+        "subscription",
+        "subscription_plan",
+        "pricing_plan",
+        "mode",
+        "has_mode",
+        # -- Project & task management --
+        "priority",
+        "has_priority",
+        "severity",
+        "has_severity",
+        "milestone",
+        "has_milestone",
+        "sprint",
+        "has_sprint",
+        "epic",
+        "has_epic",
+        "depends_on_completion_of",
+        # -- Infrastructure & networking --
+        "hostname",
+        "cluster",
+        "namespace",
+        "zone",
+        "availability_zone",
+        # -- Contact & personal --
+        "email",
+        "has_email",
+        "email_address",
+        "phone",
+        "has_phone",
+        "phone_number",
+        "website",
+        "has_website",
+        "age",
+        "has_age",
+        "born_in",
+        "birthdate",
+        "date_of_birth",
+        "married_to",
+        "spouse",
+        "employed_by",
+        "employer",
+        "work_location",
+        "office",
+    }
+)
+
+# ── Lifecycle automation (CAURA-655) ──
+# Weight threshold for archive-stale: memories below this with zero
+# recalls are eligible for archival. Lives in common/ so the threshold
+# is shared between core-api's adapter (synchronous OSS standalone path)
+# and core-worker's storage helper (SaaS Pub/Sub consumer path).
+# Diverging values would silently produce different archive footprints
+# across the two deployment modes.
+LIFECYCLE_STALE_ARCHIVE_WEIGHT: float = 0.3

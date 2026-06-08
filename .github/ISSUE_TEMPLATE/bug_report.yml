@@ -1,0 +1,114 @@
+name: Bug report
+description: Report something that isn't working as expected
+title: "[Bug] "
+labels: ["kind/bug", "status/needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Please fill in every section — incomplete reports are slower to triage.
+
+        For security vulnerabilities, **do not open a public issue** — report via [GitHub Security Advisories](https://github.com/caura-ai/caura-memclaw/security/advisories/new).
+  - type: input
+    id: version
+    attributes:
+      label: MemClaw version
+      description: Output of `curl http://localhost:8000/api/v1/version`, or `git rev-parse HEAD` if running from source.
+      placeholder: 2.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment mode
+      options:
+        - Self-hosted (Docker Compose)
+        - Self-hosted (manual / uvicorn)
+        - Managed platform (memclaw.net)
+        - Other (please describe in Additional Context)
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "macOS 15.0 / Ubuntu 24.04 / Windows 11"
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: Output of `python --version`. Leave blank if not relevant (managed platform).
+      placeholder: "3.12.7"
+  - type: input
+    id: postgres
+    attributes:
+      label: PostgreSQL version
+      description: Output of `psql --version`. Leave blank if not relevant.
+      placeholder: "16.4"
+  - type: dropdown
+    id: llm-provider
+    attributes:
+      label: LLM provider in use
+      options:
+        - openai
+        - anthropic
+        - openrouter
+        - gemini
+        - fake (no LLM)
+        - none (LLM enrichment disabled)
+        - other / multiple
+    validations:
+      required: true
+  - type: textarea
+    id: describe
+    attributes:
+      label: Describe the bug
+      description: Clear, concise description of what's wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal sequence that triggers the bug. Include exact commands, request bodies, and expected vs. actual output.
+      placeholder: |
+        1. Run `docker compose up -d`
+        2. `curl -X POST http://localhost:8000/api/v1/memories ...`
+        3. Observe error: ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include error messages, stack traces, or screenshots. Redact any secrets before pasting.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / config
+      description: Paste any relevant log output or configuration. **Redact API keys, DB passwords, and tenant identifiers.**
+      render: shell
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that might help us reproduce or understand the issue.
+  - type: checkboxes
+    id: prereqs
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and Discussions for duplicates.
+          required: true
+        - label: This is not a security vulnerability (those go through Security Advisories).
+          required: true

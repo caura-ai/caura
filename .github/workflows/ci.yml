@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, dev]
+
+env:
+  PYTHON_VERSION: "3.13"
+  UV_VERSION: "0.9.26"
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: memclaw
+          POSTGRES_USER: memclaw
+          POSTGRES_PASSWORD: changeme
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U memclaw"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js (for plugin version-sync check)
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: Check plugin version-sync (gen-version.sh → src/version.ts)
+        # Fails fast if plugin/src/version.ts has drifted from
+        # plugin/package.json's "version" field — i.e., someone bumped
+        # package.json but didn't run scripts/gen-version.sh, or hand-
+        # edited version.ts. The drift-prevention guarantee documented
+        # in scripts/gen-version.sh is enforced here.
+        run: cd plugin && npm run check:version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5.4.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          uv pip install -e core-storage-api/[dev] -e core-api/[dev]
+          echo "$VIRTUAL_ENV/bin" >> $GITHUB_PATH
+
+      - name: Run Ruff linter (core-api)
+        run: uv run ruff check core-api/src/
+
+      - name: Run Ruff linter (core-storage-api)
+        run: uv run ruff check core-storage-api/src/
+
+      - name: Run Ruff formatter check (core-api)
+        run: uv run ruff format --check core-api/src/
+
+      - name: Run Ruff formatter check (core-storage-api)
+        run: uv run ruff format --check core-storage-api/src/
+
+      - name: Guard against raw-string MCP error returns (audit B4 / CAURA-000 #147)
+        # MCP tool handlers must build error envelopes via ``_error_response(...)``
+        # so ``_with_latency`` can flip ``CallToolResult.isError = True``. Raw
+        # ``"Error: ..."`` / ``"Error (NNN): ..."`` returns slip past the
+        # JSON-shape detector and reach the client as ``isError=False`` —
+        # the exact regression we keep closing. Fail CI if any reappear.
+        run: |
+          # Match both double- and single-quoted forms, with optional f-string
+          # prefix. ``grep -n`` prefixes each hit with ``LINE:`` so the
+          # comment-skip filter anchors on ``^[0-9]+:\s*#``.
+          if grep -nE '[f]?"Error(:| \()' core-api/src/core_api/mcp_server.py | grep -vE '^[0-9]+:\s*#'; then
+            echo "::error::Raw-string MCP error return found (double-quote). Use _error_response(code, message) instead — see tests/test_mcp_iserror_propagation.py."
+            exit 1
+          fi
+          if grep -nE "[f]?'Error(:| \()" core-api/src/core_api/mcp_server.py | grep -vE '^[0-9]+:\s*#'; then
+            echo "::error::Raw-string MCP error return found (single-quote). Use _error_response(code, message) instead — see tests/test_mcp_iserror_propagation.py."
+            exit 1
+          fi
+
+      - name: Run mypy (core-api)
+        run: cd core-api && uv run mypy src/
+
+      - name: Run mypy (core-storage-api)
+        run: cd core-storage-api && uv run mypy src/
+
+      - name: Enable pgvector extension
+        run: PGPASSWORD=changeme psql -h localhost -U memclaw -d memclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+      - name: Run migrations
+        run: alembic upgrade head
+        env:
+          PYTHONPATH: core-api/src:core-storage-api/src:.
+          POSTGRES_HOST: localhost
+          POSTGRES_USER: memclaw
+          POSTGRES_PASSWORD: changeme
+          POSTGRES_DB: memclaw
+          POSTGRES_REQUIRE_SSL: "false"
+
+      - name: Run tests
+        run: |
+          uv run pytest tests/ \
+            -v --tb=short -m "not benchmark" \
+            --cov=core-api/src/core_api \
+            --cov=core-storage-api/src/core_storage_api \
+            --cov-report=xml \
+            --cov-report=term-missing
+        env:
+          PYTHONPATH: core-api/src:core-storage-api/src:.
+          POSTGRES_HOST: localhost
+          POSTGRES_USER: memclaw
+          POSTGRES_PASSWORD: changeme
+          POSTGRES_DB: memclaw
+          POSTGRES_REQUIRE_SSL: "false"
+          TEST_DATABASE_URL: "postgresql+asyncpg://memclaw:changeme@localhost:5432/memclaw"
+          EMBEDDING_PROVIDER: fake
+          ENTITY_EXTRACTION_PROVIDER: none
+          USE_LLM_FOR_MEMORY_CREATION: "false"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+      - name: Build packages
+        run: |
+          cd core-api && uv build && cd ..
+          cd core-storage-api && uv build

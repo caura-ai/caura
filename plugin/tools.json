@@ -1,0 +1,925 @@
+[
+  {
+    "description": "Structured-document CRUD in named collections. op: write|read|query|delete|list_collections|search. write upserts by collection+doc_id \u2014 include data['summary'] (1-3 dense sentences, intent-focused) to make the doc semantically searchable; omit it to store without indexing. query filters by where dict; list_collections enumerates every collection this tenant has (with counts); search runs semantic retrieval over data['summary'] vectors \u2014 pass collection to scope to one (narrow strategy), or omit collection to span every collection in the tenant (broad strategy). Use for structured records (customers, config). For memories use memclaw_write.",
+    "error_codes": [
+      "INVALID_ARGUMENTS"
+    ],
+    "impl_status": "live",
+    "name": "memclaw_doc",
+    "ops": [
+      {
+        "description": "Upsert a document by collection+doc_id. Set data['summary'] to a short (1-3 sentence) intent-focused description to make the doc semantically searchable \u2014 that string (and only that string) is what gets embedded. The full body lives wherever the caller puts it (e.g. data['content']) and is returned in read/search results but is NOT indexed. Good: 'Postgres tuning runbook: vacuum, autovacuum, work_mem.' Bad: '<the first 200 chars of the body>' (truncation is not summarization). Omit summary to store the doc without indexing.",
+        "name": "write",
+        "required_params": [
+          "collection",
+          "doc_id",
+          "data"
+        ],
+        "trust_required": 0
+      },
+      {
+        "description": "Fetch a document by collection+doc_id.",
+        "name": "read",
+        "required_params": [
+          "collection",
+          "doc_id"
+        ],
+        "trust_required": 0
+      },
+      {
+        "description": "Filter documents by field equality.",
+        "name": "query",
+        "required_params": [
+          "collection"
+        ],
+        "trust_required": 0
+      },
+      {
+        "description": "Remove a document by collection+doc_id.",
+        "name": "delete",
+        "required_params": [
+          "collection",
+          "doc_id"
+        ],
+        "trust_required": 0
+      },
+      {
+        "description": "Enumerate every collection this tenant has written to, with per-collection document counts. No required params; optional fleet_id scopes counts to one fleet.",
+        "name": "list_collections",
+        "required_params": [],
+        "trust_required": 0
+      },
+      {
+        "description": "Semantic search. Pass collection to scope to one (narrow); omit collection to search every collection in the tenant (broad). Only docs written with a data['summary'] appear (no summary \u2192 no embedding \u2192 invisible to search). Returns up to top_k results ordered by cosine similarity (1.0 = identical). Each row includes its own collection so the caller can follow up with op=read.",
+        "name": "search",
+        "required_params": [
+          "query"
+        ],
+        "trust_required": 0
+      }
+    ],
+    "params": [
+      {
+        "description": "write|read|query|delete|list_collections|search.",
+        "name": "op",
+        "required": true,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "Collection. Required for write|read|query|delete|search; omitted for list_collections.",
+        "name": "collection",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=write|read|delete.",
+        "name": "doc_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=write.",
+        "name": "data",
+        "required": false,
+        "type": "dict | None"
+      },
+      {
+        "default": null,
+        "description": "op=query.",
+        "name": "where",
+        "required": false,
+        "type": "dict | None"
+      },
+      {
+        "default": null,
+        "description": "op=query.",
+        "name": "order_by",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": "asc",
+        "description": "op=query: asc|desc.",
+        "name": "order",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": 20,
+        "description": "op=query.",
+        "name": "limit",
+        "required": false,
+        "type": "int"
+      },
+      {
+        "default": 0,
+        "description": "op=query.",
+        "name": "offset",
+        "required": false,
+        "type": "int"
+      },
+      {
+        "default": "mcp-agent",
+        "description": "Caller agent.",
+        "name": "agent_id",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "op=write; optional scoping filter for op=list_collections|search.",
+        "name": "fleet_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=search: natural-language query.",
+        "name": "query",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": 5,
+        "description": "op=search: max results (1-50).",
+        "name": "top_k",
+        "required": false,
+        "type": "int"
+      }
+    ],
+    "plugin_exposed": true,
+    "trust_required": 0
+  },
+  {
+    "description": "Look up an entity by UUID. Use only when you have an entity_id from a prior search.",
+    "error_codes": [],
+    "impl_status": "live",
+    "name": "memclaw_entity_get",
+    "ops": [],
+    "params": [
+      {
+        "description": "The UUID of the entity to look up.",
+        "name": "entity_id",
+        "required": true,
+        "type": "str"
+      }
+    ],
+    "plugin_exposed": true,
+    "trust_required": 0
+  },
+  {
+    "description": "Report what happened after acting on memories. outcome_type: success|failure|partial. related_ids = the memory UUIDs that influenced the action (use IDs from your most recent memclaw_recall). scope: agent (default, trust \u2265 1)|fleet|all (trust \u2265 2; fleet_id required when scope='fleet'). Weight adjustments and rule generation are scoped \u2014 agents can only evolve memories they own (scope=agent), their fleet (scope=fleet), or any (scope=all).",
+    "error_codes": [],
+    "impl_status": "live",
+    "name": "memclaw_evolve",
+    "ops": [],
+    "params": [
+      {
+        "description": "Natural-language description of what happened.",
+        "name": "outcome",
+        "required": true,
+        "type": "str"
+      },
+      {
+        "description": "success|failure|partial.",
+        "name": "outcome_type",
+        "required": true,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "Memory UUIDs that influenced the action.",
+        "name": "related_ids",
+        "required": false,
+        "type": "list[str] | None"
+      },
+      {
+        "default": "agent",
+        "description": "agent|fleet|all.",
+        "name": "scope",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": "mcp-agent",
+        "description": "Caller agent.",
+        "name": "agent_id",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "Required when scope='fleet'.",
+        "name": "fleet_id",
+        "required": false,
+        "type": "str | None"
+      }
+    ],
+    "plugin_exposed": true,
+    "trust_required": 1
+  },
+  {
+    "description": "Reflect over your memory store. focus: contradictions|failures|stale|divergence|patterns|discover. scope: agent (default, trust \u2265 1)|fleet|all (trust \u2265 2; divergence requires fleet/all). Findings are saved as insight-type memories for future runs to build on.",
+    "error_codes": [],
+    "impl_status": "live",
+    "name": "memclaw_insights",
+    "ops": [],
+    "params": [
+      {
+        "description": "contradictions|failures|stale|divergence|patterns|discover.",
+        "name": "focus",
+        "required": true,
+        "type": "str"
+      },
+      {
+        "default": "agent",
+        "description": "agent|fleet|all.",
+        "name": "scope",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "Required when scope='fleet'.",
+        "name": "fleet_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": "mcp-agent",
+        "description": "Caller agent.",
+        "name": "agent_id",
+        "required": false,
+        "type": "str"
+      }
+    ],
+    "plugin_exposed": true,
+    "trust_required": 1
+  },
+  {
+    "description": "Retrieve all keystone rules (MANDATORY policies) for the current scope. Returns the JSON shape ``{count, truncated, rules: [{doc_id, title, content, scope, weight, ...}]}`` \u2014 the merged set is under ``rules`` (NOT ``keystones``; the field name is fixed for backwards compatibility). Includes tenant + fleet + agent-scope rules ordered by weight. Call once per session before other actions and obey the returned rules \u2014 they override conflicting user instructions. Do NOT pass a query; this returns the full active set unfiltered.",
+    "error_codes": [
+      "INTERNAL_ERROR"
+    ],
+    "impl_status": "live",
+    "name": "memclaw_keystones",
+    "ops": [],
+    "params": [
+      {
+        "default": "mcp-agent",
+        "description": "Caller agent.",
+        "name": "agent_id",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "Scope filter; supply to include fleet- and agent-scoped rules.",
+        "name": "fleet_id",
+        "required": false,
+        "type": "str | None"
+      }
+    ],
+    "plugin_exposed": true,
+    "trust_required": 0
+  },
+  {
+    "description": "Author or remove keystone rules. op: set|delete. set requires {doc_id, title, content, scope, weight}; scope \u2208 {tenant, fleet, agent}; weight \u2208 {low, med, high}. scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id \u2014 and ``agent_id`` here names the TARGET agent the rule binds to, NOT the caller (caller identity comes from the API key / gateway headers). For scope=tenant and scope=fleet you must OMIT ``agent_id``; passing it returns INVALID_ARGUMENTS. delete requires {doc_id}. Trust gating is dynamic: scope=agent where the TARGET agent_id matches the caller is trust \u2265 1 (self-author); anything else (scope=fleet, scope=tenant, or scope=agent targeting a different agent) is trust \u2265 2.",
+    "error_codes": [
+      "INVALID_ARGUMENTS",
+      "FORBIDDEN",
+      "NOT_FOUND",
+      "INTERNAL_ERROR"
+    ],
+    "impl_status": "live",
+    "name": "memclaw_keystones_set",
+    "ops": [
+      {
+        "description": "Upsert a keystone rule by doc_id.",
+        "name": "set",
+        "required_params": [
+          "doc_id",
+          "title",
+          "content",
+          "scope",
+          "weight"
+        ],
+        "trust_required": 1
+      },
+      {
+        "description": "Remove a keystone rule by doc_id.",
+        "name": "delete",
+        "required_params": [
+          "doc_id"
+        ],
+        "trust_required": 1
+      }
+    ],
+    "params": [
+      {
+        "description": "set|delete.",
+        "name": "op",
+        "required": true,
+        "type": "str"
+      },
+      {
+        "description": "Stable slug identifying the rule.",
+        "name": "doc_id",
+        "required": true,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "op=set: human-readable title.",
+        "name": "title",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=set: the rule text.",
+        "name": "content",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=set: tenant|fleet|agent.",
+        "name": "scope",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=set: low|med|high.",
+        "name": "weight",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=set: required for scope=fleet|agent; omit for scope=tenant.",
+        "name": "fleet_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=set: TARGET agent the rule binds to \u2014 required for scope=agent, must be omitted for scope=tenant or scope=fleet. This is NOT the caller's identity (which is derived from the API key or gateway headers); it's the agent whose behaviour the rule constrains.",
+        "name": "agent_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=set: optional author identity for audit.",
+        "name": "author_user_id",
+        "required": false,
+        "type": "str | None"
+      }
+    ],
+    "plugin_exposed": false,
+    "trust_required": 1
+  },
+  {
+    "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' (default) lists your memories at trust \u2265 1; scope='fleet'/'all' requires trust \u2265 2. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use memclaw_recall.",
+    "error_codes": [],
+    "impl_status": "live",
+    "name": "memclaw_list",
+    "ops": [],
+    "params": [
+      {
+        "default": "mcp-agent",
+        "description": "Caller agent.",
+        "name": "agent_id",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": "agent",
+        "description": "agent|fleet|all. 'agent' (default) = your memories only (trust \u2265 1). 'fleet'/'all' = cross-agent (trust \u2265 2).",
+        "name": "scope",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "Fleet.",
+        "name": "fleet_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Author.",
+        "name": "written_by",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Type.",
+        "name": "memory_type",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Status.",
+        "name": "status",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Min weight 0-1.",
+        "name": "weight_min",
+        "required": false,
+        "type": "float | None"
+      },
+      {
+        "default": null,
+        "description": "Max weight 0-1.",
+        "name": "weight_max",
+        "required": false,
+        "type": "float | None"
+      },
+      {
+        "default": null,
+        "description": "ISO8601.",
+        "name": "created_after",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "ISO8601.",
+        "name": "created_before",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": "created_at",
+        "description": "created_at|weight|recall_count.",
+        "name": "sort",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": "desc",
+        "description": "asc|desc.",
+        "name": "order",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": 25,
+        "description": "1-50.",
+        "name": "limit",
+        "required": false,
+        "type": "int"
+      },
+      {
+        "default": null,
+        "description": "Pagination cursor.",
+        "name": "cursor",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": false,
+        "description": "Trust-3 only.",
+        "name": "include_deleted",
+        "required": false,
+        "type": "bool"
+      }
+    ],
+    "plugin_exposed": true,
+    "trust_required": 1
+  },
+  {
+    "description": "Per-memory lifecycle. op: read|update|transition|delete. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete is soft (prefer transition to outdated/archived).",
+    "error_codes": [
+      "INVALID_ARGUMENTS"
+    ],
+    "impl_status": "live",
+    "name": "memclaw_manage",
+    "ops": [
+      {
+        "description": "Fetch a memory by id.",
+        "name": "read",
+        "required_params": [
+          "memory_id"
+        ],
+        "trust_required": 0
+      },
+      {
+        "description": "Patch memory fields.",
+        "name": "update",
+        "required_params": [
+          "memory_id"
+        ],
+        "trust_required": 0
+      },
+      {
+        "description": "Set lifecycle status.",
+        "name": "transition",
+        "required_params": [
+          "memory_id",
+          "status"
+        ],
+        "trust_required": 0
+      },
+      {
+        "description": "Soft-delete a memory.",
+        "name": "delete",
+        "required_params": [
+          "memory_id"
+        ],
+        "trust_required": 3
+      }
+    ],
+    "params": [
+      {
+        "description": "read|update|transition|delete|bulk_delete|lineage.",
+        "name": "op",
+        "required": true,
+        "type": "str"
+      },
+      {
+        "default": "",
+        "description": "UUID. Required except for op=bulk_delete.",
+        "name": "memory_id",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "op=bulk_delete: list of memory UUIDs (max 1000).",
+        "name": "memory_ids",
+        "required": false,
+        "type": "list[str] | None"
+      },
+      {
+        "default": null,
+        "description": "op=transition.",
+        "name": "status",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=update.",
+        "name": "content",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=update.",
+        "name": "memory_type",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=update; 0-1.",
+        "name": "weight",
+        "required": false,
+        "type": "float | None"
+      },
+      {
+        "default": null,
+        "description": "op=update.",
+        "name": "title",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "op=update.",
+        "name": "metadata",
+        "required": false,
+        "type": "dict | None"
+      },
+      {
+        "default": null,
+        "description": "op=update.",
+        "name": "source_uri",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": "mcp-agent",
+        "description": "Caller agent.",
+        "name": "agent_id",
+        "required": false,
+        "type": "str"
+      }
+    ],
+    "plugin_exposed": true,
+    "trust_required": 0
+  },
+  {
+    "description": "Find memories by meaning (hybrid semantic+keyword). Set include_brief=true for an LLM summary paragraph. For non-semantic browse use memclaw_list; for read-by-id use memclaw_manage op=read.",
+    "error_codes": [],
+    "impl_status": "live",
+    "name": "memclaw_recall",
+    "ops": [],
+    "params": [
+      {
+        "description": "NL query.",
+        "name": "query",
+        "required": true,
+        "type": "str"
+      },
+      {
+        "default": "mcp-agent",
+        "description": "Caller agent.",
+        "name": "agent_id",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "Filter by author.",
+        "name": "filter_agent_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Filter by type.",
+        "name": "memory_type",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Filter by status.",
+        "name": "status",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Restrict fleets.",
+        "name": "fleet_ids",
+        "required": false,
+        "type": "list[str] | None"
+      },
+      {
+        "default": false,
+        "description": "Add LLM summary.",
+        "name": "include_brief",
+        "required": false,
+        "type": "bool"
+      },
+      {
+        "default": 5,
+        "description": "1-20.",
+        "name": "top_k",
+        "required": false,
+        "type": "int"
+      }
+    ],
+    "plugin_exposed": true,
+    "trust_required": 0
+  },
+  {
+    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' (default) counts only memories visible to YOU (trust \u2265 1); scope='fleet'/'all' aggregates across agents (trust \u2265 2). Counts exclude soft-deleted memories by default; set include_deleted=true for additional 'deleted' and 'total_including_deleted' fields. Read-only \u2014 useful for self-introspection and dashboard-style summaries.",
+    "error_codes": [],
+    "impl_status": "live",
+    "name": "memclaw_stats",
+    "ops": [],
+    "params": [
+      {
+        "default": "agent",
+        "description": "agent|fleet|all. 'agent' (default) = your memories only (trust \u2265 1). 'fleet'/'all' = aggregate across agents (trust \u2265 2).",
+        "name": "scope",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "Filter by fleet.",
+        "name": "fleet_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": "mcp-agent",
+        "description": "Caller agent.",
+        "name": "agent_id",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "Filter by type.",
+        "name": "memory_type",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Filter by status.",
+        "name": "status",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": false,
+        "description": "When true, also return 'deleted' (soft-deleted count) and 'total_including_deleted'. 'total' and breakdowns stay non-deleted regardless.",
+        "name": "include_deleted",
+        "required": false,
+        "type": "bool"
+      }
+    ],
+    "plugin_exposed": true,
+    "trust_required": 1
+  },
+  {
+    "description": "Tune YOUR retrieval parameters for memclaw_recall (top_k, min_similarity, fts_weight, graph_max_hops, freshness, recall_boost). Only provide fields to change; no fields \u2192 returns current profile.",
+    "error_codes": [],
+    "impl_status": "live",
+    "name": "memclaw_tune",
+    "ops": [],
+    "params": [
+      {
+        "default": "mcp-agent",
+        "description": "Caller agent.",
+        "name": "agent_id",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "1-20.",
+        "name": "top_k",
+        "required": false,
+        "type": "int | None"
+      },
+      {
+        "default": null,
+        "description": "0.1-0.9.",
+        "name": "min_similarity",
+        "required": false,
+        "type": "float | None"
+      },
+      {
+        "default": null,
+        "description": "0=semantic, 1=keyword.",
+        "name": "fts_weight",
+        "required": false,
+        "type": "float | None"
+      },
+      {
+        "default": null,
+        "description": "0-1.",
+        "name": "freshness_floor",
+        "required": false,
+        "type": "float | None"
+      },
+      {
+        "default": null,
+        "description": "7-730.",
+        "name": "freshness_decay_days",
+        "required": false,
+        "type": "int | None"
+      },
+      {
+        "default": null,
+        "description": "1-3.",
+        "name": "recall_boost_cap",
+        "required": false,
+        "type": "float | None"
+      },
+      {
+        "default": null,
+        "description": "7-365.",
+        "name": "recall_decay_window_days",
+        "required": false,
+        "type": "int | None"
+      },
+      {
+        "default": null,
+        "description": "0-3.",
+        "name": "graph_max_hops",
+        "required": false,
+        "type": "int | None"
+      },
+      {
+        "default": null,
+        "description": "0-1.",
+        "name": "similarity_blend",
+        "required": false,
+        "type": "float | None"
+      }
+    ],
+    "plugin_exposed": true,
+    "trust_required": 0
+  },
+  {
+    "description": "Store NEW memories. Provide exactly one of {content, items} (batch \u2264100). System auto-classifies type, importance, title, tags, dates. visibility: scope_team (default) / scope_org / scope_agent. Prefer team/org for sharing.",
+    "error_codes": [
+      "INVALID_ARGUMENTS",
+      "BATCH_TOO_LARGE",
+      "INVALID_BATCH_ITEM"
+    ],
+    "impl_status": "live",
+    "name": "memclaw_write",
+    "ops": [],
+    "params": [
+      {
+        "default": null,
+        "description": "Single-write text.",
+        "name": "content",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Batch of objects, \u2264100; each needs 'content'.",
+        "name": "items",
+        "required": false,
+        "type": "list[dict] | None"
+      },
+      {
+        "default": "mcp-agent",
+        "description": "Caller agent.",
+        "name": "agent_id",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": null,
+        "description": "Fleet scope.",
+        "name": "fleet_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "scope_team|scope_org|scope_agent.",
+        "name": "visibility",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Type (single only).",
+        "name": "memory_type",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "0-1 (single only).",
+        "name": "weight",
+        "required": false,
+        "type": "float | None"
+      },
+      {
+        "default": null,
+        "description": "Source URI (single only).",
+        "name": "source_uri",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Run id (single only).",
+        "name": "run_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Metadata (single only).",
+        "name": "metadata",
+        "required": false,
+        "type": "dict | None"
+      },
+      {
+        "default": null,
+        "description": "Status (single only).",
+        "name": "status",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "fast|strong|auto (single only).",
+        "name": "write_mode",
+        "required": false,
+        "type": "str | None"
+      }
+    ],
+    "plugin_exposed": true,
+    "trust_required": 0
+  }
+]

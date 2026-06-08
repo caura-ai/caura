@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 640" font-family="'Kalam','Caveat','Patrick Hand','Comic Sans MS',cursive">
+  <defs>
+    <radialGradient id="rg-forge" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#FFE066"/><stop offset="100%" stop-color="#C5283D"/>
+    </radialGradient>
+    <radialGradient id="rg-oracle" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#DDD6FE"/><stop offset="100%" stop-color="#5B21B6"/>
+    </radialGradient>
+    <radialGradient id="rg-dreamer" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#A5F3FC"/><stop offset="100%" stop-color="#0E7490"/>
+    </radialGradient>
+    <radialGradient id="rg-sentinel" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#A7F3D0"/><stop offset="100%" stop-color="#065F46"/>
+    </radialGradient>
+    <radialGradient id="rg-carto" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#FECDD3"/><stop offset="100%" stop-color="#9F1239"/>
+    </radialGradient>
+    <radialGradient id="rg-hunter" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#FED7AA"/><stop offset="100%" stop-color="#9A3412"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1100" height="640" fill="#0B1020"/>
+
+  <!-- title -->
+  <text x="550" y="58" text-anchor="middle" font-size="38" fill="#FFF8E7" font-weight="700">The Residents</text>
+  <text x="550" y="92" text-anchor="middle" font-size="20" fill="#F7B538" font-style="italic">you hire agents to do tasks. MemClaw hires residents to do thinking.</text>
+
+  <!-- 3x2 grid of resident cards -->
+  <!-- Card template: rounded card, big circular portrait, name, role, "tools" line -->
+
+  <!-- FORGE -->
+  <g transform="translate(60,140)">
+    <rect width="320" height="200" rx="14" fill="#15182E" stroke="#F7B538" stroke-width="2"/>
+    <circle cx="64" cy="80" r="40" fill="url(#rg-forge)" stroke="#1A1A1A" stroke-width="2"/>
+    <text x="64" y="92" text-anchor="middle" font-size="40" fill="#1A1A1A">⚒</text>
+    <text x="120" y="62" font-size="28" fill="#F7B538" font-weight="700">Forge</text>
+    <text x="120" y="86" font-size="14" fill="#FFE066" font-style="italic">the skill miner</text>
+    <text x="22" y="148" font-family="'Inter',sans-serif" font-size="13" fill="#FFF8E7">Mines outcome-tagged clusters and</text>
+    <text x="22" y="166" font-family="'Inter',sans-serif" font-size="13" fill="#FFF8E7">distills branching procedures.</text>
+    <text x="22" y="188" font-family="'Inter',sans-serif" font-size="11" fill="#94A3B8">writes → Skills Inbox · trust: 2 · cron 6h</text>
+  </g>
+
+  <!-- ORACLE -->
+  <g transform="translate(390,140)">
+    <rect width="320" height="200" rx="14" fill="#15182E" stroke="#C4B5FD" stroke-width="2"/>
+    <circle cx="64" cy="80" r="40" fill="url(#rg-oracle)" stroke="#1A1A1A" stroke-width="2"/>
+    <text x="64" y="92" text-anchor="middle" font-size="36" fill="#FFF8E7">👁</text>
+    <text x="120" y="62" font-size="28" fill="#C4B5FD" font-weight="700">Oracle</text>
+    <text x="120" y="86" font-size="14" fill="#DDD6FE" font-style="italic">erupts hypotheses</text>
+    <text x="22" y="148" font-family="'Inter',sans-serif" font-size="13" fill="#FFF8E7">Spots aggregate patterns no agent</text>
+    <text x="22" y="166" font-family="'Inter',sans-serif" font-size="13" fill="#FFF8E7">saw alone. proposes theories.</text>
+    <text x="22" y="188" font-family="'Inter',sans-serif" font-size="11" fill="#94A3B8">writes → Hypothesis Inbox · trust: 2 · cron 12h</text>
+  </g>
+
+  <!-- DREAMER -->
+  <g transform="translate(720,140)">
+    <rect width="320" height="200" rx="14" fill="#15182E" stroke="#67E8F9" stroke-width="2"/>
+    <circle cx="64" cy="80" r="40" fill="url(#rg-dreamer)" stroke="#1A1A1A" stroke-width="2"/>
+    <text x="64" y="94" text-anchor="middle" font-size="38" fill="#FFF8E7">☾</text>
+    <text x="120" y="62" font-size="28" fill="#67E8F9" font-weight="700">Dreamer</text>
+    <text x="120" y="86" font-size="14" fill="#A5F3FC" font-style="italic">consolidates while you sleep</text>
+    <text x="22" y="148" font-family="'Inter',sans-serif" font-size="13" fill="#FFF8E7">Recombines, fuses, prunes weak</text>
+    <text x="22" y="166" font-family="'Inter',sans-serif" font-size="13" fill="#FFF8E7">links, strengthens load-bearing ones.</text>
+    <text x="22" y="188" font-family="'Inter',sans-serif" font-size="11" fill="#94A3B8">writes → fused memories · trust: 3 · nightly</text>
+  </g>
+
+  <!-- SENTINEL -->
+  <g transform="translate(60,360)">
+    <rect width="320" height="200" rx="14" fill="#15182E" stroke="#6EE7B7" stroke-width="2"/>
+    <circle cx="64" cy="80" r="40" fill="url(#rg-sentinel)" stroke="#1A1A1A" stroke-width="2"/>
+    <text x="64" y="94" text-anchor="middle" font-size="38" fill="#1A1A1A">🛡</text>
+    <text x="120" y="62" font-size="28" fill="#6EE7B7" font-weight="700">Sentinel</text>
+    <text x="120" y="86" font-size="14" fill="#A7F3D0" font-style="italic">the immune system</text>
+    <text x="22" y="148" font-family="'Inter',sans-serif" font-size="13" fill="#FFF8E7">Detects poisoning. Generates antibody</text>
+    <text x="22" y="166" font-family="'Inter',sans-serif" font-size="13" fill="#FFF8E7">memories that inoculate the fleet.</text>
+    <text x="22" y="188" font-family="'Inter',sans-serif" font-size="11" fill="#94A3B8">writes → antibodies · trust: 3 · on-event</text>
+  </g>
+
+  <!-- CARTOGRAPHER -->
+  <g transform="translate(390,360)">
+    <rect width="320" height="200" rx="14" fill="#15182E" stroke="#FDA4AF" stroke-width="2"/>
+    <circle cx="64" cy="80" r="40" fill="url(#rg-carto)" stroke="#1A1A1A" stroke-width="2"/>
+    <text x="64" y="93" text-anchor="middle" font-size="38" fill="#1A1A1A">⌖</text>
+    <text x="120" y="62" font-size="26" fill="#FDA4AF" font-weight="700">Cartographer</text>
+    <text x="120" y="86" font-size="14" fill="#FECDD3" font-style="italic">draws the map of your mind</text>
+    <text x="22" y="148" font-family="'Inter',sans-serif" font-size="13" fill="#FFF8E7">Reveals shadow experts, real OKRs,</text>
+    <text x="22" y="166" font-family="'Inter',sans-serif" font-size="13" fill="#FFF8E7">contested beliefs, blind spots.</text>
+    <text x="22" y="188" font-family="'Inter',sans-serif" font-size="11" fill="#94A3B8">writes → topology snapshots · trust: 2 · weekly</text>
+  </g>
+
+  <!-- HUNTER -->
+  <g transform="translate(720,360)">
+    <rect width="320" height="200" rx="14" fill="#15182E" stroke="#FCA5A5" stroke-width="2"/>
+    <circle cx="64" cy="80" r="40" fill="url(#rg-hunter)" stroke="#1A1A1A" stroke-width="2"/>
+    <text x="64" y="92" text-anchor="middle" font-size="38" fill="#1A1A1A">◎</text>
+    <text x="120" y="62" font-size="28" fill="#FCA5A5" font-weight="700">Hunter</text>
+    <text x="120" y="86" font-size="14" fill="#FED7AA" font-style="italic">stalks the blind spots</text>
+    <text x="22" y="148" font-family="'Inter',sans-serif" font-size="13" fill="#FFF8E7">Adversarial self-play. Asks queries</text>
+    <text x="22" y="166" font-family="'Inter',sans-serif" font-size="13" fill="#FFF8E7">the fleet should answer — and can't.</text>
+    <text x="22" y="188" font-family="'Inter',sans-serif" font-size="11" fill="#94A3B8">writes → coastline backlog · trust: 1 · cron 24h</text>
+  </g>
+
+  <!-- footer ribbon: + custom -->
+  <g transform="translate(0,580)">
+    <rect x="60" y="0" width="980" height="42" rx="10" fill="#15182E" stroke="#FFE066" stroke-dasharray="6 4" stroke-width="2"/>
+    <text x="550" y="28" text-anchor="middle" font-size="18" fill="#FFE066">＋ Concierge — your custom resident. (a prompt + schedule + scope. community-shippable.)</text>
+  </g>
+</svg>

@@ -1,0 +1,166 @@
+[project]
+name = "core-api"
+version = "2.12.1"
+description = "MemClaw Core API service"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+    "sqlalchemy[asyncio]>=2.0,<3",
+    # SQLAlchemy[asyncio] pulls in greenlet. Pin <3.5.0 — greenlet 3.5.0
+    # shipped wheels for macOS/Windows ARM only, no Linux x86_64, so CI
+    # (which uses ``uv pip install`` and re-resolves rather than reading
+    # the lockfile) breaks on the Linux runner. Drop once 3.5.x has full
+    # platform coverage.
+    "greenlet<3.5.0",
+    "asyncpg>=0.30,<1",
+    "pgvector>=0.3,<1",
+    "alembic>=1.14,<2",
+    "pydantic>=2.0,<3",
+    "pydantic-settings>=2.0,<3",
+    "google-cloud-aiplatform>=1.80,<2",
+    "google-genai>=0.3",
+    "openai",
+    "python-dateutil>=2.8,<3",
+    "httpx>=0.27,<1",
+    "mcp>=1.26,<2",
+    "argon2-cffi>=23.1",
+    "cryptography>=42.0",
+    "python-jose[cryptography]>=3.3",
+    "pyotp>=2.9",
+    "cachetools>=5.3",
+    "croniter>=2.0",
+    "redis[hiredis]>=5.0,<6",
+    "slowapi>=0.1.9,<1.0",
+    "sentry-sdk[fastapi]>=2.0,<3",
+    "structlog>=25.4,<26",
+    # PR #7 (Tier-1 ingest A4): structure-aware document chunking.
+    # All three are pure-Python (no system C deps); together ~1 MB.
+    "markdown-it-py>=4.0,<5",  # markdown AST walker
+    "tiktoken>=0.10,<1",  # cl100k_base token counter for size caps
+    "pysbd>=0.3,<1",  # sentence boundary detection for sub-chunk splits
+    # PR #8 (Tier-1 ingest, optional multi-format): Kreuzberg replaces
+    # what would otherwise be pypdf + python-docx + python-pptx + … (88+
+    # formats). Provides ``extract_bytes(data, mime) -> ExtractionResult``;
+    # text-PDF works out of the box, scanned-PDF OCR requires Tesseract on
+    # the host (deferred to a follow-up — image-only PDFs raise 422 for now).
+    # License Elastic-2.0.
+    "kreuzberg>=4.9,<5",
+    # PR #9: FastAPI's UploadFile / Form support needs python-multipart at
+    # runtime. Pulled in transitively today via ``mcp`` but declaring
+    # explicitly so removing/upgrading mcp can't silently break uploads.
+    "python-multipart>=0.0.20,<1",
+]
+
+[project.optional-dependencies]
+# Optional: required only when EVENT_BUS_BACKEND=pubsub (SaaS deployments).
+# Standalone installs default to the in-process bus and don't need this.
+pubsub = ["google-cloud-pubsub>=2.23,<3"]
+dev = [
+    "core-api[test,pubsub]",
+    "mypy>=1.13,<2.0",
+    "ruff>=0.8,<1.0",
+    "types-croniter>=2.0",
+]
+test = [
+    "pytest>=8.3,<9.0",
+    "pytest-asyncio>=0.24,<1.0",
+    "pytest-cov>=6.0,<7.0",
+    "httpx>=0.27,<1.0",
+    "aiosqlite>=0.20,<1.0",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+exclude = [
+    ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    ".venv", "__pycache__", "build", "dist",
+]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "B", "C4", "UP", "ARG",
+    "SIM", "TCH", "PTH", "RUF", "ASYNC",
+]
+ignore = [
+    "E501", "TC001", "TC002", "TC003", "ARG001", "ARG002",
+    "B008", "B904", "RUF022", "PTH123", "RUF006", "SIM117",
+    "RUF012", "RUF009",
+    "SIM108", "SIM105", "SIM103", "E701", "E402",
+    "B905", "B007", "B023",
+    "UP042", "UP047",
+    "PTH103", "PTH111", "PTH120",
+    "RUF005", "RUF034", "RUF059",
+    "ASYNC109",
+]
+fixable = ["ALL"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["ARG", "S101", "F841"]
+"__init__.py" = ["F401", "E402"]
+"**/app.py" = ["E402"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["core_api", "common"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+explicit_package_bases = true
+warn_return_any = false
+warn_unused_ignores = false
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = [
+    "core_api.repositories.*",
+    "core_api.providers.local_embedding",
+    "core_api.providers._registry",
+    "core_api.services.*",
+    "core_api.pipeline.steps.*",
+    "core_api.routes.fleet",
+    "core_api.routes.memories",
+    "core_api.clients.storage_client",
+    "core_api.mcp_server",
+    "core_api.app",
+    "core_api.auth",
+    "core_api.db.session",
+]
+ignore_errors = true
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+fail_under = 50
+show_missing = true

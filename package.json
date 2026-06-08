@@ -1,0 +1,42 @@
+{
+  "name": "memclaw",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Production-grade persistent memory platform for OpenClaw agents. Agents store and retrieve memories via semantic search, with entity/relationship graphs and tenant isolation.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/caura-ai/caura-memclaw.git"
+  },
+  "keywords": [
+    "memory",
+    "llm",
+    "agents",
+    "ai-agents",
+    "mcp",
+    "model-context-protocol",
+    "openclaw",
+    "vector-search",
+    "pgvector",
+    "postgres",
+    "semantic-search",
+    "knowledge-graph"
+  ],
+  "author": "Caura",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/caura-ai/caura-memclaw/issues"
+  },
+  "homepage": "https://github.com/caura-ai/caura-memclaw#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.59.0"
+  }
+}

@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+.git
+.env
+.env.*
+node_modules
+memclaw/node_modules
+memclaw/.next
+*.egg-info
+.pytest_cache
+.mypy_cache
+.venv
+venv

@@ -1,0 +1,27 @@
+# Mirrors the checks .github/workflows/ci.yml runs so a local commit
+# catches the same formatting / lint / type issues CI would reject.
+# Enable locally with: ``pip install pre-commit && pre-commit install``.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+        # Match CI scope: src/ only (CI ignores tests/, scripts/, etc.).
+        files: ^(core-api|core-storage-api)/src/
+      - id: ruff-format
+        files: ^(core-api|core-storage-api)/src/
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+
+# mypy intentionally NOT run via pre-commit: the mirrors-mypy hook runs in
+# its own isolated env that can't see core-api / core-storage-api workspace
+# deps, so it either false-positives on unresolved imports or silently
+# under-checks. CI (``cd core-api && uv run mypy src/``) runs inside the
+# real project venv and is the authoritative type-check.
