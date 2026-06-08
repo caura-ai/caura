@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -15,6 +15,7 @@ from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import NODE_OFFLINE_SECONDS, NODE_STALE_SECONDS
 from core_api.db.session import get_db
+from core_api.repositories import fleet_repo
 from core_api.services.audit_service import log_action
 from core_api.services.organization_settings import get_raw_settings
 from core_api.version_compat import (
@@ -22,6 +23,15 @@ from core_api.version_compat import (
     MIN_RECOMMENDED_PLUGIN_VERSION,
     is_plugin_outdated,
 )
+
+# How long an ``acked`` deploy command counts as "in flight" before the
+# auto-upgrade gate allows queueing another. CAURA-000: customer prod
+# accumulated 1,381 stuck-acked deploys at a 60s/queue cadence because
+# the pending-only gate was blind to in-flight commands. A typical deploy
+# completes in <2 min (build ~30s + restart ~10s + plugin re-init ~5s);
+# 10 min is generous slack that still recovers genuinely-abandoned
+# commands without needing operator intervention.
+DEPLOY_IN_FLIGHT_WINDOW = timedelta(minutes=10)
 
 router = APIRouter(tags=["Fleet"])
 
@@ -423,6 +433,41 @@ async def _maybe_queue_auto_upgrade(
     if not await _auto_upgrade_enabled_for_tenant(db, body.tenant_id):
         return False
     if _has_recent_deploy_command_from_list(pending_commands):
+        return False
+    # CAURA-000: defence against ``acked``-then-stuck queue runaway.
+    # The pending-only list above is blind to commands the heartbeat
+    # handler has already shipped to the plugin (status: ``acked``).
+    # If a previous deploy is still in flight — OR was killed mid-
+    # result-POST by its own systemctl restart — queueing another
+    # one creates the 60s SIGTERM cycle observed on customer prod.
+    # The repo lookup is gated behind the cheaper checks above so we
+    # only pay for the DB roundtrip when an auto-upgrade is actually
+    # eligible. Falls back to ALLOW on error so a transient DB hiccup
+    # doesn't break the upgrade path entirely (the pending check above
+    # is already a safety net).
+    try:
+        in_flight = await fleet_repo.has_recent_in_flight_deploy(
+            db,
+            node_id=UUID(node_id),
+            since=datetime.now(UTC) - DEPLOY_IN_FLIGHT_WINDOW,
+        )
+    except Exception:
+        logger.warning(
+            "fleet.heartbeat: has_recent_in_flight_deploy lookup failed "
+            "node=%s tenant=%s — falling back to allow (pending check "
+            "above still gates)",
+            body.node_name,
+            body.tenant_id,
+            exc_info=True,
+        )
+        in_flight = False
+    if in_flight:
+        logger.info(
+            "fleet.heartbeat: skipping auto-upgrade for node=%s — a "
+            "deploy is already in flight within the last %s",
+            body.node_name,
+            DEPLOY_IN_FLIGHT_WINDOW,
+        )
         return False
 
     try:

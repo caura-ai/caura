@@ -139,6 +139,49 @@ class FleetRepository:
         )
         return result.scalars().all()
 
+    async def has_recent_in_flight_deploy(
+        self,
+        db: AsyncSession,
+        *,
+        node_id: UUID,
+        since: datetime,
+    ) -> bool:
+        """True if a ``deploy`` command for this node is still in flight.
+
+        "In flight" means status in (``pending``, ``acked``) and
+        ``created_at >= since``. Used by the auto-upgrade gate to suppress
+        queueing duplicate deploys when a previous one has been sent to
+        the plugin but never reported back as completed/failed.
+
+        Why this matters (CAURA-000): the existing pending-only gate
+        (``_has_recent_deploy_command_from_list``) is blind to ``acked``
+        commands. After the heartbeat handler transitions a command
+        ``pending`` → ``acked`` and ships it to the plugin, the gate
+        sees an empty pending list on the next heartbeat and happily
+        queues another deploy — even if the plugin's last deploy is
+        still in flight or got killed mid-result-POST by its own
+        ``systemctl restart``. Customer prod-data observation
+        (2026-06-08): 1,381 deploy commands stuck at ``acked``, one new
+        per heartbeat, on a single node — exactly the customer-reported
+        "SIGTERM every 60s" cycle.
+
+        The ``since`` window bounds the gate: an acked command older
+        than ~10 min is assumed abandoned, and a retry is allowed. This
+        recovers nodes whose plugin crashed mid-deploy (lost result-POST)
+        without needing operator intervention to clear stale rows.
+        """
+        result = await db.execute(
+            select(FleetCommand.id)
+            .where(
+                FleetCommand.node_id == node_id,
+                FleetCommand.command == "deploy",
+                FleetCommand.status.in_(("pending", "acked")),
+                FleetCommand.created_at >= since,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
     async def ack_commands(self, db: AsyncSession, *, command_ids: list[UUID], now: datetime) -> None:
         if not command_ids:
             return
