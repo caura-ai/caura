@@ -77,6 +77,45 @@ async def test_discover_creates_links():
 
 
 @pytest.mark.asyncio
+async def test_discover_insert_returns_real_columns_not_id():
+    """The INSERT must RETURN real columns.
+
+    ``memory_entity_links`` has a composite PK (memory_id, entity_id) and no
+    surrogate ``id`` column, so ``RETURNING id`` raises UndefinedColumnError
+    against Postgres (prod incident). Guard against its reintroduction — the
+    mock-based tests above never execute real SQL, so this asserts the SQL
+    shape directly.
+    """
+    mem_id = uuid.uuid4()
+    ent_id = uuid.uuid4()
+    embedding = [0.1] * 10
+
+    candidates = [(mem_id, "Alice loves coffee", embedding)]
+    lateral = [(mem_id, ent_id, "Alice", None, 0.95)]
+    inserted = [(mem_id, ent_id)]
+
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _mock_result(candidates),
+        _mock_result(lateral),
+        _mock_result(inserted),
+    ]
+    db.flush = AsyncMock()
+
+    ctx = _make_ctx(db, cross_link_text_verify=False)
+    step = DiscoverCrossLinks()
+    result = await step.execute(ctx)
+
+    assert result.outcome == StepOutcome.SUCCESS
+    assert ctx.data["links_created"] == 1
+
+    insert_sql = str(db.execute.call_args_list[2][0][0].text)
+    assert "INSERT INTO memory_entity_links" in insert_sql
+    assert "RETURNING memory_id, entity_id" in insert_sql
+    assert "RETURNING id" not in insert_sql
+
+
+@pytest.mark.asyncio
 async def test_discover_text_verify_filters():
     """Text-verify rejects entities whose name doesn't appear in memory content."""
     mem_id = uuid.uuid4()

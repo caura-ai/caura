@@ -136,11 +136,15 @@ class DiscoverCrossLinks:
         links_created = 0
         if to_insert:
             try:
+                # memory_entity_links has a composite PK (memory_id, entity_id)
+                # and no surrogate `id` column, so RETURNING must reference real
+                # columns. With ON CONFLICT DO NOTHING, only actually-inserted
+                # rows are returned, so the count below stays accurate.
                 insert_link_returning = text("""
                     INSERT INTO memory_entity_links (memory_id, entity_id, role)
                     VALUES (:memory_id, :entity_id, 'mentioned')
                     ON CONFLICT (memory_id, entity_id) DO NOTHING
-                    RETURNING id
+                    RETURNING memory_id, entity_id
                 """)
                 result = await ctx.require_db.execute(insert_link_returning, to_insert)
                 links_created = len(result.all())
