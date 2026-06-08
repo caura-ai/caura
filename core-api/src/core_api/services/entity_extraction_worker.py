@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from uuid import UUID
 
 from common.embedding import get_embedding
@@ -19,10 +20,43 @@ from core_api.services.entity_service import upsert_relation
 logger = logging.getLogger(__name__)
 
 
+# CAURA graph-build fix (A): reject literal VALUES and attribute/field NAMES so they
+# never become entity nodes (and thus hub bridges that explode entity_lookup's pool).
+# Shapes only — preserves legit named identifiers like "PR-2025-A" / "gpt-5.4-nano"
+# (no underscores, contain letters) while dropping dates, numbers/money/percent, and
+# snake_case field names (sla_uptime, q3_revenue, founded_year).
+_LITERAL_OR_ATTR_RE = re.compile(
+    r"^(?:"
+    r"\d{4}-\d{2}-\d{2}"  # ISO date: 2024-03-23
+    r"|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"  # slashed/dashed date
+    r"|\$?\d[\d,]*(?:\.\d+)?\s*%?\s*[kmb]?"  # number / money / percent: 14402, $35.4M, 95.1%, 1935
+    r"|[a-z][a-z0-9]*(?:_[a-z0-9]+)+"  # snake_case field/attribute name
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _same_identifier_signature(a: str, b: str) -> bool:
+    """CAURA graph-build fix (B): two names may only merge if they carry the SAME set
+    of digit-bearing identifier tokens. Synthetic suffix-distinct names like
+    'comet #0002' vs 'comet #0012' embed near-identically and trip the 0.85 similarity
+    merge, collapsing distinct entities into one contaminated mega-node."""
+    ta = set(re.findall(r"\d[\w.\-]*", a.lower()))
+    tb = set(re.findall(r"\d[\w.\-]*", b.lower()))
+    return ta == tb
+
+
 def _is_valid_entity(name: str, blocklist: frozenset[str] | None = None) -> bool:
     """Reject obviously generic names that are not real named entities."""
     bl = blocklist if blocklist is not None else ENTITY_NAME_BLOCKLIST
-    return len(name) >= MIN_ENTITY_NAME_LENGTH and name.lower() not in bl
+    if len(name) < MIN_ENTITY_NAME_LENGTH or name.lower() in bl:
+        return False
+    # CAURA graph-build fix (A): drop literal values + attribute/field names. Dropping
+    # the node cascades to its edges — relations require both endpoints to be persisted
+    # nodes (relation loop: `if from_id and to_id`).
+    if _LITERAL_OR_ATTR_RE.match(name.strip()):
+        return False
+    return True
 
 
 async def _discover_cross_links_for_memory(
@@ -210,6 +244,11 @@ async def process_entity_extraction(
             upsert_items: list[dict] = []
             for i, (name, entity_type, _role) in enumerate(filtered):
                 match = resolved[i] if i < len(resolved) else None
+                # CAURA graph-build fix (B): reject a similarity-merge when the two
+                # names carry DIFFERENT identifier tokens (e.g. "#0002" vs "#0012").
+                # Forces the create path so suffix-distinct entities stay separate.
+                if match and not _same_identifier_signature(name, match.get("canonical_name") or ""):
+                    match = None
                 item: dict = {
                     "input_idx": i,
                     "tenant_id": tenant_id,

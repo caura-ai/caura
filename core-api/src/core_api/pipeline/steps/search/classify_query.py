@@ -111,6 +111,7 @@ class ClassifyQuery:
                         entity_hops,
                         tenant_id,
                         top_k,
+                        query=query,
                         fleet_ids=fleet_ids,
                         caller_agent_id=caller_agent_id,
                         filter_agent_id=filter_agent_id,
@@ -271,6 +272,7 @@ class ClassifyQuery:
         tenant_id: str,
         top_k: int,
         *,
+        query: str = "",
         fleet_ids: list[str] | None = None,
         caller_agent_id: str | None = None,
         filter_agent_id: str | None = None,
@@ -385,5 +387,19 @@ class ClassifyQuery:
             for mid, boost in memory_boost.items()
             if mid in memories_by_id
         ]
-        rows.sort(key=lambda r: r.score, reverse=True)
+        # Re-rank the candidate pool by lexical overlap with the query before
+        # trimming to top_k. entity_lookup matches greedily and hop-boost is
+        # near-uniform, so the exact-entity memory can be diluted below
+        # token-sharing siblings; this prefers rows whose content shares more of
+        # the query's tokens, with hop-boost as the tiebreak.
+        q_tokens = set(extract_entity_tokens(query)) if query else set()
+
+        def _query_overlap(row: types.SimpleNamespace) -> float:
+            if not q_tokens:
+                return 0.0
+            content = getattr(row.Memory, "content", "") or ""
+            c_tokens = set(extract_entity_tokens(content))
+            return len(q_tokens & c_tokens) / len(q_tokens)
+
+        rows.sort(key=lambda r: (_query_overlap(r), r.score), reverse=True)
         return rows[:top_k]
