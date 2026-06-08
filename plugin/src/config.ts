@@ -31,7 +31,27 @@ export function readOpenClawConfig(): Record<string, unknown> | null {
 
 export function isMemclawAllowed(config: Record<string, any>): boolean {
   const allow = config?.plugins?.allow;
-  return Array.isArray(allow) && allow.includes("memclaw");
+  // CAURA-000: `plugins.allow` in OpenClaw 2026.6.x is a STRICT
+  // allowlist only when it is BOTH present AND non-empty. The runtime
+  // gate is:
+  //
+  //     entry?.enabled === true
+  //       && (plugins.allow.length === 0 || plugins.allow.includes(pluginId))
+  //
+  // (from OpenClaw's selection layer — confirmed against
+  // `/usr/lib/node_modules/openclaw/dist/*.js` on the wet-test VM).
+  //
+  // So a missing OR empty `plugins.allow` means "no restriction —
+  // every enabled plugin can load". Memclaw doesn't need to appear
+  // in the array in those cases; it's allowed by default. Pre-fix this
+  // function returned `false` for missing/empty allow, which drove
+  // `autoFixAllowlist` step 1 to *create* an array containing only
+  // `"memclaw"` — flipping the user's permissive config into a
+  // restrictive one and silently locking out every other built-in
+  // plugin including `openai`. Customer-reported on a fresh 2.8.1
+  // install: "Unknown model: openai/gpt-5.5" 2 minutes after install.
+  if (!Array.isArray(allow) || allow.length === 0) return true;
+  return allow.includes("memclaw");
 }
 
 export function isMemclawEnabled(config: Record<string, any>): boolean {
@@ -98,10 +118,25 @@ export function autoFixAllowlist(options?: {
 
   const changes: string[] = [];
 
-  // 1. Ensure memclaw is in plugins.allow
-  if (!isMemclawAllowed(config)) {
-    if (!config.plugins) config.plugins = {};
-    if (!Array.isArray(config.plugins.allow)) config.plugins.allow = [];
+  // 1. Ensure memclaw is in `plugins.allow` IF — and only if — the
+  //    user has an explicit, non-empty allowlist. CAURA-000: pre-fix
+  //    this branch unconditionally created `["memclaw"]` from a
+  //    missing/empty array, converting a permissive OpenClaw config
+  //    into a restrictive one that locked out every other plugin
+  //    (the customer's "openai disabled after 2.8.1 install"
+  //    symptom). The runtime gate treats missing/empty allow as
+  //    "no restriction" — see `isMemclawAllowed` docstring for the
+  //    OpenClaw-side gate evidence.
+  //
+  //    So the fix is: leave a missing/empty allowlist alone; only
+  //    append to one that's already non-empty (i.e. the user has
+  //    explicitly opted into the allowlist mechanism and we need to
+  //    make sure memclaw is in their list).
+  if (
+    Array.isArray(config?.plugins?.allow) &&
+    config.plugins.allow.length > 0 &&
+    !config.plugins.allow.includes("memclaw")
+  ) {
     config.plugins.allow.push("memclaw");
     changes.push("plugins.allow");
   }

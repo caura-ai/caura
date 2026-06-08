@@ -1,9 +1,14 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, rmSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 import {
-  isMemorySlotClaimed,
+  autoFixAllowlist,
   isContextEngineSlotClaimed,
+  isMemclawAllowed,
   isMemclawFullyConfigured,
+  isMemorySlotClaimed,
   shouldRunAutoFix,
 } from "./config.js";
 import { getPluginDir } from "./paths.js";
@@ -48,9 +53,15 @@ describe("isMemclawFullyConfigured", () => {
     assert.equal(isMemclawFullyConfigured(happyConfig()), true);
   });
 
-  test("false when memclaw is not allowlisted", () => {
+  test("false when memclaw is not in a restrictive allowlist", () => {
+    // CAURA-000: pre-fix this test used `plugins.allow = []` to mean
+    // "not allowlisted", which assumed empty = restrictive. The
+    // OpenClaw runtime actually treats empty (and missing) as
+    // PERMISSIVE — "no restriction". Use an explicit non-empty
+    // allowlist that excludes memclaw to express the real
+    // "not allowlisted" case.
     const c = happyConfig();
-    (c as any).plugins.allow = [];
+    (c as any).plugins.allow = ["some-other-plugin"];
     assert.equal(isMemclawFullyConfigured(c), false);
   });
 
@@ -166,5 +177,187 @@ describe("shouldRunAutoFix — allowlist drift gate", () => {
 
   test("no-ops on a clean install with the flag present", () => {
     assert.equal(shouldRunAutoFix(clean), false);
+  });
+});
+
+
+// ---- isMemclawAllowed — permissive allowlist semantics (CAURA-000) ----
+//
+// OpenClaw 2026.6.x treats `plugins.allow` as a STRICT allowlist only when
+// it is BOTH present AND non-empty. A missing or empty array means "no
+// restriction" — every enabled plugin can load. Pre-fix our predicate
+// reported "not allowed" for the empty/missing case, which caused
+// `autoFixAllowlist` to *create* `["memclaw"]` — silently converting a
+// permissive config into a restrictive one and locking out built-ins
+// like the bundled `openai` provider plugin.
+
+describe("isMemclawAllowed — permissive when allow is missing or empty (CAURA-000)", () => {
+  test("true when plugins.allow is missing entirely (permissive default)", () => {
+    const c: any = { plugins: { entries: {}, load: {}, slots: {} } };
+    assert.equal(isMemclawAllowed(c), true);
+  });
+
+  test("true when plugins.allow is an empty array (permissive)", () => {
+    const c: any = { plugins: { allow: [], entries: {}, load: {}, slots: {} } };
+    assert.equal(isMemclawAllowed(c), true);
+  });
+
+  test("true when plugins.allow is non-empty AND includes memclaw", () => {
+    const c: any = {
+      plugins: { allow: ["memclaw", "browser"], entries: {}, load: {}, slots: {} },
+    };
+    assert.equal(isMemclawAllowed(c), true);
+  });
+
+  test("false when plugins.allow is non-empty AND excludes memclaw (the only real 'not allowed' case)", () => {
+    const c: any = {
+      plugins: { allow: ["browser"], entries: {}, load: {}, slots: {} },
+    };
+    assert.equal(isMemclawAllowed(c), false);
+  });
+
+  test("true when plugins object is completely missing (no allowlist to speak of)", () => {
+    const c: any = {};
+    assert.equal(isMemclawAllowed(c), true);
+  });
+});
+
+
+// ---- autoFixAllowlist.plugins.allow — non-creation invariant (CAURA-000) ----
+//
+// On a fresh install, autoFixAllowlist must NOT create `plugins.allow` from
+// nothing. Doing so would silently flip the user's permissive OpenClaw
+// config into a restrictive one — the exact mechanism behind the
+// customer-reported "openai disabled after 2.8.1 install" symptom.
+//
+// These tests drive the real `autoFixAllowlist` function against tiny
+// temp `openclaw.json` files and read back the resulting config.
+
+function _autoFixWithConfig(initial: Record<string, unknown>): {
+  written: Record<string, unknown> | null;
+  result: ReturnType<typeof autoFixAllowlist>;
+  cleanup: () => void;
+} {
+  const tmp = mkdtempSync(join(tmpdir(), "memclaw-autofix-test-"));
+  mkdirSync(join(tmp, ".openclaw"), { recursive: true });
+  const cfgPath = join(tmp, ".openclaw", "openclaw.json");
+  writeFileSync(cfgPath, JSON.stringify(initial), "utf-8");
+  const prevHome = process.env.HOME;
+  process.env.HOME = tmp;
+  const result = autoFixAllowlist({ forceSlotOverride: false });
+  process.env.HOME = prevHome;
+  let written: Record<string, unknown> | null = null;
+  try {
+    written = JSON.parse(readFileSync(cfgPath, "utf-8"));
+  } catch {
+    written = null;
+  }
+  return {
+    written,
+    result,
+    cleanup: () => {
+      try {
+        rmSync(tmp, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    },
+  };
+}
+
+describe("autoFixAllowlist — plugins.allow non-creation (CAURA-000)", () => {
+  test("does NOT create plugins.allow when it was missing (fresh-install regression)", () => {
+    // Mirrors a vanilla openclaw.json that the user / installer never
+    // touched — no `plugins.allow` field at all. Pre-fix autoFix would
+    // CREATE `plugins.allow = ["memclaw"]` here, the customer's
+    // observed crash mechanism.
+    const ctx = _autoFixWithConfig({
+      plugins: {
+        // NO `allow` field
+        entries: {},
+        load: { paths: [] },
+        slots: {},
+      },
+      tools: {},
+    });
+    try {
+      const written = ctx.written as any;
+      const allow = written?.plugins?.allow;
+      assert.ok(
+        allow === undefined || (Array.isArray(allow) && allow.length === 0),
+        `expected plugins.allow to stay missing/empty after autoFix; got: ${JSON.stringify(allow)}`,
+      );
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  test("does NOT push to plugins.allow when it was an explicit empty array", () => {
+    const ctx = _autoFixWithConfig({
+      plugins: {
+        allow: [], // user explicitly set empty = permissive
+        entries: {},
+        load: { paths: [] },
+        slots: {},
+      },
+      tools: {},
+    });
+    try {
+      const written = ctx.written as any;
+      assert.deepEqual(written?.plugins?.allow, [], "empty allow must stay empty");
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  test("DOES add memclaw to an existing non-empty allowlist that excludes it", () => {
+    // User has explicitly opted into a restrictive allowlist. We must
+    // add memclaw to it so memclaw itself can still load — otherwise
+    // we'd disable our own plugin while leaving the user's allowlist
+    // semantics intact.
+    const ctx = _autoFixWithConfig({
+      plugins: {
+        allow: ["browser", "filesystem"],
+        entries: {},
+        load: { paths: [] },
+        slots: {},
+      },
+      tools: {},
+    });
+    try {
+      const written = ctx.written as any;
+      const allow: string[] = written?.plugins?.allow ?? [];
+      assert.ok(
+        allow.includes("memclaw"),
+        `expected memclaw to be added; got: ${JSON.stringify(allow)}`,
+      );
+      assert.ok(allow.includes("browser"), "must preserve existing entries");
+      assert.ok(allow.includes("filesystem"), "must preserve existing entries");
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  test("does NOT add memclaw twice when already in a non-empty allowlist", () => {
+    const ctx = _autoFixWithConfig({
+      plugins: {
+        allow: ["browser", "memclaw", "filesystem"],
+        entries: {},
+        load: { paths: [] },
+        slots: {},
+      },
+      tools: {},
+    });
+    try {
+      const written = ctx.written as any;
+      const allow: string[] = written?.plugins?.allow ?? [];
+      assert.equal(
+        allow.filter((p) => p === "memclaw").length,
+        1,
+        `memclaw must appear exactly once; got: ${JSON.stringify(allow)}`,
+      );
+    } finally {
+      ctx.cleanup();
+    }
   });
 });
