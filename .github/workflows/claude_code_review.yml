@@ -192,7 +192,7 @@ jobs:
       # review script (lets a workflow/script change self-test on its own PR).
       # Secrets are withheld from fork-PR runs and pre-checks gate the rest.
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
@@ -275,7 +275,7 @@ jobs:
 
       - name: Checkout PR branch
         if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ steps.pr.outputs.head_ref }}
           fetch-depth: 1
