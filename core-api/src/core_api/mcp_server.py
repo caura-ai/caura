@@ -2003,6 +2003,7 @@ async def memclaw_evolve(
     from core_api.services.evolve_service import (
         _apply_outcome_to_db,
         _filter_by_scope,
+        _log_weight_adjustment_skip,
         _maybe_generate_rule,
     )
     from core_api.services.organization_settings import resolve_config
@@ -2027,9 +2028,18 @@ async def memclaw_evolve(
                 return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
             await check_and_increment(db, tenant_id, "evolve")
 
+            # A15: classify why no weights will move, mirroring the REST
+            # report_outcome path. _apply_outcome_to_db requires this slug;
+            # the MCP path previously omitted it, raising a TypeError on the
+            # write path (prod incident). A deeper stage (_adjust_weights
+            # race / DB failure) may still override it.
             in_scope_ids = related_ids or []
             out_of_scope_count = 0
-            if in_scope_ids:
+            weight_adjustment_skipped_reason: str | None = None
+            if not in_scope_ids:
+                weight_adjustment_skipped_reason = "no_related_ids"
+            else:
+                original_count = len(in_scope_ids)
                 in_scope_ids, out_of_scope_count = await _filter_by_scope(
                     db,
                     tenant_id=tenant_id,
@@ -2038,6 +2048,21 @@ async def memclaw_evolve(
                     scope=scope,
                     related_ids=in_scope_ids,
                 )
+                if not in_scope_ids and out_of_scope_count >= original_count:
+                    # Filter dropped everything. Map scope → slug.
+                    weight_adjustment_skipped_reason = {
+                        "agent": "agent_id_mismatch",
+                        "fleet": "fleet_id_mismatch",
+                        "all": "all_out_of_scope",
+                    }.get(scope, "all_out_of_scope")
+                    _log_weight_adjustment_skip(
+                        weight_adjustment_skipped_reason,
+                        tenant_id,
+                        scope,
+                        out_of_scope_count=out_of_scope_count,
+                        caller_agent_id=agent_id,
+                        fleet_id=fleet_id,
+                    )
             config = await resolve_config(db, tenant_id)
         # ── Session closed. The LLM rule generation runs with no DB held. ──
 
@@ -2066,6 +2091,7 @@ async def memclaw_evolve(
                 rule_skipped_reason=rule_skipped_reason,
                 scope=scope,
                 out_of_scope_count=out_of_scope_count,
+                weight_adjustment_skipped_reason=weight_adjustment_skipped_reason,
                 t0=t0,
             )
         return _with_latency(json.dumps(result, indent=2, default=str), t0)
