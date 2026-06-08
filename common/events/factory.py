@@ -54,7 +54,9 @@ def get_event_bus() -> EventBus:
             # behaviour) — a strict no-op. Set EVENT_BUS_TOPIC_PREFIX per-env (e.g.
             # "prod"/"staging") to isolate Pub/Sub topics across environments that
             # share one GCP project, eliminating cross-env message fan-out.
-            topic_prefix = os.getenv("EVENT_BUS_TOPIC_PREFIX")
+            # Strip so a fat-fingered secret (e.g. "prod ") can't produce an
+            # invalid GCP topic name like "prod --memclaw.memory.embedded".
+            topic_prefix = (os.getenv("EVENT_BUS_TOPIC_PREFIX") or "").strip()
             if topic_prefix:
                 kwargs["topic_prefix"] = topic_prefix
             # Environment identity for the cross-env fan-out guard. Two
