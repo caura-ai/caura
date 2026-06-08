@@ -17,6 +17,7 @@ from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     GRAPH_HOP_BOOST,
     GRAPH_MAX_BOOSTED_MEMORIES,
+    GRAPH_MAX_EXPANDED_ENTITIES,
     RECALL_BOOST_CAP,
 )
 from core_api.pipeline.context import PipelineContext
@@ -89,6 +90,28 @@ async def _entity_boost_via_storage(
 
         if matched_entity_ids:
             all_entity_ids = list(entity_hops.keys())
+
+            # Bound the IN-clause size before the downstream storage call.
+            # ``entity_expand_graph`` already applies the same cap internally
+            # (CAURA-000), but a future change there must not be able to
+            # silently feed a 40K-UUID list into ``get_memory_ids_by_entity_ids``
+            # — that's the exact 42,146-bind-parameter SQL that crashed the
+            # customer's request on 2026-06-07. Order by (hop asc, weight desc)
+            # so the closest, highest-weighted entities are kept — mirrors the
+            # cap applied in ``classify_query._load_graph_memories`` so the two
+            # search paths behave consistently.
+            if len(all_entity_ids) > GRAPH_MAX_EXPANDED_ENTITIES:
+                all_entity_ids = sorted(
+                    all_entity_ids,
+                    key=lambda eid: (entity_hops[eid][0], -entity_hops[eid][1]),
+                )[:GRAPH_MAX_EXPANDED_ENTITIES]
+                logger.info(
+                    "parallel_embed_entity_boost: entity-id list capped at %d (tenant=%s dropped=%d)",
+                    GRAPH_MAX_EXPANDED_ENTITIES,
+                    tenant_id,
+                    len(entity_hops) - GRAPH_MAX_EXPANDED_ENTITIES,
+                )
+
             raw_links = await sc.get_memory_ids_by_entity_ids(
                 [str(eid) for eid in all_entity_ids],
             )

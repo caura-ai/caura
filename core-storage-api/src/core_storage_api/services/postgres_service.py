@@ -32,6 +32,7 @@ from common.constants import (
     CONTRADICTION_SIMILARITY_THRESHOLD,
     DEFAULT_RELATION_TYPE_WEIGHT,
     ENTITY_RESOLUTION_CANDIDATE_LIMIT,
+    GRAPH_MAX_EXPANDED_ENTITIES,
     GRAPH_MAX_HOPS,
     RECALL_BOOST_SCALE,
     RELATION_TYPE_WEIGHTS,
@@ -3098,14 +3099,60 @@ class PostgresService:
 
         Returns {entity_id: (min_hop_distance, relation_weight)} for all
         reachable entities (including seeds at hop 0, weight 1.0).
+
+        Frontier-size cap (CAURA-000): on a dense relation graph (e.g. an
+        enterprise tenant with tens of thousands of cross-linked entities)
+        the BFS frontier grows multiplicatively each hop. The
+        ``Relation.from/to_entity_id.in_(frontier)`` clause then becomes a
+        SQL statement with a bind parameter per frontier entry. Customer
+        log capture showed a single relations query reach **42,146 bind
+        parameters** before failing — that exceeds asyncpg's safe window
+        and crashed the request (the F4 500s observed on goodclaw / etoro
+        06-07). We cap each hop's frontier at ``GRAPH_MAX_EXPANDED_ENTITIES``
+        (200), keeping the **highest-weighted** edges so the most-relevant
+        branches are preserved. Trade-off: low-weight branches past the
+        cap are dropped from this hop's expansion (they may still appear
+        via other paths). The ID tiebreak makes the selection deterministic
+        across calls — the same query returns the same result twice.
+
+        The downstream ``parallel_embed_entity_boost`` step applies the
+        same cap defensively at the call boundary so a future regression
+        here can't blow up ``get_memory_ids_by_entity_ids`` either.
         """
         async with get_session() as session:
             entity_hops: dict[UUID, tuple[int, float]] = dict.fromkeys(seed_entity_ids, (0, 1.0))
-            frontier = set(seed_entity_ids)
+            frontier: set[UUID] | list[UUID] = set(seed_entity_ids)
 
             for hop in range(1, max_hops + 1):
                 if not frontier:
                     break
+
+                # Bound the IN-clause size BEFORE building the query. The
+                # seed-set is small by construction (entity-FTS hits) but
+                # subsequent hops can explode.
+                if len(frontier) > GRAPH_MAX_EXPANDED_ENTITIES:
+                    # Order by (weight desc, id asc) so the cap keeps the
+                    # most-relevant edges deterministically. ``entity_hops``
+                    # carries the weight assigned when this entity was
+                    # first discovered (see end of loop) — seeds default to
+                    # 1.0 so they're never dropped by the cap.
+                    capped = sorted(
+                        frontier,
+                        key=lambda eid: (
+                            -entity_hops.get(eid, (hop, 0.0))[1],
+                            eid,
+                        ),
+                    )[:GRAPH_MAX_EXPANDED_ENTITIES]
+                    logger.info(
+                        "entity_expand_graph: frontier capped at %d (tenant=%s fleet=%s hop=%d dropped=%d)",
+                        GRAPH_MAX_EXPANDED_ENTITIES,
+                        tenant_id,
+                        fleet_id,
+                        hop,
+                        len(frontier) - GRAPH_MAX_EXPANDED_ENTITIES,
+                    )
+                    frontier = capped
+
                 fwd = select(
                     Relation.to_entity_id,
                     Relation.relation_type,
