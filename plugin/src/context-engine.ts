@@ -68,6 +68,37 @@ const MAX_INGEST_WRITES_PER_SESSION = 10;
 const sessionBuffers = new Map<string, IngestMessage[]>();
 const sessionIngestCounts = new Map<string, number>();
 
+// --- Process-level bootstrap memoization (CAURA-000) ---
+//
+// OpenClaw's ``resolveContextEngine`` calls our factory every time any
+// of ~7 subsystems (embedded-agent, cli-compaction, init, openclaw-tools,
+// prepare.runtime, subagent-registry, context-engine-host-compat) needs
+// a ContextEngine — there's NO caching at the OpenClaw side
+// (``registry-CMq-i5MO.js: engine = await entry.factory(factoryCtx)``).
+// Customer log on goodclaw shows 390 ``ContextEngine bootstrap`` events
+// in 31.4 hours (~12/hour) → 388 smoke tests passed, 0 actionable
+// warnings. Each smoke = 1 write + 1-3 searches + 1 delete = 3-5 backend
+// ops + 2 embedding computations + ~500-1500ms wall-clock.
+//
+// The bootstrap state was previously instance-level (``private
+// _bootstrapped`` + ``_bootstrapPromise``), so each freshly-constructed
+// engine ran its own smoke test. Hoisting to module-level memoizes
+// across instances within the same Node process: smoke runs ONCE per
+// process lifetime, all subsequent engines share the resolved promise
+// and short-circuit instantly.
+//
+// On failure, the catch resets the promise to ``null`` so the next
+// engine retries — the "first-deploy validation" property is preserved.
+let _processBootstrapPromise: Promise<void> | null = null;
+
+/**
+ * Test-only: reset the process-level bootstrap memo so each test
+ * exercises the smoke path fresh. NOT for production use.
+ */
+export function _resetBootstrapForTests(): void {
+  _processBootstrapPromise = null;
+}
+
 /**
  * True iff the error is the content-hash dedup rejection from
  * ``POST /memories`` (the backend's idempotency guard against re-writing
@@ -404,8 +435,6 @@ const recallCache = new Map<string, { text: string; ts: number }>();
 
 export class MemClawContextEngine {
   private config: Record<string, unknown>;
-  private _bootstrapped = false;
-  private _bootstrapPromise: Promise<void> | null = null;
 
   /**
    * Engine metadata — declares to OpenClaw that we own compaction.
@@ -447,14 +476,21 @@ export class MemClawContextEngine {
   }
 
   async bootstrap(): Promise<void> {
-    if (this._bootstrapped) return;
-    if (!this._bootstrapPromise) {
-      this._bootstrapPromise = this._doBootstrap().catch((e) => {
-        this._bootstrapPromise = null;
+    // Process-level memoization: smoke test runs once per Node process,
+    // shared across every engine instance OpenClaw constructs. See
+    // ``_processBootstrapPromise`` docstring at top of file for the why.
+    // Concurrent callers all await the same in-flight promise (Node is
+    // single-threaded so the ``if (!_x) _x = ...`` assignment is safe).
+    if (!_processBootstrapPromise) {
+      _processBootstrapPromise = this._doBootstrap().catch((e) => {
+        // Reset on failure so the next engine instance can retry —
+        // matches the pre-change behavior of clearing the cache on a
+        // failed bootstrap, just at process scope instead of instance.
+        _processBootstrapPromise = null;
         throw e;
       });
     }
-    return this._bootstrapPromise;
+    return _processBootstrapPromise;
   }
 
   private async _doBootstrap(): Promise<void> {
@@ -538,7 +574,8 @@ export class MemClawContextEngine {
         ).catch(() => {});
       }
     }
-    this._bootstrapped = true;
+    // No need to set a flag here — the resolved ``_processBootstrapPromise``
+    // serves as the "done" signal; subsequent ``await``s are instant.
   }
 
   /**
