@@ -32,6 +32,7 @@ from common.events import (
     publish_insights_request,
     publish_purge_soft_deleted_request,
 )
+from common.events.lifecycle_publishers import publish_forge_distill_request
 from common.events.lifecycle_purge_request import (
     MEMORY_RETENTION_MAX_DAYS,
     MEMORY_RETENTION_MIN_DAYS,
@@ -43,6 +44,7 @@ from core_api.services.lifecycle_audit import audit_begin, resolve_publisher_kwa
 from core_api.services.tenants import (
     list_active_tenant_ids,
     list_tenants_with_purgeable_memories,
+    list_tenants_with_skills_factory_enabled,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,12 @@ _ACTION_PUBLISHERS: dict[str, _PublisherFn] = {
     # Periodic discovery insights. Consumer also lives in core-api and
     # short-circuits via the activity gate + opt-in org flag.
     "insights": publish_insights_request,
+    # Skill Factory cron tick. Consumer also lives in core-api;
+    # short-circuits via the ``org_settings.skills_factory.enabled``
+    # tenant filter in ``_list_tenants_for_action`` — non-opted-in
+    # tenants never appear in the fanout, so they pay zero per-tick
+    # cost (no message published, no audit row written).
+    "forge-distill": publish_forge_distill_request,
 }
 
 # Cap on concurrent per-org ``audit_begin + publish`` pairs in the
@@ -83,6 +91,12 @@ async def _list_tenants_for_action(action: str, db) -> list[str]:
     """
     if action == "purge-soft-deleted":
         return await list_tenants_with_purgeable_memories(db)
+    if action == "forge-distill":
+        # Per-tick zero-cost for non-opted-in tenants: filter to orgs
+        # that flipped ``skills_factory.enabled=true``. Any tenant
+        # without an org_settings row (or with the flag false) is
+        # excluded from the fanout entirely.
+        return await list_tenants_with_skills_factory_enabled(db)
     return await list_active_tenant_ids(db)
 
 

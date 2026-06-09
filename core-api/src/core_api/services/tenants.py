@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.models.memory import Memory
+from common.models.organization_settings import OrganizationSettings
 
 
 async def list_active_tenant_ids(db: AsyncSession) -> list[str]:
@@ -44,5 +45,28 @@ async def list_tenants_with_purgeable_memories(db: AsyncSession) -> list[str]:
         .where(Memory.deleted_at.is_not(None))
         .where(Memory.deleted_at < cutoff)
         .distinct()
+    )
+    return sorted([row[0] for row in result.all()])
+
+
+async def list_tenants_with_skills_factory_enabled(db: AsyncSession) -> list[str]:
+    """Return ``org_id`` values whose ``skills_factory.enabled`` is True.
+
+    Used by the lifecycle-fanout entry point for the ``forge-distill``
+    action so a tenant that hasn't opted in pays ZERO per-cron-tick
+    cost (no message published, no audit row written, no consumer
+    work). Non-opted-in tenants stay invisible to the cron until they
+    explicitly flip the flag — the merge-day invariant from PR #293
+    extends through every tick of the autonomous scheduler.
+
+    Queries the ``settings`` JSONB column directly; orgs without a
+    settings row are silently excluded (default ``enabled=False`` from
+    ``DEFAULT_SETTINGS`` applies). Sorted for stable fanout ordering
+    so flaky-test re-runs see the same per-tick sequence.
+    """
+    result = await db.execute(
+        select(OrganizationSettings.org_id).where(
+            OrganizationSettings.settings["skills_factory"]["enabled"].as_boolean().is_(True)
+        )
     )
     return sorted([row[0] for row in result.all()])

@@ -82,10 +82,16 @@ class PipelineStorageAdapter(Protocol):
     # cluster fingerprint + LLM distill pipeline. Method signature
     # mirrors the other pipeline ops (org_id/fleet_id only) — extra
     # run-knobs on :class:`LifecycleForgeDistillRequest` are
-    # intentionally NOT plumbed through the adapter for the Phase 0
-    # stub; Phase 1 will either fatten this signature or thread the
-    # full request object.
-    async def forge_distill(self, *, org_id: str, fleet_id: str | None) -> int: ...
+    # Per-tick ``run_label`` IS plumbed through so the consumer-side
+    # cron handler stamps ``origin.run_id`` on candidate docs with the
+    # SAME label that was on the event payload + audit row. A
+    # consumer that re-derives ``run_label`` from its own clock would
+    # drift across minute boundaries under queue lag, breaking the
+    # traceability link operators rely on to map a card back to its
+    # cron tick.
+    async def forge_distill(
+        self, *, org_id: str, fleet_id: str | None, run_label: str
+    ) -> int: ...
 
     async def has_recent_lifecycle_success(
         self, *, org_id: str, action: str, since_hours: int
@@ -343,11 +349,14 @@ def register_pipeline_consumers(adapter: PipelineStorageAdapter) -> None:
         return await adapter.insights(org_id=req.org_id, fleet_id=req.fleet_id)
 
     async def forge_distill_op(req: LifecycleForgeDistillRequest) -> int:
-        # Phase 0 stub: the adapter's no-op returns 0. The full
-        # request (run_label, dry_run, freshness_window_days, etc.)
-        # is preserved on the event payload for Phase 1 — only
-        # org_id + fleet_id are threaded through the adapter today.
-        return await adapter.forge_distill(org_id=req.org_id, fleet_id=req.fleet_id)
+        # Thread ``run_label`` from the event payload — the publisher
+        # stamped it with the dispatching cron tick's UTC minute, and
+        # the consumer-side cron handler stamps the same value onto
+        # every candidate doc's ``origin.run_id``. Regenerating from
+        # the consumer clock would drift across queue boundaries.
+        return await adapter.forge_distill(
+            org_id=req.org_id, fleet_id=req.fleet_id, run_label=req.run_label
+        )
 
     bus = get_event_bus()
     bus.subscribe(

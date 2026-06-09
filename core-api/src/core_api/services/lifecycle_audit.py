@@ -18,6 +18,7 @@ Three helpers:
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 from core_api.clients.storage_client import CoreStorageClient
 from core_api.constants import LIFECYCLE_STALE_ARCHIVE_WEIGHT
@@ -195,27 +196,68 @@ class _CoreApiLifecycleAdapter:
             links_created = ctx.data.get("links_created", 0)
         return int(links_created)
 
-    async def forge_distill(self, *, org_id: str, fleet_id: str | None) -> int:
-        """Skill Factory SF-007 — Forge distillation run. Phase 0 STUB.
+    async def forge_distill(self, *, org_id: str, fleet_id: str | None, run_label: str) -> int:
+        """Skill Factory cron tick (SF-CR3).
 
-        Logs the invocation and returns 0 (no candidates produced).
-        The real worker — outcome inference → session-trace clustering
-        → fingerprint stability → LLM distill → Sentinel scan →
-        skills-collection write — lands in Phase 1 inside
-        ``core_api.services.forge.forge_service``. Until then the
-        topic + payload + handler wiring is exercisable end-to-end so
-        the Phase 1 swap is a body-only change.
+        Delegates to ``core_api.services.forge.cron_handler.run_forge_cron_tick``
+        which:
+
+          1. Resolves per-tenant ``ForgeConfig`` from
+             ``org_settings.skills_factory.forge.*``.
+          2. Runs ``run_forge_distill`` over the configured freshness
+             window (mines fresh candidates).
+          3. Runs ``promote_pending_candidates`` so newly-minted
+             candidates passing the 6 auto-gates land in ``staged``
+             in the SAME tick.
+
+        Returns ``candidates_written + promoted`` so the
+        lifecycle_audit row's ``stats_key`` reflects the meaningful
+        "work done" count (a tick that writes 3 candidates of which
+        2 promote returns 5).
+
+        The shared handler's ``has_recent_lifecycle_success``
+        dedup-window check (Phase 0's ``_PIPELINE_DEDUP_WINDOW_HOURS``)
+        already protects against accidental double-ticks within the
+        same window — operators can re-curl the fanout endpoint
+        without worrying about duplicate Forge runs.
+
+        ``run_label`` is passed from the event payload and forwarded
+        to ``run_forge_cron_tick`` so candidate docs carry the same
+        label that the cron tick stamped on the audit row. Threading
+        it (rather than re-deriving from the consumer's clock) keeps
+        the candidate's ``origin.run_id`` aligned with the event +
+        audit row even when queue lag crosses a minute boundary.
         """
-        logger.info(
-            "forge_distill stub invoked (Phase 0; no-op)",
-            extra={
-                "org_id": org_id,
-                "fleet_id": fleet_id,
-                "stub": True,
-                "phase": "0",
-            },
-        )
-        return 0
+        # Lazy imports — same rationale as crystallize / insights:
+        # ``cron_handler`` pulls in the LLM provider chain via
+        # ``common.llm`` which we don't want loading at core-api
+        # startup just for the lifecycle adapter wiring.
+        from core_api.db.session import async_session
+        from core_api.services.forge.cron_handler import run_forge_cron_tick
+
+        async with async_session() as db:
+            stats = await run_forge_cron_tick(
+                db,
+                tenant_id=org_id,
+                fleet_id=fleet_id,
+                run_label=run_label,
+            )
+            # Critical: ``run_forge_cron_tick`` → ``promote_pending_candidates``
+            # → ``make_db_status_updater`` issues raw UPDATEs against this
+            # session. SQLAlchemy's ``async_sessionmaker`` defaults to
+            # ``autocommit=False``, so without this commit every
+            # candidate→staged promotion would roll back when the
+            # context exits — the audit row would report ``promoted=N``
+            # while the DB held ZERO actual transitions. Mirrors the
+            # commit pattern in ``entity_link`` above.
+            await db.commit()
+        # ``stats_key='candidates_produced'`` (see lifecycle_handlers.py
+        # registration), so the return value here is the COUNT that
+        # populates ``stats.candidates_produced`` on the audit row.
+        # Sum minted + promoted: an operator inspecting the audit row
+        # sees a single "work done" number; the full breakdown lives
+        # in the structured log line above.
+        return int(stats.get("candidates_written", 0)) + int(stats.get("promoted", 0))
 
     async def has_recent_lifecycle_success(self, *, org_id: str, action: str, since_hours: int) -> bool:
         return await self._storage.has_recent_lifecycle_success(
@@ -255,4 +297,24 @@ async def resolve_publisher_kwargs(action: str, org_id: str) -> dict:
     if action == "purge-soft-deleted":
         config = await resolve_config(None, org_id)
         return {"retention_days": config.memory_retention_days}
+    if action == "forge-distill":
+        # ``publish_forge_distill_request`` requires ``run_label``; the
+        # cron fanout supplies a deterministic, audit-friendly value
+        # so the candidate doc's ``origin.run_id`` lets an operator
+        # trace any card in the inbox back to the specific cron tick
+        # that minted it. UTC minute-bucket precision avoids two
+        # parallel fanout dispatches (e.g. an admin re-curl during a
+        # cron firing) colliding on the SAME label.
+        #
+        # NOTE: ``datetime.now(UTC)`` is evaluated per-tenant. A
+        # fanout that spans a UTC minute boundary will stamp tenants
+        # processed before :00 with one bucket and tenants after :00
+        # with the next — so two tenants that "belong to the same
+        # cron tick" can carry different ``run_label`` values. For
+        # cross-tenant tick correlation, use the audit-row
+        # ``created_at`` timestamp rather than ``run_label``.
+        # Long-term fix: thread a single ``tick_ts`` from the fanout
+        # endpoint into this helper so the stamp is computed once.
+        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M")
+        return {"run_label": f"forge-cron-{org_id}-{ts}"}
     return {}
