@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.14.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.13.0...backend-v2.14.0) (2026-06-10)
+
+
+### Features
+
+* **skills:** auto-approve clean Forge candidates (skip HITL inbox) ([#313](https://github.com/caura-ai/caura-memclaw/issues/313)) ([6f3452d](https://github.com/caura-ai/caura-memclaw/commit/6f3452d8197083a25cc34489a1c39c3adafebc81))
+* **skills:** MCP-direct delivery — agents discover only active skills ([#315](https://github.com/caura-ai/caura-memclaw/issues/315)) ([1ac4f1f](https://github.com/caura-ai/caura-memclaw/commit/1ac4f1f14a0af7384ebed9a6df696641b8d60627))
+* **skills:** wire Forge into the lifecycle cron fanout ([#311](https://github.com/caura-ai/caura-memclaw/issues/311)) ([0523ed0](https://github.com/caura-ai/caura-memclaw/commit/0523ed0ab172942d7e25f9d54a29175ec2394ea1))
+
+
+### Documentation
+
+* replace concept SVG with rendered PNG diagram in README ([#316](https://github.com/caura-ai/caura-memclaw/issues/316)) ([f32ba1b](https://github.com/caura-ai/caura-memclaw/commit/f32ba1bd675d1465d089fcd3b7e4862e9ae0f981))
+
 ## [2.13.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.12.1...backend-v2.13.0) (2026-06-08)
 
 
