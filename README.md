@@ -36,7 +36,7 @@ Agents write plain text. MemClaw turns it into searchable, governed, self-improv
 **Built for fleets, not single agents.** Public agent-memory benchmarks (LoCoMo, LongMemEval) measure one agent, one user, one long conversation — the single-chatbot shape. The deployment shape we see in production is the opposite: dozens or thousands of agents working on behalf of a company, sharing what they learn under governance. MemClaw is architected around that shape from day one — scoped memory, cross-agent outcome propagation, fleet-wide trust tiers — and competes on the axes that compound with agent count: latency, token efficiency, and governance. See [Performance](#performance) for the numbers, or read the [benchmarks write-up](https://memclaw.net/blog/memclaw-benchmarks).
 
 <p align="center">
-  <img src="static/images/memclaw-concept.svg" alt="MemClaw — Fleet Memory that Compounds" width="700" />
+  <img src="static/images/memclaw-concept.png" alt="MemClaw — Fleet Memory that Compounds" width="700" />
 </p>
 
 ---
