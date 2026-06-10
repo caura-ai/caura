@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import time
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 from uuid import UUID, uuid4
 
 import httpx
@@ -1165,6 +1165,107 @@ async def memclaw_tune(
 SKILLS_COLLECTION = "skills"
 _SKILL_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 
+# The agent-facing MCP surface only exposes skills in this status. The
+# Skill Factory lifecycle (candidate → staged → active) gates what an
+# agent can discover: candidate/staged/quarantined/rejected skills are
+# in-flight or blocked and must NOT surface to agents. Only this filter
+# turns "an operator approved it" into "agents can find it".
+_AGENT_VISIBLE_SKILL_STATUS = "active"
+
+
+async def _skills_factory_flag(db: Any, tenant_id: str) -> bool:
+    """Strict opt-in check — RAISES on a settings-lookup failure.
+
+    Is ``skills_factory.enabled`` true for this tenant? Callers that gate
+    a SECURITY decision (op=write / op=delete) wrap this and **fail
+    closed** (abort the mutation) on error — they must never proceed
+    unvalidated just because the flag couldn't be read. Read-path callers
+    use the lenient ``_skills_factory_enabled`` wrapper instead.
+    ``get_raw_settings`` is cache-first (5-min TTL), so this is a cheap
+    hot-path check.
+    """
+    from core_api.services.organization_settings import get_raw_settings
+
+    raw = await get_raw_settings(db, tenant_id)
+    return (
+        isinstance(raw, dict)
+        and isinstance(raw.get("skills_factory"), dict)
+        and bool(raw["skills_factory"].get("enabled"))
+    )
+
+
+async def _skills_factory_enabled(db: Any, tenant_id: str) -> bool:
+    """Non-raising opt-in check for the active-only skill-read filter
+    (read / query / search) — fails CLOSED on a settings-lookup failure.
+
+    On success returns the tenant's true ``skills_factory.enabled`` flag,
+    so non-opted-in tenants keep byte-identical (unfiltered) read
+    behavior — the merge-day no-op invariant.
+
+    On a settings-lookup FAILURE it returns ``True`` (assume enabled), so
+    the active-only filter IS applied: a transient settings outage must
+    not let a non-active skill (candidate / staged / quarantined) leak to
+    an agent. The read still succeeds — it's filtered, not 500'd — so the
+    cost is only that, during an outage, a tenant temporarily sees just
+    their ``active`` skills. For non-opted-in tenants that is a near
+    no-op (their skills are all ``active`` post-migration). This keeps
+    ALL skill gates fail-closed: write/delete abort, reads filter.
+    """
+    try:
+        return await _skills_factory_flag(db, tenant_id)
+    except Exception:
+        logger.warning(
+            "skills_factory flag lookup failed for %s; failing CLOSED — active-only "
+            "filter APPLIED (only status='active' skills surface) until cache recovers",
+            tenant_id,
+        )
+        return True
+
+
+def _safe_int(val: Any, default: int) -> int:
+    """Coerce a settings value to int, falling back to ``default`` on a
+    null, boolean, or non-numeric value. The per-tenant byte caps are
+    operator-editable JSON, so a misconfiguration (``null``, ``"auto"``,
+    ``true``/``false``) must degrade to the documented default — not
+    crash (or silently mis-cap) the skills write path.
+
+    ``bool`` is checked first because it is a subclass of ``int`` in
+    Python: ``int(True) == 1`` / ``int(False) == 0`` would otherwise pass
+    through silently and produce a 1- or 0-byte cap rather than the
+    intended default."""
+    if isinstance(val, bool):
+        return default
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _skill_hidden_from_agent(doc: Any, *, caller_tenant_id: str, caller_opted_in: bool) -> bool:
+    """Whether a fetched row must NOT surface on the agent MCP skill
+    surface.
+
+    A skills-collection row is hidden when it is non-active AND either:
+
+      • the caller's tenant opted in (the active-only gate applies to
+        the caller's own skills), or
+      • the row belongs to a DIFFERENT tenant than the caller — a
+        sibling tenant's in-flight / blocked skill must never leak
+        through cross-tenant credentials, regardless of the *caller's*
+        own opt-in flag. This is safe: a non-opted-in owning tenant's
+        skills are all ``active`` (backfilled by migration 022), so this
+        only ever hides a genuinely non-active row, never a legitimately
+        visible one.
+
+    Non-skills rows are never hidden. Keyed off the row's own
+    ``tenant_id`` so the decision follows the OWNING tenant, not just
+    the caller's flag (closes the cross-tenant read leak)."""
+    if getattr(doc, "collection", None) != SKILLS_COLLECTION:
+        return False
+    if (getattr(doc, "data", None) or {}).get("status") == _AGENT_VISIBLE_SKILL_STATUS:
+        return False
+    return caller_opted_in or getattr(doc, "tenant_id", caller_tenant_id) != caller_tenant_id
+
 
 async def memclaw_doc(
     op: Annotated[str, Field(description="write|read|query|delete|list_collections|search.")],
@@ -1250,6 +1351,36 @@ async def memclaw_doc(
                     fleet_id=fleet_id,
                     readable_tenant_ids=readable if op in READ_OPS else None,
                 )
+                # Active-only count correction for skills: an opted-in
+                # tenant's listing must not advertise non-active skills
+                # in the count — they're invisible to read/query/search,
+                # so a count that includes them is misleading. Recompute
+                # the skills row restricted to status='active', over the
+                # same (possibly cross-tenant) scope the listing used.
+                # One COUNT, only when a skills row is present AND the
+                # tenant opted in.
+                if any(name == SKILLS_COLLECTION for name, _ in rows) and await _skills_factory_enabled(
+                    db, tenant_id
+                ):
+                    from sqlalchemy import func as sa_func
+                    from sqlalchemy import select as sa_select
+
+                    from common.models.document import Document
+
+                    tenant_pred = (
+                        Document.tenant_id.in_(readable) if readable else Document.tenant_id == tenant_id
+                    )
+                    cnt_stmt = sa_select(sa_func.count()).where(
+                        tenant_pred,
+                        Document.collection == SKILLS_COLLECTION,
+                        Document.data["status"].astext == _AGENT_VISIBLE_SKILL_STATUS,
+                    )
+                    if fleet_id:
+                        cnt_stmt = cnt_stmt.where(Document.fleet_id == fleet_id)
+                    active_count = int((await db.execute(cnt_stmt)).scalar_one())
+                    rows = [
+                        (name, active_count if name == SKILLS_COLLECTION else count) for name, count in rows
+                    ]
                 return _with_latency(
                     json.dumps(
                         {
@@ -1280,6 +1411,140 @@ async def memclaw_doc(
                         ),
                         t0,
                     )
+                # ── Skill Factory SF-002 lifecycle validator ─────────
+                # The agent-facing MCP write path runs the SAME validator
+                # the REST route does (routes/documents.py §SF-002), so an
+                # agent-direct skill write flows through the planned
+                # lifecycle instead of landing unvalidated in limbo:
+                #   • status defaults to 'staged' → HITL Inbox (a skill is
+                #     never agent-visible until approved to 'active')
+                #   • status RBAC 403s a caller-supplied 'active' /
+                #     'candidate' / system status — this is what actually
+                #     closes self-promotion (not a blanket status reject)
+                #   • source RBAC 403s source='forge'/'manual' from an
+                #     agent caller (they must use source='agent')
+                #   • Sentinel pre-scan + content_hash + byte/slug caps
+                # MCP callers carry NO admin/forge identity — there is no
+                # is_admin/org_role accessor on this surface — so both
+                # is_admin and is_internal_forge are False. An admin who
+                # needs to author an 'active' skill uses the REST/dashboard
+                # path, which has the real auth context. Gated on the
+                # opt-in flag: non-opted-in tenants skip the validator
+                # entirely (byte-identical legacy behavior). The validator
+                # raises HTTPException (403/422/409/404); the outer
+                # ``except HTTPException`` maps it to the right error code.
+                if collection == SKILLS_COLLECTION:
+                    # ONE settings read for both the opt-in flag and the
+                    # per-tenant byte caps. ``get_settings_for_display``
+                    # returns the merged settings (which already include
+                    # ``skills_factory.enabled``), so the write path reads
+                    # the flag from it directly rather than calling
+                    # ``_skills_factory_enabled`` (a second DB-backed
+                    # ``get_raw_settings``) — one fewer cold-cache lookup.
+                    # read/query/search/delete keep the cheap helper since
+                    # they don't need the caps.
+                    from core_api.services.organization_settings import (
+                        get_settings_for_display,
+                    )
+
+                    # Fail CLOSED: this settings read gates a security
+                    # decision (whether the lifecycle validator runs). If
+                    # it fails we must NOT fall through and upsert the
+                    # skill unvalidated — abort the write instead.
+                    try:
+                        settings_display = await get_settings_for_display(db, tenant_id)
+                    except Exception:
+                        logger.exception(
+                            "skills_factory settings lookup failed for %s; cannot gate write",
+                            tenant_id,
+                        )
+                        return _with_latency(
+                            _error_response("INTERNAL_ERROR", "skill lifecycle gate unavailable"),
+                            t0,
+                        )
+                    sf_settings = (
+                        (settings_display.get("skills_factory") or {})
+                        if isinstance(settings_display, dict)
+                        else {}
+                    )
+                    if isinstance(sf_settings, dict) and bool(sf_settings.get("enabled")):
+                        # Defense-in-depth: reject a case-variant 'status'
+                        # key (e.g. 'STATUS', 'Status'). The validator
+                        # owns the canonical lowercase 'status' and
+                        # defaults it to 'staged', and every downstream
+                        # gate reads data->>'status' (case-sensitive in
+                        # JSONB), so a variant key cannot self-promote —
+                        # but it WOULD persist as a confusing shadow
+                        # field. Reject it rather than silently store it.
+                        if isinstance(data, dict):
+                            variant = next(
+                                (k for k in data if k != "status" and k.lower() == "status"),
+                                None,
+                            )
+                            if variant is not None:
+                                return _with_latency(
+                                    _error_response(
+                                        "INVALID_ARGUMENTS",
+                                        f"skills write: ambiguous status key {variant!r}. "
+                                        "Use lowercase 'status' only — and note status is "
+                                        "managed by the lifecycle (an agent write defaults "
+                                        "to 'staged'; transitions go through the Inbox).",
+                                    ),
+                                    t0,
+                                )
+                        from core_api.services.skill_lifecycle import (
+                            SkillWriteContext,
+                            validate_and_normalize_skill_write,
+                        )
+
+                        sf_ctx = SkillWriteContext(
+                            caller_agent_id=agent_id,
+                            is_admin=False,
+                            is_internal_forge=False,
+                            description_max_bytes=_safe_int(sf_settings.get("description_max_bytes"), 160),
+                            body_max_bytes=_safe_int(sf_settings.get("body_max_bytes"), 40_000),
+                        )
+                        # For kind='update' the validator needs the live
+                        # skill to bind against its current content_hash.
+                        # Mirror the REST path's read-through storage
+                        # fetch; the validator handles the not-found case.
+                        # ``isinstance`` guards a non-dict data (the
+                        # validator 422s it cleanly rather than us
+                        # AttributeError-ing into a 500 here).
+                        live_doc: dict | None = None
+                        if isinstance(data, dict) and data.get("kind") == "update":
+                            # Fail CLOSED, like the settings/flag gates: the
+                            # live-doc fetch feeds the validator's hash-
+                            # binding check, so a transient DB/network error
+                            # must abort with a curated message rather than
+                            # fall through to the outer handler (which would
+                            # leak the raw exception string).
+                            try:
+                                sc_live = get_storage_client()
+                                live_doc = await sc_live.get_document(
+                                    tenant_id=tenant_id,
+                                    collection=SKILLS_COLLECTION,
+                                    doc_id=doc_id,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "skills live-doc fetch failed for %s/%s; cannot gate update write",
+                                    tenant_id,
+                                    doc_id,
+                                )
+                                return _with_latency(
+                                    _error_response("INTERNAL_ERROR", "skill lifecycle gate unavailable"),
+                                    t0,
+                                )
+                        normalized, _scan = await validate_and_normalize_skill_write(
+                            data,
+                            ctx=sf_ctx,
+                            live_skill_doc=live_doc,
+                        )
+                        # Swap normalized data in for the rest of the flow
+                        # (embed + upsert). Status/source/scan/content_hash
+                        # and other server-controlled fields are merged.
+                        data = normalized
                 # Resolve which string in `data` gets embedded. The only
                 # embeddable field is data["summary"]; skills writes also
                 # accept data["description"] for back-compat. Non-skills
@@ -1357,6 +1622,23 @@ async def memclaw_doc(
                 )
                 if not doc:
                     return _with_latency(f"Not found: {collection}/{doc_id}", t0)
+                # Active-only gate for agent-facing skill reads. A
+                # candidate / staged / quarantined / rejected skill is
+                # in-flight or blocked and must not surface to agents —
+                # return the same "Not found" as a missing doc so we
+                # don't leak the EXISTENCE of an unapproved skill. The
+                # decision follows the row's OWNING tenant: hidden when
+                # the caller's tenant opted in, OR when the row belongs
+                # to a different tenant (cross-tenant credentials must
+                # never surface a sibling tenant's in-flight skill).
+                # The collection check short-circuits the flag lookup for
+                # non-skills reads.
+                if doc.collection == SKILLS_COLLECTION:
+                    caller_opted_in = await _skills_factory_enabled(db, tenant_id)
+                    if _skill_hidden_from_agent(
+                        doc, caller_tenant_id=tenant_id, caller_opted_in=caller_opted_in
+                    ):
+                        return _with_latency(f"Not found: {collection}/{doc_id}", t0)
                 return _with_latency(
                     json.dumps(
                         {
@@ -1370,17 +1652,84 @@ async def memclaw_doc(
                     t0,
                 )
             if op == "query":
+                effective_where = dict(where or {})
+                caller_opted_in = False
+                if collection == SKILLS_COLLECTION:
+                    caller_status = effective_where.get("status")
+                    if caller_status is not None and caller_status != _AGENT_VISIBLE_SKILL_STATUS:
+                        # Security-sensitive REJECTION path: refusing an
+                        # explicit non-active status only makes sense for
+                        # an opted-in tenant — for a tenant that never
+                        # opted in, the "use the Inbox API" message is
+                        # nonsense. So gate it on the STRICT flag and
+                        # fail CLOSED on a settings outage (INTERNAL_ERROR,
+                        # same as op=delete) rather than the lenient helper
+                        # (which assumes-enabled on error and would emit
+                        # the confusing pointer to a non-opted-in tenant).
+                        try:
+                            opted_in = await _skills_factory_flag(db, tenant_id)
+                        except Exception:
+                            logger.exception(
+                                "skills_factory flag lookup failed for %s; cannot gate query",
+                                tenant_id,
+                            )
+                            return _with_latency(
+                                _error_response("INTERNAL_ERROR", "skill lifecycle gate unavailable"),
+                                t0,
+                            )
+                        if opted_in:
+                            # An agent must not query for staged /
+                            # candidate skills. Reject (rather than
+                            # silently rewriting to 'active', which would
+                            # mislead the caller into thinking they
+                            # queried 'staged' and got nothing).
+                            return _with_latency(
+                                _error_response(
+                                    "INVALID_ARGUMENTS",
+                                    f"collection='skills' on the agent MCP surface only "
+                                    f"exposes status='active' docs; "
+                                    f"where={{'status': {caller_status!r}}} is not supported. "
+                                    "Inspect non-active skills via the Skills Inbox API "
+                                    "(/api/v1/skills-inbox/*).",
+                                ),
+                                t0,
+                            )
+                        # Genuinely not opted in: legacy behavior — the
+                        # caller's explicit status passes through untouched
+                        # (caller_opted_in stays False; the cross-tenant
+                        # net below still hides sibling non-active skills).
+                    else:
+                        # Common, SAFE path (no status, or status='active'
+                        # already): transparently scope to 'active'. Lenient
+                        # helper — fail-closed by FILTERING on a settings
+                        # outage (consistent with op=read), never errors a
+                        # plain query.
+                        caller_opted_in = await _skills_factory_enabled(db, tenant_id)
+                        if caller_opted_in:
+                            effective_where["status"] = _AGENT_VISIBLE_SKILL_STATUS
                 docs = await document_repo.query(
                     db,
                     tenant_id=tenant_id,
                     collection=collection,
-                    where=where or {},
+                    where=effective_where,
                     order_by=order_by,
                     order=order,
                     limit=min(limit, 100),
                     offset=offset,
                     readable_tenant_ids=readable,
                 )
+                # Cross-tenant safety net: when the caller's tenant is NOT
+                # opted in, the SQL status filter above never ran, so
+                # cross-tenant credentials could pull a sibling tenant's
+                # non-active skills. Drop them (the helper hides only
+                # rows owned by a different tenant in this branch; the
+                # caller's own rows are untouched — invariant preserved).
+                if collection == SKILLS_COLLECTION and not caller_opted_in:
+                    docs = [
+                        d
+                        for d in docs
+                        if not _skill_hidden_from_agent(d, caller_tenant_id=tenant_id, caller_opted_in=False)
+                    ]
                 items = [{"doc_id": d.doc_id, "data": d.data} for d in docs]
                 return _with_latency(
                     json.dumps(
@@ -1407,6 +1756,17 @@ async def memclaw_doc(
                         t0,
                     )
                 capped_top_k = max(1, min(top_k, 50))
+                # Active-only gate for a SCOPED skills search: push the
+                # status filter into the SQL so top_k stays exact (a
+                # post-filter alone would silently shrink the result
+                # set). For a broad search (collection=None) we can't
+                # filter in SQL without excluding non-skills collections.
+                search_status = None
+                scoped_skills_opted_in = collection == SKILLS_COLLECTION and await _skills_factory_enabled(
+                    db, tenant_id
+                )
+                if scoped_skills_opted_in:
+                    search_status = _AGENT_VISIBLE_SKILL_STATUS
                 pairs = await document_repo.search(
                     db,
                     tenant_id=tenant_id,
@@ -1415,7 +1775,35 @@ async def memclaw_doc(
                     top_k=capped_top_k,
                     fleet_id=fleet_id,
                     readable_tenant_ids=readable,
+                    status=search_status,
                 )
+                # Safety net for every skill row that the scoped SQL
+                # filter didn't already remove:
+                #   • broad search (collection=None) — skill rows the SQL
+                #     never touched, hidden when the caller opted in;
+                #   • cross-tenant rows (any search) — a sibling tenant's
+                #     non-active skill, hidden regardless of the caller's
+                #     own opt-in (the SQL status push only ran when the
+                #     CALLER opted in, so a non-opted-in caller reading
+                #     an opted-in sibling's skills would otherwise leak).
+                # ``_skill_hidden_from_agent`` encodes both rules per-row.
+                # The cheap ``any()`` scan short-circuits the cached flag
+                # lookup when no skill rows are present.
+                if any(d.collection == SKILLS_COLLECTION for d, _ in pairs):
+                    # For a scoped skills search we already resolved the
+                    # flag; for a broad search resolve it now.
+                    caller_opted_in = (
+                        scoped_skills_opted_in
+                        if collection == SKILLS_COLLECTION
+                        else await _skills_factory_enabled(db, tenant_id)
+                    )
+                    pairs = [
+                        (d, sim)
+                        for d, sim in pairs
+                        if not _skill_hidden_from_agent(
+                            d, caller_tenant_id=tenant_id, caller_opted_in=caller_opted_in
+                        )
+                    ]
                 source_tenants = [t for t in (readable or []) if t and t != tenant_id]
                 if source_tenants:
                     counts: dict[str, int] = {}
@@ -1467,15 +1855,43 @@ async def memclaw_doc(
 
             from common.models.document import Document
 
-            stmt = (
-                sa_delete(Document)
-                .where(
-                    Document.tenant_id == tenant_id,
-                    Document.collection == collection,
-                    Document.doc_id == doc_id,
+            # Active-only existence gate for skills: an agent must not be
+            # able to delete (or probe the existence of) a non-active
+            # skill via MCP — those are operator-managed through the
+            # Inbox (reject/quarantine), not the agent surface. We fold
+            # the status guard directly into the DELETE's WHERE so the
+            # check and the delete are a single atomic statement — no
+            # TOCTOU window where a concurrent admin promote/demote could
+            # change status between a separate pre-fetch and the delete.
+            # A non-active (or missing) skill deletes zero rows and falls
+            # through to the SAME generic not-found response a missing doc
+            # returns — so a non-active skill is byte-for-byte
+            # indistinguishable from a missing one (no existence leak),
+            # and the response stays valid JSON (``_with_latency`` only
+            # injects ``_latency_ms`` into a parsed dict; a bare string
+            # would break json.loads() callers on the delete path).
+            # Home-tenant scoped (deletes never span readable tenants).
+            # Fail CLOSED: the status guard is a security gate, so use the
+            # strict (raising) flag check and abort the delete on a
+            # settings-lookup failure rather than the lenient helper
+            # (which returns False → no status guard → fail-open delete).
+            # Short-circuits for non-skills collections (never touches
+            # settings).
+            try:
+                skills_gate_on = collection == SKILLS_COLLECTION and await _skills_factory_flag(db, tenant_id)
+            except Exception:
+                logger.exception("skills_factory flag lookup failed for %s; cannot gate delete", tenant_id)
+                return _with_latency(
+                    _error_response("INTERNAL_ERROR", "skill lifecycle gate unavailable"), t0
                 )
-                .returning(Document.id)
+            stmt = sa_delete(Document).where(
+                Document.tenant_id == tenant_id,
+                Document.collection == collection,
+                Document.doc_id == doc_id,
             )
+            if skills_gate_on:
+                stmt = stmt.where(Document.data["status"].astext == _AGENT_VISIBLE_SKILL_STATUS)
+            stmt = stmt.returning(Document.id)
             result = await db.execute(stmt)
             deleted_id = result.scalar_one_or_none()
             if not deleted_id:

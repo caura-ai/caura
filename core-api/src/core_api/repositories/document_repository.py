@@ -239,6 +239,7 @@ class DocumentRepository:
         top_k: int = 5,
         fleet_id: str | None = None,
         readable_tenant_ids: list[str] | None = None,
+        status: str | None = None,
     ) -> list[tuple[Document, float]]:
         """Semantic search over docs — scoped or cross-collection.
 
@@ -251,6 +252,13 @@ class DocumentRepository:
         ``readable_tenant_ids`` widens to ``ANY($readable)`` — semantic
         search then spans every document across the readable set, sorted
         by global cosine distance.
+
+        ``status`` (optional) adds a ``data->>'status' = :status``
+        equality filter — used by the MCP agent surface to restrict
+        skill discovery to ``status='active'``. Pure mechanism: the
+        caller decides the policy (which collection, when to apply).
+        Left ``None`` by the REST search path, so that path is
+        unaffected.
 
         Orders by cosine distance against ``query_embedding`` using the
         partial HNSW index from migration 003. Returns ``(Document,
@@ -276,6 +284,8 @@ class DocumentRepository:
             stmt = stmt.where(Document.collection == collection)
         if fleet_id:
             stmt = stmt.where(Document.fleet_id == fleet_id)
+        if status is not None:
+            stmt = stmt.where(Document.data["status"].astext == status)
         result = await db.execute(stmt)
         return [(row.Document, 1.0 - float(row.distance)) for row in result.all()]
 
