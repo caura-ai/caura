@@ -96,7 +96,9 @@ class TestResolvePublisherKwargs:
         # Deterministic format: ``forge-cron-<org>-<UTC YYYYMMDDtHHMM>``
         # so an operator inspecting an inbox card's ``origin.run_id``
         # can trace it back to the cron tick that minted it.
-        assert re.match(r"^forge-cron-wet-test-tenant-\d{8}T\d{4}$", kwargs["run_label"])
+        assert re.match(
+            r"^forge-cron-wet-test-tenant-\d{8}T\d{4}$", kwargs["run_label"]
+        )
 
     @pytest.mark.asyncio
     async def test_archive_expired_returns_empty(self):
@@ -193,6 +195,7 @@ class TestRunForgeCronTick:
             scanned=3,
             promoted=2,
             held=1,
+            auto_approved=0,
         )
 
         with (
@@ -252,6 +255,100 @@ class TestRunForgeCronTick:
         # Skip counters surface from the Forge result.
         assert stats["skipped_poisoned"] == 1
         assert stats["skipped_sentinel"] == 0
+        # auto_approved surfaces from the promoter result (0 here — the
+        # flag defaults off because the patched settings omit it).
+        assert stats["auto_approved"] == 0
+        # Flag-off: promoter invoked with auto_promote_clean=False.
+        assert run_promote.await_args.kwargs["auto_promote_clean"] is False
+
+    @pytest.mark.asyncio
+    async def test_auto_promote_clean_flag_threaded_when_enabled(self):
+        from core_api.services.forge.cron_handler import run_forge_cron_tick
+
+        fake_forge_result = ForgeRunResult(
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=None,
+            window_end=None,
+            total_traces=0,
+            labeled_traces=0,
+            clusters_total=0,
+            clusters_eligible=0,
+            candidates_written=1,
+            candidates_skipped_poisoned=0,
+            candidates_skipped_sentinel=0,
+            candidates_skipped_distill_error=0,
+            candidates_skipped_io_error=0,
+            candidates_skipped_existing=0,
+            started_at=None,
+            run_label="forge-cron-t1-20260610T0000",
+            candidate_doc_ids=["forge/x"],
+        )
+        fake_promote_result = PromoterRunResult(
+            tenant_id="t1",
+            fleet_id=None,
+            scanned=1,
+            promoted=1,
+            held=0,
+            auto_approved=1,  # the one candidate auto-activated
+        )
+
+        with (
+            patch(
+                "core_api.services.forge.cron_handler.get_settings_for_display",
+                new=AsyncMock(
+                    return_value={
+                        "skills_factory": {
+                            "forge": {},
+                            "sentinel": {"auto_promote_clean": True},
+                        }
+                    }
+                ),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler._wire_llm_fn",
+                new=AsyncMock(return_value=AsyncMock()),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler._make_candidate_writer",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler._make_status_checker",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler.run_forge_distill",
+                new=AsyncMock(return_value=fake_forge_result),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler.promote_pending_candidates",
+                new=AsyncMock(return_value=fake_promote_result),
+            ) as run_promote,
+            patch(
+                "core_api.services.forge.cron_handler.make_db_poison_checker",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler.make_db_live_data_fetcher",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler.make_db_status_updater",
+                return_value=AsyncMock(),
+            ),
+        ):
+            stats = await run_forge_cron_tick(
+                db=AsyncMock(),
+                tenant_id="t1",
+                fleet_id=None,
+                run_label="forge-cron-t1-20260610T0000",
+            )
+
+        # The flag from org_settings.sentinel.auto_promote_clean is
+        # threaded into the promoter.
+        assert run_promote.await_args.kwargs["auto_promote_clean"] is True
+        assert stats["auto_approved"] == 1
 
     @pytest.mark.asyncio
     async def test_missing_llm_provider_raises_runtime_error(self):

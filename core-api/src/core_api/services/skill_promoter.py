@@ -84,11 +84,19 @@ class AlreadyTransitionedError(RuntimeError):
 class PromotionAttempt:
     """One candidate's verdict — included in :class:`PromoterRunResult`
     so the operator UI / audit log can show "promoted: N, held: M
-    (with breakdown)" without a second query."""
+    (with breakdown)" without a second query.
+
+    ``target_status`` records WHERE a promoted candidate landed:
+    ``'staged'`` (the normal HITL path — surfaces in the Inbox) or
+    ``'active'`` (auto-approved — skipped the human gate because the
+    tenant opted into ``auto_promote_clean`` and the Sentinel scan
+    was clean). ``None`` for held candidates.
+    """
 
     doc_id: str
     promoted: bool
     gates: AutoGateResult
+    target_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +106,12 @@ class PromoterRunResult:
     scanned: int
     promoted: int
     held: int
+    # Subset of ``promoted`` that went straight to ``active`` via
+    # ``auto_promote_clean`` (skipping the Inbox). ``promoted`` is the
+    # total; ``auto_approved`` is the auto-activated slice, so
+    # ``promoted - auto_approved`` is the count that landed in
+    # ``staged`` for human review.
+    auto_approved: int = 0
     attempts: tuple[PromotionAttempt, ...] = field(default_factory=tuple)
 
 
@@ -225,6 +239,36 @@ def make_db_status_updater(db: Any, *, expected_status: str) -> StatusUpdaterCal
 # ── Tick entry point ───────────────────────────────────────────────
 
 
+def _scan_is_clean(doc: dict) -> bool:
+    """True iff the candidate's stamped Sentinel scan is fully clean
+    (``state='clean'`` AND no critical findings).
+
+    The candidate's ``data.scan`` is written at Forge-distill time
+    (``forge_service._distill_cluster`` runs ``scan_skill_doc`` and
+    stamps the result). A ``status='candidate'`` doc's scan therefore
+    always reflects its current content: the only path that mutates a
+    candidate's content is the Inbox ``edit`` endpoint, which re-runs
+    the scan AND leaves the doc in ``staged`` (so it's no longer in
+    the promoter's ``status='candidate'`` query). Trusting the
+    stamped scan here is safe — no fresh rescan needed.
+
+    NOTE: auto-gate G5 already requires ``scan.state == 'clean'`` for
+    ``gates.promote`` to be True, so this check is partially redundant
+    with the gate. We re-assert it locally anyway so the
+    security-critical "only a clean scan auto-activates" invariant is
+    self-contained at the decision site and not load-bearing on an
+    unrelated gate that could be relaxed in a future refactor.
+    """
+    scan = doc.get("scan") or {}
+    if not isinstance(scan, dict):
+        return False
+    try:
+        critical = int(scan.get("critical", 0))
+    except (TypeError, ValueError):
+        return False
+    return scan.get("state") == "clean" and critical == 0
+
+
 async def promote_pending_candidates(
     db: Any,
     *,
@@ -238,6 +282,7 @@ async def promote_pending_candidates(
     freshness_window_days: int,
     now: datetime | None = None,
     limit: int = 50,
+    auto_promote_clean: bool = False,
 ) -> PromoterRunResult:
     """One promoter tick. Reads up to ``limit`` candidates; evaluates
     each; promotes those that pass all gates.
@@ -245,6 +290,17 @@ async def promote_pending_candidates(
     ``limit`` caps wall-time per tick (and matches
     ``org_settings.skills_factory.inbox_max_pending`` — beyond that,
     the Inbox is the relief valve).
+
+    ``auto_promote_clean`` (opt-in, from
+    ``org_settings.skills_factory.sentinel.auto_promote_clean``) routes
+    a candidate that passed ALL six auto-gates AND carries a clean
+    Sentinel scan straight to ``status='active'`` instead of
+    ``'staged'`` — skipping the HITL Inbox. It NEVER bypasses the
+    gates: a candidate that fails any gate is held exactly as before;
+    the flag only changes the DESTINATION of an already-passing
+    candidate. Candidates with a non-clean scan never reach the
+    promote branch (gate G5 holds them), so they can't be
+    auto-activated regardless of the flag.
     """
     now = now or datetime.now(UTC)
     rows = (
@@ -276,6 +332,7 @@ async def promote_pending_candidates(
 
     attempts: list[PromotionAttempt] = []
     promoted = 0
+    auto_approved = 0
     for row in rows:
         doc = row.data if isinstance(row.data, dict) else {}
         # Use the candidate's OWN fleet for gate evaluation — the tick
@@ -298,8 +355,16 @@ async def promote_pending_candidates(
             freshness_window_days=freshness_window_days,
         )
         if gates.promote:
+            # Destination: ``active`` when the tenant opted into
+            # auto-promotion AND the stamped Sentinel scan is clean;
+            # otherwise the normal HITL ``staged`` path. The candidate
+            # has already cleared all six gates by this point —
+            # ``auto_promote_clean`` only chooses where it lands, never
+            # whether it lands.
+            is_auto = auto_promote_clean and _scan_is_clean(doc)
+            target_status = "active" if is_auto else "staged"
             try:
-                await status_updater(tenant_id, "skills", row.doc_id, "staged")
+                await status_updater(tenant_id, "skills", row.doc_id, target_status)
             except AlreadyTransitionedError:
                 # Concurrent writer (another promoter tick or an
                 # operator action) moved the row. Don't count it as a
@@ -321,7 +386,16 @@ async def promote_pending_candidates(
                 attempts.append(PromotionAttempt(doc_id=row.doc_id, promoted=False, gates=gates))
                 continue
             promoted += 1
-            attempts.append(PromotionAttempt(doc_id=row.doc_id, promoted=True, gates=gates))
+            if is_auto:
+                auto_approved += 1
+            attempts.append(
+                PromotionAttempt(
+                    doc_id=row.doc_id,
+                    promoted=True,
+                    gates=gates,
+                    target_status=target_status,
+                )
+            )
         else:
             attempts.append(PromotionAttempt(doc_id=row.doc_id, promoted=False, gates=gates))
 
@@ -332,11 +406,14 @@ async def promote_pending_candidates(
     # promotions silently rolls back when the session exits.
     await db.commit()
     logger.info(
-        "skill_promoter tick: tenant=%s fleet=%s scanned=%d promoted=%d held=%d",
+        "skill_promoter tick: tenant=%s fleet=%s scanned=%d promoted=%d "
+        "(auto_approved=%d → active, %d → staged) held=%d",
         tenant_id,
         fleet_id,
         len(attempts),
         promoted,
+        auto_approved,
+        promoted - auto_approved,
         held,
     )
     return PromoterRunResult(
@@ -345,6 +422,7 @@ async def promote_pending_candidates(
         scanned=len(attempts),
         promoted=promoted,
         held=held,
+        auto_approved=auto_approved,
         attempts=tuple(attempts),
     )
 

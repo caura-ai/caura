@@ -90,6 +90,20 @@ async def _resolve_forge_config(db: AsyncSession, org_id: str) -> ForgeConfig:
     )
 
 
+async def _resolve_auto_promote_clean(db: AsyncSession, org_id: str) -> bool:
+    """Read ``skills_factory.sentinel.auto_promote_clean`` for a tenant.
+
+    Default False (HITL preserved). ``get_settings_for_display`` is
+    cached (5-min TTL), so the second fetch within a tick — alongside
+    ``_resolve_forge_config`` — is a cache hit, not a second DB
+    round-trip.
+    """
+    settings = await get_settings_for_display(db, org_id)
+    sf = (settings or {}).get("skills_factory") or {}
+    sentinel = sf.get("sentinel") or {}
+    return bool(sentinel.get("auto_promote_clean", False))
+
+
 # ── Injectable factories ──────────────────────────────────────────
 
 
@@ -221,6 +235,7 @@ async def run_forge_cron_tick(
     retries on its normal schedule.
     """
     cfg = await _resolve_forge_config(db, tenant_id)
+    auto_promote_clean = await _resolve_auto_promote_clean(db, tenant_id)
     now = datetime.now(UTC)
     window_end = now
     window_start = now - timedelta(days=cfg.freshness_window_days)
@@ -261,11 +276,17 @@ async def run_forge_cron_tick(
         min_distinct_agents=cfg.min_distinct_agents,
         freshness_window_days=cfg.freshness_window_days,
         now=now,
+        auto_promote_clean=auto_promote_clean,
     )
 
     stats = {
         "candidates_written": forge_result.candidates_written,
         "promoted": promote_result.promoted,
+        # Subset of ``promoted`` that skipped the Inbox and went
+        # straight to ``active`` (opt-in ``auto_promote_clean`` +
+        # clean Sentinel scan). ``promoted - auto_approved`` is the
+        # count that landed in ``staged`` for human review.
+        "auto_approved": promote_result.auto_approved,
         "scanned": promote_result.scanned,
         "held": promote_result.held,
         # Surface the 5 Forge skip buckets so audit rows are

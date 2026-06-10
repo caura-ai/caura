@@ -95,6 +95,50 @@ passes all 6 auto-gates (volume, diversity, freshness, poison, scan,
 hash-binding) lands in `staged` within the same tick — operators
 don't have to wait a second cron firing.
 
+## Auto-approve clean candidates (skip the HITL inbox)
+
+Setting `org_settings.skills_factory.sentinel.auto_promote_clean=true`
+(default **false**) makes a candidate that passes **all 6 auto-gates
+AND carries a clean Sentinel scan** (`scan.state='clean'`,
+`scan.critical=0`) promote straight to `status='active'` —
+**skipping the human Inbox approval step entirely**.
+
+**This is a trust decision.** Flipping it true means the tenant treats
+the Sentinel scanner + the 6 auto-gates as a sufficient gate before a
+skill goes live to agents. Use it only for fleets where:
+
+- the Sentinel rule-set is tuned for the tenant's content, and
+- the cost of a bad skill reaching agents is low / quickly reversible
+  (a human can still Reject an active skill, which poisons its
+  fingerprint and stops re-derivation).
+
+What it does **not** bypass:
+
+- **The 6 auto-gates.** A candidate that fails volume / diversity /
+  freshness / poison / scan / hash-binding is held exactly as before —
+  the flag only changes the destination of an *already-passing*
+  candidate, never whether it passes.
+- **The Sentinel scan.** A candidate with a dirty scan
+  (quarantined, or any critical finding) never reaches the promotion
+  branch — gate G5 holds it in `candidate`, and even if a future gate
+  refactor let it through, the promoter re-asserts scan cleanliness at
+  the auto-approve decision site. Scans in a non-clean state
+  (`quarantined`, `warn`, `dirty`) or with any critical finding are
+  not auto-promoted; they always route to `staged` for human review.
+  A clean scan may carry `warn`-count > 0 and still auto-promote —
+  warns are surfaced on the operator card but do not block activation
+  (matching the inbox approve semantics; see
+  `test_flag_on_but_warn_scan_still_auto_activates`).
+
+Audit visibility: the lifecycle-audit row's `stats.auto_approved`
+counts how many of that tick's promotions skipped the inbox; `promoted
+- auto_approved` is the count that landed in `staged`. The structured
+promoter log line breaks both out per tick.
+
+**To pause:** flip back to `false`. The next tick's clean candidates
+route to `staged` again — already-active skills are unaffected (no
+rollback), and the inbox resumes as the gate.
+
 ## Dedup safety
 
 The shared lifecycle handler uses

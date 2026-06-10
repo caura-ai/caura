@@ -16,6 +16,7 @@ status_updater) are async fakes that the test pins.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -186,7 +187,9 @@ class TestGate3Freshness:
     @pytest.mark.asyncio
     async def test_unparseable_window_end_fails(self):
         r = await evaluate_auto_gates(
-            _candidate_doc(origin={**_candidate_doc()["origin"], "window_end": "not-iso"}),
+            _candidate_doc(
+                origin={**_candidate_doc()["origin"], "window_end": "not-iso"}
+            ),
             tenant_id="t1",
             fleet_id=None,
             now=datetime.now(UTC),
@@ -284,7 +287,9 @@ class TestGate5Scan:
     @pytest.mark.asyncio
     async def test_quarantined_scan_fails(self):
         r = await evaluate_auto_gates(
-            _candidate_doc(scan={"state": "quarantined", "critical": 1, "findings": []}),
+            _candidate_doc(
+                scan={"state": "quarantined", "critical": 1, "findings": []}
+            ),
             tenant_id="t1",
             fleet_id=None,
             now=datetime.now(UTC),
@@ -313,7 +318,9 @@ class TestGate6HashBinding:
         live_data = {"content_hash": "sha256:LIVE"}
         fetcher = await _fake_live_data_returns(live_data)
         r = await evaluate_auto_gates(
-            _candidate_doc(kind="update", target={"target_content_hash": "sha256:LIVE"}),
+            _candidate_doc(
+                kind="update", target={"target_content_hash": "sha256:LIVE"}
+            ),
             tenant_id="t1",
             fleet_id=None,
             now=datetime.now(UTC),
@@ -327,7 +334,9 @@ class TestGate6HashBinding:
         live_data = {"content_hash": "sha256:DIFFERENT"}
         fetcher = await _fake_live_data_returns(live_data)
         r = await evaluate_auto_gates(
-            _candidate_doc(kind="update", target={"target_content_hash": "sha256:STALE"}),
+            _candidate_doc(
+                kind="update", target={"target_content_hash": "sha256:STALE"}
+            ),
             tenant_id="t1",
             fleet_id=None,
             now=datetime.now(UTC),
@@ -581,6 +590,140 @@ class TestPromoter:
         assert result.held == 1
         # both updater calls were attempted (no early exit).
         assert seen == ["forge/a", "forge/b"]
+
+
+# ── auto_promote_clean (skip the HITL inbox) ───────────────────────
+
+
+@pytest.mark.unit
+class TestAutoPromoteClean:
+    @pytest.mark.asyncio
+    async def test_flag_off_routes_clean_candidate_to_staged(self):
+        # Default behavior (flag off): even a clean candidate lands in
+        # ``staged`` for human review.
+        db = _FakeDb([_FakeRow("forge/clean", _candidate_doc())])
+        updates: list[tuple] = []
+
+        async def updater(t, c, d, s):
+            updates.append((t, c, d, s))
+
+        result = await promote_pending_candidates(
+            db,
+            tenant_id="t1",
+            fleet_id=None,
+            poison_checker=_fake_poison_never,
+            live_data_fetcher=await _fake_live_data_returns(None),
+            status_updater=updater,
+            min_cluster_size=3,
+            min_distinct_agents=3,
+            freshness_window_days=14,
+            auto_promote_clean=False,
+        )
+        assert updates == [("t1", "skills", "forge/clean", "staged")]
+        assert result.promoted == 1
+        assert result.auto_approved == 0
+        assert result.attempts[0].target_status == "staged"
+
+    @pytest.mark.asyncio
+    async def test_flag_on_clean_candidate_goes_straight_to_active(self):
+        db = _FakeDb([_FakeRow("forge/clean", _candidate_doc())])
+        updates: list[tuple] = []
+
+        async def updater(t, c, d, s):
+            updates.append((t, c, d, s))
+
+        result = await promote_pending_candidates(
+            db,
+            tenant_id="t1",
+            fleet_id=None,
+            poison_checker=_fake_poison_never,
+            live_data_fetcher=await _fake_live_data_returns(None),
+            status_updater=updater,
+            min_cluster_size=3,
+            min_distinct_agents=3,
+            freshness_window_days=14,
+            auto_promote_clean=True,
+        )
+        # Clean scan + flag on → active, skipping the inbox entirely.
+        assert updates == [("t1", "skills", "forge/clean", "active")]
+        assert result.promoted == 1
+        assert result.auto_approved == 1
+        assert result.attempts[0].target_status == "active"
+
+    @pytest.mark.asyncio
+    async def test_flag_on_but_warn_scan_still_auto_activates(self):
+        # A scan with warn>0 but state='clean' + critical=0 is still a
+        # clean PASS for auto-approve — warns surface on the card but
+        # don't block (matching the inbox approve semantics). The
+        # decisive fields are ``state`` + ``critical``.
+        doc = _candidate_doc(
+            scan={"state": "clean", "critical": 0, "warn": 2, "findings": []}
+        )
+        db = _FakeDb([_FakeRow("forge/warned", doc)])
+        updates: list[tuple] = []
+
+        async def updater(t, c, d, s):
+            updates.append((t, c, d, s))
+
+        result = await promote_pending_candidates(
+            db,
+            tenant_id="t1",
+            fleet_id=None,
+            poison_checker=_fake_poison_never,
+            live_data_fetcher=await _fake_live_data_returns(None),
+            status_updater=updater,
+            min_cluster_size=3,
+            min_distinct_agents=3,
+            freshness_window_days=14,
+            auto_promote_clean=True,
+        )
+        assert updates == [("t1", "skills", "forge/warned", "active")]
+        assert result.auto_approved == 1
+
+    @pytest.mark.asyncio
+    async def test_flag_on_missing_scan_block_falls_back_to_staged(self):
+        # Defensive: a candidate that somehow reaches the promote
+        # branch without a clean ``scan`` block (shouldn't happen —
+        # gate G5 would hold it — but the auto-approve site re-asserts
+        # cleanliness rather than trusting the gate transitively) must
+        # NOT be auto-activated. It falls back to staged.
+        #
+        # We bypass G5 by injecting a doc whose scan is clean enough
+        # for the gate but whose ``critical`` is non-zero — proving the
+        # local re-assertion catches it even if a gate refactor let it
+        # through.
+        doc = _candidate_doc(
+            scan={"state": "clean", "critical": 3, "warn": 0, "findings": []}
+        )
+        db = _FakeDb([_FakeRow("forge/sketchy", doc)])
+        updates: list[tuple] = []
+
+        async def updater(t, c, d, s):
+            updates.append((t, c, d, s))
+
+        # Force the gate to pass so we exercise the auto-approve
+        # re-assertion in isolation (real G5 would hold this; we patch
+        # it to prove the promoter's own check is the safety net).
+        with patch(
+            "core_api.services.skill_promoter.evaluate_auto_gates",
+            new=AsyncMock(return_value=AutoGateResult(promote=True, gates=())),
+        ):
+            result = await promote_pending_candidates(
+                db,
+                tenant_id="t1",
+                fleet_id=None,
+                poison_checker=_fake_poison_never,
+                live_data_fetcher=await _fake_live_data_returns(None),
+                status_updater=updater,
+                min_cluster_size=3,
+                min_distinct_agents=3,
+                freshness_window_days=14,
+                auto_promote_clean=True,
+            )
+        # critical>0 → NOT clean → staged, not active.
+        assert updates == [("t1", "skills", "forge/sketchy", "staged")]
+        assert result.auto_approved == 0
+        assert result.attempts[0].target_status == "staged"
 
 
 # ── rescan_before_apply ────────────────────────────────────────────

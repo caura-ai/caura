@@ -173,6 +173,16 @@ DEFAULT_SETTINGS: dict = {
         # instead of letting it surface in the inbox.
         "sentinel": {
             "fail_on_critical": True,
+            # When True, a Forge candidate that passes ALL six
+            # auto-gates AND carries a clean Sentinel scan
+            # (``scan.state='clean'``, ``critical=0``) is promoted
+            # straight to ``status='active'`` — skipping the HITL
+            # Inbox approve step. Default False keeps the human in
+            # the loop. Flipping this true means the tenant TRUSTS
+            # the Sentinel scanner as the sole gate before a skill
+            # goes live; dirty / quarantined / warn-only candidates
+            # still route to ``staged`` and require human review.
+            "auto_promote_clean": False,
         },
         # Forge resident knobs. Phase 0 publishes the topic + stub
         # handler; Phase 1 lands the real worker that reads these.
@@ -387,6 +397,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "skills_factory.inbox_max_pending": int,
     "skills_factory.rejection_cooloff_days": int,
     "skills_factory.sentinel.fail_on_critical": bool,
+    "skills_factory.sentinel.auto_promote_clean": bool,
     "skills_factory.forge.cron_interval_hours": int,
     "skills_factory.forge.min_cluster_size": int,
     "skills_factory.forge.min_distinct_agents": int,
