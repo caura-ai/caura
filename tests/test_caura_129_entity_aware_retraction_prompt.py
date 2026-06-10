@@ -105,6 +105,75 @@ def test_prompt_frames_resolved_entities_as_authoritative():
     assert "resolved entities" in text
 
 
+def test_prompt_decides_same_subject_mechanically_on_entity_id():
+    """CAURA-133 — the priya silence on dev v2.12.1 showed that the
+    original ``If the subjects are the SAME canonical entity row, treat
+    same_subject as true`` wording wasn't forceful enough: the LLM still
+    fell back to text-NER and used surface qualifiers ("Priya from
+    AcmeCorp" vs "Priya from BetaIndustries") to set same_subject=false.
+
+    The fix anchors the decision on a mechanical entity_id comparison
+    that doesn't leave room for text reasoning. Lock the mechanical
+    framing here so a future prompt edit doesn't quietly weaken it."""
+    from core_api.services.contradiction_detector import (
+        ENTITY_AWARE_CONTRADICTION_PROMPT,
+    )
+
+    text = ENTITY_AWARE_CONTRADICTION_PROMPT.lower()
+    # The instruction must explicitly use the word "mechanically" (or
+    # close synonym) and must reference ``entity_id`` equality as the
+    # decision rule. Both halves of the rule must be present.
+    assert "mechanically" in text, (
+        "prompt must instruct the model to decide same_subject MECHANICALLY"
+    )
+    assert "entity_id == subject" in text or "entity_id ==" in text, (
+        "prompt must show the entity_id-equality decision rule"
+    )
+    assert "entity_id !=" in text, (
+        "prompt must show the entity_id-inequality decision rule (the symmetric "
+        "same_name_distinct_subject case)"
+    )
+
+
+def test_prompt_contains_positive_worked_example_for_priya_silence():
+    """CAURA-133 — the wet-test on dev v2.12.1 (CAURA-132 logs) showed
+    the entity-aware judge returned ``verdict=False`` on 15 of 16
+    candidate-pairs with shared canonical subject. A worked example
+    that mirrors the exact silence shape anchors the model on the
+    correct verdict for the dominant production failure mode."""
+    from core_api.services.contradiction_detector import (
+        ENTITY_AWARE_CONTRADICTION_PROMPT,
+    )
+
+    # The positive example shows: same entity_id on both sides, but
+    # surface text uses different employer qualifiers.
+    assert "AcmeCorp" in ENTITY_AWARE_CONTRADICTION_PROMPT
+    assert "BetaIndustries" in ENTITY_AWARE_CONTRADICTION_PROMPT
+    # And the correct verdict for that shape.
+    assert "same_subject=true" in ENTITY_AWARE_CONTRADICTION_PROMPT
+
+
+def test_prompt_contains_counter_example_for_distinct_entity_same_name():
+    """CAURA-133 — preserve the L3.4 boundary. The counter-example
+    keeps the model from over-flagging when canonical names happen to
+    collide but the resolved entity_ids are distinct. Lock it in so
+    we don't trade priya-silence (false negatives) for a different
+    false-positive class."""
+    from core_api.services.contradiction_detector import (
+        ENTITY_AWARE_CONTRADICTION_PROMPT,
+    )
+
+    # Distinct entity_ids in the counter-example (any two distinct
+    # tokens work for the lock-in; we use the literal IDs from the
+    # prompt's worked-example block).
+    assert "XYZ789" in ENTITY_AWARE_CONTRADICTION_PROMPT, (
+        "counter-example (distinct entity_id, same canonical name) must be present"
+    )
+    assert "ABC123" in ENTITY_AWARE_CONTRADICTION_PROMPT
+    # And the correct verdict for that shape — same_subject=false.
+    assert "same_subject=false" in ENTITY_AWARE_CONTRADICTION_PROMPT
+
+
 # ---------------------------------------------------------------------------
 # _format_entity_context — rendering shape
 # ---------------------------------------------------------------------------
@@ -115,12 +184,149 @@ def test_format_entity_context_renders_bullets():
 
     out = _format_entity_context(
         [
-            {"name": "Project Helios", "entity_type": "project", "role": "subject"},
-            {"name": "2027-05-01", "entity_type": "date", "role": "object"},
+            {
+                "name": "Project Helios",
+                "entity_type": "project",
+                "role": "subject",
+                "entity_id": "ent-helios",
+            },
+            {
+                "name": "2027-05-01",
+                "entity_type": "date",
+                "role": "object",
+                "entity_id": "ent-date-1",
+            },
         ]
     )
-    assert '- "Project Helios" (type: project, role: subject)' in out
-    assert '- "2027-05-01" (type: date, role: object)' in out
+    # CAURA-133 — entity_id is now rendered into each bullet so the
+    # mechanical entity_id-equality check the prompt asks for has the
+    # data it needs.
+    assert (
+        '- "Project Helios" (type: project, role: subject, entity_id: ent-helios)'
+        in out
+    )
+    assert '- "2027-05-01" (type: date, role: object, entity_id: ent-date-1)' in out
+
+
+def test_format_entity_context_renders_entity_id_for_priya_repro():
+    """CAURA-133 — lock in the priya-shape rendering. Both sides must
+    carry the same ``entity_id`` in the rendered text so the LLM sees
+    the equality the prompt instructs it to compare."""
+    from core_api.services.contradiction_detector import _format_entity_context
+
+    side_a = _format_entity_context(
+        [
+            {
+                "name": "Priya",
+                "entity_type": "person",
+                "role": "subject",
+                "entity_id": "ABC123",
+            }
+        ]
+    )
+    side_b = _format_entity_context(
+        [
+            {
+                "name": "Priya",
+                "entity_type": "person",
+                "role": "subject",
+                "entity_id": "ABC123",
+            }
+        ]
+    )
+    assert "entity_id: ABC123" in side_a
+    assert "entity_id: ABC123" in side_b
+
+
+def test_format_entity_context_renders_per_row_none_sentinel_when_entity_id_missing():
+    """Defensive — production data may have a subject-role link with
+    no ``entity_id`` (e.g., legacy rows). Render a per-row sentinel
+    ``<none-{process_uuid}-{i}>`` shape:
+
+      * The process-scoped ``_NONE_ID_PREFIX`` ensures the sentinel
+        can never collide with a real entity_id (real ids are UUIDs
+        written by the entity-extraction worker).
+      * The per-row ``-{i}>`` suffix ensures two missing rows in the
+        SAME call never render the same string.
+
+    Cross-side disambiguation (both ``_format_entity_context`` calls
+    in a single judge invocation produce ``<none-{prefix}-0>``) is
+    handled by the prompt's same_subject step rule 3 — exercised by
+    a separate test below."""
+    from core_api.services.contradiction_detector import (
+        _NONE_ID_PREFIX,
+        _format_entity_context,
+    )
+
+    expected_prefix = _NONE_ID_PREFIX  # e.g. "<none-a1b2c3d4"
+
+    # Single missing entity_id -> index 0 sentinel.
+    out = _format_entity_context(
+        [{"name": "Lost Soul", "entity_type": "person", "role": "subject"}]
+    )
+    assert f"entity_id: {expected_prefix}-0>" in out, (
+        f"expected sentinel ending in '-0>' with prefix {expected_prefix!r}; got: {out}"
+    )
+
+    # Two missing-on-same-side entity_ids -> distinct sentinels (the
+    # within-side disambiguation layer).
+    out_two = _format_entity_context(
+        [
+            {"name": "Lost Soul", "entity_type": "person", "role": "subject"},
+            {"name": "Also Lost", "entity_type": "person", "role": "object"},
+        ]
+    )
+    assert f"entity_id: {expected_prefix}-0>" in out_two
+    assert f"entity_id: {expected_prefix}-1>" in out_two
+
+
+def test_none_id_prefix_is_process_scoped_and_distinctive():
+    """The ``_NONE_ID_PREFIX`` constant is generated once per process
+    at import time. It starts with ``<none-`` and includes a random
+    hex segment so the sentinel can never collide with a real
+    entity_id (which is always a canonical UUID written by the
+    entity-extraction worker — no ``<``, no ``none-`` literal text).
+    """
+    from core_api.services.contradiction_detector import _NONE_ID_PREFIX
+
+    assert _NONE_ID_PREFIX.startswith("<none-"), (
+        f"sentinel prefix must start with '<none-' to match the prompt's "
+        f"rule 3 (case-insensitive substring check); got {_NONE_ID_PREFIX!r}"
+    )
+    # Eight hex chars after the prefix marker — enough entropy that
+    # the literal text could not have been written into a real row.
+    suffix = _NONE_ID_PREFIX[len("<none-") :]
+    assert len(suffix) == 8, f"expected 8-hex random segment; got {suffix!r}"
+    assert all(c in "0123456789abcdef" for c in suffix), (
+        f"random segment must be lowercase hex; got {suffix!r}"
+    )
+
+
+def test_prompt_treats_none_prefixed_entity_id_as_same_subject_false():
+    """The mechanical entity_id-equality rule (rule 1) would say two
+    degenerate rows (both rendering as ``<none-{prefix}-0>`` because
+    both ``_format_entity_context`` calls in one judge invocation
+    share the process-scoped prefix and both first-index missing rows)
+    are the same subject — exactly wrong. Rule 3 of the prompt's
+    same_subject step overrides rule 1 for any ``<none-``-prefixed
+    value, treating it as same_subject=false. Lock the rule in so a
+    future prompt edit can't silently drop it.
+
+    NB: the prefix in the prompt is ``<none-`` (with hyphen) — tighter
+    than just ``<none`` so a hypothetical real entity literally named
+    ``<none>`` doesn't accidentally trigger the override."""
+    from core_api.services.contradiction_detector import (
+        ENTITY_AWARE_CONTRADICTION_PROMPT,
+    )
+
+    text = ENTITY_AWARE_CONTRADICTION_PROMPT.lower()
+    assert "<none-" in text, (
+        "prompt must reference the <none-prefixed sentinel (with hyphen) "
+        "matching the format produced by _format_entity_context"
+    )
+    assert "no stable identifier" in text or "do not infer identity" in text, (
+        "prompt must explain WHY <none>-id rows aren't equal under the mechanical rule"
+    )
 
 
 def test_format_entity_context_empty_returns_sentinel():
@@ -396,8 +602,22 @@ async def test_judge_renders_entities_into_prompt_payload():
         verdict, _conf = await _llm_entity_aware_contradiction_check(
             "Project Helios has release date 2027-05-01.",
             "Project Helios has release date 2028-10-15.",
-            [{"name": "Project Helios", "entity_type": "project", "role": "subject"}],
-            [{"name": "Project Helios", "entity_type": "project", "role": "subject"}],
+            [
+                {
+                    "name": "Project Helios",
+                    "entity_type": "project",
+                    "role": "subject",
+                    "entity_id": "ent-helios",
+                }
+            ],
+            [
+                {
+                    "name": "Project Helios",
+                    "entity_type": "project",
+                    "role": "subject",
+                    "entity_id": "ent-helios",
+                }
+            ],
         )
 
     assert verdict is True
@@ -406,8 +626,10 @@ async def test_judge_renders_entities_into_prompt_payload():
     # Both entity blocks must be present and labelled.
     assert "RESOLVED ENTITIES for Statement A" in prompt
     assert "RESOLVED ENTITIES for Statement B" in prompt
-    # The bulleted format from _format_entity_context.
-    assert "(type: project, role: subject)" in prompt
+    # The bulleted format from _format_entity_context — CAURA-133 added
+    # ``entity_id`` to the rendered bullet (without it, the prompt's
+    # mechanical comparison instruction has no data to read).
+    assert "(type: project, role: subject, entity_id: ent-helios)" in prompt
 
 
 @pytest.mark.asyncio

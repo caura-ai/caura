@@ -73,6 +73,15 @@ def main() -> int:
         help="seconds to wait for entity extraction + Path C",
     )
     ap.add_argument("--write-mode", default="fast", choices=("fast", "strong"))
+    ap.add_argument(
+        "--person",
+        default=None,
+        help=(
+            "Override the subject given-name (default: 'Priya' for backward "
+            "compatibility with the original silence repro). Pass a comma-"
+            "separated list to randomise across trials, e.g. 'Dana,Ravi,Elif'."
+        ),
+    )
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -83,7 +92,18 @@ def main() -> int:
     # Generate two distinguishable contexts that share a common given
     # name. Use a uniqued suffix to avoid polluting prior runs.
     suffix = "".join(random.choices(string.ascii_lowercase, k=4))
-    person_name = "Priya"
+    if args.person:
+        # Randomise across the provided pool so a 5-trial loop exercises
+        # multiple distinct canonical-name entities, not just one. Avoids
+        # over-fitting verification to a single accumulated entity row
+        # (cf. the priya entity ``b5aca002`` that accumulated 10+ links
+        # across the CAURA-128 → 132 wet-test session).
+        pool = [p.strip() for p in args.person.split(",") if p.strip()]
+        if not pool:
+            ap.error("--person must contain at least one non-blank name")
+        person_name = random.choice(pool)
+    else:
+        person_name = "Priya"
     company_a = f"AcmeCorp-{suffix}"
     company_b = f"BetaIndustries-{suffix}"
     agent = f"repro-collision-{uuid.uuid4().hex[:6]}"
