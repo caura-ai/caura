@@ -36,7 +36,7 @@ Agents write plain text. MemClaw turns it into searchable, governed, self-improv
 **Built for fleets, not single agents.** Public agent-memory benchmarks (LoCoMo, LongMemEval) measure one agent, one user, one long conversation — the single-chatbot shape. The deployment shape we see in production is the opposite: dozens or thousands of agents working on behalf of a company, sharing what they learn under governance. MemClaw is architected around that shape from day one — scoped memory, cross-agent outcome propagation, fleet-wide trust tiers — and competes on the axes that compound with agent count: latency, token efficiency, and governance. See [Performance](#performance) for the numbers, or read the [benchmarks write-up](https://memclaw.net/blog/memclaw-benchmarks).
 
 > **In production at eToro (NASDAQ: ETOR):** 300+ AI agents on one governed
-> memory — 21,500+ memories, 1,372 shared skills, 23 ms p50 search.
+> memory — 26,500+ memories, 1,372 shared skills, 23 ms p50 search.
 > [Architecture deep-dive →](https://memclaw.net/blog/etoro-company-brain/)
 
 <p align="center">
@@ -1032,7 +1032,7 @@ The full engine — storage, 12 MCP tools, plugin, audit trail — is Apache
 governance for teams that don't want to operate infrastructure.
 
 **Who runs MemClaw in production?**
-eToro (NASDAQ: ETOR) runs 300+ agents on MemClaw — 21,500+ memories, 1,372
+eToro (NASDAQ: ETOR) runs 300+ agents on MemClaw — 26,500+ memories, 1,372
 shared skills, 23 ms p50 search.
 [Case study →](https://memclaw.net/blog/etoro-company-brain/)
 
