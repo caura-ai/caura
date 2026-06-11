@@ -224,8 +224,7 @@ async def get_entity(
             dict.fromkeys(
                 str(rel["evidence_memory_id"])
                 for rel in relations_raw
-                if rel.get("evidence_memory_id")
-                and str(rel["evidence_memory_id"]) not in authorized_ids
+                if rel.get("evidence_memory_id") and str(rel["evidence_memory_id"]) not in authorized_ids
             )
         )
         evidence_rows: dict[str, dict | None] = {}
