@@ -245,14 +245,28 @@ describe("drift checks across tool surface artefacts", () => {
   describe("prompt-section.ts (per-turn system-prompt fragment)", () => {
     const tools = memclawPromptSectionText(new Set(MEMCLAW_TOOLS));
 
-    test("includes header, identity, and pointer to SKILL.md", () => {
+    test("includes header, identity, and pointer to the memclaw skill (by name)", () => {
       assert.ok(tools.includes("## MemClaw Memory"), "missing header");
       assert.ok(tools.includes("`agent_id`"), "missing agent_id mention");
       assert.ok(tools.includes("never fabricate") || tools.includes("Never fabricate"),
         "missing identity 'never fabricate' clause");
+      // CAURA-000: the per-turn fragment must point at the **memclaw**
+      // skill by NAME, not a filesystem path — a path pointer made cron
+      // agents run OpenClaw's `search` tool to find a file that isn't in
+      // their workspace (the skill is manifest-discovered at plugin-root),
+      // burning ~3 min and failing the turn.
+      const flat = tools.replace(/\s+/g, " ");
       assert.ok(
-        tools.includes("skills/memclaw/SKILL.md"),
-        "must reference skills/memclaw/SKILL.md by path",
+        !flat.includes("skills/memclaw/SKILL.md"),
+        "must NOT reference the skill by filesystem path (CAURA-000)",
+      );
+      assert.ok(
+        /\*\*memclaw\*\* skill/i.test(flat),
+        "must reference the **memclaw** skill by name",
+      );
+      assert.ok(
+        /do NOT search the filesystem/i.test(flat),
+        "must tell the agent not to filesystem-search for the skill",
       );
     });
 
