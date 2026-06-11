@@ -53,8 +53,8 @@ LLM_FALLBACK_MODEL_OPENAI = os.environ.get("LLM_FALLBACK_MODEL_OPENAI", "gpt-5.4
 # enough that a single hung upstream call eats the whole enrichment
 # budget silently. 25s gives the provider room to respond while still
 # leaving budget for one retry under the inline ceiling.
-def _read_openai_request_timeout_seconds() -> float:
-    """Parse ``OPENAI_REQUEST_TIMEOUT_SECONDS`` defensively.
+def _read_float_env(name: str, default: float | None) -> float | None:
+    """Parse a float env var defensively.
 
     Bare ``float(os.environ.get(...))`` would raise ``ValueError`` at
     module import on a misconfigured value (e.g. ``"25s"`` instead of
@@ -62,7 +62,9 @@ def _read_openai_request_timeout_seconds() -> float:
     structured-logging is wired. Catch it here, write a warning to
     stderr, and fall back to the documented default.
     """
-    raw = os.environ.get("OPENAI_REQUEST_TIMEOUT_SECONDS", "25.0")
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
     try:
         return float(raw)
     except (TypeError, ValueError):
@@ -72,14 +74,13 @@ def _read_openai_request_timeout_seconds() -> float:
         import sys
 
         print(
-            f"WARN: OPENAI_REQUEST_TIMEOUT_SECONDS={raw!r} is not a "
-            f"valid float; falling back to 25.0",
+            f"WARN: {name}={raw!r} is not a valid float; falling back to {default}",
             file=sys.stderr,
         )
-        return 25.0
+        return default
 
 
-OPENAI_REQUEST_TIMEOUT_SECONDS = _read_openai_request_timeout_seconds()
+OPENAI_REQUEST_TIMEOUT_SECONDS = _read_float_env("OPENAI_REQUEST_TIMEOUT_SECONDS", 25.0)
 
 
 # ── httpx pool sizing for OpenAI-compatible providers ────────────────
@@ -102,4 +103,31 @@ OPENAI_HTTPX_MAX_CONNECTIONS = read_int_env("OPENAI_HTTPX_MAX_CONNECTIONS", 200)
 OPENAI_HTTPX_MAX_KEEPALIVE_CONNECTIONS = clamp_keepalive(
     OPENAI_HTTPX_MAX_CONNECTIONS,
     read_int_env("OPENAI_HTTPX_MAX_KEEPALIVE_CONNECTIONS", 50),
+)
+
+
+# ── httpx per-phase timeouts for OpenAI-compatible providers ─────────
+#
+# Passing a bare float to ``AsyncOpenAI(timeout=...)`` keeps httpx's
+# default 5 s connect/pool phases. On Cloud Run with a VPC connector in
+# ``all-traffic`` egress mode, EVERY outbound call (including public
+# LLM APIs) rides the connector + Cloud NAT, and a cold connection —
+# first call after idle, keepalive pool drained, NAT state churn —
+# intermittently exceeds 5 s. Observed in prod as a steady trickle of
+# ``httpcore.ConnectTimeout`` from the enrichment / entity-extraction
+# handlers ("pubsub handler raised; nacking for redelivery" +
+# "Entity extraction failed" — the latter permanently skips entity
+# links for that memory). The read phase stays governed by
+# ``OPENAI_REQUEST_TIMEOUT_SECONDS``; only connect/pool get headroom.
+OPENAI_HTTPX_CONNECT_TIMEOUT_SECONDS = _read_float_env(
+    "OPENAI_HTTPX_CONNECT_TIMEOUT_SECONDS", 15.0
+)
+# None ⇒ the pool phase tracks the per-instance request budget
+# (``request_timeout_seconds``), keeping exact parity with the
+# bare-float behaviour this replaced for EVERY configuration — a
+# deployment running OPENAI_REQUEST_TIMEOUT_SECONDS=60 previously got a
+# 60 s pool wait and still does. Set the env var only to decouple them
+# (e.g. fail-fast under pool pressure).
+OPENAI_HTTPX_POOL_TIMEOUT_SECONDS: float | None = _read_float_env(
+    "OPENAI_HTTPX_POOL_TIMEOUT_SECONDS", None
 )

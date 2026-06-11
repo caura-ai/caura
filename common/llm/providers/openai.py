@@ -24,8 +24,10 @@ import openai
 
 from common.llm.constants import (
     OPENAI_CHAT_BASE_URL,
+    OPENAI_HTTPX_CONNECT_TIMEOUT_SECONDS,
     OPENAI_HTTPX_MAX_CONNECTIONS,
     OPENAI_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
+    OPENAI_HTTPX_POOL_TIMEOUT_SECONDS,
     OPENAI_REQUEST_TIMEOUT_SECONDS,
 )
 from common.llm.providers._shape_error import ProviderResponseShapeError
@@ -71,6 +73,17 @@ class OpenAILLMProvider:
         # default and a single hung upstream call would eat the whole
         # enrichment budget silently.
         #
+        # Per-PHASE timeout rather than a bare float: a float keeps
+        # httpx's default 5 s connect/pool phases, and on Cloud Run with
+        # a VPC connector in ``all-traffic`` egress mode every outbound
+        # call rides the connector + Cloud NAT — a cold connection
+        # (first call after idle, drained keepalive pool, NAT state
+        # churn) intermittently exceeds 5 s. Observed in prod as a
+        # steady trickle of ``httpcore.ConnectTimeout`` from the
+        # enrichment / entity-extraction handlers. ``read`` keeps the
+        # full request budget (the provider's thinking time); only
+        # connect/pool get cold-path headroom.
+        #
         # Explicit ``http_client`` with ``httpx.Limits`` sized for our
         # bulk-write fan-out (CAURA-627). The SDK's default httpx pool
         # (100 max / 20 keepalive) saturates under storm load — 16
@@ -82,7 +95,23 @@ class OpenAILLMProvider:
         self._client = openai.AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
-            timeout=request_timeout_seconds,
+            timeout=httpx.Timeout(
+                connect=OPENAI_HTTPX_CONNECT_TIMEOUT_SECONDS,
+                # read AND write keep the full request budget — the bare
+                # float this replaces set every phase to it, and large
+                # prompt payloads can legitimately take >15 s to upload
+                # on a slow uplink.
+                read=request_timeout_seconds,
+                write=request_timeout_seconds,
+                # Pool tracks the request budget unless explicitly
+                # overridden — ``is not None`` (not ``or``) so an
+                # explicit 0.0 override means "don't wait", not "unset".
+                pool=(
+                    OPENAI_HTTPX_POOL_TIMEOUT_SECONDS
+                    if OPENAI_HTTPX_POOL_TIMEOUT_SECONDS is not None
+                    else request_timeout_seconds
+                ),
+            ),
             http_client=httpx.AsyncClient(
                 limits=httpx.Limits(
                     max_connections=OPENAI_HTTPX_MAX_CONNECTIONS,
