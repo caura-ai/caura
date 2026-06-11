@@ -63,7 +63,11 @@ function installMockFetch(): void {
   originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL | Request) => {
     const url = String(input);
-    if (url.endsWith("/api/v1/documents/query")) {
+    // The reconciler now pulls from the server-gated install surface,
+    // which applies the active-only + opt-in filter server-side. The
+    // mock returns whatever ``mockCatalog`` holds — i.e. only what the
+    // server would have already deemed installable.
+    if (url.endsWith("/api/v1/skills/installable")) {
       return new Response(JSON.stringify({ documents: mockCatalog }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -286,6 +290,42 @@ describe("reconcileSkills", () => {
     await reconcileSkills();
 
     assert.equal(readSkill("skill-a"), withSynthFrontmatter("skill-a", "alpha", "# canonical from catalog\n"));
+  });
+
+  test("de-activation: a skill withheld by the server (active→rejected/quarantined) is removed from disk next tick", async () => {
+    // Tick 1: skill is active → server returns it → lands on disk.
+    plantOnDisk("memclaw");
+    mockCatalog = [
+      { doc_id: "deploy-runbook", data: { name: "deploy-runbook", description: "deploy steps", content: "# deploy\n" } },
+    ];
+    const first = await reconcileSkills();
+    assert.deepEqual(first.added, ["deploy-runbook"]);
+    assert.ok(listSkillDirs().includes("deploy-runbook"));
+
+    // Tick 2: the skill flipped to a non-active status, so the install
+    // surface stops returning it. The reconciler must remove it from
+    // disk — keeping push (disk) in sync with the active-only gate.
+    mockCatalog = [];
+    const second = await reconcileSkills();
+    assert.deepEqual(second.removed, ["deploy-runbook"]);
+    assert.deepEqual(listSkillDirs(), ["memclaw"]); // gone; bundled survives
+  });
+
+  test("server fail-closed (503) → reconciler fails safe: disk preserved, nothing pushed", async () => {
+    // The install surface raises 503 during a settings outage (fail
+    // closed). apiCall throws on non-2xx, so the reconciler catches it
+    // and leaves disk untouched — no non-active skill can be pushed.
+    plantOnDisk("memclaw");
+    plantOnDisk("skill-a", "# from a healthy prior tick\n");
+    globalThis.fetch = (async () =>
+      new Response("skill lifecycle gate unavailable", { status: 503 })) as typeof fetch;
+
+    const summary = await reconcileSkills();
+
+    assert.deepEqual(listSkillDirs(), ["memclaw", "skill-a"]); // untouched
+    assert.equal(summary.catalogCount, 0);
+    assert.deepEqual(summary.added, []);
+    assert.deepEqual(summary.removed, []);
   });
 });
 

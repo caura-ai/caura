@@ -14,14 +14,24 @@
  * - **Self-healing**: missed heartbeats catch up on the next tick.
  *   No queue, no "lost install command" failure mode.
  * - **Idempotent**: re-running is a no-op when disk already matches.
- * - **Pull-everything-visible** (locked in 2026-05-05): tenant + fleet
- *   visibility scoping happens at the catalog query layer, so the
- *   reconciler doesn't need its own opt-in flag. Skills the agent's
- *   fleet can see → on disk; can't see → not on disk.
+ * - **Server-gated catalog**: the reconciler pulls from
+ *   ``/skills/installable``, which applies ALL policy server-side —
+ *   tenant + fleet visibility AND (for Skill-Factory-opted-in tenants)
+ *   the active-only lifecycle gate. So the reconciler carries no opt-in
+ *   flag and no status filter: skills the server returns → on disk;
+ *   anything it withholds (a sibling fleet's skill, or a candidate /
+ *   staged / quarantined skill on an opted-in tenant) → never on disk.
+ *   This is the SAME gate the MCP pull surface enforces (PR #315), so
+ *   push (this reconciler) and pull (memclaw_doc) agree on what an agent
+ *   may see. A skill flipping active→rejected/quarantined drops out of
+ *   the catalog and is removed from disk on the next tick (step 4).
  *
- * Failure mode: fail open. If the catalog query throws (network,
- * server, schema), the reconciler logs and returns; existing on-disk
- * skills are preserved untouched. The heartbeat loop continues.
+ * Failure mode: fail open. If the catalog query throws or the server
+ * returns non-2xx (network, server, schema, or the fail-closed 503 the
+ * install surface raises during a settings outage), the reconciler logs
+ * and returns; existing on-disk skills are preserved untouched and
+ * nothing new is written — so an outage can never push a non-active
+ * skill to disk. The heartbeat loop continues.
  */
 
 import {
@@ -75,18 +85,20 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
     return summary;
   }
 
-  // 1. Fetch the catalog. Visibility filtering (fleet_id) happens
-  //    server-side; we just pass our local fleet binding through.
+  // 1. Fetch the installable catalog. ALL policy — tenant + fleet
+  //    visibility AND the active-only Skill-Factory gate (for opted-in
+  //    tenants) — is applied server-side by ``/skills/installable``; we
+  //    just pass our tenant + fleet binding through. The endpoint
+  //    cannot be widened by the client (no caller ``where``), so a node
+  //    can never pull a non-active skill.
   let catalog: CatalogDoc[];
   try {
     const resp = (await apiCall(
       "POST",
-      "/documents/query",
+      "/skills/installable",
       {
         tenant_id: MEMCLAW_TENANT_ID,
-        collection: "skills",
         fleet_id: MEMCLAW_FLEET_ID || undefined,
-        where: {},
         limit: 1000,
       },
     )) as { documents?: CatalogDoc[] } | CatalogDoc[];

@@ -107,6 +107,19 @@ class DocQueryRequest(BaseModel):
     offset: int = Field(default=0, ge=0)
 
 
+class InstallableSkillsRequest(BaseModel):
+    """Request for the agent-harness install surface (`/skills/installable`).
+
+    Deliberately narrower than ``DocQueryRequest``: the collection is
+    fixed to ``skills`` and the ``where`` filter is server-decided (the
+    caller cannot widen it), so a harness can't ask for non-active skills.
+    """
+
+    tenant_id: str
+    fleet_id: str | None = None
+    limit: int = Field(default=1000, ge=1, le=1000)
+
+
 class DocSearchRequest(BaseModel):
     """Vector search over indexed documents.
 
@@ -422,6 +435,71 @@ async def query_documents(
         }
     )
 
+    return [_dict_to_out(d) for d in docs]
+
+
+@router.post("/skills/installable")
+async def installable_skills(
+    body: InstallableSkillsRequest,
+    auth: AuthContext = Depends(get_auth_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Skills an agent harness should INSTALL onto a node's disk.
+
+    The push-to-disk install path (the OpenClaw plugin reconciler)
+    consumes this instead of a raw ``/documents/query`` so the active-only
+    + opt-in gate is enforced server-side — the SAME contract the MCP pull
+    surface applies (PR #315). One enforcement point for both delivery
+    modes; the client carries no policy and cannot widen the filter.
+
+    - **Opted-in** tenant (``skills_factory.enabled``): only
+      ``status='active'`` skills are returned — ``candidate`` / ``staged``
+      / ``quarantined`` never reach a node's disk or the agent's palette.
+    - **Not opted in**: every visible skill is returned, byte-identical to
+      the legacy reconcile (``where={}``) — preserves the merge-day no-op
+      invariant (a non-opted-in tenant's legacy skills may lack a
+      ``status`` field; forcing ``status='active'`` would wrongly drop
+      them, so we don't filter at all in this case).
+    - **Fail CLOSED**: a settings-lookup failure raises 503. The
+      reconciler fails *safe* on a non-2xx (it preserves on-disk skills
+      and adds nothing), so an outage can never push a non-active skill
+      to disk.
+
+    Fleet/tenant visibility scoping is identical to ``/documents/query``.
+    """
+    auth.enforce_readable_tenant(body.tenant_id)
+
+    # Opt-in gate, server-owned and fail-closed. Mirrors the upsert
+    # path's cache-first ``get_raw_settings`` (returns just the tenant's
+    # override dict — cheap, aggressively cached).
+    try:
+        raw_settings = await get_raw_settings(db, body.tenant_id)
+    except Exception:
+        logger.exception(
+            "skills_factory flag lookup failed for %s; cannot gate installable skills",
+            body.tenant_id,
+        )
+        raise HTTPException(status_code=503, detail="skill lifecycle gate unavailable") from None
+
+    sf_enabled = (
+        isinstance(raw_settings, dict)
+        and isinstance(raw_settings.get("skills_factory"), dict)
+        and raw_settings["skills_factory"].get("enabled") is True
+    )
+
+    # Opted-in → active-only; otherwise no status filter (legacy no-op).
+    where = {"status": "active"} if sf_enabled else {}
+
+    sc = get_storage_client()
+    docs = await sc.query_documents(
+        {
+            "tenant_id": body.tenant_id,
+            "collection": SKILLS_COLLECTION,
+            "fleet_id": body.fleet_id,
+            "where": where,
+            "limit": body.limit,
+        }
+    )
     return [_dict_to_out(d) for d in docs]
 
 

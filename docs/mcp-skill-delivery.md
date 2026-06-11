@@ -122,12 +122,40 @@ So the tiers are:
 
 - **MCP-direct (this PR)** — universal, zero-integration, *probabilistic*.
   Works on any MCP-capable harness; the agent has to choose to look.
-- **Per-harness install (future)** — a reliability layer for harnesses
-  we integrate deeply (e.g. writing `~/.claude/skills/<slug>/SKILL.md`).
-  Guarantees presence; requires a harness-specific adapter.
+- **Per-harness install** — a reliability layer for harnesses we
+  integrate deeply (writing `<harness>/skills/<slug>/SKILL.md` so the
+  skill is present before the model thinks). Guarantees presence;
+  requires a harness-specific adapter. **OpenClaw is the first such
+  harness** (the MemClaw plugin reconciles the catalog to disk every
+  heartbeat).
 
 They're complementary: MCP-direct is the floor that works everywhere;
 install is the guarantee for chosen harnesses.
+
+### The push path is gated by the same rule
+
+Per-harness install is a **push** (catalog → node disk → native loader),
+the mirror of MCP's pull. It must enforce the *same* active-only + opt-in
+gate, or an opted-in tenant's `candidate` / `staged` / `quarantined`
+skills would land on every node's disk even though MCP hides them.
+
+So the OpenClaw plugin reconciler pulls from a dedicated server surface,
+**`POST /api/v1/skills/installable`**, instead of a raw
+`/documents/query`:
+
+- opted-in tenant → server returns only `status='active'` skills;
+- non-opted-in tenant → every visible skill (byte-identical to the
+  legacy reconcile — preserves the merge-day no-op invariant);
+- settings outage → `503` (fail closed); the reconciler fails *safe* on
+  a non-2xx (preserves on-disk skills, writes nothing), so an outage
+  never pushes a non-active skill to disk.
+
+The policy lives entirely server-side — the plugin sends no `status`
+filter and carries no opt-in flag, so it can't be made to pull a
+non-active skill. A skill flipping `active → rejected/quarantined` drops
+out of `installable` and the reconciler removes it from disk on the next
+tick. Push (OpenClaw) and pull (`memclaw_doc`) now agree on exactly what
+an agent may see.
 
 ## What makes a skill findable: the summary
 
@@ -139,6 +167,8 @@ read like a trigger ("Use when deploying to eu-west…"), not a label
 
 ## Related
 
-- `core-api/src/core_api/mcp_server.py` — `memclaw_doc` handler (the filter)
+- `core-api/src/core_api/mcp_server.py` — `memclaw_doc` handler (the pull filter)
+- `core-api/src/core_api/routes/documents.py` — `POST /skills/installable` (the push filter)
+- `plugin/src/reconcile-skills.ts` — the OpenClaw reconciler that consumes it
 - `core-api/src/core_api/repositories/document_repository.py` — `search(status=…)` mechanism
 - `docs/operator-forge-cron.md` — how skills reach `active` autonomously
