@@ -329,7 +329,7 @@ def configure_logging(
 # ``Config.configure_logging()`` runs at server start; if our
 # ``configure_logging()`` is called at module import (the typical app.py
 # path), the uvicorn loggers may not yet have their handlers when we
-# iterate. The function logs a debug line in that case so the caller can
+# iterate. The function logs a WARNING in that case so the caller can
 # move the call into an ASGI lifespan startup handler if production logs
 # show un-rerouted output.
 _THIRD_PARTY_LOGGERS_TO_REROUTE: tuple[str, ...] = (
@@ -376,13 +376,16 @@ def _route_third_party_to_root() -> None:
     """
     for name in _THIRD_PARTY_LOGGERS_TO_REROUTE:
         lg = logging.getLogger(name)
-        # Skip iff the snapshot says we already did the work (had handlers
-        # captured). Lets a re-call (e.g. from an ASGI lifespan startup
-        # after uvicorn initialised) idempotently no-op.
-        already_rerouted = name in _third_party_logger_original_state and bool(
-            _third_party_logger_original_state[name][0]
-        )
-        if already_rerouted:
+        # Skip iff the snapshot has this logger: the snapshot is stored
+        # only when rerouting actually ran (the uninitialised early-exit
+        # below continues before it), so presence in the dict is the
+        # complete "work was done" signal. Keying on captured handlers
+        # instead would mis-handle a logger rerouted from
+        # ``propagate=False, no-handlers`` (snapshot ``([], False, lvl)``)
+        # — a re-call (e.g. from an ASGI lifespan startup after uvicorn
+        # initialised) would fall through to the early-exit branch and
+        # emit a spurious WARNING about rerouting being a no-op.
+        if name in _third_party_logger_original_state:
             continue
         # Library may not have initialised this logger yet — there's nothing
         # to reroute right now. Don't snapshot the empty state (would freeze
