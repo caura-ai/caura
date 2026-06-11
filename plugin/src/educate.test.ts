@@ -1193,11 +1193,18 @@ describe("buildToolsMd", () => {
     assert.ok(!tools.includes("### Error codes"), "error codes must live in SKILL.md, not TOOLS.md");
   });
 
-  test("points readers to SKILL.md for the deep dive", () => {
+  test("points readers to the memclaw skill (by name, not by path) for the deep dive", () => {
+    // CAURA-000: must NOT use a filesystem path — see the AGENTS.md
+    // test above for why (cron `search`-tool storm on a missing file).
     const tools = buildToolsMd();
+    const flat = tools.replace(/\s+/g, " ");
     assert.ok(
-      tools.includes("skills/memclaw/SKILL.md"),
-      "TOOLS.md must point readers at SKILL.md for per-tool signatures and error codes",
+      !flat.includes("skills/memclaw/SKILL.md"),
+      "TOOLS.md must NOT reference the skill by filesystem path",
+    );
+    assert.ok(
+      /\*\*memclaw\*\* skill/i.test(flat),
+      "TOOLS.md must point readers at the **memclaw** skill by name",
     );
   });
 
@@ -1357,19 +1364,41 @@ describe("buildAgentsMd", () => {
     assert.ok(skill.includes("NEVER silently drop"));
   });
 
-  test("nudges the model to read SKILL.md before the first MemClaw call", () => {
-    // The tool-reference deep dive lives in SKILL.md (loaded via `read` on
-    // demand). AGENTS.md — injected as bootstrap every turn — must direct
-    // the model to load SKILL.md before its first MemClaw tool call in a
-    // session so the signatures, decision guidance, and error codes are
-    // in context when needed.
+  test("nudges the model to open the memclaw skill before the first MemClaw call", () => {
+    // The tool-reference deep dive lives in the memclaw skill, loaded
+    // automatically by the runtime from the plugin manifest
+    // (openclaw.plugin.json:skills). AGENTS.md — injected as bootstrap
+    // every turn — must direct the model to open that skill before its
+    // first MemClaw tool call so the signatures, decision guidance, and
+    // error codes are in context when needed.
+    //
+    // CAURA-000: AGENTS.md must NOT reference the skill by a filesystem
+    // path (e.g. `skills/memclaw/SKILL.md`). The skill is no longer
+    // written per-workspace — it ships once at plugin-root and is
+    // manifest-discovered. A path-style pointer made cron agents run
+    // OpenClaw's `search` tool to locate a file that isn't in their
+    // workspace, burning ~3 min and failing the turn. The pointer must
+    // be skill-name-based and explicitly tell the agent not to search.
     const agents = buildAgentsMd();
+    // Collapse whitespace (incl. markdown line wraps) the way a reader /
+    // LLM consumes the text — key phrases may break across lines in the
+    // source template.
+    const flat = agents.replace(/\s+/g, " ");
     assert.ok(
-      agents.includes("skills/memclaw/SKILL.md"),
-      "AGENTS.md must reference skills/memclaw/SKILL.md by path",
+      !flat.includes("skills/memclaw/SKILL.md"),
+      "AGENTS.md must NOT reference the skill by filesystem path " +
+        "(triggers a doomed `search` tool call on cron agents — CAURA-000)",
     );
     assert.ok(
-      /before your first MemClaw/i.test(agents),
+      /\*\*memclaw\*\* skill/i.test(flat),
+      "AGENTS.md must reference the **memclaw** skill by name",
+    );
+    assert.ok(
+      /do NOT search the filesystem/i.test(flat),
+      "AGENTS.md must explicitly tell the agent not to filesystem-search for the skill",
+    );
+    assert.ok(
+      /before your first MemClaw/i.test(flat),
       "AGENTS.md must carry a 'before your first MemClaw call' nudge",
     );
   });
