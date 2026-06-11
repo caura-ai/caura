@@ -342,8 +342,9 @@ export function buildToolsMd(): string {
 ## MemClaw — Tools Available
 
 Persistent, cross-session, multi-agent memory. For per-tool signatures,
-decision guidance, constraints, and error codes, read
-\`skills/memclaw/SKILL.md\` before your first call in a session.
+decision guidance, constraints, and error codes, open the **memclaw**
+skill (your runtime loads it automatically — do NOT search the
+filesystem for it) before your first call in a session.
 
 \`agent_id\` is resolved by your runtime — never fabricate.
 
@@ -415,10 +416,11 @@ memories, not shared); share via \`op=write doc_id=<slug>\`.
 **Recall auto-gated** on trivial turns; call \`memclaw_recall\`
 directly when a short message needs LTM.
 
-Before your first MemClaw call this session, read
-\`skills/memclaw/SKILL.md\` for signatures, cadences, quality,
-prohibitions, recall policy, and sharing. \`TOOLS.md\` carries the
-at-a-glance tool list and enum vocabulary every turn.
+Before your first MemClaw call this session, open the **memclaw**
+skill — your runtime loads it automatically, so do NOT search the
+filesystem for it — for signatures, cadences, quality, prohibitions,
+recall policy, and sharing. \`TOOLS.md\` carries the at-a-glance tool
+list and enum vocabulary every turn.
 `;
 }
 
