@@ -162,14 +162,24 @@ async def get_pending_commands(
 
 @router.patch("/commands/{command_id}/status")
 async def update_command_status(command_id: UUID, request: Request) -> dict:
+    """Update a command's status / result.
+
+    ``tenant_id`` (when present in the body) scopes the UPDATE so a tenant
+    can only complete its own commands — keying on ``command_id`` alone let
+    any caller that knew a command UUID mark another tenant's command
+    done/failed (cross-tenant BOLA). ``ok`` reports whether a row actually
+    matched so the caller can surface 404 instead of silently succeeding.
+    """
     body: dict = await request.json()
-    status = body["status"]
-    if status == "acked":
-        await _svc.fleet_ack_commands(
-            command_ids=[command_id],
-            now=datetime.now(UTC),
-        )
-    return {"ok": True}
+    completed_at_raw = body.get("completed_at")
+    matched = await _svc.fleet_update_command_result(
+        command_id=command_id,
+        status=body["status"],
+        tenant_id=body.get("tenant_id"),
+        result=body.get("result"),
+        completed_at=(datetime.fromisoformat(completed_at_raw) if completed_at_raw else datetime.now(UTC)),
+    )
+    return {"ok": matched}
 
 
 @router.post("/commands/ack")

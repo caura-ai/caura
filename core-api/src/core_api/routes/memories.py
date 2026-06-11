@@ -1264,7 +1264,10 @@ async def delete_memory(
     await log_action(
         db,
         tenant_id=tenant_id,
-        agent_id=agent_id,
+        # Attribute to the effective identity (gateway X-Agent-ID wins over
+        # the query param) — logging the raw param attributed a gateway
+        # agent's deletes to None whenever it omitted ``agent_id``.
+        agent_id=caller_agent_id,
         action="delete",
         resource_type="memory",
         resource_id=memory_id,
@@ -1758,6 +1761,19 @@ async def redistribute_memories(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(tenant_id)
+
+    # Authenticated agent identity (gateway X-Agent-ID) takes precedence over
+    # the caller-supplied query param: running the trust gate against a
+    # caller-asserted ``agent_id`` would let a low-trust agent credential
+    # clear it by naming some trust-3 agent in the query string (privilege
+    # escalation). Mirrors the precedence pattern in delete/update_memory.
+    if auth.agent_id and agent_id != auth.agent_id:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"agent_id '{agent_id}' does not match the authenticated agent identity '{auth.agent_id}'."
+            ),
+        )
 
     # Verify requesting agent is admin
     caller = await lookup_agent(db, tenant_id, agent_id)

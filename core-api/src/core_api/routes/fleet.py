@@ -759,16 +759,22 @@ async def command_result(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Plugin reports command completion."""
+    auth.enforce_read_only()
     sc = get_storage_client()
+    # Tenant-scope the update: keying on command_id alone would let any
+    # authenticated tenant complete another tenant's command by UUID
+    # (cross-tenant BOLA). ``auth.tenant_id`` is None only for admin
+    # credentials, which legitimately operate unscoped.
     updated = await sc.update_command_status(
         str(command_id),
         {
+            "tenant_id": auth.tenant_id,
             "status": body.status,
             "result": body.result,
             "completed_at": datetime.now(UTC).isoformat(),
         },
     )
-    if not updated:
+    if not updated or not updated.get("ok", False):
         raise HTTPException(status_code=404, detail="Command not found")
     return {"ok": True}
 
