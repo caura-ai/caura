@@ -21,7 +21,11 @@ from common.events import Event, PubSubEventBus, Topics
 def bus() -> PubSubEventBus:
     b = PubSubEventBus(project_id="proj", subscription_prefix="test")
     # Pre-install a fake publisher so publish() doesn't touch the SDK.
-    fake_publisher = MagicMock()
+    # spec-limited to the real PublisherClient surface we rely on: a
+    # permissive MagicMock happily accepts .close(), which is exactly
+    # how the stop()-calls-nonexistent-close() bug survived these tests
+    # (PublisherClient has stop(), not close()).
+    fake_publisher = MagicMock(spec=["topic_path", "publish", "stop"])
     fake_publisher.topic_path = lambda proj, topic: f"projects/{proj}/topics/{topic}"
     future = MagicMock()
     future.result = MagicMock(return_value="msg-id-1")
@@ -247,16 +251,22 @@ async def test_stop_cancels_pending_pull_tasks_cleanly(bus: PubSubEventBus) -> N
 
 
 async def test_stop_closes_publisher_and_subscriber(bus: PubSubEventBus) -> None:
-    # Both clients own gRPC channels + threads; stop() must call close()
-    # on each and null the references out.
+    # Both clients own gRPC channels + threads; stop() must shut each
+    # down via its REAL API and null the references out. The APIs are
+    # asymmetric: SubscriberClient has close(); PublisherClient has
+    # stop() (commits outstanding batches + joins the commit thread —
+    # the only flush in the pipeline, since publish() is fire-and-
+    # forget). The fixture's publisher mock is spec-limited so calling
+    # a nonexistent close() on it would raise instead of silently
+    # passing.
     fake_subscriber = MagicMock()
     bus._subscriber = fake_subscriber
-    # bus._publisher is already a MagicMock from the fixture.
+    # bus._publisher is already a spec-limited MagicMock from the fixture.
     publisher_ref = bus._publisher
 
     await bus.stop()
 
-    publisher_ref.close.assert_called_once()
+    publisher_ref.stop.assert_called_once()
     fake_subscriber.close.assert_called_once()
     assert bus._publisher is None
     assert bus._subscriber is None
@@ -271,11 +281,12 @@ async def test_stop_teardown_order(
     #              `_pull_loop` short-circuits on `_stopping` so the
     #              gRPC error is absorbed quietly.
     #   - PUBLISH: drain exec FIRST so in-flight publish() threads
-    #              complete on a live channel, then close publisher.
-    #              Reverse order would lose messages already en route.
+    #              complete on a live channel, then publisher.stop()
+    #              commits the outstanding client batches. Reverse
+    #              order would lose messages already en route.
     # Expected call order:
     #   subscriber.close → pull-exec.shutdown
-    #     → publish-exec.shutdown → publisher.close
+    #     → publish-exec.shutdown → publisher.stop
     calls: list[str] = []
 
     pull_exec = MagicMock()
@@ -296,7 +307,7 @@ async def test_stop_teardown_order(
     bus._subscriber = fake_subscriber
 
     publisher = bus._publisher
-    publisher.close = MagicMock(side_effect=lambda: calls.append("publisher.close"))
+    publisher.stop = MagicMock(side_effect=lambda: calls.append("publisher.stop"))
 
     await bus.stop()
 
@@ -304,7 +315,7 @@ async def test_stop_teardown_order(
         "subscriber.close",
         "pull-exec.shutdown",
         "pub-exec.shutdown",
-        "publisher.close",
+        "publisher.stop",
     ]
     pull_exec.shutdown.assert_called_once_with(True)
     pub_exec.shutdown.assert_called_once_with(True)
@@ -491,7 +502,7 @@ async def test_stop_keeps_pull_tasks_populated_through_teardown(
     sub_mock.close = MagicMock(side_effect=record_len_during_close)
     bus._subscriber = sub_mock
 
-    bus._publisher.close = MagicMock(side_effect=record_len_during_close)
+    bus._publisher.stop = MagicMock(side_effect=record_len_during_close)
 
     await bus.stop()
 
@@ -1041,7 +1052,9 @@ async def _drive_one_batch(bus: PubSubEventBus, received: list[Any]) -> dict[str
 
 
 async def test_publish_stamps_source_env_attribute() -> None:
-    bus = PubSubEventBus(project_id="proj", subscription_prefix="test", env="production")
+    bus = PubSubEventBus(
+        project_id="proj", subscription_prefix="test", env="production"
+    )
     fake_publisher = MagicMock()
     fake_publisher.topic_path = lambda proj, topic: f"projects/{proj}/topics/{topic}"
     fake_publisher.publish = MagicMock(return_value=MagicMock())
@@ -1071,7 +1084,9 @@ async def test_env_is_normalised_and_empty_collapses_to_none() -> None:
         PubSubEventBus(project_id="p", subscription_prefix="s", env=" production ")._env
         == "production"
     )
-    assert PubSubEventBus(project_id="p", subscription_prefix="s", env="   ")._env is None
+    assert (
+        PubSubEventBus(project_id="p", subscription_prefix="s", env="   ")._env is None
+    )
     assert PubSubEventBus(project_id="p", subscription_prefix="s", env="")._env is None
     assert PubSubEventBus(project_id="p", subscription_prefix="s")._env is None
 
@@ -1097,7 +1112,9 @@ async def test_foreign_source_env_decision_matrix() -> None:
 
 
 async def test_pull_loop_drops_foreign_env_message_before_dispatch() -> None:
-    bus = PubSubEventBus(project_id="proj", subscription_prefix="test", env="production")
+    bus = PubSubEventBus(
+        project_id="proj", subscription_prefix="test", env="production"
+    )
     foreign = _make_received(
         b'{"event_type": "memclaw.memory.embedded"}',
         "ack-foreign",
@@ -1113,7 +1130,9 @@ async def test_pull_loop_drops_foreign_env_message_before_dispatch() -> None:
 
 
 async def test_pull_loop_processes_same_env_message() -> None:
-    bus = PubSubEventBus(project_id="proj", subscription_prefix="test", env="production")
+    bus = PubSubEventBus(
+        project_id="proj", subscription_prefix="test", env="production"
+    )
     local = _make_received(
         b'{"event_type": "memclaw.memory.embedded"}',
         "ack-local",
@@ -1129,7 +1148,9 @@ async def test_pull_loop_processes_same_env_message() -> None:
 async def test_pull_loop_processes_message_without_source_env_attribute() -> None:
     # A publisher that predates the attribute (or an external producer) must
     # still be processed — the guard only drops *provably* foreign messages.
-    bus = PubSubEventBus(project_id="proj", subscription_prefix="test", env="production")
+    bus = PubSubEventBus(
+        project_id="proj", subscription_prefix="test", env="production"
+    )
     legacy = _make_received(
         b'{"event_type": "memclaw.memory.embedded"}', "ack-legacy", {}
     )

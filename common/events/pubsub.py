@@ -396,11 +396,16 @@ class PubSubEventBus(EventBus):
         # (admin-API request handlers await this, so queued publish
         # threads translate directly to queued requests).
         #
-        # At-least-once is preserved: stop()'s shutdown(wait=True) on the
-        # publish executor drains any in-flight batches before the
-        # process exits. The tradeoff is that we no longer surface
-        # per-message publish errors to the caller — publisher-side
-        # failures land in the SDK's background-thread log instead.
+        # At-least-once is preserved ONLY if stop() runs before process
+        # exit: the executor shutdown drains the enqueue calls, and
+        # stop()'s publisher.stop() commits the client's outstanding
+        # batches (the actual transmission happens on the SDK's
+        # background commit thread, NOT in the executor). Short-lived
+        # processes that publish and exit without awaiting stop() lose
+        # whatever is still batched. The tradeoff is that we no longer
+        # surface per-message publish errors to the caller —
+        # publisher-side failures (e.g. a 403 on the topic) land in the
+        # SDK's background-thread log instead.
         # For a fire-and-forget audit path that is the right shape.
         # Stamp the publishing environment so sibling environments that
         # share this project's topics can drop our fan-out copies (see
@@ -893,11 +898,23 @@ class PubSubEventBus(EventBus):
                 pub = self._publisher
                 self._publisher = None
                 try:
-                    await loop.run_in_executor(None, pub.close)
+                    # PublisherClient has no close(); its shutdown API is
+                    # stop(): commits every outstanding batch and joins
+                    # the background commit thread. This is the ONLY real
+                    # flush in the pipeline — publish() is fire-and-forget
+                    # into the client's batch queue, so the old code here
+                    # (calling the nonexistent close() and swallowing the
+                    # AttributeError) silently lost any batch still queued
+                    # at shutdown. Long-running services rarely noticed
+                    # (the commit thread transmits within ~10 ms of wall
+                    # clock), but a short-lived process lost its entire
+                    # final batch — verified in prod 2026-06-11 when a
+                    # backfill CLI run lost all 16 published events.
+                    await loop.run_in_executor(None, pub.stop)
                 except Exception:
                     close_failure_count += 1
                     logger.exception(
-                        "pubsub publisher.close() failed; continuing teardown"
+                        "pubsub publisher.stop() failed; continuing teardown"
                     )
             teardown_complete = True
         finally:
