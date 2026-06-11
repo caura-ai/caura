@@ -4242,7 +4242,7 @@ class PostgresService:
             if tenant_id is not None:
                 stmt = stmt.where(FleetCommand.tenant_id == tenant_id)
             res = await session.execute(stmt.values(**values))
-            return bool(res.rowcount)
+            return (res.rowcount or 0) > 0  # type: ignore[attr-defined]
 
     async def fleet_add_command(self, data: dict) -> FleetCommand:
         async with get_session() as session:
