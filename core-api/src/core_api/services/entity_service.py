@@ -157,21 +157,28 @@ async def get_entity(
     # GET /memories/{id} and search). Without this the entity is a side-door
     # that returns a peer agent's scope_agent secret / cross-fleet content by
     # entity id. No-op for tenant/user/admin credentials (caller_agent_id None).
+    caller_agent: dict | None = None
     if caller_agent_id:
-        from core_api.services.agent_service import authorize_memory_access
+        from core_api.services.agent_service import (
+            lookup_agent,
+            memory_access_allowed_for_agent,
+        )
 
-        scoped: list[dict] = []
-        for mem in linked_memories_raw:
-            if await authorize_memory_access(
-                db,
-                tenant_id,
+        # Resolve the caller's agent row ONCE — the per-memory loop used to
+        # issue an identical lookup_agent round-trip for every scope_team
+        # row (N+1 over the entity's linked memories).
+        caller_agent = await lookup_agent(db, tenant_id, caller_agent_id)
+        linked_memories_raw = [
+            mem
+            for mem in linked_memories_raw
+            if memory_access_allowed_for_agent(
+                caller_agent,
                 caller_agent_id,
                 visibility=mem.get("visibility"),
                 owner_agent_id=mem.get("agent_id"),
                 fleet_id=mem.get("fleet_id"),
-            ):
-                scoped.append(mem)
-        linked_memories_raw = scoped
+            )
+        ]
     linked_memories = []
     for mem in linked_memories_raw:
         entity_links_raw = mem.get("entity_links", [])
@@ -202,8 +209,52 @@ async def get_entity(
             )
         )
 
-    # Outgoing relations
+    # Outgoing relations. Same scope contract as the linked memories above:
+    # without it, relations were emitted straight from the raw entity, so an
+    # agent credential could enumerate relation edges and evidence_memory_ids
+    # pointing at memories it cannot read (scope side-door, audit S5). A
+    # relation is visible iff its evidence memory is readable by the caller
+    # (relations with no evidence carry no memory-derived content and stay).
     relations_raw = entity.get("relations", [])
+    if caller_agent_id and relations_raw:
+        from core_api.services.agent_service import memory_access_allowed_for_agent
+
+        authorized_ids = {str(mem.get("id")) for mem in linked_memories_raw if mem.get("id")}
+        unknown_evidence_ids = list(
+            dict.fromkeys(
+                str(rel["evidence_memory_id"])
+                for rel in relations_raw
+                if rel.get("evidence_memory_id") and str(rel["evidence_memory_id"]) not in authorized_ids
+            )
+        )
+        evidence_rows: dict[str, dict | None] = {}
+        if unknown_evidence_ids:
+            # One bulk round-trip (not per-relation); missing / cross-tenant
+            # ids come back as None in-slot.
+            fetched = await sc.bulk_get_memories(unknown_evidence_ids, tenant_id=tenant_id)
+            evidence_rows = dict(zip(unknown_evidence_ids, fetched))
+
+        def _relation_visible(rel: dict) -> bool:
+            evidence_id = rel.get("evidence_memory_id")
+            if not evidence_id:
+                return True
+            evidence_id = str(evidence_id)
+            if evidence_id in authorized_ids:
+                return True
+            row = evidence_rows.get(evidence_id)
+            if row is None:
+                # Deleted / nonexistent / cross-tenant evidence — don't leak
+                # the edge or the memory id.
+                return False
+            return memory_access_allowed_for_agent(
+                caller_agent,
+                caller_agent_id,
+                visibility=row.get("visibility"),
+                owner_agent_id=row.get("agent_id"),
+                fleet_id=row.get("fleet_id"),
+            )
+
+        relations_raw = [rel for rel in relations_raw if _relation_visible(rel)]
     relations = [
         RelationOut(
             id=rel.get("id"),

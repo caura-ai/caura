@@ -36,9 +36,10 @@ function buildRecallLines(availableTools: Set<string>): string[] {
       ". Every call MUST carry your `agent_id` (and `fleet_id` for " +
       "team / org / cross-fleet operations) — never fabricate. " +
       "Operating rules (recall before, write after, supersede don't " +
-      "delete), quality rules, and per-tool reference live in " +
-      "`skills/memclaw/SKILL.md` — read it before your first MemClaw " +
-      "call this session.",
+      "delete), quality rules, and per-tool reference live in the " +
+      "**memclaw** skill, which your runtime loads automatically — open " +
+      "it via your skill system before your first MemClaw call this " +
+      "session. Do NOT search the filesystem for it.",
   );
   lines.push("");
 

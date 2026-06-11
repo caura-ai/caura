@@ -61,7 +61,15 @@ async def clear_notes(
     agent_id: str = Query(...),
 ):
     _check_stm_enabled()
+    auth.enforce_read_only()
     tenant_id = _require_tenant(auth)
+    # Authenticated agent identity (gateway X-Agent-ID) takes precedence —
+    # an agent credential must not clear a peer agent's notes by naming it.
+    if auth.agent_id and agent_id != auth.agent_id:
+        raise HTTPException(
+            status_code=403,
+            detail=f"agent_id '{agent_id}' does not match the authenticated agent identity.",
+        )
     from core_api.services.stm_service import clear_notes
 
     await clear_notes(tenant_id, agent_id)
@@ -98,6 +106,7 @@ async def clear_bulletin(
     fleet_id: str = Query(...),
 ):
     _check_stm_enabled()
+    auth.enforce_read_only()
     tenant_id = _require_tenant(auth)
     from core_api.services.stm_service import clear_bulletin
 
@@ -125,7 +134,17 @@ async def promote_stm(
     db: AsyncSession = Depends(get_db),
 ):
     _check_stm_enabled()
+    auth.enforce_read_only()
+    auth.enforce_usage_limits()
     tenant_id = _require_tenant(auth)
+    # Bind the promoted memory to the authenticated agent identity when the
+    # credential carries one — a caller must not promote into LTM on behalf
+    # of an arbitrary peer agent.
+    if auth.agent_id and body.agent_id != auth.agent_id:
+        raise HTTPException(
+            status_code=403,
+            detail=f"agent_id '{body.agent_id}' does not match the authenticated agent identity.",
+        )
     from core_api.services.stm_service import promote
 
     result = await promote(

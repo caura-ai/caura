@@ -4211,6 +4211,39 @@ class PostgresService:
                 .values(status="acked", acked_at=now)
             )
 
+    async def fleet_update_command_result(
+        self,
+        *,
+        command_id: UUID,
+        status: str,
+        tenant_id: str | None = None,
+        result: dict | None = None,
+        completed_at: datetime | None = None,
+    ) -> bool:
+        """Record a command's completion (``done`` / ``failed`` / ``acked``).
+
+        ``tenant_id`` scopes the UPDATE so a caller can only touch its own
+        tenant's commands — keying on ``command_id`` alone let any
+        authenticated tenant complete another tenant's command by UUID
+        (cross-tenant BOLA). ``None`` (admin / unscoped callers) skips the
+        filter. Returns ``True`` iff a row matched.
+        """
+        values: dict
+        if status == "acked":
+            values = {"status": "acked", "acked_at": completed_at}
+        else:
+            values = {"status": status}
+            if result is not None:
+                values["result"] = result
+            if completed_at is not None:
+                values["completed_at"] = completed_at
+        async with get_session() as session:
+            stmt = sql_update(FleetCommand).where(FleetCommand.id == command_id)
+            if tenant_id is not None:
+                stmt = stmt.where(FleetCommand.tenant_id == tenant_id)
+            res = await session.execute(stmt.values(**values))
+            return (res.rowcount or 0) > 0  # type: ignore[attr-defined]
+
     async def fleet_add_command(self, data: dict) -> FleetCommand:
         async with get_session() as session:
             command = FleetCommand(**self._filter_fields(FleetCommand, data))

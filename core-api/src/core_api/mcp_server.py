@@ -164,6 +164,36 @@ class MCPAuthMiddleware:
             # gateway having already approved the caller.
             tenant_header = headers.get(b"x-tenant-id", b"").decode()
             if tenant_header:
+                # Perimeter check (mirrors REST ``get_auth_context`` Path 4):
+                # the header-trust path accepts X-Tenant-ID / X-Agent-ID /
+                # X-Readable-Tenant-IDs / X-Capabilities with no credential of
+                # its own, so when a shared secret is configured the request
+                # must prove it came through the gateway. A caller reaching
+                # core-api's /mcp directly (e.g. its public run.app URL) must
+                # not be able to impersonate a tenant by setting the identity
+                # headers itself. Reject outright — falling through to
+                # ``_UNAUTH`` would let the request keep going with a
+                # different (attacker-probed) identity resolution.
+                gw_secret = settings.gateway_shared_secret
+                if gw_secret and not _hmac.compare_digest(
+                    headers.get(b"x-gateway-secret", b"").decode(), gw_secret
+                ):
+                    body = _error_response(
+                        "UNAUTHORIZED",
+                        "Direct access to this service is not permitted.",
+                    ).encode()
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": 401,
+                            "headers": [
+                                (b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode()),
+                            ],
+                        }
+                    )
+                    await send({"type": "http.response.body", "body": body})
+                    return
                 _tenant_id_var.set(tenant_header)
                 _via_gateway_var.set(True)
             else:
@@ -186,32 +216,43 @@ class MCPAuthMiddleware:
                 else:
                     _tenant_id_var.set(_UNAUTH)
 
-            # X-Agent-ID injected by enterprise gateway for agent-scoped
-            # credentials (kind=agent_key). When present, this is the
-            # cryptographically verified agent identity.
-            agent_header = headers.get(b"x-agent-id", b"").decode()
+            # X-Agent-ID / X-Readable-Tenant-IDs / X-Capabilities are
+            # gateway-injected identity attributes — only honor them on the
+            # gateway-verified path (X-Tenant-ID present, secret checked
+            # above). On the direct paths (admin key / standalone) a client
+            # could otherwise self-assert a cross-tenant read set or a
+            # capability set by sending the headers itself.
+            # Always reset all three context vars at the start of every
+            # request, not just when the header is present. ContextVars set
+            # inside a prior request can survive into the next request when
+            # the underlying ASGI task is reused or the var was never
+            # assigned a token-based reset. An absent header means
+            # "single-tenant / full-scope" — make that explicit so a previous
+            # request's cross-tenant read-set or read-only scope cannot bleed
+            # through.
+            via_gateway = bool(tenant_header)
+            agent_header = headers.get(b"x-agent-id", b"").decode() if via_gateway else ""
             _agent_id_var.set(agent_header or None)
 
-            # X-Readable-Tenant-IDs and X-Key-Scopes are plumbed by the gateway
-            # for credentials authorized to read beyond their home tenant
-            # (cross-tenant agent keys). Absent / empty headers leave the
-            # context vars at their single-tenant defaults.
-            # Always reset both context vars at the start of every request,
-            # not just when the header is present. ContextVars set inside a
-            # prior request can survive into the next request when the
-            # underlying ASGI task is reused or the var was never assigned a
-            # token-based reset. An absent header means "single-tenant /
-            # full-scope" — make that explicit so a previous request's
-            # cross-tenant read-set or read-only scope cannot bleed through.
-            readable_header = headers.get(b"x-readable-tenant-ids", b"").decode()
-            _readable_tenant_ids_var.set(
-                [t.strip() for t in readable_header.split(",") if t.strip()] if readable_header else None
-            )
+            readable_header = headers.get(b"x-readable-tenant-ids", b"").decode() if via_gateway else ""
+            if readable_header:
+                # Prepend the home tenant so the set is complete even when
+                # the gateway plumbs only the *additional* readable tenants
+                # (mirrors REST ``get_auth_context``). Without it, recall /
+                # list / stats would exclude the caller's own rows whenever
+                # the gateway omits the home tenant from the CSV.
+                parsed = [t.strip() for t in readable_header.split(",") if t.strip()]
+                combined = [tenant_header] + [t for t in parsed if t != tenant_header]
+                _readable_tenant_ids_var.set(combined)
+            else:
+                _readable_tenant_ids_var.set(None)
             # X-Capabilities is canonical from the unified auth-api;
             # X-Key-Scopes is accepted as a back-compat alias during
             # the gateway rollout window.
             caps_header = (
-                headers.get(b"x-capabilities", b"").decode() or headers.get(b"x-key-scopes", b"").decode()
+                (headers.get(b"x-capabilities", b"").decode() or headers.get(b"x-key-scopes", b"").decode())
+                if via_gateway
+                else ""
             )
             _scopes_var.set({s.strip() for s in caps_header.split(",") if s.strip()} if caps_header else None)
 
@@ -1086,7 +1127,26 @@ async def memclaw_entity_get(
         )
 
     async with _mcp_session() as db:
-        result = await get_entity(db, uid, _get_tenant(), caller_agent_id=_get_agent_id())
+        try:
+            result = await get_entity(db, uid, _get_tenant(), caller_agent_id=_get_agent_id())
+        except HTTPException as e:
+            return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+        except httpx.HTTPStatusError as e:
+            # storage_client raises this on non-2xx — surface the upstream
+            # status + detail in the canonical envelope so a storage 4xx/5xx
+            # doesn't escape as an unwrapped exception (every sibling tool
+            # has this tail).
+            try:
+                detail = e.response.json()
+            except ValueError:
+                detail = e.response.text or str(e)
+            return _with_latency(
+                _error_response(code_for_status(e.response.status_code), str(detail)),
+                t0,
+            )
+        except Exception as e:
+            logger.exception("Unhandled error in memclaw_entity_get")
+            return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
         text = "Entity not found." if not result else _serialize(result)
         return _with_latency(text, t0)
 
