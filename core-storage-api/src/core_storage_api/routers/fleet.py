@@ -177,9 +177,7 @@ async def update_command_status(command_id: UUID, request: Request) -> dict:
         status=body["status"],
         tenant_id=body.get("tenant_id"),
         result=body.get("result"),
-        completed_at=(
-            datetime.fromisoformat(completed_at_raw) if completed_at_raw else datetime.now(UTC)
-        ),
+        completed_at=(datetime.fromisoformat(completed_at_raw) if completed_at_raw else datetime.now(UTC)),
     )
     return {"ok": matched}
 

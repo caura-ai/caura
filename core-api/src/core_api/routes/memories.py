@@ -1771,8 +1771,7 @@ async def redistribute_memories(
         raise HTTPException(
             status_code=403,
             detail=(
-                f"agent_id '{agent_id}' does not match the authenticated "
-                f"agent identity '{auth.agent_id}'."
+                f"agent_id '{agent_id}' does not match the authenticated agent identity '{auth.agent_id}'."
             ),
         )
 
