@@ -234,9 +234,7 @@ class MCPAuthMiddleware:
             agent_header = headers.get(b"x-agent-id", b"").decode() if via_gateway else ""
             _agent_id_var.set(agent_header or None)
 
-            readable_header = (
-                headers.get(b"x-readable-tenant-ids", b"").decode() if via_gateway else ""
-            )
+            readable_header = headers.get(b"x-readable-tenant-ids", b"").decode() if via_gateway else ""
             if readable_header:
                 # Prepend the home tenant so the set is complete even when
                 # the gateway plumbs only the *additional* readable tenants
@@ -252,8 +250,10 @@ class MCPAuthMiddleware:
             # X-Key-Scopes is accepted as a back-compat alias during
             # the gateway rollout window.
             caps_header = (
-                headers.get(b"x-capabilities", b"").decode() or headers.get(b"x-key-scopes", b"").decode()
-            ) if via_gateway else ""
+                (headers.get(b"x-capabilities", b"").decode() or headers.get(b"x-key-scopes", b"").decode())
+                if via_gateway
+                else ""
+            )
             _scopes_var.set({s.strip() for s in caps_header.split(",") if s.strip()} if caps_header else None)
 
         await self.app(scope, receive, send)
