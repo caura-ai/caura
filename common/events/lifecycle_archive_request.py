@@ -21,9 +21,17 @@ class LifecycleRequestBase(BaseModel):
     The shared handler reads only these fields and is generic over
     subclasses. New actions extend by subclassing and adding their
     own action-specific Pydantic fields.
+
+    ``extra="ignore"`` (not ``"forbid"``) for rolling-deploy safety,
+    matching the other Pub/Sub consumer schemas (see
+    ``memory_enrich_request``): with ``forbid``, a publisher deployed
+    ahead of the consumer that adds an additive field makes every
+    lifecycle delivery fail validation — archive/purge/forge requests
+    are then silently dropped to the "malformed payload" branch for the
+    duration of the deploy (audit M15).
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
 
     audit_id: int
     org_id: str

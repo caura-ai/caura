@@ -31,6 +31,8 @@ class LLMProvider(Protocol):
         prompt: str,
         *,
         temperature: float = 0.0,
+        seed: int | None = None,
+        response_schema: dict | None = None,
     ) -> dict:
         """Send a prompt and return a parsed JSON dict.
 
@@ -40,7 +42,10 @@ class LLMProvider(Protocol):
         engineering for APIs without native JSON mode).
 
         Parameters that are not supported by a provider (e.g.,
-        ``temperature``) may be silently ignored by the implementation.
+        ``temperature``, ``seed``, ``response_schema``) MUST be
+        accepted-and-ignored, never rejected: a ``TypeError`` here is
+        swallowed by the ``call_with_fallback`` retry loop and surfaces
+        as a silent degradation to the fake/regex fallback (audit C1).
         """
         ...
 

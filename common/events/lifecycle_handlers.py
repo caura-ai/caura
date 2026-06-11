@@ -155,7 +155,12 @@ async def _run_action(
     naturally excludes the in-progress row pre-published moments ago.
     """
     try:
-        request = payload_cls(**event.payload)
+        # ``model_validate`` (not a kwargs-splat) so a non-dict payload
+        # raises ValidationError and lands in the drop branch below — the
+        # splat raised TypeError, which escaped this handler, nacked the
+        # delivery, and redelivered forever / DLQ'd (the same bug
+        # ``suppression_handlers`` was fixed for; audit M16).
+        request = payload_cls.model_validate(event.payload)
     except ValidationError:
         logger.exception(
             "dropping malformed lifecycle-request payload",

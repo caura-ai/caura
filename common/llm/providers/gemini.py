@@ -127,8 +127,18 @@ class GeminiLLMProvider:
         prompt: str,
         *,
         temperature: float = 0.0,
+        seed: int | None = None,
+        response_schema: dict | None = None,
     ) -> dict:
-        """Async wrapper around the synchronous Gemini JSON completion."""
+        """Async wrapper around the synchronous Gemini JSON completion.
+
+        ``seed`` / ``response_schema`` are accepted-and-ignored (OpenAI
+        structured-output kwargs). Rejecting them made every
+        ``complete_json(..., seed=..., response_schema=...)`` caller —
+        notably entity extraction — raise ``TypeError``, exhaust its
+        retries, and silently degrade to the regex fallback on any
+        Gemini-configured tenant (audit C1).
+        """
         return await asyncio.to_thread(
             self._complete_json_sync, prompt, temperature=temperature
         )

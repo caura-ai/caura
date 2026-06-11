@@ -72,12 +72,17 @@ class ExecuteScoredSearch:
         }
 
         # Cross-tenant read widening: when the caller's AuthContext is
-        # authorised to read from more than its home tenant, pass the
-        # full set through to the storage-api so it widens the WHERE
-        # predicate. Absent / single-element list stays single-tenant
-        # (storage-api falls back to ``Memory.tenant_id == tenant_id``).
+        # authorised to read beyond its home tenant, pass the full set
+        # through to the storage-api so it widens the WHERE predicate.
+        # The explicit comparison (rather than ``len > 1``) matches the
+        # entity-lookup short-circuit in ``classify_query``: a
+        # single-element list naming a tenant other than ``tenant_id``
+        # must still be forwarded — ``len > 1`` silently narrowed that
+        # caller to home-tenant reads on this path only, so the same
+        # request returned different visibility depending on whether the
+        # query matched an entity token (audit S6).
         readable = data.get("readable_tenant_ids")
-        if readable and len(readable) > 1:
+        if readable and readable != [data["tenant_id"]]:
             search_data["readable_tenant_ids"] = readable
 
         if temporal_window is not None:

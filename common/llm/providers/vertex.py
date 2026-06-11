@@ -140,8 +140,15 @@ class VertexLLMProvider:
         prompt: str,
         *,
         temperature: float = 0.0,
+        seed: int | None = None,
+        response_schema: dict | None = None,
     ) -> dict:
-        """Async wrapper around synchronous Vertex AI JSON completion."""
+        """Async wrapper around synchronous Vertex AI JSON completion.
+
+        ``seed`` / ``response_schema`` are accepted-and-ignored (OpenAI
+        structured-output kwargs) — see ``GeminiProvider.complete_json``
+        for why rejecting them silently broke entity extraction (C1).
+        """
         return await asyncio.to_thread(
             self._complete_json_sync, prompt, temperature=temperature
         )
