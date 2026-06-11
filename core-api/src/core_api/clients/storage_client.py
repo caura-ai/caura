@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import random
-from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NotRequired, TypedDict
 
 import httpx
 
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
+from common.http_retry import with_connect_phase_retry, with_retry
 from core_api.clients.identity_token import evict as _evict_id_token
 from core_api.clients.identity_token import fetch_auth_header
 from core_api.config import settings
@@ -18,140 +16,11 @@ from core_api.config import settings
 logger = logging.getLogger(__name__)
 
 
-# F5 — transient-error retry policy for idempotent storage calls.
-#
-# Cloud Run logs over 7 days showed a 31% silent-failure rate on
-# ``process_entity_extraction`` (61 failed / 138 succeeded) on
-# ``staging-memclaw-core-api``. Every failure traced to
-# ``httpx.ConnectTimeout`` reaching ``core-storage-api`` from
-# ``upsert_entity`` — storage-api cold starts / autoscaling
-# inconsistencies. The outer ``except Exception`` in
-# ``entity_extraction_worker.process_entity_extraction`` then
-# silently absorbed the timeout, leaving ``entity_links`` empty
-# on user-visible memory rows.
-#
-# Retry policy:
-#  - Max 3 attempts (1 initial + 2 retries)
-#  - Exponential backoff with jitter: ~0.2s, ~0.4s
-#  - Worst-case added latency: < 1s
-#  - Idempotent HTTP methods (GET, PATCH, DELETE) retry the full
-#    transient set below plus retryable 5xx statuses.
-#  - POST retries connection-phase failures ONLY (ConnectTimeout /
-#    ConnectError / PoolTimeout — all raised before a single request
-#    byte is written, so a retry cannot double-insert). ReadTimeout
-#    and 5xx are NOT retried for POST: the request reached storage
-#    and may have committed; safe retry there needs idempotency-key
-#    support storage-side. Connection-phase loss was observed in prod
-#    2026-06-11: `find_similar_candidates` (contradiction detection,
-#    42 failures) and `create_audit_logs_bulk` (audit events dropped)
-#    both died on first-attempt ConnectTimeout behind the VPC
-#    connector while idempotent siblings recovered via retry.
-_RETRY_MAX_ATTEMPTS = 3
-_RETRY_BACKOFF_BASE_S = 0.2
-_RETRYABLE_EXCEPTIONS = (
-    httpx.ConnectTimeout,
-    httpx.ReadTimeout,
-    httpx.PoolTimeout,
-    # ConnectError covers refused / DNS-not-yet-resolved / route-down —
-    # all transient during Cloud Run autoscaling and storage-api
-    # restarts. Local chaos test (docker network disconnect) showed
-    # httpx raises ConnectError("Name or service not known"), not
-    # ConnectTimeout, when the upstream is temporarily unreachable.
-    httpx.ConnectError,
-)
-# Failures raised while establishing/acquiring a connection — the
-# request body was never transmitted, so retrying is safe even for
-# non-idempotent methods. ReadTimeout is deliberately absent.
-_CONNECT_PHASE_EXCEPTIONS = (
-    httpx.ConnectTimeout,
-    httpx.ConnectError,
-    httpx.PoolTimeout,
-)
-_RETRYABLE_STATUS_CODES = frozenset({502, 503, 504})
-_NO_RETRYABLE_STATUSES: frozenset[int] = frozenset()
-
-
-async def _with_retry(
-    do_request: Callable[[], Awaitable[httpx.Response]],
-    *,
-    label: str,
-    retryable_exceptions: tuple[type[Exception], ...] = _RETRYABLE_EXCEPTIONS,
-    retryable_statuses: frozenset[int] = _RETRYABLE_STATUS_CODES,
-) -> httpx.Response:
-    """Wrap a single HTTP call with retry on transient errors.
-
-    Defaults match the idempotent-method policy: retry on
-    ``ConnectTimeout`` / ``ReadTimeout`` / ``PoolTimeout`` (transient
-    connection issues) and on 5xx responses in
-    ``_RETRYABLE_STATUS_CODES`` (transient server-side). 4xx (including
-    404) and other 2xx/3xx responses are returned immediately —
-    retrying won't change a client error. Non-idempotent callers pass
-    ``_CONNECT_PHASE_EXCEPTIONS`` / empty statuses to retry only
-    failures where the request was provably never sent.
-    """
-    last_exc: BaseException | None = None
-    for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
-        try:
-            resp = await do_request()
-        except retryable_exceptions as e:
-            last_exc = e
-            if attempt < _RETRY_MAX_ATTEMPTS:
-                delay = _RETRY_BACKOFF_BASE_S * (2 ** (attempt - 1))
-                delay *= 1.0 + random.uniform(-0.1, 0.1)  # ±10% jitter
-                logger.warning(
-                    "storage_client.%s: %s on attempt %d/%d, retrying in %.2fs",
-                    label,
-                    type(e).__name__,
-                    attempt,
-                    _RETRY_MAX_ATTEMPTS,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-                continue
-            logger.warning(
-                "storage_client.%s: %s on final attempt %d/%d, giving up",
-                label,
-                type(e).__name__,
-                attempt,
-                _RETRY_MAX_ATTEMPTS,
-            )
-            raise
-        if resp.status_code in retryable_statuses and attempt < _RETRY_MAX_ATTEMPTS:
-            delay = _RETRY_BACKOFF_BASE_S * (2 ** (attempt - 1))
-            delay *= 1.0 + random.uniform(-0.1, 0.1)
-            logger.warning(
-                "storage_client.%s: HTTP %d on attempt %d/%d, retrying in %.2fs",
-                label,
-                resp.status_code,
-                attempt,
-                _RETRY_MAX_ATTEMPTS,
-                delay,
-            )
-            await asyncio.sleep(delay)
-            continue
-        return resp
-    # Unreachable — the loop either returns a response or raises.
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError("storage_client retry loop exited without response or exception")
-
-
-async def _post_with_retry(
-    do_request: Callable[[], Awaitable[httpx.Response]],
-    *,
-    label: str,
-) -> httpx.Response:
-    """Retry policy for non-idempotent POSTs, encoded in one place.
-
-    Connection-phase failures only — the request was provably never
-    sent, so a retry cannot double-insert. No status-based retries.
-    """
-    return await _with_retry(
-        do_request,
-        label=label,
-        retryable_exceptions=_CONNECT_PHASE_EXCEPTIONS,
-        retryable_statuses=_NO_RETRYABLE_STATUSES,
-    )
+# Retry policy (F5 + the 2026-06-11 connect-timeout incident) lives in
+# ``common/http_retry.py``, shared with core-worker's storage client:
+# GET/PATCH/DELETE retry the full transient set + retryable 5xx;
+# POSTs retry connection-phase failures only (request provably never
+# sent, so a retry cannot double-insert).
 
 
 class KeystoneUpsertPayload(TypedDict):
@@ -324,7 +193,7 @@ class CoreStorageClient:
         async def _do() -> httpx.Response:
             return await http.get(f"{prefix}{path}", params=params, headers=headers)
 
-        resp = await _with_retry(_do, label=f"GET {path}")
+        resp = await with_retry(_do, label=f"GET {path}")
         if resp.status_code == 404:
             return None
         self._maybe_evict_on_auth_error(resp, read=read)
@@ -339,7 +208,7 @@ class CoreStorageClient:
         async def _do() -> httpx.Response:
             return await self._read_http.get(f"{self._read_prefix}{path}", params=params, headers=headers)
 
-        resp = await _with_retry(_do, label=f"GET-list {path}")
+        resp = await with_retry(_do, label=f"GET-list {path}")
         self._maybe_evict_on_auth_error(resp, read=True)
         resp.raise_for_status()
         return resp.json()
@@ -356,7 +225,7 @@ class CoreStorageClient:
                 headers=headers,
             )
 
-        resp = await _post_with_retry(_do, label=f"POST {path}")
+        resp = await with_connect_phase_retry(_do, label=f"POST {path}")
         self._maybe_evict_on_auth_error(resp, read=read)
         resp.raise_for_status()
         return resp.json()
@@ -367,7 +236,7 @@ class CoreStorageClient:
         async def _do() -> httpx.Response:
             return await self._http.patch(f"{self._prefix}{path}", json=data, headers=headers)
 
-        resp = await _with_retry(_do, label=f"PATCH {path}")
+        resp = await with_retry(_do, label=f"PATCH {path}")
         if resp.status_code == 404:
             return None
         self._maybe_evict_on_auth_error(resp, read=False)
@@ -380,7 +249,7 @@ class CoreStorageClient:
         async def _do() -> httpx.Response:
             return await self._http.delete(f"{self._prefix}{path}", params=params, headers=headers)
 
-        resp = await _with_retry(_do, label=f"DELETE {path}")
+        resp = await with_retry(_do, label=f"DELETE {path}")
         if resp.status_code == 404:
             return False
         self._maybe_evict_on_auth_error(resp, read=False)
@@ -399,7 +268,7 @@ class CoreStorageClient:
                 headers=headers,
             )
 
-        resp = await _post_with_retry(_do, label=f"POST {path}")
+        resp = await with_connect_phase_retry(_do, label=f"POST {path}")
         if resp.status_code == 404:
             return None
         self._maybe_evict_on_auth_error(resp, read=read)
@@ -1303,7 +1172,7 @@ class CoreStorageClient:
                 headers=headers,
             )
 
-        resp = await _post_with_retry(_do, label="POST /idempotency/claim")
+        resp = await with_connect_phase_retry(_do, label="POST /idempotency/claim")
         self._maybe_evict_on_auth_error(resp, read=False)
         if resp.status_code == 201:
             return True, resp.json()

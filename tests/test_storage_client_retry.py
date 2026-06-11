@@ -148,6 +148,24 @@ async def test_get_retries_on_5xx_status() -> None:
     assert read.get.await_count == 2
 
 
+async def test_get_logs_giving_up_when_5xx_exhausts_retries(caplog) -> None:
+    """All attempts returning a retryable status must emit the same
+    "giving up" signal as the exception-exhaustion path — a 3x-502
+    incident should read as exhausted retries in the logs, not just a
+    bare HTTPStatusError from the caller."""
+    import logging
+
+    client, _write, read = await _make_client()
+    read.get = AsyncMock(return_value=_ok_response(502))
+
+    with caplog.at_level(logging.WARNING, logger="common.http_retry"):
+        with pytest.raises(httpx.HTTPStatusError):
+            await client._get("/entities/exact", read=True)
+
+    assert read.get.await_count == 3
+    assert any("giving up" in r.message for r in caplog.records), caplog.records
+
+
 async def test_get_does_not_retry_on_success_first_try() -> None:
     """No retry overhead on the happy path — the retry helper must
     short-circuit cleanly when the first attempt succeeds."""
