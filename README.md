@@ -35,8 +35,16 @@ Agents write plain text. MemClaw turns it into searchable, governed, self-improv
 
 **Built for fleets, not single agents.** Public agent-memory benchmarks (LoCoMo, LongMemEval) measure one agent, one user, one long conversation — the single-chatbot shape. The deployment shape we see in production is the opposite: dozens or thousands of agents working on behalf of a company, sharing what they learn under governance. MemClaw is architected around that shape from day one — scoped memory, cross-agent outcome propagation, fleet-wide trust tiers — and competes on the axes that compound with agent count: latency, token efficiency, and governance. See [Performance](#performance) for the numbers, or read the [benchmarks write-up](https://memclaw.net/blog/memclaw-benchmarks).
 
+> **In production at eToro (NASDAQ: ETOR):** 300+ AI agents on one governed
+> memory — 21,500+ memories, 1,372 shared skills, 23 ms p50 search.
+> [Architecture deep-dive →](https://memclaw.net/blog/etoro-company-brain/)
+
 <p align="center">
   <img src="static/images/memclaw-concept.png" alt="MemClaw — Fleet Memory that Compounds" width="700" />
+</p>
+
+<p align="center">
+  <img src="static/images/memclaw-demo.gif" alt="MemClaw demo — write, recall, and governed cross-fleet memory in action" width="700" />
 </p>
 
 ---
@@ -178,6 +186,15 @@ curl -X POST http://localhost:8000/api/v1/search \
 
 The write response includes LLM-inferred `type`, `title`, `summary`, `tags`, `status`, and `importance_score` — all from a single `content` field.
 
+---
+
+⭐ **If MemClaw just worked for you,
+[star the repo](https://github.com/caura-ai/caura-memclaw/stargazers)** —
+it's how other fleet builders find us, and it shapes how much time we can
+invest in the OSS edition.
+
+---
+
 <details>
 <summary>Auth modes</summary>
 
@@ -273,6 +290,32 @@ The plugin claims the OpenClaw `memory` slot (replacing `memory-core`) and expos
 - **MCP server** — built-in [Model Context Protocol](https://modelcontextprotocol.io) at `/mcp` (Streamable HTTP). Connect Claude Desktop, Claude Code, Cursor, Windsurf, or any MCP client with a URL and API key
 - **Multi-provider LLM** — primary + fallback provider chain per tenant (OpenAI, Gemini, Anthropic, OpenRouter) with platform defaults for zero-config tenants
 - **Document store** — structured JSONB collections alongside semantic memories for exact-field lookups (customer records, config, task lists)
+
+---
+
+## How MemClaw compares
+
+Accuracy benchmarks cluster the leading tools in a narrow band (see
+[Performance](#performance)). Where the field actually diverges is
+fleet capability and governance:
+
+| Capability | MemClaw | Mem0 | Zep | Letta |
+|---|---|---|---|---|
+| Multi-fleet support | ✅ | ❌ | ❌ | ❌ |
+| Agent trust tiers + keystone policies | ✅ | ❌ | ❌ | ❌ |
+| Cross-vendor memory sharing | ✅ | ❌ | ❌ | ❌ |
+| Contradiction detection + supersession | ✅ | ❌ | ❌ | ❌ |
+| Per-agent retrieval tuning | ✅ | ❌ | ❌ | ❌ |
+| PII detection & quarantine | ✅ | ❌ | ✅ | ❌ |
+| Audit trail / provenance | ✅ | ❌ | ⚠️ partial | ❌ |
+| Knowledge graph (auto-extracted) | ✅ | ⚠️ | ✅ | ❌ |
+| MCP-native | ✅ | ✅ | ✅ | ⚠️ |
+| OSS license | Apache 2.0 | Apache 2.0 | Apache 2.0 | Apache 2.0 |
+
+Mem0, Zep, and Letta are solid projects for single-agent memory. MemClaw's
+lane is **governed memory across agent fleets** — multiple agents, teams,
+and vendors on one auditable memory plane. Comparison reflects our reading
+of public docs as of June 2026 — corrections welcome via issue or PR.
 
 ---
 
@@ -948,6 +991,50 @@ server.
 ## Contributing
 
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, development setup, and how to submit PRs.
+
+---
+
+## FAQ
+
+**What is MemClaw?**
+MemClaw is open-source governed shared memory for AI agent fleets:
+cross-agent, cross-fleet recall with visibility scopes, trust tiers,
+keystone policies, audit trails, and tenant isolation enforced on every
+operation — plus self-improving retrieval through outcome-based learning.
+
+**How is MemClaw different from a vector database?**
+MemClaw uses pgvector under the hood but is not a vector DB wrapper. On top
+of hybrid search it adds fleet orchestration, per-agent retrieval tuning,
+contradiction detection, an 8-status lifecycle, an auto-extracted knowledge
+graph, LLM enrichment on every write, row-level tenant isolation, and audit
+trails on every operation.
+
+**How is MemClaw different from Mem0 or Zep?**
+Mem0 and Zep focus on memory for individual agents; accuracy benchmarks
+cluster all three tools in a narrow band. MemClaw is built for *fleets*:
+multiple agents across teams and vendors sharing one governed memory plane,
+with trust tiers, keystone policies, and cross-fleet permissions those
+tools don't address. See [How MemClaw compares](#how-memclaw-compares).
+
+**Does MemClaw work with Claude Desktop, Claude Code, Cursor, or Windsurf?**
+Yes — MemClaw is MCP-native. Paste a JSON config with a URL and API key
+into any MCP client and 12 tools appear immediately.
+
+**Can agents from different vendors share memory?**
+Yes — that's the point. An Anthropic agent recalls what an OpenAI agent
+wrote, under the same governance rules — with trust tiers and visibility
+scopes deciding what crosses fleet boundaries.
+
+**Is MemClaw really free?**
+The full engine — storage, 12 MCP tools, plugin, audit trail — is Apache
+2.0. Run it yourself forever. The managed platform at
+[memclaw.net](https://memclaw.net) adds hosting, scaling, and enterprise
+governance for teams that don't want to operate infrastructure.
+
+**Who runs MemClaw in production?**
+eToro (NASDAQ: ETOR) runs 300+ agents on MemClaw — 21,500+ memories, 1,372
+shared skills, 23 ms p50 search.
+[Case study →](https://memclaw.net/blog/etoro-company-brain/)
 
 ---
 
