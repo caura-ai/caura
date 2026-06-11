@@ -12,18 +12,21 @@ current main (no retry logic exists in ``storage_client._get`` /
 ``_get_list`` / ``_patch`` / ``_delete``). Implementation makes
 them pass.
 
-Scope: retries are added ONLY to idempotent methods (GET, PATCH,
-DELETE). POST is left alone — entity-extraction's create path goes
-through POST and create-without-idempotency-key would risk double-
-inserts on retry. POST retries can be added later if needed once
-storage-side idempotency keys are in place.
+Scope: idempotent methods (GET, PATCH, DELETE) retry the full
+transient set. POST retries connection-phase failures ONLY
+(ConnectTimeout / ConnectError / PoolTimeout — raised before any
+request byte is written, so a retry cannot double-insert); it does
+NOT retry ReadTimeout or 5xx, where the request may have committed
+storage-side. Full POST retry semantics still require idempotency
+keys storage-side.
 
 Retry policy
 ────────────
 - Max 3 attempts (1 initial + 2 retries)
 - Retryable exceptions: ``httpx.ConnectTimeout``, ``httpx.ReadTimeout``,
-  ``httpx.PoolTimeout``
-- Retryable HTTP statuses: 502, 503, 504
+  ``httpx.PoolTimeout`` (idempotent methods); connection-phase subset
+  for POST
+- Retryable HTTP statuses: 502, 503, 504 (idempotent methods only)
 - Exponential backoff with small jitter, capped: ~0.2s, ~0.4s
 - Worst-case added latency: < 1s
 """
@@ -217,20 +220,95 @@ async def test_patch_does_not_retry_on_404() -> None:
 
 
 # ---------------------------------------------------------------------------
-# POST is NOT retried (non-idempotent without storage-side idempotency keys)
+# POST retries connection-phase failures ONLY (request provably never sent)
 # ---------------------------------------------------------------------------
+#
+# Prod 2026-06-11: contradiction detection (find_similar_candidates)
+# failed 42× and the audit flusher (create_audit_logs_bulk) dropped
+# events — every one a first-attempt ConnectTimeout behind the VPC
+# connector. ConnectTimeout / ConnectError / PoolTimeout are all raised
+# before a single request byte is written, so retrying them cannot
+# double-insert. ReadTimeout and 5xx stay non-retried for POST: the
+# request reached storage and may have committed.
 
 
-async def test_post_does_not_retry_on_connect_timeout() -> None:
-    """POST endpoints in storage_client include create operations.
-    Retrying a POST that may have succeeded server-side risks duplicate
-    inserts. Retry semantics for POST require an idempotency key
-    upstream — defer that to a follow-up. For now: POST raises on the
-    first transient failure, same as today."""
+async def test_post_retries_on_connect_timeout_then_succeeds() -> None:
+    """The exact prod failure mode: ConnectTimeout on the first attempt
+    (cold connection through the VPC connector), success on retry."""
     client, write, _read = await _make_client()
-    write.post = AsyncMock(side_effect=httpx.ConnectTimeout("would double-create"))
+    write.post = AsyncMock(
+        side_effect=[
+            httpx.ConnectTimeout("simulated cold connection"),
+            _ok_response(200, {"inserted": 1}),
+        ]
+    )
+
+    result = await client._post("/audit-logs/bulk", {"events": [{"a": 1}]})
+
+    assert result == {"inserted": 1}
+    assert write.post.await_count == 2
+
+
+async def test_post_retries_on_connect_error_then_succeeds() -> None:
+    client, write, _read = await _make_client()
+    write.post = AsyncMock(
+        side_effect=[
+            httpx.ConnectError("Name or service not known"),
+            _ok_response(200, {"id": "abc"}),
+        ]
+    )
+
+    result = await client._post("/entities", {"canonical_name": "x"})
+
+    assert result == {"id": "abc"}
+    assert write.post.await_count == 2
+
+
+async def test_post_gives_up_after_max_attempts_on_connect_timeout() -> None:
+    client, write, _read = await _make_client()
+    write.post = AsyncMock(side_effect=httpx.ConnectTimeout("storage unreachable"))
 
     with pytest.raises(httpx.ConnectTimeout):
         await client._post("/entities", {"canonical_name": "x"})
 
+    assert write.post.await_count == 3
+
+
+async def test_post_does_not_retry_on_read_timeout() -> None:
+    """ReadTimeout means the request was sent and the response never
+    arrived — storage may have committed the insert. Retrying would
+    risk a double-insert, so POST must raise immediately."""
+    client, write, _read = await _make_client()
+    write.post = AsyncMock(side_effect=httpx.ReadTimeout("response never arrived"))
+
+    with pytest.raises(httpx.ReadTimeout):
+        await client._post("/entities", {"canonical_name": "x"})
+
     assert write.post.await_count == 1
+
+
+async def test_post_does_not_retry_on_5xx() -> None:
+    """A 5xx response proves the request reached storage — it may have
+    partially committed before failing. No retry for POST."""
+    client, write, _read = await _make_client()
+    write.post = AsyncMock(return_value=_ok_response(503))
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await client._post("/entities", {"canonical_name": "x"})
+
+    assert write.post.await_count == 1
+
+
+async def test_post_optional_retries_on_connect_timeout_then_succeeds() -> None:
+    client, write, _read = await _make_client()
+    write.post = AsyncMock(
+        side_effect=[
+            httpx.ConnectTimeout("simulated"),
+            _ok_response(200, {"ok": True}),
+        ]
+    )
+
+    result = await client._post_optional("/verification-codes/c1/use")
+
+    assert result == {"ok": True}
+    assert write.post.await_count == 2
