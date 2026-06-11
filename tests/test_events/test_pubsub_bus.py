@@ -706,10 +706,11 @@ async def test_ensure_publisher_closes_losing_candidate_on_toctou_race(
 
     class FakePublisherClient:
         def __init__(self):
-            self.closed = False
+            self.stopped = False
 
-        def close(self):
-            self.closed = True
+        def stop(self):
+            # The real PublisherClient teardown API (it has no close()).
+            self.stopped = True
             closed.append(self)
 
     fake_sdk = types.SimpleNamespace(PublisherClient=FakePublisherClient)
@@ -754,7 +755,7 @@ async def test_ensure_publisher_closes_losing_candidate_on_toctou_race(
 async def test_ensure_publisher_returns_winner_when_stop_races_close(
     bus: PubSubEventBus,
 ) -> None:
-    """3-way race: TOCTOU loser awaits ``candidate.close()`` and during
+    """3-way race: TOCTOU loser awaits ``candidate.stop()`` and during
     that yield ``stop()`` clears ``_publisher``. The loser must return
     the captured winner — not the now-None ``_publisher`` — otherwise
     ``publish()`` crashes on ``None.topic_path(...)``."""
@@ -763,10 +764,11 @@ async def test_ensure_publisher_returns_winner_when_stop_races_close(
 
     class FakePublisherClient:
         def __init__(self):
-            self.closed = False
+            self.stopped = False
 
-        def close(self):
-            self.closed = True
+        def stop(self):
+            # The real PublisherClient teardown API (it has no close()).
+            self.stopped = True
 
     fake_sdk = types.SimpleNamespace(PublisherClient=FakePublisherClient)
     bus._publisher = None
@@ -779,7 +781,7 @@ async def test_ensure_publisher_returns_winner_when_stop_races_close(
             # Inject the winner before the candidate-construction await resolves.
             bus._publisher = winning
             return await real_run(executor, fn, *args)
-        # Second call is candidate.close() — simulate stop() racing in.
+        # Second call is candidate.stop() — simulate stop() racing in.
         bus._publisher = None
         return await real_run(executor, fn, *args)
 

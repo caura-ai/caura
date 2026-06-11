@@ -240,7 +240,11 @@ class PubSubEventBus(EventBus):
             async def _close_pending() -> None:
                 try:
                     client = await ctor_fut
-                    await loop.run_in_executor(None, client.close)
+                    # stop(), not close(): PublisherClient has no close()
+                    # (same nonexistent-method bug as the stop() teardown
+                    # below — here it only leaked the SDK's commit thread
+                    # since an uninstalled candidate has no batches).
+                    await loop.run_in_executor(None, client.stop)
                 except BaseException:
                     # ``BaseException`` (not ``Exception``) — this is a
                     # fire-and-forget background task; if the event loop
@@ -248,7 +252,7 @@ class PubSubEventBus(EventBus):
                     # ``CancelledError`` would otherwise surface as
                     # "Task exception was never retrieved" log noise.
                     logger.debug(
-                        "pubsub: cancelled-publisher close failed", exc_info=True
+                        "pubsub: cancelled-publisher stop failed", exc_info=True
                     )
 
             self._spawn_background_task(_close_pending())
@@ -267,10 +271,10 @@ class PubSubEventBus(EventBus):
 
             async def _close_post_stop() -> None:
                 try:
-                    await loop.run_in_executor(None, candidate.close)
+                    await loop.run_in_executor(None, candidate.stop)
                 except BaseException:
                     logger.debug(
-                        "pubsub: post-stop candidate close failed", exc_info=True
+                        "pubsub: post-stop candidate stop failed", exc_info=True
                     )
 
             self._spawn_background_task(_close_post_stop())
@@ -293,7 +297,7 @@ class PubSubEventBus(EventBus):
             # is synchronous and doesn't yield.)
             async def _close_loser() -> None:
                 try:
-                    await loop.run_in_executor(None, candidate.close)
+                    await loop.run_in_executor(None, candidate.stop)
                 except BaseException:
                     # ``BaseException`` so a shutdown-time cancellation
                     # of this background task doesn't surface as "Task
