@@ -207,16 +207,52 @@ async def authorize_memory_access(
     """
     if not caller_agent_id:
         return True
+    if visibility in ("scope_agent", "scope_org"):
+        # No agent row needed for these branches.
+        return memory_access_allowed_for_agent(
+            None,
+            caller_agent_id,
+            visibility=visibility,
+            owner_agent_id=owner_agent_id,
+            fleet_id=fleet_id,
+            write=write,
+        )
+    # scope_team / unknown visibility: fleet-gated by the trust ladder.
+    agent = await lookup_agent(db, tenant_id, caller_agent_id)
+    return memory_access_allowed_for_agent(
+        agent,
+        caller_agent_id,
+        visibility=visibility,
+        owner_agent_id=owner_agent_id,
+        fleet_id=fleet_id,
+        write=write,
+    )
+
+
+def memory_access_allowed_for_agent(
+    agent: dict | None,
+    caller_agent_id: str,
+    *,
+    visibility: str | None,
+    owner_agent_id: str | None,
+    fleet_id: str | None,
+    write: bool = False,
+) -> bool:
+    """Pure predicate behind :func:`authorize_memory_access`.
+
+    Takes the caller's pre-fetched agent row so loops over many rows
+    (e.g. an entity's linked memories / relations) resolve the agent once
+    instead of issuing one identical lookup per row (N+1). ``agent=None``
+    on the scope_team branch means the identity is unregistered — mirror
+    ``enforce_fleet_read``'s allow-on-unknown (registration happens on
+    writes; reads of an unregistered identity are not the isolation
+    boundary this helper guards).
+    """
     if visibility == "scope_agent":
         return owner_agent_id == caller_agent_id
     if visibility == "scope_org":
         return True
-    # scope_team / unknown visibility: fleet-gated by the trust ladder.
-    agent = await lookup_agent(db, tenant_id, caller_agent_id)
     if not agent:
-        # Unknown agent — mirror enforce_fleet_read's allow-on-unknown
-        # (registration happens on writes; reads of an unregistered identity
-        # are not the isolation boundary this helper guards).
         return True
     if fleet_id is None or fleet_id == agent.get("fleet_id"):
         return True
