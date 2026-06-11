@@ -177,15 +177,23 @@ class ParallelEmbedAndEntityBoost:
         emb_task = asyncio.ensure_future(
             _get_or_cache_embedding(data["query"], data["tenant_id"], data["tenant_config"])
         )
-        ent_task = asyncio.ensure_future(
-            _entity_boost_via_storage(
-                data["query"],
-                data["tenant_id"],
-                data.get("fleet_ids"),
-                data.get("graph_expand", True),
-                sp["graph_max_hops"],
-                use_union=True,
-                precomputed_hops=data.pop("_classified_entity_hops", None),
+        # ClassifyQuery already ran the same tokenizer + entity FTS and
+        # declined the match as over-broad (CAURA-698). Re-deriving it here
+        # would hand GRAPH_HOP_BOOST to an arbitrary GRAPH_MAX_BOOSTED_MEMORIES
+        # subset of the sibling pool, outranking rows the scorer puts first.
+        ent_task = (
+            None
+            if data.get("entity_match_declined")
+            else asyncio.ensure_future(
+                _entity_boost_via_storage(
+                    data["query"],
+                    data["tenant_id"],
+                    data.get("fleet_ids"),
+                    data.get("graph_expand", True),
+                    sp["graph_max_hops"],
+                    use_union=True,
+                    precomputed_hops=data.pop("_classified_entity_hops", None),
+                )
             )
         )
         # D7 — split the prior shared ``gather`` timeout into per-task budgets.
@@ -199,13 +207,16 @@ class ParallelEmbedAndEntityBoost:
         try:
             embedding = await asyncio.wait_for(emb_task, timeout=_OVERALL_TIMEOUT_S)
         except TimeoutError:
-            ent_task.cancel()
+            if ent_task is not None:
+                ent_task.cancel()
             raise HTTPException(status_code=504, detail="Search embedding timed out")
         except ValueError as exc:
-            ent_task.cancel()
+            if ent_task is not None:
+                ent_task.cancel()
             raise HTTPException(status_code=503, detail=str(exc))
         except BaseException:
-            ent_task.cancel()
+            if ent_task is not None:
+                ent_task.cancel()
             raise
 
         # ent_task has been running in parallel with emb_task since the
@@ -214,7 +225,14 @@ class ParallelEmbedAndEntityBoost:
         # only fires when entity_boost outlasts the embedding.
         remaining = max(_MIN_ENTITY_BUDGET_S, _OVERALL_TIMEOUT_S - (time.perf_counter() - t0))
         try:
-            boosted_memory_ids, memory_boost_factor = await asyncio.wait_for(ent_task, timeout=remaining)
+            if ent_task is None:
+                logger.info(
+                    "parallel_embed_entity_boost: entity boost skipped "
+                    "(entity match declined as over-broad in classify_query)"
+                )
+                boosted_memory_ids, memory_boost_factor = set(), {}
+            else:
+                boosted_memory_ids, memory_boost_factor = await asyncio.wait_for(ent_task, timeout=remaining)
         except TimeoutError:
             logger.warning(
                 "entity_boost timed out after %.2fs remaining budget; continuing with vector-only search",

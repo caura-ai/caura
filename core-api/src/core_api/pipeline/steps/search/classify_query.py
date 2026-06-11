@@ -94,6 +94,13 @@ class ClassifyQuery:
                         len(matched_ids),
                         ENTITY_LOOKUP_MAX_MATCHES,
                     )
+                    # The same over-broad match must not be re-derived by
+                    # ParallelEmbedAndEntityBoost and used for hop-boosting:
+                    # with N >> GRAPH_MAX_BOOSTED_MEMORIES sibling entities all
+                    # at hop 0, the boost degenerates into an arbitrary-50
+                    # lottery that buries rows pure scoring ranks first
+                    # (S1 @K=10000: 11/25 vs rank-1 on unboosted score).
+                    ctx.data["entity_match_declined"] = True
                     matched_ids = []
 
                 if matched_ids:
