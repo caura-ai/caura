@@ -157,6 +157,22 @@ out of `installable` and the reconciler removes it from disk on the next
 tick. Push (OpenClaw) and pull (`memclaw_doc`) now agree on exactly what
 an agent may see.
 
+### Verifying installs reached the fleet
+
+Gating decides what *should* land; observability confirms what *did*.
+Each heartbeat carries the reconciler's summary — `installed` (the
+active skills converged onto that node's disk right now), plus per-tick
+`added` / `removed` / `skipped` / `protected` deltas — which the backend
+stores as the latest snapshot at `nodes.metadata.reconcile` and surfaces
+via `GET /api/v1/fleet/nodes`. So an operator who flips a skill to
+`active` can confirm it actually reached each node, and see *why* a
+malformed catalog row was skipped — closing the loop from "approved" to
+"installed on the fleet."
+
+`installed` is the standing truth, not a delta: it's reported on every
+tick (even steady-state ticks with empty `added`/`removed`), so a node's
+current live-skill set is always legible.
+
 ## What makes a skill findable: the summary
 
 Scoped `op=search` ranks on the embedded `data.summary`. So the

@@ -58,8 +58,16 @@ interface CatalogDoc {
   data?: Record<string, unknown>;
 }
 
-interface ReconcileSummary {
+export interface ReconcileSummary {
   catalogCount: number;
+  // The converged catalog-active skills now materialised on disk (the
+  // desired set this tick). Unlike ``added``/``removed`` — which are
+  // per-tick DELTAS, empty once a node is steady-state — ``installed`` is
+  // the standing truth: "these active skills are present on this node
+  // right now." Surfaced on the heartbeat so an operator can confirm an
+  // approved/active skill actually landed on the fleet. Excludes the
+  // bundled ``memclaw`` onboarding skill (reported via ``protected``).
+  installed: string[];
   added: string[];
   removed: string[];
   skipped: string[];   // catalog entries with bad shape (no doc_id / no content)
@@ -73,6 +81,7 @@ interface ReconcileSummary {
 export async function reconcileSkills(): Promise<ReconcileSummary> {
   const summary: ReconcileSummary = {
     catalogCount: 0,
+    installed: [],
     added: [],
     removed: [],
     skipped: [],
@@ -191,6 +200,22 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
       logError(`reconcileSkills: rm failed for ${slug}`, e);
     }
   }
+
+  // Track CONFIRMED on-disk state for ``summary.installed``. Seed with
+  // skills that are BOTH already on disk AND catalog-active this tick
+  // (``onDisk ∩ desired``); the write loop then adds each fresh
+  // successful write. Intersecting with ``desired`` — rather than
+  // ``onDisk`` minus successful removals — is what makes this correct in
+  // every case:
+  //   • same-content skill skipped by the no-op-match branch below:
+  //     in onDisk ∩ desired → kept (it's genuinely present);
+  //   • new install: not on disk → added only on a successful write;
+  //   • cleanly removed orphan: not in desired → excluded;
+  //   • FAILED removal of a deactivated skill (rmSync threw, so it's
+  //     absent from summary.removed but still on disk): not in desired
+  //     → excluded, so a stale skill is never reported as installed.
+  const desiredSlugs = new Set(desired.keys());
+  const installedSet = new Set([...onDisk].filter((s) => desiredSlugs.has(s)));
   for (const [slug, content] of desired) {
     const dir = join(skillsRoot, slug);
     const target = join(dir, "SKILL.md");
@@ -207,6 +232,7 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
     try {
       mkdirSync(dir, { recursive: true });
       writeFileSync(target, content, "utf-8");
+      installedSet.add(slug);
       summary.added.push(slug);
       console.log(
         `[memclaw] Reconciler ${onDisk.has(slug) ? "updated" : "pulled"} skill: ${slug}`,
@@ -215,6 +241,17 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
       logError(`reconcileSkills: write failed for ${slug}`, e);
     }
   }
+
+  // The standing on-disk truth: skills CONFIRMED present on disk this
+  // tick (sorted for a stable heartbeat payload / diff), excluding the
+  // bundled ``memclaw`` onboarding skill (reported via ``protected``).
+  // Built from confirmed writes + already-present survivors, NOT from
+  // ``desired`` — so a skill whose write failed above is correctly
+  // absent. Reported even when ``added``/``removed`` are empty (steady
+  // state) so an operator always sees what's live, not just what changed.
+  summary.installed = [...installedSet]
+    .filter((s) => !PROTECTED_SKILLS.has(s))
+    .sort();
 
   return summary;
 }

@@ -251,3 +251,97 @@ async def test_node_agents_from_heartbeat(client):
     node = next(n for n in nodes if n["node_name"] == f"node-agents-{tag}")
     assert node["agents"] == agents
     assert len(node["agents"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Skill-reconcile observability — the plugin's reconcileSkills() summary
+# rides the heartbeat into nodes.metadata.reconcile and out via /fleet/nodes.
+# ---------------------------------------------------------------------------
+
+
+async def test_heartbeat_persists_reconcile_summary(client):
+    """A heartbeat carrying ``reconcile`` lands at
+    ``node.metadata.reconcile`` and is readable via /fleet/nodes — so an
+    operator can confirm which active skills are installed on the node."""
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fid = f"fleet-{tag}"
+    node_name = f"node-recon-{tag}"
+    summary = {
+        "catalogCount": 3,
+        "installed": ["deploy-runbook", "git-rebase-safety"],
+        "added": ["deploy-runbook"],
+        "removed": [],
+        "skipped": ["../evil"],
+        "protected": ["memclaw"],
+    }
+    resp = await client.post(
+        "/api/v1/fleet/heartbeat",
+        json={
+            "tenant_id": tenant_id,
+            "fleet_id": fid,
+            "node_name": node_name,
+            "reconcile": summary,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+
+    nodes = await _get_nodes(client, tenant_id, headers)
+    node = next(n for n in nodes if n["node_name"] == node_name)
+    assert node["metadata"]["reconcile"] == summary
+
+
+async def test_heartbeat_reconcile_latest_snapshot_wins(client):
+    """The newest tick's summary overwrites the prior one (snapshot, not
+    accumulation) — operators see current state, not history."""
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fid = f"fleet-{tag}"
+    node_name = f"node-recon2-{tag}"
+
+    async def _send(installed: list[str]) -> None:
+        resp = await client.post(
+            "/api/v1/fleet/heartbeat",
+            json={
+                "tenant_id": tenant_id,
+                "fleet_id": fid,
+                "node_name": node_name,
+                "reconcile": {
+                    "catalogCount": len(installed),
+                    "installed": installed,
+                    "added": [],
+                    "removed": [],
+                    "skipped": [],
+                    "protected": ["memclaw"],
+                },
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+
+    await _send(["alpha", "beta"])
+    await _send(["alpha"])  # beta de-activated
+
+    nodes = await _get_nodes(client, tenant_id, headers)
+    node = next(n for n in nodes if n["node_name"] == node_name)
+    assert node["metadata"]["reconcile"]["installed"] == ["alpha"]
+
+
+async def test_heartbeat_reconcile_oversized_rejected(client):
+    """A reconcile blob over the 8 KB cap is rejected at the API boundary
+    (anti-ballooning of nodes.metadata)."""
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    oversized = {"installed": ["x" * 100 for _ in range(120)]}  # ~12 KB
+    resp = await client.post(
+        "/api/v1/fleet/heartbeat",
+        json={
+            "tenant_id": tenant_id,
+            "fleet_id": f"fleet-{tag}",
+            "node_name": f"node-big-{tag}",
+            "reconcile": oversized,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 422, resp.text

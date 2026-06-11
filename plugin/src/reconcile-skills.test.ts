@@ -123,6 +123,9 @@ describe("reconcileSkills", () => {
     assert.deepEqual(listSkillDirs(), ["memclaw"]); // foo gone, memclaw stays
     assert.deepEqual(summary.removed, ["foo"]);
     assert.deepEqual(summary.protected, ["memclaw"]);
+    // No catalog-active skills → nothing installed (the bundled memclaw
+    // is protected, not "installed" from the catalog).
+    assert.deepEqual(summary.installed, []);
     // Bundled content must be untouched
     assert.match(readSkill("memclaw"), /should survive/);
   });
@@ -146,6 +149,11 @@ describe("reconcileSkills", () => {
     ]);
     assert.deepEqual(summary.added.sort(), ["deploy-runbook", "git-rebase-safety", "incident-triage"]);
     assert.deepEqual(summary.removed, []);
+    // ``installed`` = the converged catalog-active set on disk (sorted),
+    // excluding the bundled ``memclaw`` skill.
+    assert.deepEqual(summary.installed, [
+      "deploy-runbook", "git-rebase-safety", "incident-triage",
+    ]);
     // Frontmatter synthesised from data.{name, description}; body preserved.
     const written = readSkill("git-rebase-safety");
     assert.match(written, /^---\nname: git-rebase-safety\ndescription: "rebase steps"\n---\n\n# rebase safely\n$/);
@@ -181,6 +189,10 @@ describe("reconcileSkills", () => {
     assert.deepEqual(first.added, ["skill-a"]);
     assert.deepEqual(second.added, []);
     assert.deepEqual(second.removed, []);
+    // The standing-truth value: even on the steady-state tick (no
+    // deltas), ``installed`` still reports what's live — this is exactly
+    // why ``installed`` exists rather than reading the empty ``added``.
+    assert.deepEqual(second.installed, ["skill-a"]);
     // The skill on disk hasn't been overwritten (same content → skipped)
     assert.equal(readSkill("skill-a"), withSynthFrontmatter("skill-a", "alpha", "# A\n"));
   });
@@ -300,6 +312,7 @@ describe("reconcileSkills", () => {
     ];
     const first = await reconcileSkills();
     assert.deepEqual(first.added, ["deploy-runbook"]);
+    assert.deepEqual(first.installed, ["deploy-runbook"]);
     assert.ok(listSkillDirs().includes("deploy-runbook"));
 
     // Tick 2: the skill flipped to a non-active status, so the install
@@ -308,6 +321,9 @@ describe("reconcileSkills", () => {
     mockCatalog = [];
     const second = await reconcileSkills();
     assert.deepEqual(second.removed, ["deploy-runbook"]);
+    // The heartbeat now reports an empty installed set — the operator
+    // sees the skill is no longer live on this node.
+    assert.deepEqual(second.installed, []);
     assert.deepEqual(listSkillDirs(), ["memclaw"]); // gone; bundled survives
   });
 
@@ -326,6 +342,26 @@ describe("reconcileSkills", () => {
     assert.equal(summary.catalogCount, 0);
     assert.deepEqual(summary.added, []);
     assert.deepEqual(summary.removed, []);
+  });
+
+  test("installed reflects CONFIRMED disk, not desired intent: a failed write is excluded", async () => {
+    plantOnDisk("memclaw");
+    // Plant a FILE where the reconciler wants a directory, so
+    // mkdirSync(skills/bad-skill) throws and its write fails — without
+    // mocking fs. ``good-skill`` writes cleanly.
+    writeFileSync(join(SKILLS_ROOT, "bad-skill"), "i am a file, not a dir\n", "utf-8");
+    mockCatalog = [
+      { doc_id: "good-skill", data: { name: "good-skill", description: "ok",  content: "# good\n" } },
+      { doc_id: "bad-skill",  data: { name: "bad-skill",  description: "nope", content: "# bad\n" } },
+    ];
+
+    const summary = await reconcileSkills();
+
+    // The failed write must NOT be reported as installed (it never
+    // converged to disk); the clean one must be.
+    assert.deepEqual(summary.installed, ["good-skill"]);
+    assert.ok(summary.added.includes("good-skill"));
+    assert.ok(!summary.added.includes("bad-skill"));
   });
 });
 

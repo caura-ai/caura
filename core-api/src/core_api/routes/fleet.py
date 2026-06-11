@@ -100,6 +100,15 @@ class HeartbeatIn(BaseModel):
     # reading the column (e.g. "blocked since 1970?"). Fail-loud here
     # instead.
     deploy_blocked_until: int | None = Field(None, ge=1)
+    # Skill-reconcile observability: the plugin's latest
+    # ``reconcileSkills()`` summary — ``installed`` (the active skills
+    # converged onto this node's disk), per-tick ``added``/``removed``
+    # deltas, ``skipped`` (bad-shape catalog rows), ``protected``, and
+    # ``catalogCount``. Stored as the newest snapshot on the node row
+    # (``nodes.metadata.reconcile``) so an operator can confirm an
+    # approved/active skill actually landed on the fleet. Optional —
+    # older plugin versions don't send it.
+    reconcile: dict | None = None
 
     @field_validator("recall_metrics")
     @classmethod
@@ -110,6 +119,17 @@ class HeartbeatIn(BaseModel):
         # with every reason populated; 4 KB is a comfortable headroom.
         if v is not None and len(json.dumps(v)) > 4096:
             raise ValueError("recall_metrics exceeds 4 KB limit")
+        return v
+
+    @field_validator("reconcile")
+    @classmethod
+    def _cap_reconcile(cls, v: dict | None) -> dict | None:
+        # Same anti-ballooning cap as recall_metrics. The summary is a
+        # handful of slug lists; even a fleet sharing ~150 skills stays
+        # well under 8 KB. Reject beyond that at the API boundary so a
+        # misbehaving plugin can't bloat the node row.
+        if v is not None and len(json.dumps(v)) > 8192:
+            raise ValueError("reconcile summary exceeds 8 KB limit")
         return v
 
 
@@ -533,10 +553,15 @@ async def heartbeat(
     # exposing the data via the existing /fleet/nodes endpoint and
     # ad-hoc SQL on `nodes.metadata`.
     merged_metadata: dict | None = body.metadata
-    if body.recall_metrics is not None or body.deploy_blocked_until is not None:
+    if body.recall_metrics is not None or body.deploy_blocked_until is not None or body.reconcile is not None:
         merged_metadata = dict(merged_metadata or {})
         if body.recall_metrics is not None:
             merged_metadata["recall_metrics"] = body.recall_metrics
+        if body.reconcile is not None:
+            # Latest snapshot wins — overwrites the prior tick's summary
+            # so nodes.metadata.reconcile always reflects the current
+            # on-disk skill state, not an accumulation.
+            merged_metadata["reconcile"] = body.reconcile
         if body.deploy_blocked_until is not None:
             # Mirror the gate's MAX_BLOCK_MS cap at write time. The gate
             # already ignores beyond-cap values (treats them as if the
@@ -821,7 +846,17 @@ async def list_nodes(
                 "agents": n.get("agents_json"),
                 "tools": n.get("tools_json"),
                 "channels": n.get("channels_json"),
-                "metadata": n.get("metadata"),
+                # Storage serialises the JSONB column under its ORM
+                # attribute name ``extra`` (the column is ``metadata`` but
+                # the model maps it to ``extra`` to avoid shadowing
+                # SQLAlchemy's ``MetaData``). The storage field list emits
+                # ``extra``, so reading ``"metadata"`` here always yielded
+                # ``None`` — node metadata (recall_metrics,
+                # deploy_blocked_until, and the reconcile summary) never
+                # surfaced through this endpoint. Read ``extra`` (with a
+                # ``metadata`` fallback in case a future serializer renames
+                # it back).
+                "metadata": n.get("extra", n.get("metadata")),
                 "last_heartbeat": n.get("last_heartbeat"),
                 "created_at": n.get("created_at"),
             }

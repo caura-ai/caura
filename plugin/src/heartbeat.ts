@@ -59,7 +59,7 @@ import {
 import { logError } from "./logger.js";
 import { getInstallId } from "./install-id.js";
 import { getDisplayName } from "./identity.js";
-import { reconcileSkills } from "./reconcile-skills.js";
+import { reconcileSkills, type ReconcileSummary } from "./reconcile-skills.js";
 
 let heartbeatCount = 0;
 let bakCleanupDone = false;
@@ -352,8 +352,12 @@ export async function sendHeartbeat(): Promise<void> {
   // Skill reconciler — converge plugin/skills/ with the catalog before
   // anything else. Failures are non-fatal (best-effort distribution).
   // Replaces the dropped install_skill / uninstall_skill push commands.
+  // Capture the summary so this tick's outcome (which active skills are
+  // installed on this node, plus deltas/skips) rides the heartbeat for
+  // operator observability. Left undefined if reconciliation throws.
+  let reconcile: ReconcileSummary | undefined;
   try {
-    await reconcileSkills();
+    reconcile = await reconcileSkills();
   } catch (e: unknown) {
     logError("reconcileSkills failed", e);
   }
@@ -570,6 +574,12 @@ export async function sendHeartbeat(): Promise<void> {
     // Cooldown signal: when set, the backend's auto-upgrade trigger
     // refuses to queue further deploy commands until this timestamp.
     deploy_blocked_until,
+    // Latest skill-reconcile summary for this node. Backend stores it as
+    // the newest snapshot on the node row (nodes.metadata.reconcile),
+    // surfaced via /fleet/nodes — so an operator can confirm an
+    // approved/active skill actually landed. Omitted if reconciliation
+    // threw this tick (older backends ignore the unknown field).
+    reconcile,
   };
 
   try {
