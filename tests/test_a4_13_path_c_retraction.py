@@ -671,3 +671,100 @@ async def test_kill_switch_enabled_default_allows_retraction():
         c.args == (str(cand_id), "active")
         for c in sc.update_memory_status.call_args_list
     ), "retraction_enabled=True must still allow the canonical retract path"
+
+
+# ---------------------------------------------------------------------------
+# CAURA-134 — context-fetch failure log shape (retraction path mirror)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_retraction_context_fetch_failure_logs_exc_type(caplog):
+    """CAURA-134 — when ``_fetch_entity_context`` raises (timeout,
+    network, malformed response), the retraction path's WARNING log
+    must include the exception class name. The original log used
+    plain ``%s`` for the exception, which renders as empty for
+    ``asyncio.TimeoutError`` and made the dominant production
+    failure mode un-diagnosable. Mirrors the analogous
+    detection-path test in
+    ``test_caura_131_entity_aware_path_c_detection.py``."""
+    import asyncio
+    import logging
+    from unittest.mock import patch as _patch
+
+    from core_api.services.contradiction_detector import (
+        detect_contradictions_by_entities_async,
+    )
+
+    new_id, cand_id = uuid4(), uuid4()
+    sc = _mock_sc_with_retraction_setup(new_id, cand_id)
+
+    # Patch ``_fetch_entity_context`` directly so the TimeoutError
+    # surfaces at the OUTER ``asyncio.wait_for`` boundary in
+    # ``_attempt_path_c_retraction``. The inner helper swallows
+    # storage failures and returns ``[]``; patching it is the only
+    # way to exercise the outer ``except Exception`` where the
+    # CAURA-134 WARNING + symmetric INFO logs live.
+    fetch_ctx = AsyncMock(side_effect=asyncio.TimeoutError())
+
+    judge = AsyncMock(return_value=(False, 0.95))
+
+    with (
+        caplog.at_level(
+            logging.INFO, logger="core_api.services.contradiction_detector"
+        ),
+        _patch(
+            "core_api.services.contradiction_detector.get_storage_client",
+            return_value=sc,
+        ),
+        _patch(
+            "core_api.services.contradiction_detector._fetch_entity_context",
+            fetch_ctx,
+        ),
+        _patch(
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
+            judge,
+        ),
+        _patch(
+            "core_api.services.organization_settings.resolve_config",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        await detect_contradictions_by_entities_async(new_id, "t1", "f1")
+
+    # Retraction must not have run (fetch failed; Path A verdict stands).
+    judge.assert_not_called()
+    revert_calls = [
+        c
+        for c in sc.update_memory_status.call_args_list
+        if c.args == (str(cand_id), "active")
+    ]
+    assert revert_calls == [], (
+        "fetch failure must not retract; Path A verdict must stand"
+    )
+
+    # CAURA-134 — log shape locks in: new "PATH_C_RETRACTION
+    # context_fetch_failed" prefix and the exception class name on
+    # the WARNING (with exc_type= key for grep parity with the
+    # detection-path WARNING).
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "PATH_C_RETRACTION context_fetch_failed" in m and "exc_type=TimeoutError" in m
+        for m in warnings
+    ), (
+        f"retraction-path WARNING must include the 'PATH_C_RETRACTION "
+        f"context_fetch_failed' prefix and the exc_type=TimeoutError key; "
+        f"got: {warnings}"
+    )
+    # CAURA-134 — NO symmetric INFO log on the retraction path. Unlike
+    # the detection path, retraction has no success-side
+    # ``context_fetched`` INFO to mirror — a failure-only INFO would
+    # skew any success/failure counter built from the two lines as a
+    # pair. The WARNING already carries the full diagnostic.
+    infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert not any("PATH_C_RETRACTION context_fetch_failed" in m for m in infos), (
+        f"retraction-path INFO context_fetch_failed must NOT fire (no "
+        f"success-side counterpart to mirror; would skew GCP metrics); "
+        f"got: {infos}"
+    )

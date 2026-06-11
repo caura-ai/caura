@@ -280,11 +280,20 @@ async def test_fallback_to_base_judge_when_candidate_has_empty_context():
 
 
 @pytest.mark.asyncio
-async def test_fallback_to_base_judge_when_context_fetch_fails():
+async def test_fallback_to_base_judge_when_context_fetch_fails(caplog):
     """Storage failure during the entity-context fetch must not
     silently drop candidates — fail open and run the base judge for
     every candidate. Conservative against losing real contradictions
-    on a transient storage hiccup."""
+    on a transient storage hiccup.
+
+    CAURA-134 — also asserts the failure log shape: exception class
+    name MUST appear in the WARNING (default str(e) is empty for
+    ``asyncio.TimeoutError`` — the dominant production failure
+    mode), and the symmetric ``PATH_C_DETECTION context_fetch_failed``
+    INFO log must fire (mirrors the success-side ``context_fetched``
+    line so GCP queries don't have to infer failure from absence)."""
+    import logging
+
     from core_api.services.contradiction_detector import (
         detect_contradictions_by_entities_async,
     )
@@ -293,17 +302,30 @@ async def test_fallback_to_base_judge_when_context_fetch_fails():
     new_mem = _make_new_memory(new_id, subject_entity_id=None)
     cand = _make_candidate(cand_id, subject_entity_id=None)
     sc = _sc(new_mem, [cand], {})
-    sc.get_entity_links_for_memories = AsyncMock(
-        side_effect=RuntimeError("storage down")
-    )
+
+    # Patch ``_fetch_entity_context`` directly so the exception surfaces
+    # at the OUTER ``asyncio.wait_for`` / gather boundary in
+    # ``detect_contradictions_by_entities_async``. The inner helper has
+    # its own try/except that swallows storage failures and returns
+    # ``[]`` (the "no resolved entities" signal). Patching the helper
+    # is the only way to exercise the outer ``except Exception`` path
+    # where the CAURA-134 WARNING + INFO logs live.
+    fetch_ctx = AsyncMock(side_effect=RuntimeError("storage down"))
 
     base_judge = AsyncMock(return_value=(True, 0.95))
     entity_aware_judge = AsyncMock(return_value=(True, 0.95))
 
     with (
+        caplog.at_level(
+            logging.INFO, logger="core_api.services.contradiction_detector"
+        ),
         patch(
             "core_api.services.contradiction_detector.get_storage_client",
             return_value=sc,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._fetch_entity_context",
+            fetch_ctx,
         ),
         patch(
             "core_api.services.contradiction_detector._llm_contradiction_check",
@@ -330,6 +352,127 @@ async def test_fallback_to_base_judge_when_context_fetch_fails():
     # Fetch failure → entity-aware path bypassed; base judge runs.
     base_judge.assert_called_once()
     entity_aware_judge.assert_not_called()
+
+    # CAURA-134 — WARNING in grep-friendly key=value form, mirroring
+    # the retraction-path's ``PATH_C_RETRACTION context_fetch_failed``
+    # shape. Must carry ``exc_type=…`` (greppable class name) and
+    # ``candidates=…`` (size of dropped set).
+    warning_messages = [
+        r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+    ]
+    assert any(
+        "PATH_C_DETECTION context_fetch_failed" in m
+        and "exc_type=RuntimeError" in m
+        and "candidates=1" in m
+        for m in warning_messages
+    ), f"WARNING must use the grep-friendly key=value form; got: {warning_messages}"
+    # CAURA-134 — NO symmetric INFO mirror. A failure-side INFO at the
+    # same severity-floor as the success-side ``context_fetched`` INFO
+    # would double-count failures in any GCP metric using
+    # ``severity>=INFO`` (the default — matches WARNING too) because
+    # the WARNING and INFO would share the same
+    # ``PATH_C_DETECTION context_fetch_failed`` text. Lock the absence
+    # in so a future "symmetry" refactor can't silently reintroduce
+    # the metric-distortion bug.
+    info_messages = [
+        r.getMessage() for r in caplog.records if r.levelno == logging.INFO
+    ]
+    assert not any(
+        "PATH_C_DETECTION context_fetch_failed" in m for m in info_messages
+    ), (
+        f"detection-path INFO context_fetch_failed must NOT fire (would "
+        f"double-count failures at severity>=INFO); got: {info_messages}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fallback_to_base_judge_logs_timeouterror_explicitly(caplog):
+    """CAURA-134 — the dominant production failure mode is
+    ``asyncio.TimeoutError`` from the ``wait_for`` ceiling. Its
+    default ``str(e)`` is empty, which made the pre-fix warning read
+    ``failed: . Falling through to base LLM judge.`` — un-diagnosable.
+    The new log shape ALWAYS includes ``type(e).__name__`` so the
+    failure mode is greppable."""
+    import asyncio
+    import logging
+
+    from core_api.services.contradiction_detector import (
+        detect_contradictions_by_entities_async,
+    )
+
+    new_id, cand_id = uuid4(), uuid4()
+    new_mem = _make_new_memory(new_id, subject_entity_id=None)
+    cand = _make_candidate(cand_id, subject_entity_id=None)
+    sc = _sc(new_mem, [cand], {})
+    # Patch ``_fetch_entity_context`` directly so the TimeoutError
+    # surfaces at the OUTER ``asyncio.wait_for`` boundary in
+    # ``detect_contradictions_by_entities_async``. The inner helper
+    # swallows storage failures and returns ``[]`` — patching it is
+    # the only way to exercise the outer ``except Exception`` path
+    # where the CAURA-134 WARNING lives. ``asyncio.TimeoutError()``
+    # has ``str(e) == ""`` — the bug class CAURA-134 fixes.
+    fetch_ctx = AsyncMock(side_effect=asyncio.TimeoutError())
+
+    base_judge = AsyncMock(return_value=(False, 0.95))
+    entity_aware_judge = AsyncMock(return_value=(False, 0.95))
+
+    with (
+        caplog.at_level(
+            logging.WARNING, logger="core_api.services.contradiction_detector"
+        ),
+        patch(
+            "core_api.services.contradiction_detector.get_storage_client",
+            return_value=sc,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._fetch_entity_context",
+            fetch_ctx,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._llm_contradiction_check",
+            base_judge,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
+            entity_aware_judge,
+        ),
+        patch(
+            "core_api.services.contradiction_detector.resolve_config",
+            new_callable=AsyncMock,
+            return_value=None,
+            create=True,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+    ):
+        await detect_contradictions_by_entities_async(new_id, "t1", "f1")
+
+    warning_messages = [
+        r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+    ]
+    assert any("TimeoutError" in m for m in warning_messages), (
+        f"warning must name TimeoutError even when str(e) is empty; got: {warning_messages}"
+    )
+
+
+def test_context_fetch_timeout_constant_is_generous_enough():
+    """CAURA-134 lock-in — guards against anyone tightening the
+    timeout back to the 5s value that caused the priya-silence
+    cascade on dev v2.14.0. The new floor is 15s, which gives ample
+    headroom over observed p99 storage costs (~5-15s under load)
+    while still cancelling truly hung tasks."""
+    from core_api.services.contradiction_detector import (
+        _CONTEXT_FETCH_TIMEOUT_SECONDS,
+    )
+
+    assert _CONTEXT_FETCH_TIMEOUT_SECONDS >= 15.0, (
+        f"_CONTEXT_FETCH_TIMEOUT_SECONDS must be >= 15s; got "
+        f"{_CONTEXT_FETCH_TIMEOUT_SECONDS}. The 5s value reintroduces "
+        f"the silent-miss class CAURA-134 fixed."
+    )
 
 
 @pytest.mark.asyncio

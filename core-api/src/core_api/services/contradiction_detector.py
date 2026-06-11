@@ -1069,6 +1069,27 @@ _ENTITY_CONTEXT_NAME_MAX_CHARS = 100
 # it can.
 _ENTITY_LINKS_PREFLIGHT_MAX_CANDIDATES = 20
 
+# CAURA-134 — timeout budget (seconds) for the parallel
+# ``_fetch_entity_context`` gather in both Path C entry points
+# (retraction and forward-overlap detection). Raised from 5s -> 30s
+# after CAURA-132 forensic logs showed the 5s ceiling silently firing
+# on dev v2.14.0 with accumulated tenant state, causing
+# ``contexts_fetched`` to stay False and ALL candidates to fall back
+# to the base LLM judge. The fallback bypasses CAURA-131's entity-
+# aware wiring and CAURA-133's entity-aware prompt — i.e. the priya-
+# class silence was being driven by this timeout, not by a weak
+# prompt.
+#
+# 30s is safe because Path C runs in a fire-and-forget background
+# task after the write has already returned 201; the timeout only
+# bounds the background task's wall-clock, not user-perceived
+# latency. The two storage round-trips per memory (one batch +
+# per-link gather) complete in ~50-200ms p95 in the working
+# trials we observed; 30s is comfortably above any reasonable
+# per-tenant accumulated-state cost while still cancelling truly
+# hung tasks.
+_CONTEXT_FETCH_TIMEOUT_SECONDS = 30.0
+
 # CAURA-133 — process-scoped prefix for the missing-entity_id sentinel
 # emitted by ``_format_entity_context``. A real entity_id (always a
 # UUID written by the entity-extraction worker) cannot accidentally
@@ -1407,23 +1428,37 @@ async def _attempt_path_c_retraction(
     # (degenerate inputs / extractor failure).
     # Wrap the fetch in ``asyncio.wait_for`` so a hung storage
     # round-trip cannot block Path C indefinitely (mirrors the LLM
-    # call's cancellation boundary below). 5s budget is ample for two
-    # parallel storage calls (~50-200ms p95 in practice); on failure
-    # (timeout, network, storage error), treat as "no context, leave
-    # Path A alone" rather than retrying.
+    # call's cancellation boundary below). On failure (timeout,
+    # network, storage error), treat as "no context, leave Path A
+    # alone" rather than retrying. See ``_CONTEXT_FETCH_TIMEOUT_SECONDS``
+    # for the timeout rationale (CAURA-134).
     try:
         new_entities, old_entities = await asyncio.wait_for(
             asyncio.gather(
                 _fetch_entity_context(sc, str(new_memory.get("id"))),
                 _fetch_entity_context(sc, str(candidate.get("id"))),
             ),
-            timeout=5.0,
+            timeout=_CONTEXT_FETCH_TIMEOUT_SECONDS,
         )
     except Exception as e:
+        # CAURA-134 — include exception class name in the log. The
+        # default str(e) is empty for ``asyncio.TimeoutError``, which
+        # made the old "failed: . Path A's verdict stands." message
+        # un-diagnosable; the class name disambiguates timeouts from
+        # network errors from malformed responses.
+        #
+        # No symmetric INFO line here: the retraction path has no
+        # success-side ``context_fetched`` INFO to mirror (unlike the
+        # detection path, which emits one on the happy path for GCP
+        # metric parity). A redundant failure-only INFO would skew
+        # any retraction-path success/failure counter built from
+        # ``context_fetched`` / ``context_fetch_failed`` pairs.
         logger.warning(
-            "Path C entity-context fetch failed for memory %s candidate %s: %s. Path A's verdict stands.",
+            "PATH_C_RETRACTION context_fetch_failed memory=%s candidate=%s "
+            "exc_type=%s exc=%s. Path A's verdict stands.",
             new_memory.get("id"),
             candidate.get("id"),
+            type(e).__name__,
             e,
         )
         return False
@@ -1446,10 +1481,15 @@ async def _attempt_path_c_retraction(
             timeout=10.0,
         )
     except (TimeoutError, Exception) as e:
+        # CAURA-134 — include the exception class name and use the
+        # grep-friendly ``PATH_C_RETRACTION judge_failed`` prefix.
+        # str(e) is empty for ``asyncio.TimeoutError``, which was the
+        # silent failure mode masked by the prior log shape.
         logger.warning(
-            "Path C retraction judge failed for memory %s candidate %s: %s",
+            "PATH_C_RETRACTION judge_failed memory=%s candidate=%s exc_type=%s exc=%s",
             new_memory.get("id"),
             candidate.get("id"),
+            type(e).__name__,
             e,
         )
         return False
@@ -1703,7 +1743,7 @@ async def detect_contradictions_by_entities_async(
                         _fetch_entity_context(sc, str(memory_id)),
                         *(_fetch_entity_context(sc, str(c.get("id"))) for c in candidates),
                     ),
-                    timeout=5.0,
+                    timeout=_CONTEXT_FETCH_TIMEOUT_SECONDS,
                 )
                 new_ctx = fetched[0]
                 for c, ctx in zip(candidates, fetched[1:], strict=False):
@@ -1725,11 +1765,34 @@ async def detect_contradictions_by_entities_async(
                 # decide via the base prompt. Conservative against
                 # losing real contradictions on a transient storage
                 # hiccup.
+                #
+                # CAURA-134 — WARNING in grep-friendly ``key=value``
+                # form (matching the retraction path's
+                # ``PATH_C_RETRACTION context_fetch_failed`` WARNING),
+                # always including ``type(e).__name__`` (default
+                # ``str(e)`` is empty for ``asyncio.TimeoutError`` —
+                # the dominant production failure mode — and the
+                # original log shape rendered as an un-diagnosable
+                # "failed: . Falling through to base LLM judge.").
+                #
+                # WARNING-only (no symmetric INFO mirror). A separate
+                # failure-side INFO at the same severity-floor as the
+                # success-side ``PATH_C_DETECTION context_fetched``
+                # would double-count failures in any GCP log-based
+                # metric using the default ``severity>=INFO`` filter
+                # (which matches WARNING too), distorting any
+                # success/failure ratio built on the
+                # ``PATH_C_DETECTION context_fetch`` text prefix. A
+                # metric that needs paired success/failure counters
+                # should define two filters at different severities,
+                # not match both at INFO+.
                 logger.warning(
-                    "Path C entity-links context fetch failed for memory %s: %s. "
-                    "Falling through to base LLM judge.",
+                    "PATH_C_DETECTION context_fetch_failed memory=%s exc_type=%s "
+                    "exc=%s candidates=%d. Falling through to base LLM judge.",
                     memory_id,
+                    type(e).__name__,
                     e,
+                    len(candidates),
                 )
 
         # L3.4 preflight (CAURA-130) — when the legacy A1 #17 gate fell
