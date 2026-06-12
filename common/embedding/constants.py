@@ -21,8 +21,14 @@ import os
 # Default model identifiers per provider. Override via env (e.g. swap
 # ``OPENAI_EMBEDDING_MODEL=text-embedding-3-large`` for a higher-dim
 # variant; pair with a ``VECTOR_DIM`` change at the schema level).
-OPENAI_EMBEDDING_MODEL: str = os.environ.get(
-    "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
+#
+# Use ``or`` rather than the ``get`` default so an *empty* value falls back
+# too: docker-compose maps ``OPENAI_EMBEDDING_MODEL: "${OPENAI_EMBEDDING_MODEL:-}"``,
+# so an unset var in ``.env`` reaches the container as "" (present-but-empty),
+# which ``os.environ.get(key, default)`` would NOT replace — leaving model=""
+# and every embed call failing with OpenAI 400 "you must provide a model".
+OPENAI_EMBEDDING_MODEL: str = (
+    os.environ.get("OPENAI_EMBEDDING_MODEL") or "text-embedding-3-small"
 )
 
 # Per-call OpenAI timeout. Caps a single embed/embed_batch round trip
