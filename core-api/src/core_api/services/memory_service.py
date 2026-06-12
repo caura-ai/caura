@@ -2698,6 +2698,13 @@ async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
         # finally block.
         if not fut.done():
             fut.set_exception(exc)
+            # Mark the exception retrieved immediately: in the common
+            # single-caller case there are no joiners, nobody ever awaits
+            # ``fut``, and its GC logs ERROR "Future exception was never
+            # retrieved" (prod 2026-06-12 — fired on every solo
+            # search-embed timeout). Joiners are unaffected — ``await
+            # fut`` still raises; this only clears the GC log flag.
+            fut.exception()
         raise
     finally:
         # Drop the inflight slot only after the future has been resolved.
