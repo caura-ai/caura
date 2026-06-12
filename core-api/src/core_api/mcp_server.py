@@ -1197,13 +1197,13 @@ async def memclaw_tune(
             from core_api.services.agent_service import get_or_create_agent
 
             agent = await get_or_create_agent(db, tenant_id, agent_id)
-            current = (agent.get("search_profile") if isinstance(agent, dict) else agent.search_profile) or {}
+            current = agent.get("search_profile") or {}
             if updates:
                 current.update(updates)
                 from core_api.services.organization_settings import validate_search_profile
 
                 current = validate_search_profile(current)
-                await agent_repo.update_search_profile(db, agent.id, current)
+                await agent_repo.update_search_profile(db, agent["id"], current)
                 await db.commit()
             return _with_latency(json.dumps({"agent_id": agent_id, "search_profile": current}, indent=2), t0)
         except HTTPException as e:
