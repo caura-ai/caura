@@ -19,6 +19,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
@@ -27,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from common.models.memory import Memory
+from core_api.agent_ids import DEFAULT_AGENT_ID
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings as app_settings
@@ -129,6 +131,27 @@ def _reject_reserved_memory_type(memory_type: str | None, *, index: int | None =
     if index is not None:
         detail = f"items[{index}]: {detail}"
     raise HTTPException(status_code=422, detail=detail)
+
+
+def _missing_agent_id_error() -> RequestValidationError:
+    """Build the 422 raised when a non-standalone write omits ``agent_id``.
+
+    Mirrors the shape FastAPI produces for a missing required field, so the
+    app's validation-envelope handler renders it as a 422 INVALID_ARGUMENTS.
+    RequestValidationError stores errors verbatim and ``.errors()`` returns
+    them as-is, so a pre-rendered dict is the supported input; the handler
+    only reads ``msg`` and runs the list through ``jsonable_encoder``.
+    """
+    return RequestValidationError(
+        errors=[
+            {
+                "type": "missing",
+                "loc": ("body", "agent_id"),
+                "msg": ("agent_id is required; only the standalone single-tenant deployment may omit it."),
+                "input": None,
+            }
+        ]
+    )
 
 
 async def _stats_fallback(tenant_id: str, fleet_id: str | None) -> dict:
@@ -871,6 +894,19 @@ async def write_memory(
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
     _reject_reserved_memory_type(body.memory_type)
+    # Resolve a missing agent_id. On the standalone single-tenant path there is
+    # one stable identity, so default to the reserved DEFAULT_AGENT_ID (mirrors
+    # the evolve/insights REST routes) — this is what makes the documented
+    # quickstart curl work without an agent_id. Everywhere else (tenant-scoped
+    # key / enterprise gateway) the caller MUST name a real agent, or every
+    # anonymous write would collapse onto one shared identity — the same footgun
+    # mcp_server._refuse_default_agent_on_gateway guards against. Keep that as an
+    # explicit 422 rather than a silent default.
+    if not body.agent_id:
+        if app_settings.is_standalone:
+            body = body.model_copy(update={"agent_id": DEFAULT_AGENT_ID})
+        else:
+            raise _missing_agent_id_error()
     # Idempotency replay is short-circuited BEFORE the per-tenant slot —
     # a cached retry must not consume a write-concurrency slot, or a
     # tenant retry storm starves its own legitimate new writes.
@@ -1040,6 +1076,16 @@ async def write_memories_bulk(
             bulk_attempt_id = f"broker-{auth.install_uuid or 'unknown'}-{_uuid.uuid4()}"
         if not body.agent_id:
             body.agent_id = f"broker:{auth.install_uuid or 'unknown'}"
+    # Resolve a missing agent_id (mirrors write_memory). Install-credential
+    # callers were already attributed above; everyone else either gets the
+    # reserved standalone identity or must name a real agent. Defaulting
+    # outside standalone would silently collapse anonymous writes onto one
+    # shared identity — see mcp_server._refuse_default_agent_on_gateway.
+    if not body.agent_id:
+        if app_settings.is_standalone:
+            body = body.model_copy(update={"agent_id": DEFAULT_AGENT_ID})
+        else:
+            raise _missing_agent_id_error()
     if not bulk_attempt_id:
         # Required as of CAURA-602 — without it we can't make the bulk
         # write retry-safe, and silent-create regressions reappear under

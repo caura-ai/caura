@@ -30,7 +30,13 @@ class EntityLinkIn(BaseModel):
 class MemoryCreate(BaseModel):
     tenant_id: str
     fleet_id: str | None = None
-    agent_id: str
+    # Optional like ``BulkMemoryCreate.agent_id``: omitting it is allowed only
+    # on the standalone single-tenant path, where ``write_memory`` fills the
+    # reserved ``"mcp-agent"`` identity. Tenant-scoped/gateway callers must
+    # still pass an explicit agent_id (enforced in the route) so writes are
+    # never silently attributed to one shared identity. min_length=1 rejects an
+    # empty string at the schema layer (None still means "unset").
+    agent_id: str | None = Field(default=None, min_length=1)
     memory_type: MemoryType | None = Field(default=None, description=MEMORY_TYPES_DESCRIPTION)
     content: str = Field(min_length=1, max_length=MAX_CONTENT_LENGTH)
     weight: float | None = Field(default=None, ge=0.0, le=1.0)

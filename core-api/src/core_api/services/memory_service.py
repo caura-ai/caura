@@ -228,6 +228,8 @@ def _memory_to_out(
 
 
 async def create_memory(db: AsyncSession, data: MemoryCreate) -> MemoryOut:
+    if not data.agent_id:
+        raise ValueError("agent_id must be resolved before calling create_memory")
     if _USE_PIPELINE_WRITE:
         return await _create_memory_pipeline(db, data)
     logger.warning("legacy write path invoked; this path is deprecated and scheduled for removal")

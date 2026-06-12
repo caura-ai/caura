@@ -26,6 +26,7 @@ from sqlalchemy import text as sa_text
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
+from core_api.agent_ids import DEFAULT_AGENT_ID
 from core_api.auth import get_admin_key
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.constants import (
@@ -88,7 +89,7 @@ _scopes_var: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar("m
 _UNAUTH = "__unauthenticated__"
 _ADMIN = "__admin__"
 _NO_AUTH = "__no_auth__"
-_DEFAULT_AGENT_ID = "mcp-agent"
+_DEFAULT_AGENT_ID = DEFAULT_AGENT_ID
 
 
 def _error_response(code: str, message: str, **details) -> str:
