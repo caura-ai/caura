@@ -114,8 +114,10 @@ class InferRelations:
                 reinforce_batch.append(
                     {
                         "rel_id": rel_id,
+                        # Already clamped to MAX_RELATION_WEIGHT above — bound
+                        # directly below (no SQL-side LEAST), matching the
+                        # INSERT path's ``:weight``.
                         "new_weight": new_weight,
-                        "max_weight": MAX_RELATION_WEIGHT,
                         "tenant_id": tenant_id,
                     }
                 )
@@ -135,9 +137,16 @@ class InferRelations:
         relations_reinforced = 0
         if reinforce_batch:
             await ctx.require_db.execute(
+                # ``SET weight = :new_weight`` NOT ``LEAST(:new_weight, :max_weight)``:
+                # Postgres resolves ``LEAST`` over two untyped bind params as
+                # ``text`` and then rejects the assignment to the
+                # double-precision ``weight`` column (asyncpg
+                # DatatypeMismatchError, prod 2026-06-13). Direct assignment
+                # infers the column type from context; new_weight is already
+                # clamped in Python.
                 text("""
                     UPDATE relations
-                    SET weight = LEAST(:new_weight, :max_weight)
+                    SET weight = :new_weight
                     WHERE id = :rel_id AND tenant_id = :tenant_id
                 """),
                 reinforce_batch,
