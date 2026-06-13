@@ -66,9 +66,16 @@ class BackfillEntityEmbeddings:
         backfill_count = 0
         if updates:
             await ctx.require_db.execute(
+                # ``synchronize_session=False``: this is a bulk ORM UPDATE with
+                # extra WHERE criteria over an executemany param list, which
+                # SQLAlchemy refuses to session-synchronize (InvalidRequestError,
+                # prod 2026-06-13). There is no live ORM session state to keep in
+                # sync here — the backfill writes name_embedding and moves on — so
+                # skipping synchronization is correct, not just a silencer.
                 update(Entity)
                 .where(Entity.id == sa.bindparam("eid"), Entity.tenant_id == tenant_id)
-                .values(name_embedding=sa.bindparam("emb")),
+                .values(name_embedding=sa.bindparam("emb"))
+                .execution_options(synchronize_session=False),
                 updates,
             )
             backfill_count = len(updates)
