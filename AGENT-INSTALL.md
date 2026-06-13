@@ -124,6 +124,11 @@ Add this to your MCP client configuration (Claude Code, Claude Desktop, Cursor, 
 
 Replace `standalone` with your admin key (Path 2) or the shared gate key (Path 3) as appropriate.
 
+> **Claude Code** doesn't read MCP servers from `settings.json` — register with `claude mcp add` instead (the block above maps to a project-root `.mcp.json`). Use `-s user` so the server is available in every directory, not just the one you ran the command in:
+> ```bash
+> claude mcp add --transport http -s user memclaw http://localhost:8000/mcp --header "X-API-Key: standalone"
+> ```
+
 ## Connect via OpenClaw Plugin (alternative to MCP)
 
 If you're an OpenClaw agent running on a gateway, install the plugin instead:

@@ -370,7 +370,11 @@ Add MemClaw to any MCP client with one config block.
 > For team or production use, swap the tenant-scoped key for an **agent-scoped credential** — atomic provisioning via `POST /api/v1/admin/agent-keys/provision` (or the `/settings/organization/api-credentials` wizard) mints the credential + Agent row + initial trust + fleet membership in one round trip. Both kinds use the `mc_` prefix; scope is set at mint time on the credential. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md). Using a tenant-scoped credential? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-scoped path.
 
 **Where to add this config:**
-- **Claude Code** — `~/.claude/settings.json` under `"mcpServers"`
+- **Claude Code** — Claude Code does **not** read MCP servers from `settings.json`. Register the server with `claude mcp add` instead. Use `-s user` so it's available in **every** working directory — the default scope (`local`) only registers it for the current directory, which bites when you run agents from multiple folders:
+  ```bash
+  claude mcp add --transport http -s user memclaw http://localhost:8000/mcp --header "X-API-Key: standalone"
+  ```
+  (Or commit the JSON block above to a project-root `.mcp.json` for a project-scoped server.)
 - **Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows)
 - **Cursor** — Settings > MCP Servers > Add Server
 
@@ -401,7 +405,7 @@ Install MemClaw's usage guide as a **skill** so your agent knows *when* and
 anti-patterns. The skill is loaded on-demand (not per-turn), so it costs
 nothing until the agent reaches for MemClaw.
 
-> **Prerequisite:** the MCP server is already registered (via `claude mcp add` for Claude Code or the equivalent for Codex — see the config block above). Confirm with `claude mcp list` — you should see `memclaw: ... ✓ Connected`.
+> **Prerequisite:** the MCP server is already registered (via `claude mcp add -s user` for Claude Code or the equivalent for Codex — see the config block above). Confirm with `claude mcp list` — you should see `memclaw: ... ✓ Connected`.
 
 #### Option A — one-liner (fastest)
 
