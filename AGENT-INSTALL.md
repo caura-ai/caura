@@ -25,7 +25,7 @@ docker compose ps   # all services should show "healthy"
 
 # 4. Verify
 curl http://localhost:8000/api/v1/health
-# Expected: {"status":"ok","database":"connected",...}
+# Expected: {"status":"ok","storage":"connected","redis":"connected","event_bus":"ok"}
 ```
 
 That's it. The core API is running at `http://localhost:8000` (core-storage-api on `:8002`, postgres on `:5432`, redis on `:6379` — see `docker-compose.yml`). Skip to **Create Your API Key** below.
@@ -76,7 +76,7 @@ PYTHONPATH=core-api/src uvicorn core_api.app:app --host 0.0.0.0 --port 8000
 
 # 8. Verify (in another terminal)
 curl http://localhost:8000/api/v1/health
-# Expected: {"status":"ok","database":"connected",...}
+# Expected: {"status":"ok","storage":"connected","redis":"connected","event_bus":"ok"}
 ```
 
 MemClaw is running at `http://localhost:8000`.

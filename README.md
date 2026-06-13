@@ -165,7 +165,7 @@ To upgrade to a newer image at the same tag (e.g. `:latest` after we cut a new r
 
 ```bash
 curl http://localhost:8000/api/v1/health
-# {"status":"ok","database":"connected",...}
+# {"status":"ok","storage":"connected","redis":"connected","event_bus":"ok"}
 ```
 
 #### 4. Write and search
@@ -184,7 +184,7 @@ curl -X POST http://localhost:8000/api/v1/search \
   -d '{"tenant_id": "default", "query": "authentication token lifetime"}'
 ```
 
-The write response includes LLM-inferred `type`, `title`, `summary`, `tags`, `status`, and `importance_score` — all from a single `content` field.
+The write response carries an LLM-inferred `memory_type`, `title`, `summary`, `tags`, `status`, and a `weight` (the importance score) — all derived from a single `content` field. On the default fast-write path, enrichment is applied asynchronously: the immediate response is marked `enrichment_pending` and the inferred fields populate within moments.
 
 ---
 
@@ -267,7 +267,7 @@ The plugin claims the OpenClaw `memory` slot (replacing `memory-core`) and expos
 
 ### Governance
 
-- **Tenant isolation** — row-level database separation per tenant; PII auto-detected and quarantined before it can cross fleet boundaries
+- **Tenant isolation** — row-level database separation per tenant; PII auto-detected and flagged on every write (surfaced in memory metadata as `contains_pii`/`pii_types`)
 - **Visibility scopes** — every memory is stamped at write time: `scope_agent` (private), `scope_team` (fleet-wide, default), or `scope_org` (cross-fleet). Cross-fleet recall is permissioned, not open
 - **Agent trust tiers** — four levels control cross-fleet reads, writes, and deletes. Agents are either provisioned atomically via `POST /admin/agent-keys/provision` (recommended — mints key + row + trust + fleet in one call) or auto-registered on first write (legacy fallback)
 - **Full audit log** — every write, delete, and transition logged with tenant and scope context
