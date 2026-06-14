@@ -111,21 +111,21 @@ services:
       CORE_STORAGE_API_URL: http://core-storage-api:8002
       REDIS_URL: redis://redis:6379/0
       # Provider keys and embedding config (OPENAI_API_KEY, ANTHROPIC_API_KEY,
-      # OPENROUTER_API_KEY, OPENAI_EMBEDDING_BASE_URL / _MODEL / _TRUNCATE_TO_DIM,
-      # EMBEDDING_QUERY_INSTRUCTION) come from ``env_file`` (.env) directly — they
-      # are intentionally NOT re-declared here. A "${VAR:-}" passthrough would
-      # (a) inject an empty string when the var is set only in .env, defeating
-      # the code's own defaults (the OPENAI_EMBEDDING_MODEL → 400 break), and
-      # (b) let a stale value exported in the operator's shell SHADOW the value
-      # they just set in .env, since Compose gives the shell precedence over
+      # OPENROUTER_API_KEY, OPENAI_EMBEDDING_BASE_URL / _MODEL / _SEND_DIMENSIONS /
+      # _TRUNCATE_TO_DIM, EMBEDDING_QUERY_INSTRUCTION) come from ``env_file``
+      # (.env) directly — intentionally NOT re-declared here. A "${VAR:-}"
+      # passthrough would (a) inject an empty string when the var is set only in
+      # .env, defeating the code's own defaults (the OPENAI_EMBEDDING_MODEL → 400
+      # break), and (b) let a stale value exported in the operator's shell SHADOW
+      # the value they set in .env, since Compose gives the shell precedence over
       # ``.env`` inside "${...}" substitution. ``env_file`` is not shell-shadowed.
       #
-      # SEND_DIMENSIONS is the one exception: it needs a non-empty default
-      # (true) that the code does not supply when the var is absent, so it stays
-      # a passthrough. Local-embedder (``--profile embed-local``) users set it to
-      # false in .env — but that override is itself shadowed here; tracked as a
-      # follow-up alongside a code-side default.
-      OPENAI_EMBEDDING_SEND_DIMENSIONS: "${OPENAI_EMBEDDING_SEND_DIMENSIONS:-true}"
+      # The code supplies the right defaults when a var is absent — notably
+      # OPENAI_EMBEDDING_SEND_DIMENSIONS defaults to "true" in
+      # ``common/embedding/_registry.py``, so dropping its passthrough keeps the
+      # hosted-OpenAI default AND lets local-embedder (``--profile embed-local``)
+      # users set it to "false" in .env without the passthrough overriding them
+      # (which previously tripped the base_url + send_dimensions hard-fail).
     depends_on:
       core-storage-api:
         condition: service_healthy
