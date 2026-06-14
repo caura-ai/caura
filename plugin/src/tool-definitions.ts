@@ -19,6 +19,7 @@
  * - Signal forwarding to apiCall
  */
 
+import { randomUUID } from "crypto";
 import { apiCall, textResult } from "./transport.js";
 import {
   MEMCLAW_FLEET_ID,
@@ -337,7 +338,20 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   memclaw_write: async (params, signal) => {
     const isBatch = Array.isArray(params.items);
     const body = await enrichBody(params);
-    if (isBatch) return apiCall("POST", "/memories/bulk", body, undefined, signal);
+    if (isBatch) {
+      // POST /memories/bulk requires a per-attempt idempotency token via
+      // the `X-Bulk-Attempt-Id` header (CAURA-602). The server derives each
+      // row's `client_request_id` from `${X-Bulk-Attempt-Id}:${index}`, so a
+      // retry with the same id resolves committed rows as `duplicate_attempt`
+      // instead of duplicating. Omitting it makes the endpoint return
+      // HTTP 400 "Missing required X-Bulk-Attempt-Id header" — which is why
+      // batch writes failed entirely. Generate one UUID per tool invocation
+      // (a 401-retry inside apiCall reuses it), mirroring the server's own
+      // MCP path which auto-generates `mcp:{uuid4()}`.
+      return apiCall("POST", "/memories/bulk", body, undefined, signal, undefined, {
+        "X-Bulk-Attempt-Id": randomUUID(),
+      });
+    }
     return apiCall("POST", "/memories", body, undefined, signal);
   },
 

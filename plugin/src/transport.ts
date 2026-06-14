@@ -19,6 +19,7 @@ export async function apiCall(
   query?: Record<string, string>,
   signal?: AbortSignal,
   agentId?: string,
+  extraHeaders?: Record<string, string>,
 ): Promise<unknown> {
   const start = Date.now();
 
@@ -50,6 +51,10 @@ export async function apiCall(
   const headers: Record<string, string> = {};
   if (body) headers["Content-Type"] = "application/json";
   if (effectiveKey) headers["X-API-Key"] = effectiveKey;
+  // Caller-supplied headers (e.g. the per-attempt `X-Bulk-Attempt-Id`
+  // required by POST /memories/bulk). Applied after the defaults so a
+  // caller can override them deliberately if ever needed.
+  if (extraHeaders) Object.assign(headers, extraHeaders);
 
   // Use caller's signal if provided, otherwise create a default timeout
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -74,7 +79,9 @@ export async function apiCall(
       if (res.status === 401 && effectiveKey !== MEMCLAW_API_KEY && effectiveAgentId) {
         evictAgentKey(effectiveAgentId);
         console.warn(`[memclaw] Agent key rejected for '${effectiveAgentId}', retrying with tenant key`);
-        return apiCall(method, path, body, query, signal);  // retry without agentId → uses tenant key
+        // Forward extraHeaders so the retry reuses the same per-attempt
+        // idempotency id (a fresh id would defeat bulk de-dup on retry).
+        return apiCall(method, path, body, query, signal, undefined, extraHeaders);  // retry without agentId → uses tenant key
       }
       const text = await res.text();
       // Truncate server error body to avoid leaking internal details
