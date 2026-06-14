@@ -96,7 +96,10 @@ def _validate_payload(body: dict) -> tuple[str, dict, str | None]:
         if scope == "agent" and not agent_id:
             errors.append("scope=agent requires agent_id")
         if scope != "agent" and agent_id is not None:
-            errors.append(f"scope={scope} must not include agent_id")
+            errors.append(
+                f"scope={scope} keystones apply {scope}-wide and are not agent-specific; "
+                "omit agent_id (it is only valid for scope=agent)"
+            )
 
     if errors:
         raise HTTPException(status_code=422, detail=errors)

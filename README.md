@@ -213,6 +213,26 @@ curl -X POST http://localhost:8000/api/v1/search \
 
 The write response carries an LLM-inferred `memory_type`, `title`, `summary`, `tags`, `status`, and a `weight` (the importance score) — all derived from a single `content` field. On the default fast-write path, enrichment is applied asynchronously: the immediate response is marked `enrichment_pending` and the inferred fields populate within moments.
 
+`POST /search` returns matches under an `items` array, each entry the full memory plus a `similarity` score:
+
+```json
+{
+  "items": [
+    {
+      "id": "…",
+      "agent_id": "mcp-agent",
+      "memory_type": "fact",
+      "title": "Auth service uses JWT with 15-minute expiry",
+      "similarity": 0.47,
+      "visibility": "scope_team",
+      "status": "active"
+    }
+  ]
+}
+```
+
+Embedding is asynchronous too, so a just-written memory may not surface in semantic `search` for a moment after the write returns (watch `metadata.embedding_pending`); the non-semantic `GET /memories` list shows it immediately.
+
 ---
 
 ⭐ **If MemClaw just worked for you,
@@ -420,7 +440,7 @@ The client discovers 12 tools automatically:
 | `memclaw_evolve` | Report outcomes against recalled memories — adjusts weights, generates rules (Karpathy Loop) |
 | `memclaw_stats` | Aggregate counts: total + breakdowns by type, agent, status. Read-only |
 | `memclaw_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
-| `memclaw_keystones_set` | Author or remove keystone rules (`op=set\|delete`). Trust ≥ 1 for your own `scope=agent` rule; ≥ 2 for `scope=fleet`/`scope=tenant` or another agent |
+| `memclaw_keystones_set` | Author or remove keystone rules (`op=set\|delete`). `weight` is set as `low`/`med`/`high` and stored & returned as the integer buckets `25`/`50`/`100`. Trust ≥ 1 for your own `scope=agent` rule; ≥ 2 for `scope=fleet`/`scope=tenant` or another agent |
 
 > **Skill sharing** is now done via `memclaw_doc` — agents share a `SKILL.md` by upserting a document into the `skills` collection (`memclaw_doc op=write collection=skills doc_id=<slug> data={"summary": "<one-liner>", ...}`). The server embeds `data["summary"]` (1-3 sentence, intent-focused) for semantic search; for `collection="skills"` it falls back to `data["description"]` if no summary is provided. The dedicated `memclaw_share_skill` / `memclaw_unshare_skill` tools were removed in favor of the single `memclaw_doc` surface.
 
