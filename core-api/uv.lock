@@ -414,7 +414,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.24,<1.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=6.0,<7.0" },
     { name = "python-dateutil", specifier = ">=2.8,<3" },
-    { name = "python-jose", extras = ["cryptography"], specifier = ">=3.3" },
+    { name = "python-jose", extras = ["cryptography"], specifier = ">=3.5.0" },
     { name = "python-multipart", specifier = ">=0.0.20,<1" },
     { name = "redis", extras = ["hiredis"], specifier = ">=5.0,<6" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8,<1.0" },
