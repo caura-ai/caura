@@ -21,8 +21,10 @@ updates:
     commit-message:
       prefix: "deps"
 
-  # --- Python: core-api ---
-  - package-ecosystem: "pip"
+  # --- Python (uv): core-api — manages pyproject + the committed uv.lock ---
+  # uv (not pip): core-api installs FROZEN from uv.lock, so only the uv ecosystem
+  # bumps both the lock and pyproject together (pip would leave the lock stale).
+  - package-ecosystem: "uv"
     directory: "/core-api"
     schedule:
       interval: "weekly"
@@ -34,8 +36,8 @@ updates:
     commit-message:
       prefix: "deps(core-api)"
 
-  # --- Python: core-storage-api ---
-  - package-ecosystem: "pip"
+  # --- Python (uv): core-storage-api — manages pyproject + the committed uv.lock ---
+  - package-ecosystem: "uv"
     directory: "/core-storage-api"
     schedule:
       interval: "weekly"
@@ -46,6 +48,33 @@ updates:
       - "area/core-storage-api"
     commit-message:
       prefix: "deps(core-storage-api)"
+
+  # --- Python (uv): core-worker — manages pyproject + the committed uv.lock ---
+  - package-ecosystem: "uv"
+    directory: "/core-worker"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "kind/chore"
+      - "area/core-worker"
+    commit-message:
+      prefix: "deps(core-worker)"
+
+  # --- Python (uv): core-operations — manages pyproject + the committed uv.lock ---
+  # No area/core-operations label in labels.yml yet — using area/infra.
+  - package-ecosystem: "uv"
+    directory: "/core-operations"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "kind/chore"
+      - "area/infra"
+    commit-message:
+      prefix: "deps(core-operations)"
 
   # --- npm: root (Playwright e2e) ---
   - package-ecosystem: "npm"
