@@ -308,6 +308,24 @@ openclaw gateway restart
 
 The plugin claims the OpenClaw `memory` slot (replacing `memory-core`) and exposes the same 12 MCP tools. Full setup, agent prompts, and trust levels: [static/docs/integration-guide.md](static/docs/integration-guide.md).
 
+### Python client
+
+Talk to any MemClaw deployment (managed or self-hosted) from Python:
+
+```bash
+pip install memclaw-client
+```
+
+```python
+from memclaw_client import MemClaw
+
+mc = MemClaw("mc_xxx", tenant_id="my-team", agent_id="my-agent")
+mc.write("Q3 revenue target is $4M, set on 2026-04-15.")
+print(mc.recall("Q3 revenue target").summary)
+```
+
+A thin wrapper over the REST API — see [`clients/python/`](clients/python/) for the full client.
+
 ---
 
 ## Features
