@@ -38,6 +38,7 @@ from core_api.mcp_server import get_mcp_app, mcp_lifespan
 from core_api.middleware.ingest_body_size import IngestBodySizeMiddleware
 from core_api.middleware.per_tenant_concurrency import per_tenant_storage_slot
 from core_api.middleware.rate_limit import limiter
+from core_api.middleware.request_observation import RequestObservationMiddleware
 from core_api.middleware.request_timeout import (
     _TIMEOUT_OPT_OUT_PATHS,
     RequestTimeoutMiddleware,
@@ -542,6 +543,12 @@ app.add_middleware(
     RequestTimeoutMiddleware,
     timeout_seconds=app_settings.request_timeout_seconds,
 )
+# Per-endpoint API usage: emit one structured ``http.request`` event per
+# request. Added here so it wraps RequestTimeoutMiddleware (observes the 504
+# it synthesises) while sitting inside SecurityHeaders/CORS. The router runs
+# innermost, so ``scope["route"]`` is populated by the time this middleware
+# inspects it on the way back out.
+app.add_middleware(RequestObservationMiddleware)
 # PR #9: reject oversized ingest requests at Content-Length, before
 # FastAPI parses the body. Sits inside SecurityHeaders/CORS so the 413
 # still carries those headers.
