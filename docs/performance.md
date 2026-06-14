@@ -65,7 +65,7 @@ The published numbers are warm-cache, single-tenant, on our reference hardware. 
 - Hit `POST /search` under your expected concurrency to confirm latency holds — the search-path optimizer assumes a warm pgvector cache.
 - Audit `tenant_id` and `fleet_id` filtering on every recall path you care about; the test suite covers scope correctness, but your tenancy model is yours to validate.
 
-For benchmark methodology, the raw harness, and the underlying scoring code, see the [`keystone-benchmark`](https://github.com/caura-ai/keystone-benchmark) repo (in development).
+For the results table, the methodology, and step-by-step reproduction against the public LoCoMo and LongMemEval datasets, see [`BENCHMARKS.md`](../BENCHMARKS.md).
 
 ## Sources
 

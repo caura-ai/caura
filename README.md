@@ -348,7 +348,7 @@ of public docs as of June 2026 — corrections welcome via issue or PR.
 
 ## Performance
 
-Benchmarked against the two most-cited public agent-memory benchmarks. Methodology and operator-scale context live in [`docs/performance.md`](docs/performance.md); the full write-up is on the blog.
+Benchmarked against the two most-cited public agent-memory benchmarks. Full results, methodology, and how to reproduce them live in [`BENCHMARKS.md`](BENCHMARKS.md); operator-scale context is in [`docs/performance.md`](docs/performance.md); the full write-up is on the blog.
 
 |  | LoCoMo | LongMemEval | Search latency |
 |---|---|---|---|
