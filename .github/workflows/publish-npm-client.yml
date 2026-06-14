@@ -1,0 +1,38 @@
+name: Publish @caura/memclaw-client to npm
+
+# Publishes the TypeScript client SDK to npm.
+#
+# One-time setup by a maintainer:
+#   1. Ensure the @caura npm org/scope exists and the publisher has access.
+#   2. Add an `NPM_TOKEN` repository secret (automation token with publish rights),
+#      OR configure npm trusted publishing for the package.
+#
+# Release: bump the version in clients/typescript/package.json, then push a tag
+# `memclaw-client-ts-v<version>` (or run this workflow manually).
+
+on:
+  push:
+    tags:
+      - "memclaw-client-ts-v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # npm provenance
+    defaults:
+      run:
+        working-directory: clients/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Install + build
+        run: npm install
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -326,6 +326,24 @@ print(mc.recall("Q3 revenue target").summary)
 
 A thin wrapper over the REST API — see [`clients/python/`](clients/python/) for the full client.
 
+### TypeScript client
+
+Same, from TypeScript / JavaScript (Node 18+, zero dependencies):
+
+```bash
+npm install @caura/memclaw-client
+```
+
+```ts
+import { MemClaw } from "@caura/memclaw-client";
+
+const mc = new MemClaw("mc_xxx", { tenantId: "my-team", agentId: "my-agent" });
+await mc.write("Q3 revenue target is $4M, set on 2026-04-15.");
+console.log((await mc.recall("Q3 revenue target")).summary);
+```
+
+See [`clients/typescript/`](clients/typescript/) for the full client.
+
 ---
 
 ## Features

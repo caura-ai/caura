@@ -1,0 +1,49 @@
+{
+  "name": "@caura/memclaw-client",
+  "version": "0.1.0",
+  "description": "Official TypeScript/JavaScript client for MemClaw — governed shared memory for AI agent fleets (multi-agent, multi-tenant, MCP-native).",
+  "license": "Apache-2.0",
+  "author": "Caura <hello@caura.ai>",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist/index.js", "dist/index.d.ts", "README.md"],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "memclaw",
+    "agent-memory",
+    "ai-agents",
+    "llm-memory",
+    "rag",
+    "mcp",
+    "knowledge-graph",
+    "vector-search",
+    "multi-agent"
+  ],
+  "homepage": "https://memclaw.net",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/caura-ai/caura-memclaw.git",
+    "directory": "clients/typescript"
+  },
+  "bugs": {
+    "url": "https://github.com/caura-ai/caura-memclaw/issues"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc && node --test dist/index.test.js",
+    "prepublishOnly": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5.4"
+  }
+}
