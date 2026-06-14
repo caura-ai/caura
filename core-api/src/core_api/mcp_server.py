@@ -26,6 +26,7 @@ from sqlalchemy import text as sa_text
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
+from core_api.agent_ids import DEFAULT_AGENT_ID
 from core_api.auth import get_admin_key
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.constants import (
@@ -89,7 +90,7 @@ _scopes_var: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar("m
 _UNAUTH = "__unauthenticated__"
 _ADMIN = "__admin__"
 _NO_AUTH = "__no_auth__"
-_DEFAULT_AGENT_ID = "mcp-agent"
+_DEFAULT_AGENT_ID = DEFAULT_AGENT_ID
 
 
 def _error_response(code: str, message: str, **details) -> str:
@@ -1237,13 +1238,13 @@ async def memclaw_tune(
             from core_api.services.agent_service import get_or_create_agent
 
             agent = await get_or_create_agent(db, tenant_id, agent_id)
-            current = (agent.get("search_profile") if isinstance(agent, dict) else agent.search_profile) or {}
+            current = agent.get("search_profile") or {}
             if updates:
                 current.update(updates)
                 from core_api.services.organization_settings import validate_search_profile
 
                 current = validate_search_profile(current)
-                await agent_repo.update_search_profile(db, agent.id, current)
+                await agent_repo.update_search_profile(db, agent["id"], current)
                 await db.commit()
             return _with_latency(json.dumps({"agent_id": agent_id, "search_profile": current}, indent=2), t0)
         except HTTPException as e:

@@ -77,22 +77,40 @@ async def test_discover_creates_links():
 
 
 @pytest.mark.asyncio
-async def test_discover_insert_returns_real_columns_not_id():
-    """The INSERT must RETURN real columns.
+async def test_discover_insert_is_single_statement_with_real_returning_columns():
+    """The bulk INSERT must be ONE multi-VALUES statement, not executemany.
 
-    ``memory_entity_links`` has a composite PK (memory_id, entity_id) and no
-    surrogate ``id`` column, so ``RETURNING id`` raises UndefinedColumnError
-    against Postgres (prod incident). Guard against its reintroduction — the
-    mock-based tests above never execute real SQL, so this asserts the SQL
-    shape directly.
+    Two prod incidents pin this shape:
+
+    * ``RETURNING id`` raised UndefinedColumnError — ``memory_entity_links``
+      has a composite PK (memory_id, entity_id) and no surrogate ``id``
+      column, so RETURNING must reference real columns.
+    * ``execute(stmt, [rows])`` takes SQLAlchemy's executemany path, where
+      RETURNING rows are unavailable and ``result.all()`` raises
+      ResourceClosedError ("This result object does not return rows") —
+      first triggered in prod by a 3-row batch on 2026-06-12; 1-row batches
+      happened to be the only ones seen before that.
+
+    The mock-based tests above never execute real SQL, so this asserts the
+    statement shape directly: a single positional argument (no params list →
+    no executemany) whose compiled SQL inlines every row and returns the
+    real PK columns.
     """
-    mem_id = uuid.uuid4()
+    mem_id, mem_id2, mem_id3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     ent_id = uuid.uuid4()
     embedding = [0.1] * 10
 
-    candidates = [(mem_id, "Alice loves coffee", embedding)]
-    lateral = [(mem_id, ent_id, "Alice", None, 0.95)]
-    inserted = [(mem_id, ent_id)]
+    candidates = [
+        (mem_id, "Alice loves coffee", embedding),
+        (mem_id2, "Alice hates tea", embedding),
+        (mem_id3, "Alice collects mugs", embedding),
+    ]
+    lateral = [
+        (mem_id, ent_id, "Alice", None, 0.95),
+        (mem_id2, ent_id, "Alice", None, 0.93),
+        (mem_id3, ent_id, "Alice", None, 0.91),
+    ]
+    inserted = [(mem_id, ent_id), (mem_id2, ent_id), (mem_id3, ent_id)]
 
     db = AsyncMock()
     db.execute.side_effect = [
@@ -107,12 +125,35 @@ async def test_discover_insert_returns_real_columns_not_id():
     result = await step.execute(ctx)
 
     assert result.outcome == StepOutcome.SUCCESS
-    assert ctx.data["links_created"] == 1
+    assert ctx.data["links_created"] == 3
 
-    insert_sql = str(db.execute.call_args_list[2][0][0].text)
-    assert "INSERT INTO memory_entity_links" in insert_sql
-    assert "RETURNING memory_id, entity_id" in insert_sql
-    assert "RETURNING id" not in insert_sql
+    insert_call = db.execute.call_args_list[2]
+    # Exactly one positional arg: the statement. A second positional arg
+    # (the parameter list) would flip SQLAlchemy into executemany, where
+    # RETURNING rows are unavailable and ``.all()`` raises
+    # ResourceClosedError.
+    assert len(insert_call.args) == 1
+
+    from sqlalchemy.dialects import postgresql
+
+    stmt = insert_call.args[0]
+    compiled = stmt.compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+    assert "INSERT INTO memory_entity_links" in sql
+    assert "ON CONFLICT (memory_id, entity_id) DO NOTHING" in sql
+    assert (
+        "RETURNING memory_entity_links.memory_id, memory_entity_links.entity_id" in sql
+    )
+    assert "RETURNING id" not in sql
+    # All three rows ride in the single statement.
+    assert {v for k, v in compiled.params.items() if k.startswith("memory_id")} == {
+        mem_id,
+        mem_id2,
+        mem_id3,
+    }
+    assert all(
+        v == "mentioned" for k, v in compiled.params.items() if k.startswith("role")
+    )
 
 
 @pytest.mark.asyncio

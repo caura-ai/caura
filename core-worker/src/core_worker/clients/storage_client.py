@@ -31,6 +31,7 @@ from uuid import UUID
 import httpx
 
 from common.constants import LIFECYCLE_STALE_ARCHIVE_WEIGHT
+from common.http_retry import with_connect_phase_retry
 from core_worker.clients.identity_token import evict as _evict_id_token
 from core_worker.clients.identity_token import fetch_auth_header
 
@@ -107,11 +108,24 @@ async def _signed_call(
     writer. 403 is intentionally NOT a trigger for eviction: 403 means
     the token was accepted but IAM rejected the caller, which the
     cache cannot fix.
+
+    Each attempt also retries connection-phase failures in-process via
+    ``with_connect_phase_retry`` (policy + safety argument in
+    ``common/http_retry.py``). Deliberately NOT the full idempotent
+    retry set: the worker's designed retry path for sent-but-failed
+    requests is raise → nack → Pub/Sub redelivery, and an in-process
+    ReadTimeout/5xx retry would double-layer that. Connection-phase
+    failures are the exception because each one otherwise burns a
+    Pub/Sub delivery attempt against the DLQ budget for a request
+    that never even reached storage (the 2026-06-11 incident shape).
     """
     headers = dict(kwargs.pop("headers", None) or {})
     if _audience is not None:
         headers.update(await fetch_auth_header(_audience))
-    resp = await fn(*args, headers=headers, **kwargs)
+    method = getattr(fn, "__name__", "?").upper()
+    path = args[0] if args else ""
+    label = f"{method} {path}".rstrip()
+    resp = await with_connect_phase_retry(lambda: fn(*args, headers=headers, **kwargs), label=label)
     if resp.status_code == 401 and _audience is not None:
         _evict_id_token(_audience)
         # Rebind to a NEW dict rather than ``.update()`` in place — the
@@ -120,8 +134,8 @@ async def _signed_call(
         # or test inspector that snapshots the call args would
         # otherwise see the rotated token retro-fitted into the first
         # call's record).
-        headers = {**headers, **await fetch_auth_header(_audience)}
-        resp = await fn(*args, headers=headers, **kwargs)
+        fresh_headers = {**headers, **await fetch_auth_header(_audience)}
+        resp = await with_connect_phase_retry(lambda: fn(*args, headers=fresh_headers, **kwargs), label=label)
     return resp
 
 

@@ -243,3 +243,47 @@ async def test_timeout_propagates_to_all_waiters():
     for r in results:
         assert isinstance(r, asyncio.TimeoutError)
     assert memory_service._inflight_embeddings == {}
+
+
+async def test_solo_leader_failure_future_exception_is_consumed():
+    """REGRESSION (prod 2026-06-12): with NO joiners — the common
+    single-caller case — the leader's ``set_exception`` on the inflight
+    future was never retrieved, so the future's GC logged ERROR
+    "Future exception was never retrieved" through the loop exception
+    handler on every solo search-embed timeout. The leader must mark
+    the exception retrieved after setting it; joiners still see the
+    raise from ``await fut``.
+    """
+    import gc
+
+    async def _boom(query, tenant_config):
+        raise TimeoutError
+
+    async def _miss(_key):
+        return None
+
+    handler_calls: list[dict] = []
+    loop = asyncio.get_running_loop()
+    prev_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, ctx: handler_calls.append(ctx))
+    try:
+        with (
+            patch.object(memory_service, "get_query_embedding", new=_boom),
+            patch("core_api.cache.cache_get", new=_miss),
+        ):
+            with pytest.raises(TimeoutError):
+                await memory_service._get_or_cache_embedding(
+                    "q-solo-timeout", "t1", None
+                )
+        # The orphaned future only logs at GC time — force it, then yield
+        # once so anything the handler scheduled gets to run.
+        gc.collect()
+        await asyncio.sleep(0)
+        gc.collect()
+    finally:
+        loop.set_exception_handler(prev_handler)
+
+    unretrieved = [
+        c for c in handler_calls if "never retrieved" in (c.get("message") or "")
+    ]
+    assert not unretrieved, unretrieved

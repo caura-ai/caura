@@ -81,6 +81,47 @@ describe("apiCall — MEMCLAW_API_PREFIX handling", () => {
   });
 });
 
+describe("apiCall — extraHeaders (bulk X-Bulk-Attempt-Id support)", () => {
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    calls = [];
+    installOkFetch();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("merges extraHeaders into the request headers", async () => {
+    // No agent_id in the body: that would trigger resolveAgentKey() and add
+    // a second fetch, which isn't what this test is asserting.
+    await apiCall(
+      "POST",
+      "/memories/bulk",
+      { items: [{ content: "x" }], tenant_id: "t1" },
+      undefined,
+      undefined,
+      undefined,
+      { "X-Bulk-Attempt-Id": "attempt-123" },
+    );
+    assert.equal(calls.length, 1);
+    const headers = calls[0].init?.headers as Record<string, string>;
+    assert.equal(headers["X-Bulk-Attempt-Id"], "attempt-123");
+    // Default headers must survive alongside the caller-supplied ones.
+    // (Assert presence, not the exact key value, which env.ts may source
+    // from a local .env rather than the test's process.env.)
+    assert.ok(headers["X-API-Key"], "X-API-Key should still be sent");
+    assert.equal(headers["Content-Type"], "application/json");
+  });
+
+  test("omitting extraHeaders leaves only the default headers", async () => {
+    await apiCall("POST", "/memories", { content: "x" });
+    const headers = calls[0].init?.headers as Record<string, string>;
+    assert.equal(headers["X-Bulk-Attempt-Id"], undefined);
+    assert.ok(headers["X-API-Key"], "X-API-Key should still be sent");
+  });
+});
+
 describe("parseSearchItems — search-response shape handling", () => {
   // Regression guard: the REST /search endpoint returns { items: [...] }
   // (core-api SearchResponse), but the plugin historically read .results

@@ -6,6 +6,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.15.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.14.0...backend-v2.15.0) (2026-06-13)
+
+
+### Features
+
+* **skills:** gate the OpenClaw install path to active-only skills ([#317](https://github.com/caura-ai/caura-memclaw/issues/317)) ([50488fc](https://github.com/caura-ai/caura-memclaw/commit/50488fc6eb07d244297ad1d3e065887c8cb3e47e))
+* **skills:** per-node skill-reconcile observability on the heartbeat ([#325](https://github.com/caura-ai/caura-memclaw/issues/325)) ([d806114](https://github.com/caura-ai/caura-memclaw/commit/d806114bc943a1d97480584192091e0583d41545))
+
+
+### Bug Fixes
+
+* **api:** close cross-tenant and caller-asserted-identity authz gaps ([#320](https://github.com/caura-ai/caura-memclaw/issues/320)) ([fcf96c7](https://github.com/caura-ai/caura-memclaw/commit/fcf96c74c28022415d1f691d3507c96ba8c99b22))
+* **api:** default agent_id to "mcp-agent" on standalone POST /memories ([#339](https://github.com/caura-ai/caura-memclaw/issues/339)) ([4d2d6ef](https://github.com/caura-ai/caura-memclaw/commit/4d2d6ef008de5c743b848f566b51f461d117e06a))
+* **core-worker:** retry connection-phase failures on storage calls — shared policy in common/http_retry ([#334](https://github.com/caura-ai/caura-memclaw/issues/334)) ([43b3d81](https://github.com/caura-ai/caura-memclaw/commit/43b3d8191b3567beba9cc6025f2df8e9aabb02de))
+* **cross-links:** single multi-VALUES insert — executemany cannot RETURN rows ([#337](https://github.com/caura-ai/caura-memclaw/issues/337)) ([8bbdeed](https://github.com/caura-ai/caura-memclaw/commit/8bbdeedb84c5a85655a88485583dcabd7b21d9a6))
+* cross-tenant search widening, non-default LLM structured-output kwargs, event deploy safety ([#322](https://github.com/caura-ai/caura-memclaw/issues/322)) ([f161607](https://github.com/caura-ai/caura-memclaw/commit/f1616070b72efbfba712de4095f6f556669368cc))
+* **embedding:** fall back to default model when OPENAI_EMBEDDING_MODEL is empty ([#336](https://github.com/caura-ai/caura-memclaw/issues/336)) ([d1f1f5a](https://github.com/caura-ai/caura-memclaw/commit/d1f1f5a6f8ac4a631b4bb8dfa89801384e4aea44))
+* **entities:** scope-filter relations in get_entity and drop the per-memory agent lookup ([#321](https://github.com/caura-ai/caura-memclaw/issues/321)) ([e355f87](https://github.com/caura-ai/caura-memclaw/commit/e355f87fba54ca45b634bf2affd4b9893a0e3528))
+* **entity-linking:** bind reinforce weight directly — LEAST over untyped params coerced to text ([#341](https://github.com/caura-ai/caura-memclaw/issues/341)) ([b4a5712](https://github.com/caura-ai/caura-memclaw/commit/b4a57120107c2319013e8ac64aa6aaecc87d0751))
+* **entity-linking:** synchronize_session=False on the entity-embedding backfill bulk update ([#342](https://github.com/caura-ai/caura-memclaw/issues/342)) ([c310ecf](https://github.com/caura-ai/caura-memclaw/commit/c310ecfd61ee14b0545234b7bb4773fbc0e1685e))
+* **events:** publisher candidate cleanups also called the nonexistent close() ([#331](https://github.com/caura-ai/caura-memclaw/issues/331)) ([610fe8e](https://github.com/caura-ai/caura-memclaw/commit/610fe8e385c38237cf22276a02ef35e9345772d2))
+* **events:** pubsub shutdown never flushed the publisher — final batches silently lost ([#330](https://github.com/caura-ai/caura-memclaw/issues/330)) ([1c2aba5](https://github.com/caura-ai/caura-memclaw/commit/1c2aba577a1a7cd4347faff3118d7179c39a7368))
+* **llm:** explicit httpx per-phase timeouts — 5s connect too tight behind VPC connector ([#332](https://github.com/caura-ai/caura-memclaw/issues/332)) ([ea89a61](https://github.com/caura-ai/caura-memclaw/commit/ea89a61cb3b6b4331b92183dfe09f3bbfc24e879))
+* **logging:** reroute idempotency guard mis-keys on captured handlers ([#328](https://github.com/caura-ai/caura-memclaw/issues/328)) ([352689d](https://github.com/caura-ai/caura-memclaw/commit/352689d3f18c2d00b4444cca62d80d1b4b340109))
+* **mcp:** enforce gateway perimeter on the /mcp header-trust path ([#319](https://github.com/caura-ai/caura-memclaw/issues/319)) ([109d837](https://github.com/caura-ai/caura-memclaw/commit/109d837950550a577f4fcb8e585e76105b961d9b))
+* **mcp:** memclaw_tune crashed with 'dict' object has no attribute 'id' ([#338](https://github.com/caura-ai/caura-memclaw/issues/338)) ([30e3cff](https://github.com/caura-ai/caura-memclaw/commit/30e3cff097c73d0af6faec739f638c5fecf46aef))
+* **plugin:** point agents at the memclaw skill by name, not by filesystem path (CAURA-000) ([#323](https://github.com/caura-ai/caura-memclaw/issues/323)) ([ec3fcaf](https://github.com/caura-ai/caura-memclaw/commit/ec3fcaf45a7545568e9f713a6f1db631dfa1c2f3))
+* **release:** keep plugin/src/version.ts in sync on release-please PRs ([#335](https://github.com/caura-ai/caura-memclaw/issues/335)) ([e26a3c5](https://github.com/caura-ai/caura-memclaw/commit/e26a3c561b542fbf58b4fd556ec2919e87286dfd))
+* **search:** consume the inflight embedding future's exception when no joiner awaits it ([#340](https://github.com/caura-ai/caura-memclaw/issues/340)) ([a06ec53](https://github.com/caura-ai/caura-memclaw/commit/a06ec539449d89fc3d3f58e45c645ed3ca456ae1))
+* **search:** skip entity hop-boost when classifier declined the entity match as over-broad ([#327](https://github.com/caura-ai/caura-memclaw/issues/327)) ([4744732](https://github.com/caura-ai/caura-memclaw/commit/4744732196c05fb1fd207f53f5bd03a849472f7d))
+* **storage-client:** retry POSTs on connection-phase failures — never-sent requests cannot double-insert ([#333](https://github.com/caura-ai/caura-memclaw/issues/333)) ([2d91e33](https://github.com/caura-ai/caura-memclaw/commit/2d91e33baa968459443005fd5a86d127c6c0c4d1))
+
+
+### Documentation
+
+* add eToro proof, comparison table, FAQ, and star ask to README ([#326](https://github.com/caura-ai/caura-memclaw/issues/326)) ([e6395b5](https://github.com/caura-ai/caura-memclaw/commit/e6395b535f58fd92906138c83b45a5c40a67be89))
+* bump eToro memory count 21,500 → 26,500 + social card ([#329](https://github.com/caura-ai/caura-memclaw/issues/329)) ([ea0e52b](https://github.com/caura-ai/caura-memclaw/commit/ea0e52b3fe43e72a279f365f38cd81301f1a6fce))
+* correct Claude Code MCP setup — claude mcp add -s user, not settings.json ([#343](https://github.com/caura-ai/caura-memclaw/issues/343)) ([fc6324b](https://github.com/caura-ai/caura-memclaw/commit/fc6324b6c60206efe814c3e9cdfc42d0f85266f4))
+* fix README/AGENT-INSTALL inaccuracies (PII, health shape, write response) ([#344](https://github.com/caura-ai/caura-memclaw/issues/344)) ([2dea567](https://github.com/caura-ai/caura-memclaw/commit/2dea567b802e9effaad3455284a7aab8e1cf124d))
+
 ## [2.14.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.13.0...backend-v2.14.0) (2026-06-10)
 
 

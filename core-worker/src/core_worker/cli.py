@@ -18,6 +18,7 @@ import asyncio
 import logging
 import sys
 
+from common.events.factory import get_event_bus
 from core_worker.backfill import run_embedding_backfill
 from core_worker.clients.storage_client import close_storage_client
 
@@ -66,6 +67,24 @@ async def _amain(argv: list[str]) -> int:
                 dry_run=args.dry_run,
             )
         finally:
+            # Drain the event bus BEFORE exiting: publish() is
+            # fire-and-forget into the Pub/Sub client's batch queue, and
+            # only bus.stop() (→ PublisherClient.stop()) commits the
+            # outstanding batches. Without this, a short-lived CLI run
+            # exits with its final batch un-transmitted — the backfill
+            # reports published=N while zero events reach the topic
+            # (observed in prod 2026-06-11: all 16 events of a tenant
+            # backfill silently lost).
+            #
+            # Guarded: get_event_bus() itself can raise (RuntimeError on
+            # missing pubsub env vars, ValueError on unknown backend) if
+            # the singleton was never constructed during the run — a
+            # raise here inside the finally would mask the backfill's
+            # original exception, hiding the real failure.
+            try:
+                await get_event_bus().stop()
+            except Exception:
+                logging.getLogger(__name__).exception("event bus stop failed; continuing teardown")
             # Close the singleton httpx client so the event-loop exits
             # cleanly. Mirrors the FastAPI lifespan shutdown.
             await close_storage_client()

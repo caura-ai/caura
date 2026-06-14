@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from common.models.entity import MemoryEntityLink
 from core_api.constants import (
     CROSS_LINK_MEMORY_BATCH_SIZE,
     CROSS_LINK_SIMILARITY_THRESHOLD,
@@ -136,17 +138,22 @@ class DiscoverCrossLinks:
         links_created = 0
         if to_insert:
             try:
+                # Single multi-VALUES statement via ``pg_insert(...).values(rows)``
+                # (the CAURA-686 pattern) — NOT ``execute(stmt, rows)``, which
+                # takes SQLAlchemy's executemany path where RETURNING rows are
+                # unavailable and ``result.all()`` raises ResourceClosedError.
                 # memory_entity_links has a composite PK (memory_id, entity_id)
-                # and no surrogate `id` column, so RETURNING must reference real
-                # columns. With ON CONFLICT DO NOTHING, only actually-inserted
-                # rows are returned, so the count below stays accurate.
-                insert_link_returning = text("""
-                    INSERT INTO memory_entity_links (memory_id, entity_id, role)
-                    VALUES (:memory_id, :entity_id, 'mentioned')
-                    ON CONFLICT (memory_id, entity_id) DO NOTHING
-                    RETURNING memory_id, entity_id
-                """)
-                result = await ctx.require_db.execute(insert_link_returning, to_insert)
+                # and no surrogate ``id`` column, so RETURNING must reference
+                # real columns; with ON CONFLICT DO NOTHING only actually-
+                # inserted rows return, keeping the count accurate.
+                rows = [{**row, "role": "mentioned"} for row in to_insert]
+                insert_link_returning = (
+                    pg_insert(MemoryEntityLink)
+                    .values(rows)
+                    .on_conflict_do_nothing(index_elements=["memory_id", "entity_id"])
+                    .returning(MemoryEntityLink.memory_id, MemoryEntityLink.entity_id)
+                )
+                result = await ctx.require_db.execute(insert_link_returning)
                 links_created = len(result.all())
             except Exception:
                 logger.exception(

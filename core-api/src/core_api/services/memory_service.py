@@ -228,6 +228,8 @@ def _memory_to_out(
 
 
 async def create_memory(db: AsyncSession, data: MemoryCreate) -> MemoryOut:
+    if not data.agent_id:
+        raise ValueError("agent_id must be resolved before calling create_memory")
     if _USE_PIPELINE_WRITE:
         return await _create_memory_pipeline(db, data)
     logger.warning("legacy write path invoked; this path is deprecated and scheduled for removal")
@@ -2698,6 +2700,13 @@ async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
         # finally block.
         if not fut.done():
             fut.set_exception(exc)
+            # Mark the exception retrieved immediately: in the common
+            # single-caller case there are no joiners, nobody ever awaits
+            # ``fut``, and its GC logs ERROR "Future exception was never
+            # retrieved" (prod 2026-06-12 — fired on every solo
+            # search-embed timeout). Joiners are unaffected — ``await
+            # fut`` still raises; this only clears the GC log flag.
+            fut.exception()
         raise
     finally:
         # Drop the inflight slot only after the future has been resolved.

@@ -51,6 +51,33 @@ Agents write plain text. MemClaw turns it into searchable, governed, self-improv
 
 ## Quick Start
 
+### Try it locally — no API key, no signup
+
+The fastest way to see MemClaw work. Standalone mode runs single-tenant with auth bypassed — write and recall a memory in four commands. (It boots with dummy embeddings so there's nothing to configure; add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
+
+```bash
+git clone https://github.com/caura-ai/caura-memclaw.git
+cd caura-memclaw
+cp .env.example .env && echo "IS_STANDALONE=true" >> .env   # single-tenant, no API key
+docker compose up -d                                        # Postgres + pgvector + Redis + API (~30s)
+
+# Write a memory — no API key needed
+curl -X POST http://localhost:8000/api/v1/memories \
+  -H "X-API-Key: standalone" -H "Content-Type: application/json" \
+  -d '{"tenant_id": "default", "content": "Our auth service uses JWT with 15-minute expiry."}'
+
+# Search for it
+curl -X POST http://localhost:8000/api/v1/search \
+  -H "X-API-Key: standalone" -H "Content-Type: application/json" \
+  -d '{"tenant_id": "default", "query": "authentication token lifetime"}'
+```
+
+The write response comes back enriched with an LLM-inferred `type`, `title`, `summary`, `tags`, `status`, and `importance_score` — all from a single `content` field.
+
+Ready for semantic recall, multi-tenant, a managed host, or an OpenClaw fleet? Pick a path below.
+
+---
+
 Three paths — pick the one that matches your setup:
 
 | Path | When | Time to first memory |
@@ -165,7 +192,7 @@ To upgrade to a newer image at the same tag (e.g. `:latest` after we cut a new r
 
 ```bash
 curl http://localhost:8000/api/v1/health
-# {"status":"ok","database":"connected",...}
+# {"status":"ok","storage":"connected","redis":"connected","event_bus":"ok"}
 ```
 
 #### 4. Write and search
@@ -184,7 +211,27 @@ curl -X POST http://localhost:8000/api/v1/search \
   -d '{"tenant_id": "default", "query": "authentication token lifetime"}'
 ```
 
-The write response includes LLM-inferred `type`, `title`, `summary`, `tags`, `status`, and `importance_score` — all from a single `content` field.
+The write response carries an LLM-inferred `memory_type`, `title`, `summary`, `tags`, `status`, and a `weight` (the importance score) — all derived from a single `content` field. On the default fast-write path, enrichment is applied asynchronously: the immediate response is marked `enrichment_pending` and the inferred fields populate within moments.
+
+`POST /search` returns matches under an `items` array, each entry the full memory plus a `similarity` score:
+
+```json
+{
+  "items": [
+    {
+      "id": "…",
+      "agent_id": "mcp-agent",
+      "memory_type": "fact",
+      "title": "Auth service uses JWT with 15-minute expiry",
+      "similarity": 0.47,
+      "visibility": "scope_team",
+      "status": "active"
+    }
+  ]
+}
+```
+
+Embedding is asynchronous too, so a just-written memory may not surface in semantic `search` for a moment after the write returns (watch `metadata.embedding_pending`); the non-semantic `GET /memories` list shows it immediately.
 
 ---
 
@@ -261,13 +308,49 @@ openclaw gateway restart
 
 The plugin claims the OpenClaw `memory` slot (replacing `memory-core`) and exposes the same 12 MCP tools. Full setup, agent prompts, and trust levels: [static/docs/integration-guide.md](static/docs/integration-guide.md).
 
+### Python client
+
+Talk to any MemClaw deployment (managed or self-hosted) from Python:
+
+```bash
+pip install memclaw-client
+```
+
+```python
+from memclaw_client import MemClaw
+
+mc = MemClaw("mc_xxx", tenant_id="my-team", agent_id="my-agent")
+mc.write("Q3 revenue target is $4M, set on 2026-04-15.")
+print(mc.recall("Q3 revenue target").summary)
+```
+
+A thin wrapper over the REST API — see [`clients/python/`](clients/python/) for the full client.
+
+### TypeScript client
+
+Same, from TypeScript / JavaScript (Node 18+, zero dependencies):
+
+```bash
+npm install @caura/memclaw-client
+```
+
+```ts
+import { MemClaw } from "@caura/memclaw-client";
+
+const mc = new MemClaw("mc_xxx", { tenantId: "my-team", agentId: "my-agent" });
+await mc.write("Q3 revenue target is $4M, set on 2026-04-15.");
+console.log((await mc.recall("Q3 revenue target")).summary);
+```
+
+See [`clients/typescript/`](clients/typescript/) for the full client.
+
 ---
 
 ## Features
 
 ### Governance
 
-- **Tenant isolation** — row-level database separation per tenant; PII auto-detected and quarantined before it can cross fleet boundaries
+- **Tenant isolation** — row-level database separation per tenant; PII auto-detected and flagged on every write (surfaced in memory metadata as `contains_pii`/`pii_types`)
 - **Visibility scopes** — every memory is stamped at write time: `scope_agent` (private), `scope_team` (fleet-wide, default), or `scope_org` (cross-fleet). Cross-fleet recall is permissioned, not open
 - **Agent trust tiers** — four levels control cross-fleet reads, writes, and deletes. Agents are either provisioned atomically via `POST /admin/agent-keys/provision` (recommended — mints key + row + trust + fleet in one call) or auto-registered on first write (legacy fallback)
 - **Full audit log** — every write, delete, and transition logged with tenant and scope context
@@ -306,7 +389,7 @@ fleet capability and governance:
 | Cross-vendor memory sharing | ✅ | ❌ | ❌ | ❌ |
 | Contradiction detection + supersession | ✅ | ❌ | ❌ | ❌ |
 | Per-agent retrieval tuning | ✅ | ❌ | ❌ | ❌ |
-| PII detection & quarantine | ✅ | ❌ | ✅ | ❌ |
+| PII detection & flagging | ✅ | ❌ | ✅ | ❌ |
 | Audit trail / provenance | ✅ | ❌ | ⚠️ partial | ❌ |
 | Knowledge graph (auto-extracted) | ✅ | ⚠️ | ✅ | ❌ |
 | MCP-native | ✅ | ✅ | ✅ | ⚠️ |
@@ -321,7 +404,7 @@ of public docs as of June 2026 — corrections welcome via issue or PR.
 
 ## Performance
 
-Benchmarked against the two most-cited public agent-memory benchmarks. Methodology and operator-scale context live in [`docs/performance.md`](docs/performance.md); the full write-up is on the blog.
+Benchmarked against the two most-cited public agent-memory benchmarks. Full results, methodology, and how to reproduce them live in [`BENCHMARKS.md`](BENCHMARKS.md); operator-scale context is in [`docs/performance.md`](docs/performance.md); the full write-up is on the blog.
 
 |  | LoCoMo | LongMemEval | Search latency |
 |---|---|---|---|
@@ -370,7 +453,11 @@ Add MemClaw to any MCP client with one config block.
 > For team or production use, swap the tenant-scoped key for an **agent-scoped credential** — atomic provisioning via `POST /api/v1/admin/agent-keys/provision` (or the `/settings/organization/api-credentials` wizard) mints the credential + Agent row + initial trust + fleet membership in one round trip. Both kinds use the `mc_` prefix; scope is set at mint time on the credential. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md). Using a tenant-scoped credential? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-scoped path.
 
 **Where to add this config:**
-- **Claude Code** — `~/.claude/settings.json` under `"mcpServers"`
+- **Claude Code** — Claude Code does **not** read MCP servers from `settings.json`. Register the server with `claude mcp add` instead. Use `-s user` so it's available in **every** working directory — the default scope (`local`) only registers it for the current directory, which bites when you run agents from multiple folders:
+  ```bash
+  claude mcp add --transport http -s user memclaw http://localhost:8000/mcp --header "X-API-Key: standalone"
+  ```
+  (Or commit the JSON block above to a project-root `.mcp.json` for a project-scoped server.)
 - **Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows)
 - **Cursor** — Settings > MCP Servers > Add Server
 
@@ -389,7 +476,7 @@ The client discovers 12 tools automatically:
 | `memclaw_evolve` | Report outcomes against recalled memories — adjusts weights, generates rules (Karpathy Loop) |
 | `memclaw_stats` | Aggregate counts: total + breakdowns by type, agent, status. Read-only |
 | `memclaw_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
-| `memclaw_keystones_set` | Author or remove keystone rules (`op=set\|delete`). Trust ≥ 1 for your own `scope=agent` rule; ≥ 2 for `scope=fleet`/`scope=tenant` or another agent |
+| `memclaw_keystones_set` | Author or remove keystone rules (`op=set\|delete`). `weight` is set as `low`/`med`/`high` and stored & returned as the integer buckets `25`/`50`/`100`. Trust ≥ 1 for your own `scope=agent` rule; ≥ 2 for `scope=fleet`/`scope=tenant` or another agent |
 
 > **Skill sharing** is now done via `memclaw_doc` — agents share a `SKILL.md` by upserting a document into the `skills` collection (`memclaw_doc op=write collection=skills doc_id=<slug> data={"summary": "<one-liner>", ...}`). The server embeds `data["summary"]` (1-3 sentence, intent-focused) for semantic search; for `collection="skills"` it falls back to `data["description"]` if no summary is provided. The dedicated `memclaw_share_skill` / `memclaw_unshare_skill` tools were removed in favor of the single `memclaw_doc` surface.
 
@@ -401,7 +488,7 @@ Install MemClaw's usage guide as a **skill** so your agent knows *when* and
 anti-patterns. The skill is loaded on-demand (not per-turn), so it costs
 nothing until the agent reaches for MemClaw.
 
-> **Prerequisite:** the MCP server is already registered (via `claude mcp add` for Claude Code or the equivalent for Codex — see the config block above). Confirm with `claude mcp list` — you should see `memclaw: ... ✓ Connected`.
+> **Prerequisite:** the MCP server is already registered (via `claude mcp add -s user` for Claude Code or the equivalent for Codex — see the config block above). Confirm with `claude mcp list` — you should see `memclaw: ... ✓ Connected`.
 
 #### Option A — one-liner (fastest)
 

@@ -20,7 +20,11 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION=$(python3 -c "import json; print(json.load(open('$ROOT/plugin/package.json'))['version'])")
+# The trailing ``x-release-please-version`` annotation lets release-please's
+# generic updater bump this line in release PRs (extra-files entry in
+# release-please-config.json). Without it the release PR carries a stale
+# version.ts and CI's check:version gate fails on every refresh.
 cat > "$ROOT/plugin/src/version.ts" <<EOF
 // Auto-generated from plugin/package.json by scripts/gen-version.sh — do not edit
-export const PLUGIN_VERSION = "$VERSION";
+export const PLUGIN_VERSION = "$VERSION"; // x-release-please-version
 EOF
