@@ -51,6 +51,33 @@ Agents write plain text. MemClaw turns it into searchable, governed, self-improv
 
 ## Quick Start
 
+### Try it locally — no API key, no signup
+
+The fastest way to see MemClaw work. Standalone mode runs single-tenant with auth bypassed — write and recall a memory in four commands. (It boots with dummy embeddings so there's nothing to configure; add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
+
+```bash
+git clone https://github.com/caura-ai/caura-memclaw.git
+cd caura-memclaw
+cp .env.example .env && echo "IS_STANDALONE=true" >> .env   # single-tenant, no API key
+docker compose up -d                                        # Postgres + pgvector + Redis + API (~30s)
+
+# Write a memory — no API key needed
+curl -X POST http://localhost:8000/api/v1/memories \
+  -H "X-API-Key: standalone" -H "Content-Type: application/json" \
+  -d '{"tenant_id": "default", "content": "Our auth service uses JWT with 15-minute expiry."}'
+
+# Search for it
+curl -X POST http://localhost:8000/api/v1/search \
+  -H "X-API-Key: standalone" -H "Content-Type: application/json" \
+  -d '{"tenant_id": "default", "query": "authentication token lifetime"}'
+```
+
+The write response comes back enriched with an LLM-inferred `type`, `title`, `summary`, `tags`, `status`, and `importance_score` — all from a single `content` field.
+
+Ready for semantic recall, multi-tenant, a managed host, or an OpenClaw fleet? Pick a path below.
+
+---
+
 Three paths — pick the one that matches your setup:
 
 | Path | When | Time to first memory |
