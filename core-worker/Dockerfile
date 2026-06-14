@@ -6,11 +6,17 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
-# Install Python deps first (layer cache)
-COPY core-worker/pyproject.toml core-worker/README.md* ./core-worker/
-# Dummy src so setuptools find_packages doesn't fail
+# Install Python deps FROZEN + hash-verified from the committed lock (CAURA-000):
+# uv export keeps uv.lock's pins + per-package hashes, so the image is
+# reproducible and every wheel is verified (require-hashes mode). Prevents the
+# silent dep float that broke prod 2026-06-14.
+COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /usr/local/bin/uv
+COPY core-worker/pyproject.toml core-worker/uv.lock core-worker/README.md* ./core-worker/
+# Dummy src so the project metadata resolves during export.
 RUN mkdir -p core-worker/src/core_worker && touch core-worker/src/core_worker/__init__.py
-RUN pip install --no-cache-dir './core-worker[pubsub,vertex]'
+RUN uv export --frozen --no-dev --extra pubsub --extra vertex --no-emit-project \
+      --directory core-worker -o /tmp/reqs.txt \
+    && uv pip install --system --no-cache -r /tmp/reqs.txt
 
 # Copy actual source
 COPY common/ /app/common/

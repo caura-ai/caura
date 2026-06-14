@@ -10,11 +10,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps first (layer cache)
-COPY core-storage-api/pyproject.toml core-storage-api/README.md* ./core-storage-api/
-# Dummy src so setuptools find_packages doesn't fail
+# Install Python deps FROZEN + hash-verified from the committed lock (CAURA-000):
+# uv export keeps uv.lock's pins + per-package hashes, so the image is
+# reproducible and every wheel is verified (require-hashes mode). Prevents the
+# silent dep float that broke prod 2026-06-14.
+COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /usr/local/bin/uv
+COPY core-storage-api/pyproject.toml core-storage-api/uv.lock core-storage-api/README.md* ./core-storage-api/
+# Dummy src so the project metadata resolves during export.
 RUN mkdir -p core-storage-api/src/core_storage_api && touch core-storage-api/src/core_storage_api/__init__.py
-RUN pip install --no-cache-dir ./core-storage-api
+RUN uv export --frozen --no-dev --no-emit-project \
+      --directory core-storage-api -o /tmp/reqs.txt \
+    && uv pip install --system --no-cache -r /tmp/reqs.txt
 
 # Copy actual source
 COPY common/ /app/common/

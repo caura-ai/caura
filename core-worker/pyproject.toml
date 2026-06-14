@@ -5,7 +5,10 @@ description = "MemClaw core async worker — subscribes to memclaw.memory.embed-
 license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115,<1",
+    # Cap <0.137 to match core-api (FastAPI 0.137's include_router change broke
+    # core-api's startup guard). Pinned here for a uniform FastAPI across the
+    # core-* services until the guard fix lands; dropped repo-wide then.
+    "fastapi>=0.115,<0.137",
     "uvicorn[standard]>=0.34,<1",
     "pydantic>=2.0,<3",
     "pydantic-settings>=2.0,<3",
