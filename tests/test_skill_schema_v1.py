@@ -636,13 +636,14 @@ class TestMigrationChain:
     def test_single_head(self):
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"022"}, f"Expected single head '022', got {sorted(heads)}"
+        assert heads == {"023"}, f"Expected single head '023', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
         assert chain.get("020") == "019", "020 must follow 019"
         assert chain.get("021") == "020", "021 must follow 020"
         assert chain.get("022") == "021", "022 must follow 021"
+        assert chain.get("023") == "022", "023 must follow 022"
 
 
 @pytest.mark.unit
