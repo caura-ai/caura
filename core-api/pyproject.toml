@@ -6,6 +6,15 @@ license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115,<1",
+    # Pin Starlette below the 1.x major. FastAPI's range otherwise pulls
+    # Starlette 1.x (released 2026-06-14), whose routing internals changed how
+    # included-router paths surface in ``app.routes`` — which trips the CAURA-602
+    # startup guard in app.py (it verifies every RequestTimeoutMiddleware opt-out
+    # path is a registered route) and crashes core-api on boot. uv.lock is
+    # gitignored so every build re-resolves; without this cap the drift recurs.
+    # Drop once core-api is validated against Starlette 1.x (and the guard is made
+    # route-nesting aware).
+    "starlette<1",
     "uvicorn[standard]>=0.34,<1",
     "sqlalchemy[asyncio]>=2.0,<3",
     # SQLAlchemy[asyncio] pulls in greenlet. Pin <3.5.0 — greenlet 3.5.0
