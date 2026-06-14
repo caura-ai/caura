@@ -33,6 +33,27 @@ from core_api.version_compat import (
 # commands without needing operator intervention.
 DEPLOY_IN_FLIGHT_WINDOW = timedelta(minutes=10)
 
+# CAURA-000: per-(node, target_version) auto-upgrade attempt budget.
+# The in-flight window above only suppresses concurrent storms; it does
+# nothing to stop a node being re-queued every heartbeat (~60s) forever
+# when it never converges to the target. That happens for failure modes
+# the plugin can't self-detect (persistent /plugin-source fetch errors,
+# unsafe-filename manifest aborts) and — most insidiously — when a deploy
+# "succeeds" but the served manifest version sits below MIN_RECOMMENDED,
+# so every attempt reports success, clears the plugin's cooldown, and
+# still never advances the version. After AUTO_UPGRADE_MAX_ATTEMPTS
+# deploys for the same target within AUTO_UPGRADE_ATTEMPT_WINDOW the gate
+# stops queuing and logs a warning for operator follow-up.
+#
+# A healthy upgrade converges in ONE attempt — the next heartbeat reports
+# the new version and the gate exits at the ``_semver_lt`` check before
+# this budget is ever consulted — so the budget is invisible to
+# legitimate upgrades. 5 attempts absorbs transient flakiness (a one-off
+# network blip on /plugin-source, a transient build OOM) while capping a
+# true wedge at 5 deploys/day instead of ~1,440.
+AUTO_UPGRADE_ATTEMPT_WINDOW = timedelta(hours=24)
+AUTO_UPGRADE_MAX_ATTEMPTS = 5
+
 router = APIRouter(tags=["Fleet"])
 
 
@@ -487,6 +508,42 @@ async def _maybe_queue_auto_upgrade(
             "deploy is already in flight within the last %s",
             body.node_name,
             DEPLOY_IN_FLIGHT_WINDOW,
+        )
+        return False
+    # CAURA-000: attempt budget — stop re-queuing against a node that
+    # never converges to the target. See AUTO_UPGRADE_MAX_ATTEMPTS for
+    # the full rationale. Placed after the cheaper in-flight check so
+    # the count query only runs on the rare
+    # outdated-eligible-and-not-in-flight path. Fail-open on DB error,
+    # consistent with the in-flight check above: a transient hiccup must
+    # not permanently wedge a legitimate upgrade.
+    try:
+        recent_attempts = await fleet_repo.count_recent_deploys_for_target(
+            db,
+            node_id=UUID(node_id),
+            target_version=target_version,
+            since=datetime.now(UTC) - AUTO_UPGRADE_ATTEMPT_WINDOW,
+        )
+    except Exception:
+        logger.warning(
+            "fleet.heartbeat: count_recent_deploys_for_target lookup failed "
+            "node=%s tenant=%s — falling back to allow",
+            body.node_name,
+            body.tenant_id,
+            exc_info=True,
+        )
+        recent_attempts = 0
+    if recent_attempts >= AUTO_UPGRADE_MAX_ATTEMPTS:
+        logger.warning(
+            "fleet.heartbeat: auto-upgrade budget exhausted for node=%s "
+            "target=%s (%d attempts in %s) — not re-queuing. Node is not "
+            "converging to the target version; manual intervention likely "
+            "required (check the node's deploy command results and plugin "
+            "logs).",
+            body.node_name,
+            target_version,
+            recent_attempts,
+            AUTO_UPGRADE_ATTEMPT_WINDOW,
         )
         return False
 

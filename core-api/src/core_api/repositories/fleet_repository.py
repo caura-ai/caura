@@ -182,6 +182,54 @@ class FleetRepository:
         )
         return result.scalar_one_or_none() is not None
 
+    async def count_recent_deploys_for_target(
+        self,
+        db: AsyncSession,
+        *,
+        node_id: UUID,
+        target_version: str,
+        since: datetime,
+    ) -> int:
+        """Count auto-upgrade ``deploy`` commands queued for this node at
+        ``target_version`` since ``since`` — ALL statuses.
+
+        Backs the auto-upgrade attempt budget (CAURA-000). A node that
+        never converges to the target gets re-queued every heartbeat
+        (~60s) with no brake, because:
+
+        - the 10-min in-flight window (``has_recent_in_flight_deploy``)
+          only suppresses concurrent storms, not serial re-queue;
+        - the plugin's local 24h cooldown only covers failures the
+          plugin itself detects (build-failed, post-restart version
+          mismatch) — it never engages for persistent ``/plugin-source``
+          fetch errors, unsafe-filename manifest aborts, OR the
+          "deploy succeeds but the served manifest version sits below
+          the gate's MIN_RECOMMENDED target" skew (every attempt reports
+          success and clears the cooldown, yet the version never
+          advances).
+
+        Counting ALL statuses is deliberate: the nastiest mode is
+        ``status=done`` with no version progress, which a status filter
+        would miss. Keyed on ``target_version`` so a NEW release (gate
+        target bumped) starts a fresh budget, and a node that converges
+        in one attempt never accumulates more than one row for a target
+        (the next heartbeat reports the new version and the gate exits
+        at the ``_semver_lt`` check before reaching this count).
+
+        Manual or non-auto-upgrade deploys (no/other ``target_version``
+        in payload) are excluded by the JSONB filter, so this budget
+        only governs auto-upgrade churn.
+        """
+        result = await db.execute(
+            select(func.count(FleetCommand.id)).where(
+                FleetCommand.node_id == node_id,
+                FleetCommand.command == "deploy",
+                FleetCommand.payload["target_version"].astext == target_version,
+                FleetCommand.created_at >= since,
+            )
+        )
+        return result.scalar_one() or 0
+
     async def ack_commands(self, db: AsyncSession, *, command_ids: list[UUID], now: datetime) -> None:
         if not command_ids:
             return

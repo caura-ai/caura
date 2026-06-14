@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Text, UniqueConstraint, text
+from sqlalchemy import DateTime, ForeignKey, Index, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -40,13 +40,34 @@ class FleetNode(Base):
 
 class FleetCommand(Base):
     __tablename__ = "fleet_commands"
+    __table_args__ = (
+        # Backs the two auto-upgrade gate queries in
+        # ``routes/fleet.py`` — ``has_recent_in_flight_deploy`` and
+        # ``count_recent_deploys_for_target`` — both of which filter
+        # ``node_id = ? AND command = 'deploy' AND created_at >= ?``.
+        # Partial on ``command = 'deploy'`` keeps the index small (deploy
+        # is a tiny fraction of all fleet commands) and lets Postgres
+        # seek straight to a node's deploy rows; the JSONB
+        # ``payload->>'target_version'`` predicate is then applied on the
+        # O(1)–O(10) rows that survive, so it doesn't need to be in the
+        # index. Bare column names (not ``.desc()``) so Alembic autogen
+        # can reflect/compare — matches the style in ``memory.py``.
+        Index(
+            "ix_fleet_commands_node_created_deploy",
+            "node_id",
+            "created_at",
+            postgresql_where=text("command = 'deploy'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")
     )
     tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     node_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("fleet_nodes.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("fleet_nodes.id", ondelete="CASCADE"),
+        nullable=False,
     )
     command: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict | None] = mapped_column(JSONB)

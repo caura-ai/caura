@@ -734,3 +734,165 @@ def test_deploy_in_flight_window_is_sensible():
         "window must be short enough that genuinely-abandoned acks "
         "auto-recover without operator intervention"
     )
+
+
+# ---------------------------------------------------------------------------
+# CAURA-000: auto-upgrade attempt budget (per node, per target_version)
+# ---------------------------------------------------------------------------
+#
+# The in-flight window only stops concurrent storms. A node that never
+# converges to the target — fetch failures, unsafe-filename aborts, or a
+# "succeeds but version never advances" skew between MIN_RECOMMENDED and
+# the served manifest version — would otherwise be re-queued every
+# heartbeat (~60s) forever. The budget caps that at
+# AUTO_UPGRADE_MAX_ATTEMPTS per target per AUTO_UPGRADE_ATTEMPT_WINDOW.
+#
+# Each test mocks has_recent_in_flight_deploy=False so execution reaches
+# the budget check, then mocks count_recent_deploys_for_target to drive
+# the branch under test. (These mirror the in-flight tests above.)
+
+
+def _allow_in_flight(monkeypatch):
+    """Mock the in-flight check to 'no deploy in flight' so the budget
+    check downstream is reached."""
+
+    async def _no_in_flight(_db, *, node_id, since):
+        return False
+
+    monkeypatch.setattr(
+        fleet_mod.fleet_repo, "has_recent_in_flight_deploy", _no_in_flight
+    )
+
+
+def _enable_upgrade(monkeypatch):
+    monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
+    monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "0.0.0")
+
+    async def _enabled(_db, _tid):
+        return True
+
+    monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
+
+
+@pytest.mark.asyncio
+async def test_attempt_budget_skips_when_exhausted(monkeypatch):
+    """At/above AUTO_UPGRADE_MAX_ATTEMPTS for this (node, target) in the
+    window → gate stops re-queuing (the indefinite-churn fix)."""
+    _enable_upgrade(monkeypatch)
+    _allow_in_flight(monkeypatch)
+
+    seen = {}
+
+    async def _count(_db, *, node_id, target_version, since):
+        seen["target_version"] = target_version
+        return fleet_mod.AUTO_UPGRADE_MAX_ATTEMPTS  # exactly at the cap
+
+    monkeypatch.setattr(fleet_mod.fleet_repo, "count_recent_deploys_for_target", _count)
+
+    sc = _FakeStorage()
+    queued = await fleet_mod._maybe_queue_auto_upgrade(
+        db=None,
+        sc=sc,
+        body=_body("2.3.5"),
+        pending_commands=sc.pending_commands,
+        node_id="00000000-0000-0000-0000-000000000001",
+    )
+    assert queued is False
+    assert sc.created_commands == [], (
+        f"budget-exhausted node must not be re-queued; got {sc.created_commands}"
+    )
+    # Budget must be keyed on the target version, not the node's current
+    # version — so a future release (new target) gets a fresh budget.
+    assert seen["target_version"] == "2.4.0"
+
+
+@pytest.mark.asyncio
+async def test_attempt_budget_allows_under_cap(monkeypatch):
+    """Below the cap → still queues. A node mid-upgrade (transient retry)
+    must not be braked early."""
+    _enable_upgrade(monkeypatch)
+    _allow_in_flight(monkeypatch)
+
+    async def _count(_db, *, node_id, target_version, since):
+        return fleet_mod.AUTO_UPGRADE_MAX_ATTEMPTS - 1  # one below the cap
+
+    monkeypatch.setattr(fleet_mod.fleet_repo, "count_recent_deploys_for_target", _count)
+
+    sc = _FakeStorage()
+    queued = await fleet_mod._maybe_queue_auto_upgrade(
+        db=None,
+        sc=sc,
+        body=_body("2.3.5"),
+        pending_commands=sc.pending_commands,
+        node_id="00000000-0000-0000-0000-000000000001",
+    )
+    assert queued is True
+    assert len(sc.created_commands) == 1
+    assert sc.created_commands[0]["command"] == "deploy"
+
+
+@pytest.mark.asyncio
+async def test_attempt_budget_fresh_target_gets_fresh_budget(monkeypatch):
+    """A brand-new target version (count=0 for it) queues even if the node
+    burned its budget on a PRIOR target. Keying on target_version is what
+    makes a new release recoverable."""
+    _enable_upgrade(monkeypatch)
+    _allow_in_flight(monkeypatch)
+
+    async def _count(_db, *, node_id, target_version, since):
+        return 0  # no attempts yet for THIS target
+
+    monkeypatch.setattr(fleet_mod.fleet_repo, "count_recent_deploys_for_target", _count)
+
+    sc = _FakeStorage()
+    queued = await fleet_mod._maybe_queue_auto_upgrade(
+        db=None,
+        sc=sc,
+        body=_body("2.3.5"),
+        pending_commands=sc.pending_commands,
+        node_id="00000000-0000-0000-0000-000000000001",
+    )
+    assert queued is True
+    assert len(sc.created_commands) == 1
+
+
+@pytest.mark.asyncio
+async def test_attempt_budget_fails_open_on_repo_error(monkeypatch):
+    """A DB error on the count lookup must NOT wedge a legitimate
+    upgrade — fail open and queue (mirrors the in-flight check's
+    fail-open posture). The in-flight check is the prior safety net."""
+    _enable_upgrade(monkeypatch)
+    _allow_in_flight(monkeypatch)
+
+    async def _boom(_db, *, node_id, target_version, since):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(fleet_mod.fleet_repo, "count_recent_deploys_for_target", _boom)
+
+    sc = _FakeStorage()
+    queued = await fleet_mod._maybe_queue_auto_upgrade(
+        db=None,
+        sc=sc,
+        body=_body("2.3.5"),
+        pending_commands=sc.pending_commands,
+        node_id="00000000-0000-0000-0000-000000000001",
+    )
+    assert queued is True
+    assert len(sc.created_commands) == 1
+
+
+def test_attempt_budget_constants_are_sensible():
+    """Lock the budget knobs. The window must comfortably exceed a
+    deploy cycle so a real upgrade isn't counted against itself across
+    retries; the cap must be > 1 (a converging upgrade is 1 attempt) and
+    small enough to brake a wedge quickly."""
+    from datetime import timedelta
+
+    assert fleet_mod.AUTO_UPGRADE_ATTEMPT_WINDOW >= timedelta(hours=1)
+    assert fleet_mod.AUTO_UPGRADE_ATTEMPT_WINDOW <= timedelta(days=2)
+    assert fleet_mod.AUTO_UPGRADE_MAX_ATTEMPTS >= 2, (
+        "must allow at least one retry beyond the single healthy attempt"
+    )
+    assert fleet_mod.AUTO_UPGRADE_MAX_ATTEMPTS <= 20, (
+        "must brake a true wedge well below the ~1,440/day un-budgeted rate"
+    )
