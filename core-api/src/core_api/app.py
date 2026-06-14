@@ -556,6 +556,17 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(body, status_code=422)
 
 
+# Request observation + capability-usage adoption signal. Registered FIRST so
+# it ends up INNERMOST — directly wrapping the router (only Starlette's pure-ASGI
+# ExceptionMiddleware sits between). This placement is load-bearing: it must read
+# ``scope["route"]`` (the matched route template) on the way back out, and
+# ``SlowAPIMiddleware`` is a ``BaseHTTPMiddleware`` that runs the downstream app
+# in a separate task — a route set inside it does NOT reliably propagate back out
+# to an outer middleware. Sitting inside SlowAPI guarantees the template is
+# readable. Trade-off: it no longer wraps RequestTimeout/SlowAPI, so 504s/429s
+# aren't observed — fine, those requests didn't execute a capability anyway.
+app.add_middleware(RequestObservationMiddleware)
+
 app.add_middleware(SlowAPIMiddleware)
 
 if app_settings.is_standalone:
@@ -567,12 +578,6 @@ app.add_middleware(
     RequestTimeoutMiddleware,
     timeout_seconds=app_settings.request_timeout_seconds,
 )
-# Per-endpoint API usage: emit one structured ``http.request`` event per
-# request. Added here so it wraps RequestTimeoutMiddleware (observes the 504
-# it synthesises) while sitting inside SecurityHeaders/CORS. The router runs
-# innermost, so ``scope["route"]`` is populated by the time this middleware
-# inspects it on the way back out.
-app.add_middleware(RequestObservationMiddleware)
 # PR #9: reject oversized ingest requests at Content-Length, before
 # FastAPI parses the body. Sits inside SecurityHeaders/CORS so the 413
 # still carries those headers.
