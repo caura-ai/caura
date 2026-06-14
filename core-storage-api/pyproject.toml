@@ -41,7 +41,7 @@ dependencies = [
 pubsub = ["google-cloud-pubsub>=2.23,<3"]
 dev = [
     "core-storage-api[test,pubsub]",
-    "mypy>=1.13,<2.0",
+    "mypy>=2.1.0,<3.0",
     "ruff>=0.8,<1.0",
 ]
 test = [
