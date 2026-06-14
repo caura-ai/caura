@@ -37,7 +37,7 @@ dependencies = [
 # Optional: required only when EVENT_BUS_BACKEND=pubsub (SaaS).
 # Standalone OSS installs use the in-process bus (no Pub/Sub at all —
 # core-api dispatches directly to the consumer in the same process).
-pubsub = ["google-cloud-pubsub>=2.23,<3"]
+pubsub = ["google-cloud-pubsub>=2.39.0,<3"]
 vertex = ["google-cloud-aiplatform>=1.80,<2"]
 local = ["sentence-transformers>=3.0,<4"]
 dev = [
