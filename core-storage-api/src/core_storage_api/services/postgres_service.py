@@ -1015,8 +1015,27 @@ class PostgresService:
         else:
             date_range_boost = literal_column("1.0").label("date_range_boost")
 
+        # Status demotion. ``outdated`` is always demoted (a definitively
+        # superseded fact). ``conflicted`` is demoted EXCEPT when the row is an
+        # exact lexical match for the query: a conflicted memory carries a
+        # competing claim, not a retraction, and when it is the exact thing the
+        # caller asked for it must not be buried beneath unrelated near-duplicate
+        # siblings (different entities that merely share a name prefix). The
+        # competing successor is still surfaced via load_and_serialize's
+        # supersedes-chain injection, so the caller sees both sides.
+        #
+        # Why an FTS match is the right gate: at corpus scale a conflicted row's
+        # blended relevance (vec+fts) sits only marginally above its near-dup
+        # siblings, so the 0.5 multiplier reliably sinks it below them even when
+        # it is the single best match — the exact-match signal is what
+        # distinguishes "the row the caller wants" from "a sibling about a
+        # different entity". Empty/stopword-only queries degrade ts_query to the
+        # empty tsquery (matches nothing here), so the gate is inert for
+        # vector-only / entity-only callers and conflicted stays demoted.
+        _exact_lexical_match = Memory.search_vector.op("@@")(ts_query) if query and query.strip() else false()
         status_penalty = case(
-            (Memory.status.in_(("outdated", "conflicted")), 0.5),
+            (Memory.status == "outdated", 0.5),
+            (and_(Memory.status == "conflicted", ~_exact_lexical_match), 0.5),
             else_=1.0,
         ).label("status_penalty")
 
@@ -1154,7 +1173,24 @@ class PostgresService:
             # ranking with stale claims agents shouldn't act on. Callers
             # that need to inspect superseded rows pass an explicit
             # ``status_filter`` to override.
-            scored_stmt = scored_stmt.where(Memory.status.notin_(("outdated", "conflicted")))
+            #
+            # Carve-out: a ``conflicted`` row that is an EXACT lexical match
+            # for the query is kept. ``conflicted`` (unlike ``outdated``) means
+            # "a competing claim exists", not "definitively retracted" — and the
+            # semantic contradiction path mismarks near-duplicate-but-distinct
+            # entities (e.g. ``Wayne #0000`` vs ``Wayne #0704``), so a blanket
+            # exclusion silently drops the very row the caller named. The
+            # exact-match gate scopes the carve-out to rows the caller clearly
+            # asked for; status_penalty above keeps a surfaced exact-match
+            # conflicted row un-demoted, and load_and_serialize still injects its
+            # supersedes successor so both sides are visible. ``outdated`` stays
+            # fully excluded.
+            scored_stmt = scored_stmt.where(
+                or_(
+                    Memory.status.notin_(("outdated", "conflicted")),
+                    and_(Memory.status == "conflicted", _exact_lexical_match),
+                )
+            )
         if valid_at:
             from datetime import date as _date_type
 
@@ -1312,9 +1348,16 @@ class PostgresService:
             if status_filter:
                 stmt = stmt.where(Memory.status == status_filter)
             else:
-                # Mirrors scored_search: exclude superseded memories from
-                # default results. Callers wanting them pass status_filter.
-                stmt = stmt.where(Memory.status.notin_(("outdated", "conflicted")))
+                # ENTITY_LOOKUP path: these memory IDs are already scoped to the
+                # entities the caller's query resolved to — every row here is
+                # "about" the named entity, the entity-graph analogue of the
+                # scored path's exact-lexical-match carve-out. So we keep
+                # ``conflicted`` rows (a competing claim about the very entity
+                # asked for, which the semantic contradiction path routinely
+                # mismarks across distinct ``#NNNN`` siblings) and exclude only
+                # ``outdated`` (definitively retracted). load_and_serialize still
+                # injects the supersedes successor so both sides remain visible.
+                stmt = stmt.where(Memory.status != "outdated")
             if valid_at:
                 from datetime import date as _date_type
 

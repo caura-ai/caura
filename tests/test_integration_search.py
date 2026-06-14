@@ -379,3 +379,86 @@ class TestSearchPipelineEndToEnd:
         assert str(live_mem["id"]) in result_ids, (
             "live memory was not returned by scored search"
         )
+
+
+@pytest.mark.integration
+class TestConflictedExactMatchSurfaces:
+    """Conflicted memories that exactly match the query must not be hidden.
+
+    The semantic contradiction path marks the older of two embedding-near rows
+    ``conflicted`` and routinely mismarks distinct ``#NNNN`` siblings (different
+    entities sharing a name prefix). scored_search previously hard-excluded all
+    ``conflicted``/``outdated`` rows, so an exact-match gold buried under
+    confirmed near-duplicates vanished from results entirely. The carve-out
+    keeps a ``conflicted`` row when it is an exact lexical (FTS) match for the
+    query; ``outdated`` (a definitive retraction) stays excluded.
+    """
+
+    async def test_conflicted_exact_match_is_surfaced(self, db, tenant_id):
+        # Distinctive token "zylqx" appears only in the conflicted gold, so the
+        # query FTS-matches the gold and nothing else.
+        await _insert_memory(
+            db,
+            tenant_id,
+            "Division zylqx quarterly revenue is forty two million",
+            weight=0.7,
+            status="conflicted",
+        )
+        for sib in (
+            "Division abcde quarterly revenue is ninety one million",
+            "Division fghij quarterly revenue is twelve million",
+            "Division klmno quarterly revenue is sixty million",
+        ):
+            await _insert_memory(db, tenant_id, sib, weight=0.7, status="confirmed")
+
+        from core_api.services.memory_service import search_memories
+
+        results = await search_memories(
+            db, tenant_id, "zylqx quarterly revenue", top_k=10
+        )
+        assert any("zylqx" in r.content for r in results), (
+            "conflicted exact-match gold was excluded from results"
+        )
+
+    async def test_conflicted_non_match_still_excluded(self, db, tenant_id):
+        # A conflicted row that does NOT lexically match the query stays hidden
+        # (carve-out is scoped to exact matches, not all conflicted rows).
+        await _insert_memory(
+            db,
+            tenant_id,
+            "Division qqqqq headcount is two hundred",
+            weight=0.7,
+            status="conflicted",
+        )
+        await _insert_memory(
+            db,
+            tenant_id,
+            "Division wwwww quarterly revenue is five million",
+            weight=0.7,
+            status="confirmed",
+        )
+
+        from core_api.services.memory_service import search_memories
+
+        results = await search_memories(db, tenant_id, "quarterly revenue", top_k=10)
+        assert not any("qqqqq" in r.content for r in results), (
+            "conflicted non-matching row should remain excluded"
+        )
+
+    async def test_outdated_exact_match_still_excluded(self, db, tenant_id):
+        # ``outdated`` is a definitive retraction — it stays excluded even on an
+        # exact lexical match (only ``conflicted`` gets the carve-out).
+        await _insert_memory(
+            db,
+            tenant_id,
+            "Project vortex status is cancelled",
+            weight=0.7,
+            status="outdated",
+        )
+
+        from core_api.services.memory_service import search_memories
+
+        results = await search_memories(db, tenant_id, "vortex status", top_k=10)
+        assert not any("vortex" in r.content for r in results), (
+            "outdated exact-match should remain excluded"
+        )
