@@ -5,14 +5,10 @@ description = "MemClaw Core Storage API — PostgreSQL CRUD service"
 license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
-    # Cap <0.137: FastAPI 0.137.0 (released 2026-06-14) changed
-    # include_router(prefix=...) to mount a sub-app instead of flattening the
-    # router's routes into app.routes. That breaks app.py's import-time
-    # request-timeout opt-out-path assertion (it scans app.routes for the
-    # prefixed paths) — which turned CI red repo-wide the moment 0.137 shipped,
-    # because CI re-resolves via ``uv pip install`` rather than the lockfile
-    # (same float-up reason as the greenlet cap below). Drop once 0.137+ is vetted.
-    "fastapi>=0.115,<0.137",
+    # FastAPI 0.137+ is OK since #364 made core-api's startup guard read
+    # app.openapi() instead of walking app.routes. The committed uv.lock pins the
+    # exact version; this range only bounds future re-locks.
+    "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.34,<1",
     "sqlalchemy[asyncio]>=2.0,<3",
     # SQLAlchemy[asyncio] pulls in greenlet. Pin <3.5.0 — greenlet 3.5.0

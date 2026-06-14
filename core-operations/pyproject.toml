@@ -5,10 +5,9 @@ description = "MemClaw core-operations — host for cron/scheduled background jo
 license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
-    # Cap <0.137 to match core-api (FastAPI 0.137's include_router change broke
-    # core-api's startup guard). Pinned here for a uniform FastAPI across the
-    # core-* services until the guard fix lands; dropped repo-wide then.
-    "fastapi>=0.115,<0.137",
+    # FastAPI 0.137+ OK since #364 (core-api startup guard reads app.openapi()).
+    # The committed uv.lock pins the exact version; this range only bounds re-locks.
+    "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.34,<1",
     "pydantic>=2.0,<3",
     "pydantic-settings>=2.0,<3",
