@@ -16,7 +16,7 @@ dependencies = [
     # (which uses ``uv pip install`` and re-resolves rather than reading
     # the lockfile) breaks on the Linux runner. Drop once 3.5.x has full
     # platform coverage.
-    "greenlet<3.5.0",
+    "greenlet<3.6.0",
     "asyncpg>=0.30,<1",
     "pgvector>=0.3,<1",
     "pydantic>=2.0,<3",
