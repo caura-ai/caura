@@ -306,7 +306,7 @@ fleet capability and governance:
 | Cross-vendor memory sharing | ✅ | ❌ | ❌ | ❌ |
 | Contradiction detection + supersession | ✅ | ❌ | ❌ | ❌ |
 | Per-agent retrieval tuning | ✅ | ❌ | ❌ | ❌ |
-| PII detection & quarantine | ✅ | ❌ | ✅ | ❌ |
+| PII detection & flagging | ✅ | ❌ | ✅ | ❌ |
 | Audit trail / provenance | ✅ | ❌ | ⚠️ partial | ❌ |
 | Knowledge graph (auto-extracted) | ✅ | ⚠️ | ✅ | ❌ |
 | MCP-native | ✅ | ✅ | ✅ | ⚠️ |
