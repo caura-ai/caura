@@ -181,6 +181,14 @@ class Settings(BaseSettings):
     audit_queue_max_size: int = 10000
     audit_queue_flush_threshold: int = 50
     audit_queue_flush_interval_seconds: float = 1.0
+    # Capability-usage adoption counters (services/capability_usage.py).
+    # In-process aggregation flushed to the ``capability_usage`` table on
+    # this interval — the data behind the per-capability / per-transport /
+    # per-org adoption report. Set ``capability_usage_enabled = False`` to
+    # turn off recording (the aggregator is never started, record_usage()
+    # becomes a no-op).
+    capability_usage_enabled: bool = True
+    capability_usage_flush_interval_seconds: float = 15.0
     # Rate limits applied per-route via slowapi decorators
     # (middleware/rate_limit.py). Syntax: "<count>/<period>" where period
     # is second | minute | hour | day.

@@ -4,6 +4,7 @@ from common.models.analysis_report import CrystallizationReport
 from common.models.audit import AuditLog
 from common.models.background_task import BackgroundTaskLog
 from common.models.base import Base
+from common.models.capability_usage import CapabilityUsage
 from common.models.dedup_review import DedupReview
 from common.models.document import Document
 from common.models.entity import Entity, MemoryEntityLink, Relation
@@ -17,6 +18,7 @@ __all__ = [
     "AuditLog",
     "BackgroundTaskLog",
     "Base",
+    "CapabilityUsage",
     "CrystallizationReport",
     "DedupReview",
     "Document",

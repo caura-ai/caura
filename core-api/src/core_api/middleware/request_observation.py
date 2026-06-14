@@ -49,7 +49,59 @@ from typing import Any
 from starlette.types import ASGIApp as ASGIApplication
 from starlette.types import Receive, Scope, Send
 
+from core_api.services.capability_usage import record_usage
+
 logger = logging.getLogger("core_api.access")
+
+# REST route-template → (capability, op) for the adoption signal. Keyed by
+# (METHOD, templated path) so the same path under different verbs maps to the
+# right capability/op. Capability + op names are kept aligned with the MCP
+# tool vocabulary (mcp_server tool names minus the ``memclaw_`` prefix, and
+# the manage/doc sub-ops) so REST and MCP roll up together in the report.
+#
+# Routes NOT in this map are simply not recorded as capability usage (admin,
+# list/registry, ingest pipeline, health, plugin bootstrap). Extend this when
+# a new capability-bearing route is added — it's the REST half of the
+# transport-agnostic taxonomy; the MCP half is automatic via call_tool.
+_REST_CAPABILITY: dict[tuple[str, str], tuple[str, str | None]] = {
+    # memories
+    ("POST", "/api/v1/memories"): ("write", None),
+    ("GET", "/api/v1/memories"): ("list", None),
+    ("GET", "/api/v1/memories/stats"): ("stats", None),
+    ("POST", "/api/v1/memories/bulk-delete"): ("manage", "bulk_delete"),
+    ("DELETE", "/api/v1/memories"): ("manage", "bulk_delete"),
+    ("GET", "/api/v1/memories/{memory_id}"): ("manage", "read"),
+    ("GET", "/api/v1/memories/{memory_id}/contradictions"): ("manage", "read"),
+    ("DELETE", "/api/v1/memories/{memory_id}"): ("manage", "delete"),
+    ("PATCH", "/api/v1/memories/{memory_id}/status"): ("manage", "transition"),
+    ("PATCH", "/api/v1/memories/{memory_id}"): ("manage", "update"),
+    ("POST", "/api/v1/search"): ("search", None),
+    ("POST", "/api/v1/recall"): ("recall", None),
+    # documents
+    ("POST", "/api/v1/documents"): ("doc", "write"),
+    ("GET", "/api/v1/documents"): ("doc", "read"),
+    ("GET", "/api/v1/documents/{doc_id}"): ("doc", "read"),
+    ("GET", "/api/v1/documents/collections"): ("doc", "list_collections"),
+    ("POST", "/api/v1/documents/query"): ("doc", "query"),
+    ("POST", "/api/v1/documents/search"): ("doc", "search"),
+    ("DELETE", "/api/v1/documents/{doc_id}"): ("doc", "delete"),
+    # keystones (router prefix /memclaw/keystones)
+    ("GET", "/api/v1/memclaw/keystones"): ("keystones", None),
+    ("POST", "/api/v1/memclaw/keystones"): ("keystones_set", "set"),
+    ("DELETE", "/api/v1/memclaw/keystones/{doc_id}"): ("keystones_set", "delete"),
+    # knowledge graph / entities
+    ("GET", "/api/v1/entities"): ("entity", "list"),
+    ("GET", "/api/v1/graph"): ("entity", "graph"),
+    ("POST", "/api/v1/entities/upsert"): ("entity", "write"),
+    ("GET", "/api/v1/entities/{entity_id}"): ("entity", "read"),
+    ("POST", "/api/v1/relations/upsert"): ("entity", "write"),
+    # insights / evolve / stats / tune
+    ("POST", "/api/v1/insights/generate"): ("insights", None),
+    ("POST", "/api/v1/evolve/report"): ("evolve", None),
+    ("GET", "/api/v1/stats"): ("stats", None),
+    ("GET", "/api/v1/agents/{agent_id}/tune"): ("tune", "read"),
+    ("PATCH", "/api/v1/agents/{agent_id}/tune"): ("tune", "update"),
+}
 
 
 class RequestObservationMiddleware:
@@ -90,13 +142,30 @@ class RequestObservationMiddleware:
             # for unauthenticated routes and 401s — logged as None, which is fine.
             state = scope.get("state") or {}
             tenant_id = state.get("tenant_id")
+            method = scope.get("method", "?")
             logger.info(
                 "http.request",
                 extra={
                     "http_route": http_route,
-                    "http_method": scope.get("method", "?"),
+                    "http_method": method,
                     "http_status_code": status_code,
                     "http_duration_ms": round(duration_ms, 1),
                     "tenant_id": tenant_id,
                 },
             )
+            # Adoption signal: record capability usage for mapped REST routes
+            # (transport=rest). MCP traffic (POST /mcp) is recorded separately
+            # by the call_tool wrapper, and /mcp isn't in the map, so there's
+            # no double counting. record_usage is a no-op when the aggregator
+            # isn't wired, skips non-tenant callers, and never raises.
+            cap = _REST_CAPABILITY.get((method, http_route))
+            if cap is not None:
+                capability, op = cap
+                record_usage(
+                    capability=capability,
+                    op=op,
+                    transport="rest",
+                    tenant_id=tenant_id,
+                    status="ok" if status_code < 400 else "error",
+                    duration_ms=duration_ms,
+                )

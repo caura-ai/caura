@@ -371,6 +371,25 @@ async def lifespan(app):
             set_audit_queue(audit_queue)
             await audit_queue.start()
 
+        # Capability-usage adoption counters: in-process aggregation
+        # flushed to ``capability_usage`` every
+        # ``capability_usage_flush_interval_seconds``. Disabled →
+        # ``record_usage()`` stays a no-op (the emitters never null-check).
+        capability_usage_agg = None
+        if app_settings.capability_usage_enabled:
+            from core_api.services.capability_usage import (
+                CapabilityUsageAggregator,
+                _default_flush,
+                set_aggregator,
+            )
+
+            capability_usage_agg = CapabilityUsageAggregator(
+                flush_interval_seconds=app_settings.capability_usage_flush_interval_seconds,
+                flush_callable=_default_flush,
+            )
+            set_aggregator(capability_usage_agg)
+            await capability_usage_agg.start()
+
         from core_api.tasks import cancel_all_tasks
 
         # ``register_consumers`` must run before ``bus.start`` — the
@@ -423,6 +442,11 @@ async def lifespan(app):
         shutdown_steps: list = []
         if audit_queue is not None:
             shutdown_steps.append(audit_queue.stop(timeout=5.0))
+        if capability_usage_agg is not None:
+            # Final flush before the storage client closes — same ordering
+            # rationale as the audit queue (the flush writes via the DB
+            # session, which must still be live).
+            shutdown_steps.append(capability_usage_agg.stop(timeout=5.0))
         shutdown_steps.extend(
             [
                 event_bus.stop(),

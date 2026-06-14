@@ -25,6 +25,7 @@ from common.models.analysis_report import CrystallizationReport  # noqa: F401
 from common.models.fleet import FleetNode, FleetCommand  # noqa: F401
 from common.models.document import Document  # noqa: F401
 from common.models.background_task import BackgroundTaskLog  # noqa: F401
+from common.models.capability_usage import CapabilityUsage  # noqa: F401
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit  # noqa: F401
 from sqlalchemy.ext.asyncio import create_async_engine
 
