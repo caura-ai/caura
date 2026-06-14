@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ _Key = tuple[str, str, str, str, str]
 
 
 class _Counter:
-    __slots__ = ("count", "error_count", "duration_ms_sum")
+    __slots__ = ("count", "duration_ms_sum", "error_count")
 
     def __init__(self) -> None:
         self.count = 0
@@ -70,7 +70,7 @@ class CapabilityUsageAggregator:
     def _bucket(now: datetime) -> datetime:
         # Minute-truncated UTC. Rows in the same minute across flushes and
         # instances share a ts_bucket so they SUM cleanly at query time.
-        return now.astimezone(timezone.utc).replace(second=0, microsecond=0)
+        return now.astimezone(UTC).replace(second=0, microsecond=0)
 
     def record(
         self,
@@ -96,7 +96,7 @@ class CapabilityUsageAggregator:
             capability,
             op or "",
             transport,
-            self._bucket(datetime.now(timezone.utc)).isoformat(),
+            self._bucket(datetime.now(UTC)).isoformat(),
         )
         c = self._buckets.get(key)
         if c is None:
@@ -137,9 +137,7 @@ class CapabilityUsageAggregator:
         if self._flusher_task is not None and not self._flusher_task.done():
             return
         self._stopping.clear()
-        self._flusher_task = asyncio.create_task(
-            self._flusher_loop(), name="capability-usage-flusher"
-        )
+        self._flusher_task = asyncio.create_task(self._flusher_loop(), name="capability-usage-flusher")
 
     async def stop(self, *, timeout: float = 5.0) -> None:
         if self._flusher_task is None:
@@ -164,9 +162,7 @@ class CapabilityUsageAggregator:
         while not self._stopping.is_set():
             try:
                 try:
-                    await asyncio.wait_for(
-                        self._stopping.wait(), timeout=self._flush_interval
-                    )
+                    await asyncio.wait_for(self._stopping.wait(), timeout=self._flush_interval)
                 except TimeoutError:
                     pass  # normal interval tick
                 await self._flush_once()

@@ -56,7 +56,9 @@ class CapabilityUsage(Base):
     # Rows sharing a bucket across flushes/instances SUM cleanly at query.
     ts_bucket: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
     error_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )

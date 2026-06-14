@@ -28,7 +28,6 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api.auth import get_admin_key
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
-from core_api.services.capability_usage import record_usage
 from core_api.constants import (
     DEFAULT_SEARCH_TOP_K,
     EVOLVE_OUTCOME_TYPES,
@@ -50,6 +49,7 @@ from core_api.services.agent_service import (
     enforce_fleet_write,
 )
 from core_api.services.audit_service import log_action, log_cross_tenant_read
+from core_api.services.capability_usage import record_usage
 from core_api.services.entity_service import get_entity
 from core_api.services.memory_service import (
     create_memories_bulk,
@@ -457,9 +457,7 @@ class _InstrumentedFastMCP(FastMCP):
             raise
         finally:
             op = arguments.get("op") if isinstance(arguments, dict) else None
-            capability = (
-                name.removeprefix("memclaw_") if isinstance(name, str) else str(name)
-            )
+            capability = name.removeprefix("memclaw_") if isinstance(name, str) else str(name)
             record_usage(
                 capability=capability,
                 op=op if isinstance(op, str) else None,

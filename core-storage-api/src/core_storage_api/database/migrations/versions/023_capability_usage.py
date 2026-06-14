@@ -41,9 +41,7 @@ def upgrade() -> None:
         sa.Column("transport", sa.Text(), nullable=False),
         sa.Column("ts_bucket", sa.DateTime(timezone=True), nullable=False),
         sa.Column("count", sa.Integer(), nullable=False, server_default=sa.text("0")),
-        sa.Column(
-            "error_count", sa.Integer(), nullable=False, server_default=sa.text("0")
-        ),
+        sa.Column("error_count", sa.Integer(), nullable=False, server_default=sa.text("0")),
         sa.Column(
             "duration_ms_sum",
             sa.BigInteger(),
@@ -61,13 +59,8 @@ def upgrade() -> None:
             name="ck_capability_usage_transport",
         ),
     )
-    op.execute(
-        "CREATE INDEX ix_capability_usage_bucket ON capability_usage (ts_bucket)"
-    )
-    op.execute(
-        "CREATE INDEX ix_capability_usage_tenant_bucket "
-        "ON capability_usage (tenant_id, ts_bucket)"
-    )
+    op.execute("CREATE INDEX ix_capability_usage_bucket ON capability_usage (ts_bucket)")
+    op.execute("CREATE INDEX ix_capability_usage_tenant_bucket ON capability_usage (tenant_id, ts_bucket)")
 
 
 def downgrade() -> None:
