@@ -157,6 +157,22 @@ async def test_set_allowed_for_trusted_agent(client):
     assert body["data"]["weight"] == 100  # 'high' bucket → 100 at storage
 
 
+async def test_set_allowed_for_standalone_admin_without_agent_id(client):
+    """F-7: on a standalone box the unidentified operator (no X-Agent-ID)
+    can author a keystone out-of-the-box. Pre-fix this 403'd with
+    'Agent rest-admin is not registered' because the caller fell back to the
+    synthetic, unregistered ``rest-admin`` principal. The bypass is narrow:
+    it only applies when no agent identity is asserted at all — the
+    X-Agent-ID-bearing tests below still go through the full trust gate."""
+    tenant_id, headers = get_test_auth()  # bare standalone admin — NO X-Agent-ID
+    tag = _uid()
+    resp = await _set_keystone(client, headers, tenant_id, doc_id=f"ks-{tag}", weight="high")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["doc_id"] == f"ks-{tag}"
+    assert body["data"]["scope"] == "tenant"
+
+
 # ---------------------------------------------------------------------------
 # Round-trip + scope merge passthrough
 # ---------------------------------------------------------------------------
