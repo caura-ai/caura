@@ -72,7 +72,7 @@ curl -X POST http://localhost:8000/api/v1/search \
   -d '{"tenant_id": "default", "query": "authentication token lifetime"}'
 ```
 
-The write response comes back enriched with an LLM-inferred `type`, `title`, `summary`, `tags`, `status`, and `importance_score` — all from a single `content` field.
+The write response comes back enriched with an LLM-inferred `memory_type`, `title`, `summary`, `tags`, `status`, and `weight` — all from a single `content` field.
 
 Ready for semantic recall, multi-tenant, a managed host, or an OpenClaw fleet? Pick a path below.
 
