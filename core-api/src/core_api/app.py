@@ -686,15 +686,20 @@ app.router.routes.append(
 
 
 # CAURA-602: turn a silent regression into a startup crash. The
-# request-timeout middleware skips a hardcoded path-allowlist; if a
-# router prefix or path ever moves and the allowlist isn't updated to
-# match, the silent-create class would re-emerge with no error. Verify
-# at import time that every opt-out path is actually mounted on this
-# app — string-matching is forced by the ASGI scope shape, but at
-# least the divergence will fail loudly. ``getattr`` filters out
-# ``Host`` route entries (no ``.path``); ``Mount`` and ``APIRoute``
-# both carry it.
-_registered_paths = {getattr(r, "path", None) for r in app.routes if getattr(r, "path", None)}
+# request-timeout middleware skips a hardcoded path-allowlist; if a router prefix
+# or path ever moves and the allowlist isn't updated to match, the silent-create
+# class would re-emerge with no error. Verify at import time that every opt-out
+# path is a registered route.
+#
+# Read the paths from the OpenAPI schema rather than walking ``app.routes``:
+# FastAPI 0.137 changed ``include_router(prefix=...)`` to mount the router as an
+# opaque ``_IncludedRouter`` (path=None, no public ``.routes``), so the prefixed
+# paths are no longer top-level ``APIRoute.path`` entries — which is exactly what
+# silently broke this guard when 0.137 shipped. ``app.openapi()`` is the stable,
+# public surface and lists the prefixed paths under both old (flatten) and new
+# (mount) FastAPI. Every core-api route is ``include_in_schema=True``, so none is
+# hidden from this check.
+_registered_paths = set(app.openapi().get("paths", {}))
 for _opt_out in _TIMEOUT_OPT_OUT_PATHS:
     if _opt_out not in _registered_paths:
         raise RuntimeError(
