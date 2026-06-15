@@ -174,6 +174,35 @@ If you provisioned with `initial_trust`, this step is already done — confirm w
 
 ---
 
+## 5. Author a keystone (governance rule)
+
+Keystones are mandatory rules that override conflicting instructions. Authoring a
+`scope=fleet`/`scope=tenant` rule needs trust ≥ 2 (see above).
+
+```bash
+curl -X POST "https://memclaw.dev/api/v1/memclaw/keystones" \
+  -H "X-API-Key: $MC_TENANT_KEY" \
+  -H "X-Agent-ID: quote-agent-na" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "tenant_id": "'"$TENANT_ID"'",
+        "doc_id": "no-secrets-in-logs",
+        "title": "No secrets in logs",
+        "content": "Never log credentials or API keys.",
+        "scope": "tenant",
+        "weight": "high"
+      }'
+```
+
+`doc_id` is **required** — a stable kebab-case slug you choose
+(`^[a-z0-9][a-z0-9._-]{0,99}$`). It's the rule's identity: re-POSTing the same
+`doc_id` upserts (edits) that rule rather than creating a duplicate. `weight` is
+`low` / `med` / `high` (stored as `25` / `50` / `100`). For `scope=fleet`/`agent`
+also pass `fleet_id`; `scope=agent` additionally takes the target `agent_id`
+(omit `agent_id` for `tenant`/`fleet`).
+
+---
+
 ## End-to-end bootstrap, one block
 
 ```bash

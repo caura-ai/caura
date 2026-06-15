@@ -1561,6 +1561,22 @@ class TestKeystones:
         rules = resp2.json()
         assert any(r["doc_id"] == doc_id for r in rules)
 
+    async def test_invalid_doc_id_rejected(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        # Uppercase + space + '!' violate ^[a-z0-9][a-z0-9._-]{0,99}$. The
+        # storage validator must reject it (matching the edge validators and
+        # the documented contract), not just check non-empty.
+        payload = {
+            "tenant_id": tenant_id,
+            **self._payload(doc_id="Bad Slug!", scope="tenant"),
+        }
+        resp = await client.post(f"{PREFIX}/keystones", json=payload)
+        assert resp.status_code == 422, resp.text
+        assert "doc_id must match" in resp.text
+
     async def test_scope_union(
         self,
         client: AsyncClient,

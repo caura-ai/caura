@@ -55,6 +55,22 @@ async def test_write_memory(client):
     assert data["memory_type"] == "fact"
 
 
+async def test_memory_count(client):
+    """GET /memories/count returns the active count (F-16). 'count' must resolve
+    as a literal route, not be parsed as a {memory_id} UUID (which 422'd)."""
+    tenant_id, headers = get_test_auth()
+    fleet = f"count-fleet-{_uid()}"  # isolate from other tenant data
+    await _write_memory(client, tenant_id, headers, "first", fleet_id=fleet)
+    await _write_memory(client, tenant_id, headers, "second", fleet_id=fleet)
+
+    resp = await client.get(
+        f"/api/v1/memories/count?tenant_id={tenant_id}&fleet_id={fleet}",
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"count": 2}
+
+
 async def test_list_memories(client):
     """Write 3 memories, GET /api/memories?tenant_id=X → list includes them."""
     tenant_id, headers = get_test_auth()

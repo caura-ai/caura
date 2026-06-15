@@ -466,6 +466,37 @@ async def memory_stats(
         return await _stats_fallback(tenant_id, fleet_id)
 
 
+@router.get("/memories/count")
+async def memory_count(
+    tenant_id: str | None = Query(default=None),
+    fleet_id: str | None = Query(default=None),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Count active (non-deleted) memories for a tenant, optionally a fleet.
+
+    A lightweight operational primitive — for type/agent/status breakdowns use
+    ``GET /memories/stats``. Declared BEFORE ``/memories/{memory_id}`` so the
+    literal ``count`` segment resolves here instead of being parsed as a UUID
+    (which previously returned a confusing 422).
+    """
+    # Tenant resolution mirrors memory_stats, with one deliberate difference:
+    # count is single-tenant (count_active has no cross-tenant aggregate the way
+    # compute_memory_stats does), so a tenant_id must ALWAYS be resolvable. An
+    # admin omitting tenant_id therefore gets 400 — count_active(tenant_id=None)
+    # is meaningless to storage (the /count-active endpoint requires tenant_id) —
+    # rather than aggregating the way memory_stats does for admins.
+    if tenant_id:
+        auth.enforce_readable_tenant(tenant_id)
+    elif not auth.is_admin:
+        if not auth.tenant_id:
+            raise HTTPException(status_code=400, detail="tenant_id is required")
+        tenant_id = auth.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    count = await get_storage_client().count_active(tenant_id, fleet_id)
+    return {"count": count}
+
+
 @router.delete("/memories", status_code=204)
 async def delete_all_memories(
     tenant_id: str = Query(...),
