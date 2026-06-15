@@ -70,6 +70,9 @@
 - name: area/core-worker
   color: "1d76db"
   description: Background worker — embeddings, enrichment, contradiction detection.
+- name: area/core-operations
+  color: "1d76db"
+  description: Cron/scheduled background jobs — lifecycle, retention, fan-out.
 - name: area/plugin
   color: "1d76db"
   description: OpenClaw plugin (TypeScript) — heartbeat, context-engine, agent-auth.

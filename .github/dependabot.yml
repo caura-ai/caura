@@ -63,7 +63,6 @@ updates:
       prefix: "deps(core-worker)"
 
   # --- Python (uv): core-operations — manages pyproject + the committed uv.lock ---
-  # No area/core-operations label in labels.yml yet — using area/infra.
   - package-ecosystem: "uv"
     directory: "/core-operations"
     schedule:
@@ -72,7 +71,7 @@ updates:
     labels:
       - "dependencies"
       - "kind/chore"
-      - "area/infra"
+      - "area/core-operations"
     commit-message:
       prefix: "deps(core-operations)"
 
