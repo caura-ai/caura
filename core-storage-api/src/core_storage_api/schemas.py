@@ -185,6 +185,10 @@ AUDIT_LOG_FIELDS: list[str] = [
     "resource_id",
     "detail",
     "created_at",
+    # Chain seq surfaces in list responses (JSON-safe int); the raw
+    # ``prev_hash``/``event_hash`` bytes are intentionally NOT listed
+    # here — the /verify endpoint hex-encodes them in its own response.
+    "seq",
 ]
 
 REPORT_FIELDS: list[str] = [

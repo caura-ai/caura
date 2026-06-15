@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from core_storage_api.schemas import AUDIT_LOG_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import PostgresService
@@ -142,6 +142,26 @@ async def create_audit_logs_bulk(request: Request) -> dict:
         normalised.append(normalised_event)
     await _svc.audit_add_batch(normalised)
     return {"ok": True, "count": len(normalised)}
+
+
+@router.get("/verify")
+async def verify_audit_chain(
+    tenant_id: str,
+    # Bounded so an authenticated caller can't pass ?limit=1e9 and force the
+    # service to load hundreds of millions of rows into memory (OOM).
+    limit: int = Query(default=100_000, ge=1, le=500_000),
+) -> dict:
+    """Verify a tenant's tamper-evident audit hash chain.
+
+    Walks the chain in ``seq`` order, recomputes each ``event_hash``, and
+    checks linkage + genesis + tail-against-head. Returns
+    ``{valid: true, verified_count, head_seq}`` when intact, else
+    ``{valid: false, verified_count, first_broken: {seq, id, reason}}``
+    where ``reason`` ∈ {seq_gap, prev_hash_mismatch, event_hash_mismatch,
+    tail_truncated}. Declared before the ``GET ""`` list route so
+    ``/audit-logs/verify`` matches here, not the list handler.
+    """
+    return await _svc.audit_verify_chain(tenant_id, limit=limit)
 
 
 @router.get("")

@@ -10,6 +10,7 @@ shared engine from ``core_storage_api.database.init.get_engine``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections import OrderedDict
@@ -43,6 +44,7 @@ from common.constants import (
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.models import (
     Agent,
+    AuditChainHead,
     AuditLog,
     BackgroundTaskLog,
     CrystallizationReport,
@@ -58,6 +60,13 @@ from common.models import (
     Relation,
 )
 from core_storage_api.observability import db_measure
+from core_storage_api.services.audit_chain import (
+    GENESIS_PREV_HASH,
+    assert_pii_safe,
+    canonical_created_at,
+    canonical_event,
+    compute_event_hash,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +231,75 @@ _PURGE_FLEET_TABLES: tuple[str, ...] = (
     "analysis_reports",
     "dedup_reviews",
 )
+
+
+def _verify_audit_chain_rows(
+    tenant_id: str, rows: list[AuditLog], head: AuditChainHead | None, limit: int
+) -> dict:
+    """Walk pre-fetched chain rows and verify integrity (pure CPU, no I/O).
+
+    Split out from :meth:`PostgresService.audit_verify_chain` so the SHA-256 /
+    JSON-canonicalization loop — up to ``limit`` (≤ 500k) rows — can run via
+    ``asyncio.to_thread`` instead of blocking the event loop. Operates only on
+    already-loaded ORM attributes, so it's safe off the event loop.
+    """
+    expected_prev = GENESIS_PREV_HASH
+    expected_seq = 1
+    for row in rows:
+        reason: str | None = None
+        if row.seq != expected_seq:
+            reason = "seq_gap"
+        elif row.prev_hash != expected_prev:
+            reason = "prev_hash_mismatch"
+        else:
+            canon = canonical_event(
+                tenant_id=row.tenant_id,
+                seq=row.seq,
+                agent_id=row.agent_id,
+                action=row.action,
+                resource_type=row.resource_type,
+                resource_id=row.resource_id,
+                detail=row.detail,
+                created_at_iso=canonical_created_at(row.created_at),
+            )
+            if compute_event_hash(canon, row.prev_hash) != row.event_hash:
+                reason = "event_hash_mismatch"
+        if reason is not None:
+            return {
+                "tenant_id": tenant_id,
+                "valid": False,
+                "verified_count": expected_seq - 1,
+                "first_broken": {
+                    "seq": row.seq,
+                    "id": str(row.id),
+                    "reason": reason,
+                    "created_at": row.created_at.astimezone(UTC).isoformat(),
+                },
+            }
+        expected_prev = row.event_hash
+        expected_seq += 1
+
+    truncated = len(rows) >= limit
+    head_seq, head_hash = (head.last_seq, head.last_hash) if head is not None else (0, GENESIS_PREV_HASH)
+    last_seq, last_hash = (rows[-1].seq, rows[-1].event_hash) if rows else (0, GENESIS_PREV_HASH)
+    if not truncated and (head_seq != last_seq or head_hash != last_hash):
+        return {
+            "tenant_id": tenant_id,
+            "valid": False,
+            "verified_count": len(rows),
+            "first_broken": {
+                "reason": "tail_truncated",
+                "head_seq": head_seq,
+                "chain_seq": last_seq,
+            },
+        }
+    return {
+        "tenant_id": tenant_id,
+        "valid": True,
+        "verified_count": len(rows),
+        "head_seq": last_seq,
+        "truncated": truncated,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4337,48 +4415,173 @@ class PostgresService:
         resource_id: UUID | None = None,
         detail: dict | None = None,
     ) -> None:
-        async with get_session() as session:
-            session.add(
-                AuditLog(
-                    tenant_id=tenant_id,
-                    agent_id=agent_id,
-                    action=action,
-                    resource_type=resource_type,
-                    resource_id=resource_id,
-                    detail=detail,
-                )
-            )
+        """Persist one audit event (single-event + sync-fallback path).
+
+        Chains the event so single-event inserts (the sync fallback in
+        core-api's ``log_action``, plus keystone audit writes) land in the
+        same per-tenant hash chain as the batched path — otherwise they
+        would write NULL-hash rows that break the chain (eToro governance).
+        Calls the per-tenant writer directly (one tenant, one event) rather
+        than paying the batch group-by for a singleton.
+        """
+        await self._audit_chain_one_tenant(
+            tenant_id,
+            [
+                {
+                    "agent_id": agent_id,
+                    "action": action,
+                    "resource_type": resource_type,
+                    "resource_id": resource_id,
+                    "detail": detail,
+                }
+            ],
+        )
 
     async def audit_add_batch(self, events: list[dict]) -> None:
-        """Persist N audit events in one transaction with one INSERT
-        statement (CAURA-628).
+        """Persist N audit events (CAURA-628 batched path).
 
-        ``session.add_all`` issues a single multi-row INSERT to
-        Postgres, vs ``audit_add`` which opens one transaction +
-        acquires the table write lock once per event. Reducing N
-        per-event lock acquisitions to one batched acquisition is the
-        whole point of the CAURA-628 refactor; the per-event legacy
-        path is preserved for the synchronous-fallback case in
-        core-api's ``log_action``.
+        Thin alias for :meth:`audit_add_batch_chained` so the existing
+        bulk router call site keeps working while every audit event now
+        joins the tamper-evident per-tenant hash chain.
+        """
+        await self.audit_add_batch_chained(events)
 
-        Empty ``events`` short-circuits without touching the
-        database — saves a no-op session open under the audit
-        flusher's interval-driven empty ticks.
+    async def audit_add_batch_chained(self, events: list[dict]) -> None:
+        """Persist audit events into the per-tenant tamper-evident chain.
+
+        Each event gets a monotonic per-tenant ``seq`` and an
+        ``event_hash = SHA256(canonical_event || prev_hash)`` linking it to
+        the prior event. Events are grouped by tenant and each tenant's
+        group is built + committed in its OWN transaction, so one tenant's
+        failure can't roll back another's and the per-tenant head-row lock
+        only serializes same-tenant writers.
+
+        Empty ``events`` short-circuits (the audit flusher ticks on an
+        interval even when idle).
         """
         if not events:
             return
+        by_tenant: dict[str, list[dict]] = {}
+        for ev in events:
+            by_tenant.setdefault(ev["tenant_id"], []).append(ev)
+        for tenant_id, tenant_events in by_tenant.items():
+            await self._audit_chain_one_tenant(tenant_id, tenant_events)
+
+    async def _audit_chain_one_tenant(self, tenant_id: str, events: list[dict]) -> None:
+        """Chain + insert one tenant's events inside a single transaction.
+
+        The ``audit_chain_head`` row is the serialization point: we
+        ``SELECT ... FOR UPDATE`` it so concurrent same-tenant writers run
+        one-at-a-time (different tenants lock different rows and never
+        block). ``ON CONFLICT DO NOTHING`` resolves the concurrent-genesis
+        race (two workers racing a tenant's first-ever event). The
+        ``FOR UPDATE`` lock releases atomically with the row inserts on
+        commit, so the chain can never interleave.
+        """
         async with get_session() as session:
-            session.add_all(
-                AuditLog(
-                    tenant_id=event["tenant_id"],
-                    agent_id=event.get("agent_id"),
-                    action=event["action"],
-                    resource_type=event["resource_type"],
-                    resource_id=event.get("resource_id"),
-                    detail=event.get("detail"),
-                )
-                for event in events
+            # Lock-or-create the head row. The insert is a no-op once the
+            # head exists; the unconditional FOR UPDATE select below is what
+            # actually serializes writers.
+            await session.execute(
+                pg_insert(AuditChainHead.__table__)
+                .values(tenant_id=tenant_id, last_seq=0, last_hash=GENESIS_PREV_HASH)
+                .on_conflict_do_nothing(index_elements=["tenant_id"])
             )
+            head = (
+                await session.execute(
+                    select(AuditChainHead).where(AuditChainHead.tenant_id == tenant_id).with_for_update()
+                )
+            ).scalar_one()
+
+            prev_hash = head.last_hash
+            seq = head.last_seq
+            now = datetime.now(UTC)
+            rows: list[AuditLog] = []
+            for ev in events:
+                # Scrub-before-hash: refuse to chain a raw secret. Runs
+                # BEFORE hashing so the chain only ever attests the redacted
+                # detail (raising here fails the write loudly instead).
+                assert_pii_safe(ev.get("detail"))
+                seq += 1
+                # Assign created_at in-app (not server_default now()) because
+                # the hash binds it — reading it back post-insert would risk
+                # the stored value differing from the hashed one. Events from
+                # the queue carry no created_at, so a batch shares one `now`;
+                # `seq` disambiguates same-timestamp events.
+                created = ev.get("created_at") or now
+                resource_id = ev.get("resource_id")
+                canon = canonical_event(
+                    tenant_id=tenant_id,
+                    seq=seq,
+                    agent_id=ev.get("agent_id"),
+                    action=ev["action"],
+                    resource_type=ev["resource_type"],
+                    resource_id=resource_id,
+                    detail=ev.get("detail"),
+                    created_at_iso=canonical_created_at(created),
+                )
+                this_hash = compute_event_hash(canon, prev_hash)
+                rows.append(
+                    AuditLog(
+                        tenant_id=tenant_id,
+                        agent_id=ev.get("agent_id"),
+                        action=ev["action"],
+                        resource_type=ev["resource_type"],
+                        resource_id=resource_id,
+                        detail=ev.get("detail"),
+                        created_at=created,
+                        seq=seq,
+                        prev_hash=prev_hash,
+                        event_hash=this_hash,
+                    )
+                )
+                prev_hash = this_hash
+            session.add_all(rows)
+            head.last_seq = seq
+            head.last_hash = prev_hash
+            head.updated_at = now
+
+    async def audit_verify_chain(self, tenant_id: str, *, limit: int = 100_000) -> dict:
+        """Walk a tenant's hash chain in ``seq`` order and verify integrity.
+
+        Recomputes each ``event_hash`` and checks ``prev_hash`` linkage +
+        genesis; stops at and reports the first broken link (everything
+        after it is untrustworthy). A final tail-check against
+        ``audit_chain_head`` catches rows deleted off the END of the chain
+        (a forward walk alone can't see a missing tail). ``limit`` bounds
+        the walk — when hit, the tail-check is skipped and ``truncated`` is
+        set so the caller knows to paginate.
+        """
+        async with get_read_session() as session:
+            # Pin one snapshot across BOTH reads (rows + head). Under READ
+            # COMMITTED each statement gets its own snapshot, so a concurrent
+            # same-tenant insert committing between the two reads makes the head
+            # look one seq ahead of the fetched rows and fires a FALSE
+            # tail_truncated "tampering" alert. REPEATABLE READ freezes the
+            # snapshot at the first query for the rest of the transaction
+            # (must be set before any query in the tx).
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+            rows = list(
+                (
+                    await session.execute(
+                        select(AuditLog)
+                        .where(AuditLog.tenant_id == tenant_id, AuditLog.seq.isnot(None))
+                        .order_by(AuditLog.seq.asc())
+                        .limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            head = (
+                await session.execute(select(AuditChainHead).where(AuditChainHead.tenant_id == tenant_id))
+            ).scalar_one_or_none()
+
+        # The walk is pure CPU (SHA-256 + JSON canonicalization per row) and can
+        # cover up to `limit` (≤ 500k) rows — offload it so it doesn't block the
+        # event loop and starve concurrent requests. The rows/head are already
+        # fully loaded, so the thread only touches in-memory attributes.
+        return await asyncio.to_thread(_verify_audit_chain_rows, tenant_id, rows, head, limit)
 
     async def audit_list_by_tenant(
         self,

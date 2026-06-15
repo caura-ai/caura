@@ -1,7 +1,7 @@
 # Shared SQLAlchemy models — used by core-api and core-storage-api.
 from common.models.agent import Agent
 from common.models.analysis_report import CrystallizationReport
-from common.models.audit import AuditLog
+from common.models.audit import AuditChainHead, AuditLog
 from common.models.background_task import BackgroundTaskLog
 from common.models.base import Base
 from common.models.capability_usage import CapabilityUsage
@@ -15,6 +15,7 @@ from common.models.memory import Memory
 
 __all__ = [
     "Agent",
+    "AuditChainHead",
     "AuditLog",
     "BackgroundTaskLog",
     "Base",

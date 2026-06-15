@@ -1246,6 +1246,21 @@ class CoreStorageClient:
             params["resource_type"] = resource_type
         return await self._get_list("/audit-logs", **params)
 
+    async def verify_audit_chain(self, tenant_id: str, limit: int = 100_000) -> dict:
+        """Verify a tenant's tamper-evident audit hash chain.
+
+        Returns ``{valid, verified_count, head_seq}`` (or ``first_broken``
+        on a detected break). Used by the enterprise governance UI's
+        "chain intact" check.
+        """
+        result = await self._get("/audit-logs/verify", tenant_id=tenant_id, limit=limit)
+        # Propagate failures: a None here means a network/5xx error. Returning
+        # {} would hand callers a dict with no "valid" key, turning the real
+        # error into a confusing KeyError downstream.
+        if result is None:
+            raise RuntimeError("verify_audit_chain: empty response from storage service")
+        return result
+
     # =====================================================================
     # Lifecycle audit (CAURA-655)
     # =====================================================================

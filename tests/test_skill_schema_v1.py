@@ -664,7 +664,7 @@ class TestMigrationChain:
     def test_single_head(self):
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"024"}, f"Expected single head '024', got {sorted(heads)}"
+        assert heads == {"025"}, f"Expected single head '025', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -674,6 +674,8 @@ class TestMigrationChain:
         assert chain.get("023") == "022", "023 must follow 022"
         # 024: fleet_commands auto-upgrade partial index (CAURA-000)
         assert chain.get("024") == "023", "024 must follow 023"
+        # 025: tamper-evident audit hash chain (eToro governance)
+        assert chain.get("025") == "024", "025 must follow 024"
 
 
 @pytest.mark.unit
