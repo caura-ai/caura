@@ -22,6 +22,7 @@ Cross-worker invalidation is tracked as a follow-up (see CAURA-571).
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from cachetools import TTLCache
@@ -34,6 +35,7 @@ from common.events.lifecycle_purge_request import (
     MEMORY_RETENTION_MAX_DAYS,
     MEMORY_RETENTION_MIN_DAYS,
 )
+from common.governance import PIICategory
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.provider_names import ProviderName
 from core_api.config import settings as global_settings
@@ -224,6 +226,32 @@ DEFAULT_SETTINGS: dict = {
         "work",
         "code",
     ],
+    # Ingestion-boundary content governance (eToro). Opt-in: booleans default
+    # False and the action/disposition default to the safe, non-destructive
+    # choice (flag / store) so enabling the feature later is a deliberate step.
+    # ``pii.categories`` toggles which detector categories are in scope; when
+    # PII is enabled with NO category selected, the gate scans ALL categories
+    # (the secure default — enabling protection shouldn't silently protect
+    # nothing). See ``ResolvedConfig.governance_pii``.
+    "governance": {
+        "pii": {
+            "enabled": False,
+            "action": None,  # None → "flag"; one of mask | drop | flag
+            "categories": {
+                "email": False,
+                "phone": False,
+                "credit_card": False,
+                "iban": False,
+                "national_id": False,
+                "api_key": False,
+                "secret": False,
+            },
+        },
+        "non_business": {
+            "enabled": False,
+            "disposition": None,  # None → "store"; one of drop | keep_private | store
+        },
+    },
     "api_keys": {},
 }
 
@@ -347,6 +375,31 @@ def _validate_cron(expr: str) -> None:
         raise ValueError(f"Invalid cron expression {expr!r}: {exc}") from exc
 
 
+_PII_ACTIONS = frozenset({"mask", "drop", "flag"})
+_NON_BUSINESS_DISPOSITIONS = frozenset({"drop", "keep_private", "store"})
+
+
+def _validate_governance_enums(payload: dict) -> None:
+    """Raise ``ValueError`` for governance enum values outside their allowed set.
+
+    ``_validate_leaf_types`` already pins these to ``str``; this pins the
+    actual allowed values (the leaf-type machinery checks Python types, not
+    value membership).
+    """
+    gov = payload.get("governance")
+    if not isinstance(gov, dict):
+        return
+    action = gov.get("pii", {}).get("action")
+    if action is not None and action not in _PII_ACTIONS:
+        raise ValueError(f"governance.pii.action must be one of {sorted(_PII_ACTIONS)}, got {action!r}")
+    disposition = gov.get("non_business", {}).get("disposition")
+    if disposition is not None and disposition not in _NON_BUSINESS_DISPOSITIONS:
+        raise ValueError(
+            f"governance.non_business.disposition must be one of "
+            f"{sorted(_NON_BUSINESS_DISPOSITIONS)}, got {disposition!r}"
+        )
+
+
 def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
     """Raise ``ValueError`` for any key in *payload* not present in *schema*.
 
@@ -405,6 +458,20 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "skills_factory.forge.llm_tokens_per_run": int,
     "skills_factory.forge.max_writes_per_run": int,
     "skills_factory.openclaw_bridge.enabled": bool,
+    # Governance content policy (eToro). Enum values (action / disposition) are
+    # type-checked here as str; their allowed values are checked by
+    # ``_validate_governance_enums`` in update_settings.
+    "governance.pii.enabled": bool,
+    "governance.pii.action": str,
+    "governance.pii.categories.email": bool,
+    "governance.pii.categories.phone": bool,
+    "governance.pii.categories.credit_card": bool,
+    "governance.pii.categories.iban": bool,
+    "governance.pii.categories.national_id": bool,
+    "governance.pii.categories.api_key": bool,
+    "governance.pii.categories.secret": bool,
+    "governance.non_business.enabled": bool,
+    "governance.non_business.disposition": str,
 }
 
 # Inclusive range constraints applied AFTER type validation. Listed
@@ -467,6 +534,28 @@ def _validate_leaf_types(payload: dict, prefix: str = "") -> None:
                     raise ValueError(f"Settings key {path!r} must be in [{lo}, {hi}], got {v!r}")
 
 
+_PII_CATEGORY_VALUES: frozenset[str] = frozenset(c.value for c in PIICategory)
+
+
+@dataclass(frozen=True)
+class _GovPII:
+    """Resolved PII governance policy. ``enabled_categories=None`` means scan
+    ALL categories (the secure default when the feature is on but no category
+    was narrowed); otherwise scan only the listed ones."""
+
+    enabled: bool
+    action: str  # "mask" | "drop" | "flag"
+    enabled_categories: frozenset[PIICategory] | None
+
+
+@dataclass(frozen=True)
+class _GovNB:
+    """Resolved non-business (personal-content) governance policy."""
+
+    enabled: bool
+    disposition: str  # "drop" | "keep_private" | "store"
+
+
 class ResolvedConfig:
     """Resolves LLM/feature config from organization overrides + global fallbacks."""
 
@@ -481,6 +570,29 @@ class ResolvedConfig:
         # docstring's promise to keep call-site signatures stable until
         # the parameter rename follow-up lands.
         self._ts = org_settings or tenant_settings or {}
+
+    # Governance (eToro content policy)
+    @property
+    def governance_pii(self) -> _GovPII:
+        g = self._ts.get("governance", {}).get("pii", {})
+        cats = g.get("categories", {})
+        selected = frozenset(
+            PIICategory(name) for name, on in cats.items() if on and name in _PII_CATEGORY_VALUES
+        )
+        return _GovPII(
+            enabled=bool(g.get("enabled", False)),
+            action=g.get("action") or "flag",
+            # Empty selection → None → scan all categories (secure default).
+            enabled_categories=selected or None,
+        )
+
+    @property
+    def governance_non_business(self) -> _GovNB:
+        g = self._ts.get("governance", {}).get("non_business", {})
+        return _GovNB(
+            enabled=bool(g.get("enabled", False)),
+            disposition=g.get("disposition") or "store",
+        )
 
     # Enrichment
     @property
@@ -891,6 +1003,7 @@ async def update_settings(
     """
     _check_keys(new_settings, DEFAULT_SETTINGS)
     _validate_leaf_types(new_settings)
+    _validate_governance_enums(new_settings)
     cron_override = new_settings.get("security_audit", {}).get("schedule_cron")
     if cron_override is not None:
         _validate_cron(cron_override)

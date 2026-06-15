@@ -166,6 +166,10 @@ def _validate_enrichment(raw: dict, llm_ms: int) -> EnrichmentResult:
     raw["atomic_facts"] = cleaned_facts if cleaned_facts else None
     raw["contains_pii"] = bool(raw.get("contains_pii", False))
     raw["pii_types"] = raw.get("pii_types") or []
+    # Governance gate: clamp to the allowed set; anything off-spec (including a
+    # missing value) falls back to "business" — the fail-closed-safe default, so
+    # only a confident "personal" from the LLM ever triggers the disposition gate.
+    raw["business_relevance"] = raw.get("business_relevance") if raw.get("business_relevance") in ("business", "personal") else "business"
     raw["llm_ms"] = llm_ms
     return EnrichmentResult(**raw)
 

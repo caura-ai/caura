@@ -37,6 +37,8 @@ from common.events.memory_enriched import MemoryEnriched
 from common.events.topics import Topics
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.contradiction_detector import detect_contradictions_async
+from core_api.services.governance_remediation import remediate_after_enrichment
+from core_api.services.organization_settings import resolve_config
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +89,20 @@ async def handle_memory_enriched(event: Event) -> None:
                 "memory_id": str(payload.memory_id),
                 "tenant_id": payload.tenant_id,
             },
+        )
+        return
+
+    # Fast-mode governance remediation: the worker just PATCHed the LLM's
+    # contains_pii / business_relevance onto the row; apply the tenant's
+    # configured action (drop / keep-private / flag) now — the fast-mode
+    # counterpart to the synchronous GovernanceDecision step. ``resolve_config``
+    # tolerates a None session (cache-first; cold-miss opens its own).
+    gov_cfg = await resolve_config(None, payload.tenant_id)
+    if await remediate_after_enrichment(memory, gov_cfg):
+        # Row was dropped by policy — skip contradiction detection on it.
+        logger.info(
+            "memory-enriched: row dropped by governance policy; ack",
+            extra={"memory_id": str(payload.memory_id), "tenant_id": payload.tenant_id},
         )
         return
 

@@ -8,6 +8,8 @@ from core_api.pipeline.steps.write import (
     ComputeContentHash,
     DetectNearDuplicate,
     EmitMemoryTriple,
+    GovernanceDecision,
+    GovernanceScanContent,
     LoadTenantConfig,
     MergeEnrichmentFields,
     ParallelEmbedEnrich,
@@ -25,6 +27,9 @@ def build_enrichment_pipeline() -> Pipeline:
         [
             CheckContentLength(),
             LoadTenantConfig(),
+            # Deterministic PII gate BEFORE the content hash so mask/drop act on
+            # — and the hash/dedup see — the redacted content (eToro governance).
+            GovernanceScanContent(),
             ComputeContentHash(),
             ParallelEmbedEnrich(),
             MergeEnrichmentFields(),
@@ -63,6 +68,7 @@ def build_fast_write_pipeline() -> Pipeline:
         [
             CheckContentLength(),
             LoadTenantConfig(),
+            GovernanceScanContent(),
             ComputeContentHash(),
             ParallelEmbedEnrich(),
             MergeEnrichmentFields(),
@@ -81,6 +87,10 @@ def build_stm_write_pipeline() -> Pipeline:
         "write_stm",
         [
             CheckContentLength(),
+            # Deterministic PII gate also guards STM (ephemeral notes still
+            # shouldn't persist secrets). STM bypasses enrichment, so only the
+            # deterministic scan applies — no LLM signal.
+            GovernanceScanContent(),
             ResolveSTMTarget(),
             WriteSTMNote(),
         ],
@@ -94,9 +104,14 @@ def build_strong_write_pipeline() -> Pipeline:
         [
             CheckContentLength(),
             LoadTenantConfig(),
+            GovernanceScanContent(),
             ComputeContentHash(),
             ParallelEmbedEnrich(),
             MergeEnrichmentFields(),
+            # Strong mode runs enrichment inline, so the LLM's free-form PII +
+            # business/personal signal is available pre-persist. Acts on it
+            # before dedup/write (fast mode does this as post-write remediation).
+            GovernanceDecision(),
             EmitMemoryTriple(),
             CheckExactDuplicate(),
             CheckSemanticDuplicate(),

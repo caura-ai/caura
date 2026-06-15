@@ -37,6 +37,7 @@ except ImportError:
 from common.constants import VECTOR_DIM
 from common.embedding import get_embedding, get_embeddings_batch, get_query_embedding
 from common.events import publish_memory_embed_request, publish_memory_enrich_request
+from common.governance import mask, scan
 from core_api.constants import (
     BULK_EMBEDDING_TIMEOUT_SECONDS,
     BULK_ENRICHMENT_CONCURRENCY,
@@ -74,6 +75,14 @@ from core_api.schemas import (
 )
 from core_api.services.entity_extraction_worker import process_entity_extraction
 from core_api.services.entity_tokens import extract_entity_tokens
+from core_api.services.governance_gate import (
+    ACTION_PII_DROP,
+    ACTION_PII_FLAG,
+    ACTION_PII_MASK,
+    emit_governance_audit,
+    mark_pii_flagged,
+    pii_audit_detail,
+)
 from core_api.services.hooks import get_hooks
 from core_api.services.task_tracker import tracked_task
 
@@ -258,9 +267,14 @@ async def _create_memory_pipeline(db: AsyncSession, data: MemoryCreate) -> Memor
                 status_code=422,
                 detail="STM is not enabled. Set USE_STM=true to enable short-term memory.",
             )
+        # Resolve config so the deterministic governance gate runs on STM too.
+        # STM bypasses enrichment, so only the deterministic scan applies (no
+        # LLM free-form / business-relevance signal) — a scoped limitation.
+        stm_config = await resolve_config(db, data.tenant_id)
         ctx = PipelineContext(
             db=db,
             data={"input": data, "t0": time.perf_counter()},
+            tenant_config=stm_config,
         )
         pipeline = build_stm_write_pipeline()
         await pipeline.run(ctx)
@@ -1041,6 +1055,53 @@ async def create_memories_bulk(
     # items are skipped so we don't spend provider budget on content
     # that will surface as an error anyway.
     valid_indices = [i for i in range(n) if i not in short_content_errors]
+
+    # -- Deterministic governance gate (eToro). Runs BEFORE embeddings +
+    # content-hash so masked content flows through dedup + storage, and dropped
+    # items never get embedded/enriched/written. The LLM free-form signal is
+    # applied post-persist via the enriched-consumer remediation (deferred bulk).
+    governance_errors: dict[int, str] = {}
+    gov_pii = tenant_config.governance_pii
+    if gov_pii.enabled:
+        for i in valid_indices:
+            item = items[i]
+            findings = scan(item.content, enabled_categories=gov_pii.enabled_categories)
+            if not findings:
+                continue
+            if gov_pii.action == "drop":
+                await emit_governance_audit(
+                    db,
+                    tenant_id=data.tenant_id,
+                    agent_id=data.agent_id,
+                    action=ACTION_PII_DROP,
+                    detail=pii_audit_detail(ACTION_PII_DROP, findings, item.content, "bulk"),
+                )
+                governance_errors[i] = "rejected by content policy: sensitive data detected"
+            elif gov_pii.action == "mask":
+                await emit_governance_audit(
+                    db,
+                    tenant_id=data.tenant_id,
+                    agent_id=data.agent_id,
+                    action=ACTION_PII_MASK,
+                    detail=pii_audit_detail(ACTION_PII_MASK, findings, item.content, "bulk"),
+                )
+                item.content = mask(item.content, findings)
+            else:  # flag
+                md = item.metadata or {}
+                mark_pii_flagged(md, findings)
+                item.metadata = md
+                await emit_governance_audit(
+                    db,
+                    tenant_id=data.tenant_id,
+                    agent_id=data.agent_id,
+                    action=ACTION_PII_FLAG,
+                    detail=pii_audit_detail(ACTION_PII_FLAG, findings, item.content, "bulk"),
+                )
+        # Dropped items skip embed / enrich / hash / write; surfaced as per-item
+        # errors in the results loop below.
+        if governance_errors:
+            valid_indices = [i for i in valid_indices if i not in governance_errors]
+
     embeddings: list = [None] * n
     if valid_indices and settings.inline_embedding:
         try:
@@ -1141,6 +1202,17 @@ async def create_memories_bulk(
             error_count += 1
             continue
 
+        # Governance-dropped items: never embedded, enriched, deduped, or written.
+        if i in governance_errors:
+            results[i] = BulkItemResult(
+                index=i,
+                client_request_id=item_request_id,
+                status="error",
+                error=governance_errors[i],
+            )
+            error_count += 1
+            continue
+
         ch = hashes[i]
 
         # An existing row matches this content. Two flavours:
@@ -1223,6 +1295,7 @@ async def create_memories_bulk(
                 metadata["contains_pii"] = True
                 if enrichment.pii_types:
                     metadata["pii_types"] = enrichment.pii_types
+            metadata["business_relevance"] = enrichment.business_relevance
 
         if memory_type is None:
             memory_type = "fact"

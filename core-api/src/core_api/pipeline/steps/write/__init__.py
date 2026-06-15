@@ -6,6 +6,8 @@ from core_api.pipeline.steps.write.check_semantic_duplicate import CheckSemantic
 from core_api.pipeline.steps.write.compute_content_hash import ComputeContentHash
 from core_api.pipeline.steps.write.detect_near_duplicate import DetectNearDuplicate
 from core_api.pipeline.steps.write.emit_memory_triple import EmitMemoryTriple
+from core_api.pipeline.steps.write.governance_decision import GovernanceDecision
+from core_api.pipeline.steps.write.governance_scan_content import GovernanceScanContent
 from core_api.pipeline.steps.write.load_tenant_config import LoadTenantConfig
 from core_api.pipeline.steps.write.merge_enrichment_fields import MergeEnrichmentFields
 from core_api.pipeline.steps.write.parallel_embed_enrich import ParallelEmbedEnrich
@@ -23,6 +25,8 @@ __all__ = [
     "ComputeContentHash",
     "DetectNearDuplicate",
     "EmitMemoryTriple",
+    "GovernanceDecision",
+    "GovernanceScanContent",
     "LoadTenantConfig",
     "MergeEnrichmentFields",
     "ParallelEmbedEnrich",

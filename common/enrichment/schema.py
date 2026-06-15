@@ -105,6 +105,11 @@ class EnrichmentResult(BaseModel):
     ts_valid_end: str | None = None
     contains_pii: bool = False
     pii_types: list[str] = []
+    # Governance business-vs-personal gate (eToro): "business" (work-relevant,
+    # default) vs "personal" (vacation planning, casual chat, idle ideas). The
+    # admin policy decides what to do with "personal" content; the default is
+    # the fail-closed-safe value (only a confident "personal" triggers the gate).
+    business_relevance: str = "business"
     retrieval_hint: str = ""
     atomic_facts: list[AtomicFact] | None = None
     llm_ms: int = 0

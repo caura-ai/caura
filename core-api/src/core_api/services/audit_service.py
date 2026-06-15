@@ -30,13 +30,13 @@ from core_api.services.audit_queue import get_audit_queue
 
 
 async def log_action(
-    db: AsyncSession,
+    db: AsyncSession | None,
     *,
     tenant_id: str,
     agent_id: str | None = None,
     action: str,
     resource_type: str,
-    resource_id: UUID | None = None,
+    resource_id: UUID | str | None = None,
     detail: dict | None = None,
 ) -> None:
     """Record an audit event. Async-batched via queue when available;
@@ -45,7 +45,9 @@ async def log_action(
     ``db`` is unused (audit persistence is owned by the storage layer)
     but kept in the signature for back-compat with the ``ServiceHooks``
     contract — callers pass it through; switching them all to drop the
-    arg is a separate, scoped change.
+    arg is a separate, scoped change. ``None`` is accepted for
+    fire-and-forget callers with no ambient session (the post-enrichment
+    governance remediation in the ENRICHED consumer).
     """
     payload = {
         "tenant_id": tenant_id,

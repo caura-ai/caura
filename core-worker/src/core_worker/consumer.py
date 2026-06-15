@@ -239,6 +239,7 @@ _ENRICHMENT_METADATA_FIELDS: frozenset[str] = frozenset(
         "tags",
         "contains_pii",
         "pii_types",
+        "business_relevance",
         "retrieval_hint",
         "llm_ms",
     }
@@ -277,8 +278,12 @@ _ENRICHMENT_UNROUTED_FIELDS: frozenset[str] = frozenset({"atomic_facts"})
 #   catch it. Pairing summary with the ``llm_ms > 0`` guard ensures
 #   only real-LLM summaries can overwrite (or clear, if the LLM
 #   returns ``""``).
+# * ``business_relevance`` — a re-enrichment must be able to flip a
+#   memory personal↔business; the ``llm_ms > 0`` guard prevents
+#   ``fake_enrich``'s default "business" from clobbering a real
+#   "personal" classification on a heuristic-fallback redelivery.
 _ENRICHMENT_ALWAYS_WRITE_METADATA: frozenset[str] = frozenset(
-    {"contains_pii", "pii_types", "retrieval_hint", "summary", "tags"}
+    {"contains_pii", "pii_types", "business_relevance", "retrieval_hint", "summary", "tags"}
 )
 
 # Defence-in-depth: a typo in the tuples above would silently drop in

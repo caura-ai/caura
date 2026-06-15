@@ -144,8 +144,15 @@ Analyze the following memory content and return a JSON object with these fields:
         "retrieval_hint" : same guidance as field 11 — short, query-aligned
     - When in doubt, leave atomic_facts as null.
 
+13. "business_relevance": one of "business" | "personal" (default "business")
+    - "personal": private life unrelated to work — health, family, personal
+      finance, relationships, errands, vacation planning, casual chat, idle ideas.
+    - "business": work / professional / operational content (the default).
+    - When unsure, choose "business" — only mark "personal" when you are
+      confident the content is non-work.
+
 Return ONLY valid JSON (no markdown fences):
-{{"memory_type": "...", "weight": 0.0, "title": "...", "summary": "...", "tags": ["..."], "status": "active", "ts_valid_start": null, "ts_valid_end": null, "contains_pii": false, "pii_types": [], "retrieval_hint": "", "atomic_facts": null}}
+{{"memory_type": "...", "weight": 0.0, "title": "...", "summary": "...", "tags": ["..."], "status": "active", "ts_valid_start": null, "ts_valid_end": null, "contains_pii": false, "pii_types": [], "retrieval_hint": "", "atomic_facts": null, "business_relevance": "business"}}
 
 Content:
 {content}

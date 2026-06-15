@@ -48,6 +48,9 @@ class MergeEnrichmentFields:
                 metadata["contains_pii"] = True
                 if enrichment.pii_types:
                     metadata["pii_types"] = enrichment.pii_types
+            # Business-vs-personal classification (governance gate reads this in
+            # strong mode; persisted to the row for parity with the worker path).
+            metadata["business_relevance"] = enrichment.business_relevance
 
         # Apply defaults if still unset (LLM disabled or failed)
         if memory_type is None:

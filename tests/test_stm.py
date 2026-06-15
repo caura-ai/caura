@@ -15,7 +15,10 @@ from core_api.schemas import MemoryCreate, STMWriteResponse
 
 
 class TestSTMWritePipeline:
-    """Verify the STM write pipeline runs 3 steps and produces STMWriteResponse."""
+    """Verify the STM write pipeline runs 4 steps and produces STMWriteResponse.
+
+    (4 since the deterministic governance gate joined the STM path; it
+    SKIPs when no tenant_config / governance policy is present, as here.)"""
 
     @pytest.mark.asyncio
     async def test_stm_pipeline_notes(self):
@@ -44,7 +47,7 @@ class TestSTMWritePipeline:
         result = await pipeline.run(ctx)
 
         assert not result.failed
-        assert result.step_count == 3
+        assert result.step_count == 4  # + governance_scan_content (skips: no policy)
         resp = ctx.data["stm_response"]
         assert isinstance(resp, STMWriteResponse)
         assert resp.target == "notes"
