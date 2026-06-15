@@ -416,7 +416,7 @@ async def test_enrichment_pending_cleared_even_with_heuristic_fallback(monkeypat
     # all skip per the ``llm_ms > 0`` guard. Empty metadata_patch is
     # exactly the regression scenario we're guarding against.
     heuristic = EnrichmentResult(
-        memory_type="generic",
+        memory_type="fact",
         weight=0.5,
         title="",
         summary="",
