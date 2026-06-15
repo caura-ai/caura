@@ -34,6 +34,11 @@ dependencies = [
     "pyotp>=2.9",
     "cachetools>=5.3",
     "croniter>=2.0",
+    # redis-py cap lifted <6 -> <9 (lock resolves 8.0.0). 8.x dropped its pyjwt
+    # transitive and reworked the connection pool, but core-api only uses
+    # ``redis.asyncio.from_url`` (cache.py) and ``r.pipeline(transaction=False)``
+    # (providers/redis_stm.py) — both stable across the 5->8 jump and exercised by
+    # the full test suite under 8.0.0. <9 keeps the next major out as a guardrail.
     "redis[hiredis]>=5.0,<9",
     "slowapi>=0.1.9,<1.0",
     "sentry-sdk[fastapi]>=2.0,<3",
