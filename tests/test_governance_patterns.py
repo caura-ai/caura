@@ -156,3 +156,56 @@ def test_findings_carry_no_raw_text():
     assert isinstance(f, Finding)
     assert set(vars(f)) == {"category", "start", "end", "severity"}
     assert f.severity == Severity.HIGH
+
+
+# ── National-id formats beyond US SSN ────────────────────────────────
+
+
+def test_uk_nino_detected():
+    assert PIICategory.NATIONAL_ID in _cats("NINO AB 12 34 56 C on file")
+
+
+def test_us_itin_detected():
+    # ITIN area starts with 9 and the group is 7x/8x — distinct from a valid SSN.
+    assert PIICategory.NATIONAL_ID in _cats("ITIN 912-78-3456 on the W-7")
+
+
+def test_spain_dni_detected():
+    assert PIICategory.NATIONAL_ID in _cats("DNI 12345678Z issued in Madrid")
+
+
+def test_ssn_invalid_ranges_not_flagged():
+    # The SSN rule excludes structurally-impossible area numbers so benign
+    # 3-2-4 digit strings don't false-positive as a national id.
+    assert PIICategory.NATIONAL_ID not in _cats("ref 000-12-3456")
+    assert PIICategory.NATIONAL_ID not in _cats("ref 666-12-3456")
+    assert PIICategory.NATIONAL_ID not in _cats("ref 900-12-3456")
+
+
+# ── Additional provider API-key prefixes ─────────────────────────────
+
+
+def test_anthropic_and_openai_keys_detected():
+    assert PIICategory.API_KEY in _cats(
+        "key sk-ant-api03-AbCdEf123456GhIjKl789 rotated"
+    )
+    assert PIICategory.API_KEY in _cats("export OPENAI=sk-proj1234567890ABCDEFghij now")
+
+
+# ── Generic secret: group-1 masking keeps the field name ─────────────
+
+
+def test_generic_secret_masks_value_not_field_name():
+    secret = "aB3xK9mP2qR7sT1vW5yZ8nQ4"  # 24 chars, high entropy → trips the gate
+    text = f"password = {secret}"
+    findings = scan(text)
+    assert PIICategory.SECRET in {f.category for f in findings}
+    masked = mask(text, findings)
+    # group=1 means only the credential is redacted; the field name survives so
+    # the masked record stays readable/auditable.
+    assert secret not in masked
+    assert "password" in masked
+
+
+def test_scan_empty_input_returns_no_findings():
+    assert scan("") == []
