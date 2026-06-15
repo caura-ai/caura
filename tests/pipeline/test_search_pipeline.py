@@ -263,6 +263,9 @@ async def test_load_and_serialize_uses_preloaded_entity_links():
     results = ctx.data["results"]
     assert len(results) == 1
     assert len(results[0].entity_links) == 1
+    # similarity must be the raw vector cosine (vec_sim=0.9), NOT the ranking
+    # composite (score=0.85) or the vec/FTS blend (similarity=0.8) — see F-14.
+    assert results[0].similarity == 0.9
     assert results[0].entity_links[0].entity_id == entity_link.entity_id
 
 

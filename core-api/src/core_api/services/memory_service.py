@@ -3224,7 +3224,11 @@ async def _search_memories_legacy(
             _dict_to_memory_out(
                 row,
                 entity_links=entity_links,
-                similarity=round(float(row.get("score", 0)), 4) if row.get("score") is not None else None,
+                # Raw vector cosine (``vec_sim``), NOT ``score`` (the ranking
+                # composite, which exceeds 1.0 and is useless for threshold
+                # gating). Mirrors LoadAndSerialize in the pipeline path so both
+                # surfaces agree (test_search_pipeline_equivalence) — see F-14.
+                similarity=round(float(row["vec_sim"]), 4) if row.get("vec_sim") is not None else None,
             )
         )
 

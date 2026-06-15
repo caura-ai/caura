@@ -86,7 +86,15 @@ class LoadAndSerialize:
             _memory_to_out(
                 row.Memory,
                 entity_links=row.entity_links,
-                similarity=(round(float(row.score), 4) if row.score is not None else None),
+                # Expose the raw vector cosine (``vec_sim``), NOT ``row.score`` —
+                # ``score`` is the multiplicative ranking composite (similarity *
+                # freshness * entity/recall/temporal boosts) which routinely
+                # exceeds 1.0, so it's useless for client-side threshold gating.
+                # ``vec_sim`` is the 0..1 cosine and matches the ``min_similarity``
+                # gate in PostFilterResults. Rank order is unchanged (rows are
+                # already ordered by ``score`` upstream). None for FTS-only hits,
+                # which have no vector similarity.
+                similarity=(round(float(row.vec_sim), 4) if row.vec_sim is not None else None),
             )
             for row in rows
         ]
