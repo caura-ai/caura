@@ -11,19 +11,18 @@ dependencies = [
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.34,<1",
     "sqlalchemy[asyncio]>=2.0,<3",
-    # SQLAlchemy[asyncio] pulls in greenlet. Pin <3.5.0 — greenlet 3.5.0
-    # shipped wheels for macOS/Windows ARM only, no Linux x86_64, so CI
-    # (which uses ``uv pip install`` and re-resolves rather than reading
-    # the lockfile) breaks on the Linux runner. Drop once 3.5.x has full
-    # platform coverage.
-    "greenlet<3.5.0",
+    # SQLAlchemy[asyncio] pulls in greenlet. greenlet 3.5.0 shipped wheels for
+    # macOS/Windows ARM only (no Linux x86_64) which broke the Linux runner, but
+    # 3.5.1 restored the Linux x86_64 wheels — so the old <3.5.0 cap is lifted to
+    # <3.6.0 (kept only as a major-version guardrail).
+    "greenlet<3.6.0",
     "asyncpg>=0.30,<1",
     "pgvector>=0.3,<1",
     "pydantic>=2.0,<3",
     "pydantic-settings>=2.0,<3",
     "alembic>=1.14,<2",
     "httpx>=0.27,<1",
-    "structlog>=25.4,<26",
+    "structlog>=25.4,<27",
     # OpenAI SDK. NOT used by the live core-storage-api request path
     # (which talks DB only) — added so the standalone backfill CLI at
     # ``core_storage_api.scripts.backfill_embeddings`` can
@@ -41,13 +40,13 @@ dependencies = [
 pubsub = ["google-cloud-pubsub>=2.23,<3"]
 dev = [
     "core-storage-api[test,pubsub]",
-    "mypy>=1.13,<2.0",
+    "mypy>=1.13,<3.0",
     "ruff>=0.8,<1.0",
 ]
 test = [
-    "pytest>=8.3,<9.0",
-    "pytest-asyncio>=0.24,<1.0",
-    "pytest-cov>=6.0,<7.0",
+    "pytest>=8.3,<10.0",
+    "pytest-asyncio>=0.24,<2.0",
+    "pytest-cov>=6.0,<8.0",
     "httpx>=0.27,<1.0",
 ]
 
