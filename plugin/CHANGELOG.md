@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.10.1](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.10.0...plugin-v2.10.1) (2026-06-15)
+
+
+### Bug Fixes
+
+* **plugin:** send X-Bulk-Attempt-Id header on bulk memory writes ([#355](https://github.com/caura-ai/caura-memclaw/issues/355)) ([a4515ed](https://github.com/caura-ai/caura-memclaw/commit/a4515ed1e5f5f7679daea36c99e58d1d331b3934))
+
 ## [2.10.0](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.9.0...plugin-v2.10.0) (2026-06-13)
 
 

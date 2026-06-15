@@ -6,6 +6,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.16.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.15.0...backend-v2.16.0) (2026-06-15)
+
+
+### Features
+
+* **core-api:** capability-usage adoption counters (MCP + REST) ([#353](https://github.com/caura-ai/caura-memclaw/issues/353)) ([0421ceb](https://github.com/caura-ai/caura-memclaw/commit/0421ceb0addadd71833f2ddce42cf973edd9fd75))
+
+
+### Bug Fixes
+
+* **compose:** stop shadowing .env provider keys with empty "${VAR:-}" passthroughs ([#346](https://github.com/caura-ai/caura-memclaw/issues/346)) ([8ab95d8](https://github.com/caura-ai/caura-memclaw/commit/8ab95d8e416862153410942bdf1bfcf51fcad2c1))
+* **core-api:** make the CAURA-602 startup guard FastAPI-0.137-proof ([#364](https://github.com/caura-ai/caura-memclaw/issues/364)) ([65de110](https://github.com/caura-ai/caura-memclaw/commit/65de110ac996fe7bd79c5823b92e3852934cc112))
+* **deps:** cap fastapi &lt;0.137 to unbreak CI ([#359](https://github.com/caura-ai/caura-memclaw/issues/359)) ([561d5c9](https://github.com/caura-ai/caura-memclaw/commit/561d5c96fee6be698cc0d2077a7e80f0aadbbb0c))
+* **fleet:** cap auto-upgrade re-queue with a per-(node,target) attempt budget (CAURA-000) ([#351](https://github.com/caura-ai/caura-memclaw/issues/351)) ([22a3ac0](https://github.com/caura-ai/caura-memclaw/commit/22a3ac064ecafc912180767890399a2ce93ac531))
+* **keystones:** let the standalone operator author keystones out-of-the-box (F-7) ([#354](https://github.com/caura-ai/caura-memclaw/issues/354)) ([d62c36a](https://github.com/caura-ai/caura-memclaw/commit/d62c36a9fa900426d70276f0950de318d1bdffb1))
+* **plugin:** send X-Bulk-Attempt-Id header on bulk memory writes ([#355](https://github.com/caura-ai/caura-memclaw/issues/355)) ([a4515ed](https://github.com/caura-ai/caura-memclaw/commit/a4515ed1e5f5f7679daea36c99e58d1d331b3934))
+* **search:** return raw cosine in similarity, not the ranking composite (F-14) ([#392](https://github.com/caura-ai/caura-memclaw/issues/392)) ([3865600](https://github.com/caura-ai/caura-memclaw/commit/3865600ce73a9273e4fd5db4f0b218f454b99422))
+* **search:** surface conflicted memories that exactly match the query ([#357](https://github.com/caura-ai/caura-memclaw/issues/357)) ([c00a3f7](https://github.com/caura-ai/caura-memclaw/commit/c00a3f76f6f390024567f6d23acef062f304dca9))
+
+
+### Documentation
+
+* add top-level BENCHMARKS.md as a citable benchmark asset ([#349](https://github.com/caura-ai/caura-memclaw/issues/349)) ([fc6d563](https://github.com/caura-ai/caura-memclaw/commit/fc6d563b171264fc2bc1578a708fc9ad3104cc4a))
+* comparison table — "PII detection & flagging", not "quarantine" ([#345](https://github.com/caura-ai/caura-memclaw/issues/345)) ([3bb7b1c](https://github.com/caura-ai/caura-memclaw/commit/3bb7b1c8903e90b77630324222956eb9d83fc4b9))
+* **core-api:** document the redis&lt;9 cap rationale (review follow-up) ([#395](https://github.com/caura-ai/caura-memclaw/issues/395)) ([cd5420c](https://github.com/caura-ai/caura-memclaw/commit/cd5420c255594d3f0e80798b65847d11d51db17d))
+* lead Quick Start with a no-key, no-signup local quickstart ([#348](https://github.com/caura-ai/caura-memclaw/issues/348)) ([91ee613](https://github.com/caura-ai/caura-memclaw/commit/91ee613c46cdf9e0f81c7249ab2b3c75601c110a))
+* README write-response field names match payload ([#361](https://github.com/caura-ai/caura-memclaw/issues/361)) ([2ecc098](https://github.com/caura-ai/caura-memclaw/commit/2ecc098f099c333655d922b08ea7bc03ca699c4f))
+
+
+### Code Refactoring
+
+* **api:** unify evolve/insights caller-identity resolution; close F-7 tail (§2) ([#400](https://github.com/caura-ai/caura-memclaw/issues/400)) ([f4af240](https://github.com/caura-ai/caura-memclaw/commit/f4af240917061bc568c8177ea9fcb8db004036a4))
+
 ## [2.15.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.14.0...backend-v2.15.0) (2026-06-13)
 
 

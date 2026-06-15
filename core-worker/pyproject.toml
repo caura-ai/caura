@@ -1,6 +1,6 @@
 [project]
 name = "core-worker"
-version = "2.15.0"
+version = "2.16.0"
 description = "MemClaw core async worker — subscribes to memclaw.memory.embed-requested and backfills embeddings"
 license = "Apache-2.0"
 requires-python = ">=3.12"
