@@ -141,6 +141,13 @@ def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple
     Fallback ``"rest-admin"`` is preserved for legacy callers — the
     trust check 403s on it anyway (no agent row exists), but the
     fallback keeps the error surface predictable.
+
+    NOTE: keystones deliberately does NOT use ``services/caller_identity``
+    (the shared evolve/insights resolver). Governance writes must not fall
+    back to a *registerable* identity like ``DEFAULT_AGENT_ID`` — the
+    never-registered ``rest-admin`` sentinel forces an explicit identity on
+    the gateway — and this path needs stricter anti-spoof handling (X-Agent-ID
+    mismatch rejection + the verified-floor bump) than that resolver provides.
     """
     verified_id = getattr(auth, "agent_id", None)
     if verified_id and x_agent_id and verified_id != x_agent_id:
