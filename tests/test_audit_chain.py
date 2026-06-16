@@ -365,3 +365,52 @@ async def test_chained_insert_rejects_raw_pii_and_persists_nothing():
 async def test_empty_batch_is_a_noop():
     svc = PostgresService()
     await svc.audit_add_batch_chained([])  # must not raise or open a session
+
+
+async def test_chained_insert_dedups_replayed_client_event_id():
+    """A retried bulk flush re-sends the same client_event_ids (lost-ack); the
+    chain must dedup the already-committed ones — no duplicate rows, seqs stay
+    contiguous (no gap), and the chain stays valid — while a genuinely new event
+    in the replay still appends."""
+    svc = PostgresService()
+    tenant = _tenant()
+    ev1 = {**_event("create"), "tenant_id": tenant, "client_event_id": uuid4().hex}
+    ev2 = {**_event("update"), "tenant_id": tenant, "client_event_id": uuid4().hex}
+    ev3 = {**_event("delete"), "tenant_id": tenant, "client_event_id": uuid4().hex}
+
+    # First flush commits ev1 + ev2.
+    await svc.audit_add_batch_chained([dict(ev1), dict(ev2)])
+    # Lost-ack retry: re-send ev1 + ev2 (already chained) plus a new ev3.
+    await svc.audit_add_batch_chained([dict(ev1), dict(ev2), dict(ev3)])
+
+    async with get_session() as s:
+        seqs = (
+            (
+                await s.execute(
+                    text("SELECT seq FROM audit_log WHERE tenant_id = :t ORDER BY seq"),
+                    {"t": tenant},
+                )
+            )
+            .scalars()
+            .all()
+        )
+    # ev1, ev2 once each + ev3 = 3 rows with contiguous seqs (the dedup must not
+    # leave a gap — survivors are seq'd after the existing ones are filtered).
+    assert seqs == [1, 2, 3]
+    res = await svc.audit_verify_chain(tenant)
+    assert res["valid"] is True
+    assert res["verified_count"] == 3
+
+
+async def test_dedup_within_a_single_batch():
+    """A client_event_id duplicated within ONE batch is chained once (defends
+    against a caller accidentally re-listing the same event)."""
+    svc = PostgresService()
+    tenant = _tenant()
+    ev = {**_event("create"), "tenant_id": tenant, "client_event_id": uuid4().hex}
+
+    await svc.audit_add_batch_chained([dict(ev), dict(ev)])
+
+    res = await svc.audit_verify_chain(tenant)
+    assert res["valid"] is True
+    assert res["verified_count"] == 1

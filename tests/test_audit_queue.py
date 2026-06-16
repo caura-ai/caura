@@ -308,3 +308,32 @@ async def test_stop_with_hung_flusher_falls_back_to_cancel() -> None:
     # stop() must return within a small multiple of its own timeout
     # rather than waiting for the hung sleep.
     await asyncio.wait_for(q.stop(timeout=0.1), timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_log_action_mints_unique_client_event_id() -> None:
+    """log_action stamps a per-event ``client_event_id`` (a fresh UUID) so the
+    storage-side bulk flush can dedup a retried (lost-ack) batch instead of
+    double-appending to the tamper-evident chain."""
+    from unittest.mock import MagicMock, patch
+    from uuid import UUID
+
+    from core_api.services import audit_service
+
+    captured: list[dict] = []
+    fake_queue = MagicMock()
+    fake_queue.enqueue = captured.append
+    with patch.object(audit_service, "get_audit_queue", return_value=fake_queue):
+        await audit_service.log_action(
+            None, tenant_id="t", action="create", resource_type="memory"
+        )
+        await audit_service.log_action(
+            None, tenant_id="t", action="create", resource_type="memory"
+        )
+
+    assert len(captured) == 2
+    # Present and a valid UUID on each event...
+    UUID(captured[0]["client_event_id"])
+    UUID(captured[1]["client_event_id"])
+    # ...and distinct per event, so two different mutations never collide.
+    assert captured[0]["client_event_id"] != captured[1]["client_event_id"]

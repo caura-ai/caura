@@ -213,7 +213,9 @@ class CoreStorageClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def _post(self, path: str, data: Any = None, *, read: bool = False) -> dict | list:
+    async def _post(
+        self, path: str, data: Any = None, *, read: bool = False, idempotent: bool = False
+    ) -> dict | list:
         http = self._read_http if read else self._http
         prefix = self._read_prefix if read else self._prefix
         headers = await self._auth_headers(read=read)
@@ -225,7 +227,12 @@ class CoreStorageClient:
                 headers=headers,
             )
 
-        resp = await with_connect_phase_retry(_do, label=f"POST {path}")
+        # Non-idempotent POSTs retry connection-phase failures ONLY (the request
+        # was provably never sent). ``idempotent=True`` opts a POST into the full
+        # transient set (ReadTimeout + 5xx too) — safe ONLY when the endpoint
+        # dedups replays storage-side (e.g. /audit-logs/bulk on client_event_id).
+        retry = with_retry if idempotent else with_connect_phase_retry
+        resp = await retry(_do, label=f"POST {path}")
         self._maybe_evict_on_auth_error(resp, read=read)
         resp.raise_for_status()
         return resp.json()
@@ -1224,8 +1231,17 @@ class CoreStorageClient:
     async def create_audit_logs_bulk(self, events: list[dict]) -> dict:
         """Batched audit insert (CAURA-628). One HTTP POST + one
         multi-row INSERT regardless of batch size, vs N round-trips +
-        N table-lock acquisitions on the legacy single-event path."""
-        return await self._post("/audit-logs/bulk", {"events": events})  # type: ignore[return-value]
+        N table-lock acquisitions on the legacy single-event path.
+
+        ``idempotent=True``: each event carries a ``client_event_id`` (minted in
+        ``log_action``) and storage dedups on it under the per-tenant chain-head
+        lock, so a retry on ReadTimeout / 5xx re-sends the same ids and any
+        already-committed events are skipped — no double-append to the
+        tamper-evident chain. This recovers the lost-ack case that previously
+        dropped a whole tenant's audit slice (connect-phase-only retry)."""
+        return await self._post(  # type: ignore[return-value]
+            "/audit-logs/bulk", {"events": events}, idempotent=True
+        )
 
     async def list_audit_logs(
         self,

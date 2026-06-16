@@ -664,7 +664,7 @@ class TestMigrationChain:
     def test_single_head(self):
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"025"}, f"Expected single head '025', got {sorted(heads)}"
+        assert heads == {"026"}, f"Expected single head '026', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -676,6 +676,8 @@ class TestMigrationChain:
         assert chain.get("024") == "023", "024 must follow 023"
         # 025: tamper-evident audit hash chain (eToro governance)
         assert chain.get("025") == "024", "025 must follow 024"
+        # 026: per-event audit idempotency (client_event_id + partial unique)
+        assert chain.get("026") == "025", "026 must follow 025"
 
 
 @pytest.mark.unit

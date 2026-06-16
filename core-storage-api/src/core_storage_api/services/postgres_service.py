@@ -4493,11 +4493,45 @@ class PostgresService:
                 )
             ).scalar_one()
 
+            # Idempotent retry: the audit bulk flush retries transient errors,
+            # so a lost-ack batch is re-sent with the SAME client_event_ids.
+            # Drop any event already chained for this tenant — looked up here,
+            # under the head FOR UPDATE lock, so the read is serialized with
+            # concurrent same-tenant writers — plus any duplicated within this
+            # batch. Survivors below get contiguous seqs, so the chain stays
+            # gap-free and the head consistent. Events with no client_event_id
+            # (legacy single-event path) are never deduped.
+            # ``is not None`` (not a truthy check) to match the per-event loop's
+            # guard below, so both paths treat the field identically.
+            incoming_ids = [ev["client_event_id"] for ev in events if ev.get("client_event_id") is not None]
+            already_chained: set[str | None] = set()
+            if incoming_ids:
+                already_chained = set(
+                    (
+                        await session.execute(
+                            select(AuditLog.client_event_id).where(
+                                AuditLog.tenant_id == tenant_id,
+                                AuditLog.client_event_id.in_(incoming_ids),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+
             prev_hash = head.last_hash
             seq = head.last_seq
             now = datetime.now(UTC)
+            seen_in_batch: set[str] = set()
             rows: list[AuditLog] = []
             for ev in events:
+                client_event_id = ev.get("client_event_id")
+                if client_event_id is not None:
+                    # Already committed by a prior attempt, or a duplicate
+                    # within this batch — skip without consuming a seq.
+                    if client_event_id in already_chained or client_event_id in seen_in_batch:
+                        continue
+                    seen_in_batch.add(client_event_id)
                 # Scrub-before-hash: refuse to chain a raw secret. Runs
                 # BEFORE hashing so the chain only ever attests the redacted
                 # detail (raising here fails the write loudly instead).
@@ -4533,6 +4567,7 @@ class PostgresService:
                         seq=seq,
                         prev_hash=prev_hash,
                         event_hash=this_hash,
+                        client_event_id=client_event_id,
                     )
                 )
                 prev_hash = this_hash

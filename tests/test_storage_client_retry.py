@@ -349,3 +349,52 @@ async def test_backoff_delay_cap_is_a_hard_ceiling() -> None:
     for attempt in range(1, 9):
         for _ in range(200):
             assert 0.0 <= _backoff_delay(attempt) <= RETRY_BACKOFF_MAX_S
+
+
+# ---------------------------------------------------------------------------
+# Audit bulk flush — idempotent POST retries the FULL transient set
+# ---------------------------------------------------------------------------
+#
+# Each event carries a ``client_event_id`` and storage dedups on it under the
+# per-tenant chain-head lock, so a retry of a lost-ack batch can't double-append
+# to the tamper-evident hash chain. That makes ReadTimeout / 5xx safe to retry
+# for create_audit_logs_bulk (idempotent=True) — unlike a bare POST, which must
+# raise on those because the request may have committed (the POST tests above).
+# Recovers the silent audit-slice drop from the connect-phase-only path.
+
+_AUDIT_EVENT = {
+    "tenant_id": "t",
+    "action": "a",
+    "resource_type": "r",
+    "client_event_id": "ev-1",
+}
+
+
+async def test_audit_bulk_retries_on_read_timeout_then_succeeds() -> None:
+    client, write, _read = await _make_client()
+    write.post = AsyncMock(
+        side_effect=[
+            httpx.ReadTimeout("response never arrived"),
+            _ok_response(200, {"ok": True, "count": 1}),
+        ]
+    )
+
+    result = await client.create_audit_logs_bulk([dict(_AUDIT_EVENT)])
+
+    assert result == {"ok": True, "count": 1}
+    assert write.post.await_count == 2
+
+
+async def test_audit_bulk_retries_on_5xx_then_succeeds() -> None:
+    client, write, _read = await _make_client()
+    write.post = AsyncMock(
+        side_effect=[
+            _ok_response(503),
+            _ok_response(200, {"ok": True, "count": 1}),
+        ]
+    )
+
+    result = await client.create_audit_logs_bulk([dict(_AUDIT_EVENT)])
+
+    assert result == {"ok": True, "count": 1}
+    assert write.post.await_count == 2

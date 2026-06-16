@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, LargeBinary, Text, text
+from sqlalchemy import BigInteger, DateTime, Index, LargeBinary, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,6 +34,28 @@ class AuditLog(Base):
     seq: Mapped[int | None] = mapped_column(BigInteger)
     prev_hash: Mapped[bytes | None] = mapped_column(LargeBinary)
     event_hash: Mapped[bytes | None] = mapped_column(LargeBinary)
+    # ── Per-event idempotency key (migration 026) ────────────────────
+    # A UUID minted per event by core-api's ``log_action``. Storage dedups
+    # on it (under the per-tenant head lock, BEFORE seq assignment) so the
+    # async audit bulk flush can safely retry a lost-ack POST without
+    # double-appending to the chain. NULL on the legacy single-event path
+    # and pre-026 rows (the partial unique index covers NON-NULL only).
+    client_event_id: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        # Backs per-event audit-flush idempotency (migration 026). Created
+        # ``CONCURRENTLY`` there with the same predicate; declared here so
+        # SQLAlchemy reflection / Alembic autogen round-trips match the live
+        # schema. NULL ``client_event_id`` rows are excluded so the legacy
+        # single-event path and pre-026 rows are unaffected.
+        Index(
+            "ix_audit_log_client_event_id_unique",
+            "tenant_id",
+            "client_event_id",
+            unique=True,
+            postgresql_where=text("client_event_id IS NOT NULL"),
+        ),
+    )
 
 
 class AuditChainHead(Base):

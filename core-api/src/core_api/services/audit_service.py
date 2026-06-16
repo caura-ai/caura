@@ -21,7 +21,7 @@ without a redeploy.
 
 from __future__ import annotations
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,6 +56,11 @@ async def log_action(
         "resource_type": resource_type,
         "resource_id": str(resource_id) if resource_id else None,
         "detail": detail,
+        # Per-event dedup key: lets the async bulk flush retry a lost-ack POST
+        # without double-appending to the tamper-evident chain (storage dedups
+        # on it under the per-tenant head lock). Minted here so it's stable
+        # across a retry of the same enqueued event.
+        "client_event_id": str(uuid4()),
     }
     queue = get_audit_queue()
     if queue is not None:
