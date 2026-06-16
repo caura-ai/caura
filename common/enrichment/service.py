@@ -169,7 +169,11 @@ def _validate_enrichment(raw: dict, llm_ms: int) -> EnrichmentResult:
     # Governance gate: clamp to the allowed set; anything off-spec (including a
     # missing value) falls back to "business" — the fail-closed-safe default, so
     # only a confident "personal" from the LLM ever triggers the disposition gate.
-    raw["business_relevance"] = raw.get("business_relevance") if raw.get("business_relevance") in ("business", "personal") else "business"
+    raw["business_relevance"] = (
+        raw.get("business_relevance")
+        if raw.get("business_relevance") in ("business", "personal")
+        else "business"
+    )
     raw["llm_ms"] = llm_ms
     return EnrichmentResult(**raw)
 
@@ -309,17 +313,13 @@ async def enrich_memory(
     ).isoformat()
 
     async def _do_enrich(llm: LLMProvider) -> EnrichmentResult:
-        # Escape ``{`` / ``}`` in user content before ``.format()`` —
-        # the prompt template uses them as field markers, so a memory
-        # whose content includes ``"I used {memory_type} in my code"``
-        # would raise ``KeyError`` from ``.format()``, get caught by
-        # the retry loop above, exhaust attempts, and silently fall to
-        # ``fake_enrich`` with no log surface for *why*. The template
-        # itself escapes its JSON example with literal ``{{ }}`` so
-        # there's no symmetry to preserve at the format-string layer
-        # — only user input needs the escape.
-        escaped_content = content.replace("{", "{{").replace("}", "}}")
-        prompt = ENRICHMENT_PROMPT.format(content=escaped_content, today=ref_date)
+        # ``str.format`` parses only the TEMPLATE for replacement fields; the
+        # substituted ``content`` value is inserted literally and never
+        # re-scanned, so it must NOT be brace-escaped — escaping would corrupt
+        # JSON / code / any ``{...}`` in the content before the LLM sees it (a
+        # substituted value never raises KeyError). The template's own JSON
+        # example is escaped with literal ``{{ }}``.
+        prompt = ENRICHMENT_PROMPT.format(content=content, today=ref_date)
         t0 = time.perf_counter()
         raw = await llm.complete_json(prompt)
         llm_ms = int((time.perf_counter() - t0) * 1000)

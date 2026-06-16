@@ -494,16 +494,16 @@ async def _generate_rule(
         return ("no_memories_fetched", None)
 
     memories_text = "\n".join(memories_text_lines)
-    # Escape user-controlled braces before .format() — both outcome (agent input)
-    # and memories_text (DB content/titles) can contain literal {word} that would
-    # otherwise raise KeyError outside the call_with_fallback try/except.
-    # Also cap outcome size to bound prompt tokens.
-    safe_outcome = _sanitize_content(outcome, max_len=2000).replace("{", "{{").replace("}", "}}")
-    safe_memories = memories_text.replace("{", "{{").replace("}", "}}")
+    # ``str.format`` inserts substituted values literally (it never re-scans them
+    # for fields), so outcome/memories must NOT be brace-escaped — escaping would
+    # corrupt literal {word} / JSON / code in agent input or DB content. A
+    # substituted value never raises KeyError. Still cap the outcome to bound
+    # prompt tokens.
+    safe_outcome = _sanitize_content(outcome, max_len=2000)
     prompt = _RULE_GENERATION_PROMPT.format(
         outcome=safe_outcome,
         outcome_type=outcome_type,
-        memories=safe_memories,
+        memories=memories_text,
         count=len(memories_text_lines),
     )
 

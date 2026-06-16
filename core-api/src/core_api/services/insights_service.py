@@ -958,12 +958,11 @@ async def synthesize_insights(
         if focus == "discover":
             prompt_template = _PROMPT_DISPATCH["patterns"]
 
-    # Escape literal braces in memories_text before .format(). Cluster mode
-    # always includes Python dict reprs (type_distribution); content mode can
-    # include user-controlled `{...}` strings. Without escaping, str.format
-    # raises KeyError on any stray `{word}`.
-    safe_memories = memories_text.replace("{", "{{").replace("}", "}}")
-    prompt = prompt_template.format(memories=safe_memories, count=count)
+    # ``str.format`` inserts the substituted ``memories`` value literally (it
+    # never re-scans it for fields), so it must NOT be brace-escaped — escaping
+    # would corrupt the Python dict reprs (cluster mode) and any user-controlled
+    # {...} strings. A substituted value never raises KeyError.
+    prompt = prompt_template.format(memories=memories_text, count=count)
 
     analysis = await _run_llm_analysis(prompt, config)
 
