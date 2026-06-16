@@ -250,6 +250,21 @@ DEFAULT_SETTINGS: dict = {
         "non_business": {
             "enabled": False,
             "disposition": None,  # None → "store"; one of drop | keep_private | store
+            # Fast pre-gate (opt-in): a cheap business-vs-personal go/no-go that
+            # runs BEFORE enrichment / embedding / entity extraction and rejects
+            # personal content early when ``disposition="drop"``. Disabled by
+            # default like every other security control. Its own provider/model
+            # so the signal is independent of the enrichment provider (survives
+            # ``enrichment_provider=none``, e.g. CI). ``min_confidence`` None →
+            # act on any "personal" verdict (matches the post-enrichment gate);
+            # set it to require higher confidence before dropping (fewer false
+            # rejects). Fail-open: a classifier failure never blocks a write.
+            "pregate": {
+                "enabled": False,
+                "provider": None,
+                "model": None,
+                "min_confidence": None,
+            },
         },
     },
     "api_keys": {},
@@ -377,6 +392,9 @@ def _validate_cron(expr: str) -> None:
 
 _PII_ACTIONS = frozenset({"mask", "drop", "flag"})
 _NON_BUSINESS_DISPOSITIONS = frozenset({"drop", "keep_private", "store"})
+# The fast pre-gate accepts any known LLM provider name (incl. ``none``/``fake``
+# for disable/test). Membership-checked so a typo can't silently disable the gate.
+_PREGATE_PROVIDERS = frozenset(p.value for p in ProviderName)
 
 
 def _validate_governance_enums(payload: dict) -> None:
@@ -392,11 +410,24 @@ def _validate_governance_enums(payload: dict) -> None:
     action = gov.get("pii", {}).get("action")
     if action is not None and action not in _PII_ACTIONS:
         raise ValueError(f"governance.pii.action must be one of {sorted(_PII_ACTIONS)}, got {action!r}")
-    disposition = gov.get("non_business", {}).get("disposition")
+    nb = gov.get("non_business", {})
+    disposition = nb.get("disposition")
     if disposition is not None and disposition not in _NON_BUSINESS_DISPOSITIONS:
         raise ValueError(
             f"governance.non_business.disposition must be one of "
             f"{sorted(_NON_BUSINESS_DISPOSITIONS)}, got {disposition!r}"
+        )
+    pregate = nb.get("pregate", {})
+    provider = pregate.get("provider")
+    if provider is not None and provider not in _PREGATE_PROVIDERS:
+        raise ValueError(
+            f"governance.non_business.pregate.provider must be one of "
+            f"{sorted(_PREGATE_PROVIDERS)}, got {provider!r}"
+        )
+    min_conf = pregate.get("min_confidence")
+    if min_conf is not None and not (0.0 <= min_conf <= 1.0):
+        raise ValueError(
+            f"governance.non_business.pregate.min_confidence must be in [0.0, 1.0], got {min_conf!r}"
         )
 
 
@@ -472,6 +503,10 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "governance.pii.categories.secret": bool,
     "governance.non_business.enabled": bool,
     "governance.non_business.disposition": str,
+    "governance.non_business.pregate.enabled": bool,
+    "governance.non_business.pregate.provider": str,
+    "governance.non_business.pregate.model": str,
+    "governance.non_business.pregate.min_confidence": (int, float),
 }
 
 # Inclusive range constraints applied AFTER type validation. Listed
@@ -556,6 +591,18 @@ class _GovNB:
     disposition: str  # "drop" | "keep_private" | "store"
 
 
+@dataclass(frozen=True)
+class _GovNBPregate:
+    """Resolved fast pre-gate policy: a business/personal go/no-go before
+    enrichment. ``provider``/``model`` None → resolved by the step (falls back to
+    the enrichment provider). ``min_confidence`` None → act on any "personal"."""
+
+    enabled: bool
+    provider: str | None
+    model: str | None
+    min_confidence: float | None
+
+
 class ResolvedConfig:
     """Resolves LLM/feature config from organization overrides + global fallbacks."""
 
@@ -592,6 +639,16 @@ class ResolvedConfig:
         return _GovNB(
             enabled=bool(g.get("enabled", False)),
             disposition=g.get("disposition") or "store",
+        )
+
+    @property
+    def governance_non_business_pregate(self) -> _GovNBPregate:
+        g = self._ts.get("governance", {}).get("non_business", {}).get("pregate", {})
+        return _GovNBPregate(
+            enabled=bool(g.get("enabled", False)),
+            provider=g.get("provider") or None,
+            model=g.get("model") or None,
+            min_confidence=g.get("min_confidence"),
         )
 
     # Enrichment

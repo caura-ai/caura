@@ -1,5 +1,6 @@
 """Write pipeline steps — decomposed phases of create_memory()."""
 
+from core_api.pipeline.steps.write.business_personal_pregate import BusinessPersonalPregate
 from core_api.pipeline.steps.write.check_content_length import CheckContentLength
 from core_api.pipeline.steps.write.check_exact_duplicate import CheckExactDuplicate
 from core_api.pipeline.steps.write.check_semantic_duplicate import CheckSemanticDuplicate
@@ -19,6 +20,7 @@ from core_api.pipeline.steps.write.write_memory_row import WriteMemoryRow
 from core_api.pipeline.steps.write.write_stm_note import WriteSTMNote
 
 __all__ = [
+    "BusinessPersonalPregate",
     "CheckContentLength",
     "CheckExactDuplicate",
     "CheckSemanticDuplicate",

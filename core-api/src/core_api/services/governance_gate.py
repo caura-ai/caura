@@ -22,6 +22,11 @@ ACTION_PII_DROP = "pii_drop"
 ACTION_PII_FLAG = "pii_flag"
 ACTION_NB_DROP = "nonbusiness_drop"
 ACTION_NB_KEEP_PRIVATE = "nonbusiness_keep_private"
+# Pre-gate drop: rejected by the fast business/personal classifier BEFORE any
+# persistence. Distinct from ``nonbusiness_drop`` (which in fast-mode remediation
+# soft-deletes an already-stored row) — the verb must describe what physically
+# happened, and here nothing was ever written.
+ACTION_NB_PREGATE_DROP = "nonbusiness_pregate_drop"
 
 
 def _content_sha256(content: str) -> str:
@@ -76,6 +81,23 @@ def llm_pii_audit_detail(
 
 def nonbusiness_audit_detail(action: str, content: str, write_mode: str | None) -> dict:
     return _base_audit_detail(action, content, write_mode)
+
+
+def nonbusiness_pregate_audit_detail(
+    action: str,
+    content: str,
+    write_mode: str | None,
+    *,
+    provider: str | None,
+    model: str | None,
+    confidence: float | None,
+) -> dict:
+    """Audit detail for the fast pre-gate's business/personal decision. Records
+    the classifier provider/model + confidence (metadata only — never the raw
+    content) so a compliance review can see what made the early-reject call."""
+    detail = _base_audit_detail(action, content, write_mode)
+    detail.update({"source": "llm_pregate", "provider": provider, "model": model, "confidence": confidence})
+    return detail
 
 
 def mark_pii_flagged(metadata: dict, findings: list[Finding]) -> None:

@@ -2,6 +2,7 @@
 
 from core_api.pipeline.runner import Pipeline
 from core_api.pipeline.steps.write import (
+    BusinessPersonalPregate,
     CheckContentLength,
     CheckExactDuplicate,
     CheckSemanticDuplicate,
@@ -69,6 +70,9 @@ def build_fast_write_pipeline() -> Pipeline:
             CheckContentLength(),
             LoadTenantConfig(),
             GovernanceScanContent(),
+            # Opt-in fast business/personal go/no-go: reject personal content
+            # (disposition=drop) before enrichment/embedding/extraction run.
+            BusinessPersonalPregate(),
             ComputeContentHash(),
             ParallelEmbedEnrich(),
             MergeEnrichmentFields(),
@@ -105,6 +109,9 @@ def build_strong_write_pipeline() -> Pipeline:
             CheckContentLength(),
             LoadTenantConfig(),
             GovernanceScanContent(),
+            # Opt-in fast business/personal go/no-go: reject personal content
+            # (disposition=drop) before enrichment/embedding/extraction run.
+            BusinessPersonalPregate(),
             ComputeContentHash(),
             ParallelEmbedEnrich(),
             MergeEnrichmentFields(),
