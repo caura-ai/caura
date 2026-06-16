@@ -22,13 +22,14 @@ keys storage-side.
 
 Retry policy
 ────────────
-- Max 3 attempts (1 initial + 2 retries)
+- Idempotent methods: max 3 attempts (1 initial + 2 retries)
+- Connection-phase (POST) failures: max ``CONNECT_PHASE_MAX_ATTEMPTS`` (5) —
+  they add no server load, so retrying more rides out a cold start
 - Retryable exceptions: ``httpx.ConnectTimeout``, ``httpx.ReadTimeout``,
   ``httpx.PoolTimeout`` (idempotent methods); connection-phase subset
   for POST
 - Retryable HTTP statuses: 502, 503, 504 (idempotent methods only)
-- Exponential backoff with small jitter, capped: ~0.2s, ~0.4s
-- Worst-case added latency: < 1s
+- Exponential backoff with small jitter, capped at ``RETRY_BACKOFF_MAX_S``
 """
 
 from __future__ import annotations
@@ -283,13 +284,19 @@ async def test_post_retries_on_connect_error_then_succeeds() -> None:
 
 
 async def test_post_gives_up_after_max_attempts_on_connect_timeout() -> None:
+    """Connection-phase failures retry CONNECT_PHASE_MAX_ATTEMPTS (5) times —
+    more than the idempotent default (3, see
+    test_get_retries_then_gives_up_after_max_attempts) — because they add no
+    load to a healthy server and just ride out a cold start."""
+    from common.http_retry import CONNECT_PHASE_MAX_ATTEMPTS
+
     client, write, _read = await _make_client()
     write.post = AsyncMock(side_effect=httpx.ConnectTimeout("storage unreachable"))
 
     with pytest.raises(httpx.ConnectTimeout):
         await client._post("/entities", {"canonical_name": "x"})
 
-    assert write.post.await_count == 3
+    assert write.post.await_count == CONNECT_PHASE_MAX_ATTEMPTS == 5
 
 
 async def test_post_does_not_retry_on_read_timeout() -> None:
@@ -330,3 +337,15 @@ async def test_post_optional_retries_on_connect_timeout_then_succeeds() -> None:
 
     assert result == {"ok": True}
     assert write.post.await_count == 2
+
+
+async def test_backoff_delay_cap_is_a_hard_ceiling() -> None:
+    """``RETRY_BACKOFF_MAX_S`` is a HARD ceiling — jitter is applied before the
+    cap, so no single backoff sleep exceeds it even at the highest attempt.
+    (Regression: capping before jitter let the real ceiling reach MAX * 1.1.)"""
+    from common.http_retry import RETRY_BACKOFF_MAX_S, _backoff_delay
+
+    # Attempts 5+ saturate the cap; sample widely to catch the jittered maximum.
+    for attempt in range(1, 9):
+        for _ in range(200):
+            assert 0.0 <= _backoff_delay(attempt) <= RETRY_BACKOFF_MAX_S

@@ -15,19 +15,29 @@ History (load-bearing for the policy split):
   dropped) both died on first-attempt ``ConnectTimeout`` behind the VPC
   connector because POSTs had no retry at all. Connection-phase retry
   for non-idempotent methods landed in response (caura-memclaw#333).
+* 2026-06-16 prod — a steady trickle of ``httpx.ConnectTimeout`` still
+  reached core-api on the Pub/Sub enrichment, entity-extraction,
+  contradiction and audit-flush paths (storage-api cold starts /
+  instance recycles). 3 attempts (~0.6s of backoff) is too short to
+  ride out a cold start, so the connect-phase path now retries more
+  times — see ``CONNECT_PHASE_MAX_ATTEMPTS``. This complements, not
+  replaces, keeping storage-api warm (Cloud Run min-instances).
 
 Retry policy:
- - Max 3 attempts (1 initial + 2 retries)
- - Exponential backoff with jitter: ~0.2s, ~0.4s
- - Worst-case added latency: < 1s
- - Idempotent HTTP methods retry ``RETRYABLE_EXCEPTIONS`` plus
-   ``RETRYABLE_STATUS_CODES`` (use :func:`with_retry` defaults).
- - Non-idempotent methods retry ``CONNECT_PHASE_EXCEPTIONS`` ONLY
-   (use :func:`with_connect_phase_retry`): ConnectTimeout /
-   ConnectError / PoolTimeout are all raised before a single request
-   byte is written, so a retry cannot double-insert. ReadTimeout and
-   5xx are NOT retried there — the request reached storage and may
-   have committed; safe retry needs storage-side idempotency keys.
+ - Idempotent methods: max 3 attempts (1 initial + 2 retries), retry
+   ``RETRYABLE_EXCEPTIONS`` plus ``RETRYABLE_STATUS_CODES``
+   (use :func:`with_retry` defaults). Kept at 3 so a genuine 5xx
+   storm isn't amplified by extra load against a struggling server.
+ - Non-idempotent methods: ``CONNECT_PHASE_EXCEPTIONS`` ONLY
+   (use :func:`with_connect_phase_retry`), max ``CONNECT_PHASE_MAX_ATTEMPTS``
+   attempts. ConnectTimeout / ConnectError / PoolTimeout are all raised
+   before a single request byte is written, so a retry cannot
+   double-insert — and against an instance that isn't accepting yet
+   they add no server load, so retrying more times just rides out the
+   cold start. ReadTimeout and 5xx are NOT retried there — the request
+   reached storage and may have committed; safe retry needs
+   storage-side idempotency keys.
+ - Exponential backoff with jitter, capped at ``RETRY_BACKOFF_MAX_S``.
 """
 
 from __future__ import annotations
@@ -43,6 +53,16 @@ logger = logging.getLogger(__name__)
 
 RETRY_MAX_ATTEMPTS = 3
 RETRY_BACKOFF_BASE_S = 0.2
+# Cap any single backoff sleep so a higher attempt count can't grow the delay
+# unboundedly (matters once CONNECT_PHASE_MAX_ATTEMPTS pushes past 3 attempts).
+RETRY_BACKOFF_MAX_S = 2.0
+# Connection-phase failures (CONNECT_PHASE_EXCEPTIONS) are raised before the
+# request is sent and against an instance that isn't accepting yet, so retrying
+# them adds no load to a healthy server — it just rides out a Cloud Run cold
+# start / instance recycle. We retry them MORE times than the idempotent default
+# so a transient storage blip doesn't surface as a handler failure (and, on the
+# Pub/Sub path, a nack → immediate-redelivery storm).
+CONNECT_PHASE_MAX_ATTEMPTS = 5
 RETRYABLE_EXCEPTIONS = (
     httpx.ConnectTimeout,
     httpx.ReadTimeout,
@@ -66,12 +86,22 @@ RETRYABLE_STATUS_CODES = frozenset({502, 503, 504})
 NO_RETRYABLE_STATUSES: frozenset[int] = frozenset()
 
 
+def _backoff_delay(attempt: int) -> float:
+    """Exponential backoff for a 1-based ``attempt``, with ±10% jitter and a
+    hard ceiling of ``RETRY_BACKOFF_MAX_S``. The cap is applied AFTER jitter so
+    a single sleep never exceeds it (jitter on the already-capped value would
+    push the real ceiling to RETRY_BACKOFF_MAX_S * 1.1)."""
+    delay = RETRY_BACKOFF_BASE_S * (2 ** (attempt - 1))
+    return min(delay * (1.0 + random.uniform(-0.1, 0.1)), RETRY_BACKOFF_MAX_S)
+
+
 async def with_retry(
     do_request: Callable[[], Awaitable[httpx.Response]],
     *,
     label: str,
     retryable_exceptions: tuple[type[Exception], ...] = RETRYABLE_EXCEPTIONS,
     retryable_statuses: frozenset[int] = RETRYABLE_STATUS_CODES,
+    max_attempts: int = RETRY_MAX_ATTEMPTS,
 ) -> httpx.Response:
     """Wrap a single HTTP call with retry on transient errors.
 
@@ -85,20 +115,19 @@ async def with_retry(
     where the request was provably never sent.
     """
     last_exc: BaseException | None = None
-    for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
             resp = await do_request()
         except retryable_exceptions as e:
             last_exc = e
-            if attempt < RETRY_MAX_ATTEMPTS:
-                delay = RETRY_BACKOFF_BASE_S * (2 ** (attempt - 1))
-                delay *= 1.0 + random.uniform(-0.1, 0.1)  # ±10% jitter
+            if attempt < max_attempts:
+                delay = _backoff_delay(attempt)
                 logger.warning(
                     "storage_client.%s: %s on attempt %d/%d, retrying in %.2fs",
                     label,
                     type(e).__name__,
                     attempt,
-                    RETRY_MAX_ATTEMPTS,
+                    max_attempts,
                     delay,
                 )
                 await asyncio.sleep(delay)
@@ -108,18 +137,17 @@ async def with_retry(
                 label,
                 type(e).__name__,
                 attempt,
-                RETRY_MAX_ATTEMPTS,
+                max_attempts,
             )
             raise
-        if resp.status_code in retryable_statuses and attempt < RETRY_MAX_ATTEMPTS:
-            delay = RETRY_BACKOFF_BASE_S * (2 ** (attempt - 1))
-            delay *= 1.0 + random.uniform(-0.1, 0.1)
+        if resp.status_code in retryable_statuses and attempt < max_attempts:
+            delay = _backoff_delay(attempt)
             logger.warning(
                 "storage_client.%s: HTTP %d on attempt %d/%d, retrying in %.2fs",
                 label,
                 resp.status_code,
                 attempt,
-                RETRY_MAX_ATTEMPTS,
+                max_attempts,
                 delay,
             )
             await asyncio.sleep(delay)
@@ -134,7 +162,7 @@ async def with_retry(
                 label,
                 resp.status_code,
                 attempt,
-                RETRY_MAX_ATTEMPTS,
+                max_attempts,
             )
         return resp
     # Unreachable — the loop either returns a response or raises.
@@ -152,10 +180,14 @@ async def with_connect_phase_retry(
 
     Connection-phase failures only — the request was provably never
     sent, so a retry cannot double-insert. No status-based retries.
+    Uses ``CONNECT_PHASE_MAX_ATTEMPTS`` (> the idempotent default): these
+    failures add no load to a healthy server, so retrying more times just
+    rides out a cold start / instance recycle.
     """
     return await with_retry(
         do_request,
         label=label,
         retryable_exceptions=CONNECT_PHASE_EXCEPTIONS,
         retryable_statuses=NO_RETRYABLE_STATUSES,
+        max_attempts=CONNECT_PHASE_MAX_ATTEMPTS,
     )
