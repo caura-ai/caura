@@ -66,16 +66,23 @@ class BackfillEntityEmbeddings:
         backfill_count = 0
         if updates:
             await ctx.require_db.execute(
-                # ``synchronize_session=False``: this is a bulk ORM UPDATE with
-                # extra WHERE criteria over an executemany param list, which
-                # SQLAlchemy refuses to session-synchronize (InvalidRequestError,
-                # prod 2026-06-13). There is no live ORM session state to keep in
-                # sync here — the backfill writes name_embedding and moves on — so
-                # skipping synchronization is correct, not just a silencer.
-                update(Entity)
-                .where(Entity.id == sa.bindparam("eid"), Entity.tenant_id == tenant_id)
-                .values(name_embedding=sa.bindparam("emb"))
-                .execution_options(synchronize_session=False),
+                # Target the Core ``entities`` table, NOT the ORM-mapped ``Entity``.
+                # ``session.execute(update(Entity), <list of param dicts>)`` routes to
+                # SQLAlchemy's "ORM Bulk UPDATE by Primary Key", which requires every
+                # dict to carry the PK column ``id`` — but our dicts key the PK off a
+                # custom ``eid`` bindparam in the WHERE clause, so that path raised
+                # ``InvalidRequestError: No primary key value supplied for column(s)
+                # entities.id`` (prod 2026-06-16). The earlier ``synchronize_session=
+                # False`` (prod 2026-06-13) only silenced a *different* error on that
+                # same ORM path. ``update(Entity.__table__)`` is a plain Core executemany
+                # UPDATE that honours the custom bindparams and has no ORM bulk-by-PK or
+                # session-synchronisation behaviour at all.
+                update(Entity.__table__)
+                .where(
+                    Entity.__table__.c.id == sa.bindparam("eid"),
+                    Entity.__table__.c.tenant_id == tenant_id,
+                )
+                .values(name_embedding=sa.bindparam("emb")),
                 updates,
             )
             backfill_count = len(updates)
