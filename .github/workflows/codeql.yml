@@ -1,0 +1,51 @@
+name: CodeQL
+
+# GitHub-native SAST (CodeQL) for the Python + JS/TS sources. Free on this
+# public repo; results land in the Security → Code scanning tab and as inline
+# PR annotations. Complements ci.yml (lint/type/test) + security-scan.yml
+# (bandit/pip-audit) with deeper dataflow-based vulnerability analysis.
+#
+# Runs on PRs (diff-scoped alerts), on push to main (the default-branch
+# baseline the PR diffs compare against), and weekly (catches newly published
+# query updates against unchanged code).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, dev]
+  schedule:
+    - cron: "0 7 * * 1" # weekly, Monday 07:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write # upload CodeQL results to code scanning
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Python services (core-api, core-storage-api) + the TS plugin/client.
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          languages: ${{ matrix.language }}
+
+      # Python + JS/TS are interpreted — CodeQL extracts them without a build
+      # step, so no autobuild is needed.
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          category: "/language:${{ matrix.language }}"
