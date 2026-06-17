@@ -233,6 +233,24 @@ DEFAULT_SETTINGS: dict = {
     # PII is enabled with NO category selected, the gate scans ALL categories
     # (the secure default — enabling protection shouldn't silently protect
     # nothing). See ``ResolvedConfig.governance_pii``.
+    #
+    # Two paths back the PII ``action`` (mask/drop/flag), with different recall:
+    #   1. Deterministic, span-aware validators (``GovernanceScanContent``):
+    #      regex/Luhn/IBAN/entropy. The strong, fail-closed path for structured
+    #      PII (email/phone/cards/IBAN/keys), and the only one that can honestly
+    #      ``mask`` (it has span offsets). Precision confirmed; high recall on
+    #      the patterns it covers.
+    #   2. The enrichment LLM's free-form ``contains_pii`` signal
+    #      (``GovernanceDecision``): catches unstructured/contextual PII the
+    #      patterns can't (e.g. "X is in addiction recovery"), but its RECALL is
+    #      bounded by the enrichment model — a small/cheap model (e.g. *-nano)
+    #      under-detects subtly-phrased free-form PII. A tenant relying on
+    #      ``drop``/``mask`` to catch FREE-FORM PII should set a capable
+    #      ``enrichment.model``; the deterministic path stays the precise
+    #      backstop, but free-form coverage is only as strong as that model's
+    #      recall. (The LLM path has no offsets, so a ``mask`` policy can only
+    #      flag a free-form match — see ``llm_pii_audit_detail`` /
+    #      ``configured_action``.)
     "governance": {
         "pii": {
             "enabled": False,
