@@ -186,7 +186,8 @@ catalog is pruned. Operators can add extra target dirs via the
   skills there but **only ever touches entries it wrote**, tracked by a
   per-skill `.memclaw-owned` marker file:
   - a slug already occupied by an *unowned* skill is a **collision** —
-    skipped, never overwritten (reported in `skipped`);
+    skipped, never overwritten (reported in the summary's `collisions`
+    list, kept distinct from the catalog-shape `skipped` list);
   - an unowned skill is **never removed**, even on an empty catalog;
   - only marker-bearing entries are updated/pruned.
 

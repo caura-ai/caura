@@ -506,7 +506,8 @@ describe("reconcileSkills — configured targets", () => {
     // installs it — that's a different target; per-target detail is PR3.)
     assert.equal(readFileSync(ext("deploy-runbook", "SKILL.md"), "utf-8"), "# CLIENT version — keep me\n");
     assert.ok(!existsSync(ext("deploy-runbook", OWNED_MARKER)));
-    assert.ok(summary.skipped.includes("deploy-runbook"), "collision reported in skipped");
+    assert.ok(summary.collisions.includes("deploy-runbook"), "collision reported in collisions");
+    assert.ok(!summary.skipped.includes("deploy-runbook"), "collisions are not conflated into skipped");
   });
 
   test("additive: a MemClaw-owned skill dropped from the catalog IS removed", async () => {

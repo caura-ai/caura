@@ -106,6 +106,12 @@ export interface ReconcileSummary {
   added: string[];
   removed: string[];
   skipped: string[];   // catalog entries with bad shape (no doc_id / no content)
+  // Slugs not written because an unowned dir already occupies the slot in
+  // an ``additive`` target (a foreign skill we refuse to clobber). Distinct
+  // from ``skipped`` so a caller can tell a catalog-shape error apart from a
+  // naming conflict with a client-owned skill. Empty unless an ``additive``
+  // target is configured.
+  collisions: string[];
   protected: string[]; // catalog-absent but not deleted
 }
 
@@ -211,7 +217,7 @@ interface DirReconcileResult {
    * by a foreign (non-MemClaw-owned) entry in an ``additive`` dir. Always
    * empty for ``owned`` dirs (which fully own their contents).
    */
-  skipped: string[];
+  collisions: string[];
 }
 
 /**
@@ -229,7 +235,7 @@ function reconcileOwnedDir(
     removed: [],
     protected: [],
     installed: [],
-    skipped: [],
+    collisions: [],
   };
 
   // Read disk. Skip non-directories so a stray file in the target dir
@@ -343,7 +349,7 @@ function reconcileAdditiveDir(
     removed: [],
     protected: [],
     installed: [],
-    skipped: [],
+    collisions: [],
   };
 
   if (!existsSync(skillsRoot)) {
@@ -388,9 +394,14 @@ function reconcileAdditiveDir(
   const installedSet = new Set<string>();
   for (const [slug, content] of desired) {
     const skillDir = join(skillsRoot, slug);
-    const present = onDisk.has(slug);
-    if (present && !isMemclawOwned(skillDir)) {
-      result.skipped.push(slug);
+    // Re-check liveness here, not just the start-of-function ``onDisk``
+    // snapshot: a foreign dir created between the readdir and now would
+    // otherwise slip past the collision guard (present=false), get its
+    // SKILL.md clobbered, and be wrongly stamped as MemClaw-owned. The
+    // ``existsSync`` re-stat closes that TOCTOU window.
+    const dirExistsNow = onDisk.has(slug) || existsSync(skillDir);
+    if (dirExistsNow && !isMemclawOwned(skillDir)) {
+      result.collisions.push(slug);
       console.warn(
         `[memclaw] additive: ${slug} is occupied by an unowned skill in ` +
           `${skillsRoot}; skipping (collision)`,
@@ -399,7 +410,7 @@ function reconcileAdditiveDir(
     }
     const target = join(skillDir, "SKILL.md");
     // Owned + unchanged content → already installed; skip the rewrite.
-    if (present) {
+    if (dirExistsNow) {
       try {
         if (existsSync(target) && readFileSync(target, "utf-8") === content) {
           installedSet.add(slug);
@@ -411,15 +422,16 @@ function reconcileAdditiveDir(
     }
     try {
       mkdirSync(skillDir, { recursive: true });
-      // Stamp ownership on first write; an already-owned dir keeps its marker.
-      if (!present) {
+      // Stamp ownership only on genuinely new dirs; an already-existing
+      // owned dir keeps its marker.
+      if (!dirExistsNow) {
         writeFileSync(join(skillDir, OWNED_MARKER), OWNED_MARKER_BODY, "utf-8");
       }
       writeFileSync(target, content, "utf-8");
       installedSet.add(slug);
       result.added.push(slug);
       console.log(
-        `[memclaw] additive: ${present ? "updated" : "pulled"} skill ${slug} in ${skillsRoot}`,
+        `[memclaw] additive: ${dirExistsNow ? "updated" : "pulled"} skill ${slug} in ${skillsRoot}`,
       );
     } catch (e: unknown) {
       logError(`reconcileAdditiveDir: write failed for ${slug}`, e);
@@ -441,6 +453,7 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
     added: [],
     removed: [],
     skipped: [],
+    collisions: [],
     protected: [],
   };
 
@@ -525,7 +538,7 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   const addedAll: string[] = [];
   const removedAll: string[] = [];
   const protectedAll: string[] = [];
-  const skippedAll: string[] = [];
+  const collisionsAll: string[] = [];
   for (const target of resolveSkillTargets()) {
     const dirResult =
       target.mode === "additive"
@@ -535,7 +548,7 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
     removedAll.push(...dirResult.removed);
     protectedAll.push(...dirResult.protected);
     installedAll.push(...dirResult.installed);
-    skippedAll.push(...dirResult.skipped);
+    collisionsAll.push(...dirResult.collisions);
   }
 
   // Aggregate across targets at slug granularity — a skill present in
@@ -547,9 +560,11 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   summary.removed = [...new Set(removedAll)].sort();
   summary.protected = [...new Set(protectedAll)].sort();
   summary.installed = [...new Set(installedAll)].sort();
-  // ``skipped`` combines bad-shape catalog rows (collected above during
-  // ``desired`` construction) with additive-dir collisions.
-  summary.skipped = [...new Set([...summary.skipped, ...skippedAll])].sort();
+  // ``skipped`` stays catalog-shape errors only (populated above during
+  // ``desired`` construction); additive-dir collisions are reported
+  // separately so the two failure modes don't get conflated.
+  summary.skipped = [...new Set(summary.skipped)].sort();
+  summary.collisions = [...new Set(collisionsAll)].sort();
 
   return summary;
 }
