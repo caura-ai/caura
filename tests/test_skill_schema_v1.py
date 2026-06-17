@@ -679,6 +679,62 @@ class TestMigrationChain:
         # 026: per-event audit idempotency (client_event_id + partial unique)
         assert chain.get("026") == "025", "026 must follow 025"
 
+    def test_no_plain_create_index_on_large_tables(self):
+        """Indexes on large, pre-existing tables MUST be built ``CONCURRENTLY``
+        (inside an ``op.get_context().autocommit_block()``). A plain,
+        in-transaction ``CREATE INDEX`` takes an AccessExclusive lock that blocks
+        writes AND holds the migration advisory lock for the whole build — which
+        crashed 6 storage-writer boots on 2026-06-16 (migration 025 indexed
+        ``audit_log`` without CONCURRENTLY). This guards the raw-SQL
+        ``op.execute("CREATE INDEX ...")`` path on the known-large tables; indexes
+        created on a brand-new table in the same migration are unaffected."""
+        import re
+
+        large_tables = {
+            "audit_log",
+            "memories",
+            "entities",
+            "documents",
+            "memory_entity_links",
+            "relations",
+        }
+        # The CONCURRENTLY convention for indexes on already-populated large
+        # tables is enforced from migration 005 onward (see 005/007/011/016/017).
+        # 001–004 build the initial schema and index tables that are empty at
+        # creation, so a plain CREATE INDEX there is harmless. 025 postdates the
+        # convention but predates enforcement and is already applied in prod (the
+        # index exists; the migration can't be rewritten) — documented debt.
+        convention_from = 5
+        applied_debt = {25}
+        # CREATE [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS] <name> ON <table>
+        pat = re.compile(
+            r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(CONCURRENTLY\s+)?"
+            r"(?:IF\s+NOT\s+EXISTS\s+)?\w+\s+ON\s+(\w+)",
+            re.IGNORECASE,
+        )
+        versions = pathlib.Path(
+            "core-storage-api/src/core_storage_api/database/migrations/versions"
+        )
+        violations: list[str] = []
+        for f in sorted(versions.glob("*.py")):
+            prefix = f.stem.split("_")[0]
+            if (
+                not prefix.isdigit()
+                or int(prefix) < convention_from
+                or int(prefix) in applied_debt
+            ):
+                continue
+            for concurrently, table in pat.findall(f.read_text()):
+                if table.lower() in large_tables and not concurrently:
+                    violations.append(f"{f.name}: plain CREATE INDEX on '{table}'")
+        assert not violations, (
+            "Plain (non-CONCURRENTLY) CREATE INDEX on a large table blocks writes "
+            "and holds the migration advisory lock for the whole build (crashed "
+            "storage-writer boots on 2026-06-16). Use CREATE INDEX CONCURRENTLY in "
+            "an op.get_context().autocommit_block() — see migration 007 / 026. "
+            f"Violations: {'; '.join(violations)}"
+        )
+
 
 @pytest.mark.unit
 class TestForgeEventPayloadNaming:

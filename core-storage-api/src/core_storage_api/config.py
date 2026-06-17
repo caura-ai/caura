@@ -47,6 +47,19 @@ class Settings(BaseSettings):
     db_pool_timeout: int = 60
     db_pool_recycle: int = 1800
 
+    # How long a booting writer waits to acquire the migration advisory lock
+    # before giving up. One replica runs ``alembic upgrade head`` while holding
+    # the lock; the others poll for it and only serve once it's released. This
+    # must comfortably exceed the slowest real migration — a large
+    # ``CREATE INDEX CONCURRENTLY`` / backfill can run for minutes, and the lock
+    # is held for the whole run — so a legitimately slow migration doesn't crash
+    # the N-1 booting replicas waiting on it. It was a hardcoded 300s, which
+    # migration 025 blew past on 2026-06-16, failing 6 writer boots. The wait is
+    # now a STUCK-migration backstop, not a routine cap. Keep it <= the Cloud Run
+    # startup-probe deadline, or the probe kills the instance before this fires.
+    # Env: MIGRATION_LOCK_WAIT_SECONDS.
+    migration_lock_wait_seconds: int = 1800
+
     # Service role (CAURA-591 Part B). "hybrid" keeps the original
     # single-service behaviour and is the safe default for OSS + any
     # deploy that hasn't opted into the split. Enterprise SaaS runs

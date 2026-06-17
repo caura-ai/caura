@@ -91,8 +91,15 @@ async def init_database() -> None:
     # variant would be released by those commits, breaking the multi-worker
     # serialisation guarantee.
     _MIGRATION_LOCK_ID = 8_675_309  # arbitrary unique int
-    _LOCK_WAIT_SECONDS = 300
     _LOCK_POLL_INTERVAL = 0.5
+    _LOCK_LOG_EVERY_SECONDS = 30.0
+    # The winning replica holds this lock for the WHOLE ``alembic upgrade head``
+    # (including minutes-long ``CREATE INDEX CONCURRENTLY`` builds / backfills),
+    # so the wait is a stuck-migration backstop, not a routine cap. It must
+    # exceed the slowest real migration or a slow-but-progressing one crashes the
+    # N-1 booting replicas waiting on it (2026-06-16: a hardcoded 300s cap that
+    # migration 025 blew past, failing 6 writer boots). Tunable via env.
+    lock_wait_seconds = settings.migration_lock_wait_seconds
     async with engine.connect() as lock_conn:
         # AUTOCOMMIT so the lock_conn never sits "idle in transaction": a
         # blocking ``pg_advisory_lock`` waiter keeps an open tx for the full
@@ -102,7 +109,9 @@ async def init_database() -> None:
         # holds a tx for sub-ms per attempt and avoids that interaction.
         lock_conn = await lock_conn.execution_options(isolation_level="AUTOCOMMIT")
         loop = asyncio.get_event_loop()
-        deadline = loop.time() + _LOCK_WAIT_SECONDS
+        start = loop.time()
+        deadline = start + lock_wait_seconds
+        next_log = start + _LOCK_LOG_EVERY_SECONDS
         while True:
             got = await lock_conn.scalar(
                 text("SELECT pg_try_advisory_lock(:lock_id)"),
@@ -110,12 +119,26 @@ async def init_database() -> None:
             )
             if got:
                 break
-            if loop.time() >= deadline:
+            now = loop.time()
+            if now >= deadline:
                 raise TimeoutError(
-                    f"Migration advisory lock {_MIGRATION_LOCK_ID} not "
-                    f"acquired within {_LOCK_WAIT_SECONDS}s — another worker "
-                    "still running migrations or stuck"
+                    f"Migration advisory lock {_MIGRATION_LOCK_ID} not acquired "
+                    f"within {lock_wait_seconds}s — another worker is likely stuck "
+                    "running migrations. A healthy slow migration should finish "
+                    "within this window; if a legitimate migration needs longer, "
+                    "raise MIGRATION_LOCK_WAIT_SECONDS (keeping it <= the Cloud Run "
+                    "startup-probe deadline)."
                 )
+            # Surface the wait so a long-but-healthy migration looks like progress
+            # in the logs, not a silently hung boot.
+            if now >= next_log:
+                logger.info(
+                    "Waiting on migration advisory lock (%.0fs of %ds elapsed) — "
+                    "another worker is running migrations",
+                    now - start,
+                    lock_wait_seconds,
+                )
+                next_log = now + _LOCK_LOG_EVERY_SECONDS
             await asyncio.sleep(_LOCK_POLL_INTERVAL)
         try:
             async with engine.connect() as work_conn:
