@@ -335,9 +335,10 @@ async def test_rest_search_scope_agent_uses_authenticated_identity(client, as_ag
 
     tenant_id, headers = get_test_auth()
     marker = f"PRIVATEMARKER{uuid.uuid4().hex[:10]}"
+    content = f"alice private note {marker}"
     priv = await _write(
         client, headers, tenant_id, agent_id="alice", fleet_id="fleet-alpha",
-        visibility="scope_agent", content=f"alice private note {marker}",
+        visibility="scope_agent", content=content,
         write_mode="strong",  # synchronous embedding ⇒ the row is searchable immediately (de-flakes)
     )
 
@@ -346,11 +347,17 @@ async def test_rest_search_scope_agent_uses_authenticated_identity(client, as_ag
         assert r.status_code == 200, r.text
         return [m["id"] for m in r.json()["items"]]
 
+    # Query the row's EXACT content, not just the bare marker. The deterministic
+    # word-set fake embedder makes that a similarity-1.0 hit, so alice's freshly
+    # written row clears any relevance cutoff and is returned — the assertions
+    # then depend only on the scope_agent VISIBILITY filter, not on stochastic
+    # vector-rank ordering over the shared test corpus. (A marker-only query
+    # ranked the row out of top_k and flaked: "author cannot see own row".)
     as_agent(tenant_id, "bob")
-    assert priv not in await _search(marker), "scope_agent row leaked to another agent in search"
+    assert priv not in await _search(content), "scope_agent row leaked to another agent in search"
 
     as_agent(tenant_id, "alice")
-    assert priv in await _search(marker), "author cannot see own scope_agent row in search"
+    assert priv in await _search(content), "author cannot see own scope_agent row in search"
 
 
 # ---------------------------------------------------------------------------
