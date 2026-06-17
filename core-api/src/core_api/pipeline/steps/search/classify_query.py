@@ -312,7 +312,11 @@ class ClassifyQuery:
         )
 
         # Best (lowest hop → highest boost) per memory + collect entity links.
+        # ``memory_match_count`` tracks how many DIRECTLY-MATCHED (hop-0) query
+        # entities each memory links to — the pre-load relevance signal that
+        # survives the fan-out cap below.
         memory_boost: dict[str, float] = {}
+        memory_match_count: dict[str, int] = {}
         memory_entity_links: dict[str, list[EntityLinkOut]] = {}
         for link in all_links:
             mem_id, ent_id_str, role = link["memory_id"], link["entity_id"], link.get("role")
@@ -323,16 +327,29 @@ class ClassifyQuery:
             boost = GRAPH_HOP_BOOST.get(hop_dist, _GRAPH_HOP_BOOST_FALLBACK) * rel_weight
             if mem_id not in memory_boost or boost > memory_boost[mem_id]:
                 memory_boost[mem_id] = boost
+            if hop_dist == 0:
+                memory_match_count[mem_id] = memory_match_count.get(mem_id, 0) + 1
             memory_entity_links.setdefault(mem_id, []).append(EntityLinkOut(entity_id=ent_id, role=role))
 
         if not memory_boost:
             return []
 
-        # Cap to prevent popular-entity fan-out.
+        # Cap to prevent popular-entity fan-out. A30: a hub entity (e.g. a bare
+        # "john smith" linking 100+ memories) floods the pool, and a cap by
+        # near-uniform hop-boost alone drops the gold BEFORE the query-overlap
+        # rerank (below) can see it. Rank the cap by how many of the query's
+        # matched entities each memory links to FIRST (a "X's manager" gold
+        # links to both the person hub AND the "manager" role → count 2, vs 1
+        # for sibling facts about other attributes), with hop-boost as the
+        # tiebreak. This collapses the pool to the relevant subset regardless of
+        # hub size; the discriminator (e.g. "#0000") is then resolved by
+        # _query_overlap after load.
         if len(memory_boost) > GRAPH_MAX_BOOSTED_MEMORIES:
-            memory_ids_sorted = sorted(memory_boost, key=memory_boost.__getitem__, reverse=True)[
-                :GRAPH_MAX_BOOSTED_MEMORIES
-            ]
+            memory_ids_sorted = sorted(
+                memory_boost,
+                key=lambda mid: (memory_match_count.get(mid, 0), memory_boost[mid]),
+                reverse=True,
+            )[:GRAPH_MAX_BOOSTED_MEMORIES]
             memory_boost = {mid: memory_boost[mid] for mid in memory_ids_sorted}
 
         # CAURA-687: load memories by ID via the dedicated short-circuit

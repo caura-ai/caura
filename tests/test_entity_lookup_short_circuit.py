@@ -169,7 +169,11 @@ async def test_collect_memories_forwards_valid_at_and_readable_tenant_ids():
     )
     fake_storage.get_memory_ids_by_entity_ids = AsyncMock(
         return_value=[
-            {"memory_id": matched_memory_id, "entity_id": str(matched_entity_id), "role": "subject"}
+            {
+                "memory_id": matched_memory_id,
+                "entity_id": str(matched_entity_id),
+                "role": "subject",
+            }
         ]
     )
     fake_storage.load_memories_by_ids = AsyncMock(
@@ -241,7 +245,11 @@ async def test_collect_memories_omits_readable_tenant_ids_when_single_tenant():
     )
     fake_storage.get_memory_ids_by_entity_ids = AsyncMock(
         return_value=[
-            {"memory_id": matched_memory_id, "entity_id": str(matched_entity_id), "role": "subject"}
+            {
+                "memory_id": matched_memory_id,
+                "entity_id": str(matched_entity_id),
+                "role": "subject",
+            }
         ]
     )
     fake_storage.load_memories_by_ids = AsyncMock(
@@ -306,7 +314,11 @@ async def test_collect_memories_forwards_single_element_when_different_from_home
     )
     fake_storage.get_memory_ids_by_entity_ids = AsyncMock(
         return_value=[
-            {"memory_id": matched_memory_id, "entity_id": str(matched_entity_id), "role": "subject"}
+            {
+                "memory_id": matched_memory_id,
+                "entity_id": str(matched_entity_id),
+                "role": "subject",
+            }
         ]
     )
     fake_storage.load_memories_by_ids = AsyncMock(
@@ -357,7 +369,6 @@ async def test_collect_memories_forwards_single_element_when_different_from_home
 async def test_entity_lookup_fires_when_match_count_at_threshold():
     """Match count exactly at the threshold is still allowed through —
     the gate is `> threshold`, not `>= threshold`."""
-    import logging
 
     from core_api.constants import ENTITY_LOOKUP_MAX_MATCHES
     from core_api.pipeline.context import PipelineContext
@@ -369,13 +380,19 @@ async def test_entity_lookup_fires_when_match_count_at_threshold():
     matched_memory_id = str(uuid4())
 
     fake_storage = AsyncMock()
-    fake_storage.fts_search_entities = AsyncMock(return_value=[str(e) for e in matched_entity_ids])
+    fake_storage.fts_search_entities = AsyncMock(
+        return_value=[str(e) for e in matched_entity_ids]
+    )
     fake_storage.expand_graph = AsyncMock(
         return_value={str(matched_entity_ids[0]): {"hop": 0, "weight": 1.0}}
     )
     fake_storage.get_memory_ids_by_entity_ids = AsyncMock(
         return_value=[
-            {"memory_id": matched_memory_id, "entity_id": str(matched_entity_ids[0]), "role": "subject"}
+            {
+                "memory_id": matched_memory_id,
+                "entity_id": str(matched_entity_ids[0]),
+                "role": "subject",
+            }
         ]
     )
     fake_storage.load_memories_by_ids = AsyncMock(
@@ -429,7 +446,9 @@ async def test_entity_lookup_falls_through_when_match_count_exceeds_threshold(ca
     matched_entity_ids = [uuid4() for _ in range(ENTITY_LOOKUP_MAX_MATCHES + 1)]
 
     fake_storage = AsyncMock()
-    fake_storage.fts_search_entities = AsyncMock(return_value=[str(e) for e in matched_entity_ids])
+    fake_storage.fts_search_entities = AsyncMock(
+        return_value=[str(e) for e in matched_entity_ids]
+    )
     # These must NOT be called once the gate fires.
     fake_storage.expand_graph = AsyncMock(return_value={})
     fake_storage.get_memory_ids_by_entity_ids = AsyncMock(return_value=[])
@@ -443,10 +462,15 @@ async def test_entity_lookup_falls_through_when_match_count_exceeds_threshold(ca
         "temporal_window": None,
     }
 
-    with patch(
-        "core_api.pipeline.steps.search.classify_query.get_storage_client",
-        return_value=fake_storage,
-    ), caplog.at_level(logging.INFO, logger="core_api.pipeline.steps.search.classify_query"):
+    with (
+        patch(
+            "core_api.pipeline.steps.search.classify_query.get_storage_client",
+            return_value=fake_storage,
+        ),
+        caplog.at_level(
+            logging.INFO, logger="core_api.pipeline.steps.search.classify_query"
+        ),
+    ):
         await ClassifyQuery().execute(ctx)
 
     # Downstream calls must NOT have happened — short-circuit was declined.
@@ -465,4 +489,108 @@ async def test_entity_lookup_falls_through_when_match_count_exceeds_threshold(ca
     assert declined, (
         "decline decision must be logged at INFO so ops can see how often the gate fires; "
         f"got: {[r.message for r in caplog.records]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A30: person-hub dilution — match-count-aware fan-out cap
+# ---------------------------------------------------------------------------
+
+
+async def test_collect_memories_cap_prefers_multi_matched_entity_gold_over_hub_siblings():
+    """A30: when a hub entity floods the candidate pool beyond
+    GRAPH_MAX_BOOSTED_MEMORIES, the fan-out cap must keep the memory that
+    links to MORE of the query's matched (hop-0) entities over single-link
+    siblings, even though hop-boost is near-uniform.
+
+    Concretely: "What is John Smith #0000's manager?" matches the bare
+    "john smith" hub (100+ sibling memories) AND the "manager" role. The
+    gold "John Smith #0000's manager is Mark Lin" links to BOTH (match
+    count 2); sibling facts about other attributes link to only the hub
+    (count 1). A cap by near-uniform hop-boost alone drops the gold before
+    the _query_overlap rerank can see it (the original A30 bug).
+
+    Regression guard: the gold's links are returned LAST, so a cap by boost
+    alone (stable sort over equal boosts) cuts it; only the match-count
+    primary key rescues it. This test fails on the pre-A30 code.
+    """
+    from core_api.constants import GRAPH_MAX_BOOSTED_MEMORIES
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.search.classify_query import ClassifyQuery
+    from core_api.pipeline.steps.search.retrieval_types import RetrievalStrategy
+
+    hub_entity = uuid4()  # bare "john smith" — matched, hop 0, popular
+    role_entity = uuid4()  # "manager" role — matched, hop 0
+    gold_id = str(uuid4())
+
+    # More siblings than the cap, each linking ONLY to the hub.
+    n_siblings = GRAPH_MAX_BOOSTED_MEMORIES + 30
+    sibling_ids = [str(uuid4()) for _ in range(n_siblings)]
+
+    fake_storage = AsyncMock()
+    fake_storage.fts_search_entities = AsyncMock(
+        return_value=[str(hub_entity), str(role_entity)]
+    )
+    fake_storage.expand_graph = AsyncMock(
+        return_value={
+            str(hub_entity): {"hop": 0, "weight": 1.0},
+            str(role_entity): {"hop": 0, "weight": 1.0},
+        }
+    )
+    # Siblings -> hub only (1 matched entity each); gold -> hub AND role
+    # (2 matched entities). Gold links appended LAST so a boost-only
+    # stable-sort cap would drop it at the GRAPH_MAX_BOOSTED_MEMORIES cut.
+    links = [
+        {"memory_id": sid, "entity_id": str(hub_entity), "role": "subject"}
+        for sid in sibling_ids
+    ] + [
+        {"memory_id": gold_id, "entity_id": str(hub_entity), "role": "subject"},
+        {"memory_id": gold_id, "entity_id": str(role_entity), "role": "mentioned"},
+    ]
+    fake_storage.get_memory_ids_by_entity_ids = AsyncMock(return_value=links)
+
+    captured: dict = {}
+
+    async def _load(payload):
+        captured["ids"] = list(payload["memory_ids"])
+        return [
+            {
+                "id": mid,
+                "tenant_id": "t1",
+                "content": "x",
+                "memory_type": "fact",
+                "weight": 0.5,
+                "status": "active",
+                "ts_valid_start": None,
+                "ts_valid_end": None,
+                "metadata_": {},
+                "fleet_id": None,
+            }
+            for mid in payload["memory_ids"]
+        ]
+
+    fake_storage.load_memories_by_ids = AsyncMock(side_effect=_load)
+
+    ctx = PipelineContext()
+    ctx.data = {
+        "query": "What is John Smith #0000's manager?",
+        "tenant_id": "t1",
+        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": 10},
+        "temporal_window": None,
+    }
+
+    with patch(
+        "core_api.pipeline.steps.search.classify_query.get_storage_client",
+        return_value=fake_storage,
+    ):
+        await ClassifyQuery().execute(ctx)
+
+    assert ctx.data["retrieval_plan"].strategy == RetrievalStrategy.ENTITY_LOOKUP
+    # The cap keeps exactly GRAPH_MAX_BOOSTED_MEMORIES ids for loading...
+    assert len(captured["ids"]) == GRAPH_MAX_BOOSTED_MEMORIES
+    # ...and the gold (2 matched entities) must be among them despite being
+    # enqueued last — this is the A30 fix.
+    assert gold_id in captured["ids"], (
+        "A30 regression: the multi-matched-entity gold was dropped by the "
+        "fan-out cap — match-count must rank ahead of near-uniform hop-boost."
     )
