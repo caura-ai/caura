@@ -26,6 +26,18 @@ RUN uv export --frozen --no-dev --extra pubsub --no-emit-project \
       --directory core-api -o /tmp/reqs.txt \
     && uv pip install --system --no-cache -r /tmp/reqs.txt
 
+# Stamp the service version into a file the app reads at runtime. Source of
+# truth is pyproject.toml; an optional MEMCLAW_VERSION build-arg (e.g. the
+# release tag) overrides it. Deterministic and independent of installed-
+# package metadata — deps install via ``--no-emit-project`` so core-api is
+# never installed as a package, leaving importlib.metadata with no version
+# to find (the endpoint silently served "dev"). Read by
+# core_api.constants._resolve_version().
+ARG MEMCLAW_VERSION=
+RUN VER="${MEMCLAW_VERSION:-$(python -c "import tomllib; print(tomllib.load(open('core-api/pyproject.toml','rb'))['project']['version'])")}" \
+    && printf '%s' "$VER" > /app/VERSION \
+    && echo "Stamped MemClaw version: $VER"
+
 # Copy actual source
 COPY common/ /app/common/
 COPY core-api/src/ /app/core-api/src/

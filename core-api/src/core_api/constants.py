@@ -2,6 +2,7 @@
 
 import importlib.metadata
 import os
+from pathlib import Path
 
 # Re-export DB-query constants from common (shared with core-storage-api).
 from common.constants import (  # noqa: F401
@@ -58,12 +59,39 @@ def is_mcp_path(path: str) -> bool:
 
 
 # ── Version ──
-# Source-only dev (PYTHONPATH set but no `pip install -e`) has no
-# package metadata; fall back to "dev" rather than crashing import.
-try:
-    VERSION = importlib.metadata.version("core-api")
-except importlib.metadata.PackageNotFoundError:
-    VERSION = "dev"
+def _resolve_version() -> str:
+    """Resolve the running service version.
+
+    Precedence (most to least authoritative):
+
+    1. ``MEMCLAW_VERSION`` env — explicit deploy/ad-hoc override.
+    2. ``VERSION`` file baked into the image at build time from
+       ``pyproject.toml`` (see ``core-api/Dockerfile``). Deterministic and
+       independent of installed-package metadata — the prod Dockerfile
+       installs deps via ``uv export --no-emit-project`` (the project
+       itself is never installed), so ``importlib.metadata`` finds no
+       ``core-api`` dist and the endpoint silently served ``"dev"``.
+    3. Installed package metadata — editable dev installs (``pip install -e``).
+    4. ``"dev"`` — source-only checkout with none of the above.
+    """
+    env = os.environ.get("MEMCLAW_VERSION")
+    if env and env.strip():
+        return env.strip()
+    # constants.py → core_api → src → core-api → repo root (image: /app).
+    version_file = Path(__file__).resolve().parents[3] / "VERSION"
+    try:
+        stamped = version_file.read_text().strip()
+        if stamped:
+            return stamped
+    except OSError:
+        pass
+    try:
+        return importlib.metadata.version("core-api")
+    except importlib.metadata.PackageNotFoundError:
+        return "dev"
+
+
+VERSION = _resolve_version()
 OPENAI_EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDING_RETRY_ATTEMPTS = 2
 EMBEDDING_RETRY_DELAY_S = 1.0

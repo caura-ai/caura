@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 
-from core_api.constants import VERSION
+from core_api.constants import VERSION, _resolve_version
 
 
 # ---------------------------------------------------------------------------
@@ -163,3 +164,30 @@ async def test_status_is_valid_json(client):
     resp = await client.get("/api/v1/status")
     assert resp.status_code == 200
     json.loads(resp.text)  # raises if the body isn't strict JSON
+
+
+# ---------------------------------------------------------------------------
+# Version resolution (regression guard — /api/v1/version once served "dev")
+# ---------------------------------------------------------------------------
+
+
+def test_version_is_resolved_not_dev():
+    """In CI core-api is installed editable, so metadata resolution yields a
+    real semver. ``"dev"`` here means the resolution chain is broken."""
+    assert VERSION != "dev"
+    assert re.match(r"^\d+\.\d+\.\d+", VERSION), VERSION
+
+
+def test_version_env_override_wins(monkeypatch):
+    """An explicit ``MEMCLAW_VERSION`` env beats file/metadata resolution."""
+    monkeypatch.setenv("MEMCLAW_VERSION", "9.9.9-test")
+    assert _resolve_version() == "9.9.9-test"
+
+
+def test_version_blank_env_override_ignored(monkeypatch):
+    """A blank/whitespace ``MEMCLAW_VERSION`` must not win — it falls through
+    to the file/metadata chain rather than serving an empty version."""
+    monkeypatch.setenv("MEMCLAW_VERSION", "   ")
+    resolved = _resolve_version()
+    assert resolved.strip() == resolved
+    assert resolved not in ("", "dev")

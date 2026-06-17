@@ -144,3 +144,39 @@ jobs:
         run: |
           cd core-api && uv build && cd ..
           cd core-storage-api && uv build
+
+  image-version:
+    # Guards the /api/v1/version surface end-to-end: builds the actual
+    # core-api image and asserts it bakes a real semver (== pyproject),
+    # not "dev". This is the regression that silently shipped for weeks —
+    # the prod Dockerfile installs deps via ``uv export --no-emit-project``
+    # so core-api is never installed as a package, leaving importlib.metadata
+    # with nothing to resolve → "dev". A pytest check can't catch it: CI
+    # installs core-api editable, so the bug only exists inside the built
+    # image. See core-api/Dockerfile version stamp +
+    # core_api.constants._resolve_version().
+    name: core-api image bakes a real version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Build core-api image
+        run: docker build --platform linux/amd64 --target runtime -t core-api-versiontest -f core-api/Dockerfile .
+
+      - name: Assert baked version is a real semver matching pyproject
+        run: |
+          BAKED=$(docker run --rm core-api-versiontest python -c "from core_api.constants import VERSION; print(VERSION)")
+          EXPECTED=$(python3 -c "import tomllib; print(tomllib.load(open('core-api/pyproject.toml','rb'))['project']['version'])")
+          echo "baked=$BAKED expected=$EXPECTED"
+          if [ "$BAKED" = "dev" ] || ! echo "$BAKED" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::core-api image did not bake a real semver (got '$BAKED'). /api/v1/version would serve a bogus value — see core-api/Dockerfile + core_api.constants._resolve_version."
+            exit 1
+          fi
+          if [ "$BAKED" != "$EXPECTED" ]; then
+            echo "::error::baked version '$BAKED' != pyproject '$EXPECTED' — the version stamp drifted from the source of truth."
+            exit 1
+          fi

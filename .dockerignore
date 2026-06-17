@@ -7,6 +7,11 @@ node_modules
 memclaw/node_modules
 memclaw/.next
 *.egg-info
+# Bare globs only match the context root — add a recursive form so a stray
+# nested build artifact (e.g. core-api/src/core_api.egg-info from a local
+# editable install) can't bake into the image and shadow the version stamp.
+**/*.egg-info
+**/__pycache__
 .pytest_cache
 .mypy_cache
 .venv
