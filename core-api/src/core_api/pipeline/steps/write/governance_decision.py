@@ -71,6 +71,9 @@ class GovernanceDecision:
                     agent_id=data.agent_id,
                     action=ACTION_PII_DROP,
                     detail=llm_pii_audit_detail(ACTION_PII_DROP, enr.pii_types, data.content, write_mode),
+                    # Reject path: audit must survive queue overflow (the write
+                    # is refused, so a dropped audit would erase the only record).
+                    critical=True,
                 )
                 raise HTTPException(
                     status_code=422,
@@ -106,6 +109,8 @@ class GovernanceDecision:
                     agent_id=data.agent_id,
                     action=ACTION_NB_DROP,
                     detail=nonbusiness_audit_detail(ACTION_NB_DROP, data.content, write_mode),
+                    # Reject path: audit must survive queue overflow (see above).
+                    critical=True,
                 )
                 raise HTTPException(
                     status_code=422,

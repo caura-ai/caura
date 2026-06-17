@@ -1075,6 +1075,9 @@ async def create_memories_bulk(
                     agent_id=data.agent_id,
                     action=ACTION_PII_DROP,
                     detail=pii_audit_detail(ACTION_PII_DROP, findings, item.content, "bulk"),
+                    # Reject path: the item is refused, so this audit is the only
+                    # record — must survive queue overflow (sync-fallback).
+                    critical=True,
                 )
                 governance_errors[i] = "rejected by content policy: sensitive data detected"
             elif gov_pii.action == "mask":

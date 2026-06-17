@@ -60,6 +60,9 @@ class GovernanceScanContent:
                 agent_id=data.agent_id,
                 action=ACTION_PII_DROP,
                 detail=pii_audit_detail(ACTION_PII_DROP, findings, data.content, write_mode),
+                # Reject path: the write is refused, so this audit is the only
+                # record — must survive queue overflow (sync-fallback, not drop).
+                critical=True,
             )
             raise HTTPException(
                 status_code=422,

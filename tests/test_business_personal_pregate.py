@@ -11,6 +11,7 @@ Layers, all deterministic (no HTTP/settings round-trip):
   * Pipeline wiring: the step is composed into strong + fast at the right spot.
 """
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,7 @@ from core_api.pipeline.steps.write import business_personal_pregate as pregate_m
 from core_api.pipeline.steps.write.business_personal_pregate import (
     BusinessPersonalPregate,
 )
+from core_api.services import business_classifier as bc_mod
 from core_api.services.business_classifier import (
     BusinessClassification,
     classify_business_personal,
@@ -75,14 +77,31 @@ def _ctx(data, *, cfg, mode="strong") -> PipelineContext:
     )
 
 
-def _patch_classifier(monkeypatch, *, relevance="personal", confidence=0.95):
-    """Replace the step's classifier with a canned result; capture call kwargs."""
+def _patch_classifier(
+    monkeypatch,
+    *,
+    relevance="personal",
+    confidence=0.95,
+    llm_ms=3,
+    result_provider="openai",
+    result_model="gpt-5.4-nano",
+):
+    """Replace the step's classifier with a canned result; capture call kwargs.
+
+    ``provider``/``model`` here are the verdict's ACTUAL provider/model (what the
+    classifier reports it used, possibly a fallback) — distinct from the intended
+    provider/model the step passes in, which we capture. ``llm_ms=0`` simulates a
+    fail-open verdict (no live model ran)."""
     captured: dict = {}
 
     async def _fake(content, tenant_config=None, *, provider, model):
         captured.update(content=content, provider=provider, model=model)
         return BusinessClassification(
-            business_relevance=relevance, confidence=confidence, llm_ms=3
+            business_relevance=relevance,
+            confidence=confidence,
+            llm_ms=llm_ms,
+            provider=result_provider,
+            model=result_model,
         )
 
     monkeypatch.setattr(pregate_mod, "classify_business_personal", _fake)
@@ -139,6 +158,35 @@ async def test_pregate_personal_drop_raises_422(monkeypatch, emitted):
     drop = next(c for c in emitted if c["action"] == "nonbusiness_pregate_drop")
     assert drop["detail"]["source"] == "llm_pregate"
     assert drop["detail"]["confidence"] == 0.9
+    # Reject path → the audit must survive queue overflow (sync fallback).
+    assert drop["critical"] is True
+
+
+async def test_pregate_drop_audit_records_actual_provider_under_fallback(
+    monkeypatch, emitted
+):
+    # Intended provider is "openai", but the verdict actually came from the
+    # tenant's fallback ("gemini"/"gemini-2.0-flash"). The audit must name the
+    # provider/model that ACTUALLY decided, not the intended one (audit truth).
+    _patch_classifier(
+        monkeypatch,
+        relevance="personal",
+        confidence=0.9,
+        result_provider="gemini",
+        result_model="gemini-2.0-flash",
+    )
+    cfg = _cfg(
+        nb={
+            "enabled": True,
+            "disposition": "drop",
+            "pregate": {"enabled": True, "provider": "openai", "model": "gpt-5.4-nano"},
+        }
+    )
+    with pytest.raises(HTTPException):
+        await BusinessPersonalPregate().execute(_ctx(_data("my vacation"), cfg=cfg))
+    drop = next(c for c in emitted if c["action"] == "nonbusiness_pregate_drop")
+    assert drop["detail"]["provider"] == "gemini"
+    assert drop["detail"]["model"] == "gemini-2.0-flash"
 
 
 async def test_pregate_business_flows_through(monkeypatch, emitted):
@@ -208,6 +256,86 @@ async def test_classifier_none_provider_fail_open():
     )
     assert res.business_relevance == "business"
     assert res.llm_ms == 0
+    # No live model ran → no provider/model attribution.
+    assert res.provider is None and res.model is None
+
+
+async def test_classifier_times_out_fails_open(monkeypatch):
+    # A slow/unreachable provider must never stall a write: the hard ceiling
+    # cancels the chain and the classifier fails open (business, llm_ms=0).
+    monkeypatch.setattr(bc_mod, "PREGATE_CLASSIFIER_TIMEOUT_SECONDS", 0.01)
+
+    async def _slow(**kwargs):
+        await asyncio.sleep(1.0)
+        raise AssertionError("should have been cancelled by the timeout")
+
+    monkeypatch.setattr(bc_mod, "call_with_fallback", _slow)
+    res = await classify_business_personal(
+        "anything", None, provider="openai", model=None
+    )
+    assert res.business_relevance == "business"
+    assert res.llm_ms == 0
+
+
+async def test_pregate_failopen_stores_without_enforcement_by_default(
+    monkeypatch, emitted, caplog
+):
+    # Classifier unavailable (fail-open: provider/model unset) + fail_closed
+    # default False → the write proceeds (no exception, no drop audit), but an
+    # alertable warning surfaces the silent enforcement bypass.
+    _patch_classifier(
+        monkeypatch,
+        relevance="business",
+        confidence=0.0,
+        llm_ms=0,
+        result_provider=None,
+        result_model=None,
+    )
+    cfg = _cfg(
+        nb={
+            "enabled": True,
+            "disposition": "drop",
+            "pregate": {"enabled": True, "provider": "none"},
+        }
+    )
+    with caplog.at_level("WARNING"):
+        res = await BusinessPersonalPregate().execute(_ctx(_data(), cfg=cfg))
+    assert res is None
+    assert emitted == []  # fail-open: nothing dropped, nothing audited
+    assert any("WITHOUT pre-gate enforcement" in r.message for r in caplog.records)
+
+
+async def test_pregate_failclosed_rejects_when_classifier_unavailable(
+    monkeypatch, emitted, caplog
+):
+    # Same unavailable classifier, but fail_closed=True → reject the write (503)
+    # rather than store unclassified content, with a distinct critical audit.
+    _patch_classifier(
+        monkeypatch,
+        relevance="business",
+        confidence=0.0,
+        llm_ms=0,
+        result_provider=None,
+        result_model=None,
+    )
+    cfg = _cfg(
+        nb={
+            "enabled": True,
+            "disposition": "drop",
+            "pregate": {"enabled": True, "provider": "none", "fail_closed": True},
+        }
+    )
+    with caplog.at_level("WARNING"), pytest.raises(HTTPException) as exc:
+        await BusinessPersonalPregate().execute(_ctx(_data(), cfg=cfg))
+    assert exc.value.status_code == 503
+    unavail = next(
+        c for c in emitted if c["action"] == "nonbusiness_pregate_unavailable"
+    )
+    assert unavail["detail"]["source"] == "llm_pregate"
+    assert unavail["critical"] is True
+    # The log must reflect the rejection, not claim the content was stored.
+    assert any("REJECTING write" in r.message for r in caplog.records)
+    assert not any("content stored WITHOUT" in r.message for r in caplog.records)
 
 
 async def test_classifier_prompt_preserves_braces():
@@ -229,6 +357,7 @@ async def test_pregate_default_off():
     pg = ResolvedConfig({}).governance_non_business_pregate
     assert pg.enabled is False
     assert pg.provider is None and pg.model is None and pg.min_confidence is None
+    assert pg.fail_closed is False  # opt-in: default fail-open
 
 
 async def test_pregate_settings_resolve():
@@ -241,6 +370,7 @@ async def test_pregate_settings_resolve():
                         "provider": "openai",
                         "model": "gpt-5.4-nano",
                         "min_confidence": 0.7,
+                        "fail_closed": True,
                     }
                 }
             }
@@ -251,6 +381,7 @@ async def test_pregate_settings_resolve():
         and pg.provider == "openai"
         and pg.model == "gpt-5.4-nano"
         and pg.min_confidence == 0.7
+        and pg.fail_closed is True
     )
 
 

@@ -15,6 +15,8 @@ a classifier failure or a ``none`` provider never blocks a write.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import HTTPException
 
 from core_api.pipeline.context import PipelineContext
@@ -22,9 +24,12 @@ from core_api.pipeline.step import StepOutcome, StepResult
 from core_api.services.business_classifier import classify_business_personal
 from core_api.services.governance_gate import (
     ACTION_NB_PREGATE_DROP,
+    ACTION_NB_PREGATE_UNAVAILABLE,
     emit_governance_audit,
     nonbusiness_pregate_audit_detail,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class BusinessPersonalPregate:
@@ -50,6 +55,50 @@ class BusinessPersonalPregate:
         provider = pregate.provider or cfg.enrichment_provider
         result = await classify_business_personal(data.content, cfg, provider=provider, model=pregate.model)
 
+        # No live model evaluated this write (``provider is None`` ⇔ the
+        # fail-open path: ``none`` provider, timeout, or classifier error), so a
+        # "drop" policy isn't actually being enforced on it. Act per the
+        # tenant's fail-open (default) vs fail-closed choice.
+        if result.provider is None:
+            if pregate.fail_closed:
+                # Fail-closed: reject rather than store unclassified content.
+                logger.warning(
+                    "business_personal_pregate: classifier unavailable while a non-business "
+                    "'drop' policy is active — REJECTING write (fail_closed) (tenant=%s, provider=%s)",
+                    data.tenant_id,
+                    provider,
+                )
+                await emit_governance_audit(
+                    ctx.db,
+                    tenant_id=data.tenant_id,
+                    agent_id=data.agent_id,
+                    action=ACTION_NB_PREGATE_UNAVAILABLE,
+                    detail=nonbusiness_pregate_audit_detail(
+                        ACTION_NB_PREGATE_UNAVAILABLE,
+                        data.content,
+                        write_mode,
+                        provider=provider,
+                        model=pregate.model,
+                        confidence=None,
+                    ),
+                    critical=True,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="Content policy classifier unavailable; write rejected (fail-closed)",
+                )
+            # Fail-open (default): store the write but surface the silent bypass
+            # so a compliance tenant can detect it (the post-enrichment gate is
+            # the backstop).
+            logger.warning(
+                "business_personal_pregate: classifier unavailable (fail-open) while a "
+                "non-business 'drop' policy is active — content stored WITHOUT pre-gate "
+                "enforcement (tenant=%s, provider=%s)",
+                data.tenant_id,
+                provider,
+            )
+            return None
+
         # Fail-open: only a confident "personal" verdict blocks. min_confidence
         # None → 0.0 → act on any "personal" (matches the post-enrichment gate).
         threshold = pregate.min_confidence or 0.0
@@ -63,10 +112,15 @@ class BusinessPersonalPregate:
                     ACTION_NB_PREGATE_DROP,
                     data.content,
                     write_mode,
-                    provider=provider,
-                    model=pregate.model,
+                    # The provider/model that ACTUALLY classified (may be the
+                    # fallback) — not the intended ones — so audit is truthful.
+                    provider=result.provider,
+                    model=result.model,
                     confidence=result.confidence,
                 ),
+                # Reject path: the write is refused, so its audit must not be
+                # lost to queue overflow — sync-fallback rather than drop.
+                critical=True,
             )
             raise HTTPException(
                 status_code=422,

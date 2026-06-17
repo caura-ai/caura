@@ -73,6 +73,9 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> bool:
                 action=ACTION_PII_DROP,
                 detail=llm_pii_audit_detail(ACTION_PII_DROP, pii_types, content, "fast"),
                 resource_id=memory_id,
+                # Destructive: the soft-delete below removes the row, so this
+                # audit is the only trace — must survive queue overflow.
+                critical=True,
             )
             await sc.soft_delete_memory(memory_id)
             logger.info("governance: dropped fast-mode memory %s (pii)", memory_id)
@@ -108,6 +111,8 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> bool:
                 action=ACTION_NB_DROP,
                 detail=nonbusiness_audit_detail(ACTION_NB_DROP, content, "fast"),
                 resource_id=memory_id,
+                # Destructive: see the PII-drop branch — audit is the only trace.
+                critical=True,
             )
             await sc.soft_delete_memory(memory_id)
             logger.info("governance: dropped fast-mode memory %s (non-business)", memory_id)

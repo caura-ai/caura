@@ -101,8 +101,21 @@ class AuditEventQueue:
     def queue_size(self) -> int:
         return self._queue.qsize()
 
-    def enqueue(self, event: dict) -> None:
+    def enqueue(self, event: dict, *, silent: bool = False) -> bool:
         """Non-blocking enqueue. Drops + warns when the queue is full.
+
+        Returns ``True`` when the event was queued, ``False`` when the
+        queue was full and the event dropped. Fire-and-forget callers ignore
+        the return — the prior ``None`` was already falsy, so existing call
+        sites are unaffected. A compliance-critical caller inspects it to fall
+        back to a synchronous write for an event that must not be lost (see
+        ``log_action(critical=True)``).
+
+        ``silent``: when True, a full-queue rejection returns ``False``
+        without incrementing the drop counter or logging — for a caller that
+        recovers the event itself (e.g. ``log_action(critical=True)``, which
+        falls back to a synchronous write), so a recovered event isn't
+        miscounted as a loss.
 
         Synchronous (no ``await``) so callers in fire-and-forget paths
         don't pay an extra event-loop hop. ``Queue.put_nowait`` returns
@@ -114,6 +127,10 @@ class AuditEventQueue:
         try:
             self._queue.put_nowait(event)
         except asyncio.QueueFull:
+            if silent:
+                # Caller will recover this event synchronously — not a real
+                # drop, so leave the metric and the warning untouched.
+                return False
             self._dropped_count += 1
             # Log every 100th drop so a sustained overload produces a
             # finite, informative log volume rather than one line per
@@ -126,11 +143,12 @@ class AuditEventQueue:
                     self._dropped_count,
                     self._max_queue_size,
                 )
-            return
+            return False
         # Wake the flusher early when we reach the batch threshold so a
         # storm doesn't have to wait for the interval timer.
         if self._queue.qsize() >= self._flush_threshold:
             self._wake_event.set()
+        return True
 
     async def start(self) -> None:
         """Idempotent: a second call is a no-op."""

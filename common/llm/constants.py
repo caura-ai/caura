@@ -83,6 +83,20 @@ def _read_float_env(name: str, default: float | None) -> float | None:
 OPENAI_REQUEST_TIMEOUT_SECONDS = _read_float_env("OPENAI_REQUEST_TIMEOUT_SECONDS", 25.0)
 
 
+# Hard ceiling on the *whole* business/personal pre-gate classification —
+# across retries and any provider fallback — enforced by the classifier itself
+# (``classify_business_personal`` wraps the call in ``asyncio.wait_for``). The
+# pre-gate is a fast, fail-open go/no-go that runs inline on the write path
+# BEFORE the row is written, so a slow or unreachable provider must never stall
+# a write: exceeding this ceiling fails open (the post-enrichment gate remains
+# the backstop). Deliberately aggressive — much tighter than the per-call SDK
+# read timeout above — because the cost of a too-low value is only a missed
+# early-reject, never a blocked write. Env-tunable per deployment.
+PREGATE_CLASSIFIER_TIMEOUT_SECONDS = _read_float_env(
+    "PREGATE_CLASSIFIER_TIMEOUT_SECONDS", 5.0
+)
+
+
 # ── httpx pool sizing for OpenAI-compatible providers ────────────────
 #
 # CAURA-627: the SDK rides httpx's default (100 max_connections / 20

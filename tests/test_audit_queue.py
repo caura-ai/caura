@@ -134,11 +134,54 @@ async def test_overflow_drops_and_increments_counter() -> None:
     assert q.queue_size == 2
     assert q.dropped_count == 0
 
-    q.enqueue({"i": 2})  # full
-    q.enqueue({"i": 3})  # still full
+    assert q.enqueue({"i": 2}) is False  # full → dropped
+    assert q.enqueue({"i": 3}) is False  # still full
 
     assert q.queue_size == 2
     assert q.dropped_count == 2
+
+
+@pytest.mark.asyncio
+async def test_enqueue_returns_true_when_queued() -> None:
+    """enqueue reports success so a compliance-critical caller can tell a
+    queued event from a dropped one (see log_action critical fallback)."""
+
+    async def flush(events: list[dict]) -> None:
+        pass
+
+    q = AuditEventQueue(
+        max_queue_size=2,
+        flush_threshold=1000,
+        flush_interval_seconds=1000.0,
+        flush_callable=flush,
+    )
+    assert q.enqueue({"i": 0}) is True
+    assert q.enqueue({"i": 1}) is True
+    assert q.enqueue({"i": 2}) is False  # now full
+
+
+@pytest.mark.asyncio
+async def test_enqueue_silent_drop_does_not_count_or_warn() -> None:
+    """A ``silent=True`` full-queue rejection returns False but leaves the
+    drop counter untouched — the critical path recovers the event via a sync
+    write, so counting it as dropped would over-count the metric and emit a
+    false 'dropped' warning for an event that was never lost."""
+
+    async def flush(events: list[dict]) -> None:
+        pass
+
+    q = AuditEventQueue(
+        max_queue_size=1,
+        flush_threshold=1000,
+        flush_interval_seconds=1000.0,
+        flush_callable=flush,
+    )
+    assert q.enqueue({"i": 0}) is True
+    # Full now: a silent reject doesn't move the counter; a loud one does.
+    assert q.enqueue({"i": 1}, silent=True) is False
+    assert q.dropped_count == 0
+    assert q.enqueue({"i": 2}) is False
+    assert q.dropped_count == 1
 
 
 @pytest.mark.asyncio
@@ -321,8 +364,13 @@ async def test_log_action_mints_unique_client_event_id() -> None:
     from core_api.services import audit_service
 
     captured: list[dict] = []
+
+    def _capture(payload: dict, *, silent: bool = False) -> bool:
+        captured.append(payload)
+        return True
+
     fake_queue = MagicMock()
-    fake_queue.enqueue = captured.append
+    fake_queue.enqueue = _capture
     with patch.object(audit_service, "get_audit_queue", return_value=fake_queue):
         await audit_service.log_action(
             None, tenant_id="t", action="create", resource_type="memory"
@@ -337,3 +385,104 @@ async def test_log_action_mints_unique_client_event_id() -> None:
     UUID(captured[1]["client_event_id"])
     # ...and distinct per event, so two different mutations never collide.
     assert captured[0]["client_event_id"] != captured[1]["client_event_id"]
+
+
+@pytest.mark.asyncio
+async def test_log_action_critical_falls_back_to_sync_on_full_queue() -> None:
+    """A ``critical`` event whose enqueue is rejected (queue full → enqueue
+    returns False) falls back to a synchronous storage POST instead of being
+    silently dropped. Non-critical events stay fire-and-forget."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from core_api.services import audit_service
+
+    full_queue = MagicMock()
+    full_queue.enqueue = MagicMock(return_value=False)  # always "full"
+    fake_storage = MagicMock()
+    fake_storage.create_audit_log = AsyncMock()
+
+    with (
+        patch.object(audit_service, "get_audit_queue", return_value=full_queue),
+        patch.object(audit_service, "get_storage_client", return_value=fake_storage),
+    ):
+        # Non-critical: dropped on overflow, no synchronous write.
+        await audit_service.log_action(
+            None, tenant_id="t", action="create", resource_type="memory"
+        )
+        fake_storage.create_audit_log.assert_not_called()
+
+        # Critical: falls back to the synchronous storage write.
+        await audit_service.log_action(
+            None,
+            tenant_id="t",
+            action="nonbusiness_pregate_drop",
+            resource_type="memory",
+            critical=True,
+        )
+    fake_storage.create_audit_log.assert_awaited_once()
+    payload = fake_storage.create_audit_log.await_args.args[0]
+    assert payload["action"] == "nonbusiness_pregate_drop"
+    # The non-critical enqueue must NOT be silent (a real drop should count +
+    # warn); the critical one MUST be silent (it's recovered via the sync
+    # write, so it isn't a real drop and shouldn't inflate the metric).
+    silent_flags = [c.kwargs.get("silent", False) for c in full_queue.enqueue.call_args_list]
+    assert silent_flags == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_log_action_critical_uses_queue_when_not_full() -> None:
+    """A ``critical`` event that the queue accepts (enqueue returns True) does
+    NOT pay the synchronous fallback — the hot path stays fast."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from core_api.services import audit_service
+
+    ok_queue = MagicMock()
+    ok_queue.enqueue = MagicMock(return_value=True)
+    fake_storage = MagicMock()
+    fake_storage.create_audit_log = AsyncMock()
+
+    with (
+        patch.object(audit_service, "get_audit_queue", return_value=ok_queue),
+        patch.object(audit_service, "get_storage_client", return_value=fake_storage),
+    ):
+        await audit_service.log_action(
+            None,
+            tenant_id="t",
+            action="nonbusiness_pregate_drop",
+            resource_type="memory",
+            critical=True,
+        )
+    ok_queue.enqueue.assert_called_once()
+    fake_storage.create_audit_log.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_log_action_critical_sync_failure_does_not_propagate() -> None:
+    """If the critical sync fallback ALSO fails (queue full AND storage down),
+    log_action logs loudly but does NOT raise. A critical audit is emitted
+    right before a governance enforcement action (a 4xx reject or a
+    soft-delete); a failing audit write must not block that action — otherwise
+    the row the policy means to drop would be left in place."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from core_api.services import audit_service
+
+    full_queue = MagicMock()
+    full_queue.enqueue = MagicMock(return_value=False)  # queue full
+    fake_storage = MagicMock()
+    fake_storage.create_audit_log = AsyncMock(side_effect=RuntimeError("storage down"))
+
+    with (
+        patch.object(audit_service, "get_audit_queue", return_value=full_queue),
+        patch.object(audit_service, "get_storage_client", return_value=fake_storage),
+    ):
+        # Must NOT raise despite both the queue and the sync write failing.
+        await audit_service.log_action(
+            None,
+            tenant_id="t",
+            action="nonbusiness_pregate_drop",
+            resource_type="memory",
+            critical=True,
+        )
+    fake_storage.create_audit_log.assert_awaited_once()

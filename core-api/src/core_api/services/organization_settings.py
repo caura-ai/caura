@@ -278,14 +278,24 @@ DEFAULT_SETTINGS: dict = {
             # default like every other security control. Its own provider/model
             # so the signal is independent of the enrichment provider (survives
             # ``enrichment_provider=none``, e.g. CI). ``min_confidence`` None →
-            # act on any "personal" verdict (matches the post-enrichment gate);
-            # set it to require higher confidence before dropping (fewer false
-            # rejects). Fail-open: a classifier failure never blocks a write.
+            # act on any "personal" verdict. Raising it makes the pre-gate SKIP
+            # the early drop for low-confidence "personal" verdicts and defer
+            # them to the more accurate post-enrichment gate; it does NOT add a
+            # confidence floor to the final decision (that backstop drops any
+            # "personal" verdict unconditionally — there is no enrichment
+            # confidence to gate on). So it trades a little extra compute for
+            # fewer *early* rejects on borderline content, not a blanket
+            # reduction in drops. ``fail_closed`` False → fail-open: a classifier
+            # failure/timeout never blocks a write (the post-enrichment gate
+            # remains the backstop). Set ``fail_closed`` True so a tenant that
+            # requires enforcement REJECTS writes (503) when the classifier is
+            # unavailable rather than storing unclassified content.
             "pregate": {
                 "enabled": False,
                 "provider": None,
                 "model": None,
                 "min_confidence": None,
+                "fail_closed": False,
             },
         },
     },
@@ -529,6 +539,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "governance.non_business.pregate.provider": str,
     "governance.non_business.pregate.model": str,
     "governance.non_business.pregate.min_confidence": (int, float),
+    "governance.non_business.pregate.fail_closed": bool,
 }
 
 # Inclusive range constraints applied AFTER type validation. Listed
@@ -617,12 +628,17 @@ class _GovNB:
 class _GovNBPregate:
     """Resolved fast pre-gate policy: a business/personal go/no-go before
     enrichment. ``provider``/``model`` None → resolved by the step (falls back to
-    the enrichment provider). ``min_confidence`` None → act on any "personal"."""
+    the enrichment provider). ``min_confidence`` None → act on any "personal"
+    verdict; raising it defers low-confidence verdicts to the post-enrichment
+    backstop rather than dropping them early (it does not floor the final drop).
+    ``fail_closed`` → reject the write (503) when the classifier is unavailable
+    instead of failing open."""
 
     enabled: bool
     provider: str | None
     model: str | None
     min_confidence: float | None
+    fail_closed: bool
 
 
 class ResolvedConfig:
@@ -671,6 +687,7 @@ class ResolvedConfig:
             provider=g.get("provider") or None,
             model=g.get("model") or None,
             min_confidence=g.get("min_confidence"),
+            fail_closed=bool(g.get("fail_closed", False)),
         )
 
     # Enrichment
