@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NotRequired, TypedDict
 
 import httpx
@@ -96,6 +98,16 @@ class CoreStorageClient:
             # against a single service for no benefit.
             self._read_http = self._http
 
+        # Pool self-healing (incident 2026-06-16): the singleton pool could
+        # leak connection slots when in-flight calls were cancelled and never
+        # recovered without a process restart. ``_pool_generation`` lets
+        # concurrent ``PoolTimeout``s collapse into exactly one rebuild.
+        self._pool_lock = asyncio.Lock()
+        self._pool_generation = 0
+        # Anchor fire-and-forget pool-close tasks so they aren't GC'd while
+        # pending (Python 3.12+ warns otherwise); discard on completion.
+        self._background_tasks: set[asyncio.Task] = set()
+
     @staticmethod
     def _make_pool() -> httpx.AsyncClient:
         """Construct an httpx pool with the tuned timeouts + limits.
@@ -153,6 +165,94 @@ class CoreStorageClient:
             if self._read_http is not self._http:
                 await self._read_http.aclose()
 
+    # -- pool resilience (incident 2026-06-16) ---------------------------
+
+    async def _cancel_safe(self, coro: Awaitable[httpx.Response]) -> httpx.Response:
+        """Run an in-flight storage request so cancellation cannot strand its
+        pooled connection.
+
+        When the 35s enrichment ``wait_for`` or the 45s request-timeout
+        cancels the awaiting task mid-request, httpcore (1.0.9, current)
+        does not return the connection to the pool — leaked slots accumulate
+        until the ``max_connections=200`` ceiling is hit and every acquire
+        ``PoolTimeout``s (incident 2026-06-16). Shielding lets the request
+        run to completion (returning its slot) while the caller still
+        observes ``CancelledError`` immediately; the orphaned result is
+        consumed so it is not logged as never-retrieved.
+        """
+        task = asyncio.create_task(coro)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+
+            def _consume_result(t: asyncio.Task) -> None:
+                if t.cancelled():
+                    return
+                exc = t.exception()
+                if exc is not None:
+                    logger.debug("storage_client: shielded request failed after caller cancellation: %r", exc)
+
+            task.add_done_callback(_consume_result)
+            raise
+
+    @staticmethod
+    async def _safe_aclose(client: httpx.AsyncClient) -> None:
+        try:
+            await client.aclose()
+        except Exception as exc:  # pool teardown must never surface to callers
+            logger.warning("storage_client: error closing recycled pool: %r", exc)
+
+    async def _recycle_pools(self, *, observed_gen: int, label: str) -> None:
+        """Rebuild the httpx pool(s) after exhaustion so a leaked-out singleton
+        self-heals in seconds instead of requiring a process restart. The
+        generation guard means concurrent ``PoolTimeout``s trigger exactly one
+        rebuild; later arrivals see the bumped generation and return."""
+        async with self._pool_lock:
+            if self._pool_generation != observed_gen:
+                return
+            old_write, old_read = self._http, self._read_http
+            shared = old_read is old_write
+            self._http = self._make_pool()
+            self._read_http = self._http if shared else self._make_pool()
+            self._pool_generation += 1
+            logger.error(
+                "storage_client.%s: core-storage pool exhausted (PoolTimeout) — "
+                "recycled connection pool (generation %d→%d); see incident 2026-06-16",
+                label,
+                observed_gen,
+                self._pool_generation,
+            )
+        # Force-close the old pool(s) in the background. Safe to drop mid-flight:
+        # a pool only reaches this path once it can no longer hand out
+        # connections, so there is no healthy in-flight work left to disrupt.
+        for old in {old_write, old_read}:
+            t = asyncio.create_task(self._safe_aclose(old))
+            self._background_tasks.add(t)
+            t.add_done_callback(self._background_tasks.discard)
+
+    async def _execute(
+        self,
+        do_request: Callable[[], Awaitable[httpx.Response]],
+        *,
+        retry: Callable[..., Awaitable[httpx.Response]],
+        label: str,
+    ) -> httpx.Response:
+        """Run ``do_request`` through the ``retry`` policy, made cancellation-safe
+        and pool-self-healing. ``do_request`` must read ``self._http`` /
+        ``self._read_http`` lazily so a recycled pool is picked up on retry.
+        If ``PoolTimeout`` survives the retry policy the pool is exhausted —
+        recycle it once and retry on the fresh pool."""
+
+        def _shielded() -> Awaitable[httpx.Response]:
+            return self._cancel_safe(do_request())
+
+        observed_gen = self._pool_generation
+        try:
+            return await retry(_shielded, label=label)
+        except httpx.PoolTimeout:
+            await self._recycle_pools(observed_gen=observed_gen, label=label)
+            return await retry(_shielded, label=label)
+
     # -- internal helpers ------------------------------------------------
 
     async def _auth_headers(self, *, read: bool) -> dict[str, str]:
@@ -186,14 +286,15 @@ class CoreStorageClient:
             _evict_id_token(audience)
 
     async def _get(self, path: str, *, read: bool = True, **params: Any) -> dict | None:
-        http = self._read_http if read else self._http
         prefix = self._read_prefix if read else self._prefix
         headers = await self._auth_headers(read=read)
 
-        async def _do() -> httpx.Response:
-            return await http.get(f"{prefix}{path}", params=params, headers=headers)
+        def _do() -> Awaitable[httpx.Response]:
+            # Read the pool lazily so a mid-call recycle is picked up on retry.
+            http = self._read_http if read else self._http
+            return http.get(f"{prefix}{path}", params=params, headers=headers)
 
-        resp = await with_retry(_do, label=f"GET {path}")
+        resp = await self._execute(_do, retry=with_retry, label=f"GET {path}")
         if resp.status_code == 404:
             return None
         self._maybe_evict_on_auth_error(resp, read=read)
@@ -205,10 +306,10 @@ class CoreStorageClient:
         # sit on the write path, so no per-call opt-out is needed yet.
         headers = await self._auth_headers(read=True)
 
-        async def _do() -> httpx.Response:
-            return await self._read_http.get(f"{self._read_prefix}{path}", params=params, headers=headers)
+        def _do() -> Awaitable[httpx.Response]:
+            return self._read_http.get(f"{self._read_prefix}{path}", params=params, headers=headers)
 
-        resp = await with_retry(_do, label=f"GET-list {path}")
+        resp = await self._execute(_do, retry=with_retry, label=f"GET-list {path}")
         self._maybe_evict_on_auth_error(resp, read=True)
         resp.raise_for_status()
         return resp.json()
@@ -216,12 +317,12 @@ class CoreStorageClient:
     async def _post(
         self, path: str, data: Any = None, *, read: bool = False, idempotent: bool = False
     ) -> dict | list:
-        http = self._read_http if read else self._http
         prefix = self._read_prefix if read else self._prefix
         headers = await self._auth_headers(read=read)
 
-        async def _do() -> httpx.Response:
-            return await http.post(
+        def _do() -> Awaitable[httpx.Response]:
+            http = self._read_http if read else self._http
+            return http.post(
                 f"{prefix}{path}",
                 json=data if data is not None else {},
                 headers=headers,
@@ -232,7 +333,7 @@ class CoreStorageClient:
         # transient set (ReadTimeout + 5xx too) — safe ONLY when the endpoint
         # dedups replays storage-side (e.g. /audit-logs/bulk on client_event_id).
         retry = with_retry if idempotent else with_connect_phase_retry
-        resp = await retry(_do, label=f"POST {path}")
+        resp = await self._execute(_do, retry=retry, label=f"POST {path}")
         self._maybe_evict_on_auth_error(resp, read=read)
         resp.raise_for_status()
         return resp.json()
@@ -240,10 +341,10 @@ class CoreStorageClient:
     async def _patch(self, path: str, data: dict) -> dict | None:
         headers = await self._auth_headers(read=False)
 
-        async def _do() -> httpx.Response:
-            return await self._http.patch(f"{self._prefix}{path}", json=data, headers=headers)
+        def _do() -> Awaitable[httpx.Response]:
+            return self._http.patch(f"{self._prefix}{path}", json=data, headers=headers)
 
-        resp = await with_retry(_do, label=f"PATCH {path}")
+        resp = await self._execute(_do, retry=with_retry, label=f"PATCH {path}")
         if resp.status_code == 404:
             return None
         self._maybe_evict_on_auth_error(resp, read=False)
@@ -253,10 +354,10 @@ class CoreStorageClient:
     async def _delete(self, path: str, **params: Any) -> bool:
         headers = await self._auth_headers(read=False)
 
-        async def _do() -> httpx.Response:
-            return await self._http.delete(f"{self._prefix}{path}", params=params, headers=headers)
+        def _do() -> Awaitable[httpx.Response]:
+            return self._http.delete(f"{self._prefix}{path}", params=params, headers=headers)
 
-        resp = await with_retry(_do, label=f"DELETE {path}")
+        resp = await self._execute(_do, retry=with_retry, label=f"DELETE {path}")
         if resp.status_code == 404:
             return False
         self._maybe_evict_on_auth_error(resp, read=False)
@@ -264,18 +365,18 @@ class CoreStorageClient:
         return True
 
     async def _post_optional(self, path: str, data: Any = None, *, read: bool = False) -> dict | None:
-        http = self._read_http if read else self._http
         prefix = self._read_prefix if read else self._prefix
         headers = await self._auth_headers(read=read)
 
-        async def _do() -> httpx.Response:
-            return await http.post(
+        def _do() -> Awaitable[httpx.Response]:
+            http = self._read_http if read else self._http
+            return http.post(
                 f"{prefix}{path}",
                 json=data if data is not None else {},
                 headers=headers,
             )
 
-        resp = await with_connect_phase_retry(_do, label=f"POST {path}")
+        resp = await self._execute(_do, retry=with_connect_phase_retry, label=f"POST {path}")
         if resp.status_code == 404:
             return None
         self._maybe_evict_on_auth_error(resp, read=read)
@@ -1025,11 +1126,15 @@ class CoreStorageClient:
         if agent_id is not None:
             params["agent_id"] = agent_id
         headers = await self._auth_headers(read=True)
-        resp = await self._read_http.get(
-            f"{self._read_prefix}/keystones",
-            params=params,
-            headers=headers,
-        )
+
+        def _do() -> Awaitable[httpx.Response]:
+            return self._read_http.get(
+                f"{self._read_prefix}/keystones",
+                params=params,
+                headers=headers,
+            )
+
+        resp = await self._execute(_do, retry=with_retry, label="GET /keystones")
         self._maybe_evict_on_auth_error(resp, read=True)
         resp.raise_for_status()
         truncated = resp.headers.get("X-Truncated", "").lower() == "true"
@@ -1167,8 +1272,8 @@ class CoreStorageClient:
         """
         headers = await self._auth_headers(read=False)
 
-        async def _do() -> httpx.Response:
-            return await self._http.post(
+        def _do() -> Awaitable[httpx.Response]:
+            return self._http.post(
                 f"{self._prefix}/idempotency/claim",
                 json={
                     "tenant_id": tenant_id,
@@ -1179,7 +1284,7 @@ class CoreStorageClient:
                 headers=headers,
             )
 
-        resp = await with_connect_phase_retry(_do, label="POST /idempotency/claim")
+        resp = await self._execute(_do, retry=with_connect_phase_retry, label="POST /idempotency/claim")
         self._maybe_evict_on_auth_error(resp, read=False)
         if resp.status_code == 201:
             return True, resp.json()
