@@ -77,6 +77,53 @@ def _fake_extract(content: str) -> ExtractedGraph:
     return ExtractedGraph(entities=entities, relations=[])
 
 
+# A33 (mechanism ①): the extractor inconsistently splits a trailing
+# disambiguator off its subject — "Acme Corp #0033's …" becomes subject
+# "acme corp" + a SEPARATE identifier "#0033" (role=mentioned) — so every
+# "<Name> #NNNN" collapses onto one bare "<Name>" subject entity. With
+# same_subject = (entity_id == entity_id) (CAURA-133) that shared id is a
+# guaranteed false contradiction, and the bare hub also dilutes entity_lookup
+# (A30). Re-fold a trailing disambiguator (a "#tag" or a "(qualifier)") back
+# into its subject when the content shows the two adjacent. Only "#"/paren
+# shapes qualify, so real named identifiers ("pr-2025-a", "build-734") are
+# left untouched; the content-adjacency gate avoids folding an unrelated tag.
+_DISCRIMINATOR_RE = re.compile(r"#\w[\w.\-]*|\([^)]+\)")
+
+
+def _reattach_subject_discriminators(graph: ExtractedGraph, content: str) -> ExtractedGraph:
+    """Fold a split-off trailing disambiguator back into its subject (A33 ①)."""
+    subjects = [e for e in graph.entities if e.role == "subject"]
+    if not subjects:
+        return graph
+    content_l = content.lower()
+    renames: dict[str, str] = {}  # old canonical -> new, for relation/mention remap
+    folded: set[str] = set()  # canonical names of discriminators merged away
+    for e in graph.entities:
+        if e.role == "subject":
+            continue
+        disc = e.canonical_name.strip()
+        if not _DISCRIMINATOR_RE.fullmatch(disc.lower()):
+            continue
+        for s in subjects:
+            base = s.canonical_name.strip()
+            if base and f"{base.lower()} {disc.lower()}" in content_l:
+                new_name = f"{base} {disc}"
+                renames[s.canonical_name] = new_name
+                s.canonical_name = new_name
+                folded.add(e.canonical_name)
+                break
+    if not folded:
+        return graph
+    graph.entities = [e for e in graph.entities if not (e.role != "subject" and e.canonical_name in folded)]
+    for r in graph.relations:
+        r.from_entity = renames.get(r.from_entity, r.from_entity)
+        r.to_entity = renames.get(r.to_entity, r.to_entity)
+    for m in graph.mentions:
+        if m.entity_canonical in renames:
+            m.entity_canonical = renames[m.entity_canonical]
+    return graph
+
+
 async def extract_entities_from_content(
     content: str,
     memory_type: str,
@@ -126,7 +173,7 @@ async def extract_entities_from_content(
         or settings.entity_extraction_model
         or None
     )
-    return await call_with_fallback(
+    graph = await call_with_fallback(
         primary_provider_name=provider_name,
         call_fn=_do_extract,
         fake_fn=lambda: _fake_extract(content),
@@ -135,6 +182,8 @@ async def extract_entities_from_content(
         model_override=extraction_model,
         model_attr="entity_extraction_model",
     )
+    # A33 ①: undo the split-discriminator pattern before resolution.
+    return _reattach_subject_discriminators(graph, content)
 
 
 # Backward-compat re-exports for tests
