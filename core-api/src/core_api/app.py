@@ -488,7 +488,14 @@ async def _json_rate_limit_handler(request: Request, exc: RateLimitExceeded) -> 
     detail_str = f"Rate limit exceeded: {exc.detail}. Try again later."
     body = {"detail": detail_str, **make_error_payload("RATE_LIMITED", detail_str)}
     response = JSONResponse(body, status_code=429)
-    response = request.app.state.limiter._inject_headers(response, request.state.view_rate_limit)
+    # Inject X-RateLimit headers only when the limit was actually evaluated. A
+    # swallowed storage error (see _key_func) leaves view_rate_limit None; skip
+    # the private _inject_headers call entirely rather than depending on slowapi's
+    # None-handling for OUR call site. (On the 429 path it's normally set — a 429
+    # means a limit was hit — so this is defence in depth.)
+    view_rate_limit = getattr(request.state, "view_rate_limit", None)
+    if view_rate_limit is not None:
+        response = request.app.state.limiter._inject_headers(response, view_rate_limit)
     return response
 
 

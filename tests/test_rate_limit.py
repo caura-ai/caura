@@ -14,6 +14,7 @@ anyway, and it makes the test runner-speed-independent.
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -43,6 +44,9 @@ class _FakeRequest:
         self.client = type("C", (), {"host": client_host})()
         # slowapi's get_remote_address looks at scope too; emulate it.
         self.scope = {"client": (client_host, 0)}
+        # _key_func seeds request.state.view_rate_limit (the fail-open default);
+        # a real Starlette request always has .state.
+        self.state = SimpleNamespace()
 
 
 async def test_key_func_prefers_api_key_over_ip():
@@ -72,6 +76,40 @@ async def test_key_func_different_keys_yield_different_buckets():
 async def test_key_func_falls_back_to_ip_without_api_key():
     req = _FakeRequest(headers={}, client_host="198.51.100.7")
     assert _key_func(req) == "ip:198.51.100.7"
+
+
+async def test_key_func_seeds_fail_open_default_without_clobbering():
+    """key_func seeds request.state.view_rate_limit=None (fail-open default) on
+    first call, but — since slowapi calls it once per applied limit — must NOT
+    reset a value a prior limit's hit() already wrote (else multi-limit routes
+    drop X-RateLimit headers on a partial Redis outage)."""
+    req = _FakeRequest(headers={"x-api-key": "mc_multi_limit_probe"})
+    # First call (before any hit) seeds the fail-open default.
+    _key_func(req)
+    assert req.state.view_rate_limit is None
+    # Simulate an earlier limit's successful hit() setting the real value.
+    req.state.view_rate_limit = ("limit-1", ["result"])
+    # A later key_func call (second stacked limit) must leave it intact.
+    _key_func(req)
+    assert req.state.view_rate_limit == ("limit-1", ["result"])
+
+
+async def test_inject_headers_is_noop_for_none_limit():
+    """The fail-open path relies on slowapi's ``_inject_headers`` being a no-op
+    when ``current_limit`` is None (slowapi 0.1.10 extension.py:
+    ``if ... and current_limit is not None``). Pin that assumption at CI so a
+    slowapi upgrade that drops the guard fails here, not by 500ing the
+    swallowed-error path in prod. ``headers_enabled=True`` so the None guard is
+    the operative one (not the earlier headers-disabled short-circuit)."""
+    from slowapi import Limiter
+    from slowapi.util import get_remote_address
+    from starlette.responses import Response
+
+    lim = Limiter(key_func=get_remote_address, headers_enabled=True)
+    lim.enabled = True
+    resp = Response()
+    # Must return the response unchanged and must not raise on a None limit.
+    assert lim._inject_headers(resp, None) is resp
 
 
 # ── HTTP layer: 429 on burst ──
@@ -146,3 +184,32 @@ async def test_health_is_not_rate_limited(client):
         resp = await client.get("/api/v1/health")
         codes.append(resp.status_code)
     assert 429 not in codes
+
+
+# ── fail-open: rate-limit storage (Redis) outage must not 500 ──
+
+
+async def test_search_fails_open_when_rate_limit_storage_errors(client, monkeypatch):
+    """A Redis/storage outage must FAIL OPEN, not 500. With ``swallow_errors=True``
+    slowapi swallows the backend error ("Failed to rate limit. Swallowing error"),
+    but its limit decorator still reads ``request.state.view_rate_limit`` on the way
+    out — which is unset on the swallowed path. Without ``_key_func``'s ``None``
+    seed that's an ``AttributeError`` → 500 (prod 2026-06-17 on /api/v1/search when
+    Redis connection reset). The request must be served normally, not 500'd."""
+
+    def _boom(*args, **kwargs):
+        raise ConnectionError("simulated Redis down")
+
+    # slowapi calls ``limiter.limiter.hit(...)`` against the backend during the
+    # per-route check; make that raise to emulate Redis being unreachable.
+    monkeypatch.setattr(limiter.limiter, "hit", _boom)
+
+    resp = await client.post(
+        "/api/v1/search",
+        json={"tenant_id": "default", "query": "hello"},
+        headers={"x-api-key": "mc_failopen_probe"},
+    )
+
+    assert resp.status_code == 200, (
+        f"rate-limit storage outage must fail open, got {resp.text}"
+    )

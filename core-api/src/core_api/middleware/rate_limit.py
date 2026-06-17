@@ -41,6 +41,29 @@ def _key_func(request: Request) -> str:
     storage backend or access logs, while keeping buckets unique for
     keys that happen to share a prefix.
     """
+    # Fail-open seed for slowapi 0.1.10's swallow_errors gap. slowapi sets
+    # ``request.state.view_rate_limit`` only AFTER it hits the storage backend
+    # (extension.py: ``self.limiter.hit(...)`` then ``view_rate_limit = ...``).
+    # With ``swallow_errors=True`` a Redis outage is swallowed BEFORE that
+    # assignment ("Failed to rate limit. Swallowing error"), yet the limit
+    # decorator then reads ``request.state.view_rate_limit`` unconditionally to
+    # inject headers — so the swallow path raised AttributeError → 500 instead of
+    # failing open (prod 2026-06-17: Redis connection reset → 500s on
+    # /api/v1/search). key_func runs first in every check and never touches the
+    # backend, so seed None here: a successful check overwrites it, a swallowed
+    # one leaves it None — which slowapi's ``_inject_headers`` no-ops on (verified
+    # 0.1.10 extension.py: ``if ... and current_limit is not None``; pinned by
+    # test_inject_headers_is_noop_for_none_limit so a slowapi upgrade that breaks
+    # it fails CI, not prod) — making ``swallow_errors`` actually fail open.
+    #
+    # Guard with ``hasattr``: slowapi calls key_func once PER applied limit (and
+    # per limit in a multi-part "10/s;100/h" string), so an unconditional seed
+    # would reset a value an earlier limit's successful ``hit()`` already wrote.
+    # Only seed when unset — the attribute still always exists before the first
+    # ``hit()``, so the fail-open guarantee holds.
+    if not hasattr(request.state, "view_rate_limit"):
+        request.state.view_rate_limit = None
+
     api_key = request.headers.get("x-api-key")
     if not api_key:
         auth = request.headers.get("authorization", "")
