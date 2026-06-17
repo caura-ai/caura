@@ -373,11 +373,16 @@ function reconcileAdditiveDir(
   // Anything without the marker is foreign and is never touched.
   for (const slug of onDisk) {
     if (desired.has(slug)) continue;
+    // Ownership gates everything in an additive dir: a foreign slug is left
+    // alone even if its name collides with a PROTECTED one. A foreign
+    // "memclaw" dir (no marker) is the client's, not ours — ignore it
+    // rather than misreport it as a MemClaw-protected skill. An OWNED
+    // protected dir still survives via the protected check below.
+    if (!isMemclawOwned(join(skillsRoot, slug))) continue; // foreign — leave alone
     if (PROTECTED_SKILLS.has(slug)) {
       result.protected.push(slug);
       continue;
     }
-    if (!isMemclawOwned(join(skillsRoot, slug))) continue; // foreign — leave alone
     try {
       rmSync(join(skillsRoot, slug), { recursive: true, force: true });
       result.removed.push(slug);

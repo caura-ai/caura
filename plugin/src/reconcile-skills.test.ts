@@ -556,6 +556,34 @@ describe("reconcileSkills — configured targets", () => {
     assert.ok(summary.collisions.includes("deploy-runbook"), "marker-less dir is a collision");
   });
 
+  test("additive: a FOREIGN dir whose name matches a protected slug is ignored, not reported protected", async () => {
+    // No memclaw in the default owned dir (resetSkillsDir cleared it), so any
+    // "memclaw" in summary.protected could only come from the additive dir.
+    plantForeign("memclaw", "# client's own thing named memclaw\n"); // foreign, no marker
+    useAdditive();
+    mockCatalog = []; // nothing active
+
+    const summary = await reconcileSkills();
+
+    // Ownership gates first: the foreign dir is left untouched AND is not
+    // misreported as a MemClaw-protected skill.
+    assert.equal(readFileSync(ext("memclaw", "SKILL.md"), "utf-8"), "# client's own thing named memclaw\n");
+    assert.ok(!summary.removed.includes("memclaw"), "foreign protected-name dir not removed");
+    assert.ok(!summary.protected.includes("memclaw"), "foreign dir not reported as protected");
+  });
+
+  test("additive: an OWNED dir matching a protected slug survives (reported protected)", async () => {
+    plantOwned("memclaw", "# memclaw we wrote\n"); // owned (marker present)
+    useAdditive();
+    mockCatalog = []; // not in catalog
+
+    const summary = await reconcileSkills();
+
+    assert.ok(existsSync(ext("memclaw", "SKILL.md")), "owned protected dir survives");
+    assert.ok(!summary.removed.includes("memclaw"), "owned protected dir not removed");
+    assert.ok(summary.protected.includes("memclaw"), "owned protected dir reported in protected");
+  });
+
   test("an extra owned target is reconciled alongside the default", async () => {
     plantOnDisk("memclaw");
     process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([{ dir: EXTRA_OWNED, mode: "owned" }]);
