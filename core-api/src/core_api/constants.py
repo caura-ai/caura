@@ -471,8 +471,16 @@ FTS_BOOST_MAX_TOKENS = 3  # queries with more meaningful tokens than this stay a
 FTS_BOOST_SPECIFICITY_RATIO = 0.4  # strict >; at N=2 this means >=1 specific token triggers boost
 SIMILARITY_BLEND = 0.85  # base_score = SIMILARITY_BLEND * similarity + (1 - SIMILARITY_BLEND) * weight (raised from 0.75 — LoCoMo sweep showed +13pp recall)
 SEARCH_OVERFETCH_FACTOR = 2  # fetch top_k * N candidates from storage, trim to top_k after min_similarity filter — gives post-filter headroom
-RECALL_BOOST_CAP = 1.5  # max multiplier from frequent recall
-RECALL_DECAY_WINDOW_DAYS = 90  # only recalls within this window contribute to boost
+# A26: recall_count is bumped for every RETURNED row, used or not (see
+# TrackRecalls + memory_increment_recall), and feeds recall_boost back into the
+# rank score — a self-reinforcing "returned → boosted → returned" loop with no
+# usefulness signal. Until a confirmation-gated bump lands (the real fix, tied to
+# D5/D1), the cap is dialed down so the boost can no longer hijack rankings: at
+# cap=1.1 a popular-but-useless row can only overtake a more-relevant one whose
+# base score is <10% higher (was <50% at cap=1.5), and the shorter decay window
+# lets stale popularity fade in ~2 weeks instead of a quarter.
+RECALL_BOOST_CAP = 1.1  # max multiplier from frequent recall (A26: dialed down from 1.5)
+RECALL_DECAY_WINDOW_DAYS = 14  # only recalls within this window contribute to boost (A26: from 90)
 
 # ── Recall summary ──
 MEMORY_RECALL_SUMMARY_TEMPERATURE = 0.3

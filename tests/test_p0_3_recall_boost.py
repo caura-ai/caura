@@ -55,13 +55,19 @@ class TestRecallBoostDecay:
         assert b == pytest.approx(1.0)
 
     def test_recently_recalled_gets_boost(self):
-        """Recalled 1 hour ago with count=10 → meaningful boost."""
+        """Recalled 1 hour ago with count=10 → a boost, bounded by the cap.
+
+        A26: with RECALL_BOOST_CAP dialed down to 1.1 the boost is small by
+        design (count=10, recency≈1 → 1 + (cap-1)*0.5 ≈ 1.05). Assert the shape
+        relative to the constant, not a hard-coded magnitude, so this survives
+        future cap tuning.
+        """
         now = self._now()
         last = now - timedelta(hours=1)
         b = compute_recall_boost(10, last_recalled_at=last, now=now)
-        # recency ≈ 1.0, count=10 → boost ≈ 1 + 0.5 * 1.0 * 10/20 = 1.25
-        assert b > 1.2
-        assert b < RECALL_BOOST_CAP
+        expected = 1.0 + (RECALL_BOOST_CAP - 1.0) * 1.0 * 10 / (10 + RECALL_BOOST_SCALE)
+        assert b == pytest.approx(expected, abs=0.01)
+        assert 1.0 < b < RECALL_BOOST_CAP
 
     def test_old_recall_no_boost(self):
         """THE KEY FIX: recalled 50 times but last recall was 31 days ago → boost ≈ 1.0."""
@@ -131,24 +137,57 @@ class TestRecallBoostDecay:
     # -- Comparison: before vs after --
 
     def test_feedback_loop_broken_scenario(self):
-        """Scenario that demonstrates the fix.
+        """Decay + A26 dial-down both break the feedback loop.
 
-        Before: memory with 50 recalls always got ~1.42x boost regardless of when.
-        After: boost decays to 1.0 if not recalled within RECALL_DECAY_WINDOW_DAYS.
+        A non-stale popular memory gets at most a small boost (bounded by the
+        A26-dialed-down cap), and a stale one decays to exactly 1.0 regardless
+        of how many times it was recalled.
         """
         now = self._now()
-        # Old formula (broken): 1 + 0.5 * 50 / (50 + 10) ≈ 1.417
-        old_boost = 1.0 + (RECALL_BOOST_CAP - 1.0) * 50 / (50 + RECALL_BOOST_SCALE)
-        assert old_boost > 1.4  # confirm old behavior was problematic
+        # Non-stale: recalled just now, count=50 → a real but cap-bounded boost.
+        fresh_boost = compute_recall_boost(50, last_recalled_at=now, now=now)
+        assert 1.0 < fresh_boost <= RECALL_BOOST_CAP
 
-        # New formula: same memory, last recalled well past the decay window
-        new_boost = compute_recall_boost(
+        # Same memory, last recalled well past the decay window → boost ~1.0.
+        stale_boost = compute_recall_boost(
             50,
             last_recalled_at=now - timedelta(days=RECALL_DECAY_WINDOW_DAYS + 15),
             now=now,
         )
-        assert new_boost == pytest.approx(1.0), (
-            f"Old boost was {old_boost:.3f}, new should be ~1.0 but got {new_boost:.3f}"
+        assert stale_boost == pytest.approx(1.0), (
+            f"stale popular memory should decay to ~1.0, got {stale_boost:.3f}"
+        )
+        # The decay removes a genuine boost (fresh strictly beats stale).
+        assert fresh_boost > stale_boost
+
+    def test_a26_boost_cannot_hijack_a_more_relevant_memory(self):
+        """A26: recall_boost is dialed down so a popular-but-unused memory can
+        no longer out-rank a more-relevant one on boost alone.
+
+        score = base_score * ... * recall_boost. A saturated, just-recalled row
+        gets at most RECALL_BOOST_CAP; a fresh, more-relevant row gets 1.0. So a
+        row only needs to be >(cap-1) more relevant to be safe — the "hijack
+        zone". At the pre-A26 cap of 1.5 that zone was 50%; dialed to 1.1 it is
+        ~10%. Guards against silently raising the cap back toward 1.5.
+        """
+        now = self._now()
+        # P: useless but hammered + just recalled → the max possible boost.
+        boost_p = compute_recall_boost(1_000_000, last_recalled_at=now, now=now)
+        assert boost_p <= RECALL_BOOST_CAP + 1e-9
+
+        hijack_zone = RECALL_BOOST_CAP - 1.0
+        assert hijack_zone <= 0.15, (
+            f"A26: recall_boost leaves a {hijack_zone:.0%} hijack zone — a "
+            "popular-but-unused memory can out-rank a more-relevant one. Keep "
+            "the cap dialed down until confirmation-gated recall lands."
+        )
+
+        # Concrete: a 12%-more-relevant fresh memory must beat the saturated one.
+        base_p, base_r = 1.0, 1.12
+        boost_r = compute_recall_boost(0, last_recalled_at=now, now=now)  # 1.0
+        assert base_r * boost_r > base_p * boost_p, (
+            "a 12%-more-relevant fresh memory must out-rank a saturated popular "
+            "one — recall_boost must not be able to hijack the ranking"
         )
 
 
