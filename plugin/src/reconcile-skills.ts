@@ -221,6 +221,30 @@ interface DirReconcileResult {
 }
 
 /**
+ * Read the immediate subdirectory names (candidate skill slugs) of
+ * ``root``. Non-directory entries are skipped so a stray file isn't
+ * treated as a managed slug; a stat failure on one entry is non-fatal.
+ * Returns ``null`` (and logs) if the directory itself can't be read, so
+ * callers bail out rather than acting on an empty set.
+ */
+function readDirSlugs(root: string, caller: string): Set<string> | null {
+  const slugs = new Set<string>();
+  try {
+    for (const name of readdirSync(root)) {
+      try {
+        if (statSync(join(root, name)).isDirectory()) slugs.add(name);
+      } catch {
+        // stat failure on one entry is non-fatal for the rest
+      }
+    }
+  } catch (e: unknown) {
+    logError(`${caller}: failed to read skills directory`, e);
+    return null;
+  }
+  return slugs;
+}
+
+/**
  * Reconcile ONE ``owned`` target dir against the desired catalog set:
  * prune orphans (anything on disk not in ``desired``, except
  * {@link PROTECTED_SKILLS}), then write/update the desired skills.
@@ -243,21 +267,8 @@ function reconcileOwnedDir(
   if (!existsSync(skillsRoot)) {
     mkdirSync(skillsRoot, { recursive: true });
   }
-  const onDisk = new Set<string>();
-  try {
-    for (const name of readdirSync(skillsRoot)) {
-      try {
-        if (statSync(join(skillsRoot, name)).isDirectory()) {
-          onDisk.add(name);
-        }
-      } catch {
-        // stat failure on one entry is non-fatal for the rest
-      }
-    }
-  } catch (e: unknown) {
-    logError("reconcileOwnedDir: failed to read skills directory", e);
-    return result;
-  }
+  const onDisk = readDirSlugs(skillsRoot, "reconcileOwnedDir");
+  if (!onDisk) return result;
 
   // Apply diff. Order: removals first, then writes — so a rename
   // (slug A → slug B) lands cleanly even if the operator does both in
@@ -355,21 +366,8 @@ function reconcileAdditiveDir(
   if (!existsSync(skillsRoot)) {
     mkdirSync(skillsRoot, { recursive: true });
   }
-  const onDisk = new Set<string>();
-  try {
-    for (const name of readdirSync(skillsRoot)) {
-      try {
-        if (statSync(join(skillsRoot, name)).isDirectory()) {
-          onDisk.add(name);
-        }
-      } catch {
-        // stat failure on one entry is non-fatal for the rest
-      }
-    }
-  } catch (e: unknown) {
-    logError("reconcileAdditiveDir: failed to read skills directory", e);
-    return result;
-  }
+  const onDisk = readDirSlugs(skillsRoot, "reconcileAdditiveDir");
+  if (!onDisk) return result;
 
   // Removals first — but ONLY for MemClaw-owned (marker-bearing) orphans.
   // Anything without the marker is foreign and is never touched.
@@ -389,17 +387,30 @@ function reconcileAdditiveDir(
     }
   }
 
+  // Track CONFIRMED on-disk state for ``installed``. Pre-seed with skills
+  // already on disk, MemClaw-owned, AND catalog-active this tick — mirrors
+  // reconcileOwnedDir so a transient read/write I/O failure doesn't drop a
+  // physically-present skill from the installed report. (Unlike the owned
+  // dir we additionally require the ownership marker — a foreign occupant
+  // of a desired slug is never "ours" and is reported as a collision.)
+  const installedSet = new Set<string>(
+    [...onDisk].filter(
+      (s) => desired.has(s) && isMemclawOwned(join(skillsRoot, s)),
+    ),
+  );
+
   // Writes — only into absent or already-owned slots. A foreign occupant
   // of the same slug is a collision: skip it, never clobber.
-  const installedSet = new Set<string>();
   for (const [slug, content] of desired) {
     const skillDir = join(skillsRoot, slug);
-    // Re-check liveness here, not just the start-of-function ``onDisk``
-    // snapshot: a foreign dir created between the readdir and now would
-    // otherwise slip past the collision guard (present=false), get its
-    // SKILL.md clobbered, and be wrongly stamped as MemClaw-owned. The
-    // ``existsSync`` re-stat closes that TOCTOU window.
-    const dirExistsNow = onDisk.has(slug) || existsSync(skillDir);
+    // Re-stat live, not from the start-of-function ``onDisk`` snapshot: a
+    // dir created OR removed between the readdir and now would otherwise be
+    // misclassified (a fresh foreign dir slipping past the collision guard,
+    // or a since-deleted owned dir wrongly read as a foreign collision).
+    // The ``existsSync`` re-stat narrows the TOCTOU window; the
+    // non-recursive ``mkdirSync`` below provides the actual atomic guard
+    // via EEXIST.
+    const dirExistsNow = existsSync(skillDir);
     if (dirExistsNow && !isMemclawOwned(skillDir)) {
       result.collisions.push(slug);
       console.warn(
@@ -421,17 +432,38 @@ function reconcileAdditiveDir(
       }
     }
     try {
-      mkdirSync(skillDir, { recursive: true });
-      // Stamp ownership only on genuinely new dirs; an already-existing
-      // owned dir keeps its marker.
-      if (!dirExistsNow) {
+      // Atomic create-or-detect: a non-recursive mkdir throws EEXIST if the
+      // dir appeared after our existsSync check, closing the TOCTOU window
+      // that a recursive (idempotent) mkdir would leave open.
+      let isNew = false;
+      try {
+        mkdirSync(skillDir);
+        isNew = true;
+      } catch (mkdirErr: unknown) {
+        if ((mkdirErr as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirErr;
+        // Dir raced into existence after our existsSync check — re-verify
+        // ownership before touching it; a foreign winner is a collision.
+        if (!isMemclawOwned(skillDir)) {
+          result.collisions.push(slug);
+          console.warn(
+            `[memclaw] additive: ${slug} collision (post-existsSync race in ${skillsRoot}); skipping`,
+          );
+          continue;
+        }
+      }
+      // Stamp ownership on a genuinely new dir. For an existing dir we only
+      // reach here after the ownership check passed, so the marker should
+      // already be present — but re-stamp defensively if it vanished
+      // between that check and now (a marker IS the ownership signal, and a
+      // dir missing it at guard time is treated as a foreign collision).
+      if (isNew || !existsSync(join(skillDir, OWNED_MARKER))) {
         writeFileSync(join(skillDir, OWNED_MARKER), OWNED_MARKER_BODY, "utf-8");
       }
       writeFileSync(target, content, "utf-8");
       installedSet.add(slug);
       result.added.push(slug);
       console.log(
-        `[memclaw] additive: ${dirExistsNow ? "updated" : "pulled"} skill ${slug} in ${skillsRoot}`,
+        `[memclaw] additive: ${isNew ? "pulled" : "updated"} skill ${slug} in ${skillsRoot}`,
       );
     } catch (e: unknown) {
       logError(`reconcileAdditiveDir: write failed for ${slug}`, e);

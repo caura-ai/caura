@@ -539,6 +539,23 @@ describe("reconcileSkills — configured targets", () => {
     assert.ok(existsSync(ext("deploy-runbook", OWNED_MARKER)), "marker preserved");
   });
 
+  test("additive: a skill whose marker was deleted is treated as foreign (collision, not clobbered)", async () => {
+    plantOnDisk("memclaw");
+    plantOwned("deploy-runbook", "# was owned, marker now gone\n");
+    rmSync(ext("deploy-runbook", OWNED_MARKER), { force: true }); // marker wiped → no longer recognisable as ours
+    useAdditive();
+    mockCatalog = [
+      { doc_id: "deploy-runbook", data: { name: "deploy-runbook", description: "d", content: "# catalog version\n" } },
+    ];
+
+    const summary = await reconcileSkills();
+
+    // The marker IS the ownership signal: without it the dir is foreign, so
+    // we refuse to overwrite it and report a collision (fail-safe).
+    assert.equal(readFileSync(ext("deploy-runbook", "SKILL.md"), "utf-8"), "# was owned, marker now gone\n");
+    assert.ok(summary.collisions.includes("deploy-runbook"), "marker-less dir is a collision");
+  });
+
   test("an extra owned target is reconciled alongside the default", async () => {
     plantOnDisk("memclaw");
     process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([{ dir: EXTRA_OWNED, mode: "owned" }]);
