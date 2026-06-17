@@ -38,7 +38,7 @@ const originalHome = process.env.HOME;
 const tmpHome = mkdtempSync(join(tmpdir(), "reconcile-skills-test-home-"));
 process.env.HOME = tmpHome;
 
-const { reconcileSkills, PROTECTED_SKILLS } = await import("./reconcile-skills.js");
+const { reconcileSkills, PROTECTED_SKILLS, resolveSkillTargets } = await import("./reconcile-skills.js");
 
 const SKILLS_ROOT = join(tmpHome, ".openclaw", "plugins", "memclaw", "skills");
 
@@ -362,6 +362,129 @@ describe("reconcileSkills", () => {
     assert.deepEqual(summary.installed, ["good-skill"]);
     assert.ok(summary.added.includes("good-skill"));
     assert.ok(!summary.added.includes("bad-skill"));
+  });
+});
+
+describe("resolveSkillTargets (config plumbing)", () => {
+  afterEach(() => {
+    delete process.env.MEMCLAW_SKILL_TARGETS;
+  });
+
+  test("default (unset): single owned target = the plugin skills dir", () => {
+    delete process.env.MEMCLAW_SKILL_TARGETS;
+    const targets = resolveSkillTargets();
+    assert.equal(targets.length, 1);
+    assert.equal(targets[0].dir, SKILLS_ROOT);
+    assert.equal(targets[0].mode, "owned");
+  });
+
+  test("valid JSON appends extra targets (owned + additive)", () => {
+    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([
+      { dir: "/tmp/wt-a", mode: "additive" },
+      { dir: "/tmp/wt-b", mode: "owned" },
+    ]);
+    const targets = resolveSkillTargets();
+    assert.equal(targets[0].dir, SKILLS_ROOT); // owned dir always first
+    assert.deepEqual(
+      targets.slice(1).map((t) => [t.dir, t.mode]),
+      [["/tmp/wt-a", "additive"], ["/tmp/wt-b", "owned"]],
+    );
+  });
+
+  test("invalid JSON → fail safe to owned-only", () => {
+    process.env.MEMCLAW_SKILL_TARGETS = "{not valid json";
+    const targets = resolveSkillTargets();
+    assert.equal(targets.length, 1);
+    assert.equal(targets[0].mode, "owned");
+  });
+
+  test("non-array JSON → owned-only", () => {
+    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify({ dir: "/tmp/x", mode: "owned" });
+    assert.equal(resolveSkillTargets().length, 1);
+  });
+
+  test("malformed entries skipped (missing dir / invalid mode)", () => {
+    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([
+      { mode: "owned" }, // missing dir
+      { dir: "/tmp/x", mode: "weird" }, // invalid mode
+      { dir: "/tmp/ok", mode: "additive" }, // valid
+    ]);
+    const targets = resolveSkillTargets();
+    assert.equal(targets.length, 2); // owned default + /tmp/ok
+    assert.deepEqual([targets[1].dir, targets[1].mode], ["/tmp/ok", "additive"]);
+  });
+
+  test("an entry duplicating the owned dir is dropped", () => {
+    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([{ dir: SKILLS_ROOT, mode: "owned" }]);
+    assert.equal(resolveSkillTargets().length, 1);
+  });
+
+  test("too-shallow target dirs (/, /tmp) are skipped — owned-mode rmSync guard", () => {
+    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([
+      { dir: "/", mode: "owned" }, // 0 segments
+      { dir: "/tmp", mode: "owned" }, // 1 segment
+      { dir: "/tmp/skills-ok", mode: "additive" }, // 2 segments → kept
+    ]);
+    const targets = resolveSkillTargets();
+    assert.equal(targets.length, 2); // owned default + /tmp/skills-ok
+    assert.deepEqual([targets[1].dir, targets[1].mode], ["/tmp/skills-ok", "additive"]);
+  });
+});
+
+describe("reconcileSkills — configured targets", () => {
+  const EXTERNAL = join(tmpHome, "external-skills");
+  const EXTRA_OWNED = join(tmpHome, "extra-owned-skills");
+  const wipe = (d: string) => { if (existsSync(d)) rmSync(d, { recursive: true, force: true }); };
+
+  beforeEach(() => {
+    resetSkillsDir();
+    wipe(EXTERNAL);
+    wipe(EXTRA_OWNED);
+    installMockFetch();
+    mockCatalog = [];
+  });
+
+  afterEach(() => {
+    restoreFetch();
+    delete process.env.MEMCLAW_SKILL_TARGETS;
+  });
+
+  test("additive target is parsed but SKIPPED (not implemented) — foreign dir untouched", async () => {
+    plantOnDisk("memclaw");
+    // a client-owned skill living in the additive target dir
+    mkdirSync(join(EXTERNAL, "client-skill"), { recursive: true });
+    writeFileSync(join(EXTERNAL, "client-skill", "SKILL.md"), "# client owned\n", "utf-8");
+    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([{ dir: EXTERNAL, mode: "additive" }]);
+    mockCatalog = [
+      { doc_id: "deploy-runbook", data: { name: "deploy-runbook", description: "d", content: "# deploy\n" } },
+    ];
+
+    const summary = await reconcileSkills();
+
+    // Owned dir reconciles normally.
+    assert.ok(listSkillDirs().includes("deploy-runbook"));
+    assert.deepEqual(summary.installed, ["deploy-runbook"]);
+    // The additive dir + its foreign skill are completely untouched: not
+    // pruned, not overwritten, and the catalog skill is NOT written there.
+    assert.equal(
+      readFileSync(join(EXTERNAL, "client-skill", "SKILL.md"), "utf-8"),
+      "# client owned\n",
+    );
+    assert.ok(!existsSync(join(EXTERNAL, "deploy-runbook")));
+  });
+
+  test("an extra owned target is reconciled alongside the default", async () => {
+    plantOnDisk("memclaw");
+    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([{ dir: EXTRA_OWNED, mode: "owned" }]);
+    mockCatalog = [
+      { doc_id: "deploy-runbook", data: { name: "deploy-runbook", description: "d", content: "# deploy\n" } },
+    ];
+
+    await reconcileSkills();
+
+    // Written into BOTH the default owned dir and the extra owned dir.
+    assert.ok(existsSync(join(SKILLS_ROOT, "deploy-runbook", "SKILL.md")));
+    assert.ok(existsSync(join(EXTRA_OWNED, "deploy-runbook", "SKILL.md")));
   });
 });
 

@@ -3,9 +3,21 @@
  * migration.
  *
  * On every heartbeat, mirror the visible ``collection=skills`` catalog
- * onto ``plugin/skills/<slug>/SKILL.md`` on local disk. Replaces the
- * dropped ``install_skill`` / ``uninstall_skill`` fleet commands (which
- * were Phase B's removed push-mode behaviour).
+ * onto ``<target>/<slug>/SKILL.md`` on local disk. Replaces the dropped
+ * ``install_skill`` / ``uninstall_skill`` fleet commands (which were
+ * Phase B's removed push-mode behaviour).
+ *
+ * Targets: by default the reconciler converges the plugin's own skills
+ * dir (``getPluginDir()/skills``) in ``owned`` mode. Additional targets
+ * can be configured via ``MEMCLAW_SKILL_TARGETS`` (see
+ * {@link resolveSkillTargets}). Two modes exist in the type system —
+ * ``owned`` (the dir is fully MemClaw-managed; orphans are pruned) and
+ * ``additive`` (a shared/foreign dir; MemClaw only manages entries it
+ * wrote). NOTE: this change ships the refactor + config plumbing only —
+ * ``owned`` is implemented; ``additive`` targets are parsed but skipped
+ * with a warning until the additive-mode follow-up lands. This keeps the
+ * default (no config) behaviour byte-identical and makes a misconfigured
+ * additive target a no-op rather than a destructive prune.
  *
  * Properties:
  *
@@ -24,7 +36,7 @@
  *   This is the SAME gate the MCP pull surface enforces (PR #315), so
  *   push (this reconciler) and pull (memclaw_doc) agree on what an agent
  *   may see. A skill flipping active→rejected/quarantined drops out of
- *   the catalog and is removed from disk on the next tick (step 4).
+ *   the catalog and is removed from disk on the next tick (owned mode).
  *
  * Failure mode: fail open. If the catalog query throws or the server
  * returns non-2xx (network, server, schema, or the fail-closed 503 the
@@ -38,7 +50,7 @@ import {
   existsSync, mkdirSync, readdirSync, readFileSync,
   rmSync, statSync, writeFileSync,
 } from "fs";
-import { join } from "path";
+import { join, resolve } from "path";
 
 import { apiCall } from "./transport.js";
 import { MEMCLAW_TENANT_ID, MEMCLAW_FLEET_ID } from "./env.js";
@@ -67,6 +79,7 @@ export interface ReconcileSummary {
   // right now." Surfaced on the heartbeat so an operator can confirm an
   // approved/active skill actually landed on the fleet. Excludes the
   // bundled ``memclaw`` onboarding skill (reported via ``protected``).
+  // Aggregated across all reconciled targets (deduplicated, sorted).
   installed: string[];
   added: string[];
   removed: string[];
@@ -75,8 +88,208 @@ export interface ReconcileSummary {
 }
 
 /**
- * Mirror the catalog onto ``plugin/skills/``. Returns a summary for
- * tests / logging; never throws.
+ * How aggressively the reconciler may prune a target dir.
+ *
+ * - ``owned``: the dir is fully MemClaw-managed — every on-disk entry
+ *   not in the catalog is deleted (except {@link PROTECTED_SKILLS}).
+ * - ``additive``: a shared/foreign dir — MemClaw must only ever touch
+ *   entries it wrote, never prune others. Parsed but NOT yet acted on
+ *   here (a later PR implements ownership-tracked additive reconcile);
+ *   until then such targets are skipped with a warning.
+ */
+export type SkillTargetMode = "owned" | "additive";
+
+export interface SkillTarget {
+  dir: string;
+  mode: SkillTargetMode;
+}
+
+/** The plugin's own skills dir — always reconciled in ``owned`` mode. */
+function ownedSkillsDir(): string {
+  return join(getPluginDir(), "skills");
+}
+
+/**
+ * Resolve the target dirs to reconcile this tick.
+ *
+ * Always includes the plugin's owned dir (``owned`` mode). Additional
+ * targets come from the ``MEMCLAW_SKILL_TARGETS`` env var — a JSON array
+ * of ``{ dir, mode }``. Read at call time (``env.ts`` has already loaded
+ * ``.env`` into ``process.env`` at import). The parse fails safe: invalid
+ * JSON, a non-array value, or a malformed entry is logged and ignored so
+ * a bad config can never crash the heartbeat or alter the owned dir. An
+ * entry pointing at the owned dir is dropped (it's always present, in
+ * ``owned`` mode).
+ */
+export function resolveSkillTargets(): SkillTarget[] {
+  // resolve() so the dedup seed uses the same canonical representation as
+  // the resolve()d entries below — otherwise a non-canonical owned path
+  // (e.g. with ``..`` segments) would let an entry resolving to the same
+  // dir slip past the seen-set and reconcile the owned dir twice.
+  const ownedDir = resolve(ownedSkillsDir());
+  const targets: SkillTarget[] = [{ dir: ownedDir, mode: "owned" }];
+
+  const raw = process.env.MEMCLAW_SKILL_TARGETS;
+  if (!raw || !raw.trim()) return targets;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e: unknown) {
+    logError("resolveSkillTargets: MEMCLAW_SKILL_TARGETS is not valid JSON; ignoring", e);
+    return targets;
+  }
+  if (!Array.isArray(parsed)) {
+    console.warn("[memclaw] MEMCLAW_SKILL_TARGETS must be a JSON array; ignoring");
+    return targets;
+  }
+
+  const seen = new Set<string>([ownedDir]);
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object") {
+      console.warn("[memclaw] MEMCLAW_SKILL_TARGETS: skipping non-object entry");
+      continue;
+    }
+    const dir = (entry as { dir?: unknown }).dir;
+    const mode = (entry as { mode?: unknown }).mode;
+    if (typeof dir !== "string" || !dir.trim()) {
+      console.warn("[memclaw] MEMCLAW_SKILL_TARGETS: entry missing string 'dir'; skipping");
+      continue;
+    }
+    if (mode !== "owned" && mode !== "additive") {
+      console.warn(`[memclaw] MEMCLAW_SKILL_TARGETS: entry ${dir} has invalid mode ${String(mode)}; skipping`);
+      continue;
+    }
+    const normalized = resolve(dir);
+    // Safety: owned-mode reconcile rmSync's orphans under the target, so a
+    // too-shallow path (``/``, ``/tmp``) would be catastrophic if
+    // misconfigured. Require at least two path segments.
+    const parts = normalized.split("/").filter(Boolean);
+    if (parts.length < 2) {
+      console.warn(
+        `[memclaw] MEMCLAW_SKILL_TARGETS: entry dir ${normalized} is too shallow; skipping`,
+      );
+      continue;
+    }
+    if (seen.has(normalized)) continue; // dedupe; owned dir already present
+    seen.add(normalized);
+    targets.push({ dir: normalized, mode });
+  }
+  return targets;
+}
+
+interface DirReconcileResult {
+  added: string[];
+  removed: string[];
+  protected: string[];
+  /** Confirmed-on-disk catalog skills for this dir, excluding PROTECTED. */
+  installed: string[];
+}
+
+/**
+ * Reconcile ONE ``owned`` target dir against the desired catalog set:
+ * prune orphans (anything on disk not in ``desired``, except
+ * {@link PROTECTED_SKILLS}), then write/update the desired skills.
+ * Returns this dir's contribution to the summary; never throws.
+ */
+function reconcileOwnedDir(
+  skillsRoot: string,
+  desired: Map<string, string>,
+): DirReconcileResult {
+  const result: DirReconcileResult = {
+    added: [],
+    removed: [],
+    protected: [],
+    installed: [],
+  };
+
+  // Read disk. Skip non-directories so a stray file in the target dir
+  // doesn't get treated as a managed slug.
+  if (!existsSync(skillsRoot)) {
+    mkdirSync(skillsRoot, { recursive: true });
+  }
+  const onDisk = new Set<string>();
+  try {
+    for (const name of readdirSync(skillsRoot)) {
+      try {
+        if (statSync(join(skillsRoot, name)).isDirectory()) {
+          onDisk.add(name);
+        }
+      } catch {
+        // stat failure on one entry is non-fatal for the rest
+      }
+    }
+  } catch (e: unknown) {
+    logError("reconcileOwnedDir: failed to read skills directory", e);
+    return result;
+  }
+
+  // Apply diff. Order: removals first, then writes — so a rename
+  // (slug A → slug B) lands cleanly even if the operator does both in
+  // the same heartbeat window.
+  for (const slug of onDisk) {
+    if (desired.has(slug)) continue;
+    if (PROTECTED_SKILLS.has(slug)) {
+      result.protected.push(slug);
+      continue;
+    }
+    try {
+      rmSync(join(skillsRoot, slug), { recursive: true, force: true });
+      result.removed.push(slug);
+      console.log(`[memclaw] Reconciler removed orphan skill: ${slug}`);
+    } catch (e: unknown) {
+      logError(`reconcileOwnedDir: rm failed for ${slug}`, e);
+    }
+  }
+
+  // Track CONFIRMED on-disk state for ``installed``. Seed with skills
+  // that are BOTH already on disk AND catalog-active this tick
+  // (``onDisk ∩ desired``); the write loop then adds each fresh
+  // successful write. Intersecting with ``desired`` — rather than
+  // ``onDisk`` minus successful removals — is what makes this correct in
+  // every case:
+  //   • same-content skill skipped by the no-op-match branch below:
+  //     in onDisk ∩ desired → kept (it's genuinely present);
+  //   • new install: not on disk → added only on a successful write;
+  //   • cleanly removed orphan: not in desired → excluded;
+  //   • FAILED removal of a deactivated skill (rmSync threw, so it's
+  //     absent from removed but still on disk): not in desired →
+  //     excluded, so a stale skill is never reported as installed.
+  const desiredSlugs = new Set(desired.keys());
+  const installedSet = new Set([...onDisk].filter((s) => desiredSlugs.has(s)));
+  for (const [slug, content] of desired) {
+    const dir = join(skillsRoot, slug);
+    const target = join(dir, "SKILL.md");
+    // Skip writes when the on-disk content already matches the catalog's
+    // content — keeps mtime stable and avoids spamming OpenClaw's
+    // skill-watch reload path on every heartbeat.
+    if (existsSync(target)) {
+      try {
+        if (readFileSync(target, "utf-8") === content) continue;
+      } catch {
+        // Read failure → fall through and overwrite
+      }
+    }
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(target, content, "utf-8");
+      installedSet.add(slug);
+      result.added.push(slug);
+      console.log(
+        `[memclaw] Reconciler ${onDisk.has(slug) ? "updated" : "pulled"} skill: ${slug}`,
+      );
+    } catch (e: unknown) {
+      logError(`reconcileOwnedDir: write failed for ${slug}`, e);
+    }
+  }
+
+  result.installed = [...installedSet].filter((s) => !PROTECTED_SKILLS.has(s));
+  return result;
+}
+
+/**
+ * Mirror the catalog onto the configured target dirs. Returns a summary
+ * for tests / logging; never throws.
  */
 export async function reconcileSkills(): Promise<ReconcileSummary> {
   const summary: ReconcileSummary = {
@@ -122,24 +335,23 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   }
   summary.catalogCount = catalog.length;
 
-  // 2. Build the desired state from the catalog. Skip rows missing
-  //    doc_id or content — they can't be materialised. Slug
-  //    validation (filesystem-safe) was enforced server-side by the
-  //    Phase B ``memclaw_doc op=write collection=skills`` rule, so
-  //    every doc_id we see here should already be safe — but defense
-  //    in depth: re-validate before touching the filesystem.
+  // 2. Build the desired state from the catalog (target-independent).
+  //    Skip rows missing doc_id or content — they can't be materialised.
+  //    Slug validation (filesystem-safe) was enforced server-side by the
+  //    Phase B ``memclaw_doc op=write collection=skills`` rule, so every
+  //    doc_id we see here should already be safe — but defense in depth:
+  //    re-validate before touching the filesystem.
   //
   //    OpenClaw's skill loader rejects any SKILL.md without YAML
   //    frontmatter declaring ``name`` and ``description`` (it returns
   //    null in ``loadSingleSkillDirectory`` when either is missing,
   //    silently filtering the skill out of the agent's tool palette).
   //    Skills uploaded via ``memclaw_doc op=write collection=skills``
-  //    typically supply ``data.{name, description, content}`` as
-  //    separate fields with the content being plain markdown — so the
-  //    reconciler synthesises frontmatter from ``data.name`` and
-  //    ``data.description`` before writing, unless the content already
-  //    starts with a ``---`` fence (in which case the author's own
-  //    frontmatter is preserved).
+  //    typically supply ``data.{name, description, content}`` as separate
+  //    fields with the content being plain markdown — so the reconciler
+  //    synthesises frontmatter from ``data.name`` and ``data.description``
+  //    before writing, unless the content already starts with a ``---``
+  //    fence (in which case the author's own frontmatter is preserved).
   const desired = new Map<string, string>();
   for (const doc of catalog) {
     const slug = typeof doc.doc_id === "string" ? doc.doc_id : "";
@@ -161,97 +373,39 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
     desired.set(slug, ensureFrontmatter(rawContent, name, description));
   }
 
-  // 3. Read disk. Skip non-directories so a stray file in
-  //    plugin/skills/ doesn't get treated as a managed slug.
-  const skillsRoot = join(getPluginDir(), "skills");
-  if (!existsSync(skillsRoot)) {
-    mkdirSync(skillsRoot, { recursive: true });
-  }
-  const onDisk = new Set<string>();
-  try {
-    for (const name of readdirSync(skillsRoot)) {
-      try {
-        if (statSync(join(skillsRoot, name)).isDirectory()) {
-          onDisk.add(name);
-        }
-      } catch {
-        // stat failure on one entry is non-fatal for the rest
-      }
-    }
-  } catch (e: unknown) {
-    logError("reconcileSkills: failed to read skills directory", e);
-    return summary;
-  }
-
-  // 4. Apply diff. Order: removals first, then writes — so a rename
-  //    (slug A → slug B) lands cleanly even if the operator does both
-  //    in the same heartbeat window.
-  for (const slug of onDisk) {
-    if (desired.has(slug)) continue;
-    if (PROTECTED_SKILLS.has(slug)) {
-      summary.protected.push(slug);
+  // 3. Reconcile each configured target. Default is a single ``owned``
+  //    target (the plugin's skills dir) → behaviour identical to before
+  //    targets were configurable. ``additive`` targets are not yet
+  //    implemented here; skip them with a warning rather than applying
+  //    the destructive ``owned`` prune to a shared dir.
+  const installedAll: string[] = [];
+  const addedAll: string[] = [];
+  const removedAll: string[] = [];
+  const protectedAll: string[] = [];
+  for (const target of resolveSkillTargets()) {
+    if (target.mode !== "owned") {
+      console.warn(
+        `[memclaw] skill target ${target.dir} (mode=${target.mode}) skipped — ` +
+          "additive mode not yet implemented",
+      );
       continue;
     }
-    try {
-      rmSync(join(skillsRoot, slug), { recursive: true, force: true });
-      summary.removed.push(slug);
-      console.log(`[memclaw] Reconciler removed orphan skill: ${slug}`);
-    } catch (e: unknown) {
-      logError(`reconcileSkills: rm failed for ${slug}`, e);
-    }
+    const dirResult = reconcileOwnedDir(target.dir, desired);
+    addedAll.push(...dirResult.added);
+    removedAll.push(...dirResult.removed);
+    protectedAll.push(...dirResult.protected);
+    installedAll.push(...dirResult.installed);
   }
 
-  // Track CONFIRMED on-disk state for ``summary.installed``. Seed with
-  // skills that are BOTH already on disk AND catalog-active this tick
-  // (``onDisk ∩ desired``); the write loop then adds each fresh
-  // successful write. Intersecting with ``desired`` — rather than
-  // ``onDisk`` minus successful removals — is what makes this correct in
-  // every case:
-  //   • same-content skill skipped by the no-op-match branch below:
-  //     in onDisk ∩ desired → kept (it's genuinely present);
-  //   • new install: not on disk → added only on a successful write;
-  //   • cleanly removed orphan: not in desired → excluded;
-  //   • FAILED removal of a deactivated skill (rmSync threw, so it's
-  //     absent from summary.removed but still on disk): not in desired
-  //     → excluded, so a stale skill is never reported as installed.
-  const desiredSlugs = new Set(desired.keys());
-  const installedSet = new Set([...onDisk].filter((s) => desiredSlugs.has(s)));
-  for (const [slug, content] of desired) {
-    const dir = join(skillsRoot, slug);
-    const target = join(dir, "SKILL.md");
-    // Skip writes when the on-disk content already matches the
-    // catalog's content — keeps mtime stable and avoids spamming
-    // OpenClaw's skill-watch reload path on every heartbeat.
-    if (existsSync(target)) {
-      try {
-        if (readFileSync(target, "utf-8") === content) continue;
-      } catch {
-        // Read failure → fall through and overwrite
-      }
-    }
-    try {
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(target, content, "utf-8");
-      installedSet.add(slug);
-      summary.added.push(slug);
-      console.log(
-        `[memclaw] Reconciler ${onDisk.has(slug) ? "updated" : "pulled"} skill: ${slug}`,
-      );
-    } catch (e: unknown) {
-      logError(`reconcileSkills: write failed for ${slug}`, e);
-    }
-  }
-
-  // The standing on-disk truth: skills CONFIRMED present on disk this
-  // tick (sorted for a stable heartbeat payload / diff), excluding the
-  // bundled ``memclaw`` onboarding skill (reported via ``protected``).
-  // Built from confirmed writes + already-present survivors, NOT from
-  // ``desired`` — so a skill whose write failed above is correctly
-  // absent. Reported even when ``added``/``removed`` are empty (steady
-  // state) so an operator always sees what's live, not just what changed.
-  summary.installed = [...installedSet]
-    .filter((s) => !PROTECTED_SKILLS.has(s))
-    .sort();
+  // Aggregate across targets at slug granularity — a skill present in
+  // more than one target is one slug, not N — deduped + sorted for a
+  // stable heartbeat payload. ``installed`` excludes the bundled
+  // ``memclaw`` skill (filtered per dir). For the default single target
+  // this is identical to the un-aggregated per-dir lists.
+  summary.added = [...new Set(addedAll)].sort();
+  summary.removed = [...new Set(removedAll)].sort();
+  summary.protected = [...new Set(protectedAll)].sort();
+  summary.installed = [...new Set(installedAll)].sort();
 
   return summary;
 }
