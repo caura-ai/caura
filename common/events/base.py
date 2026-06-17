@@ -66,7 +66,9 @@ class EventBus(ABC):
         """
 
     @abstractmethod
-    def subscribe(self, topic: str, handler: EventHandler) -> None:
+    def subscribe(
+        self, topic: str, handler: EventHandler, *, broadcast: bool = False
+    ) -> None:
         """Register *handler* as a subscriber to *topic*. May be called
         at startup only — not thread-safe during `publish`.
 
@@ -75,6 +77,16 @@ class EventBus(ABC):
         handler raises, gets redelivered. Use `event.event_id` as a
         natural dedup key when the operation isn't inherently
         idempotent.
+
+        ``broadcast``: when True, *every* subscribing process must receive
+        each event (fan-out), not just one. The default (False) is the
+        work-queue semantics every existing consumer relies on — a shared
+        per-service subscription delivers each message to a single
+        process. Broadcast is for cross-process cache invalidation, where
+        one worker handling the event would leave the others stale. The
+        in-process bus dispatches to all local handlers regardless, so it
+        ignores the flag; the Pub/Sub bus gives broadcast topics a
+        per-process subscription.
         """
 
     async def start(self) -> None:

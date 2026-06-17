@@ -43,6 +43,13 @@ class Org(enum.StrEnum):
     # affected tenants synchronously, even while the durable mirror
     # eventually catches up.
     SUPPRESSION_CHANGED = "memclaw.org.suppression-changed"
+    # CAURA-571: core-api publishes this after an org's settings are written so
+    # every process drops its per-process settings cache promptly — without it,
+    # a tightened governance control keeps applying its looser prior value on
+    # sibling workers for up to the cache TTL (5 min). Subscribe with
+    # ``broadcast=True`` (every process must receive it), not the work-queue
+    # default.
+    SETTINGS_CHANGED = "memclaw.org.settings-changed"
 
 
 class Lifecycle(enum.StrEnum):

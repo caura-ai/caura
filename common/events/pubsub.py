@@ -4,10 +4,15 @@ Publishers push JSON-encoded `Event` payloads to per-topic Pub/Sub
 topics; subscribers pull messages from per-subscriber subscriptions and
 dispatch to async handlers.
 
-Topic + subscription provisioning is *not* done here — it's expected to
-be managed via Terraform / gcloud at deploy time so subscription
-configuration (ack deadlines, retry policies, dead-letter topics) lives
-with infra. This class assumes the topics/subscriptions already exist.
+Topic + *durable* subscription provisioning is *not* done here — it's
+expected to be managed via Terraform / gcloud at deploy time so
+subscription configuration (ack deadlines, retry policies, dead-letter
+topics) lives with infra. This class assumes those already exist. The
+SOLE exception is per-process *broadcast* subscriptions (see
+``subscribe(broadcast=True)``): their names embed a per-process id so
+Terraform can't pre-provision them, so ``_ensure_broadcast_subscription``
+creates one at ``start()`` (with an ``expiration_policy`` backstop) and
+deletes it at ``stop()``.
 
 Import is lazy so `common.events` can be imported in OSS standalone
 installs that don't have `google-cloud-pubsub` installed.
@@ -36,6 +41,7 @@ import concurrent.futures
 import functools
 import json
 import logging
+import uuid
 from collections import defaultdict
 from typing import Any
 
@@ -53,6 +59,13 @@ logger = logging.getLogger(__name__)
 # filters can only match attributes, never the message body. See the
 # cross-environment leakage note in the module docstring.
 SOURCE_ENV_ATTRIBUTE = "source_env"
+
+# Ephemeral broadcast subscriptions (``subscribe(broadcast=True)``) are created
+# per-process at ``start()`` and deleted at ``stop()``. This TTL is the backstop
+# for an unclean shutdown: Pub/Sub auto-deletes a subscription left idle this
+# long, so a crashed process can't leak its subscription forever. 1 day is the
+# Pub/Sub minimum for ``expiration_policy``.
+BROADCAST_SUBSCRIPTION_TTL_SECONDS = 86400
 
 
 class PubSubEventBus(EventBus):
@@ -174,6 +187,15 @@ class PubSubEventBus(EventBus):
         # warn against bare ``create_task(coro)``. The done-callback
         # auto-discards on completion so the set stays bounded.
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        # Topics registered with ``broadcast=True`` get a PER-PROCESS
+        # subscription so every process receives every message (fan-out),
+        # instead of the shared per-service subscription that delivers each
+        # message to a single consumer. ``_instance_id`` makes this process's
+        # subscription name unique; ``_broadcast_sub_paths`` records the ones
+        # this process created so ``stop()`` can delete them.
+        self._broadcast_topics: set[str] = set()
+        self._broadcast_sub_paths: list[str] = []
+        self._instance_id = uuid.uuid4().hex[:12]
 
     def _spawn_background_task(self, coro: Any) -> asyncio.Task[Any]:
         """Schedule a fire-and-forget task; see ``_background_tasks`` for why."""
@@ -427,7 +449,9 @@ class PubSubEventBus(EventBus):
 
     # ── subscriber ─────────────────────────────────────────────────
 
-    def subscribe(self, topic: str, handler: EventHandler) -> None:
+    def subscribe(
+        self, topic: str, handler: EventHandler, *, broadcast: bool = False
+    ) -> None:
         # Late subscribes silently orphan the handler — pull tasks are
         # only spawned during start(). Fail loudly so the bug surfaces
         # at wire-up rather than appearing as "events aren't arriving".
@@ -440,6 +464,10 @@ class PubSubEventBus(EventBus):
                 "the pull loop for this topic won't be created otherwise."
             )
         self._handlers[topic].append(handler)
+        # ``broadcast`` topics get a per-process subscription at start() so
+        # every process receives every message (fan-out), not just one.
+        if broadcast:
+            self._broadcast_topics.add(topic)
 
     async def start(self) -> None:
         # Idempotent guard — a second call would leak the old
@@ -538,9 +566,66 @@ class PubSubEventBus(EventBus):
             )
             for topic, handlers in self._handlers.items():
                 sub_name = f"{self._subscription_prefix}--{self._topic_name(topic)}"
+                if topic in self._broadcast_topics:
+                    # Per-process subscription (unique suffix) for fan-out; skip
+                    # the pull loop if it can't be created (see the helper — it
+                    # degrades to TTL rather than crashing startup).
+                    sub_name = f"{sub_name}--{self._instance_id}"
+                    if not await self._ensure_broadcast_subscription(topic, sub_name):
+                        continue
                 task = asyncio.create_task(self._pull_loop(sub_name, handlers))
                 self._pull_tasks.append(task)
         self._started = True
+
+    async def _ensure_broadcast_subscription(self, topic: str, sub_name: str) -> bool:
+        """Create this process's ephemeral subscription for a broadcast topic.
+
+        Returns True if the subscription exists (so a pull loop should be
+        spawned), False if creation failed — the caller then degrades to no
+        fan-out for this topic (cross-process invalidation falls back to the
+        cache TTL) rather than crashing startup. Sets ``expiration_policy`` so a
+        subscription orphaned by an unclean shutdown self-deletes after
+        ``BROADCAST_SUBSCRIPTION_TTL_SECONDS``.
+        """
+        from google.api_core import exceptions as gexc
+
+        loop = asyncio.get_running_loop()
+        sub_path = self._subscriber.subscription_path(self._project_id, sub_name)
+        topic_path = f"projects/{self._project_id}/topics/{self._topic_name(topic)}"
+
+        def _create() -> None:
+            self._subscriber.create_subscription(
+                request={
+                    "name": sub_path,
+                    "topic": topic_path,
+                    "ack_deadline_seconds": 30,
+                    "expiration_policy": {
+                        "ttl": {"seconds": BROADCAST_SUBSCRIPTION_TTL_SECONDS}
+                    },
+                }
+            )
+
+        try:
+            await loop.run_in_executor(self._pull_executor, _create)
+        except gexc.AlreadyExists:
+            # A prior unclean shutdown left this process's subscription (same
+            # _instance_id) around — reuse it. The create failed, so its
+            # expiration_policy TTL is NOT reset here; the pull loop's ongoing
+            # activity is what keeps Pub/Sub from expiring it.
+            pass
+        except Exception:
+            logger.error(
+                "pubsub: failed to create broadcast subscription %s; this "
+                "process will NOT receive %s events (cross-process cache "
+                "invalidation falls back to the TTL). Check the service account "
+                "has pubsub.subscriptions.create on the project.",
+                sub_name,
+                topic,
+                exc_info=True,
+            )
+            return False
+        self._broadcast_sub_paths.append(sub_path)
+        return True
 
     def _foreign_source_env(self, message: Any) -> str | None:
         """Return the message's ``source_env`` when it was published by a
@@ -842,6 +927,30 @@ class PubSubEventBus(EventBus):
         # idempotency guard and create a fresh SubscriberClient that
         # the in-flight stop() would then close out from under the caller.
         try:
+            # Delete this process's ephemeral broadcast subscriptions BEFORE
+            # closing the subscriber (the delete needs the client). Best-effort:
+            # the ``expiration_policy`` set at creation reaps any subscription
+            # this misses (unclean shutdown). The close below then wakes the
+            # pull threads via the gRPC channel error, so they exit through the
+            # ``if self._stopping: return`` path rather than logging NotFound.
+            if self._subscriber is not None and self._broadcast_sub_paths:
+                for sub_path in self._broadcast_sub_paths:
+                    try:
+                        await loop.run_in_executor(
+                            None,
+                            functools.partial(
+                                self._subscriber.delete_subscription,
+                                request={"subscription": sub_path},
+                            ),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "pubsub: failed to delete ephemeral broadcast "
+                            "subscription %s; expiration_policy will reap it",
+                            sub_path,
+                            exc_info=True,
+                        )
+                self._broadcast_sub_paths.clear()
             # Close the subscriber BEFORE cancelling/awaiting the pull
             # tasks. Pull threads are blocked inside a synchronous
             # `subscriber.pull(timeout=pull_timeout)` — asyncio

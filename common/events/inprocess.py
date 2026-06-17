@@ -33,7 +33,12 @@ class InProcessEventBus(EventBus):
         self._handlers: dict[str, list[EventHandler]] = defaultdict(list)
         self._tasks: set[asyncio.Task[None]] = set()
 
-    def subscribe(self, topic: str, handler: EventHandler) -> None:
+    def subscribe(
+        self, topic: str, handler: EventHandler, *, broadcast: bool = False
+    ) -> None:
+        # ``broadcast`` is a no-op here: a single-process bus already
+        # dispatches every event to all local handlers (fan-out within the
+        # process). Cross-worker fan-out is a Pub/Sub-backend concern.
         self._handlers[topic].append(handler)
 
     async def publish(self, topic: str, event: Event) -> None:

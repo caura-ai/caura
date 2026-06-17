@@ -34,11 +34,12 @@ from common.events.base import Event
 from common.events.factory import get_event_bus
 from common.events.memory_embedded import MemoryEmbedded
 from common.events.memory_enriched import MemoryEnriched
+from common.events.org_settings_changed_event import OrgSettingsChangedEvent
 from common.events.topics import Topics
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.contradiction_detector import detect_contradictions_async
 from core_api.services.governance_remediation import remediate_after_enrichment
-from core_api.services.organization_settings import resolve_config
+from core_api.services.organization_settings import invalidate_cache, resolve_config
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +231,38 @@ async def handle_memory_embedded(event: Event) -> None:
     )
 
 
+async def handle_org_settings_changed(event: Event) -> None:
+    """Process one ``Topics.Org.SETTINGS_CHANGED`` event (CAURA-571).
+
+    Drops the affected org's entry from THIS process's settings cache, so a
+    settings change made on any worker/instance takes effect here promptly
+    instead of waiting out the per-process 5-min TTL. The publishing worker
+    already invalidated its own cache locally; this is the fan-out to every
+    other process (the topic is subscribed with ``broadcast=True``).
+
+    Idempotent — evicting an absent or already-fresh entry is a harmless no-op —
+    so the at-least-once bus may redeliver freely. A malformed payload is
+    ack-dropped (no retry will make it parse).
+    """
+    try:
+        payload = OrgSettingsChangedEvent.model_validate(event.payload)
+    except ValidationError:
+        logger.exception(
+            "dropping malformed org-settings-changed payload",
+            extra={
+                "event_type": event.event_type,
+                "event_id": str(event.event_id),
+                "dropped": True,
+            },
+        )
+        return
+    invalidate_cache(payload.org_id)
+    logger.info(
+        "settings cache invalidated via broadcast",
+        extra={"event_id": str(event.event_id), "org_id": payload.org_id},
+    )
+
+
 def register_consumers() -> None:
     """Wire the consumers into the event bus.
 
@@ -240,3 +273,7 @@ def register_consumers() -> None:
     bus = get_event_bus()
     bus.subscribe(Topics.Memory.ENRICHED, handle_memory_enriched)
     bus.subscribe(Topics.Memory.EMBEDDED, handle_memory_embedded)
+    # Broadcast: EVERY core-api process must drop its settings cache, not just
+    # one — so this uses a per-process subscription, unlike the work-queue
+    # consumers above (CAURA-571).
+    bus.subscribe(Topics.Org.SETTINGS_CHANGED, handle_org_settings_changed, broadcast=True)

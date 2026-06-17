@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from common.events import Event, PubSubEventBus, Topics
+from common.events.pubsub import BROADCAST_SUBSCRIPTION_TTL_SECONDS
 
 
 @pytest.fixture
@@ -1161,3 +1162,91 @@ async def test_pull_loop_processes_message_without_source_env_attribute() -> Non
 
     assert len(result["dispatched"]) == 1
     assert result["acked"] == ["ack-legacy"]
+
+
+# ── broadcast subscriptions (CAURA-571) ──────────────────────────────
+
+
+def test_subscribe_broadcast_records_topic() -> None:
+    # broadcast=True flags the topic for a per-process subscription; the
+    # default keeps the shared work-queue subscription.
+    b = PubSubEventBus(project_id="proj", subscription_prefix="core-api")
+
+    async def handler(event: Event) -> None: ...
+
+    b.subscribe(Topics.Org.SETTINGS_CHANGED, handler, broadcast=True)
+    b.subscribe(Topics.Memory.EMBEDDED, handler)
+    assert Topics.Org.SETTINGS_CHANGED in b._broadcast_topics
+    assert Topics.Memory.EMBEDDED not in b._broadcast_topics
+
+
+async def test_ensure_broadcast_subscription_creates_with_expiration(
+    bus: PubSubEventBus,
+) -> None:
+    # Each process creates its OWN subscription (unique name) so every process
+    # receives every event; expiration_policy reaps it if the process dies.
+    fake_sub = MagicMock()
+    fake_sub.subscription_path = (
+        lambda proj, name: f"projects/{proj}/subscriptions/{name}"
+    )
+    bus._subscriber = fake_sub
+    ok = await bus._ensure_broadcast_subscription(
+        Topics.Org.SETTINGS_CHANGED,
+        f"core-api--{Topics.Org.SETTINGS_CHANGED}--abc123",
+    )
+    assert ok is True
+    req = fake_sub.create_subscription.call_args.kwargs["request"]
+    assert req["topic"] == f"projects/proj/topics/{Topics.Org.SETTINGS_CHANGED}"
+    assert req["name"].endswith("--abc123")
+    assert (
+        req["expiration_policy"]["ttl"]["seconds"]
+        == BROADCAST_SUBSCRIPTION_TTL_SECONDS
+    )
+    # Tracked so stop() can delete it.
+    assert bus._broadcast_sub_paths == [req["name"]]
+
+
+async def test_ensure_broadcast_subscription_already_exists_is_ok(
+    bus: PubSubEventBus,
+) -> None:
+    from google.api_core import exceptions as gexc
+
+    fake_sub = MagicMock()
+    fake_sub.subscription_path = (
+        lambda proj, name: f"projects/{proj}/subscriptions/{name}"
+    )
+    fake_sub.create_subscription = MagicMock(side_effect=gexc.AlreadyExists("exists"))
+    bus._subscriber = fake_sub
+    ok = await bus._ensure_broadcast_subscription(Topics.Org.SETTINGS_CHANGED, "sub-x")
+    # Reuse a prior run's subscription (same _instance_id) rather than fail.
+    assert ok is True
+    assert len(bus._broadcast_sub_paths) == 1
+
+
+async def test_ensure_broadcast_subscription_failure_degrades(
+    bus: PubSubEventBus,
+) -> None:
+    # Missing IAM (pubsub.subscriptions.create) must NOT crash startup — the
+    # process degrades to no fan-out (invalidation falls back to the cache TTL).
+    fake_sub = MagicMock()
+    fake_sub.subscription_path = (
+        lambda proj, name: f"projects/{proj}/subscriptions/{name}"
+    )
+    fake_sub.create_subscription = MagicMock(
+        side_effect=RuntimeError("permission denied")
+    )
+    bus._subscriber = fake_sub
+    ok = await bus._ensure_broadcast_subscription(Topics.Org.SETTINGS_CHANGED, "sub-x")
+    assert ok is False
+    assert bus._broadcast_sub_paths == []
+
+
+async def test_stop_deletes_broadcast_subscriptions(bus: PubSubEventBus) -> None:
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    bus._broadcast_sub_paths = ["projects/proj/subscriptions/core-api--x--abc"]
+    await bus.stop()
+    fake_sub.delete_subscription.assert_called_once()
+    req = fake_sub.delete_subscription.call_args.kwargs["request"]
+    assert req["subscription"] == "projects/proj/subscriptions/core-api--x--abc"
+    assert bus._broadcast_sub_paths == []

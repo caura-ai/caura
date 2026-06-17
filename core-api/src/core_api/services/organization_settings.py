@@ -31,10 +31,14 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from common.events.base import Event
+from common.events.factory import get_event_bus
 from common.events.lifecycle_purge_request import (
     MEMORY_RETENTION_MAX_DAYS,
     MEMORY_RETENTION_MIN_DAYS,
 )
+from common.events.org_settings_changed_event import OrgSettingsChangedEvent
+from common.events.topics import Topics
 from common.governance import PIICategory
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.provider_names import ProviderName
@@ -1120,7 +1124,28 @@ async def update_settings(
     )
     await db.commit()
 
-    # Local invalidation — other workers pick up the change within TTL.
+    # Invalidate THIS process's cache immediately...
     invalidate_cache(tenant_id)
+    # ...and broadcast so every other worker/instance drops its copy promptly
+    # too (CAURA-571), instead of serving the stale value for up to the TTL —
+    # which matters for a tightened governance control. Best-effort: a publish
+    # failure must not fail a settings write that already committed; siblings
+    # then fall back to the TTL, exactly as before this change.
+    try:
+        await get_event_bus().publish(
+            Topics.Org.SETTINGS_CHANGED,
+            Event(
+                event_type=Topics.Org.SETTINGS_CHANGED,
+                tenant_id=tenant_id,
+                payload=OrgSettingsChangedEvent(org_id=tenant_id).model_dump(mode="json"),
+            ),
+        )
+    except Exception:
+        logger.warning(
+            "failed to publish settings-changed for %s; sibling workers will "
+            "pick up the change within the cache TTL",
+            tenant_id,
+            exc_info=True,
+        )
 
     return _deep_merge(DEFAULT_SETTINGS, merged)

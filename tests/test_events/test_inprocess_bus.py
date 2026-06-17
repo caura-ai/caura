@@ -183,3 +183,22 @@ async def test_is_healthy_default_true() -> None:
     subscriber state in-process."""
     bus = InProcessEventBus()
     assert bus.is_healthy is True
+
+
+async def test_subscribe_broadcast_flag_accepted_and_dispatches() -> None:
+    """The in-process bus already dispatches to every local handler, so
+    ``broadcast=True`` is a no-op it must accept without error and still
+    deliver (CAURA-571 — the flag only changes Pub/Sub subscription shape)."""
+    bus = InProcessEventBus()
+    seen: list[str] = []
+
+    async def handler(event: Event) -> None:
+        seen.append(event.event_type)
+
+    bus.subscribe(Topics.Org.SETTINGS_CHANGED, handler, broadcast=True)
+    await bus.publish(
+        Topics.Org.SETTINGS_CHANGED,
+        Event(event_type=Topics.Org.SETTINGS_CHANGED, payload={"org_id": "o1"}),
+    )
+    await bus.drain()
+    assert seen == [Topics.Org.SETTINGS_CHANGED]

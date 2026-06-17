@@ -259,19 +259,26 @@ async def test_register_consumers_subscribes_to_both_topics() -> None:
     back-channel topic — a typo on either side would silently orphan
     the handler.
 
-    Two subscriptions wired: ``ENRICHED`` (CAURA-595) and ``EMBEDDED``
+    Three subscriptions wired: ``ENRICHED`` (CAURA-595) and ``EMBEDDED``
     (the symmetric path that fires contradiction detection on the
     embed-after-enrich ordering — the only case under
-    ``EMBED_ON_HOT_PATH=false``).
+    ``EMBED_ON_HOT_PATH=false``), both work-queue; plus
+    ``Org.SETTINGS_CHANGED`` (CAURA-571) as a BROADCAST subscription so
+    every process drops its settings cache.
     """
     fake_bus = MagicMock()
     with patch("core_api.consumer.get_event_bus", return_value=fake_bus):
         consumer.register_consumers()
 
-    assert fake_bus.subscribe.call_count == 2
+    assert fake_bus.subscribe.call_count == 3
     fake_bus.subscribe.assert_any_call(
         Topics.Memory.ENRICHED, consumer.handle_memory_enriched
     )
     fake_bus.subscribe.assert_any_call(
         Topics.Memory.EMBEDDED, consumer.handle_memory_embedded
+    )
+    fake_bus.subscribe.assert_any_call(
+        Topics.Org.SETTINGS_CHANGED,
+        consumer.handle_org_settings_changed,
+        broadcast=True,
     )
