@@ -225,19 +225,22 @@ def as_agent(monkeypatch):
     _app.dependency_overrides.pop(_gac, None)
 
 
-async def _write(client, headers, tenant_id, *, agent_id, fleet_id, visibility, content=None):
-    resp = await client.post(
-        "/api/v1/memories",
-        json={
-            "tenant_id": tenant_id,
-            "content": content or f"row {uuid.uuid4().hex[:8]}",
-            "agent_id": agent_id,
-            "fleet_id": fleet_id,
-            "visibility": visibility,
-            "memory_type": "fact",
-        },
-        headers=headers,
-    )
+async def _write(client, headers, tenant_id, *, agent_id, fleet_id, visibility, content=None, write_mode=None):
+    body = {
+        "tenant_id": tenant_id,
+        "content": content or f"row {uuid.uuid4().hex[:8]}",
+        "agent_id": agent_id,
+        "fleet_id": fleet_id,
+        "visibility": visibility,
+        "memory_type": "fact",
+    }
+    # write_mode="strong" keeps embedding/indexing synchronous, so a search
+    # immediately after the write is deterministic (see test_a13). Omitted by
+    # default — only search-after-write tests need it; the by-id/list tests
+    # read from the DB directly and are unaffected.
+    if write_mode is not None:
+        body["write_mode"] = write_mode
+    resp = await client.post("/api/v1/memories", json=body, headers=headers)
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
 
@@ -335,6 +338,7 @@ async def test_rest_search_scope_agent_uses_authenticated_identity(client, as_ag
     priv = await _write(
         client, headers, tenant_id, agent_id="alice", fleet_id="fleet-alpha",
         visibility="scope_agent", content=f"alice private note {marker}",
+        write_mode="strong",  # synchronous embedding ⇒ the row is searchable immediately (de-flakes)
     )
 
     async def _search(query):
