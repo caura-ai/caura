@@ -1,0 +1,63 @@
+name: Security Scan
+
+# Static security scanning for the Python services: SAST (bandit) + dependency
+# CVE audit (pip-audit). Complements the per-PR lint/type/test gate in ci.yml —
+# that catches style/type/behaviour; this catches security smells and known-
+# vulnerable dependencies. Runs per-PR (fast feedback) + weekly (catches newly
+# disclosed CVEs in unchanged deps).
+#
+# Both steps are REPORT-ONLY for now (continue-on-error) so the existing
+# backlog doesn't block merges on day one — the findings show in the job log.
+# Ratchet to a hard fail (drop continue-on-error) once the initial backlog is
+# triaged. A richer SAST (GitHub CodeQL) is free on this public repo and can be
+# added later via .github/workflows/codeql.yml.
+
+on:
+  pull_request:
+    branches: [main, dev]
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.13"
+  UV_VERSION: "0.9.26"
+
+permissions:
+  contents: read
+
+jobs:
+  security-scan:
+    name: Security Scan (bandit + pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5.4.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install project + scanners
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          uv pip install -e core-api/[dev] -e core-storage-api/[dev] bandit pip-audit
+          echo "$VIRTUAL_ENV/bin" >> "$GITHUB_PATH"
+
+      - name: Bandit SAST (medium+ severity / medium+ confidence)
+        # Report-only for now — see header comment. -r scans src only (not tests).
+        continue-on-error: true
+        run: bandit -r core-api/src core-storage-api/src --severity-level medium --confidence-level medium
+
+      - name: pip-audit (known-vulnerable dependencies)
+        # Audits the resolved venv (core-api + core-storage-api deps). Report-only
+        # for now; editable project packages with no release are skipped.
+        continue-on-error: true
+        run: pip-audit --desc
