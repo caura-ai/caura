@@ -173,6 +173,29 @@ malformed catalog row was skipped — closing the loop from "approved" to
 tick (even steady-state ticks with empty `added`/`removed`), so a node's
 current live-skill set is always legible.
 
+### Reconcile targets: `owned` vs `additive`
+
+By default the reconciler manages one **`owned`** dir — the plugin's own
+`skills/` — where it has full authority: anything on disk not in the
+catalog is pruned. Operators can add extra target dirs via the
+`MEMCLAW_SKILL_TARGETS` env var (JSON array of `{ dir, mode }`):
+
+- **`owned`** — fully MemClaw-managed (destructive prune). Use only for
+  dirs MemClaw exclusively controls.
+- **`additive`** — a **shared/foreign** dir. MemClaw writes its active
+  skills there but **only ever touches entries it wrote**, tracked by a
+  per-skill `.memclaw-owned` marker file:
+  - a slug already occupied by an *unowned* skill is a **collision** —
+    skipped, never overwritten (reported in `skipped`);
+  - an unowned skill is **never removed**, even on an empty catalog;
+  - only marker-bearing entries are updated/pruned.
+
+This makes the "empty catalog / wrong tenant wipes the dir" hazard apply
+only to `owned` dirs — `additive` dirs lose only MemClaw's own entries,
+never the client's. For an additive target to actually reach agents it
+must be on OpenClaw's skill load path (e.g. registered in
+`settings.skills.customDirectories`).
+
 ## What makes a skill findable: the summary
 
 Scoped `op=search` ranks on the embedded `data.summary`. So the

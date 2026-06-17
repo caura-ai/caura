@@ -10,14 +10,16 @@
  * Targets: by default the reconciler converges the plugin's own skills
  * dir (``getPluginDir()/skills``) in ``owned`` mode. Additional targets
  * can be configured via ``MEMCLAW_SKILL_TARGETS`` (see
- * {@link resolveSkillTargets}). Two modes exist in the type system —
- * ``owned`` (the dir is fully MemClaw-managed; orphans are pruned) and
- * ``additive`` (a shared/foreign dir; MemClaw only manages entries it
- * wrote). NOTE: this change ships the refactor + config plumbing only —
- * ``owned`` is implemented; ``additive`` targets are parsed but skipped
- * with a warning until the additive-mode follow-up lands. This keeps the
- * default (no config) behaviour byte-identical and makes a misconfigured
- * additive target a no-op rather than a destructive prune.
+ * {@link resolveSkillTargets}). Two modes:
+ *   - ``owned`` ({@link reconcileOwnedDir}): the dir is fully
+ *     MemClaw-managed; any on-disk skill not in the catalog is pruned
+ *     (except {@link PROTECTED_SKILLS}).
+ *   - ``additive`` ({@link reconcileAdditiveDir}): a shared/foreign dir.
+ *     MemClaw only ever touches entries it wrote, tracked per-skill via
+ *     the {@link OWNED_MARKER} sentinel — foreign skills are never
+ *     overwritten (collisions are skipped) or removed.
+ * With no config, the single default ``owned`` target makes behaviour
+ * byte-identical to before targets were configurable.
  *
  * Properties:
  *
@@ -64,6 +66,26 @@ import { logError } from "./logger.js";
  * agent's onboarding skill).
  */
 export const PROTECTED_SKILLS: ReadonlySet<string> = new Set(["memclaw"]);
+
+// Per-skill ownership marker for ``additive`` (shared/foreign) target
+// dirs. MemClaw writes this sentinel inside every skill dir it creates
+// there, and only ever updates/removes a ``<slug>`` that carries it — so
+// a skill it doesn't own is never touched. The marker lives INSIDE the
+// skill dir (``<dir>/<slug>/.memclaw-owned``); OpenClaw's loader reads
+// only ``SKILL.md`` and halts recursion at a skill root, so the marker is
+// invisible to it (verified against agent-core skills.ts / session.ts).
+// Choosing a per-skill marker over a central manifest makes the safety
+// property fail-safe: a missing marker means "leave it alone", never
+// "delete it".
+export const OWNED_MARKER = ".memclaw-owned";
+const OWNED_MARKER_BODY =
+  "This skill directory is managed by the MemClaw plugin reconciler.\n" +
+  "Do not edit by hand — it is overwritten/removed to match the catalog.\n";
+
+/** True if ``skillDir`` carries the MemClaw ownership marker. */
+function isMemclawOwned(skillDir: string): boolean {
+  return existsSync(join(skillDir, OWNED_MARKER));
+}
 
 interface CatalogDoc {
   doc_id?: string;
@@ -184,6 +206,12 @@ interface DirReconcileResult {
   protected: string[];
   /** Confirmed-on-disk catalog skills for this dir, excluding PROTECTED. */
   installed: string[];
+  /**
+   * Desired skills NOT materialised because the slug is already occupied
+   * by a foreign (non-MemClaw-owned) entry in an ``additive`` dir. Always
+   * empty for ``owned`` dirs (which fully own their contents).
+   */
+  skipped: string[];
 }
 
 /**
@@ -201,6 +229,7 @@ function reconcileOwnedDir(
     removed: [],
     protected: [],
     installed: [],
+    skipped: [],
   };
 
   // Read disk. Skip non-directories so a stray file in the target dir
@@ -280,6 +309,120 @@ function reconcileOwnedDir(
       );
     } catch (e: unknown) {
       logError(`reconcileOwnedDir: write failed for ${slug}`, e);
+    }
+  }
+
+  result.installed = [...installedSet].filter((s) => !PROTECTED_SKILLS.has(s));
+  return result;
+}
+
+/**
+ * Reconcile ONE ``additive`` (shared / foreign) target dir.
+ *
+ * Unlike {@link reconcileOwnedDir}, MemClaw does NOT own this dir, so it
+ * must never touch an entry it didn't write. Safety is enforced by the
+ * per-skill {@link OWNED_MARKER}:
+ *
+ *  - **write**: a desired slug is written only when its dir is absent
+ *    (new → stamp the marker) or already MemClaw-owned (update in place).
+ *    A slug occupied by an UNOWNED dir is a collision → skipped, never
+ *    overwritten.
+ *  - **remove**: an on-disk slug not in the catalog is removed only when
+ *    it carries the marker; unowned (foreign) entries are left untouched.
+ *
+ * Consequence: an empty catalog (or a misconfigured tenant returning an
+ * empty installable set) prunes only MemClaw-owned entries here —
+ * foreign skills survive. Never throws.
+ */
+function reconcileAdditiveDir(
+  skillsRoot: string,
+  desired: Map<string, string>,
+): DirReconcileResult {
+  const result: DirReconcileResult = {
+    added: [],
+    removed: [],
+    protected: [],
+    installed: [],
+    skipped: [],
+  };
+
+  if (!existsSync(skillsRoot)) {
+    mkdirSync(skillsRoot, { recursive: true });
+  }
+  const onDisk = new Set<string>();
+  try {
+    for (const name of readdirSync(skillsRoot)) {
+      try {
+        if (statSync(join(skillsRoot, name)).isDirectory()) {
+          onDisk.add(name);
+        }
+      } catch {
+        // stat failure on one entry is non-fatal for the rest
+      }
+    }
+  } catch (e: unknown) {
+    logError("reconcileAdditiveDir: failed to read skills directory", e);
+    return result;
+  }
+
+  // Removals first — but ONLY for MemClaw-owned (marker-bearing) orphans.
+  // Anything without the marker is foreign and is never touched.
+  for (const slug of onDisk) {
+    if (desired.has(slug)) continue;
+    if (PROTECTED_SKILLS.has(slug)) {
+      result.protected.push(slug);
+      continue;
+    }
+    if (!isMemclawOwned(join(skillsRoot, slug))) continue; // foreign — leave alone
+    try {
+      rmSync(join(skillsRoot, slug), { recursive: true, force: true });
+      result.removed.push(slug);
+      console.log(`[memclaw] Reconciler (additive) removed owned orphan: ${slug}`);
+    } catch (e: unknown) {
+      logError(`reconcileAdditiveDir: rm failed for ${slug}`, e);
+    }
+  }
+
+  // Writes — only into absent or already-owned slots. A foreign occupant
+  // of the same slug is a collision: skip it, never clobber.
+  const installedSet = new Set<string>();
+  for (const [slug, content] of desired) {
+    const skillDir = join(skillsRoot, slug);
+    const present = onDisk.has(slug);
+    if (present && !isMemclawOwned(skillDir)) {
+      result.skipped.push(slug);
+      console.warn(
+        `[memclaw] additive: ${slug} is occupied by an unowned skill in ` +
+          `${skillsRoot}; skipping (collision)`,
+      );
+      continue;
+    }
+    const target = join(skillDir, "SKILL.md");
+    // Owned + unchanged content → already installed; skip the rewrite.
+    if (present) {
+      try {
+        if (existsSync(target) && readFileSync(target, "utf-8") === content) {
+          installedSet.add(slug);
+          continue;
+        }
+      } catch {
+        // Read failure → fall through and overwrite
+      }
+    }
+    try {
+      mkdirSync(skillDir, { recursive: true });
+      // Stamp ownership on first write; an already-owned dir keeps its marker.
+      if (!present) {
+        writeFileSync(join(skillDir, OWNED_MARKER), OWNED_MARKER_BODY, "utf-8");
+      }
+      writeFileSync(target, content, "utf-8");
+      installedSet.add(slug);
+      result.added.push(slug);
+      console.log(
+        `[memclaw] additive: ${present ? "updated" : "pulled"} skill ${slug} in ${skillsRoot}`,
+      );
+    } catch (e: unknown) {
+      logError(`reconcileAdditiveDir: write failed for ${slug}`, e);
     }
   }
 
@@ -375,26 +518,24 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
 
   // 3. Reconcile each configured target. Default is a single ``owned``
   //    target (the plugin's skills dir) → behaviour identical to before
-  //    targets were configurable. ``additive`` targets are not yet
-  //    implemented here; skip them with a warning rather than applying
-  //    the destructive ``owned`` prune to a shared dir.
+  //    targets were configurable. ``owned`` dirs are fully managed
+  //    (destructive prune); ``additive`` dirs are shared/foreign and are
+  //    reconciled non-destructively via the ownership marker.
   const installedAll: string[] = [];
   const addedAll: string[] = [];
   const removedAll: string[] = [];
   const protectedAll: string[] = [];
+  const skippedAll: string[] = [];
   for (const target of resolveSkillTargets()) {
-    if (target.mode !== "owned") {
-      console.warn(
-        `[memclaw] skill target ${target.dir} (mode=${target.mode}) skipped — ` +
-          "additive mode not yet implemented",
-      );
-      continue;
-    }
-    const dirResult = reconcileOwnedDir(target.dir, desired);
+    const dirResult =
+      target.mode === "additive"
+        ? reconcileAdditiveDir(target.dir, desired)
+        : reconcileOwnedDir(target.dir, desired);
     addedAll.push(...dirResult.added);
     removedAll.push(...dirResult.removed);
     protectedAll.push(...dirResult.protected);
     installedAll.push(...dirResult.installed);
+    skippedAll.push(...dirResult.skipped);
   }
 
   // Aggregate across targets at slug granularity — a skill present in
@@ -406,6 +547,9 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   summary.removed = [...new Set(removedAll)].sort();
   summary.protected = [...new Set(protectedAll)].sort();
   summary.installed = [...new Set(installedAll)].sort();
+  // ``skipped`` combines bad-shape catalog rows (collected above during
+  // ``desired`` construction) with additive-dir collisions.
+  summary.skipped = [...new Set([...summary.skipped, ...skippedAll])].sort();
 
   return summary;
 }
