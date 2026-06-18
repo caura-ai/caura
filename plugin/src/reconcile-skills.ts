@@ -658,16 +658,21 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   //    aborts the heartbeat (the skills are already on disk regardless).
   const registerDirs = targets.filter((t) => t.register).map((t) => t.dir);
   if (registerDirs.length > 0) {
-    summary.registeredDirs = [...new Set(registerDirs)].sort();
     const reg = ensureExtraSkillDirs(registerDirs);
     if (reg.error) {
+      // Registration failed — do NOT report these as managed; the field
+      // must reflect what's actually on the load path.
       console.warn(
         `[memclaw] reconcileSkills: could not register extra skill dir(s) in openclaw.json: ${reg.error}`,
       );
-    } else if (reg.added.length > 0) {
-      console.log(
-        `[memclaw] reconcileSkills: registered skills.load.extraDirs: ${reg.added.join(", ")}`,
-      );
+    } else {
+      // Success or idempotent no-op (already present) → standing truth.
+      summary.registeredDirs = [...new Set(registerDirs)].sort();
+      if (reg.added.length > 0) {
+        console.log(
+          `[memclaw] reconcileSkills: registered skills.load.extraDirs: ${reg.added.join(", ")}`,
+        );
+      }
     }
   }
 

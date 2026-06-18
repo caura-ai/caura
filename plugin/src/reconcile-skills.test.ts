@@ -714,6 +714,24 @@ describe("reconcileSkills — configured targets", () => {
     assert.deepEqual(readExtraDirs(), ["/pre/existing"], "extraDirs unchanged");
   });
 
+  test("register: a write failure is NOT reported as registered", async () => {
+    plantOnDisk("memclaw");
+    // No openclaw.json written → ensureExtraSkillDirs fails closed.
+    if (existsSync(OPENCLAW_JSON)) rmSync(OPENCLAW_JSON, { force: true });
+    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([
+      { dir: EXTERNAL, mode: "additive", register: true },
+    ]);
+    mockCatalog = [
+      { doc_id: "deploy-runbook", data: { name: "deploy-runbook", description: "d", content: "# deploy\n" } },
+    ];
+
+    const summary = await reconcileSkills();
+
+    // Skill still reconciled to disk, but registration failed → not claimed.
+    assert.ok(existsSync(ext("deploy-runbook", "SKILL.md")), "skill still written to disk");
+    assert.deepEqual(summary.registeredDirs, [], "failed registration is not reported as managed");
+  });
+
   test("register: idempotent — re-running does not duplicate the entry", async () => {
     plantOnDisk("memclaw");
     writeOpenClawJson({ skills: { load: { extraDirs: [EXTERNAL] } } }); // already present
