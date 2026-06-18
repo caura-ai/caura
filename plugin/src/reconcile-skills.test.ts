@@ -597,6 +597,55 @@ describe("reconcileSkills — configured targets", () => {
     assert.ok(existsSync(join(SKILLS_ROOT, "deploy-runbook", "SKILL.md")));
     assert.ok(existsSync(join(EXTRA_OWNED, "deploy-runbook", "SKILL.md")));
   });
+
+  test("per-target: default single target yields one entry mirroring the aggregate", async () => {
+    plantOnDisk("memclaw");
+    mockCatalog = [
+      { doc_id: "deploy-runbook", data: { name: "deploy-runbook", description: "d", content: "# deploy\n" } },
+    ];
+
+    const summary = await reconcileSkills();
+
+    assert.equal(summary.targets.length, 1, "one target reconciled");
+    const t = summary.targets[0];
+    assert.equal(t.mode, "owned");
+    assert.equal(t.dir, SKILLS_ROOT);
+    assert.deepEqual(t.installed, summary.installed);
+    assert.deepEqual(t.added, summary.added);
+    assert.deepEqual(t.protected, summary.protected);
+  });
+
+  test("per-target: owned + additive each report their own slice; aggregate dedups", async () => {
+    plantOnDisk("memclaw");
+    plantForeign("deploy-runbook", "# CLIENT version — keep\n"); // collides in the additive dir
+    useAdditive();
+    mockCatalog = [
+      { doc_id: "deploy-runbook", data: { name: "deploy-runbook", description: "d", content: "# CATALOG deploy\n" } },
+    ];
+
+    const summary = await reconcileSkills();
+
+    assert.equal(summary.targets.length, 2, "owned (default) + additive");
+    const owned = summary.targets.find((t) => t.mode === "owned");
+    const additive = summary.targets.find((t) => t.mode === "additive");
+    assert.ok(owned && additive, "both targets present");
+
+    // Owned default dir installs the catalog skill; no collision there.
+    assert.equal(owned!.dir, SKILLS_ROOT);
+    assert.ok(owned!.installed.includes("deploy-runbook"));
+    assert.deepEqual(owned!.collisions, []);
+
+    // Additive dir reports the collision against the foreign occupant; it
+    // installs nothing for that slug.
+    assert.equal(additive!.dir, EXTERNAL);
+    assert.deepEqual(additive!.collisions, ["deploy-runbook"]);
+    assert.ok(!additive!.installed.includes("deploy-runbook"));
+
+    // Aggregate: the slug shows up once in installed (from owned) and once
+    // in collisions (from additive).
+    assert.ok(summary.installed.includes("deploy-runbook"));
+    assert.deepEqual(summary.collisions, ["deploy-runbook"]);
+  });
 });
 
 // Restore HOME after the suite so subsequent test files (run in

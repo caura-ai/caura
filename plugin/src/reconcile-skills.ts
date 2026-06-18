@@ -113,6 +113,25 @@ export interface ReconcileSummary {
   // target is configured.
   collisions: string[];
   protected: string[]; // catalog-absent but not deleted
+  // Per-target breakdown — one entry per dir reconciled this tick, in the
+  // order ``resolveSkillTargets()`` returns them (owned dir first). The
+  // top-level arrays above are these deduped+sorted across all targets;
+  // ``targets`` keeps them split so an operator can see WHICH dir a skill
+  // landed in (or collided in) when more than one target is configured.
+  // For the default single-target case this is one entry mirroring the
+  // top-level arrays.
+  targets: TargetReconcileResult[];
+}
+
+/** One target dir's contribution to a {@link ReconcileSummary}. */
+export interface TargetReconcileResult {
+  dir: string;
+  mode: SkillTargetMode;
+  installed: string[];
+  added: string[];
+  removed: string[];
+  collisions: string[];
+  protected: string[];
 }
 
 /**
@@ -120,10 +139,10 @@ export interface ReconcileSummary {
  *
  * - ``owned``: the dir is fully MemClaw-managed — every on-disk entry
  *   not in the catalog is deleted (except {@link PROTECTED_SKILLS}).
- * - ``additive``: a shared/foreign dir — MemClaw must only ever touch
- *   entries it wrote, never prune others. Parsed but NOT yet acted on
- *   here (a later PR implements ownership-tracked additive reconcile);
- *   until then such targets are skipped with a warning.
+ * - ``additive``: a shared/foreign dir — MemClaw only ever touches
+ *   entries it wrote, tracked by a per-skill {@link OWNED_MARKER}. A
+ *   foreign occupant of a desired slug is a collision (skipped, never
+ *   clobbered); unowned entries are never pruned.
  */
 export type SkillTargetMode = "owned" | "additive";
 
@@ -492,6 +511,7 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
     skipped: [],
     collisions: [],
     protected: [],
+    targets: [],
   };
 
   if (!MEMCLAW_TENANT_ID) {
@@ -586,6 +606,17 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
     protectedAll.push(...dirResult.protected);
     installedAll.push(...dirResult.installed);
     collisionsAll.push(...dirResult.collisions);
+    // Per-target breakdown — sorted within each target for a stable
+    // payload. The top-level arrays below dedup these across targets.
+    summary.targets.push({
+      dir: target.dir,
+      mode: target.mode,
+      installed: [...dirResult.installed].sort(),
+      added: [...dirResult.added].sort(),
+      removed: [...dirResult.removed].sort(),
+      collisions: [...dirResult.collisions].sort(),
+      protected: [...dirResult.protected].sort(),
+    });
   }
 
   // Aggregate across targets at slug granularity — a skill present in

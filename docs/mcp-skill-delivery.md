@@ -162,16 +162,24 @@ an agent may see.
 Gating decides what *should* land; observability confirms what *did*.
 Each heartbeat carries the reconciler's summary — `installed` (the
 active skills converged onto that node's disk right now), plus per-tick
-`added` / `removed` / `skipped` / `protected` deltas — which the backend
-stores as the latest snapshot at `nodes.metadata.reconcile` and surfaces
-via `GET /api/v1/fleet/nodes`. So an operator who flips a skill to
-`active` can confirm it actually reached each node, and see *why* a
-malformed catalog row was skipped — closing the loop from "approved" to
-"installed on the fleet."
+`added` / `removed` / `skipped` / `collisions` / `protected` deltas —
+which the backend stores as the latest snapshot at
+`nodes.metadata.reconcile` and surfaces via `GET /api/v1/fleet/nodes`. So
+an operator who flips a skill to `active` can confirm it actually reached
+each node, and see *why* a malformed catalog row was skipped — closing
+the loop from "approved" to "installed on the fleet."
 
 `installed` is the standing truth, not a delta: it's reported on every
 tick (even steady-state ticks with empty `added`/`removed`), so a node's
 current live-skill set is always legible.
+
+When more than one target dir is configured (see below), those top-level
+arrays are deduped *across* targets. The summary also carries a
+`targets[]` array with a **per-target** breakdown — one entry per dir
+(`{ dir, mode, installed, added, removed, collisions, protected }`) — so
+an operator can see exactly *which* dir a skill landed in or collided in.
+For the default single-target case it's one entry mirroring the top-level
+arrays.
 
 ### Reconcile targets: `owned` vs `additive`
 
