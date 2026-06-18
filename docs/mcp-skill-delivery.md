@@ -179,14 +179,16 @@ arrays are deduped *across* targets. The summary also carries a
 (`{ dir, mode, installed, added, removed, collisions, protected }`) — so
 an operator can see exactly *which* dir a skill landed in or collided in.
 For the default single-target case it's one entry mirroring the top-level
-arrays.
+arrays. A `registeredDirs[]` array lists the target dirs MemClaw has
+ensured are on OpenClaw's skill load path this tick (the `register: true`
+opt-in below); it's empty unless a target opts in.
 
 ### Reconcile targets: `owned` vs `additive`
 
 By default the reconciler manages one **`owned`** dir — the plugin's own
 `skills/` — where it has full authority: anything on disk not in the
 catalog is pruned. Operators can add extra target dirs via the
-`MEMCLAW_SKILL_TARGETS` env var (JSON array of `{ dir, mode }`):
+`MEMCLAW_SKILL_TARGETS` env var (JSON array of `{ dir, mode, register? }`):
 
 - **`owned`** — fully MemClaw-managed (destructive prune). Use only for
   dirs MemClaw exclusively controls.
@@ -201,9 +203,27 @@ catalog is pruned. Operators can add extra target dirs via the
 
 This makes the "empty catalog / wrong tenant wipes the dir" hazard apply
 only to `owned` dirs — `additive` dirs lose only MemClaw's own entries,
-never the client's. For an additive target to actually reach agents it
-must be on OpenClaw's skill load path (e.g. registered in
-`settings.skills.customDirectories`).
+never the client's.
+
+#### Reaching agents: `register`
+
+The plugin's own `owned` dir is already published as a plugin skill, so it
+reaches agents automatically. An **extra** target dir (typically
+`additive`) is *not* on OpenClaw's skill load path by default — its skills
+land on disk but stay invisible. Set **`register: true`** on the entry and
+the reconciler adds that dir to **`skills.load.extraDirs`** in
+`~/.openclaw/openclaw.json` — OpenClaw's documented, watched mechanism for
+extra skill directories (`docs/tools/skills-config.md`; consumed by the
+skills-snapshot refresh). The write is append-only and idempotent (existing
+entries preserved; written only when the dir is newly added), and fail-safe
+(a missing/unreadable config is logged, never fatal to the heartbeat). The
+owned dir is never registered this way.
+
+`skills.load.watch` defaults to `true`, so OpenClaw picks up a newly
+registered dir and refreshes its skills snapshot without a restart.
+**But** a long-lived agent *session* keeps its cached `<available_skills>`
+snapshot — a session that was already running won't see the newly
+registered skills until a fresh session starts (new `--session-key`).
 
 ## What makes a skill findable: the summary
 

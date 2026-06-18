@@ -391,6 +391,26 @@ describe("resolveSkillTargets (config plumbing)", () => {
     );
   });
 
+  test("register defaults to false; owned default dir is never register:true", () => {
+    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([{ dir: "/tmp/wt-a", mode: "additive" }]);
+    const targets = resolveSkillTargets();
+    assert.equal(targets[0].register, false, "owned default dir is never registered");
+    assert.equal(targets[1].register, false, "register omitted → false");
+  });
+
+  test("register: true is parsed per entry", () => {
+    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([
+      { dir: "/tmp/wt-a", mode: "additive", register: true },
+      { dir: "/tmp/wt-b", mode: "additive", register: false },
+      { dir: "/tmp/wt-c", mode: "additive", register: "yes" }, // non-true → false
+    ]);
+    const targets = resolveSkillTargets();
+    assert.deepEqual(
+      targets.slice(1).map((t) => [t.dir, t.register]),
+      [["/tmp/wt-a", true], ["/tmp/wt-b", false], ["/tmp/wt-c", false]],
+    );
+  });
+
   test("invalid JSON → fail safe to owned-only", () => {
     process.env.MEMCLAW_SKILL_TARGETS = "{not valid json";
     const targets = resolveSkillTargets();
@@ -444,10 +464,24 @@ describe("reconcileSkills — configured targets", () => {
     mockCatalog = [];
   });
 
+  const OPENCLAW_JSON = join(tmpHome, ".openclaw", "openclaw.json");
+
   afterEach(() => {
     restoreFetch();
     delete process.env.MEMCLAW_SKILL_TARGETS;
+    if (existsSync(OPENCLAW_JSON)) rmSync(OPENCLAW_JSON, { force: true });
   });
+
+  const writeOpenClawJson = (cfg: Record<string, unknown>) => {
+    mkdirSync(join(tmpHome, ".openclaw"), { recursive: true });
+    writeFileSync(OPENCLAW_JSON, JSON.stringify(cfg), "utf-8");
+  };
+  const readExtraDirs = (): string[] => {
+    const cfg = JSON.parse(readFileSync(OPENCLAW_JSON, "utf-8")) as {
+      skills?: { load?: { extraDirs?: string[] } };
+    };
+    return cfg.skills?.load?.extraDirs ?? [];
+  };
 
   // Helpers for the additive dir.
   const ext = (slug: string, ...rest: string[]) => join(EXTERNAL, slug, ...rest);
@@ -645,6 +679,53 @@ describe("reconcileSkills — configured targets", () => {
     // in collisions (from additive).
     assert.ok(summary.installed.includes("deploy-runbook"));
     assert.deepEqual(summary.collisions, ["deploy-runbook"]);
+  });
+
+  test("register: an additive target with register:true is added to skills.load.extraDirs", async () => {
+    plantOnDisk("memclaw");
+    writeOpenClawJson({ tools: {} }); // vanilla config, no skills block yet
+    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([
+      { dir: EXTERNAL, mode: "additive", register: true },
+    ]);
+    mockCatalog = [
+      { doc_id: "deploy-runbook", data: { name: "deploy-runbook", description: "d", content: "# deploy\n" } },
+    ];
+
+    const summary = await reconcileSkills();
+
+    // The additive dir is registered on OpenClaw's load path...
+    assert.deepEqual(summary.registeredDirs, [EXTERNAL]);
+    assert.ok(readExtraDirs().includes(EXTERNAL), "extraDirs contains the additive dir");
+    // ...but never the plugin's own owned dir (published as a plugin skill).
+    assert.ok(!readExtraDirs().includes(SKILLS_ROOT), "owned dir is never registered");
+  });
+
+  test("register: omitted/false leaves openclaw.json untouched", async () => {
+    plantOnDisk("memclaw");
+    writeOpenClawJson({ skills: { load: { extraDirs: ["/pre/existing"] } } });
+    useAdditive(); // no register flag
+    mockCatalog = [
+      { doc_id: "deploy-runbook", data: { name: "deploy-runbook", description: "d", content: "# deploy\n" } },
+    ];
+
+    const summary = await reconcileSkills();
+
+    assert.deepEqual(summary.registeredDirs, [], "nothing registered");
+    assert.deepEqual(readExtraDirs(), ["/pre/existing"], "extraDirs unchanged");
+  });
+
+  test("register: idempotent — re-running does not duplicate the entry", async () => {
+    plantOnDisk("memclaw");
+    writeOpenClawJson({ skills: { load: { extraDirs: [EXTERNAL] } } }); // already present
+    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([
+      { dir: EXTERNAL, mode: "additive", register: true },
+    ]);
+    mockCatalog = [];
+
+    const summary = await reconcileSkills();
+
+    assert.deepEqual(summary.registeredDirs, [EXTERNAL], "still reported as managed");
+    assert.deepEqual(readExtraDirs(), [EXTERNAL], "no duplicate appended");
   });
 });
 

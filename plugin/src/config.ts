@@ -3,7 +3,8 @@
  */
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
-import { join } from "path";
+import { join, resolve } from "path";
+import { homedir } from "os";
 import { MEMCLAW_TOOLS } from "./tools.js";
 import { getPluginDir, getOpenClawConfigPath } from "./paths.js";
 import { logError } from "./logger.js";
@@ -296,4 +297,85 @@ export function shouldRunAutoFix(params: {
     params.missingToolCount > 0 ||
     !params.contextEngineSlotClaimed
   );
+}
+
+/** Expand a leading ``~`` / ``~/`` to the home dir, then resolve to an
+ * absolute canonical path — for comparing config entries (which may use
+ * ``~``) against our already-absolute target dirs. */
+function canonicalDir(p: string): string {
+  const expanded =
+    p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p;
+  return resolve(expanded);
+}
+
+/**
+ * Ensure each dir in ``dirs`` is present in ``skills.load.extraDirs`` in
+ * ``openclaw.json`` — OpenClaw's documented, watched load path for extra
+ * skill directories (``docs/tools/skills-config.md``; consumed by
+ * ``src/skills/runtime/refresh.ts``). This is how a reconciled *additive*
+ * target dir (one MemClaw doesn't own and can't publish as a plugin skill)
+ * actually reaches agents.
+ *
+ * Append-only and idempotent: existing entries are preserved, a dir already
+ * present (compared by canonical path, so ``~`` entries match) is left
+ * alone, and the file is written ONLY when something was added. Mirrors the
+ * ``autoFixAllowlist`` write idiom and OpenClaw's own
+ * ``plugins-install-command`` extraDirs-merge pattern. Fails safe: a missing
+ * or unreadable config, or a write error, returns an ``error`` and never
+ * throws — the heartbeat must not crash on a registration failure.
+ *
+ * NOTE: adding a dir here makes its skills discoverable on the node, but an
+ * already-running agent session keeps its cached ``<available_skills>``
+ * snapshot until a fresh session starts.
+ */
+export function ensureExtraSkillDirs(dirs: string[]): {
+  changed: boolean;
+  added: string[];
+  error?: string;
+} {
+  const wanted = [...new Set(dirs.filter((d) => typeof d === "string" && d.trim()))];
+  if (wanted.length === 0) return { changed: false, added: [] };
+
+  const config = readOpenClawConfig() as Record<string, any> | null;
+  if (!config) {
+    return {
+      changed: false,
+      added: [],
+      error: `openclaw.json not found/unreadable at ${getOpenClawConfigPath()}`,
+    };
+  }
+
+  if (!config.skills || typeof config.skills !== "object" || Array.isArray(config.skills)) {
+    config.skills = {};
+  }
+  if (
+    !config.skills.load ||
+    typeof config.skills.load !== "object" ||
+    Array.isArray(config.skills.load)
+  ) {
+    config.skills.load = {};
+  }
+  const existing: string[] = Array.isArray(config.skills.load.extraDirs)
+    ? config.skills.load.extraDirs.filter((x: unknown): x is string => typeof x === "string")
+    : [];
+  const present = new Set(existing.map(canonicalDir));
+
+  const added: string[] = [];
+  const next = [...existing];
+  for (const dir of wanted) {
+    if (present.has(canonicalDir(dir))) continue;
+    next.push(dir);
+    present.add(canonicalDir(dir));
+    added.push(dir);
+  }
+  if (added.length === 0) return { changed: false, added: [] };
+
+  config.skills.load.extraDirs = next;
+  try {
+    writeFileSync(getOpenClawConfigPath(), JSON.stringify(config, null, 2) + "\n", "utf-8");
+    return { changed: true, added };
+  } catch (e: unknown) {
+    const msg = logError("ensureExtraSkillDirs write failed", e);
+    return { changed: false, added: [], error: msg };
+  }
 }

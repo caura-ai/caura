@@ -5,6 +5,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import {
   autoFixAllowlist,
+  ensureExtraSkillDirs,
   isContextEngineSlotClaimed,
   isMemclawAllowed,
   isMemclawFullyConfigured,
@@ -356,6 +357,127 @@ describe("autoFixAllowlist — plugins.allow non-creation (CAURA-000)", () => {
         1,
         `memclaw must appear exactly once; got: ${JSON.stringify(allow)}`,
       );
+    } finally {
+      ctx.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureExtraSkillDirs — append a dir to OpenClaw's skills.load.extraDirs
+// ---------------------------------------------------------------------------
+
+function _ensureExtraDirsWithConfig(
+  initial: Record<string, unknown> | null,
+  dirsOrFn: string[] | ((home: string) => string[]),
+): {
+  written: Record<string, unknown> | null;
+  result: ReturnType<typeof ensureExtraSkillDirs>;
+  cleanup: () => void;
+} {
+  const tmp = mkdtempSync(join(tmpdir(), "memclaw-extradirs-test-"));
+  mkdirSync(join(tmp, ".openclaw"), { recursive: true });
+  const cfgPath = join(tmp, ".openclaw", "openclaw.json");
+  if (initial !== null) {
+    writeFileSync(cfgPath, JSON.stringify(initial), "utf-8");
+  }
+  // Resolve dirs against the SAME home the function will see, so a test can
+  // build an absolute path that matches a ``~``-relative config entry.
+  const dirs = typeof dirsOrFn === "function" ? dirsOrFn(tmp) : dirsOrFn;
+  const prevHome = process.env.HOME;
+  process.env.HOME = tmp;
+  const result = ensureExtraSkillDirs(dirs);
+  process.env.HOME = prevHome;
+  let written: Record<string, unknown> | null = null;
+  try {
+    written = JSON.parse(readFileSync(cfgPath, "utf-8"));
+  } catch {
+    written = null;
+  }
+  return {
+    written,
+    result,
+    cleanup: () => {
+      try {
+        rmSync(tmp, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    },
+  };
+}
+
+describe("ensureExtraSkillDirs", () => {
+  test("creates skills.load.extraDirs and appends the dir when absent", () => {
+    const ctx = _ensureExtraDirsWithConfig({ tools: {} }, ["/srv/shared/skills"]);
+    try {
+      assert.equal(ctx.result.changed, true);
+      assert.deepEqual(ctx.result.added, ["/srv/shared/skills"]);
+      const skills = ctx.written?.skills as { load?: { extraDirs?: string[] } };
+      assert.deepEqual(skills.load?.extraDirs, ["/srv/shared/skills"]);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  test("preserves existing extraDirs and appends only the missing one", () => {
+    const ctx = _ensureExtraDirsWithConfig(
+      { skills: { load: { extraDirs: ["/already/there"], watch: true } } },
+      ["/srv/shared/skills"],
+    );
+    try {
+      assert.equal(ctx.result.changed, true);
+      assert.deepEqual(ctx.result.added, ["/srv/shared/skills"]);
+      const load = (ctx.written?.skills as { load?: { extraDirs?: string[]; watch?: boolean } })
+        .load;
+      assert.deepEqual(load?.extraDirs, ["/already/there", "/srv/shared/skills"]);
+      assert.equal(load?.watch, true, "other load keys are preserved");
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  test("is idempotent — a dir already present is a no-op (no write)", () => {
+    const ctx = _ensureExtraDirsWithConfig(
+      { skills: { load: { extraDirs: ["/srv/shared/skills"] } } },
+      ["/srv/shared/skills"],
+    );
+    try {
+      assert.equal(ctx.result.changed, false);
+      assert.deepEqual(ctx.result.added, []);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  test("matches an existing ~-relative entry against an absolute dir (no dup)", () => {
+    const ctx = _ensureExtraDirsWithConfig(
+      { skills: { load: { extraDirs: ["~/shared/skills"] } } },
+      (home) => [join(home, "shared", "skills")],
+    );
+    try {
+      assert.equal(ctx.result.changed, false, "~ entry should canonically match the absolute dir");
+      assert.deepEqual(ctx.result.added, []);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  test("fails safe when openclaw.json is missing — error, no throw", () => {
+    const ctx = _ensureExtraDirsWithConfig(null, ["/srv/shared/skills"]);
+    try {
+      assert.equal(ctx.result.changed, false);
+      assert.ok(ctx.result.error && /not found/.test(ctx.result.error));
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  test("empty input is a no-op", () => {
+    const ctx = _ensureExtraDirsWithConfig({ skills: {} }, []);
+    try {
+      assert.equal(ctx.result.changed, false);
+      assert.deepEqual(ctx.result.added, []);
     } finally {
       ctx.cleanup();
     }

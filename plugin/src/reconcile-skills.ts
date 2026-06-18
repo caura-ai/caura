@@ -56,7 +56,7 @@ import { join, resolve } from "path";
 
 import { apiCall } from "./transport.js";
 import { MEMCLAW_TENANT_ID, MEMCLAW_FLEET_ID } from "./env.js";
-import { getPluginDir } from "./config.js";
+import { getPluginDir, ensureExtraSkillDirs } from "./config.js";
 import { logError } from "./logger.js";
 
 /**
@@ -121,6 +121,11 @@ export interface ReconcileSummary {
   // For the default single-target case this is one entry mirroring the
   // top-level arrays.
   targets: TargetReconcileResult[];
+  // Target dirs MemClaw ensured are present in OpenClaw's
+  // ``skills.load.extraDirs`` this tick (the ``register: true`` opt-in).
+  // Standing truth — the full set we manage, sorted — not a delta. Empty
+  // unless a configured target opts into registration.
+  registeredDirs: string[];
 }
 
 /** One target dir's contribution to a {@link ReconcileSummary}. */
@@ -149,6 +154,14 @@ export type SkillTargetMode = "owned" | "additive";
 export interface SkillTarget {
   dir: string;
   mode: SkillTargetMode;
+  /**
+   * Opt-in: also register this dir in OpenClaw's ``skills.load.extraDirs``
+   * (in ``openclaw.json``) so its reconciled skills actually reach agents.
+   * Off by default. The plugin's own owned dir is never registered — it's
+   * already published as a plugin skill. Use for a configured dir (usually
+   * ``additive``) that isn't otherwise on OpenClaw's skill load path.
+   */
+  register: boolean;
 }
 
 /** The plugin's own skills dir — always reconciled in ``owned`` mode. */
@@ -174,7 +187,9 @@ export function resolveSkillTargets(): SkillTarget[] {
   // (e.g. with ``..`` segments) would let an entry resolving to the same
   // dir slip past the seen-set and reconcile the owned dir twice.
   const ownedDir = resolve(ownedSkillsDir());
-  const targets: SkillTarget[] = [{ dir: ownedDir, mode: "owned" }];
+  // The plugin's own dir is published as a plugin skill, never registered
+  // as an extraDir.
+  const targets: SkillTarget[] = [{ dir: ownedDir, mode: "owned", register: false }];
 
   const raw = process.env.MEMCLAW_SKILL_TARGETS;
   if (!raw || !raw.trim()) return targets;
@@ -199,6 +214,7 @@ export function resolveSkillTargets(): SkillTarget[] {
     }
     const dir = (entry as { dir?: unknown }).dir;
     const mode = (entry as { mode?: unknown }).mode;
+    const register = (entry as { register?: unknown }).register === true;
     if (typeof dir !== "string" || !dir.trim()) {
       console.warn("[memclaw] MEMCLAW_SKILL_TARGETS: entry missing string 'dir'; skipping");
       continue;
@@ -220,7 +236,7 @@ export function resolveSkillTargets(): SkillTarget[] {
     }
     if (seen.has(normalized)) continue; // dedupe; owned dir already present
     seen.add(normalized);
-    targets.push({ dir: normalized, mode });
+    targets.push({ dir: normalized, mode, register });
   }
   return targets;
 }
@@ -512,6 +528,7 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
     collisions: [],
     protected: [],
     targets: [],
+    registeredDirs: [],
   };
 
   if (!MEMCLAW_TENANT_ID) {
@@ -596,7 +613,8 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   const removedAll: string[] = [];
   const protectedAll: string[] = [];
   const collisionsAll: string[] = [];
-  for (const target of resolveSkillTargets()) {
+  const targets = resolveSkillTargets();
+  for (const target of targets) {
     const dirResult =
       target.mode === "additive"
         ? reconcileAdditiveDir(target.dir, desired)
@@ -633,6 +651,25 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   // separately so the two failure modes don't get conflated.
   summary.skipped = [...new Set(summary.skipped)].sort();
   summary.collisions = [...new Set(collisionsAll)].sort();
+
+  // 4. Register any opt-in target dirs in OpenClaw's ``skills.load.extraDirs``
+  //    so their reconciled skills actually reach agents. Append-only,
+  //    idempotent, and fail-safe — a registration error is logged but never
+  //    aborts the heartbeat (the skills are already on disk regardless).
+  const registerDirs = targets.filter((t) => t.register).map((t) => t.dir);
+  if (registerDirs.length > 0) {
+    summary.registeredDirs = [...new Set(registerDirs)].sort();
+    const reg = ensureExtraSkillDirs(registerDirs);
+    if (reg.error) {
+      console.warn(
+        `[memclaw] reconcileSkills: could not register extra skill dir(s) in openclaw.json: ${reg.error}`,
+      );
+    } else if (reg.added.length > 0) {
+      console.log(
+        `[memclaw] reconcileSkills: registered skills.load.extraDirs: ${reg.added.join(", ")}`,
+      );
+    }
+  }
 
   return summary;
 }
