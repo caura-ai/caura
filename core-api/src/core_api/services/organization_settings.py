@@ -23,12 +23,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
 
 from cachetools import TTLCache
 from croniter import CroniterBadCronError, croniter
-from sqlalchemy import func, select, text
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.events.base import Event
@@ -40,8 +37,9 @@ from common.events.lifecycle_purge_request import (
 from common.events.org_settings_changed_event import OrgSettingsChangedEvent
 from common.events.topics import Topics
 from common.governance import PIICategory
-from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
+from common.organization_settings_merge import deep_merge as _deep_merge
 from common.provider_names import ProviderName
+from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings as global_settings
 
 logger = logging.getLogger(__name__)
@@ -374,44 +372,6 @@ def _remap_vertex(provider: str) -> str:
 # the query is an indexed PK lookup and the result is identical, so racing
 # populations are harmless.
 _settings_cache: TTLCache[str, dict] = TTLCache(maxsize=10_000, ttl=300)
-
-
-def _deep_merge(old: Any, new: Any) -> Any:
-    """Return ``old`` with ``new`` merged recursively for nested dicts.
-
-    Non-dict values in ``new`` overwrite ``old`` wholesale (including lists).
-    """
-    if not isinstance(old, dict) or not isinstance(new, dict):
-        return new
-    out = dict(old)
-    for k, v in new.items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = _deep_merge(out[k], v)
-        else:
-            out[k] = v
-    return out
-
-
-def _diff_settings(old: dict, new: dict, prefix: str = "") -> dict:
-    """Flat diff: ``{"enrichment.provider": [old, new], ...}``.
-
-    Recurses into nested dicts; treats non-dict values as leaves. Only records
-    keys present in ``new`` whose value differs from ``old``; does not record
-    deletions (updates are additive).
-    """
-    out: dict = {}
-    for k, new_v in new.items():
-        path = f"{prefix}{k}"
-        old_v = old.get(k) if isinstance(old, dict) else None
-        if isinstance(new_v, dict):
-            # Recurse even when the old side is absent, so we always emit flat
-            # leaf keys (e.g. "security_audit.schedule_enabled") rather than a
-            # whole-dict diff ["enrichment": [None, {...}]].
-            old_dict = old_v if isinstance(old_v, dict) else {}
-            out.update(_diff_settings(old_dict, new_v, prefix=f"{path}."))
-        elif new_v != old_v:
-            out[path] = [old_v, new_v]
-    return out
 
 
 def _validate_cron(expr: str) -> None:
@@ -1025,9 +985,10 @@ def invalidate_cache(tenant_id: str) -> None:
 async def resolve_config(db: AsyncSession | None, tenant_id: str) -> ResolvedConfig:
     """Resolve config for a tenant: tenant override → global env default.
 
-    ``db`` may be ``None`` for fire-and-forget callers (post-commit
-    contradiction detection, the CAURA-595 ENRICHED consumer) — see
-    :func:`get_raw_settings` for the cold-cache fallback.
+    ``db`` is retained for call-site back-compat and is IGNORED — settings now
+    load through core-storage-api (Fix 2 Phase 0). Fire-and-forget callers
+    (post-commit contradiction detection, the CAURA-595 ENRICHED consumer)
+    pass ``None`` and resolve correctly via the same storage-client path.
     """
     raw = await get_raw_settings(db, tenant_id)
     return ResolvedConfig(raw)
@@ -1036,45 +997,27 @@ async def resolve_config(db: AsyncSession | None, tenant_id: str) -> ResolvedCon
 async def get_raw_settings(db: AsyncSession | None, tenant_id: str) -> dict:
     """Return the tenant's raw override dict, or ``{}`` if no overrides set.
 
-    Cache-first: returns ``{}`` for tenants that have never been configured.
+    Cache-first (5-min TTL); on a miss, fetched via core-storage-api.
 
-    ``db is None`` is the fire-and-forget path: post-commit detection
-    (the request session has closed), the CAURA-595 ``ENRICHED``
-    consumer (Pub/Sub handler with no ambient request session), and
-    similar callers can pass ``None`` and rely on the cache. On a
-    cache miss with ``db is None`` we open a fresh session here
-    rather than crash with ``AttributeError: 'NoneType' object has
-    no attribute 'execute'`` — which is what happened in production
-    until this fallback landed (CAURA-595 Phase 5a brought the
-    consumer up; cold-start always missed the cache; every event
-    crashed inside detection before this guard).
+    ``db`` is retained for call-site back-compat and is IGNORED: there is no
+    longer a direct DB read here (Fix 2 Phase 0 routed it through the storage
+    client per the "no DB outside core-storage-api" rule). The old
+    ``db is None`` self-session fallback is therefore gone — request-scoped and
+    fire-and-forget callers (the ENRICHED consumer, post-commit detection) now
+    take the identical storage-client path, so a cold cache no longer needs a
+    DB session in scope (the original CAURA-595 Phase 5a crash mode).
     """
     cached = _settings_cache.get(tenant_id)
     if cached is not None:
         logger.debug("organization_settings cache hit for %s", tenant_id)
         return cached
-
-    if db is None:
-        # Lazy import — db.session imports SQLAlchemy engine which
-        # touches DATABASE_URL at module-import time; keeping this
-        # behind a cache miss means the standalone OSS path that
-        # never hits the cold-cache branch doesn't pay the cost.
-        from core_api.db.session import async_session
-
-        async with async_session() as session:
-            return await _load_and_cache(session, tenant_id)
-
-    return await _load_and_cache(db, tenant_id)
+    return await _load_and_cache(tenant_id)
 
 
-async def _load_and_cache(db: AsyncSession, tenant_id: str) -> dict:
-    result = await db.execute(
-        select(OrganizationSettings.settings).where(OrganizationSettings.org_id == tenant_id)
-    )
-    row = result.scalar_one_or_none()
-    resolved = row if isinstance(row, dict) else {}
+async def _load_and_cache(tenant_id: str) -> dict:
+    resolved = await get_storage_client().get_org_settings(tenant_id)
     _settings_cache[tenant_id] = resolved
-    logger.info("organization_settings cache miss for %s; loaded from DB and cached", tenant_id)
+    logger.info("organization_settings cache miss for %s; loaded via storage-api and cached", tenant_id)
     return resolved
 
 
@@ -1085,7 +1028,7 @@ async def get_settings_for_display(db: AsyncSession | None, tenant_id: str) -> d
 
 
 async def update_settings(
-    db: AsyncSession,
+    db: AsyncSession | None,
     tenant_id: str,
     new_settings: dict,
     *,
@@ -1096,6 +1039,12 @@ async def update_settings(
     Returns the merged display view (``DEFAULT_SETTINGS`` ⊕ tenant overrides)
     so callers can echo back the resulting state. No-ops when the submitted
     payload introduces no actual changes.
+
+    ``db`` is retained for call-site back-compat and is IGNORED — the
+    transactional upsert (``FOR UPDATE`` read → flat diff → JSONB ``||`` merge →
+    audit row, one transaction) now runs server-side in core-storage-api (Fix 2
+    Phase 0). Validation, the TTL-cache invalidate, and the ``SETTINGS_CHANGED``
+    broadcast stay here.
     """
     _check_keys(new_settings, DEFAULT_SETTINGS)
     _validate_leaf_types(new_settings)
@@ -1104,42 +1053,15 @@ async def update_settings(
     if cron_override is not None:
         _validate_cron(cron_override)
 
-    # Read current overrides straight from DB — we don't want to diff against a
-    # stale cache entry, and this path is rare compared to reads.
-    # FOR UPDATE prevents lost-update races under concurrent writes for the same tenant.
-    result = await db.execute(
-        select(OrganizationSettings.settings)
-        .where(OrganizationSettings.org_id == tenant_id)
-        .with_for_update()
-    )
-    current_row = result.scalar_one_or_none()
-    current: dict = current_row if isinstance(current_row, dict) else {}
-
-    diff = _diff_settings(current, new_settings)
-    if not diff:
-        # Identical payload — skip write and audit row entirely.
-        return _deep_merge(DEFAULT_SETTINGS, current)
-
-    merged = _deep_merge(current, new_settings)
-
-    # FOR UPDATE serialises all writes once the row exists. Concurrent first-time
-    # inserts (no row yet) use JSONB || to merge at the DB level so two racing
-    # inserts don't silently overwrite each other. The shallow || merge is safe
-    # because top-level schema keys (enrichment, recall, …) are independent.
-    upsert = pg_insert(OrganizationSettings).values(org_id=tenant_id, settings=merged)
-    await db.execute(
-        upsert.on_conflict_do_update(
-            index_elements=["org_id"],
-            set_={
-                "settings": text("organization_settings.settings || EXCLUDED.settings"),
-                "updated_at": func.now(),
-            },
-        )
-    )
-    await db.execute(
-        pg_insert(OrganizationSettingsAudit).values(org_id=tenant_id, changed_by=changed_by, diff=diff)
-    )
-    await db.commit()
+    # The diff-against-current + upsert + audit happen in one server-side
+    # transaction (the FOR UPDATE lost-update guard can't span an HTTP read +
+    # write, so it lives in storage-api). ``merged`` is the resulting raw
+    # overrides; ``changed`` is False when the payload was a no-op.
+    result = await get_storage_client().update_org_settings(tenant_id, new_settings, changed_by=changed_by)
+    merged = result["settings"]
+    if not result.get("changed"):
+        # Identical payload — storage wrote nothing; nothing to invalidate or broadcast.
+        return _deep_merge(DEFAULT_SETTINGS, merged)
 
     # Invalidate THIS process's cache immediately...
     invalidate_cache(tenant_id)

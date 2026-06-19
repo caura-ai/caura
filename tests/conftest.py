@@ -246,6 +246,18 @@ async def sc():
 
 
 @pytest.fixture
+def storage_http(_patch_storage_client):
+    """Raw httpx client bridged to the in-process core-storage-api app.
+
+    For tests that POST malformed/raw bodies the typed storage client would
+    never send (e.g. exercising a router's 422 input-validation guards).
+    Depends on ``_patch_storage_client`` so the ASGI bridge + test-engine
+    session factory are wired up first.
+    """
+    return _storage_asgi_http
+
+
+@pytest.fixture
 def tenant_id():
     """Unique tenant ID per test module."""
     return TENANT_ID

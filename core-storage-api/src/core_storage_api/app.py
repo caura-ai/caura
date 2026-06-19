@@ -37,6 +37,7 @@ from core_storage_api.routers import (
     keystones_router,
     lifecycle_audit_router,
     memories_router,
+    organization_settings_router,
     preview_router,
     purge_router,
     reports_router,
@@ -123,6 +124,10 @@ def create_app() -> FastAPI:
     app.include_router(tasks_router, prefix=prefix)
     app.include_router(idempotency_router, prefix=prefix)
     app.include_router(lifecycle_audit_router, prefix=prefix)
+    # Fix 2 Phase 0: per-org settings read/write, moved off core-api's
+    # direct DB pool. core-api calls these via its storage_client and keeps
+    # the TTL cache / SETTINGS_CHANGED publish / validators client-side.
+    app.include_router(organization_settings_router, prefix=prefix)
     app.include_router(purge_router, prefix=prefix)
     # CAURA-696: per-tenant row counts for the deletion-preview panel.
     # Mirrors ``purge``'s VPC-only trust model: no router-level auth,

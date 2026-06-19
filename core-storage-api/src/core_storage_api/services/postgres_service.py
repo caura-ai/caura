@@ -59,6 +59,8 @@ from common.models import (
     MemoryEntityLink,
     Relation,
 )
+from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
+from common.organization_settings_merge import deep_merge, diff_settings
 from core_storage_api.observability import db_measure
 from core_storage_api.services.audit_chain import (
     GENESIS_PREV_HASH,
@@ -4762,6 +4764,78 @@ class PostgresService:
                 .limit(1)
             )
             return row.scalar_one_or_none() is not None
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  ORGANIZATION SETTINGS (OrganizationSettings + audit)
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def organization_settings_get(self, org_id: str) -> dict:
+        """Return the org's raw override JSONB, or ``{}`` when no row exists.
+
+        Read-only; safe on the reader replica. core-api fronts this with a
+        5-min TTL cache, so it's hit only on a cache miss.
+        """
+        async with get_read_session() as session:
+            row = await session.execute(
+                select(OrganizationSettings.settings).where(OrganizationSettings.org_id == org_id)
+            )
+            settings = row.scalar_one_or_none()
+            return settings if isinstance(settings, dict) else {}
+
+    async def organization_settings_update(
+        self,
+        *,
+        org_id: str,
+        new_settings: dict,
+        changed_by: str | None = None,
+    ) -> dict:
+        """Upsert org overrides + append an audit row, in ONE transaction.
+
+        The flat diff is computed against the ``FOR UPDATE``-locked current
+        row so the read and write can't interleave with a concurrent writer
+        for the same org (lost-update guard). Returns
+        ``{"settings": <merged overrides>, "changed": bool}``. A no-op payload
+        (the diff is empty) writes neither row and returns the current
+        overrides with ``changed=False``.
+
+        Schema validation is the caller's responsibility — core-api validates
+        keys / leaf types / governance enums / cron before calling.
+        """
+        async with get_session() as session:
+            result = await session.execute(
+                select(OrganizationSettings.settings)
+                .where(OrganizationSettings.org_id == org_id)
+                .with_for_update()
+            )
+            current_row = result.scalar_one_or_none()
+            current: dict = current_row if isinstance(current_row, dict) else {}
+
+            diff = diff_settings(current, new_settings)
+            if not diff:
+                # Identical payload — skip the write and the audit row entirely.
+                return {"settings": current, "changed": False}
+
+            merged = deep_merge(current, new_settings)
+
+            # FOR UPDATE serialises writes once the row exists. Concurrent
+            # first-time inserts (no row yet) use JSONB || to merge at the DB
+            # level so two racing inserts don't silently overwrite each other;
+            # the shallow || is safe because top-level schema keys (enrichment,
+            # recall, …) are independent.
+            upsert = pg_insert(OrganizationSettings).values(org_id=org_id, settings=merged)
+            await session.execute(
+                upsert.on_conflict_do_update(
+                    index_elements=["org_id"],
+                    set_={
+                        "settings": text("organization_settings.settings || EXCLUDED.settings"),
+                        "updated_at": func.now(),
+                    },
+                )
+            )
+            await session.execute(
+                pg_insert(OrganizationSettingsAudit).values(org_id=org_id, changed_by=changed_by, diff=diff)
+            )
+            return {"settings": merged, "changed": True}
 
     # ══════════════════════════════════════════════════════════════════════
     #  REPORTS (CrystallizationReport)

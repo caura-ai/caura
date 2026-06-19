@@ -1452,6 +1452,44 @@ class CoreStorageClient:
         return bool((result or {}).get("has_recent_success"))
 
     # =====================================================================
+    # Organization settings (Fix 2 Phase 0)
+    # =====================================================================
+
+    async def get_org_settings(self, org_id: str) -> dict:
+        """Return the org's raw setting overrides (``{}`` when unset).
+
+        Read path (rides the connect-phase retry budget). core-api fronts
+        this with a 5-min TTL cache, so it's hit only on a cache miss.
+        """
+        result = await self._get(f"/organization-settings/{org_id}")
+        return (result or {}).get("settings", {})
+
+    async def update_org_settings(
+        self, org_id: str, settings: dict, *, changed_by: str | None = None
+    ) -> dict:
+        """Transactional upsert + audit, server-side. Returns
+        ``{"settings": <merged overrides>, "changed": bool}``.
+
+        Non-idempotent ``_post`` (connection-phase retry only): a write whose
+        response was lost is never replayed. Re-applying the same payload is a
+        no-op anyway — the server diffs it to empty and writes nothing.
+        """
+        result = await self._post(
+            f"/organization-settings/{org_id}",
+            {"settings": settings, "changed_by": changed_by},
+        )
+        # _post is typed dict | list; the endpoint always returns an object.
+        # Guard so an unexpected shape (error envelope, schema drift) fails with
+        # a diagnostic here rather than a bare TypeError on result["settings"]
+        # in the caller — and the narrowing lets us drop the return-value ignore.
+        if not isinstance(result, dict):
+            raise ValueError(
+                f"core-storage-api returned unexpected type for org-settings update: "
+                f"{type(result).__name__!r}"
+            )
+        return result
+
+    # =====================================================================
     # Reports
     # =====================================================================
 
