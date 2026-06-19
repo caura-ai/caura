@@ -102,6 +102,7 @@ async def with_retry(
     retryable_exceptions: tuple[type[Exception], ...] = RETRYABLE_EXCEPTIONS,
     retryable_statuses: frozenset[int] = RETRYABLE_STATUS_CODES,
     max_attempts: int = RETRY_MAX_ATTEMPTS,
+    connect_phase_max_attempts: int | None = None,
 ) -> httpx.Response:
     """Wrap a single HTTP call with retry on transient errors.
 
@@ -113,31 +114,55 @@ async def with_retry(
     retrying won't change a client error. Non-idempotent callers go
     through :func:`with_connect_phase_retry` to retry only failures
     where the request was provably never sent.
+
+    ``connect_phase_max_attempts`` (default = ``max_attempts``) gives the
+    connection-phase exceptions (``CONNECT_PHASE_EXCEPTIONS``) their own,
+    typically higher, attempt budget while ReadTimeout and 5xx stay capped
+    at ``max_attempts``. Idempotent reads use this to ride out a storage
+    cold start (a connect failure was provably never sent, so the extra
+    retries add no load) without over-retrying a genuine 5xx storm — the
+    same rationale as :func:`with_connect_phase_retry`, applied to GETs so a
+    transient ``ConnectTimeout`` doesn't surface as a handler failure (and,
+    on the Pub/Sub path, a nack → immediate-redelivery storm).
     """
+    cp_max = (
+        connect_phase_max_attempts
+        if connect_phase_max_attempts is not None
+        else max_attempts
+    )
+    effective_max = max(max_attempts, cp_max)
     last_exc: BaseException | None = None
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, effective_max + 1):
         try:
             resp = await do_request()
         except retryable_exceptions as e:
             last_exc = e
-            if attempt < max_attempts:
+            # Connection-phase failures get their own (typically higher)
+            # budget; ReadTimeout and other transients stay at max_attempts.
+            limit = cp_max if isinstance(e, CONNECT_PHASE_EXCEPTIONS) else max_attempts
+            if attempt < limit:
                 delay = _backoff_delay(attempt)
                 logger.warning(
                     "storage_client.%s: %s on attempt %d/%d, retrying in %.2fs",
                     label,
                     type(e).__name__,
                     attempt,
-                    max_attempts,
+                    limit,
                     delay,
                 )
                 await asyncio.sleep(delay)
                 continue
+            # Don't print "attempt N/M": when connect-phase retries burn past
+            # max_attempts (cp_max > max_attempts) and a ReadTimeout/5xx then
+            # hits at attempt N > max_attempts, "N/M" reads as a self-
+            # contradictory "4/3" during triage. Name the per-error budget
+            # instead so the asymmetric limit is self-explanatory.
             logger.warning(
-                "storage_client.%s: %s on final attempt %d/%d, giving up",
+                "storage_client.%s: giving up on attempt %d (budget for %s: %d)",
                 label,
-                type(e).__name__,
                 attempt,
-                max_attempts,
+                type(e).__name__,
+                limit,
             )
             raise
         if resp.status_code in retryable_statuses and attempt < max_attempts:
@@ -156,12 +181,15 @@ async def with_retry(
             # Final attempt still returned a retryable status — mirror the
             # exception path's "giving up" signal so a 3x-502 incident is
             # visible as exhausted retries, not just a bare HTTPStatusError
-            # from the caller's raise_for_status().
+            # from the caller's raise_for_status(). Budget-not-"N/M" framing
+            # for the same reason as the exception path above (a 5xx at
+            # attempt N > max_attempts after connect-phase retries would
+            # otherwise log a contradictory "4/3").
             logger.warning(
-                "storage_client.%s: HTTP %d on final attempt %d/%d, giving up",
+                "storage_client.%s: giving up on attempt %d (budget for HTTP %d: %d)",
                 label,
-                resp.status_code,
                 attempt,
+                resp.status_code,
                 max_attempts,
             )
         return resp

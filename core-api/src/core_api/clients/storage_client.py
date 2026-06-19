@@ -10,7 +10,7 @@ from typing import Any, Literal, NotRequired, TypedDict
 import httpx
 
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
-from common.http_retry import with_connect_phase_retry, with_retry
+from common.http_retry import CONNECT_PHASE_MAX_ATTEMPTS, with_connect_phase_retry, with_retry
 from core_api.clients.identity_token import evict as _evict_id_token
 from core_api.clients.identity_token import fetch_auth_header
 from core_api.config import settings
@@ -23,6 +23,17 @@ logger = logging.getLogger(__name__)
 # GET/PATCH/DELETE retry the full transient set + retryable 5xx;
 # POSTs retry connection-phase failures only (request provably never
 # sent, so a retry cannot double-insert).
+
+
+# Idempotent reads (GET) ride out a storage cold start / instance recycle on
+# the connection-phase retry budget (CONNECT_PHASE_MAX_ATTEMPTS) — a connect
+# failure is provably never sent, so the extra attempts add no load — while
+# ReadTimeout/5xx stay at the default 3. Without this, a multi-second storage
+# blip exhausted the 3 GET attempts and surfaced on the Pub/Sub enrichment
+# path as a handler failure → nack → redelivery (the "pubsub handler raised"
+# tail; the POST connect-phase path was already on this budget).
+async def _read_retry(do_request: Callable[[], Awaitable[httpx.Response]], *, label: str) -> httpx.Response:
+    return await with_retry(do_request, label=label, connect_phase_max_attempts=CONNECT_PHASE_MAX_ATTEMPTS)
 
 
 class KeystoneUpsertPayload(TypedDict):
@@ -294,7 +305,7 @@ class CoreStorageClient:
             http = self._read_http if read else self._http
             return http.get(f"{prefix}{path}", params=params, headers=headers)
 
-        resp = await self._execute(_do, retry=with_retry, label=f"GET {path}")
+        resp = await self._execute(_do, retry=_read_retry, label=f"GET {path}")
         if resp.status_code == 404:
             return None
         self._maybe_evict_on_auth_error(resp, read=read)
@@ -309,7 +320,7 @@ class CoreStorageClient:
         def _do() -> Awaitable[httpx.Response]:
             return self._read_http.get(f"{self._read_prefix}{path}", params=params, headers=headers)
 
-        resp = await self._execute(_do, retry=with_retry, label=f"GET-list {path}")
+        resp = await self._execute(_do, retry=_read_retry, label=f"GET-list {path}")
         self._maybe_evict_on_auth_error(resp, read=True)
         resp.raise_for_status()
         return resp.json()

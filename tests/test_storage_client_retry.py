@@ -103,14 +103,20 @@ async def test_get_retries_on_connect_timeout_then_succeeds() -> None:
 async def test_get_retries_then_gives_up_after_max_attempts() -> None:
     """When storage stays unreachable, we eventually raise the original
     timeout so the caller (the worker's except-block) still sees a
-    clear failure mode in logs."""
+    clear failure mode in logs. A perma ConnectTimeout is a connection-phase
+    failure, so an idempotent GET rides the higher CONNECT_PHASE_MAX_ATTEMPTS
+    (5) budget — same as POST — to ride out a storage cold start. ReadTimeout
+    / 5xx stay capped at the default 3 (see
+    test_get_logs_giving_up_when_5xx_exhausts_retries)."""
+    from common.http_retry import CONNECT_PHASE_MAX_ATTEMPTS
+
     client, _write, read = await _make_client()
     read.get = AsyncMock(side_effect=httpx.ConnectTimeout("perma down"))
 
     with pytest.raises(httpx.ConnectTimeout):
         await client._get("/entities/exact", read=True)
 
-    assert read.get.await_count == 3  # 1 initial + 2 retries = max attempts
+    assert read.get.await_count == CONNECT_PHASE_MAX_ATTEMPTS == 5
 
 
 async def test_get_retries_on_connect_error_then_succeeds() -> None:
@@ -285,9 +291,11 @@ async def test_post_retries_on_connect_error_then_succeeds() -> None:
 
 async def test_post_gives_up_after_max_attempts_on_connect_timeout() -> None:
     """Connection-phase failures retry CONNECT_PHASE_MAX_ATTEMPTS (5) times —
-    more than the idempotent default (3, see
-    test_get_retries_then_gives_up_after_max_attempts) — because they add no
-    load to a healthy server and just ride out a cold start."""
+    more than the ReadTimeout/5xx default (3, see
+    test_get_logs_giving_up_when_5xx_exhausts_retries) — because a connect
+    failure was provably never sent: it adds no load to a healthy server and
+    just rides out a cold start. Idempotent GETs share this connect-phase
+    budget too (see test_get_retries_then_gives_up_after_max_attempts)."""
     from common.http_retry import CONNECT_PHASE_MAX_ATTEMPTS
 
     client, write, _read = await _make_client()

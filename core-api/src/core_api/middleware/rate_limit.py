@@ -32,6 +32,26 @@ from core_api.config import settings
 # An empty redis_url (OSS default) → memory store, single-instance only.
 _STORAGE_URI = settings.redis_url or "memory://"
 
+# Redis connection resilience (cuts the "Failed to rate limit. Swallowing
+# error" ConnectionReset tail seen in prod): forwarded to the redis client
+# behind the limiter. ``health_check_interval`` PINGs a connection idle >30s
+# before reuse so one the server already closed (Memorystore maintenance /
+# single-zone failover, or idle eviction) is detected + reconnected rather
+# than reset mid-command; ``socket_keepalive`` keeps the TCP alive so
+# intermediaries don't drop it; the bounded connect/op timeouts fail fast into
+# the ``swallow_errors`` fail-open path instead of hanging. Empty for the
+# in-memory store (memory://), which takes no connection options.
+_STORAGE_OPTIONS: dict[str, object] = (
+    {
+        "socket_keepalive": True,
+        "socket_connect_timeout": 5,
+        "socket_timeout": 5,
+        "health_check_interval": 30,
+    }
+    if settings.redis_url
+    else {}
+)
+
 
 def _key_func(request: Request) -> str:
     """Rate-limit key. Prefers API key over IP so NAT'd agents don't
@@ -77,6 +97,10 @@ def _key_func(request: Request) -> str:
 limiter = Limiter(
     key_func=_key_func,
     storage_uri=_STORAGE_URI,
+    # slowapi types storage_options as dict[str, str], but it forwards them to
+    # the limits → redis client, which wants bool/int for these connection
+    # kwargs (socket_keepalive, *_timeout, health_check_interval).
+    storage_options=_STORAGE_OPTIONS,  # type: ignore[arg-type]
     # Redis outages degrade gracefully — requests pass through rather
     # than all rate-limited routes returning 500.
     swallow_errors=True,
