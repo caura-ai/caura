@@ -335,21 +335,33 @@ function canonicalDir(p: string): string {
 export function ensureExtraSkillDirs(dirs: string[]): {
   changed: boolean;
   added: string[];
+  /** Wanted dirs already on the load path before this call — genuinely
+   * registered regardless of whether a write for new additions failed. */
+  alreadyPresent: string[];
   error?: string;
 } {
   const wanted = [...new Set(dirs.filter((d) => typeof d === "string" && d.trim()))];
-  if (wanted.length === 0) return { changed: false, added: [] };
+  if (wanted.length === 0) return { changed: false, added: [], alreadyPresent: [] };
 
   const config = readOpenClawConfig() as Record<string, any> | null;
+  if (!config) {
+    return {
+      changed: false,
+      added: [],
+      alreadyPresent: [],
+      error: `openclaw.json not found or unreadable at ${getOpenClawConfigPath()}`,
+    };
+  }
   // Must be a JSON object. A top-level array (or other non-object) is
   // truthy and would slip past a bare ``!config`` check — then setting
   // ``.skills`` on it is silently dropped by JSON.stringify and the file
   // gets rewritten as ``[]``. Reject it instead of clobbering the config.
-  if (!config || typeof config !== "object" || Array.isArray(config)) {
+  if (typeof config !== "object" || Array.isArray(config)) {
     return {
       changed: false,
       added: [],
-      error: `openclaw.json not found/unreadable or not a JSON object at ${getOpenClawConfigPath()}`,
+      alreadyPresent: [],
+      error: `openclaw.json is not a JSON object at ${getOpenClawConfigPath()}`,
     };
   }
 
@@ -373,6 +385,7 @@ export function ensureExtraSkillDirs(dirs: string[]): {
     (x): x is string => typeof x === "string",
   );
   const present = new Set(existing.map(canonicalDir));
+  const alreadyPresent: string[] = wanted.filter((d) => present.has(canonicalDir(d)));
 
   const added: string[] = [];
   const next: unknown[] = [...originalExtraDirs];
@@ -382,14 +395,14 @@ export function ensureExtraSkillDirs(dirs: string[]): {
     present.add(canonicalDir(dir));
     added.push(dir);
   }
-  if (added.length === 0) return { changed: false, added: [] };
+  if (added.length === 0) return { changed: false, added: [], alreadyPresent };
 
   config.skills.load.extraDirs = next;
   try {
     writeFileSync(getOpenClawConfigPath(), JSON.stringify(config, null, 2) + "\n", "utf-8");
-    return { changed: true, added };
+    return { changed: true, added, alreadyPresent };
   } catch (e: unknown) {
     const msg = logError("ensureExtraSkillDirs write failed", e);
-    return { changed: false, added: [], error: msg };
+    return { changed: false, added: [], alreadyPresent, error: msg };
   }
 }

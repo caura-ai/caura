@@ -437,6 +437,20 @@ describe("ensureExtraSkillDirs", () => {
     }
   });
 
+  test("reports alreadyPresent alongside a newly added dir", () => {
+    const ctx = _ensureExtraDirsWithConfig(
+      { skills: { load: { extraDirs: ["/already/here"] } } },
+      ["/already/here", "/srv/new"],
+    );
+    try {
+      assert.equal(ctx.result.changed, true);
+      assert.deepEqual(ctx.result.added, ["/srv/new"]);
+      assert.deepEqual(ctx.result.alreadyPresent, ["/already/here"]);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
   test("is idempotent — a dir already present is a no-op (no write)", () => {
     const ctx = _ensureExtraDirsWithConfig(
       { skills: { load: { extraDirs: ["/srv/shared/skills"] } } },
