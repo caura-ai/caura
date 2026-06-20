@@ -299,13 +299,17 @@ export function shouldRunAutoFix(params: {
   );
 }
 
-/** Expand a leading ``~`` / ``~/`` to the home dir, then resolve to an
- * absolute canonical path — for comparing config entries (which may use
- * ``~``) against our already-absolute target dirs. */
+/** Canonicalize a config entry for dedup comparison against our
+ * already-absolute target dirs. ``~``/``~/`` expand to the home dir;
+ * absolute paths are resolved; a RELATIVE entry is compared literally —
+ * resolving it against ``process.cwd()`` would guess a base that likely
+ * differs from how OpenClaw interprets relative ``extraDirs`` entries,
+ * causing false dedup misses. */
 function canonicalDir(p: string): string {
-  const expanded =
-    p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p;
-  return resolve(expanded);
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return resolve(join(homedir(), p.slice(2)));
+  if (p.startsWith("/")) return resolve(p);
+  return p; // relative path: compare literally, don't guess a base
 }
 
 /**
@@ -337,11 +341,15 @@ export function ensureExtraSkillDirs(dirs: string[]): {
   if (wanted.length === 0) return { changed: false, added: [] };
 
   const config = readOpenClawConfig() as Record<string, any> | null;
-  if (!config) {
+  // Must be a JSON object. A top-level array (or other non-object) is
+  // truthy and would slip past a bare ``!config`` check — then setting
+  // ``.skills`` on it is silently dropped by JSON.stringify and the file
+  // gets rewritten as ``[]``. Reject it instead of clobbering the config.
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
     return {
       changed: false,
       added: [],
-      error: `openclaw.json not found/unreadable at ${getOpenClawConfigPath()}`,
+      error: `openclaw.json not found/unreadable or not a JSON object at ${getOpenClawConfigPath()}`,
     };
   }
 

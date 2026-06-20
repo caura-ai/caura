@@ -487,6 +487,38 @@ describe("ensureExtraSkillDirs", () => {
     }
   });
 
+  test("rejects a top-level JSON array — error, file NOT clobbered", () => {
+    // A top-level array is truthy: a bare !config check would let it through,
+    // then JSON.stringify would silently drop the .skills prop and rewrite [].
+    const ctx = _ensureExtraDirsWithConfig(["/pre/existing"] as unknown as Record<string, unknown>, [
+      "/srv/shared/skills",
+    ]);
+    try {
+      assert.equal(ctx.result.changed, false);
+      assert.ok(ctx.result.error && /not a JSON object/.test(ctx.result.error));
+      assert.deepEqual(ctx.written, ["/pre/existing"], "original array left untouched");
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  test("a relative existing entry is not falsely deduped against an absolute dir", () => {
+    const ctx = _ensureExtraDirsWithConfig(
+      { skills: { load: { extraDirs: ["./rel/skills"] } } },
+      ["/srv/shared/skills"],
+    );
+    try {
+      // Relative entries are compared literally (no CWD guess), so the
+      // absolute dir is treated as distinct and appended; the relative
+      // entry is preserved.
+      assert.equal(ctx.result.changed, true);
+      const load = (ctx.written?.skills as { load?: { extraDirs?: string[] } }).load;
+      assert.deepEqual(load?.extraDirs, ["./rel/skills", "/srv/shared/skills"]);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
   test("empty input is a no-op", () => {
     const ctx = _ensureExtraDirsWithConfig({ skills: {} }, []);
     try {
