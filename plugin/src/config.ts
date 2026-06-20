@@ -355,13 +355,19 @@ export function ensureExtraSkillDirs(dirs: string[]): {
   ) {
     config.skills.load = {};
   }
-  const existing: string[] = Array.isArray(config.skills.load.extraDirs)
-    ? config.skills.load.extraDirs.filter((x: unknown): x is string => typeof x === "string")
+  // Preserve the original array verbatim on write (including any non-string
+  // entries — future format extensions or user mistakes); use the
+  // string-only view solely for canonical-path dedup.
+  const originalExtraDirs: unknown[] = Array.isArray(config.skills.load.extraDirs)
+    ? config.skills.load.extraDirs
     : [];
+  const existing: string[] = originalExtraDirs.filter(
+    (x): x is string => typeof x === "string",
+  );
   const present = new Set(existing.map(canonicalDir));
 
   const added: string[] = [];
-  const next = [...existing];
+  const next: unknown[] = [...originalExtraDirs];
   for (const dir of wanted) {
     if (present.has(canonicalDir(dir))) continue;
     next.push(dir);

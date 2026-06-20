@@ -463,6 +463,20 @@ describe("ensureExtraSkillDirs", () => {
     }
   });
 
+  test("preserves non-string entries already in extraDirs (no data loss)", () => {
+    const ctx = _ensureExtraDirsWithConfig(
+      { skills: { load: { extraDirs: ["/keep/me", 42, { weird: true }] } } },
+      ["/srv/shared/skills"],
+    );
+    try {
+      assert.equal(ctx.result.changed, true);
+      const load = (ctx.written?.skills as { load?: { extraDirs?: unknown[] } }).load;
+      assert.deepEqual(load?.extraDirs, ["/keep/me", 42, { weird: true }, "/srv/shared/skills"]);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
   test("fails safe when openclaw.json is missing — error, no throw", () => {
     const ctx = _ensureExtraDirsWithConfig(null, ["/srv/shared/skills"]);
     try {
