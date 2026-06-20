@@ -39,7 +39,6 @@ from common.events.lifecycle_purge_request import (
 )
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
-from core_api.db.session import async_session
 from core_api.services.lifecycle_audit import audit_begin, resolve_publisher_kwargs
 from core_api.services.tenants import (
     list_active_tenant_ids,
@@ -80,7 +79,7 @@ _ACTION_PUBLISHERS: dict[str, _PublisherFn] = {
 _FANOUT_CONCURRENCY = 50
 
 
-async def _list_tenants_for_action(action: str, db) -> list[str]:
+async def _list_tenants_for_action(action: str) -> list[str]:
     """Discovery query for the fanout — purge is the odd action here:
     its target is orgs whose soft-deleted rows have aged past the
     retention window. The archive ``deleted_at IS NULL`` filter would
@@ -88,16 +87,19 @@ async def _list_tenants_for_action(action: str, db) -> list[str]:
     that 100%-soft-deleted its memories), so purge gets its own
     helper bounded to soft-deleted rows older than
     ``MEMORY_RETENTION_MAX_DAYS``.
+
+    Each helper now reads through core-storage-api (Fix 2 Phase 1), so no
+    core-api DB session is involved.
     """
     if action == "purge-soft-deleted":
-        return await list_tenants_with_purgeable_memories(db)
+        return await list_tenants_with_purgeable_memories()
     if action == "forge-distill":
         # Per-tick zero-cost for non-opted-in tenants: filter to orgs
         # that flipped ``skills_factory.enabled=true``. Any tenant
         # without an org_settings row (or with the flag false) is
         # excluded from the fanout entirely.
-        return await list_tenants_with_skills_factory_enabled(db)
-    return await list_active_tenant_ids(db)
+        return await list_tenants_with_skills_factory_enabled()
+    return await list_active_tenant_ids()
 
 
 def _resolve_publisher(action: str) -> _PublisherFn:
@@ -160,16 +162,14 @@ async def fanout_lifecycle_action(
     Returns ``{"action", "published", "failed"}`` — counts only, no
     per-org id list, so the response stays bounded at scale.
 
-    The DB session is opened locally and released BEFORE the
-    ``asyncio.gather`` fan-out so a slow per-org Pub/Sub publish can't
-    park a connection for the whole loop. The fan-out only needs the
-    org list, not the session.
+    The org list is fetched up front (via core-storage-api) before the
+    ``asyncio.gather`` fan-out; the fan-out itself holds no DB session, so a
+    slow per-org Pub/Sub publish can't park a connection for the whole loop.
     """
     auth.enforce_admin()
     publisher = _resolve_publisher(action)
 
-    async with async_session() as db:
-        org_ids = await _list_tenants_for_action(action, db)
+    org_ids = await _list_tenants_for_action(action)
 
     # Fan out concurrently with a semaphore cap (see _FANOUT_CONCURRENCY)
     # so a deployment with N orgs doesn't fire N simultaneous storage

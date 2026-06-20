@@ -43,6 +43,7 @@ from core_storage_api.routers import (
     reports_router,
     tasks_router,
     tenant_suppression_router,
+    tenants_router,
 )
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,9 @@ def create_app() -> FastAPI:
     # direct DB pool. core-api calls these via its storage_client and keeps
     # the TTL cache / SETTINGS_CHANGED publish / validators client-side.
     app.include_router(organization_settings_router, prefix=prefix)
+    # Fix 2 Phase 1: tenant-discovery lists for the lifecycle fanout, moved off
+    # core-api's direct DB pool (active / purgeable / skills-factory-enabled).
+    app.include_router(tenants_router, prefix=prefix)
     app.include_router(purge_router, prefix=prefix)
     # CAURA-696: per-tenant row counts for the deletion-preview panel.
     # Mirrors ``purge``'s VPC-only trust model: no router-level auth,

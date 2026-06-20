@@ -4838,6 +4838,57 @@ class PostgresService:
             return {"settings": merged, "changed": True}
 
     # ══════════════════════════════════════════════════════════════════════
+    #  TENANT DISCOVERY (lifecycle fanout target lists)
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def tenants_list_active(self) -> list[str]:
+        """Distinct ``tenant_id`` from non-soft-deleted memories, sorted.
+
+        Archive/lifecycle fanout target: an org with no live memories has
+        nothing to archive. Read-only (reader replica).
+        """
+        async with get_read_session() as session:
+            result = await session.execute(
+                select(Memory.tenant_id).where(Memory.deleted_at.is_(None)).distinct()
+            )
+            return sorted(row[0] for row in result.all())
+
+    async def tenants_list_purgeable(self) -> list[str]:
+        """Distinct ``tenant_id`` from soft-deleted memories older than the max
+        retention window (``MEMORY_RETENTION_MAX_DAYS``), sorted.
+
+        Orgs whose soft-deleted rows are all newer than the max window are
+        guaranteed no-ops on the purge primitive, so excluding them keeps the
+        discovery scan bounded as ``memories`` grows. ``func.now()`` (DB clock)
+        matches the purge primitive's cutoff and avoids client-clock drift.
+        """
+        cutoff = func.now() - timedelta(days=MEMORY_RETENTION_MAX_DAYS)
+        async with get_read_session() as session:
+            result = await session.execute(
+                select(Memory.tenant_id)
+                .where(Memory.deleted_at.is_not(None))
+                .where(Memory.deleted_at < cutoff)
+                .distinct()
+            )
+            return sorted(row[0] for row in result.all())
+
+    async def tenants_list_skills_factory_enabled(self) -> list[str]:
+        """``org_id`` values whose ``skills_factory.enabled`` JSONB flag is True,
+        sorted.
+
+        The forge-distill lifecycle fanout uses this so a tenant that hasn't
+        opted in pays ZERO per-tick cost. Orgs with no settings row are excluded
+        (the ``DEFAULT_SETTINGS`` default of ``enabled=False`` applies).
+        """
+        async with get_read_session() as session:
+            result = await session.execute(
+                select(OrganizationSettings.org_id).where(
+                    OrganizationSettings.settings["skills_factory"]["enabled"].as_boolean().is_(True)
+                )
+            )
+            return sorted(row[0] for row in result.all())
+
+    # ══════════════════════════════════════════════════════════════════════
     #  REPORTS (CrystallizationReport)
     # ══════════════════════════════════════════════════════════════════════
 

@@ -1949,11 +1949,10 @@ admin_memories_router = APIRouter(tags=["Admin"])
 @admin_memories_router.get("/admin/tenants")
 async def admin_list_tenants(
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Admin: list all tenant IDs that have memories."""
     auth.enforce_admin()
-    return await list_active_tenant_ids(db)
+    return await list_active_tenant_ids()
 
 
 @admin_memories_router.get("/admin/fleets")

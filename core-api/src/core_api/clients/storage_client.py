@@ -1490,6 +1490,36 @@ class CoreStorageClient:
         return result
 
     # =====================================================================
+    # Tenant discovery (Fix 2 Phase 1) — lifecycle-fanout target lists
+    # =====================================================================
+
+    # ``_get`` returns None on HTTP 404. These endpoints always return 200 with
+    # an envelope (an empty list when there are no tenants), so None means the
+    # endpoint is MISSING (wrong prefix / version skew / routing). Raise rather
+    # than degrade to [] — a silent empty list would make the lifecycle fanout
+    # publish zero messages and report success, hiding the misconfiguration.
+    async def list_active_tenants(self) -> list[str]:
+        """Orgs with at least one live (non-soft-deleted) memory."""
+        result = await self._get("/tenants/active")
+        if result is None:
+            raise RuntimeError("core-storage-api /tenants/active returned 404")
+        return result.get("tenant_ids", [])
+
+    async def list_purgeable_tenants(self) -> list[str]:
+        """Orgs with soft-deleted memories older than the max retention window."""
+        result = await self._get("/tenants/purgeable")
+        if result is None:
+            raise RuntimeError("core-storage-api /tenants/purgeable returned 404")
+        return result.get("tenant_ids", [])
+
+    async def list_skills_factory_enabled_orgs(self) -> list[str]:
+        """Orgs whose ``skills_factory.enabled`` setting is True."""
+        result = await self._get("/tenants/skills-factory-enabled")
+        if result is None:
+            raise RuntimeError("core-storage-api /tenants/skills-factory-enabled returned 404")
+        return result.get("org_ids", [])
+
+    # =====================================================================
     # Reports
     # =====================================================================
 

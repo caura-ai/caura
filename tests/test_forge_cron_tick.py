@@ -55,7 +55,7 @@ class TestTenantFilter:
                 "core_api.routes.lifecycle.list_active_tenant_ids",
                 new=AsyncMock(return_value=["all-other-tenants"]),
             ) as active_all:
-                result = await _list_tenants_for_action("forge-distill", db=None)
+                result = await _list_tenants_for_action("forge-distill")
         assert result == ["tenant-a", "tenant-c"]
         opted_in.assert_awaited_once()
         # Critical invariant: the broad "active tenants" helper MUST NOT
@@ -78,7 +78,7 @@ class TestTenantFilter:
                 "core_api.routes.lifecycle.list_tenants_with_skills_factory_enabled",
                 new=AsyncMock(return_value=["should-not-be-called"]),
             ) as opted_in:
-                result = await _list_tenants_for_action("archive-expired", db=None)
+                result = await _list_tenants_for_action("archive-expired")
         assert result == ["a", "b"]
         active_all.assert_awaited_once()
         opted_in.assert_not_awaited()
