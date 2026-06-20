@@ -365,15 +365,29 @@ export function ensureExtraSkillDirs(dirs: string[]): {
     };
   }
 
-  if (!config.skills || typeof config.skills !== "object" || Array.isArray(config.skills)) {
+  // Normalize the nested containers, but only when ABSENT (null/undefined).
+  // A truthy non-object (e.g. ``"skills": "foo"`` or ``42``) is a malformed
+  // config we must not silently overwrite — detect-and-error, consistent
+  // with the top-level guard above.
+  if (config.skills == null) {
     config.skills = {};
+  } else if (typeof config.skills !== "object" || Array.isArray(config.skills)) {
+    return {
+      changed: false,
+      added: [],
+      alreadyPresent: [],
+      error: `openclaw.json 'skills' is not an object at ${getOpenClawConfigPath()}`,
+    };
   }
-  if (
-    !config.skills.load ||
-    typeof config.skills.load !== "object" ||
-    Array.isArray(config.skills.load)
-  ) {
+  if (config.skills.load == null) {
     config.skills.load = {};
+  } else if (typeof config.skills.load !== "object" || Array.isArray(config.skills.load)) {
+    return {
+      changed: false,
+      added: [],
+      alreadyPresent: [],
+      error: `openclaw.json 'skills.load' is not an object at ${getOpenClawConfigPath()}`,
+    };
   }
   // Preserve the original array verbatim on write (including any non-string
   // entries — future format extensions or user mistakes); use the

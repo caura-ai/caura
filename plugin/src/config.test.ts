@@ -516,6 +516,28 @@ describe("ensureExtraSkillDirs", () => {
     }
   });
 
+  test("rejects a malformed non-object skills field — error, not clobbered", () => {
+    const ctx = _ensureExtraDirsWithConfig({ skills: "i am a string" }, ["/srv/shared/skills"]);
+    try {
+      assert.equal(ctx.result.changed, false);
+      assert.ok(ctx.result.error && /'skills' is not an object/.test(ctx.result.error));
+      assert.equal((ctx.written as { skills?: unknown }).skills, "i am a string", "untouched");
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  test("rejects a malformed non-object skills.load field — error, not clobbered", () => {
+    const ctx = _ensureExtraDirsWithConfig({ skills: { load: 42 } }, ["/srv/shared/skills"]);
+    try {
+      assert.equal(ctx.result.changed, false);
+      assert.ok(ctx.result.error && /'skills\.load' is not an object/.test(ctx.result.error));
+      assert.equal((ctx.written as { skills?: { load?: unknown } }).skills?.load, 42, "untouched");
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
   test("a relative existing entry is not falsely deduped against an absolute dir", () => {
     const ctx = _ensureExtraDirsWithConfig(
       { skills: { load: { extraDirs: ["./rel/skills"] } } },
