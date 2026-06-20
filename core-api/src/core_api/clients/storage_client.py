@@ -835,6 +835,118 @@ class CoreStorageClient:
         )
 
     # =====================================================================
+    # Fix 2 Phase 2 — fleet/admin discovery, detail, bulk mutations
+    # =====================================================================
+    #
+    # The list/dict GET helpers below always return 200 with an envelope
+    # (an empty list / zeroed stats when there's no data), so a None / 404
+    # from ``_get`` means the endpoint is MISSING (version skew / routing),
+    # not "no data" — raise rather than silently degrade (mirrors the
+    # Phase 1 tenant-discovery methods). The two by-id reads
+    # (``get_memory_detail`` / ``get_memory_contradictions``) DO treat 404
+    # as a legitimate "memory not found" and return None for the caller to
+    # translate into its own 404.
+
+    async def memory_fleet_distribution(
+        self,
+        tenant_id: str | None = None,
+        *,
+        exclude_scope_agent: bool = False,
+    ) -> list[dict]:
+        """Distinct ``fleet_id`` with memory + agent counts, desc."""
+        params: dict[str, Any] = {"exclude_scope_agent": exclude_scope_agent}
+        if tenant_id is not None:
+            params["tenant_id"] = tenant_id
+        return await self._get_list("/memories/fleet-distribution", **params)
+
+    async def get_memory_detail(self, tenant_id: str, memory_id: str) -> dict | None:
+        """Full memory row + entity links + server-computed embedding stats.
+
+        Returns None on 404 (absent / soft-deleted / cross-tenant) — the
+        caller raises its own 404.
+        """
+        return await self._get(f"/memories/{memory_id}/detail", tenant_id=tenant_id)
+
+    async def get_memory_contradictions(self, tenant_id: str, memory_id: str) -> dict | None:
+        """Raw contradiction rows ``{memory, supersessors[], older|null}``.
+
+        Returns None on 404 (absent / soft-deleted / cross-tenant) — the
+        caller raises its own 404.
+        """
+        return await self._get(f"/memories/{memory_id}/contradictions", tenant_id=tenant_id)
+
+    async def admin_memory_stats(
+        self,
+        tenant_id: str | None = None,
+        fleet_id: str | None = None,
+    ) -> dict:
+        """Admin ``{total, by_type, by_agent, by_status}`` (cross-tenant when
+        ``tenant_id`` is omitted)."""
+        params: dict[str, Any] = {}
+        if tenant_id is not None:
+            params["tenant_id"] = tenant_id
+        if fleet_id is not None:
+            params["fleet_id"] = fleet_id
+        result = await self._get("/memories/admin-stats", **params)
+        if result is None:
+            raise RuntimeError("core-storage-api /memories/admin-stats returned 404")
+        return result
+
+    async def admin_list_memories(self, data: dict) -> list[dict]:
+        """Admin cross-tenant memory list (NO visibility scoping).
+
+        ``data`` carries the filter/sort/cursor params plus ``limit`` already
+        widened to ``limit+1``; the caller slices + builds the next cursor.
+        """
+        result = await self._post("/memories/admin-list", data, read=True)
+        if result is None:
+            raise RuntimeError("core-storage-api /memories/admin-list returned 404")
+        return result  # type: ignore[return-value]
+
+    async def soft_delete_by_filter(self, data: dict) -> int:
+        """Soft-delete every matching live memory for a tenant; returns count."""
+        result = await self._post("/memories/soft-delete-by-filter", data)
+        return (result or {}).get("deleted", 0)  # type: ignore[union-attr]
+
+    async def soft_delete_by_ids(self, tenant_id: str, ids: list[str]) -> int:
+        """Soft-delete live memories by id (tenant-scoped); returns count."""
+        result = await self._post("/memories/soft-delete-by-ids", {"tenant_id": tenant_id, "ids": ids})
+        return (result or {}).get("deleted", 0)  # type: ignore[union-attr]
+
+    async def soft_delete_by_run(
+        self,
+        tenant_id: str,
+        run_id: str,
+        *,
+        metadata_source: str = "ingest",
+    ) -> int:
+        """Soft-delete live memories tagged with ``run_id`` AND
+        ``metadata.source = metadata_source``; returns count."""
+        result = await self._post(
+            "/memories/soft-delete-by-run",
+            {"tenant_id": tenant_id, "run_id": run_id, "metadata_source": metadata_source},
+        )
+        return (result or {}).get("deleted", 0)  # type: ignore[union-attr]
+
+    async def redistribute_memories(
+        self,
+        tenant_id: str,
+        memory_ids: list[str],
+        target_agent_id: str,
+    ) -> dict:
+        """Bulk-reassign memories in ONE storage transaction.
+
+        Returns ``{moved, promoted, skipped, from_agents[], not_found[]}``.
+        """
+        result = await self._post(
+            "/memories/redistribute",
+            {"tenant_id": tenant_id, "memory_ids": memory_ids, "target_agent_id": target_agent_id},
+        )
+        if result is None:
+            raise RuntimeError("core-storage-api /memories/redistribute returned 404")
+        return result  # type: ignore[return-value]
+
+    # =====================================================================
     # Entities
     # =====================================================================
 

@@ -13,7 +13,7 @@ from common.events.lifecycle_purge_request import (
     MEMORY_RETENTION_MIN_DAYS,
 )
 from core_storage_api.observability import bind_timer, log_request
-from core_storage_api.schemas import MEMORY_FIELDS, orm_to_dict
+from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import PostgresService
 
 router = APIRouter(prefix="/memories", tags=["Memories"])
@@ -888,8 +888,202 @@ async def decide_dedup_review(review_id: UUID, request: Request) -> dict:
 
 
 # ------------------------------------------------------------------
+# Fix 2 Phase 2 — fleet/admin discovery + detail + bulk mutations
+#
+# Literal-path routes; MUST stay above the parameterised ``/{memory_id}``
+# block below so segments like ``fleet-distribution`` / ``admin-list`` /
+# ``redistribute`` aren't parsed as a memory UUID.
+# ------------------------------------------------------------------
+
+
+@router.get("/fleet-distribution")
+async def fleet_distribution(
+    tenant_id: str | None = None,
+    exclude_scope_agent: bool = False,
+) -> list[dict]:
+    """Distinct ``fleet_id`` with memory + agent counts, desc.
+
+    Serves both ``GET /fleets`` (``exclude_scope_agent=true``) and
+    ``GET /admin/fleets`` (``exclude_scope_agent=false``, cross-tenant when
+    ``tenant_id`` is omitted) upstream.
+    """
+    return await _svc.memory_fleet_distribution(tenant_id, exclude_scope_agent=exclude_scope_agent)
+
+
+@router.get("/admin-stats")
+async def admin_stats(
+    tenant_id: str | None = None,
+    fleet_id: str | None = None,
+) -> dict:
+    """Admin memory stats — ``{total, by_type, by_agent, by_status}``.
+
+    Single GROUPING SETS scan, no visibility scoping, cross-tenant when
+    ``tenant_id`` is omitted.
+    """
+    return await _svc.memory_admin_stats(tenant_id, fleet_id)
+
+
+@router.post("/admin-list")
+async def admin_list(request: Request) -> list[dict]:
+    """Admin cross-tenant memory list (NO visibility scoping).
+
+    Body: ``{tenant_id?, fleet_id?, agent_id?, memory_type?, status?,
+    include_deleted, sort, order, offset, limit, cursor_ts?, cursor_id?}``.
+    Returns up to ``limit`` rows in input cursor order — the caller passes
+    ``limit`` already widened to ``limit+1`` and slices / builds the next
+    cursor itself.
+    """
+    body: dict = await request.json()
+    # Guard cursor parsing (matches the sibling soft-delete/redistribute routes):
+    # a malformed cursor in the raw body must 422, not 500 on an unhandled
+    # ValueError/TypeError from fromisoformat / UUID.
+    cursor_ts_raw = body.get("cursor_ts")
+    cursor_id_raw = body.get("cursor_id")
+    try:
+        cursor_ts = datetime.fromisoformat(cursor_ts_raw) if isinstance(cursor_ts_raw, str) else cursor_ts_raw
+        cursor_id = UUID(cursor_id_raw) if cursor_id_raw else None
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"invalid cursor fields: {exc}") from exc
+    memories = await _svc.memory_admin_list(
+        tenant_id=body.get("tenant_id"),
+        fleet_id=body.get("fleet_id"),
+        agent_id=body.get("agent_id"),
+        memory_type=body.get("memory_type"),
+        status=body.get("status"),
+        include_deleted=bool(body.get("include_deleted", False)),
+        sort=body.get("sort", "created_at"),
+        order=body.get("order", "desc"),
+        offset=body.get("offset", 0),
+        limit=body.get("limit", 50),
+        cursor_ts=cursor_ts,
+        cursor_id=cursor_id,
+    )
+    # MEMORY_LIST_FIELDS (no embedding/search_vector): core-api's _memory_to_out
+    # discards the vector, so don't ship it over the wire for a list.
+    return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
+
+
+@router.post("/soft-delete-by-filter")
+async def soft_delete_by_filter(request: Request) -> dict:
+    """Soft-delete every matching live memory for a tenant.
+
+    Body: ``{tenant_id, fleet_id?, agent_id?, memory_type?, status?,
+    exclude_ids?[], metadata_filter?{k:v}}``. The ≤20-pair + string-value
+    validation stays in core-api (for its exact 400 messages); this route
+    builds the JSONB predicate via SQLAlchemy bound params.
+    """
+    body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=422, detail="tenant_id is required")
+    try:
+        exclude_ids = [UUID(i) for i in body.get("exclude_ids") or []]
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"invalid UUID in exclude_ids: {exc}")
+    metadata_filter = body.get("metadata_filter") or None
+    if metadata_filter is not None and not isinstance(metadata_filter, dict):
+        raise HTTPException(status_code=422, detail="metadata_filter must be an object")
+    deleted = await _svc.memory_soft_delete_by_filter(
+        tenant_id=tenant_id,
+        fleet_id=body.get("fleet_id"),
+        agent_id=body.get("agent_id"),
+        memory_type=body.get("memory_type"),
+        status=body.get("status"),
+        exclude_ids=exclude_ids,
+        metadata_filter=metadata_filter,
+    )
+    return {"deleted": deleted}
+
+
+@router.post("/soft-delete-by-ids")
+async def soft_delete_by_ids(request: Request) -> dict:
+    """Soft-delete live memories by id (tenant-scoped). Body: ``{tenant_id,
+    ids[]}``. The 1-1000 cap stays in core-api."""
+    body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=422, detail="tenant_id is required")
+    try:
+        ids = [UUID(i) for i in body.get("ids") or []]
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"invalid UUID in ids: {exc}")
+    deleted = await _svc.memory_soft_delete_by_ids(tenant_id, ids)
+    return {"deleted": deleted}
+
+
+@router.post("/soft-delete-by-run")
+async def soft_delete_by_run(request: Request) -> dict:
+    """Soft-delete live memories tagged with ``run_id`` AND
+    ``metadata.source = metadata_source``. Body: ``{tenant_id, run_id,
+    metadata_source}``."""
+    body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    run_id = body.get("run_id")
+    if not tenant_id or not run_id:
+        raise HTTPException(status_code=422, detail="tenant_id and run_id are required")
+    deleted = await _svc.memory_soft_delete_by_run(
+        tenant_id,
+        run_id,
+        metadata_source=body.get("metadata_source", "ingest"),
+    )
+    return {"deleted": deleted}
+
+
+@router.post("/redistribute")
+async def redistribute(request: Request) -> dict:
+    """Bulk-reassign memories to ``target_agent_id`` in ONE transaction.
+
+    Body: ``{tenant_id, memory_ids[], target_agent_id}``. Returns
+    ``{moved, promoted, skipped, from_agents[], not_found[]}``. Trust gates
+    + the agent_id==auth precedence check stay in core-api.
+    """
+    body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    target_agent_id = body.get("target_agent_id")
+    if not tenant_id or not target_agent_id:
+        raise HTTPException(status_code=422, detail="tenant_id and target_agent_id are required")
+    try:
+        memory_ids = [UUID(i) for i in body.get("memory_ids") or []]
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"invalid UUID in memory_ids: {exc}")
+    return await _svc.memory_redistribute(
+        tenant_id=tenant_id,
+        memory_ids=memory_ids,
+        target_agent_id=target_agent_id,
+    )
+
+
+# ------------------------------------------------------------------
 # Parameterised paths — MUST come last to avoid catching /count etc.
 # ------------------------------------------------------------------
+
+
+@router.get("/{memory_id}/detail")
+async def get_memory_detail(memory_id: UUID, tenant_id: str) -> dict:
+    """Full memory row + entity links + server-computed embedding stats.
+
+    The raw pgvector is never returned — only a first-20 preview and
+    {dimensions,min,max,mean,non_zero}. 404 when the row is absent,
+    soft-deleted, or belongs to another tenant.
+    """
+    detail = await _svc.memory_get_detail(memory_id, tenant_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return detail
+
+
+@router.get("/{memory_id}/contradictions")
+async def get_memory_contradictions(memory_id: UUID, tenant_id: str) -> dict:
+    """Raw contradiction rows: ``{memory, supersessors[], older|null}``.
+
+    The cross-tenant ``older`` guard is enforced server-side; core-api keeps
+    the reason/direction/detection_status shaping. 404 when the target
+    memory is absent/soft-deleted/wrong tenant.
+    """
+    rows = await _svc.memory_contradiction_rows(memory_id, tenant_id)
+    if rows is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return rows
 
 
 @router.get("/{memory_id}")

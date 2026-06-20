@@ -21,7 +21,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, case, delete, false, func, literal_column, or_, select, text, tuple_
+from sqlalchemy import and_, bindparam, case, delete, false, func, literal_column, or_, select, text, tuple_
 from sqlalchemy import update as sql_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -62,6 +62,7 @@ from common.models import (
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.organization_settings_merge import deep_merge, diff_settings
 from core_storage_api.observability import db_measure
+from core_storage_api.schemas import MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.audit_chain import (
     GENESIS_PREV_HASH,
     assert_pii_safe,
@@ -168,6 +169,25 @@ def _relation_weight(relation_type: str, row_weight: float) -> float:
 # on every call. Both sets are static for the lifetime of the process.
 _MEMORY_VALID_FIELDS = frozenset(
     {c.key for c in Memory.__table__.columns} | {a.key for a in Memory.__mapper__.column_attrs}
+)
+
+# Columns the admin memory-list endpoint may sort by. Allowlisted so an
+# unexpected ``sort`` value falls back to created_at instead of raising
+# AttributeError (500) at ``getattr(Memory, sort)`` — the endpoint is callable
+# independently of core-api's route-level regex guard.
+_ADMIN_LIST_SORTABLE = frozenset(
+    {
+        "created_at",
+        "weight",
+        "memory_type",
+        "agent_id",
+        "status",
+        "recall_count",
+        "fleet_id",
+        "tenant_id",
+        "expires_at",
+        "deleted_at",
+    }
 )
 
 
@@ -2574,6 +2594,433 @@ class PostgresService:
             )
             result = await session.execute(stmt)
             return {m.id: m for m in result.scalars().all()}
+
+    # ------------------------------------------------------------------
+    # B) Fix 2 Phase 2 — fleet/admin discovery + detail + bulk mutations
+    # ------------------------------------------------------------------
+
+    async def memory_fleet_distribution(
+        self,
+        tenant_id: str | None,
+        *,
+        exclude_scope_agent: bool,
+    ) -> list[dict]:
+        """Distinct ``fleet_id`` with memory + distinct-agent counts, desc.
+
+        Serves both the tenant-facing ``/fleets`` (``exclude_scope_agent``
+        True — no caller identity to legitimately see ``scope_agent`` rows,
+        so they're excluded the same way ``list_by_filters`` does) and the
+        admin ``/admin/fleets`` (``exclude_scope_agent`` False, cross-tenant
+        when ``tenant_id`` is None). Read-only (reader replica).
+        """
+        filters = [Memory.deleted_at.is_(None), Memory.fleet_id.isnot(None)]
+        if exclude_scope_agent:
+            # ``Memory.visibility`` is NOT NULL with a server default, so the
+            # three-valued-logic NULL pitfall doesn't apply.
+            filters.append(Memory.visibility != "scope_agent")
+        if tenant_id is not None:
+            filters.append(Memory.tenant_id == tenant_id)
+        async with get_read_session() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        Memory.fleet_id,
+                        func.count(),
+                        func.count(func.distinct(Memory.agent_id)),
+                    )
+                    .where(*filters)
+                    .group_by(Memory.fleet_id)
+                    .order_by(func.count().desc())
+                )
+            ).all()
+        return [{"fleet_id": r[0], "memory_count": r[1], "agent_count": r[2]} for r in rows]
+
+    async def memory_get_detail(
+        self,
+        memory_id: UUID,
+        tenant_id: str,
+    ) -> dict | None:
+        """Bundle a single memory's full row + entity links + embedding stats.
+
+        The raw pgvector NEVER crosses the wire: embedding min/max/mean/
+        non_zero/dimensions and a first-20 preview are computed here and the
+        embedding column is stripped from the returned row dict. The memory
+        row and its entity-link outerjoin are fetched in two queries in one
+        session (no per-link N+1). Returns None when the row is absent, soft-
+        deleted, or belongs to another tenant. Read-only (reader replica).
+        """
+        async with get_read_session() as session:
+            memory = await session.get(Memory, memory_id)
+            if memory is None or memory.tenant_id != tenant_id or memory.deleted_at is not None:
+                return None
+
+            link_rows = (
+                await session.execute(
+                    select(MemoryEntityLink, Entity)
+                    .outerjoin(Entity, MemoryEntityLink.entity_id == Entity.id)
+                    .where(MemoryEntityLink.memory_id == memory_id)
+                )
+            ).all()
+            entity_links: list[dict] = []
+            for link, entity in link_rows:
+                entry: dict = {"entity_id": str(link.entity_id), "role": link.role}
+                if entity is not None:
+                    entry["entity_type"] = entity.entity_type
+                    entry["canonical_name"] = entity.canonical_name
+                    entry["attributes"] = entity.attributes
+                entity_links.append(entry)
+
+            embedding_preview: list[float] | None = None
+            embedding_stats: dict | None = None
+            if memory.embedding is not None:
+                vec = [float(v) for v in memory.embedding]
+                if vec:
+                    embedding_preview = vec[:20]
+                    embedding_stats = {
+                        "dimensions": len(vec),
+                        "min": round(min(vec), 6),
+                        "max": round(max(vec), 6),
+                        "mean": round(sum(vec) / len(vec), 6),
+                        "non_zero": sum(1 for v in vec if abs(v) > 1e-8),
+                    }
+
+            # MEMORY_LIST_FIELDS excludes embedding + search_vector: the client
+            # consumes the server-computed preview/stats, never the raw vector,
+            # so it's neither serialised nor shipped.
+            row = orm_to_dict(memory, MEMORY_LIST_FIELDS)
+        return {
+            "memory": row,
+            "entity_links": entity_links,
+            "embedding_preview": embedding_preview,
+            "embedding_stats": embedding_stats,
+        }
+
+    async def memory_contradiction_rows(
+        self,
+        memory_id: UUID,
+        tenant_id: str,
+    ) -> dict | None:
+        """Bundle the 3 contradiction reads in one round-trip.
+
+        Returns ``{memory, supersessors[], older|null}`` as flat row dicts;
+        the upstream core-api keeps the ``_reason_for`` / direction /
+        ``detection_status`` shaping. The cross-tenant ``older`` guard
+        (a corrupted ``supersedes_id`` pointing at another tenant's row)
+        is enforced here so the leak never crosses the wire. Returns None
+        when the target memory is absent/soft-deleted/wrong tenant.
+        Read-only (reader replica).
+        """
+        async with get_read_session() as session:
+            memory = await session.get(Memory, memory_id)
+            if memory is None or memory.tenant_id != tenant_id or memory.deleted_at is not None:
+                return None
+
+            supersessors = (
+                (
+                    await session.execute(
+                        select(Memory)
+                        .where(
+                            Memory.supersedes_id == memory_id,
+                            Memory.tenant_id == tenant_id,
+                            Memory.deleted_at.is_(None),
+                        )
+                        .order_by(Memory.created_at.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+            older = None
+            if memory.supersedes_id:
+                older_row = await session.get(Memory, memory.supersedes_id)
+                # ``session.get`` is a bare PK lookup — guard against a
+                # corrupted cross-tenant ``supersedes_id`` leaking another
+                # tenant's content.
+                if older_row is not None and older_row.tenant_id == tenant_id:
+                    older = older_row
+
+            return {
+                # MEMORY_LIST_FIELDS: core-api's contradiction shaping never
+                # reads the embedding/search_vector, so don't ship them.
+                "memory": orm_to_dict(memory, MEMORY_LIST_FIELDS),
+                "supersessors": [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in supersessors],
+                "older": orm_to_dict(older, MEMORY_LIST_FIELDS) if older is not None else None,
+            }
+
+    async def memory_soft_delete_by_filter(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None = None,
+        agent_id: str | None = None,
+        memory_type: str | None = None,
+        status: str | None = None,
+        exclude_ids: list[UUID] | None = None,
+        metadata_filter: dict[str, str] | None = None,
+    ) -> int:
+        """Soft-delete every matching live memory for a tenant; returns count.
+
+        The JSONB ``metadata->>'key' = 'value'`` predicates are built with
+        SQLAlchemy bound params (``Memory.metadata_[key].astext == bindparam(...)``)
+        — never string interpolation. Transactional (writer session).
+        """
+        stmt = sql_update(Memory).where(
+            Memory.tenant_id == tenant_id,
+            Memory.deleted_at.is_(None),
+        )
+        if fleet_id:
+            stmt = stmt.where(Memory.fleet_id == fleet_id)
+        if agent_id:
+            stmt = stmt.where(Memory.agent_id == agent_id)
+        if memory_type:
+            stmt = stmt.where(Memory.memory_type == memory_type)
+        if status:
+            stmt = stmt.where(Memory.status == status)
+        if exclude_ids:
+            stmt = stmt.where(Memory.id.notin_(exclude_ids))
+        if metadata_filter:
+            for i, (key, value) in enumerate(metadata_filter.items()):
+                # Distinct bindparam name per pair so multiple predicates
+                # don't collide; the KEY indexes the JSONB column (a SQL
+                # expression, not a bound value) while the VALUE is bound.
+                param: Any = bindparam(f"meta_val_{i}", value)
+                stmt = stmt.where(Memory.metadata_[str(key)].astext == param)
+        stmt = stmt.values(deleted_at=datetime.now(UTC), status="deleted")
+        async with get_session() as session:
+            result = await session.execute(stmt)
+            return result.rowcount or 0  # type: ignore[attr-defined]
+
+    async def memory_soft_delete_by_ids(
+        self,
+        tenant_id: str,
+        ids: list[UUID],
+    ) -> int:
+        """Soft-delete live memories by id (tenant-scoped); returns count.
+
+        Transactional (writer session). The 1-1000 cap stays in core-api.
+        """
+        if not ids:
+            return 0
+        async with get_session() as session:
+            result = await session.execute(
+                sql_update(Memory)
+                .where(
+                    Memory.tenant_id == tenant_id,
+                    Memory.id.in_(ids),
+                    Memory.deleted_at.is_(None),
+                )
+                .values(deleted_at=datetime.now(UTC), status="deleted")
+            )
+            return result.rowcount or 0  # type: ignore[attr-defined]
+
+    async def memory_soft_delete_by_run(
+        self,
+        tenant_id: str,
+        run_id: str,
+        *,
+        metadata_source: str = "ingest",
+    ) -> int:
+        """Soft-delete live memories tagged with ``run_id`` AND
+        ``metadata.source = metadata_source`` (belt-and-braces so non-ingest
+        memories sharing a run_id aren't touched); returns count.
+        Transactional (writer session).
+        """
+        async with get_session() as session:
+            result = await session.execute(
+                sql_update(Memory)
+                .where(
+                    Memory.tenant_id == tenant_id,
+                    Memory.deleted_at.is_(None),
+                    Memory.run_id == run_id,
+                    Memory.metadata_["source"].astext == metadata_source,
+                )
+                .values(deleted_at=datetime.now(UTC), status="deleted")
+            )
+            return result.rowcount or 0  # type: ignore[attr-defined]
+
+    async def memory_redistribute(
+        self,
+        *,
+        tenant_id: str,
+        memory_ids: list[UUID],
+        target_agent_id: str,
+    ) -> dict:
+        """Bulk-reassign memories to ``target_agent_id`` in ONE transaction.
+
+        Locks the matching live rows ``FOR UPDATE``, loops computing
+        moved/promoted/skipped/from_agents, sets ``agent_id`` and auto-promotes
+        ``scope_agent`` → ``scope_team`` to prevent data loss, and computes
+        ``not_found`` for ids that didn't match (deleted, wrong tenant, or
+        non-existent). Trust gates + the agent_id==auth precedence check stay
+        in core-api BEFORE the call. Transactional (writer session).
+        """
+        async with get_session() as session:
+            memories = (
+                (
+                    await session.execute(
+                        select(Memory)
+                        .where(
+                            Memory.id.in_(memory_ids),
+                            Memory.tenant_id == tenant_id,
+                            Memory.deleted_at.is_(None),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+            found_ids = {mem.id for mem in memories}
+            not_found = [str(mid) for mid in memory_ids if mid not in found_ids]
+
+            moved = 0
+            promoted = 0
+            skipped = 0
+            from_agents: set[str] = set()
+
+            for mem in memories:
+                if mem.agent_id == target_agent_id:
+                    skipped += 1
+                    continue
+                from_agents.add(mem.agent_id)
+                mem.agent_id = target_agent_id
+                if mem.visibility == "scope_agent":
+                    mem.visibility = "scope_team"
+                    promoted += 1
+                moved += 1
+
+        return {
+            "moved": moved,
+            "promoted": promoted,
+            "skipped": skipped,
+            "from_agents": sorted(from_agents),
+            "not_found": not_found,
+        }
+
+    async def memory_admin_list(
+        self,
+        *,
+        tenant_id: str | None = None,
+        fleet_id: str | None = None,
+        agent_id: str | None = None,
+        memory_type: str | None = None,
+        status: str | None = None,
+        include_deleted: bool = False,
+        sort: str = "created_at",
+        order: str = "desc",
+        offset: int = 0,
+        limit: int = 50,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
+    ) -> list[Memory]:
+        """Admin cross-tenant memory list (NO visibility scoping).
+
+        Returns up to ``limit`` rows (the route passes ``limit`` already
+        widened to ``limit+1`` so it can detect ``has_more`` and build the
+        next cursor). Mirrors the prior inline admin query's filter, cursor,
+        and tiebreaker exactly. Read-only (reader replica).
+        """
+        stmt = select(Memory)
+        if tenant_id:
+            stmt = stmt.where(Memory.tenant_id == tenant_id)
+        if fleet_id:
+            stmt = stmt.where(Memory.fleet_id == fleet_id)
+        if not include_deleted:
+            stmt = stmt.where(Memory.deleted_at.is_(None))
+        if agent_id:
+            stmt = stmt.where(Memory.agent_id == agent_id)
+        if memory_type:
+            stmt = stmt.where(Memory.memory_type == memory_type)
+        if status:
+            stmt = stmt.where(Memory.status == status)
+
+        using_cursor = cursor_ts is not None and cursor_id is not None
+        if using_cursor:
+            # Row-value comparison ``(created_at, id) < (cursor_ts, cursor_id)``
+            # — same form core-api's ``memory_repository.list_by_filters`` uses.
+            # ``type: ignore`` because the SQLAlchemy stubs don't model bare
+            # Python literals as ``tuple_`` args.
+            stmt = stmt.where(tuple_(Memory.created_at, Memory.id) < tuple_(cursor_ts, cursor_id))  # type: ignore[arg-type]
+
+        # core-api restricts ``sort`` via a route regex, but this endpoint is
+        # independently callable — allowlist the column so an unknown value
+        # falls back to created_at instead of AttributeError-ing (500) on
+        # getattr(Memory, sort).
+        if sort not in _ADMIN_LIST_SORTABLE:
+            sort = "created_at"
+        col = getattr(Memory, sort)
+        if order == "desc":
+            stmt = stmt.order_by(col.desc(), Memory.id.desc())
+        else:
+            stmt = stmt.order_by(col.asc(), Memory.id.asc())
+        if not using_cursor:
+            stmt = stmt.offset(offset)
+        stmt = stmt.limit(limit)
+
+        async with get_read_session() as session:
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+    async def memory_admin_stats(
+        self,
+        tenant_id: str | None,
+        fleet_id: str | None,
+    ) -> dict:
+        """Admin memory stats — ``{total, by_type, by_agent, by_status}``.
+
+        Single GROUPING SETS scan over ``(memory_type), (agent_id), (status),
+        ()``. Unlike ``memory_compute_health_stats`` (which has no ``by_agent``
+        and a different shape), this matches the admin route's response. NO
+        visibility scoping (admin sees everything). Cross-tenant when
+        ``tenant_id`` is None. Read-only (reader replica).
+        """
+        # Single GROUPING SETS scan. Optional filters use the
+        # ``(:p IS NULL OR col = :p)`` idiom with bound params — no compiled-SQL
+        # splicing, injection-safe by construction. ``CAST(:p AS text)`` (not
+        # ``:p::text`` — the ``::`` collides with text()'s ``:param`` colon
+        # syntax) is required so asyncpg can infer the type of a NULL bound
+        # param used in ``IS NULL`` (else AmbiguousParameterError).
+        # ``GROUPING(col)=0`` ⇒ this output row groups on that column; the
+        # all-bits-set value (7) flags the overall total (the empty grouping set).
+        sql = text(
+            """
+            SELECT
+                CASE
+                    WHEN GROUPING(memory_type, agent_id, status) = 7 THEN 'total'
+                    WHEN GROUPING(memory_type) = 0 THEN 'by_type'
+                    WHEN GROUPING(agent_id) = 0 THEN 'by_agent'
+                    WHEN GROUPING(status) = 0 THEN 'by_status'
+                END                                              AS bucket,
+                memory_type, agent_id, status,
+                COUNT(*)                                         AS cnt
+            FROM memories
+            WHERE deleted_at IS NULL
+              AND (CAST(:tenant_id AS text) IS NULL OR tenant_id = CAST(:tenant_id AS text))
+              AND (CAST(:fleet_id AS text) IS NULL OR fleet_id = CAST(:fleet_id AS text))
+            GROUP BY GROUPING SETS ((memory_type), (agent_id), (status), ())
+            """
+        ).bindparams(tenant_id=tenant_id, fleet_id=fleet_id)
+
+        total = 0
+        by_type: dict = {}
+        by_agent: dict = {}
+        by_status: dict = {}
+        async with get_read_session() as session:
+            rows = (await session.execute(sql)).all()
+        for row in rows:
+            bucket = row[0]
+            cnt = int(row[4] or 0)
+            if bucket == "total":
+                total = cnt
+            elif bucket == "by_type":
+                by_type[row[1]] = cnt
+            elif bucket == "by_agent":
+                by_agent[row[2]] = cnt
+            elif bucket == "by_status":
+                by_status[row[3]] = cnt
+        return {"total": total, "by_type": by_type, "by_agent": by_agent, "by_status": by_status}
 
     # ══════════════════════════════════════════════════════════════════════
     #  ENTITIES
