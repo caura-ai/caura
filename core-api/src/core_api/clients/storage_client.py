@@ -151,7 +151,14 @@ class CoreStorageClient:
             # Sized for 20 concurrent storm writes x ~5 storage calls
             # each = 100 in-flight at peak, plus tenant-B probe headroom
             # and a 33% burst margin.
-            limits=httpx.Limits(max_connections=200, max_keepalive_connections=150),
+            # ``keepalive_expiry`` defaults to 5s in httpx — too short for the
+            # bursty entity-context / enrichment fan-out, whose bursts arrive
+            # seconds-to-tens-of-seconds apart. At 5s the warm pool drains
+            # between bursts, so the next burst opens cold TCP handshakes that
+            # pile up at the Cloud Run VPC connector (the residual ConnectTimeout
+            # class). 90s keeps connections warm across the inter-burst gap so the
+            # fan-out reuses them instead of re-handshaking.
+            limits=httpx.Limits(max_connections=200, max_keepalive_connections=150, keepalive_expiry=90.0),
             follow_redirects=True,
         )
 

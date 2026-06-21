@@ -1214,6 +1214,31 @@ def _extract_subject_canonical_identity(
     return None
 
 
+_ENTITY_CTX_FANOUT_LIMIT = 8
+
+
+async def _bounded_gather(coros, limit=_ENTITY_CTX_FANOUT_LIMIT):
+    """``asyncio.gather`` capped at ``limit`` concurrent coroutines.
+
+    The Path-C entity-context fan-out (one ``_fetch_entity_context`` per
+    candidate — up to ``_ENTITY_LINKS_DETECTION_FETCH_MAX_CANDIDATES`` — each
+    hydrating N entity links) would otherwise open dozens of simultaneous
+    storage handshakes that saturate the Cloud Run VPC connector and surface as
+    ``ConnectTimeout`` storms. Capping concurrency keeps each burst within the
+    connector's handshake headroom; combined with the storage client's warm
+    keep-alive pool the calls reuse connections instead of re-handshaking. A
+    fresh semaphore per call (bound to the running loop) sidesteps cross-loop
+    binding issues in tests. Order is preserved (``gather`` semantics).
+    """
+    sem = asyncio.Semaphore(limit)
+
+    async def _run(coro):
+        async with sem:
+            return await coro
+
+    return await asyncio.gather(*(_run(c) for c in coros))
+
+
 async def _fetch_entity_context(sc, memory_id: str) -> list[dict]:
     """Fetch and denormalise ``MemoryEntityLink`` rows for a single memory.
 
@@ -1269,7 +1294,7 @@ async def _fetch_entity_context(sc, memory_id: str) -> list[dict]:
             "entity_id": str(entity_id),
         }
 
-    hydrated = await asyncio.gather(*(_hydrate(link) for link in links))
+    hydrated = await _bounded_gather([_hydrate(link) for link in links])
     return [h for h in hydrated if h is not None]
 
 
@@ -1739,9 +1764,11 @@ async def detect_contradictions_by_entities_async(
         else:
             try:
                 fetched = await asyncio.wait_for(
-                    asyncio.gather(
-                        _fetch_entity_context(sc, str(memory_id)),
-                        *(_fetch_entity_context(sc, str(c.get("id"))) for c in candidates),
+                    _bounded_gather(
+                        [
+                            _fetch_entity_context(sc, str(memory_id)),
+                            *(_fetch_entity_context(sc, str(c.get("id"))) for c in candidates),
+                        ]
                     ),
                     timeout=_CONTEXT_FETCH_TIMEOUT_SECONDS,
                 )
