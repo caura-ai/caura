@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any, Literal, NotRequired, TypedDict
+from uuid import UUID
 
 import httpx
 
@@ -1190,14 +1192,45 @@ class CoreStorageClient:
     async def upsert_document(self, data: dict) -> dict:
         return await self._post("/documents", data)  # type: ignore[return-value]
 
+    async def upsert_document_xmax(self, data: dict) -> dict:
+        return await self._post("/documents/upsert-xmax", data, read=False)  # type: ignore[return-value]
+
+    async def list_document_collections(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None = None,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> dict:
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if fleet_id is not None:
+            params["fleet_id"] = fleet_id
+        if readable_tenant_ids is not None:
+            params["readable_tenant_ids"] = readable_tenant_ids
+        result = await self._get("/documents/collections", read=True, **params)
+        if result is None:
+            # _get returns None only on 404 — i.e. the endpoint is missing
+            # (version skew / undeployed). Surface it instead of masking it as
+            # an empty collection list with `or {}`.
+            raise RuntimeError("GET /documents/collections returned 404 — core-storage-api version skew?")
+        return result
+
+    async def search_documents_vector(self, data: dict) -> list[dict]:
+        return await self._post("/documents/search", data, read=True)  # type: ignore[return-value]
+
     async def get_document(
         self,
         tenant_id: str,
         collection: str,
         doc_id: str,
+        *,
+        read: bool = True,
     ) -> dict | None:
+        # read=False forces the primary — use it for read-after-write re-fetches
+        # (e.g. immediately after an upsert) so replication lag can't yield None.
         return await self._get(
             f"/documents/{collection}/{doc_id}",
+            read=read,
             tenant_id=tenant_id,
         )
 
@@ -1355,6 +1388,28 @@ class CoreStorageClient:
 
     async def delete_fleet(self, tenant_id: str, fleet_id: str) -> bool:
         return await self._delete(f"/fleet/{fleet_id}", tenant_id=tenant_id)
+
+    async def fleet_in_flight_deploy(self, *, node_id: UUID, since: datetime) -> bool:
+        result = await self._get(
+            "/fleet/commands/in-flight-deploy",
+            # primary, not replica: read-after-write deploy-dedup gate — it must see
+            # a deploy command queued by a prior heartbeat, or replica lag lets a
+            # duplicate through (the acked-stuck-queue storm this gate prevents).
+            read=False,
+            node_id=str(node_id),
+            since=since.isoformat(),
+        )
+        return bool((result or {}).get("in_flight"))
+
+    async def fleet_deploy_attempt_count(self, *, node_id: UUID, target_version: str, since: datetime) -> int:
+        result = await self._get(
+            "/fleet/commands/deploy-attempt-count",
+            read=False,  # primary: attempt budget must count just-queued deploys (see fleet_in_flight_deploy)
+            node_id=str(node_id),
+            target_version=target_version,
+            since=since.isoformat(),
+        )
+        return int((result or {}).get("count", 0))
 
     # =====================================================================
     # Idempotency inbox

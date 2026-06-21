@@ -160,6 +160,26 @@ async def get_pending_commands(
     return [orm_to_dict(c, FLEET_COMMAND_FIELDS) for c in commands]
 
 
+@router.get("/commands/in-flight-deploy")
+async def in_flight_deploy(node_id: UUID, since: datetime) -> dict:
+    """True if a ``deploy`` command for this node is still in flight
+    (status pending/acked, created_at >= since)."""
+    in_flight = await _svc.fleet_has_recent_in_flight_deploy(node_id=node_id, since=since)
+    return {"in_flight": in_flight}
+
+
+@router.get("/commands/deploy-attempt-count")
+async def deploy_attempt_count(node_id: UUID, target_version: str, since: datetime) -> dict:
+    """Count auto-upgrade ``deploy`` commands for this node at
+    ``target_version`` since ``since`` — ALL statuses."""
+    count = await _svc.fleet_count_recent_deploys_for_target(
+        node_id=node_id,
+        target_version=target_version,
+        since=since,
+    )
+    return {"count": count}
+
+
 @router.patch("/commands/{command_id}/status")
 async def update_command_status(command_id: UUID, request: Request) -> dict:
     """Update a command's status / result.

@@ -317,31 +317,24 @@ async def test_rest_documents_search_emits_cross_tenant_audit(monkeypatch):
     from core_api.routes import documents as documents_routes
 
     spy = _spy_log(monkeypatch, documents_routes)
-    fake_doc = SimpleNamespace(
-        tenant_id="sibling",
-        id="d1",
-        collection="things",
-        doc_id="docX",
-        data={},
-    )
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.search",
-        AsyncMock(return_value=[(fake_doc, 0.91)]),
-    )
-    monkeypatch.setattr(
-        "core_api.services.memory_service.get_query_embedding",
-        AsyncMock(return_value=[0.1] * 8),
-    )
-    monkeypatch.setattr(
-        "core_api.services.organization_settings.resolve_config",
-        AsyncMock(return_value=SimpleNamespace(embedding_model=None)),
-    )
+    # The REST search route now routes through the storage client
+    # (``sc.search_documents_vector``), which returns plain dict rows
+    # carrying ``tenant_id`` for the cross-tenant audit count.
+    fake_rows = [
+        {
+            "tenant_id": "sibling",
+            "collection": "things",
+            "doc_id": "docX",
+            "data": {},
+            "similarity": 0.91,
+        }
+    ]
+    fake_sc = SimpleNamespace(search_documents_vector=AsyncMock(return_value=fake_rows))
+    monkeypatch.setattr(documents_routes, "get_storage_client", lambda: fake_sc)
     monkeypatch.setattr(documents_routes, "check_and_increment", AsyncMock())
-    # The route uses ``common.embedding.get_embedding`` (a separate
-    # provider entry from ``get_query_embedding``); patch it too.
-    monkeypatch.setattr(
-        "common.embedding.get_embedding", AsyncMock(return_value=[0.1] * 8)
-    )
+    # The route imports ``get_embedding`` at module top-level, so patch it
+    # in the route module's namespace (not at the source).
+    monkeypatch.setattr(documents_routes, "get_embedding", AsyncMock(return_value=[0.1] * 8))
 
     body = documents_routes.DocSearchRequest(
         tenant_id="home",

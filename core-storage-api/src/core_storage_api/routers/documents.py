@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from core_storage_api.schemas import DOCUMENT_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import PostgresService
@@ -27,6 +27,57 @@ async def upsert_document(request: Request) -> dict:
     return orm_to_dict(doc, DOCUMENT_FIELDS)
 
 
+@router.post("/upsert-xmax")
+async def upsert_document_xmax(request: Request) -> dict:
+    """Upsert returning (id, created_at, updated_at, xmax).
+
+    ``xmax == 0`` → INSERT (new row); ``xmax != 0`` → UPDATE (the
+    on-conflict path fired). ``embedding`` is opt-in; passing ``None``
+    on a re-write clears a previously-indexed doc's vector (intentional).
+    """
+    body: dict = await request.json()
+    try:
+        row = await _svc.document_upsert_returning_xmax(
+            tenant_id=body["tenant_id"],
+            collection=body["collection"],
+            doc_id=body["doc_id"],
+            data=body["data"],
+            fleet_id=body.get("fleet_id"),
+            embedding=body.get("embedding"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # ``.returning(Document.id, Document.created_at, Document.updated_at, text("xmax"))``
+    # — index positionally (the Row is typed as a plain ``tuple``).
+    doc_id_, created_at, updated_at, xmax = row
+    return {
+        "id": str(doc_id_),
+        "created_at": created_at.isoformat(),
+        "updated_at": updated_at.isoformat(),
+        "xmax": int(xmax),
+    }
+
+
+@router.post("/search")
+async def search_documents(request: Request) -> list[dict]:
+    body: dict = await request.json()
+    pairs = await _svc.document_search(
+        tenant_id=body["tenant_id"],
+        query_embedding=body["query_embedding"],
+        collection=body.get("collection"),
+        top_k=body.get("top_k", 5),
+        fleet_id=body.get("fleet_id"),
+        readable_tenant_ids=body.get("readable_tenant_ids"),
+        status=body.get("status"),
+    )
+    results: list[dict] = []
+    for d, sim in pairs:
+        row = orm_to_dict(d, DOCUMENT_FIELDS)
+        row["similarity"] = sim
+        results.append(row)
+    return results
+
+
 @router.post("/query")
 async def query_documents(request: Request) -> list[dict]:
     body: dict = await request.json()
@@ -41,6 +92,26 @@ async def query_documents(request: Request) -> list[dict]:
         offset=body.get("offset", 0),
     )
     return [orm_to_dict(d, DOCUMENT_FIELDS) for d in docs]
+
+
+# NOTE: /documents/collections MUST be registered BEFORE /documents/{collection}
+# and /documents/{collection}/{doc_id} — FastAPI matches in declaration order, so
+# otherwise ``GET /documents/collections`` would bind ``collection="collections"``.
+@router.get("/collections")
+async def list_collections(
+    tenant_id: str,
+    fleet_id: str | None = None,
+    readable_tenant_ids: list[str] | None = Query(default=None),
+) -> dict:
+    rows = await _svc.document_list_collections(
+        tenant_id=tenant_id,
+        fleet_id=fleet_id,
+        readable_tenant_ids=readable_tenant_ids,
+    )
+    return {
+        "collections": [{"name": name, "count": count} for name, count in rows],
+        "count": len(rows),
+    }
 
 
 @router.get("/{collection}/{doc_id}")

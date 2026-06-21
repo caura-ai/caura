@@ -4325,8 +4325,23 @@ class PostgresService:
         doc_id: str,
         data: dict,
         fleet_id: str | None = None,
+        embedding: list[float] | None = None,
+        system: bool = False,
     ) -> tuple:
-        """Upsert and return (id, created_at, updated_at, xmax) for MCP callers."""
+        """Upsert and return (id, created_at, updated_at, xmax) for MCP callers.
+
+        ``embedding`` is opt-in — callers that skip it leave the column
+        ``NULL`` and the doc won't participate in semantic search. Upsert
+        always writes the embedding column, so passing ``None`` on a
+        re-write will clear a previously-indexed doc (intentional — the
+        caller chose not to index this version).
+
+        Mirrors ``document_upsert``'s system-collection guard: writes to
+        ``_``-prefixed (system-managed, e.g. ``_keystones``) collections
+        require ``system=True``, so the public endpoint can't reach them.
+        """
+        if collection.startswith("_") and not system:
+            raise ValueError(f"Collection '{collection}' is system-managed; use the dedicated endpoint.")
         async with get_session() as session:
             stmt = (
                 pg_insert(Document)
@@ -4336,15 +4351,108 @@ class PostgresService:
                     collection=collection,
                     doc_id=doc_id,
                     data=data,
+                    embedding=embedding,
                 )
                 .on_conflict_do_update(
                     constraint="uq_documents_tenant_collection_doc",
-                    set_={"data": data, "fleet_id": fleet_id, "updated_at": text("now()")},
+                    set_={
+                        "data": data,
+                        "fleet_id": fleet_id,
+                        "embedding": embedding,
+                        "updated_at": text("now()"),
+                    },
                 )
                 .returning(Document.id, Document.created_at, Document.updated_at, text("xmax"))
             )
             result = await session.execute(stmt)
             return result.one()  # type: ignore[return-value]
+
+    async def document_list_collections(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None = None,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> list[tuple[str, int]]:
+        """Enumerate collections a tenant has written to, with per-collection
+        document counts.
+
+        Returns rows of ``(collection, count)`` sorted alphabetically by
+        collection name. If ``fleet_id`` is supplied, only documents matching
+        that fleet are counted; otherwise counts span every fleet within the
+        tenant.
+
+        ``readable_tenant_ids`` widens to ``ANY($readable)`` — counts then
+        span every collection across the readable set (collections with the
+        same name across multiple tenants merge into one row).
+        """
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
+        stmt = (
+            select(Document.collection, func.count().label("count"))
+            .where(tenant_pred)
+            .group_by(Document.collection)
+            .order_by(Document.collection)
+        )
+        if fleet_id:
+            stmt = stmt.where(Document.fleet_id == fleet_id)
+        async with get_read_session() as session:
+            result = await session.execute(stmt)
+            # Positional access: ``row.count`` resolves to ``Row.count()`` (the
+            # tuple method) under the type checker; index by position instead.
+            return [(row[0], int(row[1])) for row in result.all()]
+
+    async def document_search(
+        self,
+        *,
+        tenant_id: str,
+        query_embedding: list[float],
+        collection: str | None = None,
+        top_k: int = 5,
+        fleet_id: str | None = None,
+        readable_tenant_ids: list[str] | None = None,
+        status: str | None = None,
+    ) -> list[tuple[Document, float]]:
+        """Semantic search over docs — scoped or cross-collection.
+
+        If ``collection`` is supplied, search is restricted to that
+        collection (narrow / strategy 1). If ``collection`` is ``None``,
+        search spans every collection in the tenant (broad / strategy 2).
+        Only rows with ``embedding IS NOT NULL`` are considered.
+
+        ``readable_tenant_ids`` widens to ``ANY($readable)`` — semantic
+        search then spans every document across the readable set, sorted
+        by global cosine distance.
+
+        ``status`` (optional) adds a ``data->>'status' = :status``
+        equality filter. Returns ``(Document, similarity)`` pairs where
+        ``similarity = 1 - cosine_distance``.
+        """
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
+        distance = Document.embedding.cosine_distance(query_embedding)
+        stmt = (
+            select(Document, distance.label("distance"))
+            .where(
+                tenant_pred,
+                Document.embedding.is_not(None),
+            )
+            .order_by(distance)
+            .limit(max(top_k, 1))
+        )
+        if collection is not None:
+            stmt = stmt.where(Document.collection == collection)
+        if fleet_id:
+            stmt = stmt.where(Document.fleet_id == fleet_id)
+        if status is not None:
+            stmt = stmt.where(Document.data["status"].astext == status)
+        async with get_read_session() as session:
+            result = await session.execute(stmt)
+            return [(row.Document, 1.0 - float(row.distance)) for row in result.all()]
 
     async def document_get_by_doc_id(
         self,
@@ -4765,6 +4873,64 @@ class PostgresService:
                 .order_by(FleetCommand.created_at)
             )
             return result.scalars().all()
+
+    async def fleet_has_recent_in_flight_deploy(
+        self,
+        *,
+        node_id: UUID,
+        since: datetime,
+    ) -> bool:
+        """True if a ``deploy`` command for this node is still in flight.
+
+        "In flight" means status in (``pending``, ``acked``) and
+        ``created_at >= since``. Used by the auto-upgrade gate to suppress
+        queueing duplicate deploys when a previous one has been sent to
+        the plugin but never reported back as completed/failed.
+        """
+        # Primary (writer) session, not get_read_session: this is a read-after-write
+        # deploy-dedup gate — a replica read under lag could miss a just-queued command
+        # and let a duplicate deploy through.
+        async with get_session() as session:
+            result = await session.execute(
+                select(FleetCommand.id)
+                .where(
+                    FleetCommand.node_id == node_id,
+                    FleetCommand.command == "deploy",
+                    FleetCommand.status.in_(("pending", "acked")),
+                    FleetCommand.created_at >= since,
+                )
+                .limit(1)
+            )
+            return result.scalar_one_or_none() is not None
+
+    async def fleet_count_recent_deploys_for_target(
+        self,
+        *,
+        node_id: UUID,
+        target_version: str,
+        since: datetime,
+    ) -> int:
+        """Count auto-upgrade ``deploy`` commands queued for this node at
+        ``target_version`` since ``since`` — ALL statuses.
+
+        Backs the auto-upgrade attempt budget (CAURA-000). Counting ALL
+        statuses is deliberate: the nastiest mode is ``status=done`` with
+        no version progress, which a status filter would miss. Keyed on
+        ``target_version`` so a NEW release starts a fresh budget.
+        """
+        # Primary (writer) session, not get_read_session: the attempt budget must
+        # count deploys queued by a prior heartbeat (replica lag would under-count
+        # and let the budget be exceeded).
+        async with get_session() as session:
+            result = await session.execute(
+                select(func.count(FleetCommand.id)).where(
+                    FleetCommand.node_id == node_id,
+                    FleetCommand.command == "deploy",
+                    FleetCommand.payload["target_version"].astext == target_version,
+                    FleetCommand.created_at >= since,
+                )
+            )
+            return result.scalar_one() or 0
 
     async def fleet_ack_commands(
         self,

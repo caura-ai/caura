@@ -15,7 +15,6 @@ from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import NODE_OFFLINE_SECONDS, NODE_STALE_SECONDS
 from core_api.db.session import get_db
-from core_api.repositories import fleet_repo
 from core_api.services.audit_service import log_action
 from core_api.services.organization_settings import get_raw_settings
 from core_api.version_compat import (
@@ -487,8 +486,7 @@ async def _maybe_queue_auto_upgrade(
     # doesn't break the upgrade path entirely (the pending check above
     # is already a safety net).
     try:
-        in_flight = await fleet_repo.has_recent_in_flight_deploy(
-            db,
+        in_flight = await sc.fleet_in_flight_deploy(
             node_id=UUID(node_id),
             since=datetime.now(UTC) - DEPLOY_IN_FLIGHT_WINDOW,
         )
@@ -518,8 +516,7 @@ async def _maybe_queue_auto_upgrade(
     # consistent with the in-flight check above: a transient hiccup must
     # not permanently wedge a legitimate upgrade.
     try:
-        recent_attempts = await fleet_repo.count_recent_deploys_for_target(
-            db,
+        recent_attempts = await sc.fleet_deploy_attempt_count(
             node_id=UUID(node_id),
             target_version=target_version,
             since=datetime.now(UTC) - AUTO_UPGRADE_ATTEMPT_WINDOW,
