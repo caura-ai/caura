@@ -6,7 +6,7 @@ Every test runs against a real PostgreSQL instance.
 
 import pytest
 
-from tests.conftest import get_admin_headers, get_test_auth
+from tests.conftest import get_test_auth, uid
 
 
 async def _write_memory(
@@ -108,9 +108,12 @@ async def test_list_tenants_with_api_key(client):
 @pytest.mark.integration
 async def test_own_tenant_memory_access_ok(client):
     """A tenant can read their own memories normally."""
-    import uuid
-    tenant_id, headers = get_test_auth("self-org")
-    await _write_memory(client, tenant_id, headers, f"My data for tenant isolation test [{uuid.uuid4().hex[:8]}]")
+    # Unique per-run tenant: the test DB keeps storage-committed rows across
+    # sessions (they aren't rolled back like the `db` fixture), so a shared
+    # tenant accumulates memories and a freshly-written one can fall outside the
+    # default list page — making a bare ``len >= 1`` presence check flaky.
+    tenant_id, headers = get_test_auth(f"self-org-{uid()}")
+    written = await _write_memory(client, tenant_id, headers, f"My data for tenant isolation test [{uid()}]")
 
     resp = await client.get(
         f"/api/v1/memories?tenant_id={tenant_id}",
@@ -119,7 +122,9 @@ async def test_own_tenant_memory_access_ok(client):
     assert resp.status_code == 200
     data = resp.json()
     items = data.get("items", data) if isinstance(data, dict) and "items" in data else data
-    assert len(items) >= 1
+    # The just-written memory is readable (robust to ambient rows) ...
+    assert any(m["id"] == written["id"] for m in items)
+    # ... and the tenant-scoped list never leaks another tenant's rows.
     assert all(m["tenant_id"] == tenant_id for m in items)
 
 
