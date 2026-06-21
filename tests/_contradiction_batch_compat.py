@@ -42,7 +42,11 @@ def install_batch_status_replay_shim(mock_sc: Any) -> None:
 
     update_mock = mock_sc.update_memory_status
 
-    async def _replay(payload: dict) -> dict:
+    async def _replay(payload: dict, *, tenant_id: str | None = None) -> dict:
+        # ``tenant_id`` is the batch-level cross-tenant guard threaded by the
+        # detector (Ph4 round-3 FIX 1). Accept-and-ignore here so the replay
+        # shim keeps the legacy per-row ``update_memory_status`` assertions
+        # valid without each test having to thread it.
         for row in payload.get("updates", []):
             mid = row["memory_id"]
             status = row["status"]

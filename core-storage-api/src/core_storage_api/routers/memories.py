@@ -542,6 +542,17 @@ async def batch_update_status(request: Request) -> dict:
     """
     body: dict = await request.json()
 
+    # The batch is per-tenant: every memory in one batch shares the trigger
+    # tenant, so ``tenant_id`` is carried at the batch level (not per row) and
+    # threaded into each ``memory_update_status`` as the cross-tenant write
+    # guard. Explicit 422 on missing tenant_id, mirroring the sibling routes.
+    tenant_id: str | None = body.get("tenant_id")
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise HTTPException(
+            status_code=422,
+            detail="'tenant_id' is required and must be a non-empty string",
+        )
+
     # Two passes: validate everything FIRST, then execute. A malformed
     # item in the middle of the batch would otherwise commit rows
     # 0..K-1 before the 422 lands, leaving the caller no receipt of
@@ -583,6 +594,7 @@ async def batch_update_status(request: Request) -> dict:
         ok = await _svc.memory_update_status(
             mid,
             new_status,
+            tenant_id=tenant_id,
             supersedes_id=sup_uuid,
             unset_supersedes=unset_sup,
             expected_supersedes_id=exp_sup_uuid,
@@ -963,6 +975,101 @@ async def admin_list(request: Request) -> list[dict]:
     return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
 
+@router.post("/list")
+async def list_by_filters(request: Request) -> list[dict]:
+    """Non-admin memory list WITH visibility scoping (MCP ``memclaw_list``).
+
+    Body: ``{tenant_id, caller_agent_id?, fleet_id?, written_by?, memory_type?,
+    status?, run_id?, weight_min?, weight_max?, created_after?, created_before?,
+    include_deleted, sort, order, limit, offset, cursor_ts?, cursor_id?,
+    readable_tenant_ids?}``. ``limit`` is the caller's desired page size; this
+    endpoint over-fetches ``limit+1`` rows internally for has_more detection and
+    the caller slices to ``limit`` / builds the next cursor. Distinct from
+    ``/admin-list`` which has NO visibility scoping.
+    """
+    body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=422, detail="tenant_id is required")
+    # Cap the page size: the service over-fetches ``limit + 1``, so an
+    # unbounded ``limit`` would let a caller pull the whole table in one
+    # request. [1, 5000] matches the /null-embedding-ids bound in this file.
+    raw_limit = body.get("limit", 25)
+    try:
+        limit = max(1, min(int(raw_limit), 5000))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="'limit' must be a positive integer") from None
+    cursor_ts_raw = body.get("cursor_ts")
+    cursor_id_raw = body.get("cursor_id")
+    created_after_raw = body.get("created_after")
+    created_before_raw = body.get("created_before")
+    try:
+        cursor_ts = datetime.fromisoformat(cursor_ts_raw) if isinstance(cursor_ts_raw, str) else cursor_ts_raw
+        cursor_id = UUID(cursor_id_raw) if cursor_id_raw else None
+        created_after = (
+            datetime.fromisoformat(created_after_raw)
+            if isinstance(created_after_raw, str)
+            else created_after_raw
+        )
+        created_before = (
+            datetime.fromisoformat(created_before_raw)
+            if isinstance(created_before_raw, str)
+            else created_before_raw
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"invalid datetime fields: {exc}") from exc
+    memories = await _svc.memory_list_by_filters(
+        tenant_id=tenant_id,
+        caller_agent_id=body.get("caller_agent_id"),
+        fleet_id=body.get("fleet_id"),
+        written_by=body.get("written_by"),
+        memory_type=body.get("memory_type"),
+        status=body.get("status"),
+        run_id=body.get("run_id"),
+        weight_min=body.get("weight_min"),
+        weight_max=body.get("weight_max"),
+        created_after=created_after,
+        created_before=created_before,
+        include_deleted=bool(body.get("include_deleted", False)),
+        sort=body.get("sort", "created_at"),
+        order=body.get("order", "desc"),
+        limit=limit,
+        offset=body.get("offset", 0),
+        cursor_ts=cursor_ts,
+        cursor_id=cursor_id,
+        readable_tenant_ids=body.get("readable_tenant_ids"),
+    )
+    return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
+
+
+@router.post("/stats-breakdown")
+async def stats_breakdown(request: Request) -> dict:
+    """Visibility-scoped stats breakdown (MCP ``memclaw_stats``).
+
+    Body: ``{tenant_id?, fleet_id?, agent_id?, memory_type?, status?,
+    include_deleted?, readable_tenant_ids?}``. Returns ``{total, by_type,
+    by_agent, by_status}`` plus optional ``by_tenant`` (when the readable set
+    spans >1 tenant) and ``deleted`` / ``total_including_deleted`` (when
+    ``include_deleted``). Distinct from ``/admin-stats`` (no scoping) and
+    ``/stats`` (health-stats shape).
+    """
+    body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    if not tenant_id:
+        # Mirror /list: a binding/home tenant is mandatory. Without it (and with no
+        # readable set) the aggregation would run unscoped across all tenants.
+        raise HTTPException(status_code=422, detail="tenant_id is required")
+    return await _svc.memory_stats_breakdown(
+        tenant_id=tenant_id,
+        fleet_id=body.get("fleet_id"),
+        agent_id=body.get("agent_id"),
+        memory_type=body.get("memory_type"),
+        status=body.get("status"),
+        include_deleted=bool(body.get("include_deleted", False)),
+        readable_tenant_ids=body.get("readable_tenant_ids"),
+    )
+
+
 @router.post("/soft-delete-by-filter")
 async def soft_delete_by_filter(request: Request) -> dict:
     """Soft-delete every matching live memory for a tenant.
@@ -1153,6 +1260,17 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
     unset_supersedes = bool(body.get("unset_supersedes", False))
     expected_supersedes_id = body.get("expected_supersedes_id")
 
+    # ``tenant_id`` scopes every write path in this route (the CAS retraction,
+    # the ``memory_update_status`` status flip, and the set-supersedes update)
+    # so a caller in tenant B can't touch tenant A's memory by id. Explicit 422
+    # on a missing tenant_id, mirroring the sibling routes.
+    tenant_id: str | None = body.get("tenant_id")
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise HTTPException(
+            status_code=422,
+            detail="'tenant_id' is required and must be a non-empty string",
+        )
+
     if unset_supersedes and supersedes_id is not None:
         raise HTTPException(
             status_code=422,
@@ -1186,6 +1304,7 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                 sql_update(Memory)
                 .where(
                     Memory.id == memory_id,
+                    Memory.tenant_id == tenant_id,
                     or_(
                         Memory.supersedes_id == expected_uuid,
                         Memory.supersedes_id.is_(None),
@@ -1207,7 +1326,7 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
     # Set or status-only paths. ``memory_update_status`` returns False
     # when the target row doesn't exist (or was already deleted); surface
     # as 404 so the caller doesn't silently treat a no-op as success.
-    ok = await _svc.memory_update_status(memory_id, status)
+    ok = await _svc.memory_update_status(memory_id, status, tenant_id=tenant_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"memory {memory_id} not found")
 
@@ -1226,7 +1345,11 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
         async with get_session() as session:
             await session.execute(
                 sql_update(Memory)
-                .where(Memory.id == memory_id, Memory.supersedes_id.is_(None))
+                .where(
+                    Memory.id == memory_id,
+                    Memory.tenant_id == tenant_id,
+                    Memory.supersedes_id.is_(None),
+                )
                 .values(supersedes_id=UUID(supersedes_id))
             )
     return {"ok": True}

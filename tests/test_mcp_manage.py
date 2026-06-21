@@ -9,6 +9,7 @@ Covers:
 - ``op=delete`` success.
 - Service ``HTTPException`` → ``Error (…)`` envelope.
 """
+
 from __future__ import annotations
 
 from uuid import uuid4
@@ -17,7 +18,12 @@ import pytest
 from fastapi import HTTPException
 
 from core_api import mcp_server
-from tests._mcp_test_helpers import as_text, parse_envelope, strip_latency
+from tests._mcp_test_helpers import (
+    as_text,
+    parse_envelope,
+    stub_storage_client,
+    strip_latency,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -25,25 +31,33 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 VALID_UID = str(uuid4())
 
 
-class _MemoryRow:
-    """Stand-in for the SQLAlchemy Memory row returned by get_by_id_for_tenant."""
+def _memory_dict(status="active", agent_id="alice", content="hello"):
+    """Storage-client memory row (Fix 2 Phase 4: ``sc.get_memory_for_tenant``
+    returns a plain dict, not an ORM row). ``memclaw_manage`` reads it via
+    ``.get(...)`` so all the fields the read/transition shaping touches are
+    present as dict keys."""
+    from datetime import datetime, timezone
 
-    def __init__(self, status="active", agent_id="alice", content="hello"):
-        from datetime import datetime, timezone
-
-        self.id = uuid4()
-        self.agent_id = agent_id
-        self.fleet_id = None
-        self.memory_type = "fact"
-        self.status = status
-        self.weight = 0.5
-        self.visibility = "scope_team"
-        self.title = "t"
-        self.summary = "s"
-        self.content = content
-        self.created_at = datetime.now(timezone.utc)
-        self.updated_at = self.created_at
-        self.metadata_ = {}
+    mid = uuid4()
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "id": str(mid),
+        "agent_id": agent_id,
+        "fleet_id": None,
+        "memory_type": "fact",
+        "status": status,
+        "weight": 0.5,
+        "visibility": "scope_team",
+        "title": "t",
+        "summary": "s",
+        "content": content,
+        "created_at": now,
+        "updated_at": now,
+        "last_recalled_at": None,
+        "recall_count": 0,
+        "deleted_at": None,
+        "metadata_": {},
+    }
 
 
 async def test_manage_invalid_op_errors(mcp_env):
@@ -68,23 +82,18 @@ async def test_manage_invalid_uuid_errors(mcp_env):
 
 
 async def test_manage_read_not_found(mcp_env, monkeypatch):
-    monkeypatch.setattr(
-        "core_api.repositories.memory_repo.get_by_id_for_tenant",
-        _async_return(None),
-    )
+    stub_storage_client(monkeypatch, get_memory_for_tenant=None)
     out = await mcp_server.memclaw_manage(op="read", memory_id=VALID_UID)
     assert "Memory not found" in strip_latency(out)
 
 
 async def test_manage_read_happy_path(mcp_env, monkeypatch):
-    memory = _MemoryRow()
-    monkeypatch.setattr(
-        "core_api.repositories.memory_repo.get_by_id_for_tenant",
-        _async_return(memory),
-    )
+    memory = _memory_dict()
+    stub_storage_client(monkeypatch, get_memory_for_tenant=memory)
+    monkeypatch.setattr(mcp_server, "authorize_memory_access", _async_return(True))
     out = await mcp_server.memclaw_manage(op="read", memory_id=VALID_UID)
     payload = parse_envelope(out)
-    assert payload["id"] == str(memory.id)
+    assert payload["id"] == memory["id"]
     assert payload["content"] == "hello"
     assert payload["memory_type"] == "fact"
 
@@ -104,10 +113,7 @@ async def test_manage_transition_invalid_status_errors(mcp_env):
 
 
 async def test_manage_transition_not_found(mcp_env, monkeypatch):
-    monkeypatch.setattr(
-        "core_api.repositories.memory_repo.get_by_id_for_tenant",
-        _async_return(None),
-    )
+    stub_storage_client(monkeypatch, get_memory_for_tenant=None)
     out = await mcp_server.memclaw_manage(
         op="transition", memory_id=VALID_UID, status="archived"
     )
@@ -115,21 +121,19 @@ async def test_manage_transition_not_found(mcp_env, monkeypatch):
 
 
 async def test_manage_transition_happy_path(mcp_env, monkeypatch):
-    memory = _MemoryRow(status="active")
-    monkeypatch.setattr(
-        "core_api.repositories.memory_repo.get_by_id_for_tenant",
-        _async_return(memory),
+    memory = _memory_dict(status="active")
+    sc = stub_storage_client(
+        monkeypatch,
+        get_memory_for_tenant=memory,
+        update_memory_status=None,
     )
-    monkeypatch.setattr(
-        "core_api.repositories.memory_repo.update_status", _async_return(None)
-    )
-    monkeypatch.setattr(
-        "core_api.services.audit_service.log_action", _async_return(None)
-    )
+    monkeypatch.setattr(mcp_server, "authorize_memory_access", _async_return(True))
+    monkeypatch.setattr(mcp_server, "log_action", _async_return(None))
     out = await mcp_server.memclaw_manage(
         op="transition", memory_id=VALID_UID, status="archived"
     )
     assert "active -> archived" in strip_latency(out)
+    sc.update_memory_status.assert_awaited_once()
 
 
 async def test_manage_update_no_fields_errors(mcp_env):

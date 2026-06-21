@@ -428,7 +428,9 @@ async def _detect(
             )
 
         if rdf_updates:
-            rdf_result = await sc.batch_update_status({"updates": list(rdf_updates.values())})
+            rdf_result = await sc.batch_update_status(
+                {"updates": list(rdf_updates.values())}, tenant_id=tenant_id
+            )
             if rdf_result.get("skipped"):
                 # ``skipped`` carries rows the storage-side dropped — CAS
                 # gate fail (caller-supplied ``expected_supersedes_id``
@@ -586,7 +588,9 @@ async def _detect(
                     )
 
             if updates:
-                sem_result = await sc.batch_update_status({"updates": list(updates.values())})
+                sem_result = await sc.batch_update_status(
+                    {"updates": list(updates.values())}, tenant_id=tenant_id
+                )
                 if sem_result.get("skipped"):
                     # See RDF path above for the ``skipped`` semantics.
                     logger.warning(
@@ -1542,12 +1546,28 @@ async def _attempt_path_c_retraction(
         )
         return False
 
-    # Two-step retraction via A4 #10.
-    await sc.update_memory_status(str(candidate.get("id")), "active")
+    # Two-step retraction via A4 #10. Each write is scoped to the HOME tenant
+    # of the row it touches — the candidate and new_memory live in the same
+    # (trigger) tenant, but we pass each row's own ``tenant_id`` so the
+    # storage-layer cross-tenant guard never silently no-ops a legitimate write.
+    # Extract each row's home tenant explicitly. ``get_memory`` always
+    # serialises ``tenant_id`` (NOT NULL column in MEMORY_FIELDS), so this
+    # never fires in practice — but raising beats ``str(None)`` -> "None",
+    # which would silently match no row and turn the retraction into a
+    # no-op rather than surfacing the broken invariant.
+    cand_tenant = candidate.get("tenant_id")
+    new_tenant = new_memory.get("tenant_id")
+    if not cand_tenant or not new_tenant:
+        raise ValueError(
+            f"Path C retraction missing tenant_id (candidate={candidate.get('id')}, "
+            f"new_memory={new_memory.get('id')})"
+        )
+    await sc.update_memory_status(str(candidate.get("id")), "active", tenant_id=cand_tenant)
     try:
         await sc.update_memory_status(
             str(new_memory.get("id")),
             new_memory.get("status", "active"),
+            tenant_id=new_tenant,
             unset_supersedes=True,
             expected_supersedes_id=str(candidate.get("id")),
         )
@@ -1998,7 +2018,9 @@ async def detect_contradictions_by_entities_async(
                 )
 
         if updates:
-            path_c_result = await sc.batch_update_status({"updates": list(updates.values())})
+            path_c_result = await sc.batch_update_status(
+                {"updates": list(updates.values())}, tenant_id=tenant_id
+            )
             if path_c_result.get("skipped"):
                 # See RDF path in ``_detect`` for the ``skipped`` semantics.
                 logger.warning(

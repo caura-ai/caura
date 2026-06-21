@@ -23,6 +23,7 @@ from uuid import UUID
 
 from sqlalchemy import and_, bindparam, case, delete, false, func, literal_column, or_, select, text, tuple_
 from sqlalchemy import update as sql_update
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -641,6 +642,7 @@ class PostgresService:
         memory_id: UUID,
         status: str,
         *,
+        tenant_id: str,
         supersedes_id: UUID | None = None,
         unset_supersedes: bool = False,
         expected_supersedes_id: UUID | None = None,
@@ -650,6 +652,10 @@ class PostgresService:
         Args:
             memory_id: Target row.
             status: New status value.
+            tenant_id: Home tenant of the target memory. REQUIRED — the WHERE
+                clause is scoped to ``Memory.tenant_id == tenant_id`` so a
+                caller in tenant B can never flip the status of tenant A's
+                memory by id (cross-tenant write guard).
             supersedes_id: If provided, set ``supersedes_id`` to this UUID.
                 Ignored when ``unset_supersedes`` is True.
             unset_supersedes: If True, clear ``supersedes_id`` to NULL.
@@ -662,8 +668,9 @@ class PostgresService:
 
         Returns:
             True if the row was updated, False if the ``expected_supersedes_id``
-            CAS check failed (or the row id doesn't exist). Existing callers
-            ignore the return value — adding it is backward-compatible.
+            CAS check failed, the tenant didn't match, or the row id doesn't
+            exist. Existing callers ignore the return value — adding it is
+            backward-compatible.
         """
         values: dict[str, Any] = {"status": status}
         if unset_supersedes:
@@ -672,7 +679,10 @@ class PostgresService:
             values["supersedes_id"] = supersedes_id
 
         async with get_session() as session:
-            stmt = sql_update(Memory).where(Memory.id == memory_id)
+            stmt = sql_update(Memory).where(
+                Memory.id == memory_id,
+                Memory.tenant_id == tenant_id,
+            )
             if expected_supersedes_id is not None:
                 stmt = stmt.where(Memory.supersedes_id == expected_supersedes_id)
             stmt = stmt.values(**values)
@@ -3022,6 +3032,289 @@ class PostgresService:
                 by_status[row[3]] = cnt
         return {"total": total, "by_type": by_type, "by_agent": by_agent, "by_status": by_status}
 
+    async def memory_list_by_filters(
+        self,
+        *,
+        tenant_id: str,
+        caller_agent_id: str | None = None,
+        fleet_id: str | None = None,
+        written_by: str | None = None,
+        memory_type: str | None = None,
+        status: str | None = None,
+        run_id: str | None = None,
+        weight_min: float | None = None,
+        weight_max: float | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        include_deleted: bool = False,
+        sort: str = "created_at",
+        order: str = "desc",
+        limit: int = 25,
+        offset: int = 0,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> list[Memory]:
+        """Filter, sort, paginate memories WITH visibility scoping.
+
+        Ports core-api ``memory_repository.list_by_filters`` verbatim — same
+        visibility predicate, filters, cursor predicate, ``(sort, id)``
+        tiebreaker, and ``limit + 1`` over-fetch (the caller slices + builds
+        the next cursor). Distinct from ``memory_admin_list`` which has NO
+        visibility scoping. Read-only (reader replica).
+
+        **Visibility:** when ``caller_agent_id`` is set, ``scope_agent`` rows
+        are visible only to the authoring agent; team/org always visible. When
+        unset, all ``scope_agent`` rows are excluded. **Cross-tenant widening:**
+        a non-empty ``readable_tenant_ids`` expands ``tenant_id = $1`` to
+        ``tenant_id = ANY($1)``; ``tenant_id`` stays the binding/home tenant.
+        """
+        if readable_tenant_ids:
+            stmt = select(Memory).where(Memory.tenant_id.in_(readable_tenant_ids))
+        else:
+            stmt = select(Memory).where(Memory.tenant_id == tenant_id)
+
+        # Visibility predicate (critical: prevents scope_agent leaks).
+        if caller_agent_id:
+            stmt = stmt.where(
+                or_(
+                    Memory.visibility == "scope_org",
+                    Memory.visibility == "scope_team",
+                    and_(
+                        Memory.visibility == "scope_agent",
+                        Memory.agent_id == caller_agent_id,
+                    ),
+                )
+            )
+        else:
+            stmt = stmt.where(Memory.visibility != "scope_agent")
+
+        if fleet_id:
+            stmt = stmt.where(Memory.fleet_id == fleet_id)
+        if written_by:
+            stmt = stmt.where(Memory.agent_id == written_by)
+        if memory_type:
+            stmt = stmt.where(Memory.memory_type == memory_type)
+        if status:
+            stmt = stmt.where(Memory.status == status)
+        if run_id is not None:
+            stmt = stmt.where(Memory.run_id == run_id)
+        if weight_min is not None:
+            stmt = stmt.where(Memory.weight >= weight_min)
+        if weight_max is not None:
+            stmt = stmt.where(Memory.weight <= weight_max)
+        if created_after is not None:
+            stmt = stmt.where(Memory.created_at >= created_after)
+        if created_before is not None:
+            stmt = stmt.where(Memory.created_at <= created_before)
+        if not include_deleted:
+            stmt = stmt.where(Memory.deleted_at.is_(None))
+
+        if cursor_ts is not None and cursor_id is not None:
+            # Cursor predicate direction must match the ORDER BY below: a desc
+            # page walks toward older rows (tuple `<` cursor), an asc page
+            # toward newer rows (tuple `>` cursor). Splitting on `order` keeps
+            # asc pagination moving forward (regression-covered by
+            # test_list_by_filters_asc_cursor_returns_forward_page).
+            if order == "desc":
+                stmt = stmt.where(tuple_(Memory.created_at, Memory.id) < tuple_(cursor_ts, cursor_id))  # type: ignore[arg-type]
+            else:
+                stmt = stmt.where(tuple_(Memory.created_at, Memory.id) > tuple_(cursor_ts, cursor_id))  # type: ignore[arg-type]
+
+        # Allowlist the sort column — this endpoint is independently callable,
+        # so an unknown value falls back to created_at rather than
+        # AttributeError-ing (500) on getattr(Memory, sort). core-api applies
+        # its own stricter allowlist upstream.
+        if sort not in _ADMIN_LIST_SORTABLE:
+            sort = "created_at"
+        col = getattr(Memory, sort)
+        if order == "desc":
+            stmt = stmt.order_by(col.desc(), Memory.id.desc())
+        else:
+            stmt = stmt.order_by(col.asc(), Memory.id.asc())
+        if offset and cursor_ts is None:
+            stmt = stmt.offset(offset)
+        stmt = stmt.limit(limit + 1)
+
+        async with get_read_session() as session:
+            return list((await session.execute(stmt)).scalars().all())
+
+    async def memory_stats_breakdown(
+        self,
+        *,
+        tenant_id: str | None,
+        fleet_id: str | None = None,
+        agent_id: str | None = None,
+        memory_type: str | None = None,
+        status: str | None = None,
+        include_deleted: bool = False,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> dict:
+        """Return ``{total, by_type, by_agent, by_status}`` (+ optional
+        ``by_tenant`` / ``deleted`` / ``total_including_deleted``).
+
+        Ports core-api ``services.memory_stats.compute_memory_stats`` verbatim —
+        same visibility scoping (``agent_id`` doubles as visibility identity AND
+        author filter; when omitted, ``scope_agent`` rows are excluded so totals
+        match what a non-semantic list would return), same single-pass GROUPING
+        SETS aggregation, same cross-tenant widening + ``by_tenant`` breakdown,
+        and same ``include_deleted`` CTE. Read-only (reader replica).
+        """
+        scope_filters = []
+        if readable_tenant_ids:
+            scope_filters.append(Memory.tenant_id.in_(readable_tenant_ids))
+        else:
+            # Always bind a tenant predicate — never run unscoped. With tenant_id
+            # None this renders ``tenant_id IS NULL`` (matches nothing), so a caller
+            # that omits tenant scope gets empty stats, never cross-tenant rows.
+            scope_filters.append(Memory.tenant_id == tenant_id)
+        if fleet_id:
+            scope_filters.append(Memory.fleet_id == fleet_id)
+        if agent_id:
+            scope_filters.append(Memory.agent_id == agent_id)
+            scope_filters.append(
+                or_(
+                    Memory.visibility == "scope_org",
+                    Memory.visibility == "scope_team",
+                    and_(
+                        Memory.visibility == "scope_agent",
+                        Memory.agent_id == agent_id,
+                    ),
+                )
+            )
+        else:
+            scope_filters.append(Memory.visibility != "scope_agent")
+        if memory_type:
+            scope_filters.append(Memory.memory_type == memory_type)
+        if status:
+            scope_filters.append(Memory.status == status)
+
+        filters = [Memory.deleted_at.is_(None), *scope_filters]
+
+        include_by_tenant = bool(readable_tenant_ids and len(readable_tenant_ids) > 1)
+
+        grouping_sets = ["()", "(memory_type)", "(agent_id)", "(status)"]
+        if include_by_tenant:
+            grouping_sets.append("(tenant_id)")
+        grouping_sets_sql = ", ".join(grouping_sets)
+
+        grouping_total_cols = ["memory_type", "agent_id", "status"]
+        if include_by_tenant:
+            grouping_total_cols.append("tenant_id")
+        grouping_total_arg = ", ".join(grouping_total_cols)
+        grouping_total_value = (1 << len(grouping_total_cols)) - 1
+        bucket_when = [
+            f"WHEN GROUPING({grouping_total_arg}) = {grouping_total_value} THEN 'total'",
+            "WHEN GROUPING(memory_type) = 0 THEN 'by_type'",
+            "WHEN GROUPING(agent_id) = 0 THEN 'by_agent'",
+            "WHEN GROUPING(status) = 0 THEN 'by_status'",
+        ]
+        if include_by_tenant:
+            bucket_when.append("WHEN GROUPING(tenant_id) = 0 THEN 'by_tenant'")
+        bucket_when_sql = "\n                ".join(bucket_when)
+
+        # Compile the SQLAlchemy filter expressions to a WHERE fragment with BOUND
+        # parameters (not literal_binds) — keeps the dynamic visibility / scoping
+        # rules out of hand-written SQL while leaving user-supplied filter values
+        # (fleet_id/agent_id/memory_type/status) parameterised, never inlined.
+        # Returns (where_fragment, params) to thread into the ``text()`` execute.
+        def _predicate_sql(filter_list) -> tuple[str, dict]:
+            compiled = (
+                select(Memory.id).where(*filter_list).compile(dialect=postgresql.dialect(paramstyle="named"))
+            )
+            rendered = str(compiled)
+            idx = rendered.upper().find("WHERE ")
+            if idx < 0:
+                # Never fall back to "TRUE": a missing WHERE would run the
+                # aggregation UNSCOPED across all tenants. If SQLAlchemy ever
+                # changes its compiled format, fail loudly instead.
+                raise RuntimeError(
+                    "memory_stats_breakdown: no WHERE clause in compiled output "
+                    f"(refusing to run unscoped): {rendered[:200]!r}"
+                )
+            fragment = rendered[idx + len("WHERE ") :]
+            return fragment, dict(compiled.params)
+
+        select_cols = "memory_type, agent_id, status"
+        if include_by_tenant:
+            select_cols = f"{select_cols}, tenant_id"
+
+        if include_deleted:
+            all_predicate, pred_params = _predicate_sql(scope_filters)
+            sql = f"""
+            WITH base AS (
+                SELECT memory_type, agent_id, status, tenant_id,
+                       (deleted_at IS NULL) AS alive
+                FROM memories
+                WHERE {all_predicate}
+            )
+            SELECT
+                CASE
+                    {bucket_when_sql}
+                END                                              AS bucket,
+                {select_cols},
+                COUNT(*) FILTER (WHERE alive)                    AS live_cnt,
+                COUNT(*) FILTER (WHERE NOT alive)                AS deleted_cnt
+            FROM base
+            GROUP BY GROUPING SETS ({grouping_sets_sql})
+            """
+        else:
+            predicate, pred_params = _predicate_sql(filters)
+            sql = f"""
+            SELECT
+                CASE
+                    {bucket_when_sql}
+                END                                              AS bucket,
+                {select_cols},
+                COUNT(*)                                         AS live_cnt,
+                0                                                AS deleted_cnt
+            FROM memories
+            WHERE {predicate}
+            GROUP BY GROUPING SETS ({grouping_sets_sql})
+            """
+
+        async with get_read_session() as session:
+            rows = (await session.execute(text(sql), pred_params)).all()
+
+        total = 0
+        by_type: dict = {}
+        by_agent: dict = {}
+        by_status: dict = {}
+        by_tenant: dict = {}
+        deleted = 0
+
+        live_idx = 5 if include_by_tenant else 4
+        deleted_idx = live_idx + 1
+
+        for row in rows:
+            bucket = row[0]
+            live = int(row[live_idx] or 0)
+            dead = int(row[deleted_idx] or 0)
+            if bucket == "total":
+                total = live
+                deleted = dead
+            elif bucket == "by_type":
+                by_type[row[1]] = live
+            elif bucket == "by_agent":
+                by_agent[row[2]] = live
+            elif bucket == "by_status":
+                by_status[row[3]] = live
+            elif bucket == "by_tenant":
+                by_tenant[row[4]] = live
+
+        result = {
+            "total": total,
+            "by_type": by_type,
+            "by_agent": by_agent,
+            "by_status": by_status,
+        }
+        if include_by_tenant:
+            result["by_tenant"] = by_tenant
+        if include_deleted:
+            result["deleted"] = deleted
+            result["total_including_deleted"] = total + deleted
+        return result
+
     # ══════════════════════════════════════════════════════════════════════
     #  ENTITIES
     # ══════════════════════════════════════════════════════════════════════
@@ -4404,6 +4697,37 @@ class PostgresService:
             # tuple method) under the type checker; index by position instead.
             return [(row[0], int(row[1])) for row in result.all()]
 
+    async def document_count_in_collection(
+        self,
+        *,
+        tenant_id: str,
+        collection: str,
+        status: str | None = None,
+        fleet_id: str | None = None,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> int:
+        """Count documents in one collection, optionally filtered by a
+        ``data->>'status'`` value.
+
+        Backs the MCP ``list_collections`` skills active-only count correction
+        (the server-owned active-only gate): an opted-in tenant's listing must
+        not advertise non-active skills in the count. ``readable_tenant_ids``
+        widens to ``ANY($readable)`` over the same scope the listing used.
+        """
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
+        stmt = (
+            select(func.count()).select_from(Document).where(tenant_pred, Document.collection == collection)
+        )
+        if status is not None:
+            stmt = stmt.where(Document.data["status"].astext == status)
+        if fleet_id:
+            stmt = stmt.where(Document.fleet_id == fleet_id)
+        async with get_read_session() as session:
+            return int((await session.execute(stmt)).scalar_one())
+
     async def document_search(
         self,
         *,
@@ -4460,10 +4784,22 @@ class PostgresService:
         tenant_id: str,
         collection: str,
         doc_id: str,
+        readable_tenant_ids: list[str] | None = None,
     ) -> Document | None:
+        """Fetch one document by (tenant, collection, doc_id).
+
+        ``readable_tenant_ids`` widens the tenant predicate to
+        ``ANY($readable)`` so cross-tenant credentials can read docs from
+        sibling tenants; ``tenant_id`` stays the binding/home tenant.
+        Mirrors core-api ``document_repository.get_by_doc_id``.
+        """
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
         async with get_session() as session:
             stmt = select(Document).where(
-                Document.tenant_id == tenant_id,
+                tenant_pred,
                 Document.collection == collection,
                 Document.doc_id == doc_id,
             )
@@ -4481,11 +4817,21 @@ class PostgresService:
         order: str = "asc",
         limit: int = 20,
         offset: int = 0,
+        readable_tenant_ids: list[str] | None = None,
     ) -> list[Document]:
-        """Query documents with optional JSONB field-equality filters."""
+        """Query documents with optional JSONB field-equality filters.
+
+        ``readable_tenant_ids`` widens ``tenant_id`` to ``ANY($readable)``
+        for cross-tenant credentials. Mirrors core-api
+        ``document_repository.query``.
+        """
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
         async with get_session() as session:
             stmt = select(Document).where(
-                Document.tenant_id == tenant_id,
+                tenant_pred,
                 Document.collection == collection,
             )
             if fleet_id:
@@ -4536,24 +4882,32 @@ class PostgresService:
         collection: str,
         doc_id: str,
         system: bool = False,
+        require_status: str | None = None,
     ) -> UUID | None:
         """Delete by (tenant_id, collection, doc_id). Returns the deleted id or None.
 
         Mirrors the ``system`` guard on ``document_upsert`` — deletes against
         system-managed collections (``_``-prefixed) require ``system=True``.
+
+        ``require_status`` (optional) folds a ``data->>'status' = :status``
+        guard directly into the DELETE's WHERE so the check and the delete are
+        a single atomic statement — no TOCTOU window. Backs the MCP skills
+        active-only delete gate: a non-matching (or missing) doc deletes zero
+        rows and returns ``None``, indistinguishable from a missing one (no
+        existence leak). Home-tenant scoped (deletes never span readable
+        tenants).
         """
         if collection.startswith("_") and not system:
             raise ValueError(f"Collection '{collection}' is system-managed; use the dedicated endpoint.")
         async with get_session() as session:
-            stmt = (
-                delete(Document)
-                .where(
-                    Document.tenant_id == tenant_id,
-                    Document.collection == collection,
-                    Document.doc_id == doc_id,
-                )
-                .returning(Document.id)
+            base = delete(Document).where(
+                Document.tenant_id == tenant_id,
+                Document.collection == collection,
+                Document.doc_id == doc_id,
             )
+            if require_status is not None:
+                base = base.where(Document.data["status"].astext == require_status)
+            stmt = base.returning(Document.id)
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
 

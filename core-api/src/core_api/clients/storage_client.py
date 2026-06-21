@@ -448,10 +448,16 @@ class CoreStorageClient:
         status: str,
         supersedes_id: str | None = None,
         *,
+        tenant_id: str,
         unset_supersedes: bool = False,
         expected_supersedes_id: str | None = None,
     ) -> dict | None:
         """Update status and optionally set or clear ``supersedes_id``.
+
+        ``tenant_id`` is the home tenant of the target memory and is REQUIRED:
+        the storage route scopes every write to ``tenant_id == memory.tenant_id``
+        so a caller in tenant B cannot flip the status of tenant A's memory by
+        id (cross-tenant write guard).
 
         Set path (existing behaviour):
             ``supersedes_id=<uuid>`` sets the row's pointer, guarded by
@@ -484,7 +490,7 @@ class CoreStorageClient:
                     "for the CAS anchor; clearing without one would race "
                     "concurrent setters."
                 )
-        payload: dict[str, Any] = {"status": status}
+        payload: dict[str, Any] = {"status": status, "tenant_id": tenant_id}
         if supersedes_id is not None:
             payload["supersedes_id"] = supersedes_id
         if unset_supersedes:
@@ -820,8 +826,16 @@ class CoreStorageClient:
     async def mark_dedup_checked(self, memory_ids: list[str]) -> dict:
         return await self._post("/memories/mark-dedup-checked", {"memory_ids": memory_ids})  # type: ignore[return-value]
 
-    async def batch_update_status(self, data: dict) -> dict:
-        return await self._post("/memories/batch-update-status", data)  # type: ignore[return-value]
+    async def batch_update_status(self, data: dict, *, tenant_id: str) -> dict:
+        """Apply status updates to many memories within one tenant.
+
+        ``tenant_id`` is the trigger tenant shared by every memory in the
+        batch and is REQUIRED: the storage route scopes each row's write to
+        ``tenant_id == memory.tenant_id`` (cross-tenant write guard). It is
+        injected at the batch level rather than per row.
+        """
+        payload = {**data, "tenant_id": tenant_id}
+        return await self._post("/memories/batch-update-status", payload)  # type: ignore[return-value]
 
     async def bulk_get_memories(
         self,
@@ -921,6 +935,35 @@ class CoreStorageClient:
         """Soft-delete live memories by id (tenant-scoped); returns count."""
         result = await self._post("/memories/soft-delete-by-ids", {"tenant_id": tenant_id, "ids": ids})
         return (result or {}).get("deleted", 0)  # type: ignore[union-attr]
+
+    async def list_memories_by_filters(self, data: dict) -> list[dict]:
+        """Non-admin memory list WITH visibility scoping (MCP ``memclaw_list``).
+
+        ``data`` carries the filter/sort/cursor params (incl. ``caller_agent_id``
+        for the scope_agent visibility gate and an optional ``readable_tenant_ids``
+        widening) plus ``limit`` (the desired page size). The storage service
+        over-fetches ``limit+1`` internally for has_more detection; the caller
+        slices to ``limit`` + builds the next cursor. Distinct from
+        ``admin_list_memories`` (NO visibility scoping).
+        """
+        result = await self._post("/memories/list", data, read=True)
+        if result is None:
+            raise RuntimeError("core-storage-api /memories/list returned 404")
+        return result  # type: ignore[return-value]
+
+    async def memory_stats_breakdown(self, data: dict) -> dict:
+        """Visibility-scoped stats breakdown (MCP ``memclaw_stats``).
+
+        ``data`` carries ``{tenant_id?, fleet_id?, agent_id?, memory_type?,
+        status?, include_deleted?, readable_tenant_ids?}``. Returns
+        ``{total, by_type, by_agent, by_status}`` plus optional ``by_tenant`` /
+        ``deleted`` / ``total_including_deleted``. Distinct from
+        ``admin_memory_stats`` (no scoping).
+        """
+        result = await self._post("/memories/stats-breakdown", data, read=True)
+        if result is None:
+            raise RuntimeError("core-storage-api /memories/stats-breakdown returned 404")
+        return result  # type: ignore[return-value]
 
     async def soft_delete_by_run(
         self,
@@ -1232,14 +1275,41 @@ class CoreStorageClient:
         doc_id: str,
         *,
         read: bool = True,
+        readable_tenant_ids: list[str] | None = None,
     ) -> dict | None:
         # read=False forces the primary — use it for read-after-write re-fetches
         # (e.g. immediately after an upsert) so replication lag can't yield None.
+        # ``readable_tenant_ids`` widens the tenant predicate to ANY($readable)
+        # for cross-tenant credentials (omit ⇒ home-tenant only).
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if readable_tenant_ids is not None:
+            params["readable_tenant_ids"] = readable_tenant_ids
         return await self._get(
             f"/documents/{collection}/{doc_id}",
             read=read,
-            tenant_id=tenant_id,
+            **params,
         )
+
+    async def document_count_in_collection(
+        self,
+        tenant_id: str,
+        collection: str,
+        *,
+        status: str | None = None,
+        fleet_id: str | None = None,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> int:
+        """Count docs in one collection, optionally filtered by
+        ``data->>'status'``. Backs the MCP skills active-only count."""
+        params: dict[str, Any] = {"tenant_id": tenant_id, "collection": collection}
+        if status is not None:
+            params["status"] = status
+        if fleet_id is not None:
+            params["fleet_id"] = fleet_id
+        if readable_tenant_ids is not None:
+            params["readable_tenant_ids"] = readable_tenant_ids
+        result = await self._get("/documents/collection-count", read=True, **params)
+        return (result or {}).get("count", 0)
 
     async def query_documents(self, data: dict) -> list[dict]:
         return await self._post("/documents/query", data, read=True)  # type: ignore[return-value]
@@ -1262,10 +1332,19 @@ class CoreStorageClient:
         tenant_id: str,
         collection: str,
         doc_id: str,
+        *,
+        require_status: str | None = None,
     ) -> bool:
+        # ``require_status`` folds a ``data->>'status' = :status`` guard into the
+        # DELETE atomically (the MCP skills active-only gate): a non-matching /
+        # missing row deletes nothing and returns False, indistinguishable from
+        # a missing one. Home-tenant scoped (deletes never span readable tenants).
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if require_status is not None:
+            params["require_status"] = require_status
         return await self._delete(
             f"/documents/{collection}/{doc_id}",
-            tenant_id=tenant_id,
+            **params,
         )
 
     # =====================================================================

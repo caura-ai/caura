@@ -2165,7 +2165,7 @@ async def _enrich_memory_background(
                 # Fall back to update via scored-search patch endpoint
                 await sc._patch(f"/memories/{memory_id}", patch)
             if status_val:
-                await sc.update_memory_status(str(memory_id), status_val)
+                await sc.update_memory_status(str(memory_id), status_val, tenant_id=tenant_id)
 
         memory_type = patch.get("memory_type") or mem.get("memory_type")
 

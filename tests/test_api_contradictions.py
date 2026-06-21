@@ -92,8 +92,10 @@ async def test_contradictions_completed_with_supersedes_chain(client, sc):
     # Simulate detector side-effects via the storage client (same path
     # the real detector uses): old becomes outdated, new.supersedes_id
     # points at old.
-    await sc.update_memory_status(old["id"], "outdated")
-    await sc.update_memory_status(new["id"], "active", supersedes_id=old["id"])
+    await sc.update_memory_status(old["id"], "outdated", tenant_id=tenant_id)
+    await sc.update_memory_status(
+        new["id"], "active", tenant_id=tenant_id, supersedes_id=old["id"]
+    )
 
     # ---- From the OLDER memory's perspective: it was superseded.
     resp_old = await client.get(

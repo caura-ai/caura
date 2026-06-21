@@ -30,6 +30,8 @@ from uuid import UUID
 
 import pytest
 
+from tests._mcp_test_helpers import stub_storage_client
+
 pytestmark = [pytest.mark.unit]
 
 
@@ -93,6 +95,34 @@ class _MemoryRow:
         return {"id": self.id, "tenant_id": self.tenant_id}
 
 
+def _memory_row_dict(tenant_id: str) -> dict:
+    """Storage-client memory row (a dict) carrying the ``tenant_id`` the
+    cross-tenant audit count reads. Fix 2 Phase 4: ``memclaw_list`` consumes
+    ``sc.list_memories_by_filters`` dict rows (``row.get("tenant_id")`` /
+    ``_memory_to_out(dict)``), not ORM rows."""
+    return {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "tenant_id": tenant_id,
+        "fleet_id": None,
+        "agent_id": "test-agent",
+        "memory_type": "fact",
+        "title": None,
+        "content": "x",
+        "weight": 0.5,
+        "source_uri": None,
+        "run_id": None,
+        "metadata_": {},
+        "created_at": datetime(2026, 1, 1, tzinfo=UTC).isoformat(),
+        "expires_at": None,
+        "status": "active",
+        "visibility": "scope_team",
+        "recall_count": 0,
+        "last_recalled_at": None,
+        "supersedes_id": None,
+        "deleted_at": None,
+    }
+
+
 # ===========================================================================
 # MCP surfaces (cross-tenant ContextVars + spy on mcp_server.log_cross_tenant_read)
 # ===========================================================================
@@ -128,13 +158,14 @@ async def test_memclaw_recall_emits_cross_tenant_audit(
         _MemoryRow("tenant-home"),
         _MemoryRow("tenant-sibling"),
     ]
+    # Fix 2 Phase 4: ``resolve_config`` is a top-level import on mcp_server, and
+    # the agent profile lookup routes through the storage client's ``get_agent``.
     monkeypatch.setattr(
-        "core_api.services.organization_settings.resolve_config",
+        mcp_server,
+        "resolve_config",
         AsyncMock(return_value=SimpleNamespace(recall_boost=False, graph_expand=False)),
     )
-    monkeypatch.setattr(
-        "core_api.repositories.agent_repo.get_by_id", AsyncMock(return_value=None)
-    )
+    stub_storage_client(monkeypatch, get_agent=None)
 
     await mcp_server.memclaw_recall(query="cross-tenant probe", agent_id="a1")
 
@@ -155,13 +186,14 @@ async def test_memclaw_list_emits_cross_tenant_audit(
     audits with ``surface=memclaw_list``."""
     from core_api import mcp_server
 
-    monkeypatch.setattr(
-        "core_api.repositories.memory_repo.list_by_filters",
-        AsyncMock(
-            return_value=[_MemoryRow("tenant-home"), _MemoryRow("tenant-sibling")]
-        ),
+    stub_storage_client(
+        monkeypatch,
+        list_memories_by_filters=[
+            _memory_row_dict("tenant-home"),
+            _memory_row_dict("tenant-sibling"),
+        ],
     )
-    # Trust gate stubbed so the handler doesn't 403 before reaching list_by_filters.
+    # Trust gate stubbed so the handler doesn't 403 before reaching the list.
     monkeypatch.setattr(
         mcp_server, "_require_trust", AsyncMock(return_value=(3, False, None))
     )
@@ -188,19 +220,18 @@ async def test_memclaw_stats_emits_cross_tenant_audit(
     monkeypatch.setattr(
         mcp_server, "_require_trust", AsyncMock(return_value=(3, False, None))
     )
-    # ``compute_memory_stats`` is imported INSIDE the handler — patch
-    # at the source so the late import resolves to our mock.
-    monkeypatch.setattr(
-        "core_api.services.memory_stats.compute_memory_stats",
-        AsyncMock(
-            return_value={
-                "total": 5,
-                "by_type": {"fact": 5},
-                "by_agent": {},
-                "by_status": {"active": 5},
-                "by_tenant": {"tenant-home": 3, "tenant-sibling": 2},
-            }
-        ),
+    # Fix 2 Phase 4: stats route through the storage client's
+    # ``memory_stats_breakdown`` (the GROUPING-SETS aggregation moved into
+    # core-storage-api). Stub it so the handler reaches the audit emission.
+    stub_storage_client(
+        monkeypatch,
+        memory_stats_breakdown={
+            "total": 5,
+            "by_type": {"fact": 5},
+            "by_agent": {},
+            "by_status": {"active": 5},
+            "by_tenant": {"tenant-home": 3, "tenant-sibling": 2},
+        },
     )
 
     await mcp_server.memclaw_stats(scope="fleet", agent_id="a1")
@@ -222,21 +253,27 @@ async def test_memclaw_doc_search_emits_cross_tenant_audit(
     the query, calls ``document_repo.search``, then emits."""
     from core_api import mcp_server
 
-    fake_doc = SimpleNamespace(tenant_id="tenant-sibling", id="d1", collection="things")
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.search",
-        AsyncMock(return_value=[(fake_doc, 0.91)]),
+    # Fix 2 Phase 4: ``op=search`` routes through ``sc.search_documents_vector``,
+    # which returns plain dict rows each carrying ``tenant_id`` + inline
+    # ``similarity`` (vs the repo's ``(Document, sim)`` tuples).
+    stub_storage_client(
+        monkeypatch,
+        search_documents_vector=[
+            {
+                "tenant_id": "tenant-sibling",
+                "doc_id": "d1",
+                "collection": "things",
+                "data": {},
+                "similarity": 0.91,
+            }
+        ],
     )
-    # The embed step is gated by an embed-provider call we'd rather not
-    # touch in a unit test — patch the helper that wraps it.
+    # The embed step is gated by an embed-provider call we'd rather not touch in
+    # a unit test — the handler resolves ``get_embedding`` from
+    # ``common.embedding`` (inline import), so patch it at the source.
     monkeypatch.setattr(
-        "core_api.services.memory_service.get_query_embedding",
+        "common.embedding.get_embedding",
         AsyncMock(return_value=[0.1] * 8),
-    )
-    # ``tenant_config`` resolution short-circuits to a fake.
-    monkeypatch.setattr(
-        "core_api.services.organization_settings.resolve_config",
-        AsyncMock(return_value=SimpleNamespace(embedding_model=None)),
     )
 
     await mcp_server.memclaw_doc(op="search", query="hello world", agent_id="a1")

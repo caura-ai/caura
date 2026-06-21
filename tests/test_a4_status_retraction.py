@@ -71,7 +71,7 @@ async def _establish_conflicted(sc, *, conflicted: dict, by: dict) -> None:
     """Set ``conflicted.status=conflicted`` and ``conflicted.supersedes_id=by.id``
     using the existing (pre-A4) update_memory_status surface."""
     await sc.update_memory_status(
-        conflicted["id"], "conflicted", supersedes_id=by["id"]
+        conflicted["id"], "conflicted", tenant_id=TENANT_ID, supersedes_id=by["id"]
     )
 
 
@@ -98,6 +98,7 @@ async def test_retraction_clears_supersedes_and_sets_status_active(sc):
     result = await sc.update_memory_status(
         b["id"],
         status="active",
+        tenant_id=TENANT_ID,
         unset_supersedes=True,
         expected_supersedes_id=a["id"],
     )
@@ -136,6 +137,7 @@ async def test_retraction_rejects_when_supersedes_changed_under_us(sc):
         await sc.update_memory_status(
             b["id"],
             status="active",
+            tenant_id=TENANT_ID,
             unset_supersedes=True,
             expected_supersedes_id=a["id"],  # caller's stale view
         )
@@ -170,12 +172,20 @@ async def test_retraction_is_idempotent_on_already_cleared_row(sc):
 
     # First retraction — clears the pointer.
     await sc.update_memory_status(
-        b["id"], status="active", unset_supersedes=True, expected_supersedes_id=a["id"]
+        b["id"],
+        status="active",
+        tenant_id=TENANT_ID,
+        unset_supersedes=True,
+        expected_supersedes_id=a["id"],
     )
 
     # Second retraction — must not error; row is already in target state.
     result = await sc.update_memory_status(
-        b["id"], status="active", unset_supersedes=True, expected_supersedes_id=a["id"]
+        b["id"],
+        status="active",
+        tenant_id=TENANT_ID,
+        unset_supersedes=True,
+        expected_supersedes_id=a["id"],
     )
     assert result is not None
 
@@ -218,7 +228,7 @@ async def test_client_rejects_unset_without_expected_supersedes_id():
     fake_id = str(uuid.uuid4())
     with pytest.raises(ValueError, match="expected_supersedes_id"):
         await client.update_memory_status(
-            fake_id, status="active", unset_supersedes=True
+            fake_id, status="active", tenant_id=TENANT_ID, unset_supersedes=True
         )
 
 
@@ -233,6 +243,7 @@ async def test_client_rejects_set_and_unset_in_same_call():
         await client.update_memory_status(
             fake_id,
             status="active",
+            tenant_id=TENANT_ID,
             supersedes_id=other_id,
             unset_supersedes=True,
         )

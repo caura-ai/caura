@@ -1342,7 +1342,7 @@ async def update_memory_status(
                 detail=f"Agent '{auth.agent_id}' cannot modify memory in fleet '{memory.get('fleet_id')}'.",
             )
     old_status = memory.get("status")
-    await sc.update_memory_status(str(memory_id), status)
+    await sc.update_memory_status(str(memory_id), status, tenant_id=tenant_id)
 
     # Audit stays a decoupled async POST (not folded into the storage txn).
     await log_action(

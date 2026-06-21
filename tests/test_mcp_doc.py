@@ -6,40 +6,46 @@ Covers:
 - Happy paths for all four ops (action/payload/count fields).
 - ``op=read`` not-found → "Not found:" text.
 - ``op=delete`` not-found → structured error envelope.
+
+Fix 2 Phase 4 routed ``memclaw_doc`` through the core-storage-api HTTP
+client (``get_storage_client()``), so these tests stub the storage client
+(``stub_storage_client``) and assert on the new dict-shaped payloads /
+single-positional-dict call args, rather than the old ``document_repo.*``
+ORM-row / tuple shapes.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
 
 import pytest
 
 from core_api import mcp_server
 from core_api.constants import VECTOR_DIM
-from tests._mcp_test_helpers import parse_envelope, strip_latency
+from tests._mcp_test_helpers import parse_envelope, strip_latency, stub_storage_client
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
-class _DocRow:
-    def __init__(self, doc_id: str = "acme", collection: str = "customers"):
-        self.collection = collection
-        self.doc_id = doc_id
-        self.data = {"plan": "business"}
-        self.updated_at = datetime.now(timezone.utc)
+def _doc(doc_id: str = "acme", collection: str = "customers", **extra) -> dict:
+    """A storage-client document dict (Fix 2 Phase 4 shape)."""
+    doc = {
+        "collection": collection,
+        "doc_id": doc_id,
+        "tenant_id": "test-tenant",
+        "data": {"plan": "business"},
+        "updated_at": datetime.now(timezone.utc),
+    }
+    doc.update(extra)
+    return doc
 
 
-class _UpsertRow:
-    """Stand-in for the unlabeled Row returned by upsert_returning_xmax.
-    xmax sits at index 3 (id=0, created_at=1, updated_at=2, xmax=3).
-    """
-
-    def __init__(self, xmax: int):
-        self._data = (None, None, None, xmax)
-
-    def __getitem__(self, idx):
-        return self._data[idx]
+def _search_hit(
+    doc_id: str, similarity: float, collection: str = "customers", **extra
+) -> dict:
+    """A storage-client search result: a doc dict with an inline
+    ``similarity`` float (vs the repo's ``(Document, sim)`` tuples)."""
+    return _doc(doc_id, collection=collection, similarity=similarity, **extra)
 
 
 async def test_doc_invalid_op_errors(mcp_env):
@@ -68,10 +74,7 @@ async def test_doc_write_missing_data(mcp_env):
 
 async def test_doc_write_happy_path_new(mcp_env, monkeypatch):
     """xmax=0 means a brand-new row was inserted."""
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.upsert_returning_xmax",
-        _async_return(_UpsertRow(xmax=0)),
-    )
+    stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
     out = await mcp_server.memclaw_doc(
         op="write", collection="customers", doc_id="acme", data={"plan": "enterprise"}
     )
@@ -85,10 +88,7 @@ async def test_doc_write_happy_path_new(mcp_env, monkeypatch):
 
 async def test_doc_write_happy_path_updated(mcp_env, monkeypatch):
     """xmax!=0 means an existing row was updated."""
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.upsert_returning_xmax",
-        _async_return(_UpsertRow(xmax=42)),
-    )
+    stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 42})
     out = await mcp_server.memclaw_doc(
         op="write", collection="customers", doc_id="acme", data={"plan": "pro"}
     )
@@ -102,9 +102,7 @@ async def test_doc_read_missing_doc_id(mcp_env):
 
 
 async def test_doc_read_not_found(mcp_env, monkeypatch):
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.get_by_doc_id", _async_return(None)
-    )
+    stub_storage_client(monkeypatch, get_document=None)
     out = await mcp_server.memclaw_doc(
         op="read", collection="customers", doc_id="ghost"
     )
@@ -112,10 +110,7 @@ async def test_doc_read_not_found(mcp_env, monkeypatch):
 
 
 async def test_doc_read_happy_path(mcp_env, monkeypatch):
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.get_by_doc_id",
-        _async_return(_DocRow("acme")),
-    )
+    stub_storage_client(monkeypatch, get_document=_doc("acme"))
     out = await mcp_server.memclaw_doc(op="read", collection="customers", doc_id="acme")
     payload = parse_envelope(out)
     assert payload["doc_id"] == "acme"
@@ -123,10 +118,8 @@ async def test_doc_read_happy_path(mcp_env, monkeypatch):
 
 
 async def test_doc_query_happy_path(mcp_env, monkeypatch):
-    rows = [_DocRow("acme"), _DocRow("initech")]
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.query", _async_return(rows)
-    )
+    rows = [_doc("acme"), _doc("initech")]
+    stub_storage_client(monkeypatch, query_documents=rows)
     out = await mcp_server.memclaw_doc(
         op="query", collection="customers", where={"plan": "business"}
     )
@@ -137,15 +130,9 @@ async def test_doc_query_happy_path(mcp_env, monkeypatch):
 
 
 async def test_doc_query_where_defaults_to_empty_dict(mcp_env, monkeypatch):
-    captured = {}
-
-    async def fake_query(db, **kwargs):
-        captured.update(kwargs)
-        return []
-
-    monkeypatch.setattr("core_api.repositories.document_repo.query", fake_query)
+    sc = stub_storage_client(monkeypatch, query_documents=[])
     await mcp_server.memclaw_doc(op="query", collection="customers")
-    assert captured["where"] == {}
+    assert sc.query_documents.await_args.args[0]["where"] == {}
 
 
 async def test_doc_delete_missing_doc_id(mcp_env):
@@ -153,28 +140,21 @@ async def test_doc_delete_missing_doc_id(mcp_env):
     assert "op=delete requires 'doc_id'" in strip_latency(out)
 
 
-async def test_doc_delete_not_found_envelope(mcp_env):
-    """The DELETE scalar_one_or_none path returns a {"error": "…"} JSON blob."""
-    # db.execute(...) → result with scalar_one_or_none() returning None.
-    result_mock = MagicMock()
-    result_mock.scalar_one_or_none.return_value = None
-    mcp_env["db"].execute.return_value = result_mock
-
+async def test_doc_delete_not_found_envelope(mcp_env, monkeypatch):
+    """A storage delete that matched nothing returns False → the handler
+    emits a ``{"error": "…"}`` JSON blob."""
+    sc = stub_storage_client(monkeypatch, delete_document=False)
     out = await mcp_server.memclaw_doc(
         op="delete", collection="customers", doc_id="ghost"
     )
     payload = parse_envelope(out)
     assert "not found" in payload["error"].lower()
     assert "ghost" in payload["error"]
+    sc.delete_document.assert_awaited_once()
 
 
-async def test_doc_delete_happy_path(mcp_env):
-    from uuid import uuid4
-
-    result_mock = MagicMock()
-    result_mock.scalar_one_or_none.return_value = uuid4()
-    mcp_env["db"].execute.return_value = result_mock
-
+async def test_doc_delete_happy_path(mcp_env, monkeypatch):
+    sc = stub_storage_client(monkeypatch, delete_document=True)
     out = await mcp_server.memclaw_doc(
         op="delete", collection="customers", doc_id="acme"
     )
@@ -182,7 +162,7 @@ async def test_doc_delete_happy_path(mcp_env):
     assert payload["ok"] is True
     assert payload["deleted"] is True
     assert payload["doc_id"] == "acme"
-    mcp_env["db"].commit.assert_awaited_once()
+    sc.delete_document.assert_awaited_once()
 
 
 async def test_doc_auth_failure_shortcircuits(monkeypatch):
@@ -198,9 +178,15 @@ async def test_doc_auth_failure_shortcircuits(monkeypatch):
 
 async def test_doc_list_collections_happy_path(mcp_env, monkeypatch):
     """Returns each collection with its document count."""
-    rows = [("customers", 3), ("onboarding_guides", 1), ("proposals", 2)]
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.list_collections", _async_return(rows)
+    stub_storage_client(
+        monkeypatch,
+        list_document_collections={
+            "collections": [
+                {"name": "customers", "count": 3},
+                {"name": "onboarding_guides", "count": 1},
+                {"name": "proposals", "count": 2},
+            ]
+        },
     )
     out = await mcp_server.memclaw_doc(op="list_collections")
     payload = parse_envelope(out)
@@ -214,9 +200,7 @@ async def test_doc_list_collections_happy_path(mcp_env, monkeypatch):
 
 async def test_doc_list_collections_empty_tenant(mcp_env, monkeypatch):
     """Empty tenant returns an empty list, not an error."""
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.list_collections", _async_return([])
-    )
+    stub_storage_client(monkeypatch, list_document_collections={"collections": []})
     out = await mcp_server.memclaw_doc(op="list_collections")
     payload = parse_envelope(out)
     assert payload["collections"] == []
@@ -227,9 +211,7 @@ async def test_doc_list_collections_does_not_require_collection(mcp_env, monkeyp
     """Unlike every other op, list_collections has no required params — the
     whole point is to discover collection names when you don't know them yet.
     """
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.list_collections", _async_return([])
-    )
+    stub_storage_client(monkeypatch, list_document_collections={"collections": []})
     out = await mcp_server.memclaw_doc(op="list_collections")
     payload = parse_envelope(out)
     assert "error" not in payload
@@ -237,17 +219,14 @@ async def test_doc_list_collections_does_not_require_collection(mcp_env, monkeyp
 
 async def test_doc_list_collections_passes_fleet_id_filter(mcp_env, monkeypatch):
     """fleet_id scopes the count; not a mandatory param."""
-    captured = {}
-
-    async def fake_list(db, *, tenant_id, fleet_id=None, readable_tenant_ids=None):  # noqa: ARG001
-        captured["fleet_id"] = fleet_id
-        return [("customers", 1)]
-
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.list_collections", fake_list
+    sc = stub_storage_client(
+        monkeypatch,
+        list_document_collections={"collections": [{"name": "customers", "count": 1}]},
     )
     await mcp_server.memclaw_doc(op="list_collections", fleet_id="caura-rnd-fleet")
-    assert captured["fleet_id"] == "caura-rnd-fleet"
+    assert (
+        sc.list_document_collections.await_args.kwargs["fleet_id"] == "caura-rnd-fleet"
+    )
 
 
 async def test_doc_write_requires_collection(mcp_env):
@@ -274,20 +253,14 @@ async def test_doc_query_requires_collection(mcp_env):
 
 async def test_doc_write_summary_embeds_and_forwards(mcp_env, monkeypatch):
     """When data["summary"] is present, the server embeds that string and
-    forwards the vector to the repo. Response reports indexed=True."""
+    forwards the vector to the storage client. Response reports indexed=True."""
     captured: dict = {}
-
-    async def fake_upsert(db, **kwargs):  # noqa: ARG001
-        captured.update(kwargs)
-        return _UpsertRow(xmax=0)
 
     async def fake_embed(text):
         captured["embed_text"] = text
         return [0.1] * VECTOR_DIM
 
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.upsert_returning_xmax", fake_upsert
-    )
+    sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
     monkeypatch.setattr("common.embedding.get_embedding", fake_embed)
 
     out = await mcp_server.memclaw_doc(
@@ -304,7 +277,9 @@ async def test_doc_write_summary_embeds_and_forwards(mcp_env, monkeypatch):
     assert payload["indexed"] is True
     # Only the summary is embedded — the body is stored but not indexed.
     assert captured["embed_text"] == "Claude Code setup runbook"
-    assert len(captured["embedding"]) == VECTOR_DIM
+    # The embedding is forwarded in the dict passed to upsert_document_xmax.
+    sent = sc.upsert_document_xmax.await_args.args[0]
+    assert len(sent["embedding"]) == VECTOR_DIM
 
 
 async def test_doc_write_no_summary_stores_unindexed(mcp_env, monkeypatch):
@@ -316,10 +291,7 @@ async def test_doc_write_no_summary_stores_unindexed(mcp_env, monkeypatch):
         called["hit"] = True
         return [0.0] * VECTOR_DIM
 
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.upsert_returning_xmax",
-        _async_return(_UpsertRow(xmax=0)),
-    )
+    stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
     monkeypatch.setattr("common.embedding.get_embedding", should_not_embed)
 
     out = await mcp_server.memclaw_doc(
@@ -369,23 +341,17 @@ async def test_doc_write_embedding_provider_failure_aborts(mcp_env, monkeypatch)
 async def test_doc_search_without_collection_spans_all(mcp_env, monkeypatch):
     """Collection is intentionally optional on search — omitting it triggers
     the cross-collection strategy. Handler must pass collection=None to the
-    repo, not reject the call."""
-    captured: dict = {}
-
-    async def fake_search(db, **kwargs):  # noqa: ARG001
-        captured.update(kwargs)
-        return []
-
+    storage client, not reject the call."""
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    monkeypatch.setattr("core_api.repositories.document_repo.search", fake_search)
+    sc = stub_storage_client(monkeypatch, search_documents_vector=[])
 
     out = await mcp_server.memclaw_doc(op="search", query="onboarding")
     payload = parse_envelope(out)
     # No 422 — broad search is a legitimate call
     assert "error" not in payload
-    assert captured["collection"] is None
+    assert sc.search_documents_vector.await_args.args[0]["collection"] is None
 
 
 async def test_doc_search_broad_results_include_per_row_collection(
@@ -396,13 +362,11 @@ async def test_doc_search_broad_results_include_per_row_collection(
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    pairs = [
-        (_DocRow("acme", collection="customers"), 0.9),
-        (_DocRow("guide-1", collection="onboarding_guides"), 0.6),
+    hits = [
+        _search_hit("acme", 0.9, collection="customers"),
+        _search_hit("guide-1", 0.6, collection="onboarding_guides"),
     ]
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.search", _async_return(pairs)
-    )
+    stub_storage_client(monkeypatch, search_documents_vector=hits)
     out = await mcp_server.memclaw_doc(op="search", query="signup flow")
     payload = parse_envelope(out)
     assert payload["collection"] is None
@@ -422,14 +386,12 @@ async def test_doc_search_empty_query_rejected(mcp_env):
 
 
 async def test_doc_search_happy_path(mcp_env, monkeypatch):
-    """Happy path: embedding → repo.search → results sorted by similarity."""
+    """Happy path: embedding → storage search → results sorted by similarity."""
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    pairs = [(_DocRow("acme"), 0.92), (_DocRow("initech"), 0.81)]
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.search", _async_return(pairs)
-    )
+    hits = [_search_hit("acme", 0.92), _search_hit("initech", 0.81)]
+    stub_storage_client(monkeypatch, search_documents_vector=hits)
     out = await mcp_server.memclaw_doc(
         op="search",
         collection="customers",
@@ -448,7 +410,7 @@ async def test_doc_search_empty_results(mcp_env, monkeypatch):
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    monkeypatch.setattr("core_api.repositories.document_repo.search", _async_return([]))
+    stub_storage_client(monkeypatch, search_documents_vector=[])
     out = await mcp_server.memclaw_doc(op="search", collection="c", query="anything")
     payload = parse_envelope(out)
     assert payload["count"] == 0
@@ -457,19 +419,13 @@ async def test_doc_search_empty_results(mcp_env, monkeypatch):
 
 async def test_doc_search_top_k_capped_at_50(mcp_env, monkeypatch):
     """top_k above 50 is capped server-side."""
-    captured: dict = {}
-
-    async def fake_search(db, **kwargs):  # noqa: ARG001
-        captured.update(kwargs)
-        return []
-
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    monkeypatch.setattr("core_api.repositories.document_repo.search", fake_search)
+    sc = stub_storage_client(monkeypatch, search_documents_vector=[])
 
     await mcp_server.memclaw_doc(op="search", collection="c", query="q", top_k=9999)
-    assert captured["top_k"] == 50
+    assert sc.search_documents_vector.await_args.args[0]["top_k"] == 50
 
 
 async def test_doc_search_embedding_provider_failure_aborts(mcp_env, monkeypatch):
@@ -480,36 +436,22 @@ async def test_doc_search_embedding_provider_failure_aborts(mcp_env, monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# Read-op widening: ``_readable_tenant_ids_var`` reaches the repo call
+# Read-op widening: ``_readable_tenant_ids_var`` reaches the storage call
 # (audit T1)
 # ---------------------------------------------------------------------------
 #
 # Cross-tenant credentials surface as a non-empty
 # ``_readable_tenant_ids_var``; the tool reads it via
 # ``_get_readable_tenants()`` and passes the list as ``readable_tenant_ids``
-# to whichever ``document_repo`` function backs the requested op:
+# to whichever storage method backs the requested op:
 #
-#   list_collections → document_repo.list_collections
-#   read             → document_repo.get_by_doc_id
-#   query            → document_repo.query
-#   search           → document_repo.search
+#   list_collections → sc.list_document_collections   (kwarg)
+#   read             → sc.get_document                 (kwarg)
+#   query            → sc.query_documents              (dict key)
+#   search           → sc.search_documents_vector      (dict key)
 #
 # T1 locks in the wiring: a regression that silently drops the list on
 # any of those four paths would fail the corresponding test below.
-
-
-async def _capture_readable_tenant_ids(monkeypatch, repo_attr: str, return_value):
-    """Patch the named ``document_repo`` function with a capture stub
-    that records the ``readable_tenant_ids`` kwarg and returns the
-    given value."""
-    captured: dict = {}
-
-    async def fake(*args, **kwargs):  # noqa: ARG001
-        captured["readable_tenant_ids"] = kwargs.get("readable_tenant_ids")
-        return return_value
-
-    monkeypatch.setattr(f"core_api.repositories.document_repo.{repo_attr}", fake)
-    return captured
 
 
 async def test_doc_list_collections_passes_readable_tenants(mcp_env, monkeypatch):
@@ -518,33 +460,37 @@ async def test_doc_list_collections_passes_readable_tenants(mcp_env, monkeypatch
     monkeypatch.setattr(
         mcp_server, "_get_readable_tenants", lambda: ["home", "sibling"]
     )
-    captured = await _capture_readable_tenant_ids(monkeypatch, "list_collections", [])
+    sc = stub_storage_client(monkeypatch, list_document_collections={"collections": []})
     await mcp_server.memclaw_doc(op="list_collections")
-    assert captured["readable_tenant_ids"] == ["home", "sibling"]
+    assert sc.list_document_collections.await_args.kwargs["readable_tenant_ids"] == [
+        "home",
+        "sibling",
+    ]
 
 
 async def test_doc_list_collections_single_tenant_passes_none(mcp_env, monkeypatch):
     """Single-tenant credential: ``_get_readable_tenants()`` returns
-    ``[]`` → the tool collapses it to ``None`` before calling the repo
-    (so the repo's single-tenant fast path runs)."""
+    ``[]`` → the tool collapses it to ``None`` before calling storage
+    (so the storage single-tenant fast path runs)."""
     monkeypatch.setattr(mcp_server, "_get_readable_tenants", lambda: [])
-    captured = await _capture_readable_tenant_ids(monkeypatch, "list_collections", [])
+    sc = stub_storage_client(monkeypatch, list_document_collections={"collections": []})
     await mcp_server.memclaw_doc(op="list_collections")
-    assert captured["readable_tenant_ids"] is None
+    assert sc.list_document_collections.await_args.kwargs["readable_tenant_ids"] is None
 
 
 async def test_doc_read_passes_readable_tenants(mcp_env, monkeypatch):
-    """``op=read`` widens via ``readable_tenant_ids``. The repo can
+    """``op=read`` widens via ``readable_tenant_ids``. Storage can
     then resolve a doc that lives in a sibling tenant when the caller
     is authorized to read from it."""
     monkeypatch.setattr(
         mcp_server, "_get_readable_tenants", lambda: ["home", "sibling"]
     )
-    captured = await _capture_readable_tenant_ids(
-        monkeypatch, "get_by_doc_id", _DocRow()
-    )
+    sc = stub_storage_client(monkeypatch, get_document=_doc())
     await mcp_server.memclaw_doc(op="read", collection="customers", doc_id="acme")
-    assert captured["readable_tenant_ids"] == ["home", "sibling"]
+    assert sc.get_document.await_args.kwargs["readable_tenant_ids"] == [
+        "home",
+        "sibling",
+    ]
 
 
 async def test_doc_query_passes_readable_tenants(mcp_env, monkeypatch):
@@ -552,25 +498,31 @@ async def test_doc_query_passes_readable_tenants(mcp_env, monkeypatch):
     monkeypatch.setattr(
         mcp_server, "_get_readable_tenants", lambda: ["home", "sibling"]
     )
-    captured = await _capture_readable_tenant_ids(monkeypatch, "query", [])
+    sc = stub_storage_client(monkeypatch, query_documents=[])
     await mcp_server.memclaw_doc(op="query", collection="customers", where={"k": 1})
-    assert captured["readable_tenant_ids"] == ["home", "sibling"]
+    assert sc.query_documents.await_args.args[0]["readable_tenant_ids"] == [
+        "home",
+        "sibling",
+    ]
 
 
 async def test_doc_search_passes_readable_tenants(mcp_env, monkeypatch):
     """``op=search`` (vector recall) widens the same way. The audit
     emission has its own assertion in
     ``tests/test_cross_tenant_audit_surfaces.py``; this test only
-    confirms the wiring from the context var to the repo arg."""
+    confirms the wiring from the context var to the storage arg."""
     monkeypatch.setattr(
         mcp_server, "_get_readable_tenants", lambda: ["home", "sibling"]
     )
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    captured = await _capture_readable_tenant_ids(monkeypatch, "search", [])
+    sc = stub_storage_client(monkeypatch, search_documents_vector=[])
     await mcp_server.memclaw_doc(op="search", query="hello")
-    assert captured["readable_tenant_ids"] == ["home", "sibling"]
+    assert sc.search_documents_vector.await_args.args[0]["readable_tenant_ids"] == [
+        "home",
+        "sibling",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -583,13 +535,22 @@ async def test_doc_search_passes_readable_tenants(mcp_env, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-class _SkillRow:
-    def __init__(self, doc_id: str, status: str, tenant_id: str = "test-tenant"):
-        self.collection = "skills"
-        self.doc_id = doc_id
-        self.tenant_id = tenant_id
-        self.data = {"slug": doc_id, "status": status, "summary": "a skill"}
-        self.updated_at = datetime.now(timezone.utc)
+def _skill_doc(doc_id: str, status: str, tenant_id: str = "test-tenant") -> dict:
+    """A storage-client skills document dict."""
+    return {
+        "collection": "skills",
+        "doc_id": doc_id,
+        "tenant_id": tenant_id,
+        "data": {"slug": doc_id, "status": status, "summary": "a skill"},
+        "updated_at": datetime.now(timezone.utc),
+    }
+
+
+def _skill_hit(
+    doc_id: str, status: str, similarity: float, tenant_id: str = "test-tenant"
+) -> dict:
+    """A storage-client skills search result (skill doc + inline similarity)."""
+    return {**_skill_doc(doc_id, status, tenant_id), "similarity": similarity}
 
 
 def _patch_flag(monkeypatch, enabled: bool):
@@ -606,11 +567,17 @@ def _patch_sf_settings(monkeypatch, *, enabled: bool = True, **caps):
     path now derives BOTH the opt-in flag and the byte caps from this one
     ``get_settings_for_display`` call (no separate ``_skills_factory_enabled``
     read), so tests set ``skills_factory.enabled`` here. Extra kwargs land
-    as ``skills_factory`` leaves (e.g. ``description_max_bytes=None``)."""
+    as ``skills_factory`` leaves (e.g. ``description_max_bytes=None``).
+
+    The handler calls the module-level ``mcp_server.get_settings_for_display``
+    name, so patch that alias (patching the original
+    ``core_api.services.organization_settings.get_settings_for_display`` would
+    not rebind the name the handler resolves)."""
     sf: dict = {"enabled": enabled}
     sf.update(caps)
     monkeypatch.setattr(
-        "core_api.services.organization_settings.get_settings_for_display",
+        mcp_server,
+        "get_settings_for_display",
         _async_return({"skills_factory": sf}),
     )
 
@@ -639,9 +606,8 @@ def _valid_skill_data(**overrides):
 
 async def test_skill_read_hides_non_active_when_flag_on(mcp_env, monkeypatch):
     _patch_flag(monkeypatch, True)
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.get_by_doc_id",
-        _async_return(_SkillRow("forge/x", status="staged")),
+    stub_storage_client(
+        monkeypatch, get_document=_skill_doc("forge/x", status="staged")
     )
     out = await mcp_server.memclaw_doc(op="read", collection="skills", doc_id="forge/x")
     # Non-active skill → same "Not found" as a missing doc (no existence leak).
@@ -650,9 +616,8 @@ async def test_skill_read_hides_non_active_when_flag_on(mcp_env, monkeypatch):
 
 async def test_skill_read_returns_active_when_flag_on(mcp_env, monkeypatch):
     _patch_flag(monkeypatch, True)
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.get_by_doc_id",
-        _async_return(_SkillRow("forge/x", status="active")),
+    stub_storage_client(
+        monkeypatch, get_document=_skill_doc("forge/x", status="active")
     )
     out = await mcp_server.memclaw_doc(op="read", collection="skills", doc_id="forge/x")
     payload = parse_envelope(out)
@@ -664,9 +629,8 @@ async def test_skill_read_no_filter_when_flag_off(mcp_env, monkeypatch):
     # Non-opted-in tenant: byte-identical to pre-Skill-Factory — a
     # staged (or status-less) skill is still readable.
     _patch_flag(monkeypatch, False)
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.get_by_doc_id",
-        _async_return(_SkillRow("forge/x", status="staged")),
+    stub_storage_client(
+        monkeypatch, get_document=_skill_doc("forge/x", status="staged")
     )
     out = await mcp_server.memclaw_doc(op="read", collection="skills", doc_id="forge/x")
     payload = parse_envelope(out)
@@ -683,20 +647,14 @@ async def test_skill_query_rejects_explicit_non_active_status_when_flag_on(
     # to active — that would mislead the caller into thinking they
     # queried 'staged'). Points them to the Inbox API.
     _patch_flag(monkeypatch, True)
-    called = {"query": False}
-
-    async def fake_query(db, **kwargs):  # noqa: ARG001
-        called["query"] = True
-        return []
-
-    monkeypatch.setattr("core_api.repositories.document_repo.query", fake_query)
+    sc = stub_storage_client(monkeypatch, query_documents=[])
     out = await mcp_server.memclaw_doc(
         op="query", collection="skills", where={"status": "staged"}
     )
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INVALID_ARGUMENTS"
     assert "skills-inbox" in payload["error"]["message"].lower()
-    assert called["query"] is False
+    sc.query_documents.assert_not_awaited()
 
 
 async def test_skill_query_scopes_to_active_when_no_status_when_flag_on(
@@ -706,33 +664,24 @@ async def test_skill_query_scopes_to_active_when_no_status_when_flag_on(
     # 'active' (no error), so an agent's plain skills query only ever
     # sees live skills.
     _patch_flag(monkeypatch, True)
-    captured: dict = {}
-
-    async def fake_query(db, **kwargs):  # noqa: ARG001
-        captured.update(kwargs)
-        return []
-
-    monkeypatch.setattr("core_api.repositories.document_repo.query", fake_query)
-    await mcp_server.memclaw_doc(op="query", collection="skills", where={"domain": "ops"})
-    assert captured["where"]["status"] == "active"
-    assert captured["where"]["domain"] == "ops"
+    sc = stub_storage_client(monkeypatch, query_documents=[])
+    await mcp_server.memclaw_doc(
+        op="query", collection="skills", where={"domain": "ops"}
+    )
+    sent = sc.query_documents.await_args.args[0]
+    assert sent["where"]["status"] == "active"
+    assert sent["where"]["domain"] == "ops"
 
 
 async def test_skill_query_no_filter_when_flag_off(mcp_env, monkeypatch):
     _patch_flag(monkeypatch, False)
-    captured: dict = {}
-
-    async def fake_query(db, **kwargs):  # noqa: ARG001
-        captured.update(kwargs)
-        return []
-
-    monkeypatch.setattr("core_api.repositories.document_repo.query", fake_query)
+    sc = stub_storage_client(monkeypatch, query_documents=[])
     await mcp_server.memclaw_doc(
         op="query", collection="skills", where={"status": "staged"}
     )
     # Genuinely not opted in → caller's where passes through untouched
     # (legacy), NOT the confusing Inbox-API rejection.
-    assert captured["where"] == {"status": "staged"}
+    assert sc.query_documents.await_args.args[0]["where"] == {"status": "staged"}
 
 
 async def test_skill_query_explicit_status_fails_closed_on_settings_error(
@@ -746,36 +695,24 @@ async def test_skill_query_explicit_status_fails_closed_on_settings_error(
         raise RuntimeError("settings store down")
 
     monkeypatch.setattr(mcp_server, "_skills_factory_flag", _boom)
-    called = {"query": False}
-
-    async def fake_query(db, **kwargs):  # noqa: ARG001
-        called["query"] = True
-        return []
-
-    monkeypatch.setattr("core_api.repositories.document_repo.query", fake_query)
+    sc = stub_storage_client(monkeypatch, query_documents=[])
     out = await mcp_server.memclaw_doc(
         op="query", collection="skills", where={"status": "staged"}
     )
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INTERNAL_ERROR"
-    assert called["query"] is False
+    sc.query_documents.assert_not_awaited()
 
 
 async def test_non_skills_query_unaffected_by_flag(mcp_env, monkeypatch):
     # The active-only policy is skills-only — a customers query must not
     # get a status filter injected even when the flag is on.
     _patch_flag(monkeypatch, True)
-    captured: dict = {}
-
-    async def fake_query(db, **kwargs):  # noqa: ARG001
-        captured.update(kwargs)
-        return []
-
-    monkeypatch.setattr("core_api.repositories.document_repo.query", fake_query)
+    sc = stub_storage_client(monkeypatch, query_documents=[])
     await mcp_server.memclaw_doc(
         op="query", collection="customers", where={"plan": "biz"}
     )
-    assert "status" not in captured["where"]
+    assert "status" not in sc.query_documents.await_args.args[0]["where"]
 
 
 # ── op=search (scoped) ─────────────────────────────────────────────
@@ -785,38 +722,26 @@ async def test_skill_search_scoped_passes_active_status_when_flag_on(
     mcp_env, monkeypatch
 ):
     _patch_flag(monkeypatch, True)
-    captured: dict = {}
-
-    async def fake_search(db, **kwargs):  # noqa: ARG001
-        captured.update(kwargs)
-        return []
-
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    monkeypatch.setattr("core_api.repositories.document_repo.search", fake_search)
+    sc = stub_storage_client(monkeypatch, search_documents_vector=[])
     await mcp_server.memclaw_doc(
         op="search", collection="skills", query="deploy eu-west"
     )
-    assert captured["status"] == "active"
+    assert sc.search_documents_vector.await_args.args[0]["status"] == "active"
 
 
 async def test_skill_search_scoped_no_status_when_flag_off(mcp_env, monkeypatch):
     _patch_flag(monkeypatch, False)
-    captured: dict = {}
-
-    async def fake_search(db, **kwargs):  # noqa: ARG001
-        captured.update(kwargs)
-        return []
-
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    monkeypatch.setattr("core_api.repositories.document_repo.search", fake_search)
+    sc = stub_storage_client(monkeypatch, search_documents_vector=[])
     await mcp_server.memclaw_doc(
         op="search", collection="skills", query="deploy eu-west"
     )
-    assert captured["status"] is None
+    assert sc.search_documents_vector.await_args.args[0]["status"] is None
 
 
 # ── op=search (broad / cross-collection) ───────────────────────────
@@ -827,14 +752,12 @@ async def test_skill_search_broad_drops_non_active_when_flag_on(mcp_env, monkeyp
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    pairs = [
-        (_DocRow("acme", collection="customers"), 0.9),  # non-skill: always kept
-        (_SkillRow("forge/active", status="active"), 0.8),  # kept
-        (_SkillRow("forge/staged", status="staged"), 0.7),  # DROPPED
+    hits = [
+        _search_hit("acme", 0.9, collection="customers"),  # non-skill: always kept
+        _skill_hit("forge/active", status="active", similarity=0.8),  # kept
+        _skill_hit("forge/staged", status="staged", similarity=0.7),  # DROPPED
     ]
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.search", _async_return(pairs)
-    )
+    stub_storage_client(monkeypatch, search_documents_vector=hits)
     out = await mcp_server.memclaw_doc(op="search", query="anything")
     payload = parse_envelope(out)
     returned = {(r["collection"], r["doc_id"]) for r in payload["results"]}
@@ -848,10 +771,8 @@ async def test_skill_search_broad_no_filter_when_flag_off(mcp_env, monkeypatch):
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    pairs = [(_SkillRow("forge/staged", status="staged"), 0.7)]
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.search", _async_return(pairs)
-    )
+    hits = [_skill_hit("forge/staged", status="staged", similarity=0.7)]
+    stub_storage_client(monkeypatch, search_documents_vector=hits)
     out = await mcp_server.memclaw_doc(op="search", query="anything")
     payload = parse_envelope(out)
     # Flag off → no broad post-filter; the staged skill surfaces as before.
@@ -861,7 +782,9 @@ async def test_skill_search_broad_no_filter_when_flag_off(mcp_env, monkeypatch):
 # ── op=write (self-promotion guard) ────────────────────────────────
 
 
-async def test_skill_write_rejects_caller_active_status_when_flag_on(mcp_env, monkeypatch):
+async def test_skill_write_rejects_caller_active_status_when_flag_on(
+    mcp_env, monkeypatch
+):
     # The MCP write path now runs the SF-002 lifecycle validator. An
     # agent-direct write carries is_admin=False, so a caller-supplied
     # status='active' hits ADMIN_ONLY_STATUSES and 403s — this is what
@@ -871,15 +794,7 @@ async def test_skill_write_rejects_caller_active_status_when_flag_on(mcp_env, mo
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    called = {"upsert": False}
-
-    async def fake_upsert(db, **kwargs):  # noqa: ARG001
-        called["upsert"] = True
-        return _UpsertRow(xmax=0)
-
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.upsert_returning_xmax", fake_upsert
-    )
+    sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
     out = await mcp_server.memclaw_doc(
         op="write",
         collection="skills",
@@ -890,8 +805,8 @@ async def test_skill_write_rejects_caller_active_status_when_flag_on(mcp_env, mo
     # Validator raises HTTPException(403) → outer handler maps to FORBIDDEN.
     assert payload["error"]["code"] == "FORBIDDEN"
     assert "admin" in payload["error"]["message"].lower()
-    # The write must NOT have reached the DB.
-    assert called["upsert"] is False
+    # The write must NOT have reached storage.
+    sc.upsert_document_xmax.assert_not_awaited()
 
 
 async def test_skill_write_rejects_forge_source_when_flag_on(mcp_env, monkeypatch):
@@ -904,15 +819,7 @@ async def test_skill_write_rejects_forge_source_when_flag_on(mcp_env, monkeypatc
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    called = {"upsert": False}
-
-    async def fake_upsert(db, **kwargs):  # noqa: ARG001
-        called["upsert"] = True
-        return _UpsertRow(xmax=0)
-
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.upsert_returning_xmax", fake_upsert
-    )
+    sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
     out = await mcp_server.memclaw_doc(
         op="write",
         collection="skills",
@@ -921,7 +828,7 @@ async def test_skill_write_rejects_forge_source_when_flag_on(mcp_env, monkeypatc
     )
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "FORBIDDEN"
-    assert called["upsert"] is False
+    sc.upsert_document_xmax.assert_not_awaited()
 
 
 async def test_skill_write_defaults_to_staged_when_flag_on(mcp_env, monkeypatch):
@@ -934,15 +841,7 @@ async def test_skill_write_defaults_to_staged_when_flag_on(mcp_env, monkeypatch)
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    captured = {}
-
-    async def fake_upsert(db, **kwargs):  # noqa: ARG001
-        captured.update(kwargs)
-        return _UpsertRow(xmax=0)
-
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.upsert_returning_xmax", fake_upsert
-    )
+    sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
     out = await mcp_server.memclaw_doc(
         op="write",
         collection="skills",
@@ -952,10 +851,11 @@ async def test_skill_write_defaults_to_staged_when_flag_on(mcp_env, monkeypatch)
     payload = parse_envelope(out)
     assert payload["ok"] is True
     # Validator-normalized data was passed through to the upsert.
-    assert captured["data"]["status"] == "staged"
-    assert captured["data"]["source"] == "agent"
+    sent_data = sc.upsert_document_xmax.await_args.args[0]["data"]
+    assert sent_data["status"] == "staged"
+    assert sent_data["source"] == "agent"
     # content_hash is server-stamped, never trusted from the body.
-    assert captured["data"]["content_hash"].startswith("sha256:")
+    assert sent_data["content_hash"].startswith("sha256:")
 
 
 async def test_skill_write_tolerates_misconfigured_byte_caps(mcp_env, monkeypatch):
@@ -971,10 +871,7 @@ async def test_skill_write_tolerates_misconfigured_byte_caps(mcp_env, monkeypatc
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.upsert_returning_xmax",
-        _async_return(_UpsertRow(xmax=0)),
-    )
+    stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
     out = await mcp_server.memclaw_doc(
         op="write",
         collection="skills",
@@ -992,24 +889,14 @@ async def test_skill_write_fails_closed_on_settings_error(mcp_env, monkeypatch):
     async def _boom(*_a, **_k):
         raise RuntimeError("settings store down")
 
-    monkeypatch.setattr(
-        "core_api.services.organization_settings.get_settings_for_display", _boom
-    )
-    called = {"upsert": False}
-
-    async def fake_upsert(db, **kwargs):  # noqa: ARG001
-        called["upsert"] = True
-        return _UpsertRow(xmax=0)
-
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.upsert_returning_xmax", fake_upsert
-    )
+    monkeypatch.setattr(mcp_server, "get_settings_for_display", _boom)
+    sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
     out = await mcp_server.memclaw_doc(
         op="write", collection="skills", doc_id="forge-x", data=_valid_skill_data()
     )
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INTERNAL_ERROR"
-    assert called["upsert"] is False
+    sc.upsert_document_xmax.assert_not_awaited()
 
 
 async def test_skill_update_write_fails_closed_on_live_doc_fetch_error(
@@ -1024,20 +911,12 @@ async def test_skill_update_write_fails_closed_on_live_doc_fetch_error(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
 
-    class _BoomClient:
-        async def get_document(self, **_kwargs):
-            raise RuntimeError("storage down")
+    async def _boom_get_document(**_kwargs):
+        raise RuntimeError("storage down")
 
-    monkeypatch.setattr(mcp_server, "get_storage_client", lambda: _BoomClient())
-    called = {"upsert": False}
-
-    async def fake_upsert(db, **kwargs):  # noqa: ARG001
-        called["upsert"] = True
-        return _UpsertRow(xmax=0)
-
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.upsert_returning_xmax", fake_upsert
-    )
+    # The live-doc fetch (get_document) raises; the upsert must never run.
+    sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
+    sc.get_document.side_effect = _boom_get_document
     out = await mcp_server.memclaw_doc(
         op="write",
         collection="skills",
@@ -1048,7 +927,7 @@ async def test_skill_update_write_fails_closed_on_live_doc_fetch_error(
     )
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INTERNAL_ERROR"
-    assert called["upsert"] is False
+    sc.upsert_document_xmax.assert_not_awaited()
 
 
 async def test_skill_write_status_allowed_when_flag_off(mcp_env, monkeypatch):
@@ -1060,15 +939,7 @@ async def test_skill_write_status_allowed_when_flag_off(mcp_env, monkeypatch):
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    captured = {}
-
-    async def fake_upsert(db, **kwargs):  # noqa: ARG001
-        captured.update(kwargs)
-        return _UpsertRow(xmax=0)
-
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.upsert_returning_xmax", fake_upsert
-    )
+    sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
     out = await mcp_server.memclaw_doc(
         op="write",
         collection="skills",
@@ -1078,22 +949,22 @@ async def test_skill_write_status_allowed_when_flag_off(mcp_env, monkeypatch):
     payload = parse_envelope(out)
     assert payload["ok"] is True
     # Untouched: no validator ran, so status stays exactly as supplied.
-    assert captured["data"]["status"] == "active"
+    assert sc.upsert_document_xmax.await_args.args[0]["data"]["status"] == "active"
 
 
 # ── op=delete (active-only existence gate) ─────────────────────────
 
 
 async def test_skill_delete_hides_non_active_when_flag_on(mcp_env, monkeypatch):
-    # The status guard is folded into the DELETE's WHERE (atomic, no
-    # pre-fetch). A staged skill matches zero rows → the DELETE returns
-    # no id → the SAME generic JSON not-found a MISSING doc returns, so
-    # a non-active skill is byte-for-byte indistinguishable from a
-    # missing one (no existence leak) and the response is valid JSON.
+    # The status guard is folded into the storage DELETE's WHERE
+    # (atomic, via ``require_status``). A staged skill matches zero rows →
+    # storage returns False → the SAME generic JSON not-found a MISSING
+    # doc returns, so a non-active skill is byte-for-byte indistinguishable
+    # from a missing one (no existence leak) and the response is valid JSON.
     _patch_flag(monkeypatch, True)
-    result_mock = MagicMock()
-    result_mock.scalar_one_or_none.return_value = None  # status=active matched nothing
-    mcp_env["db"].execute.return_value = result_mock
+    stub_storage_client(
+        monkeypatch, delete_document=False
+    )  # status guard matched nothing
     out = await mcp_server.memclaw_doc(
         op="delete", collection="skills", doc_id="forge/x"
     )
@@ -1102,14 +973,10 @@ async def test_skill_delete_hides_non_active_when_flag_on(mcp_env, monkeypatch):
 
 
 async def test_skill_delete_allows_active_when_flag_on(mcp_env, monkeypatch):
-    from uuid import uuid4
-
-    # An active skill matches the WHERE status='active' guard → one row
-    # deleted, returns its id.
+    # An active skill matches the require_status='active' guard → one row
+    # deleted, storage returns True.
     _patch_flag(monkeypatch, True)
-    result_mock = MagicMock()
-    result_mock.scalar_one_or_none.return_value = uuid4()
-    mcp_env["db"].execute.return_value = result_mock
+    stub_storage_client(monkeypatch, delete_document=True)
     out = await mcp_server.memclaw_doc(
         op="delete", collection="skills", doc_id="forge/x"
     )
@@ -1126,13 +993,14 @@ async def test_skill_delete_fails_closed_on_settings_error(mcp_env, monkeypatch)
         raise RuntimeError("settings store down")
 
     monkeypatch.setattr(mcp_server, "_skills_factory_flag", _boom)
+    sc = stub_storage_client(monkeypatch, delete_document=True)
     out = await mcp_server.memclaw_doc(
         op="delete", collection="skills", doc_id="forge/x"
     )
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INTERNAL_ERROR"
     # The DELETE must never have run.
-    mcp_env["db"].execute.assert_not_called()
+    sc.delete_document.assert_not_awaited()
 
 
 # ── Cross-tenant leak: a sibling tenant's non-active skill must never
@@ -1150,9 +1018,9 @@ async def test_skill_read_hides_cross_tenant_non_active_even_when_caller_off(
     monkeypatch.setattr(
         mcp_server, "_get_readable_tenants", lambda: ["test-tenant", "sibling"]
     )
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.get_by_doc_id",
-        _async_return(_SkillRow("forge/x", status="staged", tenant_id="sibling")),
+    stub_storage_client(
+        monkeypatch,
+        get_document=_skill_doc("forge/x", status="staged", tenant_id="sibling"),
     )
     out = await mcp_server.memclaw_doc(op="read", collection="skills", doc_id="forge/x")
     assert "Not found: skills/forge/x" in strip_latency(out)
@@ -1166,14 +1034,16 @@ async def test_skill_query_drops_cross_tenant_non_active_when_caller_off(
         mcp_server, "_get_readable_tenants", lambda: ["test-tenant", "sibling"]
     )
     rows = [
-        _SkillRow("own/active", status="active", tenant_id="test-tenant"),
-        _SkillRow("own/staged", status="staged", tenant_id="test-tenant"),  # kept: caller off, same tenant
-        _SkillRow("sib/staged", status="staged", tenant_id="sibling"),  # dropped: cross-tenant non-active
-        _SkillRow("sib/active", status="active", tenant_id="sibling"),  # kept: active
+        _skill_doc("own/active", status="active", tenant_id="test-tenant"),
+        _skill_doc(
+            "own/staged", status="staged", tenant_id="test-tenant"
+        ),  # kept: caller off, same tenant
+        _skill_doc(
+            "sib/staged", status="staged", tenant_id="sibling"
+        ),  # dropped: cross-tenant non-active
+        _skill_doc("sib/active", status="active", tenant_id="sibling"),  # kept: active
     ]
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.query", _async_return(rows)
-    )
+    stub_storage_client(monkeypatch, query_documents=rows)
     out = await mcp_server.memclaw_doc(op="query", collection="skills")
     payload = parse_envelope(out)
     ids = {r["doc_id"] for r in payload["results"]}
@@ -1191,14 +1061,14 @@ async def test_skill_search_drops_cross_tenant_non_active_when_caller_off(
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    pairs = [
-        (_SkillRow("sib/staged", status="staged", tenant_id="sibling"), 0.9),
-        (_SkillRow("sib/active", status="active", tenant_id="sibling"), 0.8),
-        (_SkillRow("own/staged", status="staged", tenant_id="test-tenant"), 0.7),
+    hits = [
+        _skill_hit("sib/staged", status="staged", similarity=0.9, tenant_id="sibling"),
+        _skill_hit("sib/active", status="active", similarity=0.8, tenant_id="sibling"),
+        _skill_hit(
+            "own/staged", status="staged", similarity=0.7, tenant_id="test-tenant"
+        ),
     ]
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.search", _async_return(pairs)
-    )
+    stub_storage_client(monkeypatch, search_documents_vector=hits)
     # Broad search (collection=None) over the readable set.
     out = await mcp_server.memclaw_doc(op="search", query="deploy")
     payload = parse_envelope(out)
@@ -1214,14 +1084,17 @@ async def test_list_collections_skill_count_active_only_when_flag_on(
     mcp_env, monkeypatch
 ):
     _patch_flag(monkeypatch, True)
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.list_collections",
-        _async_return([("customers", 5), ("skills", 9)]),
+    # The active-only recount issues one COUNT via the storage client.
+    stub_storage_client(
+        monkeypatch,
+        list_document_collections={
+            "collections": [
+                {"name": "customers", "count": 5},
+                {"name": "skills", "count": 9},
+            ]
+        },
+        document_count_in_collection=3,  # only 3 of the 9 skills are active
     )
-    # The active-only recount issues one COUNT via db.execute.
-    result_mock = MagicMock()
-    result_mock.scalar_one.return_value = 3  # only 3 of the 9 skills are active
-    mcp_env["db"].execute.return_value = result_mock
     out = await mcp_server.memclaw_doc(op="list_collections")
     payload = parse_envelope(out)
     counts = {c["name"]: c["count"] for c in payload["collections"]}
@@ -1233,9 +1106,9 @@ async def test_list_collections_skill_count_unchanged_when_flag_off(
     mcp_env, monkeypatch
 ):
     _patch_flag(monkeypatch, False)
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.list_collections",
-        _async_return([("skills", 9)]),
+    stub_storage_client(
+        monkeypatch,
+        list_document_collections={"collections": [{"name": "skills", "count": 9}]},
     )
     out = await mcp_server.memclaw_doc(op="list_collections")
     payload = parse_envelope(out)
@@ -1254,15 +1127,7 @@ async def test_skill_write_rejects_case_variant_status_key_when_flag_on(
     # field. Reject it outright.
     _patch_flag(monkeypatch, True)
     _patch_sf_settings(monkeypatch)
-    called = {"upsert": False}
-
-    async def fake_upsert(db, **kwargs):  # noqa: ARG001
-        called["upsert"] = True
-        return _UpsertRow(xmax=0)
-
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.upsert_returning_xmax", fake_upsert
-    )
+    sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
     out = await mcp_server.memclaw_doc(
         op="write",
         collection="skills",
@@ -1272,7 +1137,7 @@ async def test_skill_write_rejects_case_variant_status_key_when_flag_on(
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INVALID_ARGUMENTS"
     assert "status" in payload["error"]["message"].lower()
-    assert called["upsert"] is False
+    sc.upsert_document_xmax.assert_not_awaited()
 
 
 async def test_safe_int_degrades_bool_and_garbage_to_default():
@@ -1288,7 +1153,9 @@ async def test_safe_int_degrades_bool_and_garbage_to_default():
     assert mcp_server._safe_int("4096", 160) == 4096
 
 
-async def test_skills_factory_enabled_fails_closed_on_settings_error(mcp_env, monkeypatch):
+async def test_skills_factory_enabled_fails_closed_on_settings_error(
+    mcp_env, monkeypatch
+):
     # The read-path helper must fail CLOSED: if the strict flag lookup
     # raises, assume enabled (True) so the active-only filter is applied
     # and non-active skills can't leak during a settings outage.
@@ -1300,16 +1167,17 @@ async def test_skills_factory_enabled_fails_closed_on_settings_error(mcp_env, mo
     assert result is True
 
 
-async def test_skill_read_hides_non_active_when_flag_lookup_errors(mcp_env, monkeypatch):
+async def test_skill_read_hides_non_active_when_flag_lookup_errors(
+    mcp_env, monkeypatch
+):
     # End-to-end: a settings outage during a skill read filters (hides
     # the non-active skill), it does not 500 or leak.
     async def _boom(*_a, **_k):
         raise RuntimeError("settings store down")
 
     monkeypatch.setattr(mcp_server, "_skills_factory_flag", _boom)
-    monkeypatch.setattr(
-        "core_api.repositories.document_repo.get_by_doc_id",
-        _async_return(_SkillRow("forge/x", status="staged")),
+    stub_storage_client(
+        monkeypatch, get_document=_skill_doc("forge/x", status="staged")
     )
     out = await mcp_server.memclaw_doc(op="read", collection="skills", doc_id="forge/x")
     assert "Not found: skills/forge/x" in strip_latency(out)

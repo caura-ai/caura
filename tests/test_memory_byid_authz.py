@@ -21,6 +21,7 @@ import pytest
 from core_api.services import agent_service
 from core_api.services.agent_service import authorize_memory_access
 
+from tests._mcp_test_helpers import stub_storage_client
 from tests.conftest import parse_envelope  # noqa: F401  (re-exported MCP helper)
 
 
@@ -29,15 +30,6 @@ from tests.conftest import parse_envelope  # noqa: F401  (re-exported MCP helper
 # ---------------------------------------------------------------------------
 
 pytestmark_unit = pytest.mark.unit
-
-
-class _FakeMem:
-    def __init__(self, *, visibility, agent_id, fleet_id, **extra):
-        self.visibility = visibility
-        self.agent_id = agent_id
-        self.fleet_id = fleet_id
-        for k, v in extra.items():
-            setattr(self, k, v)
 
 
 @pytest.fixture
@@ -134,35 +126,38 @@ async def test_unknown_agent_allowed(patch_lookup):
 
 
 def _fake_read_row(*, visibility, agent_id, fleet_id):
+    # Fix 2 Phase 4: ``memclaw_manage`` op=read fetches via the storage client
+    # (``sc.get_memory_for_tenant``), which returns a plain dict — not an ORM
+    # row. The authz contract under test (``authorize_memory_access`` over the
+    # row's visibility / owner / fleet) is unchanged; only the row SHAPE is.
     mid = uuid.uuid4()
-    return mid, _FakeMem(
-        visibility=visibility,
-        agent_id=agent_id,
-        fleet_id=fleet_id,
-        id=mid,
-        content="cross-fleet secret",
-        memory_type="fact",
-        status="active",
-        weight=0.5,
-        title=None,
-        created_at=None,
-        last_recalled_at=None,
-        recall_count=0,
-        deleted_at=None,
-        metadata_=None,
-    )
+    return mid, {
+        "id": str(mid),
+        "visibility": visibility,
+        "agent_id": agent_id,
+        "fleet_id": fleet_id,
+        "content": "cross-fleet secret",
+        "memory_type": "fact",
+        "status": "active",
+        "weight": 0.5,
+        "title": None,
+        "created_at": None,
+        "last_recalled_at": None,
+        "recall_count": 0,
+        "deleted_at": None,
+        "metadata_": None,
+    }
 
 
 async def _mcp_read(mcp_env, monkeypatch, *, caller, row):
     from core_api import mcp_server
-    from core_api.repositories import memory_repo
 
     mid, mem = row
 
-    async def fake_get(db, _uid, _tenant):
-        return mem
-
-    monkeypatch.setattr(memory_repo, "get_by_id_for_tenant", fake_get)
+    # Stub the storage client's by-id read; the real ``authorize_memory_access``
+    # then runs over the returned row (``lookup_agent`` is controlled by
+    # ``patch_lookup``), exactly as the pre-migration test exercised it.
+    stub_storage_client(monkeypatch, get_memory_for_tenant=mem)
     monkeypatch.setattr(mcp_server, "_get_agent_id", lambda: caller)
     return await mcp_server.memclaw_manage(op="read", memory_id=str(mid))
 

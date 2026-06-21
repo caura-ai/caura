@@ -64,7 +64,8 @@ async def test_batch_update_status_backward_compat_2field_shape(sc):
                 {"memory_id": a["id"], "status": "archived"},
                 {"memory_id": b["id"], "status": "conflicted"},
             ]
-        }
+        },
+        tenant_id=tid,
     )
     assert result["ok"] is True
     assert result["skipped"] == []
@@ -90,7 +91,8 @@ async def test_batch_update_status_sets_supersedes(sc):
                     "supersedes_id": older["id"],
                 },
             ]
-        }
+        },
+        tenant_id=tid,
     )
     assert result["ok"] is True
     assert result["skipped"] == []
@@ -106,7 +108,9 @@ async def test_batch_update_status_unset_supersedes(sc):
     newer = await _write_memory(sc, tid, "newer")
     # First set the pointer via the single-row PATCH so the unset case
     # has something to clear.
-    await sc.update_memory_status(newer["id"], "active", supersedes_id=older["id"])
+    await sc.update_memory_status(
+        newer["id"], "active", tenant_id=tid, supersedes_id=older["id"]
+    )
 
     result = await sc.batch_update_status(
         {
@@ -117,7 +121,8 @@ async def test_batch_update_status_unset_supersedes(sc):
                     "unset_supersedes": True,
                 },
             ]
-        }
+        },
+        tenant_id=tid,
     )
     assert result["ok"] is True
 
@@ -133,7 +138,9 @@ async def test_batch_update_status_cas_skip_on_mismatch(sc):
     newer = await _write_memory(sc, tid, "newer")
     other = await _write_memory(sc, tid, "third")
     # Row currently points at ``other``.
-    await sc.update_memory_status(newer["id"], "conflicted", supersedes_id=other["id"])
+    await sc.update_memory_status(
+        newer["id"], "conflicted", tenant_id=tid, supersedes_id=other["id"]
+    )
 
     # Caller's stale view: thinks the row points at ``older``.
     result = await sc.batch_update_status(
@@ -146,7 +153,8 @@ async def test_batch_update_status_cas_skip_on_mismatch(sc):
                     "expected_supersedes_id": older["id"],
                 },
             ]
-        }
+        },
+        tenant_id=tid,
     )
     # CAS gate fires: row reported as skipped, status untouched.
     assert newer["id"] in result["skipped"]
@@ -596,7 +604,7 @@ async def test_patch_memory_status_returns_404_on_missing(sc):
     a silent ``{ok: True}`` they can't distinguish from a real update.
     """
     ghost = str(uuid4())
-    result = await sc.update_memory_status(ghost, "active")
+    result = await sc.update_memory_status(ghost, "active", tenant_id=_t())
     assert result is None
 
 
@@ -705,7 +713,8 @@ async def test_batch_update_status_malformed_uuid_returns_422(sc):
 
     with pytest.raises(httpx.HTTPStatusError) as exc:
         await sc.batch_update_status(
-            {"updates": [{"memory_id": "not-a-uuid", "status": "active"}]}
+            {"updates": [{"memory_id": "not-a-uuid", "status": "active"}]},
+            tenant_id=_t(),
         )
     assert exc.value.response.status_code == 422
 
@@ -717,7 +726,8 @@ async def test_batch_update_status_missing_required_key_returns_422(sc):
 
     with pytest.raises(httpx.HTTPStatusError) as exc:
         await sc.batch_update_status(
-            {"updates": [{"memory_id": str(uuid4())}]}  # missing "status"
+            {"updates": [{"memory_id": str(uuid4())}]},  # missing "status"
+            tenant_id=_t(),
         )
     assert exc.value.response.status_code == 422
 
@@ -740,7 +750,8 @@ async def test_batch_update_status_partial_validation_failure_writes_nothing(sc)
                     {"memory_id": target["id"], "status": "archived"},
                     {"memory_id": "garbage", "status": "active"},  # crash pt
                 ]
-            }
+            },
+            tenant_id=tid,
         )
     assert exc.value.response.status_code == 422
 
@@ -944,13 +955,14 @@ async def test_batch_update_status_error_detail_omits_raw_item_repr(sc):
     resp = await sc._http.post(
         f"{sc._prefix}/memories/batch-update-status",
         json={
+            "tenant_id": _t(),
             "updates": [
                 {
                     "memory_id": str(uuid4()),
                     # status intentionally absent → KeyError
                     "supersedes_id": "secret-value-must-not-leak",
                 },
-            ]
+            ],
         },
         headers=await sc._auth_headers(read=False),
     )
@@ -972,6 +984,7 @@ async def test_batch_update_status_error_omits_malformed_uuid_value(sc):
     resp = await sc._http.post(
         f"{sc._prefix}/memories/batch-update-status",
         json={
+            "tenant_id": _t(),
             "updates": [
                 {
                     "memory_id": str(uuid4()),
@@ -979,7 +992,7 @@ async def test_batch_update_status_error_omits_malformed_uuid_value(sc):
                     # Bad UUID in supersedes_id, NOT memory_id.
                     "supersedes_id": "secret-uuid-must-not-leak-back",
                 },
-            ]
+            ],
         },
         headers=await sc._auth_headers(read=False),
     )

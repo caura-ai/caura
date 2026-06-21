@@ -90,6 +90,7 @@ async def query_documents(request: Request) -> list[dict]:
         order=body.get("order", "asc"),
         limit=body.get("limit", 20),
         offset=body.get("offset", 0),
+        readable_tenant_ids=body.get("readable_tenant_ids"),
     )
     return [orm_to_dict(d, DOCUMENT_FIELDS) for d in docs]
 
@@ -114,16 +115,40 @@ async def list_collections(
     }
 
 
+# NOTE: registered BEFORE /{collection}/{doc_id} and /{collection} so the
+# literal "collection-count" path doesn't bind ``collection="collection-count"``.
+@router.get("/collection-count")
+async def collection_count(
+    tenant_id: str,
+    collection: str,
+    status: str | None = None,
+    fleet_id: str | None = None,
+    readable_tenant_ids: list[str] | None = Query(default=None),
+) -> dict:
+    """Count documents in ``collection``, optionally filtered by
+    ``data->>'status'``. Backs the MCP skills active-only count correction."""
+    count = await _svc.document_count_in_collection(
+        tenant_id=tenant_id,
+        collection=collection,
+        status=status,
+        fleet_id=fleet_id,
+        readable_tenant_ids=readable_tenant_ids,
+    )
+    return {"count": count}
+
+
 @router.get("/{collection}/{doc_id}")
 async def get_document(
     collection: str,
     doc_id: str,
     tenant_id: str,
+    readable_tenant_ids: list[str] | None = Query(default=None),
 ) -> dict:
     doc = await _svc.document_get_by_doc_id(
         tenant_id=tenant_id,
         collection=collection,
         doc_id=doc_id,
+        readable_tenant_ids=readable_tenant_ids,
     )
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -153,12 +178,18 @@ async def delete_document(
     collection: str,
     doc_id: str,
     tenant_id: str,
+    require_status: str | None = None,
 ) -> dict:
+    """Delete one document. ``require_status`` (optional) folds a
+    ``data->>'status' = :status`` guard into the DELETE atomically — a
+    non-matching/missing row deletes zero rows and 404s, indistinguishable
+    from a missing one (the MCP skills active-only delete gate)."""
     try:
         deleted_id = await _svc.document_delete_by_doc_id(
             tenant_id=tenant_id,
             collection=collection,
             doc_id=doc_id,
+            require_status=require_status,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

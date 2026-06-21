@@ -94,8 +94,10 @@ async def _wire_path_a_retraction(sc, *, newer_id: str, older_id: str) -> None:
     ``newer_id``'s ``supersedes_id`` to point at it. This is the
     bidirectional state Path A produces: older.status=conflicted,
     older.supersedes_id=NULL, newer.supersedes_id=older."""
-    await sc.update_memory_status(older_id, "conflicted")
-    await sc.update_memory_status(newer_id, "active", supersedes_id=older_id)
+    await sc.update_memory_status(older_id, "conflicted", tenant_id=TENANT_ID)
+    await sc.update_memory_status(
+        newer_id, "active", tenant_id=TENANT_ID, supersedes_id=older_id
+    )
 
 
 # ---------------------------------------------------------------------------

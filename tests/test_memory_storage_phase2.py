@@ -212,7 +212,9 @@ async def test_contradictions_bundle_supersessor(sc):
     older = await _write_memory(sc, tid, content="older fact", status="outdated")
     newer = await _write_memory(sc, tid, content="newer fact")
     # newer supersedes older
-    await sc.update_memory_status(newer["id"], "active", supersedes_id=older["id"])
+    await sc.update_memory_status(
+        newer["id"], "active", tenant_id=tid, supersedes_id=older["id"]
+    )
 
     # Older row sees the newer one as a supersessor.
     bundle = await sc.get_memory_contradictions(tid, older["id"])

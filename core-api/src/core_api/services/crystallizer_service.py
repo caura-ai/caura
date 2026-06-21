@@ -369,7 +369,9 @@ async def _run_crystallization(
             {"memory_id": str(mem.get("id")), "status": "archived"} for mem in cluster_memories
         ]
         try:
-            batch_result = await sc.batch_update_status({"updates": cluster_ids_to_archive})
+            batch_result = await sc.batch_update_status(
+                {"updates": cluster_ids_to_archive}, tenant_id=tenant_id
+            )
             skipped_set = set(batch_result.get("skipped") or [])
             for item in cluster_ids_to_archive:
                 if item["memory_id"] not in skipped_set:
