@@ -396,7 +396,17 @@ async def _create_memory_pipeline(db: AsyncSession, data: MemoryCreate) -> Memor
                 "embedding_ms": timings.get("embedding_ms"),
                 "enrichment_ms": timings.get("enrichment_ms"),
                 "storage_ms": timings.get("storage_ms"),
+                "dedup_lookup_ms": timings.get("dedup_lookup_ms"),
                 "entity_links_ms": timings.get("entity_links_ms"),
+                # Sum of every storage roundtrip on the write path (dedup
+                # lookup + insert + entity-link upsert). ``total_ms`` minus
+                # this is pure core-api-side time — the split that attributes
+                # the single_write p99 tail to storage-DB vs core-api.
+                "storage_total_ms": (
+                    (timings.get("storage_ms") or 0)
+                    + (timings.get("dedup_lookup_ms") or 0)
+                    + (timings.get("entity_links_ms") or 0)
+                ),
                 "total_ms": round((time.perf_counter() - ctx.data["t0"]) * 1000),
                 "embedding_pending": bool(memory_metadata.get("embedding_pending")),
                 "enrichment_pending": bool(memory_metadata.get("enrichment_pending")),

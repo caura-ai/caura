@@ -124,6 +124,35 @@ async def test_compute_content_hash_still_looks_up_when_embedding_inline(
 
 
 @pytest.mark.asyncio
+async def test_check_exact_duplicate_records_dedup_lookup_ms():
+    """CheckExactDuplicate times just its storage roundtrip into
+    ``phase_timings["dedup_lookup_ms"]`` so the ``memory_write_latency``
+    emit can separate the dedup lookup (GET /by-content-hash) from the
+    insert (``storage_ms``) and from core-api-side overhead — the split
+    that attributes the single_write p99 tail."""
+    from unittest.mock import AsyncMock, patch
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.write.check_exact_duplicate import CheckExactDuplicate
+
+    ctx = PipelineContext(
+        db=AsyncMock(),
+        data={"input": _make_input(), "content_hash": "deadbeef"},
+    )
+    mock_sc = AsyncMock()
+    mock_sc.find_by_content_hash.return_value = None  # no duplicate
+    with patch(
+        "core_api.pipeline.steps.write.check_exact_duplicate.get_storage_client",
+        return_value=mock_sc,
+    ):
+        result = await CheckExactDuplicate().execute(ctx)
+
+    assert result is None
+    mock_sc.find_by_content_hash.assert_called_once()
+    dedup_ms = ctx.data["phase_timings"]["dedup_lookup_ms"]
+    assert isinstance(dedup_ms, int) and dedup_ms >= 0
+
+
+@pytest.mark.asyncio
 async def test_apply_enrichment_step_defaults():
     """MergeEnrichmentFields applies correct defaults when no enrichment."""
     from unittest.mock import AsyncMock
