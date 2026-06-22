@@ -118,7 +118,7 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> bool:
             logger.info("governance: dropped fast-mode memory %s (non-business)", memory_id)
             return True
         if nb_cfg.disposition == "keep_private":
-            await sc.update_memory(memory_id, {"visibility": "scope_agent"})
+            await sc.update_memory(memory_id, tenant_id, {"visibility": "scope_agent"})
             await emit_governance_audit(
                 None,
                 tenant_id=tenant_id,

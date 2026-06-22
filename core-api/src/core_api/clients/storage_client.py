@@ -436,8 +436,12 @@ class CoreStorageClient:
     async def get_memory_for_tenant(self, tenant_id: str, memory_id: str) -> dict | None:
         return await self._get(f"/memories/{memory_id}", tenant_id=tenant_id)
 
-    async def update_memory(self, memory_id: str, data: dict) -> dict | None:
-        return await self._patch(f"/memories/{memory_id}", data)
+    async def update_memory(self, memory_id: str, tenant_id: str, data: dict) -> dict | None:
+        # ``tenant_id`` (the row's home tenant) scopes the by-id UPDATE on
+        # the storage side so a content PATCH can't cross tenants; sent in
+        # the body and popped there before the remaining keys become the
+        # patch. The explicit arg wins over any ``tenant_id`` in ``data``.
+        return await self._patch(f"/memories/{memory_id}", {**data, "tenant_id": tenant_id})
 
     async def soft_delete_memory(self, memory_id: str) -> bool:
         return await self._delete(f"/memories/{memory_id}")
@@ -750,11 +754,15 @@ class CoreStorageClient:
     async def update_embedding(
         self,
         memory_id: str,
+        tenant_id: str,
         embedding: list[float],
     ) -> dict | None:
+        # ``tenant_id`` (the row's home tenant) scopes the by-id embedding
+        # write so a worker/backfill can't overwrite a foreign tenant's
+        # vector.
         return await self._patch(
             f"/memories/{memory_id}/embedding",
-            {"embedding": embedding},
+            {"embedding": embedding, "tenant_id": tenant_id},
         )
 
     async def update_memory_entities(
@@ -823,8 +831,13 @@ class CoreStorageClient:
     async def find_neighbors_by_embedding(self, data: dict) -> list[dict]:
         return await self._post("/memories/neighbors-by-embedding", data) or []  # type: ignore[return-value]
 
-    async def mark_dedup_checked(self, memory_ids: list[str]) -> dict:
-        return await self._post("/memories/mark-dedup-checked", {"memory_ids": memory_ids})  # type: ignore[return-value]
+    async def mark_dedup_checked(self, memory_ids: list[str], tenant_id: str) -> dict:
+        # ``tenant_id`` (the row's home tenant) bounds the bulk dedup-checked
+        # stamp to the caller's tenant.
+        return await self._post(
+            "/memories/mark-dedup-checked",
+            {"memory_ids": memory_ids, "tenant_id": tenant_id},
+        )  # type: ignore[return-value]
 
     async def batch_update_status(self, data: dict, *, tenant_id: str) -> dict:
         """Apply status updates to many memories within one tenant.

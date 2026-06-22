@@ -524,7 +524,7 @@ class PostgresService:
                 memory.deleted_at = datetime.now(UTC)
                 memory.status = "deleted"
 
-    async def memory_update(self, memory_id: UUID, patch: dict) -> bool:
+    async def memory_update(self, memory_id: UUID, tenant_id: str, patch: dict) -> bool:
         """Apply arbitrary field updates to a memory.
 
         Two patch shapes are supported in the same request:
@@ -540,6 +540,11 @@ class PostgresService:
 
         Other top-level keys whose names don't match a ``Memory`` column
         are silently dropped — callers validate upstream.
+
+        Every statement is scoped to ``tenant_id`` (the row's home
+        tenant): a ``memory_id`` owned by a different tenant matches no
+        row, so the existence check returns ``False`` (→ 404) and neither
+        UPDATE can touch a foreign tenant's row.
 
         Returns ``True`` when the row exists and is live (the patch was
         applied or was a no-op due to all-unknown keys); ``False`` when
@@ -580,7 +585,9 @@ class PostgresService:
             # ``deleted_at`` alone would collapse both into None.
             row = (
                 await session.execute(
-                    select(Memory.id, Memory.deleted_at).where(Memory.id == memory_id).with_for_update()
+                    select(Memory.id, Memory.deleted_at)
+                    .where(Memory.id == memory_id, Memory.tenant_id == tenant_id)
+                    .with_for_update()
                 )
             ).first()
             if row is None:
@@ -603,7 +610,11 @@ class PostgresService:
             if values:
                 await session.execute(
                     sql_update(Memory)
-                    .where(Memory.id == memory_id, Memory.deleted_at.is_(None))
+                    .where(
+                        Memory.id == memory_id,
+                        Memory.tenant_id == tenant_id,
+                        Memory.deleted_at.is_(None),
+                    )
                     .values(**values)
                 )
             if metadata_patch:
@@ -632,8 +643,8 @@ class PostgresService:
                     text(
                         "UPDATE memories "
                         "SET metadata = COALESCE(metadata::jsonb, '{}'::jsonb) || (:patch)::jsonb "
-                        "WHERE id = :id AND deleted_at IS NULL"
-                    ).bindparams(patch=json.dumps(metadata_patch), id=memory_id),
+                        "WHERE id = :id AND tenant_id = :tenant_id AND deleted_at IS NULL"
+                    ).bindparams(patch=json.dumps(metadata_patch), id=memory_id, tenant_id=tenant_id),
                 )
         return True
 
@@ -692,14 +703,22 @@ class PostgresService:
     async def memory_update_embedding(
         self,
         memory_id: UUID,
+        tenant_id: str,
         embedding: list[float],
         metadata: dict | None = None,
     ) -> None:
+        # ``tenant_id`` scopes the write to the row's home tenant: a
+        # memory_id from another tenant matches no row, so a stale or
+        # spoofed worker payload can never overwrite a foreign embedding.
         async with get_session() as session:
             values: dict = {"embedding": embedding}
             if metadata is not None:
                 values["metadata_"] = metadata
-            await session.execute(sql_update(Memory).where(Memory.id == memory_id).values(**values))
+            await session.execute(
+                sql_update(Memory)
+                .where(Memory.id == memory_id, Memory.tenant_id == tenant_id)
+                .values(**values)
+            )
 
     # ------------------------------------------------------------------
     # B) Content hash / dedup
@@ -2267,12 +2286,18 @@ class PostgresService:
     async def memory_mark_dedup_checked(
         self,
         memory_ids: list[UUID],
+        tenant_id: str,
     ) -> None:
         if not memory_ids:
             return
+        # ``tenant_id`` bounds the bulk stamp to the caller's tenant: any
+        # id in the list that belongs to another tenant is silently
+        # skipped rather than having its dedup-checked timestamp moved.
         async with get_session() as session:
             await session.execute(
-                sql_update(Memory).where(Memory.id.in_(memory_ids)).values(last_dedup_checked_at=func.now())
+                sql_update(Memory)
+                .where(Memory.id.in_(memory_ids), Memory.tenant_id == tenant_id)
+                .values(last_dedup_checked_at=func.now())
             )
 
     async def memory_find_expired_still_active(

@@ -37,8 +37,8 @@ def storage(monkeypatch):
         async def soft_delete_memory(self, mid):
             actions.append(("soft_delete", mid))
 
-        async def update_memory(self, mid, patch):
-            actions.append(("update", mid, patch))
+        async def update_memory(self, mid, tenant_id, patch):
+            actions.append(("update", mid, tenant_id, patch))
 
     monkeypatch.setattr(governance_remediation, "get_storage_client", lambda: _SC())
     return actions
@@ -115,7 +115,7 @@ async def test_nonbusiness_keep_private_updates_visibility(emitted, storage):
     mem = _mem(metadata={"business_relevance": "personal"})
     dropped = await governance_remediation.remediate_after_enrichment(mem, cfg)
     assert dropped is False
-    assert ("update", "m1", {"visibility": "scope_agent"}) in storage
+    assert ("update", "m1", "t1", {"visibility": "scope_agent"}) in storage
     assert any(c["action"] == "nonbusiness_keep_private" for c in emitted)
 
 

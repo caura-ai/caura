@@ -1863,7 +1863,7 @@ async def _reembed_memory(
                 )
             )
             return
-        await sc.update_embedding(str(memory_id), embedding)
+        await sc.update_embedding(str(memory_id), tenant_id, embedding)
         logger.info("Background re-embed succeeded for memory %s", memory_id)
     except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
         logger.exception("Background re-embed error for memory %s", memory_id)
@@ -2032,7 +2032,7 @@ async def _reembed_memories_bulk(
             )
             continue
         try:
-            await sc.update_embedding(str(memory_id), embedding)
+            await sc.update_embedding(str(memory_id), tenant_id, embedding)
         except Exception:
             # Broad match for the same reason as the outer batch-call
             # except: httpx-layer errors, pool exhaustion, auth, etc.
@@ -2173,7 +2173,7 @@ async def _enrich_memory_background(
             if patch:
                 # Use a generic memory patch (metadata, type, weight, etc.)
                 # Fall back to update via scored-search patch endpoint
-                await sc._patch(f"/memories/{memory_id}", patch)
+                await sc.update_memory(str(memory_id), tenant_id, patch)
             if status_val:
                 await sc.update_memory_status(str(memory_id), status_val, tenant_id=tenant_id)
 
@@ -2516,7 +2516,7 @@ async def update_memory(
 
     # Apply the patch via storage client
     if patch:
-        await sc._patch(f"/memories/{memory_id}", patch)
+        await sc.update_memory(str(memory_id), tenant_id, patch)
 
     # Audit log — only fire when something actually changed. The
     # ``elif data.metadata`` guard above already prevents falsy

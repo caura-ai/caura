@@ -116,7 +116,10 @@ async def _handle_set_field(body: TimeWarpRequest, auth: AuthContext) -> TimeWar
             raise HTTPException(status_code=404, detail="Memory not found")
         if row.get("tenant_id") != auth.tenant_id:
             raise HTTPException(status_code=403, detail="Tenant mismatch")
-        result = await sc.update_memory(body.id, {body.field: parsed_value.isoformat()})
+        # Pass the row's HOME tenant (verified == auth.tenant_id just above) so
+        # the storage-side guard scopes the write; row["tenant_id"] is a non-null
+        # column, unlike the Optional auth.tenant_id.
+        result = await sc.update_memory(body.id, row["tenant_id"], {body.field: parsed_value.isoformat()})
         affected = 1 if result else 0
     else:
         affected = 0

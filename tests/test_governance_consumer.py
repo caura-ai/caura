@@ -117,7 +117,7 @@ async def test_keep_private_updates_visibility_and_still_runs_detection(
 
     await consumer.handle_memory_enriched(_event(mid))
 
-    sc.update_memory.assert_awaited_once_with(str(mid), {"visibility": "scope_agent"})
+    sc.update_memory.assert_awaited_once_with(str(mid), "tenant-gov", {"visibility": "scope_agent"})
     detect.assert_awaited_once()  # not dropped → detection proceeds on the kept row
 
 

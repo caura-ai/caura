@@ -184,7 +184,7 @@ async def test_atomic_fact_children_embed_raw_fact_content() -> None:
     sc.update_memory_status = AsyncMock()
     install_batch_status_replay_shim(sc)
     sc.create_memory = AsyncMock()
-    sc._patch = AsyncMock()
+    sc.update_memory = AsyncMock()
 
     def _stub_tracked_task(coro, _name, *_a, **_k):
         coro.close()

@@ -242,7 +242,7 @@ async def _remediate_missing_embeddings(
         embedding = await get_embedding(content)
         if embedding is None:
             continue
-        await sc.update_embedding(str(mem_id), embedding)
+        await sc.update_embedding(str(mem_id), tenant_id, embedding)
         patched += 1
 
     if patched:
@@ -551,7 +551,7 @@ async def _check_near_duplicates(
 
     # Mark all processed memories as dedup-checked
     if checked_ids:
-        await sc.mark_dedup_checked(checked_ids)
+        await sc.mark_dedup_checked(checked_ids, tenant_id)
 
     pairs_list = [{"id1": k[0], "id2": k[1], "similarity": v} for k, v in pairs.items()]
     return {"count": len(pairs_list), "pairs": pairs_list}

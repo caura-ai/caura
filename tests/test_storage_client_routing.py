@@ -136,7 +136,7 @@ async def test_patch_goes_to_writer() -> None:
     client, writer, reader = await _fresh_client(
         writer_url="http://writer:8002", reader_url="http://reader:8002"
     )
-    await client.update_embedding("11111111-1111-1111-1111-111111111111", [0.1])
+    await client.update_embedding("11111111-1111-1111-1111-111111111111", "t", [0.1])
     assert len(writer.requests) == 1
     assert len(reader.requests) == 0
 
@@ -289,7 +289,7 @@ async def test_authorization_header_attached_on_patch() -> None:
         client, writer, reader = await _fresh_client(
             writer_url="https://writer:8002", reader_url="https://reader:8002"
         )
-        await client.update_embedding("11111111-1111-1111-1111-111111111111", [0.1])
+        await client.update_embedding("11111111-1111-1111-1111-111111111111", "t", [0.1])
     assert writer.requests[0].headers["Authorization"] == "Bearer tok-writer"
 
 

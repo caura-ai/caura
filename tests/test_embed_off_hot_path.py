@@ -545,7 +545,7 @@ async def test_enrich_no_contradiction_when_no_prior_embedding() -> None:
     sc = MagicMock()
     sc.get_memory = AsyncMock(return_value=mem_row)
     sc.update_embedding = AsyncMock()
-    sc._patch = AsyncMock()
+    sc.update_memory = AsyncMock()
 
     enrichment = SimpleNamespace(
         memory_type="fact",
@@ -807,7 +807,7 @@ async def test_bulk_reembed_reschedules_items_whose_get_memory_failed() -> None:
         )
 
     # Item B went through the normal write pass.
-    sc.update_embedding.assert_awaited_once_with(str(mem_b_id), [0.2] * VECTOR_DIM)
+    sc.update_embedding.assert_awaited_once_with(str(mem_b_id), TENANT_ID, [0.2] * VECTOR_DIM)
     # Item A was rescheduled as a per-item retry (reembed task) AND
     # item B scheduled contradiction detection — both tracked.
     names = [call.args[1] for call in tracked.call_args_list]
@@ -832,7 +832,7 @@ async def test_bulk_reembed_patch_failure_reschedules_item() -> None:
     async def _get_memory(mid: str):
         return {"id": mid, "deleted_at": None, "fleet_id": "f", "embedding": None}
 
-    async def _update_embedding(mid: str, _emb):
+    async def _update_embedding(mid: str, _tenant, _emb):
         if mid == str(mem_a_id):
             raise _MockHTTPError("connection pool exhausted for item A")
 
@@ -954,7 +954,7 @@ async def test_bulk_reembed_respects_existing_embedding_per_item() -> None:
 
     # mem_a: race guard → no PATCH, contradiction on the EXISTING embedding
     # mem_b: normal path → PATCH fresh, contradiction on the fresh embedding
-    sc.update_embedding.assert_awaited_once_with(str(mem_b_id), fresh)
+    sc.update_embedding.assert_awaited_once_with(str(mem_b_id), TENANT_ID, fresh)
     assert len(detect_calls) == 2
     # Order matches the input order; arg[0]=memory_id, arg[4]=embedding
     by_id = {args[0]: args[4] for args in detect_calls}

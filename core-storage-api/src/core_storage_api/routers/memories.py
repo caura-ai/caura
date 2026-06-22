@@ -499,8 +499,11 @@ async def find_neighbors_by_embedding(request: Request) -> list[dict]:
 @router.post("/mark-dedup-checked")
 async def mark_dedup_checked(request: Request) -> dict:
     body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=422, detail="tenant_id is required")
     memory_ids = [UUID(mid) for mid in body["memory_ids"]]
-    await _svc.memory_mark_dedup_checked(memory_ids)
+    await _svc.memory_mark_dedup_checked(memory_ids, tenant_id)
     return {"ok": True}
 
 
@@ -1225,6 +1228,13 @@ async def get_memory(memory_id: UUID, tenant_id: str | None = None) -> dict:
 @router.patch("/{memory_id}")
 async def update_memory(memory_id: UUID, request: Request) -> dict:
     body: dict = await request.json()
+    # Tenant guard: ``tenant_id`` is the row's home tenant, popped out of
+    # the body so it scopes the UPDATE rather than landing as a patched
+    # column (``Memory`` has a ``tenant_id`` column). A PATCH for a row
+    # owned by another tenant matches nothing → 404 below.
+    tenant_id = body.pop("tenant_id", None)
+    if not tenant_id:
+        raise HTTPException(status_code=422, detail="tenant_id is required")
     # ``_parse_datetimes`` mirrors the POST route's ingress contract:
     # asyncpg requires datetime instances on ``DateTime(timezone=True)``
     # columns and rejects ISO strings with ``CannotCoerceError``. The
@@ -1241,7 +1251,7 @@ async def update_memory(memory_id: UUID, request: Request) -> dict:
     # earlier short-circuit would let a PATCH ``{}`` on a deleted row
     # answer 200 — inconsistent with the 404 the same row gets on a
     # non-empty PATCH.
-    found = await _svc.memory_update(memory_id, body or {})
+    found = await _svc.memory_update(memory_id, tenant_id, body or {})
     if not found:
         # Pre-this-fix the route returned ``200 {"ok": True}`` regardless
         # of whether the row was missing or soft-deleted, so a PATCH on
@@ -1358,8 +1368,12 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
 @router.patch("/{memory_id}/embedding")
 async def update_embedding(memory_id: UUID, request: Request) -> dict:
     body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=422, detail="tenant_id is required")
     await _svc.memory_update_embedding(
         memory_id,
+        tenant_id=tenant_id,
         embedding=body["embedding"],
         metadata=body.get("metadata"),
     )
