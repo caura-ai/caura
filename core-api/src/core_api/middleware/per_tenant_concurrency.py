@@ -41,7 +41,7 @@ from core_api.config import settings
 
 logger = logging.getLogger(__name__)
 
-Scope = Literal["write", "search", "storage_write", "storage_search"]
+Scope = Literal["write", "search", "embed", "storage_write", "storage_search"]
 
 # Per-(scope, tenant) state. Read-modify-write of ``_TENANT_SEMAPHORES``
 # in ``_get_semaphore`` is safe without a lock because asyncio runs one
@@ -63,6 +63,8 @@ def _cap_for(scope: Scope) -> int:
         return settings.per_tenant_write_concurrency
     if scope == "search":
         return settings.per_tenant_search_concurrency
+    if scope == "embed":
+        return settings.per_tenant_embed_concurrency
     if scope == "storage_write":
         return settings.per_tenant_storage_write_concurrency
     if scope == "storage_search":
@@ -93,25 +95,26 @@ def _get_semaphore(scope: Scope, tenant_id: str) -> asyncio.Semaphore:
 
 @asynccontextmanager
 async def per_tenant_slot(
-    scope: Literal["write", "search"],
+    scope: Literal["write", "search", "embed"],
     tenant_id: str,
 ) -> AsyncIterator[None]:
     """Acquire one of the per-tenant slots for ``scope``, or raise 429
     fast.
 
     Cap is read from ``Settings`` (``per_tenant_write_concurrency`` /
-    ``per_tenant_search_concurrency``) at semaphore-creation time.
-    Use as a context manager around the request handler body. Releases
-    on exit (success or exception) so a handler raising 5xx still
-    frees the slot.
+    ``per_tenant_search_concurrency`` / ``per_tenant_embed_concurrency``)
+    at semaphore-creation time. Use as a context manager around the
+    request handler body (or, for ``"embed"``, around the embedding
+    backend call). Releases on exit (success or exception) so a handler
+    raising 5xx still frees the slot.
 
-    The ``scope`` parameter is narrowed to the route-entry literals
-    only — the deeper ``"storage_*"`` scopes have different semantics
-    (unbounded queue) and live behind :func:`per_tenant_storage_slot`.
-    Passing a storage scope here would create a fast-fail 429
-    semaphore against the same ``(scope, tenant_id)`` key that the
-    storage variant uses, with no warning; the type-checker rejects
-    that mistake instead.
+    The ``scope`` parameter is narrowed to the fast-fail-429 scopes
+    (``"write"`` / ``"search"`` / ``"embed"``) — the deeper ``"storage_*"``
+    scopes have different semantics (unbounded queue) and live behind
+    :func:`per_tenant_storage_slot`. Passing a storage scope here would
+    create a fast-fail 429 semaphore against the same ``(scope,
+    tenant_id)`` key that the storage variant uses, with no warning; the
+    type-checker rejects that mistake instead.
     """
     sem = _get_semaphore(scope, tenant_id)
     try:

@@ -208,6 +208,20 @@ class Settings(BaseSettings):
     # search/list ops) while still tripping under a genuine storm.
     per_tenant_search_concurrency: int = 32
     per_tenant_write_concurrency: int = 16
+    # Per-tenant cap on concurrent embedding-backend (TEI) calls. Gates
+    # only the single-flight cold-miss leader in
+    # ``memory_service._get_or_cache_embedding`` (cache hits / in-flight
+    # joiners take no slot), so one hot tenant's search storm can't
+    # occupy the whole embedding service and starve other tenants
+    # (noisy-neighbor-search). The TEI backend is a fixed pool
+    # (``staging-memclaw-tei``: 2 instances x containerConcurrency 10 =
+    # ~20 slots, no autoscale); with cap N on M core-api instances a
+    # single tenant holds at most ``N * M`` of those, leaving headroom
+    # for everyone else. Tighter than ``per_tenant_search_concurrency``
+    # on purpose: a tenant may have many searches in flight but only a
+    # few concurrent cold embeds. Fast-fails 429 like the other
+    # route-entry caps rather than queueing behind TEI.
+    per_tenant_embed_concurrency: int = 6
     # Deeper bulkhead at the storage roundtrip itself
     # (CAURA-602 follow-up). Smaller than the route-entry caps above
     # because each request only holds the storage slot for the actual

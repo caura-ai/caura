@@ -39,11 +39,13 @@ def tight_caps(monkeypatch):
         *,
         write: int = 2,
         search: int = 2,
+        embed: int = 2,
         storage_write: int = 2,
         storage_search: int = 2,
     ) -> None:
         monkeypatch.setattr(settings, "per_tenant_write_concurrency", write)
         monkeypatch.setattr(settings, "per_tenant_search_concurrency", search)
+        monkeypatch.setattr(settings, "per_tenant_embed_concurrency", embed)
         monkeypatch.setattr(settings, "per_tenant_storage_write_concurrency", storage_write)
         monkeypatch.setattr(settings, "per_tenant_storage_search_concurrency", storage_search)
         per_tenant_concurrency._reset_for_tests()
@@ -136,6 +138,92 @@ async def test_tenants_isolated(tight_caps):
     finally:
         release.set()
         await holder
+
+
+# ── Embedding-backend slot (noisy-neighbor-search) ──
+
+
+async def test_embed_slot_429s_when_cap_exhausted(tight_caps):
+    """The first ``cap`` embed slots succeed; the next fast-fails 429 —
+    so a hot tenant's cold-miss search storm can't occupy the whole
+    fixed TEI pool."""
+    tight_caps(embed=2)
+
+    async def hold_slot(release: asyncio.Event) -> None:
+        async with per_tenant_slot("embed", "tenant-a"):
+            await release.wait()
+
+    release = asyncio.Event()
+    holders = [
+        asyncio.create_task(hold_slot(release)),
+        asyncio.create_task(hold_slot(release)),
+    ]
+    await asyncio.sleep(0.01)
+    try:
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc:
+            async with per_tenant_slot("embed", "tenant-a"):
+                pass
+        assert exc.value.status_code == 429
+        assert "embed" in exc.value.detail
+    finally:
+        release.set()
+        await asyncio.gather(*holders)
+
+
+async def test_embed_scope_isolated_from_search(tight_caps):
+    """``embed`` and ``search`` track separate caps for the same tenant,
+    so the nested embed gate never consumes the route-entry search
+    budget (and vice versa)."""
+    tight_caps(search=1, embed=1)
+
+    async def hold_embed(release: asyncio.Event) -> None:
+        async with per_tenant_slot("embed", "tenant-a"):
+            await release.wait()
+
+    release = asyncio.Event()
+    holder = asyncio.create_task(hold_embed(release))
+    await asyncio.sleep(0.01)
+    try:
+        # search slot for the same tenant must still be free.
+        async with per_tenant_slot("search", "tenant-a"):
+            pass
+    finally:
+        release.set()
+        await holder
+
+
+async def test_embed_tenants_isolated(tight_caps):
+    """Saturating tenant A's embed cap doesn't affect tenant B — the
+    noisy-neighbor target case for the embedding backend."""
+    tight_caps(embed=1)
+
+    async def hold(release: asyncio.Event) -> None:
+        async with per_tenant_slot("embed", "tenant-a"):
+            await release.wait()
+
+    release = asyncio.Event()
+    holder = asyncio.create_task(hold(release))
+    await asyncio.sleep(0.01)
+    try:
+        async with per_tenant_slot("embed", "tenant-b"):
+            pass
+    finally:
+        release.set()
+        await holder
+
+
+async def test_embed_slot_release_on_exception(tight_caps):
+    """An exception inside the embed slot (e.g. a TEI timeout) releases
+    it for the next caller."""
+    tight_caps(embed=1)
+    with pytest.raises(RuntimeError):
+        async with per_tenant_slot("embed", "tenant-a"):
+            raise RuntimeError("boom")
+    # Cap was 1; if the slot wasn't released we'd 429 here.
+    async with per_tenant_slot("embed", "tenant-a"):
+        pass
 
 
 # ── Storage-call slot (CAURA-602 follow-up) ──

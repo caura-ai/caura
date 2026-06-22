@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
-from core_api.middleware.per_tenant_concurrency import per_tenant_storage_slot
+from core_api.middleware.per_tenant_concurrency import per_tenant_slot, per_tenant_storage_slot
 from core_api.tasks import track_task
 
 try:
@@ -2762,7 +2762,16 @@ async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
         # task instruction (env: ``EMBEDDING_QUERY_INSTRUCTION``) so the query
         # is encoded with the same instruction prefix the model was trained on.
         # Documents (writes) embed unmodified text.
-        embedding = await asyncio.wait_for(get_query_embedding(query, tenant_config), timeout=10.0)
+        #
+        # Per-tenant embed slot: gate the cold-miss leader so one tenant's
+        # search storm can't occupy the whole fixed TEI pool and starve
+        # other tenants (noisy-neighbor-search). Only the leader reaches
+        # here — cache hits and in-flight joiners returned above and take
+        # no slot. Held strictly across the TEI call; a 429 on acquire
+        # propagates through the ``except`` below (future + joiners) and
+        # the ``finally`` still pops the in-flight entry.
+        async with per_tenant_slot("embed", tenant_id):
+            embedding = await asyncio.wait_for(get_query_embedding(query, tenant_config), timeout=10.0)
         if embedding is None:
             raise ValueError("Embedding service unavailable")
         await cache_set(_cache_key, json.dumps(embedding), ttl=EMBEDDING_CACHE_TTL)
