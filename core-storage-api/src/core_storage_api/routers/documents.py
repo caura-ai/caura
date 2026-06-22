@@ -78,6 +78,37 @@ async def search_documents(request: Request) -> list[dict]:
     return results
 
 
+@router.post("/update-status")
+async def update_document_status(request: Request) -> dict:
+    """Conditional (CAS) status flip on a document's ``data`` jsonb.
+
+    Backs ``skill_promoter.make_db_status_updater`` (Fix 2 Ph5a). The UPDATE
+    narrows on the EXPECTED source status; a zero-row match → 404 so core-api
+    raises ``AlreadyTransitionedError`` (mirrors the bec8229 "404 not
+    silent-200" decision). Returns ``{updated: true, doc_id}`` on a match.
+    """
+    body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=422, detail="tenant_id is required")
+    for key in ("collection", "doc_id", "new_status", "expected_status"):
+        if not body.get(key):
+            raise HTTPException(status_code=422, detail=f"{key} is required")
+    updated = await _svc.document_update_status(
+        tenant_id=tenant_id,
+        collection=body["collection"],
+        doc_id=body["doc_id"],
+        new_status=body["new_status"],
+        expected_status=body["expected_status"],
+    )
+    if not updated:
+        # CAS miss: the row no longer carries ``expected_status`` (a
+        # concurrent writer transitioned it, or it never existed). 404 so the
+        # client returns None and the promoter raises AlreadyTransitionedError.
+        raise HTTPException(status_code=404, detail="No document matched the expected status")
+    return {"updated": True, "doc_id": body["doc_id"]}
+
+
 @router.post("/query")
 async def query_documents(request: Request) -> list[dict]:
     body: dict = await request.json()
@@ -137,7 +168,11 @@ async def collection_count(
     return {"count": count}
 
 
-@router.get("/{collection}/{doc_id}")
+# ``doc_id:path`` so by-id access works for doc_ids that contain a slash —
+# forge-distilled skills use ``forge/<slug>`` (see distill_prompt). The doc_id
+# is only ever a bound SQL param here, never a filesystem path, so matching the
+# rest of the URL into it is safe.
+@router.get("/{collection}/{doc_id:path}")
 async def get_document(
     collection: str,
     doc_id: str,
@@ -173,7 +208,7 @@ async def list_documents(
     return [orm_to_dict(d, DOCUMENT_FIELDS) for d in docs]
 
 
-@router.delete("/{collection}/{doc_id}")
+@router.delete("/{collection}/{doc_id:path}")
 async def delete_document(
     collection: str,
     doc_id: str,

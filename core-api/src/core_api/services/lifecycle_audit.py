@@ -228,29 +228,22 @@ class _CoreApiLifecycleAdapter:
         the candidate's ``origin.run_id`` aligned with the event +
         audit row even when queue lag crosses a minute boundary.
         """
-        # Lazy imports — same rationale as crystallize / insights:
-        # ``cron_handler`` pulls in the LLM provider chain via
-        # ``common.llm`` which we don't want loading at core-api
-        # startup just for the lifecycle adapter wiring.
-        from core_api.db.session import async_session
+        # Lazy import — ``cron_handler`` pulls in the LLM provider chain via
+        # ``common.llm`` which we don't want loading at core-api startup just
+        # for the lifecycle adapter wiring.
+        #
+        # Fix 2 Ph5a: this path no longer opens an ``async_session()`` — the
+        # whole forge tick (candidate scan, CAS status flips, session-trace
+        # upsert, poison reads, outcome signals) goes through core-storage-api
+        # via the storage client, each its own committed transaction
+        # storage-side. ``tenant_id`` is threaded in place of the session.
         from core_api.services.forge.cron_handler import run_forge_cron_tick
 
-        async with async_session() as db:
-            stats = await run_forge_cron_tick(
-                db,
-                tenant_id=org_id,
-                fleet_id=fleet_id,
-                run_label=run_label,
-            )
-            # Critical: ``run_forge_cron_tick`` → ``promote_pending_candidates``
-            # → ``make_db_status_updater`` issues raw UPDATEs against this
-            # session. SQLAlchemy's ``async_sessionmaker`` defaults to
-            # ``autocommit=False``, so without this commit every
-            # candidate→staged promotion would roll back when the
-            # context exits — the audit row would report ``promoted=N``
-            # while the DB held ZERO actual transitions. Mirrors the
-            # commit pattern in ``entity_link`` above.
-            await db.commit()
+        stats = await run_forge_cron_tick(
+            tenant_id=org_id,
+            fleet_id=fleet_id,
+            run_label=run_label,
+        )
         # ``stats_key='candidates_produced'`` (see lifecycle_handlers.py
         # registration), so the return value here is the COUNT that
         # populates ``stats.candidates_produced`` on the audit row.

@@ -155,6 +155,30 @@ def _scope_sql(
     return clause, params
 
 
+def _as_json_str(value: Any) -> str:
+    """Normalise a JSONB bind to a JSON string for asyncpg's ``::jsonb`` cast.
+
+    The session-trace upsert binds ``memory_ids`` / ``entity_ids`` /
+    ``signals_summary`` as ``:param::jsonb``; asyncpg expects a JSON string,
+    not a python list/dict. Callers may hand either (the HTTP body arrives as
+    a python object after JSON-decode), so accept both and emit a string.
+    """
+    if isinstance(value, str):
+        return value
+    return json.dumps(value)
+
+
+def _coerce_dt(value: Any) -> Any:
+    """Parse an ISO-8601 string to ``datetime``; pass ``datetime`` through.
+
+    Trace timestamps cross the wire as ISO strings (JSON has no datetime),
+    so the upsert path coerces them back before binding.
+    """
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    return value
+
+
 def _relation_weight(relation_type: str, row_weight: float) -> float:
     """Compute effective weight for a relation edge."""
     type_w = RELATION_TYPE_WEIGHTS.get(
@@ -4939,6 +4963,556 @@ class PostgresService:
             stmt = base.returning(Document.id)
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
+
+    async def document_update_status(
+        self,
+        *,
+        tenant_id: str,
+        collection: str,
+        doc_id: str,
+        new_status: str,
+        expected_status: str,
+    ) -> bool:
+        """Conditional (CAS) status flip on one document's ``data`` jsonb.
+
+        Ports ``skill_promoter.make_db_status_updater._update`` verbatim:
+        narrows the UPDATE on the EXPECTED source status so a concurrent
+        writer that already transitioned the row matches zero rows. Stamps
+        ``<new_status>_at`` alongside the status flip (mirroring
+        ``routes/skills_inbox._persist_status_transition``) so a worker-driven
+        promotion leaves a ``staged_at`` / ``active_at`` timestamp the
+        "promoted age" queries rely on.
+
+        Returns ``True`` when a row matched and was updated, ``False`` when
+        the CAS missed (no row with ``data->>'status' = expected_status``).
+        The route translates ``False`` to a 404 so core-api raises
+        ``AlreadyTransitionedError``.
+        """
+        at_key = f"{new_status}_at"
+        now_iso = datetime.now(UTC).isoformat(timespec="seconds")
+        async with get_session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    UPDATE documents
+                    SET data = jsonb_set(
+                                   jsonb_set(data::jsonb, '{status}', to_jsonb(CAST(:new_status AS text))),
+                                   ARRAY[:at_key],
+                                   to_jsonb(CAST(:now_iso AS text))
+                               )::json
+                    WHERE tenant_id = :tenant_id
+                      AND collection = :collection
+                      AND doc_id     = :doc_id
+                      AND (data->>'status') = :expected_status
+                    RETURNING doc_id
+                    """
+                ),
+                {
+                    "tenant_id": tenant_id,
+                    "collection": collection,
+                    "doc_id": doc_id,
+                    "new_status": new_status,
+                    "expected_status": expected_status,
+                    "at_key": at_key,
+                    "now_iso": now_iso,
+                },
+            )
+            return result.fetchone() is not None
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  SKILL FACTORY — forge poison, session traces, outcome-signal reads
+    #  (Fix 2 Ph5a)
+    # ══════════════════════════════════════════════════════════════════════
+    #
+    # These port the raw PG SQL from the core-api skill-factory pipeline
+    # (services/forge/poison.py, services/session_trace.py,
+    # services/outcome_inference/*) VERBATIM — DISTINCT ON, the self-join on
+    # supersedes_id, the 3-arm fleet predicate, INTERVAL '1 day' * cooloff_days,
+    # ANY(CAST(:ids AS uuid[])), ON CONFLICT ... DO UPDATE, RETURNING. Each
+    # takes an explicit tenant_id (+ fleet/window/params); there are no RLS
+    # GUCs server-side.
+
+    async def forge_write_rejected_fingerprint(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        cluster_fingerprint: str,
+        rejected_by_agent: str,
+        cooloff_days: int,
+        reason: str | None = None,
+    ) -> str:
+        """Insert one ``forge_rejected_fingerprints`` row; return its id.
+
+        Ports ``forge/poison.write_rejected_fingerprint`` verbatim. The
+        ValueError guards (empty fingerprint / cooloff_days < 1) stay on the
+        core-api side so the existing route's 422 contract is unchanged; this
+        method trusts its inputs.
+        """
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO forge_rejected_fingerprints
+                            (tenant_id, fleet_id, cluster_fingerprint,
+                             rejected_by_agent, cooloff_days, reason)
+                        VALUES
+                            (:tenant_id, :fleet_id, :cluster_fingerprint,
+                             :rejected_by_agent, :cooloff_days, :reason)
+                        RETURNING id::text AS id
+                        """
+                    ),
+                    {
+                        "tenant_id": tenant_id,
+                        "fleet_id": fleet_id,
+                        "cluster_fingerprint": cluster_fingerprint,
+                        "rejected_by_agent": rejected_by_agent,
+                        "cooloff_days": cooloff_days,
+                        "reason": reason,
+                    },
+                )
+            ).fetchone()
+            return row.id if row else "unknown"
+
+    async def forge_is_fingerprint_poisoned(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        cluster_fingerprint: str,
+    ) -> bool:
+        """Return True iff a live cooloff row exists for this (tenant, fleet,
+        fp) triple. Ports ``forge/poison.is_fingerprint_poisoned`` verbatim,
+        including the 3-arm fleet predicate and the
+        ``rejected_at + (interval '1 day' * cooloff_days) > now()`` window.
+
+        Reads the PRIMARY (``get_session``), not a replica: this is a write-path
+        guard — the forge tick gates candidate creation on it, so it must see a
+        just-committed rejection. A replica-lag miss would let a freshly rejected
+        cluster be re-proposed. Mirrors ``memory_find_by_content_hash``; the pure
+        analytics reads below stay on the replica.
+        """
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT 1
+                        FROM forge_rejected_fingerprints
+                        WHERE tenant_id = :tenant_id
+                          AND cluster_fingerprint = :cluster_fingerprint
+                          AND (
+                              fleet_id IS NULL
+                              OR CAST(:fleet_id AS text) IS NULL
+                              OR fleet_id = :fleet_id
+                          )
+                          AND rejected_at + (interval '1 day' * cooloff_days) > now()
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "tenant_id": tenant_id,
+                        "fleet_id": fleet_id,
+                        "cluster_fingerprint": cluster_fingerprint,
+                    },
+                )
+            ).fetchone()
+            return row is not None
+
+    async def session_traces_upsert(self, *, tenant_id: str, traces: list[dict]) -> None:
+        """Batch-upsert ``session_traces`` rows keyed by
+        ``(tenant_id, run_id, agent_id)``. Ports
+        ``session_trace._upsert_session_traces`` verbatim (one statement per
+        row, jsonb-cast binds). Every trace's ``tenant_id`` is forced to the
+        batch-level ``tenant_id`` so a caller can't smuggle a foreign tenant
+        into the batch.
+        """
+        if not traces:
+            return
+        sql = """
+            INSERT INTO session_traces (
+                tenant_id, fleet_id, run_id, agent_id,
+                outcome_label, memory_ids, entity_ids,
+                signals_summary, goal_phrase, started_at, ended_at
+            )
+            VALUES (
+                :tenant_id, :fleet_id, :run_id, :agent_id,
+                :outcome_label,
+                CAST(:memory_ids AS jsonb), CAST(:entity_ids AS jsonb),
+                CAST(:signals_summary AS jsonb), :goal_phrase,
+                :started_at, :ended_at
+            )
+            ON CONFLICT (tenant_id, run_id, agent_id) DO UPDATE SET
+                fleet_id         = EXCLUDED.fleet_id,
+                outcome_label    = EXCLUDED.outcome_label,
+                memory_ids       = EXCLUDED.memory_ids,
+                entity_ids       = EXCLUDED.entity_ids,
+                signals_summary  = EXCLUDED.signals_summary,
+                goal_phrase      = EXCLUDED.goal_phrase,
+                started_at       = EXCLUDED.started_at,
+                ended_at         = EXCLUDED.ended_at
+        """
+        async with get_session() as session:
+            for trace in traces:
+                bind = {
+                    "tenant_id": tenant_id,
+                    "fleet_id": trace.get("fleet_id"),
+                    "run_id": trace["run_id"],
+                    "agent_id": trace["agent_id"],
+                    "outcome_label": trace["outcome_label"],
+                    # JSONB params need to be JSON strings for asyncpg. The
+                    # caller may hand either a python object or a pre-dumped
+                    # string; normalise to a string here.
+                    "memory_ids": _as_json_str(trace.get("memory_ids", [])),
+                    "entity_ids": _as_json_str(trace.get("entity_ids", [])),
+                    "signals_summary": _as_json_str(trace.get("signals_summary", {})),
+                    "goal_phrase": trace.get("goal_phrase"),
+                    "started_at": _coerce_dt(trace["started_at"]),
+                    "ended_at": _coerce_dt(trace["ended_at"]),
+                }
+                await session.execute(text(sql), bind)
+
+    async def session_memories_in_window(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[dict]:
+        """Return run-scoped memories in the window for trace enumeration.
+
+        Ports ``session_trace._query_memories_in_window`` verbatim. Rows
+        carry ``memory_id, run_id, agent_id, fleet_id, created_at``; the
+        builder groups them by ``(run_id, agent_id)``.
+        """
+        sql = """
+            SELECT
+                m.id           AS memory_id,
+                m.run_id       AS run_id,
+                m.agent_id     AS agent_id,
+                m.fleet_id     AS fleet_id,
+                m.created_at   AS created_at
+            FROM memories AS m
+            WHERE m.tenant_id = :tenant_id
+              AND m.created_at >= :w_start
+              AND m.created_at <  :w_end
+              AND m.run_id IS NOT NULL
+              AND (CAST(:fleet_id AS text) IS NULL OR m.fleet_id = :fleet_id OR m.fleet_id IS NULL)
+            ORDER BY m.run_id, m.agent_id, m.created_at ASC
+        """
+        async with get_read_session() as session:
+            rows = (
+                await session.execute(
+                    text(sql),
+                    {
+                        "tenant_id": tenant_id,
+                        "fleet_id": fleet_id,
+                        "w_start": window_start,
+                        "w_end": window_end,
+                    },
+                )
+            ).fetchall()
+        return [
+            {
+                "memory_id": str(r.memory_id),
+                "run_id": r.run_id,
+                "agent_id": r.agent_id,
+                "fleet_id": r.fleet_id,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+
+    async def memory_entity_links_batch(self, *, tenant_id: str, memory_ids: list[str]) -> list[dict]:
+        """Return ``(memory_id, entity_id)`` pairs for a batch of memory ids.
+
+        Ports ``session_trace._query_entity_ids_for_memories`` — casts the
+        PARAMETER to ``uuid[]`` (NOT the column to text) so the index on
+        ``memory_entity_links.memory_id`` stays eligible. Scoped to
+        ``tenant_id`` via a join on ``memories`` (the link table has no
+        tenant column) so the HTTP boundary can't return another tenant's
+        links for a smuggled id. Empty input → empty list (no query issued).
+        """
+        if not memory_ids:
+            return []
+        sql = """
+            SELECT mel.memory_id::text AS memory_id, mel.entity_id::text AS entity_id
+            FROM memory_entity_links AS mel
+            JOIN memories AS m ON m.id = mel.memory_id AND m.tenant_id = :tenant_id
+            WHERE mel.memory_id = ANY(CAST(:memory_ids AS uuid[]))
+        """
+        async with get_read_session() as session:
+            rows = (
+                await session.execute(text(sql), {"tenant_id": tenant_id, "memory_ids": list(memory_ids)})
+            ).fetchall()
+        return [{"memory_id": r.memory_id, "entity_id": r.entity_id} for r in rows]
+
+    async def memory_content_by_ids(self, *, tenant_id: str, memory_ids: list[str]) -> list[dict]:
+        """Bulk-load ``(id, content)`` by memory id. Ports
+        ``forge/cron_handler._make_memory_fetcher._fetch`` — the param-cast
+        (text[] → uuid[]) preserves the btree index on ``memories.id``.
+        Scoped to ``tenant_id`` so the HTTP boundary can't return another
+        tenant's content for a smuggled id. Empty input → empty list.
+        """
+        if not memory_ids:
+            return []
+        sql = (
+            "SELECT id::text AS id, content FROM memories "
+            "WHERE id = ANY(CAST(:ids AS uuid[])) AND tenant_id = :tenant_id"
+        )
+        async with get_read_session() as session:
+            rows = (
+                await session.execute(text(sql), {"ids": list(memory_ids), "tenant_id": tenant_id})
+            ).fetchall()
+        return [{"id": r.id, "content": r.content if r.content is not None else ""} for r in rows]
+
+    async def outcome_contradiction_signals(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        window_start: datetime,
+        window_end: datetime,
+        contradicted_statuses: list[str],
+        run_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> list[dict]:
+        """Contradicted memories whose status flip falls in the window.
+
+        Ports ``outcome_inference/contradictions.extract`` (``status =
+        ANY(:contradicted_statuses)`` + a window on the status-transition
+        time).
+
+        DEVIATION (Fix 2 Ph5a): the source SQL windowed on
+        ``COALESCE(m.updated_at, m.created_at)``, but the OSS ``memories``
+        table has NO ``updated_at`` column (verified against
+        ``001_initial_schema`` + the ``Memory`` model — only ``agents`` /
+        ``documents`` carry one). That reference was a latent bug against the
+        OSS schema (the extractor was only ever unit-tested with a mocked
+        ``db``, never executed against a real OSS DB). We window on
+        ``created_at`` instead — the faithful OSS-correct approximation of the
+        same intent. When a ``status_changed_at`` / ``updated_at`` column lands
+        (the CAURA-future the source docstring anticipates), swap it back in.
+        """
+        sql = """
+            SELECT
+                m.id          AS memory_id,
+                m.run_id      AS run_id,
+                m.agent_id    AS agent_id,
+                m.status      AS status,
+                m.created_at  AS observed_at
+            FROM memories AS m
+            WHERE m.tenant_id = :tenant_id
+              AND m.status = ANY(CAST(:contradicted_statuses AS text[]))
+              AND m.created_at >= :w_start
+              AND m.created_at <  :w_end
+              AND (CAST(:fleet_id AS text) IS NULL OR m.fleet_id = :fleet_id OR m.fleet_id IS NULL)
+              AND (CAST(:run_id AS text) IS NULL OR m.run_id   = :run_id)
+              AND (CAST(:agent_id AS text) IS NULL OR m.agent_id = :agent_id)
+              AND m.run_id IS NOT NULL
+        """
+        async with get_read_session() as session:
+            rows = (
+                await session.execute(
+                    text(sql),
+                    {
+                        "tenant_id": tenant_id,
+                        "fleet_id": fleet_id,
+                        "w_start": window_start,
+                        "w_end": window_end,
+                        "run_id": run_id,
+                        "agent_id": agent_id,
+                        "contradicted_statuses": list(contradicted_statuses),
+                    },
+                )
+            ).fetchall()
+        return [
+            {
+                "memory_id": str(r.memory_id),
+                "run_id": r.run_id,
+                "agent_id": r.agent_id,
+                "status": r.status,
+                "observed_at": r.observed_at.isoformat() if r.observed_at else None,
+            }
+            for r in rows
+        ]
+
+    async def outcome_supersession_signals(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        window_start: datetime,
+        window_end: datetime,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> list[dict]:
+        """Memories superseded within the window (self-join on
+        ``supersedes_id``). Ports ``outcome_inference/supersessions.extract``
+        SQL verbatim, including the cross-fleet isolation predicate on the
+        OLD memory.
+        """
+        sql = """
+            SELECT
+                old_mem.id           AS superseded_id,
+                old_mem.run_id       AS run_id,
+                old_mem.agent_id     AS agent_id,
+                new_mem.id           AS by_id,
+                new_mem.created_at   AS observed_at
+            FROM memories AS new_mem
+            JOIN memories AS old_mem
+              ON old_mem.id = new_mem.supersedes_id
+             AND old_mem.tenant_id = new_mem.tenant_id
+            WHERE new_mem.tenant_id = :tenant_id
+              AND new_mem.created_at >= :w_start
+              AND new_mem.created_at <  :w_end
+              AND (CAST(:fleet_id AS text) IS NULL OR new_mem.fleet_id  = :fleet_id  OR new_mem.fleet_id IS NULL)
+              AND (CAST(:fleet_id AS text) IS NULL OR old_mem.fleet_id  = :fleet_id  OR old_mem.fleet_id IS NULL)
+              AND (CAST(:run_id AS text) IS NULL OR old_mem.run_id    = :run_id)
+              AND (CAST(:agent_id AS text) IS NULL OR old_mem.agent_id  = :agent_id)
+              AND old_mem.run_id IS NOT NULL
+        """
+        async with get_read_session() as session:
+            rows = (
+                await session.execute(
+                    text(sql),
+                    {
+                        "tenant_id": tenant_id,
+                        "fleet_id": fleet_id,
+                        "w_start": window_start,
+                        "w_end": window_end,
+                        "run_id": run_id,
+                        "agent_id": agent_id,
+                    },
+                )
+            ).fetchall()
+        return [
+            {
+                "superseded_id": str(r.superseded_id),
+                "run_id": r.run_id,
+                "agent_id": r.agent_id,
+                "by_id": str(r.by_id),
+                "observed_at": r.observed_at.isoformat() if r.observed_at else None,
+            }
+            for r in rows
+        ]
+
+    async def outcome_cross_agent_reuse_signals(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        window_start: datetime,
+        window_end: datetime,
+        threshold: int,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> list[dict]:
+        """Load-bearing memories (``recall_count >= threshold``) authored in
+        the window. Ports ``outcome_inference/cross_agent_reuse.extract`` SQL
+        verbatim.
+        """
+        sql = """
+            SELECT
+                m.id           AS memory_id,
+                m.run_id       AS run_id,
+                m.agent_id     AS agent_id,
+                m.recall_count AS recall_count,
+                m.last_recalled_at AS observed_at
+            FROM memories AS m
+            WHERE m.tenant_id = :tenant_id
+              AND m.recall_count >= :threshold
+              AND m.created_at >= :w_start
+              AND m.created_at <  :w_end
+              AND m.run_id IS NOT NULL
+              AND (CAST(:fleet_id AS text) IS NULL OR m.fleet_id = :fleet_id OR m.fleet_id IS NULL)
+              AND (CAST(:run_id AS text) IS NULL OR m.run_id   = :run_id)
+              AND (CAST(:agent_id AS text) IS NULL OR m.agent_id = :agent_id)
+        """
+        async with get_read_session() as session:
+            rows = (
+                await session.execute(
+                    text(sql),
+                    {
+                        "tenant_id": tenant_id,
+                        "fleet_id": fleet_id,
+                        "w_start": window_start,
+                        "w_end": window_end,
+                        "run_id": run_id,
+                        "agent_id": agent_id,
+                        "threshold": threshold,
+                    },
+                )
+            ).fetchall()
+        return [
+            {
+                "memory_id": str(r.memory_id),
+                "run_id": r.run_id,
+                "agent_id": r.agent_id,
+                "recall_count": r.recall_count,
+                "observed_at": r.observed_at.isoformat() if r.observed_at else None,
+            }
+            for r in rows
+        ]
+
+    async def outcome_terminal_memory_signals(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        window_start: datetime,
+        window_end: datetime,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> list[dict]:
+        """The LAST memory of each session in the window (``DISTINCT ON
+        (run_id, agent_id) ... ORDER BY run_id, agent_id, created_at DESC``).
+        Ports ``outcome_inference/terminal_memory.extract`` SQL verbatim; the
+        keyword classifier stays on the core-api side.
+        """
+        sql = """
+            SELECT DISTINCT ON (m.run_id, m.agent_id)
+                m.id          AS memory_id,
+                m.run_id      AS run_id,
+                m.agent_id    AS agent_id,
+                m.content     AS content,
+                m.created_at  AS observed_at
+            FROM memories AS m
+            WHERE m.tenant_id = :tenant_id
+              AND m.created_at >= :w_start
+              AND m.created_at <  :w_end
+              AND m.run_id IS NOT NULL
+              AND (CAST(:fleet_id AS text) IS NULL OR m.fleet_id = :fleet_id OR m.fleet_id IS NULL)
+              AND (CAST(:run_id AS text) IS NULL OR m.run_id   = :run_id)
+              AND (CAST(:agent_id AS text) IS NULL OR m.agent_id = :agent_id)
+            ORDER BY m.run_id, m.agent_id, m.created_at DESC
+        """
+        async with get_read_session() as session:
+            rows = (
+                await session.execute(
+                    text(sql),
+                    {
+                        "tenant_id": tenant_id,
+                        "fleet_id": fleet_id,
+                        "w_start": window_start,
+                        "w_end": window_end,
+                        "run_id": run_id,
+                        "agent_id": agent_id,
+                    },
+                )
+            ).fetchall()
+        return [
+            {
+                "memory_id": str(r.memory_id),
+                "run_id": r.run_id,
+                "agent_id": r.agent_id,
+                "content": r.content,
+                "observed_at": r.observed_at.isoformat() if r.observed_at else None,
+            }
+            for r in rows
+        ]
 
     # ══════════════════════════════════════════════════════════════════════
     #  FLEET

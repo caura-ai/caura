@@ -132,7 +132,7 @@ class TestForgeConfigResolution:
             "core_api.services.forge.cron_handler.get_settings_for_display",
             new=AsyncMock(return_value=fake_settings),
         ):
-            cfg = await _resolve_forge_config(db=None, org_id="tenant-1")
+            cfg = await _resolve_forge_config(org_id="tenant-1")
         assert cfg.min_cluster_size == 5
         assert cfg.min_distinct_agents == 4
         assert cfg.freshness_window_days == 7
@@ -147,7 +147,7 @@ class TestForgeConfigResolution:
             "core_api.services.forge.cron_handler.get_settings_for_display",
             new=AsyncMock(return_value={}),
         ):
-            cfg = await _resolve_forge_config(db=None, org_id="empty-tenant")
+            cfg = await _resolve_forge_config(org_id="empty-tenant")
         defaults = ForgeConfig()
         assert cfg.min_cluster_size == defaults.min_cluster_size
         assert cfg.body_max_bytes == defaults.body_max_bytes
@@ -237,7 +237,6 @@ class TestRunForgeCronTick:
             ),
         ):
             stats = await run_forge_cron_tick(
-                db=AsyncMock(),
                 tenant_id="t1",
                 fleet_id=None,
                 run_label="forge-cron-t1-20260608T2100",
@@ -339,7 +338,6 @@ class TestRunForgeCronTick:
             ),
         ):
             stats = await run_forge_cron_tick(
-                db=AsyncMock(),
                 tenant_id="t1",
                 fleet_id=None,
                 run_label="forge-cron-t1-20260610T0000",

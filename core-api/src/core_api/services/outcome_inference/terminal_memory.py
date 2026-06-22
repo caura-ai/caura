@@ -29,9 +29,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
 
-from sqlalchemy import text
+from core_api.clients.storage_client import get_storage_client
 
 from . import (
     DEFAULT_SIGNAL_WEIGHTS,
@@ -39,6 +38,7 @@ from . import (
     SignalEvidence,
     SignalKind,
     SignalQuery,
+    parse_observed_at,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,7 +111,7 @@ def _classify(content: str | None) -> Polarity | None:
     return None
 
 
-async def extract(query: SignalQuery, db: Any) -> list[SignalEvidence]:
+async def extract(query: SignalQuery) -> list[SignalEvidence]:
     """Find the LAST memory of each session within the window and
     classify its content.
 
@@ -123,48 +123,27 @@ async def extract(query: SignalQuery, db: Any) -> list[SignalEvidence]:
 
     Output: at most one ``SignalEvidence`` per (run_id, agent_id) pair
     that produced a confidently classified terminal.
+
+    As of Fix 2 Ph5a the ``DISTINCT ON (run_id, agent_id) ... ORDER BY
+    run_id, agent_id, created_at DESC`` read goes through core-storage-api
+    (``sc.outcome_terminal_memory_signals``); the keyword classifier stays
+    here on the core-api side.
     """
     weight = DEFAULT_SIGNAL_WEIGHTS[SignalKind.TERMINAL_MEMORY]
 
-    # DISTINCT ON pattern picks the latest memory per (run_id,
-    # agent_id) — Postgres-specific but already used elsewhere in
-    # the codebase (see contradictions.py).
-    sql = """
-        SELECT DISTINCT ON (m.run_id, m.agent_id)
-            m.id          AS memory_id,
-            m.run_id      AS run_id,
-            m.agent_id    AS agent_id,
-            m.content     AS content,
-            m.created_at  AS observed_at
-        FROM memories AS m
-        WHERE m.tenant_id = :tenant_id
-          AND m.created_at >= :w_start
-          AND m.created_at <  :w_end
-          AND m.run_id IS NOT NULL
-          AND (:fleet_id IS NULL OR m.fleet_id = :fleet_id OR m.fleet_id IS NULL)
-          AND (:run_id   IS NULL OR m.run_id   = :run_id)
-          AND (:agent_id IS NULL OR m.agent_id = :agent_id)
-        ORDER BY m.run_id, m.agent_id, m.created_at DESC
-    """
-
-    rows = (
-        await db.execute(
-            text(sql),
-            {
-                "tenant_id": query.tenant_id,
-                "fleet_id": query.fleet_id,
-                "w_start": query.window_start,
-                "w_end": query.window_end,
-                "run_id": query.run_id,
-                "agent_id": query.agent_id,
-            },
-        )
-    ).fetchall()
+    rows = await get_storage_client().outcome_terminal_memory_signals(
+        tenant_id=query.tenant_id,
+        fleet_id=query.fleet_id,
+        window_start=query.window_start,
+        window_end=query.window_end,
+        run_id=query.run_id,
+        agent_id=query.agent_id,
+    )
 
     out: list[SignalEvidence] = []
     classified_count = 0
     for row in rows:
-        verdict = _classify(row.content)
+        verdict = _classify(row.get("content"))
         if verdict is None:
             continue
         classified_count += 1
@@ -173,15 +152,15 @@ async def extract(query: SignalQuery, db: Any) -> list[SignalEvidence]:
                 kind=SignalKind.TERMINAL_MEMORY,
                 polarity=verdict,
                 weight=weight,
-                memory_ids=(str(row.memory_id),),
+                memory_ids=(str(row["memory_id"]),),
                 details={
-                    "memory_id": str(row.memory_id),
-                    "run_id": row.run_id,
-                    "agent_id": row.agent_id,
+                    "memory_id": str(row["memory_id"]),
+                    "run_id": row["run_id"],
+                    "agent_id": row["agent_id"],
                     "classifier_version": CLASSIFIER_VERSION,
                     "verdict": verdict.value,
                 },
-                observed_at=row.observed_at,
+                observed_at=parse_observed_at(row.get("observed_at")),
             )
         )
 

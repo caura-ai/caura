@@ -27,9 +27,8 @@ same; the SQL gets sharper. Tracked as OQ-future.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
-from sqlalchemy import text
+from core_api.clients.storage_client import get_storage_client
 
 from . import (
     DEFAULT_SIGNAL_WEIGHTS,
@@ -37,6 +36,7 @@ from . import (
     SignalEvidence,
     SignalKind,
     SignalQuery,
+    parse_observed_at,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,47 +51,29 @@ kind: SignalKind = SignalKind.CROSS_AGENT_REUSE
 DEFAULT_RECALL_COUNT_THRESHOLD: int = 5
 
 
-async def extract(query: SignalQuery, db: Any) -> list[SignalEvidence]:
+async def extract(query: SignalQuery) -> list[SignalEvidence]:
     """Find memories with recall_count above threshold whose AUTHOR's
     trace is in the window. The signal fires on the AUTHOR's trace
     (the session that produced the load-bearing memory), not on the
     recalling sessions — that's where Forge needs the evidence to
     decide "this trace's procedure is worth crystallising".
+
+    As of Fix 2 Ph5a the analytic read goes through core-storage-api
+    (``sc.outcome_cross_agent_reuse_signals``); the ``recall_count >=
+    :threshold`` + window SQL lives in
+    ``PostgresService.outcome_cross_agent_reuse_signals``.
     """
     weight = DEFAULT_SIGNAL_WEIGHTS[SignalKind.CROSS_AGENT_REUSE]
 
-    sql = """
-        SELECT
-            m.id           AS memory_id,
-            m.run_id       AS run_id,
-            m.agent_id     AS agent_id,
-            m.recall_count AS recall_count,
-            m.last_recalled_at AS observed_at
-        FROM memories AS m
-        WHERE m.tenant_id = :tenant_id
-          AND m.recall_count >= :threshold
-          AND m.created_at >= :w_start
-          AND m.created_at <  :w_end
-          AND m.run_id IS NOT NULL
-          AND (:fleet_id IS NULL OR m.fleet_id = :fleet_id OR m.fleet_id IS NULL)
-          AND (:run_id   IS NULL OR m.run_id   = :run_id)
-          AND (:agent_id IS NULL OR m.agent_id = :agent_id)
-    """
-
-    rows = (
-        await db.execute(
-            text(sql),
-            {
-                "tenant_id": query.tenant_id,
-                "fleet_id": query.fleet_id,
-                "w_start": query.window_start,
-                "w_end": query.window_end,
-                "run_id": query.run_id,
-                "agent_id": query.agent_id,
-                "threshold": DEFAULT_RECALL_COUNT_THRESHOLD,
-            },
-        )
-    ).fetchall()
+    rows = await get_storage_client().outcome_cross_agent_reuse_signals(
+        tenant_id=query.tenant_id,
+        fleet_id=query.fleet_id,
+        window_start=query.window_start,
+        window_end=query.window_end,
+        threshold=DEFAULT_RECALL_COUNT_THRESHOLD,
+        run_id=query.run_id,
+        agent_id=query.agent_id,
+    )
 
     out: list[SignalEvidence] = []
     for row in rows:
@@ -100,16 +82,16 @@ async def extract(query: SignalQuery, db: Any) -> list[SignalEvidence]:
                 kind=SignalKind.CROSS_AGENT_REUSE,
                 polarity=Polarity.NEUTRAL,
                 weight=weight,
-                memory_ids=(str(row.memory_id),),
+                memory_ids=(str(row["memory_id"]),),
                 details={
-                    "memory_id": str(row.memory_id),
-                    "run_id": row.run_id,
-                    "agent_id": row.agent_id,
-                    "recall_count": row.recall_count,
+                    "memory_id": str(row["memory_id"]),
+                    "run_id": row["run_id"],
+                    "agent_id": row["agent_id"],
+                    "recall_count": row["recall_count"],
                     "threshold": DEFAULT_RECALL_COUNT_THRESHOLD,
                     "approximation": "total-recalls (Phase 1 v1) — see module docstring",
                 },
-                observed_at=row.observed_at,
+                observed_at=parse_observed_at(row.get("observed_at")),
             )
         )
 

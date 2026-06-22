@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -72,53 +72,69 @@ class _MemRow:
 
 @dataclass
 class _EntityRow:
-    """Mock row for the ``memory_entity_links`` SELECT.
+    """Mock row for the ``memory_entity_links`` read.
 
-    The N+1 fix changed the SQL from "give me entity_ids for these
-    memories" (returned a flat list per call) to "give me
-    (memory_id, entity_id) pairs for these memories" (returned a
-    dict via one bulk call). The mock row now carries both columns
-    so the builder's regrouping logic can be exercised.
+    The builder asks storage for ``(memory_id, entity_id)`` pairs in one
+    bulk call; this row carries both columns so the regrouping logic can be
+    exercised.
     """
 
     memory_id: str
     entity_id: str
 
 
-def _mock_db_for_build(
+class _FakeStorageClient:
+    """Stand-in for the storage client the session-trace builder uses.
+
+    Ph5a: ``build_session_traces`` no longer takes a ``db`` session — it
+    calls ``sc.session_memories_in_window`` (run-scoped memories),
+    ``sc.session_trace_entity_links`` (bulk entity links), and
+    ``sc.upsert_session_traces`` (persist). This fake records calls so the
+    tests can assert the single-bulk-entity-query invariant + the
+    persist/no-persist split without any real SQL.
+    """
+
+    def __init__(self, memory_rows: list[_MemRow], entity_rows: list[_EntityRow]):
+        self._memory_rows = memory_rows
+        self._entity_rows = entity_rows
+        self.entity_link_calls: list[list[str]] = []
+        self.upsert_calls: list[list[dict]] = []
+
+    async def session_memories_in_window(self, *, tenant_id, fleet_id, window_start, window_end):
+        return [
+            {
+                "memory_id": m.memory_id,
+                "run_id": m.run_id,
+                "agent_id": m.agent_id,
+                "fleet_id": m.fleet_id,
+                "created_at": m.created_at.isoformat(),
+            }
+            for m in self._memory_rows
+        ]
+
+    async def session_trace_entity_links(self, *, tenant_id, memory_ids):
+        self.entity_link_calls.append(list(memory_ids))
+        wanted = set(memory_ids)
+        return [
+            {"memory_id": e.memory_id, "entity_id": e.entity_id}
+            for e in self._entity_rows
+            if e.memory_id in wanted
+        ]
+
+    async def upsert_session_traces(self, *, tenant_id, traces):
+        self.upsert_calls.append(list(traces))
+
+
+def _patch_storage_for_build(
     memory_rows: list[_MemRow],
     entity_rows: list[_EntityRow] | None = None,
-):
-    """Mock the db.execute() returning different result sets based on
-    which SQL is being executed. The builder issues:
-      - one SELECT against ``memories`` (groups by run_id/agent_id)
-      - one SELECT against ``memory_entity_links`` per trace
-      - one INSERT per trace on persist
-    """
-    if entity_rows is None:
-        entity_rows = []
-
-    call_log: list[str] = []
-
-    def make_proxy(rows):
-        p = MagicMock()
-        p.fetchall.return_value = rows
-        return p
-
-    async def execute(sql, params=None):
-        sql_text = str(sql).lower()
-        call_log.append(sql_text)
-        if "from memories" in sql_text and "memory_entity_links" not in sql_text:
-            return make_proxy(memory_rows)
-        if "from memory_entity_links" in sql_text:
-            return make_proxy(entity_rows)
-        # INSERT path returns an empty proxy.
-        return make_proxy([])
-
-    db = MagicMock()
-    db.execute = AsyncMock(side_effect=execute)
-    db._call_log = call_log
-    return db
+) -> tuple[_FakeStorageClient, object]:
+    """Build a fake storage client + a patch context that wires it into
+    ``session_trace.get_storage_client``. Returns ``(fake, ctx)``; the
+    caller uses ``with ctx:`` and asserts on ``fake``."""
+    fake = _FakeStorageClient(memory_rows, entity_rows or [])
+    ctx = patch("core_api.services.session_trace.get_storage_client", return_value=fake)
+    return fake, ctx
 
 
 # ── fold_outcome_label ─────────────────────────────────────────────
@@ -237,15 +253,15 @@ class TestSummarizeEvidence:
 class TestBuildSessionTracesOrchestration:
     @pytest.mark.asyncio
     async def test_no_memories_no_traces(self):
-        db = _mock_db_for_build(memory_rows=[])
-        out = await build_session_traces(
-            db,
-            tenant_id="t1",
-            fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
-            persist=False,
-        )
+        _fake, ctx = _patch_storage_for_build(memory_rows=[])
+        with ctx:
+            out = await build_session_traces(
+                tenant_id="t1",
+                fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                persist=False,
+            )
         assert out == []
 
     @pytest.mark.asyncio
@@ -255,13 +271,14 @@ class TestBuildSessionTracesOrchestration:
             _MemRow("m2", "run-A", "sasha", None, datetime(2026, 5, 6, tzinfo=timezone.utc)),
             _MemRow("m3", "run-B", "mira",  None, datetime(2026, 5, 7, tzinfo=timezone.utc)),
         ]
-        db = _mock_db_for_build(memory_rows=mem)
-        out = await build_session_traces(
-            db, tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
-            persist=False,
-        )
+        _fake, ctx = _patch_storage_for_build(memory_rows=mem)
+        with ctx:
+            out = await build_session_traces(
+                tenant_id="t1", fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                persist=False,
+            )
         # Two distinct (run_id, agent_id) groups → two traces.
         assert len(out) == 2
         traces_by_key = {(r.run_id, r.agent_id): r for r in out}
@@ -273,7 +290,7 @@ class TestBuildSessionTracesOrchestration:
     @pytest.mark.asyncio
     async def test_runs_all_six_extractors_concurrently(self):
         mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=timezone.utc))]
-        db = _mock_db_for_build(memory_rows=mem)
+        _fake, ctx = _patch_storage_for_build(memory_rows=mem)
 
         # Patch every extractor to return [] but capture invocation count.
         call_counts: dict[str, int] = {mod.__name__: 0 for mod in SIGNAL_MODULES}
@@ -284,7 +301,7 @@ class TestBuildSessionTracesOrchestration:
                 return []
             return fake_extract
 
-        patches = []
+        patches = [ctx]
         for mod in SIGNAL_MODULES:
             fake = await make_recorder(mod.__name__)
             patches.append(patch.object(mod, "extract", new=fake))
@@ -293,7 +310,7 @@ class TestBuildSessionTracesOrchestration:
             p.start()
         try:
             await build_session_traces(
-                db, tenant_id="t1", fleet_id=None,
+                tenant_id="t1", fleet_id=None,
                 window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
                 window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
                 persist=False,
@@ -311,7 +328,7 @@ class TestBuildSessionTracesOrchestration:
             _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=timezone.utc)),
             _MemRow("m2", "run-B", "mira",  None, datetime(2026, 5, 6, tzinfo=timezone.utc)),
         ]
-        db = _mock_db_for_build(memory_rows=mem)
+        _fake, ctx = _patch_storage_for_build(memory_rows=mem)
 
         # Stub all extractors except terminal_memory to return [].
         # terminal_memory returns one success for run-A/sasha only.
@@ -319,12 +336,13 @@ class TestBuildSessionTracesOrchestration:
             contradictions, cross_agent_reuse, external_hooks,
             repeat_recall, supersessions, terminal_memory,
         )
-        async def succ_for_a(_q, _db):
+        async def succ_for_a(_q):
             return [_ev(SignalKind.TERMINAL_MEMORY, Polarity.SUCCESS,
                         run_id="run-A", agent_id="sasha", memory_id="m1")]
         async def noop(*_a, **_k): return []
 
         with (
+            ctx,
             patch.object(terminal_memory, "extract", new=succ_for_a),
             patch.object(contradictions, "extract", new=noop),
             patch.object(supersessions, "extract", new=noop),
@@ -333,7 +351,7 @@ class TestBuildSessionTracesOrchestration:
             patch.object(external_hooks, "extract", new=noop),
         ):
             out = await build_session_traces(
-                db, tenant_id="t1", fleet_id=None,
+                tenant_id="t1", fleet_id=None,
                 window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
                 window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
                 persist=False,
@@ -349,19 +367,20 @@ class TestBuildSessionTracesOrchestration:
     @pytest.mark.asyncio
     async def test_one_extractor_exception_does_not_abort_build(self):
         mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=timezone.utc))]
-        db = _mock_db_for_build(memory_rows=mem)
+        _fake, ctx = _patch_storage_for_build(memory_rows=mem)
 
         from core_api.services.outcome_inference import (
             contradictions, cross_agent_reuse, external_hooks,
             repeat_recall, supersessions, terminal_memory,
         )
         async def boom(*_a, **_k): raise RuntimeError("simulated extractor crash")
-        async def succ_for_a(_q, _db):
+        async def succ_for_a(_q):
             return [_ev(SignalKind.TERMINAL_MEMORY, Polarity.SUCCESS,
                         run_id="r1", agent_id="a1", memory_id="m1")]
         async def noop(*_a, **_k): return []
 
         with (
+            ctx,
             patch.object(contradictions, "extract", new=boom),
             patch.object(terminal_memory, "extract", new=succ_for_a),
             patch.object(supersessions, "extract", new=noop),
@@ -370,7 +389,7 @@ class TestBuildSessionTracesOrchestration:
             patch.object(external_hooks, "extract", new=noop),
         ):
             out = await build_session_traces(
-                db, tenant_id="t1", fleet_id=None,
+                tenant_id="t1", fleet_id=None,
                 window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
                 window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
                 persist=False,
@@ -384,31 +403,35 @@ class TestBuildSessionTracesOrchestration:
     @pytest.mark.asyncio
     async def test_persist_false_skips_insert(self):
         mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=timezone.utc))]
-        db = _mock_db_for_build(memory_rows=mem)
-        await build_session_traces(
-            db, tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
-            persist=False,
-        )
-        # Only the SELECTs ran — no INSERT.
-        assert not any("insert into session_traces" in s for s in db._call_log)
+        fake, ctx = _patch_storage_for_build(memory_rows=mem)
+        with ctx:
+            await build_session_traces(
+                tenant_id="t1", fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                persist=False,
+            )
+        # persist=False → no upsert call to storage.
+        assert fake.upsert_calls == []
 
     @pytest.mark.asyncio
-    async def test_persist_true_issues_one_insert_per_trace(self):
+    async def test_persist_true_upserts_all_traces_in_one_batch(self):
         mem = [
             _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=timezone.utc)),
             _MemRow("m2", "run-B", "mira",  None, datetime(2026, 5, 6, tzinfo=timezone.utc)),
         ]
-        db = _mock_db_for_build(memory_rows=mem)
-        await build_session_traces(
-            db, tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
-            persist=True,
-        )
-        insert_calls = [s for s in db._call_log if "insert into session_traces" in s]
-        assert len(insert_calls) == 2
+        fake, ctx = _patch_storage_for_build(memory_rows=mem)
+        with ctx:
+            await build_session_traces(
+                tenant_id="t1", fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                persist=True,
+            )
+        # One upsert call carrying BOTH traces in a single batch (the
+        # builder hands the whole list to sc.upsert_session_traces).
+        assert len(fake.upsert_calls) == 1
+        assert len(fake.upsert_calls[0]) == 2
 
     @pytest.mark.asyncio
     async def test_entity_ids_resolved_via_link_table(self):
@@ -419,49 +442,44 @@ class TestBuildSessionTracesOrchestration:
             _EntityRow("m1", "e-1"),
             _EntityRow("m1", "e-3"),
         ]
-        db = _mock_db_for_build(memory_rows=mem, entity_rows=ents)
-        out = await build_session_traces(
-            db, tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
-            persist=False,
-        )
+        _fake, ctx = _patch_storage_for_build(memory_rows=mem, entity_rows=ents)
+        with ctx:
+            out = await build_session_traces(
+                tenant_id="t1", fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                persist=False,
+            )
         # Entity ids sorted (deterministic input for fingerprint later).
         assert out[0].entity_ids == ["e-1", "e-2", "e-3"]
 
     @pytest.mark.asyncio
-    async def test_entity_fetch_sql_casts_param_not_column(self):
-        """Index-preservation regression: the WHERE clause must cast
-        the PARAMETER (``:memory_ids``) to uuid[], NOT the column
-        (``memory_id``) to text. ``memory_id::text = ANY(...)`` would
-        defeat any index on ``memory_entity_links.memory_id`` because
-        the column reference is wrapped in a function call. Pinning
-        the SQL text here catches a future refactor that flips the
-        cast direction."""
-        mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=timezone.utc))]
-        db = _mock_db_for_build(memory_rows=mem)
-        await build_session_traces(
-            db,
-            tenant_id="t1",
-            fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
-            persist=False,
-        )
-        link_call = next(s for s in db._call_log if "from memory_entity_links" in s)
-        # The PARAMETER carries the cast — preserves the column's
-        # index-eligibility.
-        assert "cast(:memory_ids as uuid[])" in link_call
-        # Defensive: the column reference must NOT be wrapped in a
-        # cast / function call. ``memory_id::text = any(...)`` would
-        # disable the index.
-        assert "memory_id::text = any" not in link_call
+    async def test_entity_fetch_passes_all_window_memory_ids(self):
+        """The builder must hand EVERY window memory id to the bulk
+        entity-links read in one call. (The index-preserving
+        ``CAST(:memory_ids AS uuid[])`` SQL now lives storage-side and is
+        pinned by the Ph5a storage integration test.)"""
+        mem = [
+            _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=timezone.utc)),
+            _MemRow("m2", "run-B", "mira",  None, datetime(2026, 5, 6, tzinfo=timezone.utc)),
+        ]
+        fake, ctx = _patch_storage_for_build(memory_rows=mem)
+        with ctx:
+            await build_session_traces(
+                tenant_id="t1",
+                fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                persist=False,
+            )
+        assert len(fake.entity_link_calls) == 1
+        assert sorted(fake.entity_link_calls[0]) == ["m1", "m2"]
 
     @pytest.mark.asyncio
     async def test_entity_fetch_is_single_bulk_query(self):
-        """Regression guard for the N+1 fix: ``memory_entity_links``
-        must be queried EXACTLY ONCE per builder invocation, no
-        matter how many traces are in the window.
+        """Regression guard for the N+1 fix: the entity-links read must
+        be issued EXACTLY ONCE per builder invocation, no matter how many
+        traces are in the window.
 
         The previous shape issued one query per trace inside the
         per-trace loop — a 100-trace tick was 100+ extra round-trips.
@@ -476,17 +494,17 @@ class TestBuildSessionTracesOrchestration:
             _EntityRow("m2", "e-2"),
             _EntityRow("m3", "e-3"),
         ]
-        db = _mock_db_for_build(memory_rows=mem, entity_rows=ents)
-        await build_session_traces(
-            db, tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
-            persist=False,
-        )
-        # Exactly ONE entity-links query, not one per trace.
-        link_calls = [s for s in db._call_log if "from memory_entity_links" in s]
-        assert len(link_calls) == 1, (
-            f"expected exactly one memory_entity_links query, got {len(link_calls)}; "
+        fake, ctx = _patch_storage_for_build(memory_rows=mem, entity_rows=ents)
+        with ctx:
+            await build_session_traces(
+                tenant_id="t1", fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                persist=False,
+            )
+        # Exactly ONE entity-links call, not one per trace.
+        assert len(fake.entity_link_calls) == 1, (
+            f"expected exactly one entity-links call, got {len(fake.entity_link_calls)}; "
             "N+1 regression"
         )
 
@@ -502,7 +520,7 @@ class TestBuildSessionTracesOrchestration:
         import core_api.services.session_trace as svc
 
         mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=timezone.utc))]
-        db = _mock_db_for_build(memory_rows=mem)
+        _fake, ctx = _patch_storage_for_build(memory_rows=mem)
 
         # Patch one extractor to return evidence with EMPTY details —
         # simulates a regression where a future signal forgets to
@@ -516,7 +534,7 @@ class TestBuildSessionTracesOrchestration:
             terminal_memory,
         )
 
-        async def bad_extractor(_q, _db):
+        async def bad_extractor(_q):
             return [
                 SignalEvidence(
                     kind=SignalKind.TERMINAL_MEMORY,
@@ -531,6 +549,7 @@ class TestBuildSessionTracesOrchestration:
             return []
 
         with (
+            ctx,
             patch.object(terminal_memory, "extract", new=bad_extractor),
             patch.object(contradictions, "extract", new=noop),
             patch.object(supersessions, "extract", new=noop),
@@ -540,7 +559,6 @@ class TestBuildSessionTracesOrchestration:
             caplog.at_level(logging.WARNING, logger=svc.__name__),
         ):
             out = await build_session_traces(
-                db,
                 tenant_id="t1",
                 fleet_id=None,
                 window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
@@ -572,13 +590,14 @@ class TestBuildSessionTracesOrchestration:
             _EntityRow("m2", "e-A2"),
             _EntityRow("m3", "e-B"),
         ]
-        db = _mock_db_for_build(memory_rows=mem, entity_rows=ents)
-        out = await build_session_traces(
-            db, tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
-            persist=False,
-        )
+        _fake, ctx = _patch_storage_for_build(memory_rows=mem, entity_rows=ents)
+        with ctx:
+            out = await build_session_traces(
+                tenant_id="t1", fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                persist=False,
+            )
         by_key = {(r.run_id, r.agent_id): r for r in out}
         # Trace A owns m1+m2 → entities e-A1, e-A2 only.
         assert by_key[("run-A", "sasha")].entity_ids == ["e-A1", "e-A2"]

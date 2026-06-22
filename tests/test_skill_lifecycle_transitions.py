@@ -396,31 +396,26 @@ class TestAggregatePromote:
 # ── promote_pending_candidates ─────────────────────────────────────
 
 
-class _FakeRow:
-    def __init__(self, doc_id: str, data: dict, fleet_id: str | None = None):
-        self.doc_id = doc_id
-        self.data = data
-        self.fleet_id = fleet_id
+def _doc_row(doc_id: str, data: dict, fleet_id: str | None = None) -> dict:
+    """One candidate row as ``sc.query_documents`` returns it (the
+    storage ``orm_to_dict`` shape: top-level ``doc_id`` / ``fleet_id`` +
+    a nested ``data`` jsonb)."""
+    return {"doc_id": doc_id, "fleet_id": fleet_id, "data": data}
 
 
-class _FakeResult:
-    def __init__(self, rows):
-        self._rows = rows
+def _patch_candidates(rows: list[dict]):
+    """Patch ``skill_promoter.get_storage_client`` so the promoter's
+    candidate scan (``sc.query_documents``) returns ``rows``.
 
-    def fetchall(self):
-        return self._rows
-
-
-class _FakeDb:
-    def __init__(self, rows):
-        self._rows = rows
-        self.commit_count = 0
-
-    async def execute(self, _stmt, _params=None):  # noqa: D401 — fake
-        return _FakeResult(self._rows)
-
-    async def commit(self) -> None:
-        self.commit_count += 1
+    Replaces the pre-Ph5a ``_FakeDb`` injection — the promoter no longer
+    takes a ``db`` session; it queries candidates over the storage client.
+    """
+    fake_sc = AsyncMock()
+    fake_sc.query_documents = AsyncMock(return_value=rows)
+    return patch(
+        "core_api.services.skill_promoter.get_storage_client",
+        return_value=fake_sc,
+    )
 
 
 @pytest.mark.unit
@@ -428,23 +423,22 @@ class TestPromoter:
     @pytest.mark.asyncio
     async def test_promotes_clean_candidate(self):
         doc = _candidate_doc()
-        db = _FakeDb([_FakeRow("forge/test-skill", doc)])
         updates: list[tuple] = []
 
         async def updater(t, c, d, s):
             updates.append((t, c, d, s))
 
-        result = await promote_pending_candidates(
-            db,
-            tenant_id="t1",
-            fleet_id=None,
-            poison_checker=_fake_poison_never,
-            live_data_fetcher=await _fake_live_data_returns(None),
-            status_updater=updater,
-            min_cluster_size=3,
-            min_distinct_agents=3,
-            freshness_window_days=14,
-        )
+        with _patch_candidates([_doc_row("forge/test-skill", doc)]):
+            result = await promote_pending_candidates(
+                tenant_id="t1",
+                fleet_id=None,
+                poison_checker=_fake_poison_never,
+                live_data_fetcher=await _fake_live_data_returns(None),
+                status_updater=updater,
+                min_cluster_size=3,
+                min_distinct_agents=3,
+                freshness_window_days=14,
+            )
         assert result.scanned == 1
         assert result.promoted == 1
         assert result.held == 0
@@ -453,22 +447,21 @@ class TestPromoter:
     @pytest.mark.asyncio
     async def test_holds_poisoned_candidate(self):
         doc = _candidate_doc()
-        db = _FakeDb([_FakeRow("forge/poisoned", doc)])
 
         async def updater(*_a):
             raise AssertionError("must not promote poisoned cluster")
 
-        result = await promote_pending_candidates(
-            db,
-            tenant_id="t1",
-            fleet_id=None,
-            poison_checker=_fake_poison_always,
-            live_data_fetcher=await _fake_live_data_returns(None),
-            status_updater=updater,
-            min_cluster_size=3,
-            min_distinct_agents=3,
-            freshness_window_days=14,
-        )
+        with _patch_candidates([_doc_row("forge/poisoned", doc)]):
+            result = await promote_pending_candidates(
+                tenant_id="t1",
+                fleet_id=None,
+                poison_checker=_fake_poison_always,
+                live_data_fetcher=await _fake_live_data_returns(None),
+                status_updater=updater,
+                min_cluster_size=3,
+                min_distinct_agents=3,
+                freshness_window_days=14,
+            )
         assert result.promoted == 0
         assert result.held == 1
         held_attempt = result.attempts[0]
@@ -481,7 +474,6 @@ class TestPromoter:
         # with the candidate's OWN fleet so fleet-scoped reject rows
         # apply, not silently bypassed.
         doc = _candidate_doc()
-        db = _FakeDb([_FakeRow("forge/a", doc, fleet_id="fleet-A")])
         seen_fleets: list[str | None] = []
 
         async def poison_checker(tenant_id, fleet_id, fp):
@@ -491,45 +483,59 @@ class TestPromoter:
         async def updater(*_a):
             pass
 
-        await promote_pending_candidates(
-            db,
-            tenant_id="t1",
-            fleet_id=None,  # all-fleet tick
-            poison_checker=poison_checker,
-            live_data_fetcher=await _fake_live_data_returns(None),
-            status_updater=updater,
-            min_cluster_size=3,
-            min_distinct_agents=3,
-            freshness_window_days=14,
-        )
+        with _patch_candidates([_doc_row("forge/a", doc, fleet_id="fleet-A")]):
+            await promote_pending_candidates(
+                tenant_id="t1",
+                fleet_id=None,  # all-fleet tick
+                poison_checker=poison_checker,
+                live_data_fetcher=await _fake_live_data_returns(None),
+                status_updater=updater,
+                min_cluster_size=3,
+                min_distinct_agents=3,
+                freshness_window_days=14,
+            )
         assert seen_fleets == ["fleet-A"], (
             "poison_checker must be invoked with the candidate's own fleet, "
             "not the tick's (all-fleet) None"
         )
 
     @pytest.mark.asyncio
-    async def test_tick_commits_db(self):
-        # Without an end-of-tick ``db.commit()``, the UPDATEs that
-        # ``make_db_status_updater`` issues would silently roll back
-        # when the SQLAlchemy session closes.
+    async def test_scans_candidates_via_storage_client(self):
+        # Ph5a: the promoter no longer opens a DB session / commits — it
+        # queries candidates over the storage client (each CAS status flip
+        # commits storage-side). Verify the candidate scan is issued via
+        # ``sc.query_documents`` with the candidate/forge filter + created_at
+        # ordering, and that the tick promotes without any commit step.
         doc = _candidate_doc()
-        db = _FakeDb([_FakeRow("forge/test-skill", doc)])
+        updates: list[tuple] = []
 
         async def updater(t, c, d, s):
-            pass
+            updates.append((t, c, d, s))
 
-        await promote_pending_candidates(
-            db,
-            tenant_id="t1",
-            fleet_id=None,
-            poison_checker=_fake_poison_never,
-            live_data_fetcher=await _fake_live_data_returns(None),
-            status_updater=updater,
-            min_cluster_size=3,
-            min_distinct_agents=3,
-            freshness_window_days=14,
-        )
-        assert db.commit_count == 1, "promoter must commit the tick exactly once"
+        fake_sc = AsyncMock()
+        fake_sc.query_documents = AsyncMock(return_value=[_doc_row("forge/test-skill", doc)])
+        with patch(
+            "core_api.services.skill_promoter.get_storage_client",
+            return_value=fake_sc,
+        ):
+            await promote_pending_candidates(
+                tenant_id="t1",
+                fleet_id=None,
+                poison_checker=_fake_poison_never,
+                live_data_fetcher=await _fake_live_data_returns(None),
+                status_updater=updater,
+                min_cluster_size=3,
+                min_distinct_agents=3,
+                freshness_window_days=14,
+            )
+        fake_sc.query_documents.assert_awaited_once()
+        sent = fake_sc.query_documents.await_args.args[0]
+        assert sent["collection"] == "skills"
+        assert sent["where"] == {"status": "candidate", "source": "forge"}
+        assert sent["order_by"] == "created_at"
+        assert sent["order"] == "asc"
+        # Promotion happened (the CAS status flip ran).
+        assert updates == [("t1", "skills", "forge/test-skill", "staged")]
 
     @pytest.mark.asyncio
     async def test_already_transitioned_is_held_not_promoted(self):
@@ -538,22 +544,21 @@ class TestPromoter:
         # Promoter must record a held attempt — NOT an io_error and
         # NOT a promotion.
         doc = _candidate_doc()
-        db = _FakeDb([_FakeRow("forge/concurrent", doc)])
 
         async def updater(t, c, d, s):
             raise AlreadyTransitionedError("staged by parallel tick")
 
-        result = await promote_pending_candidates(
-            db,
-            tenant_id="t1",
-            fleet_id=None,
-            poison_checker=_fake_poison_never,
-            live_data_fetcher=await _fake_live_data_returns(None),
-            status_updater=updater,
-            min_cluster_size=3,
-            min_distinct_agents=3,
-            freshness_window_days=14,
-        )
+        with _patch_candidates([_doc_row("forge/concurrent", doc)]):
+            result = await promote_pending_candidates(
+                tenant_id="t1",
+                fleet_id=None,
+                poison_checker=_fake_poison_never,
+                live_data_fetcher=await _fake_live_data_returns(None),
+                status_updater=updater,
+                min_cluster_size=3,
+                min_distinct_agents=3,
+                freshness_window_days=14,
+            )
         assert result.scanned == 1
         assert result.promoted == 0
         assert result.held == 1
@@ -566,7 +571,6 @@ class TestPromoter:
         # Two candidates; first updater raises, second succeeds.
         a = _candidate_doc(slug="forge/a")
         b = _candidate_doc(slug="forge/b")
-        db = _FakeDb([_FakeRow("forge/a", a), _FakeRow("forge/b", b)])
         seen = []
 
         async def flaky_updater(t, c, d, s):
@@ -574,17 +578,17 @@ class TestPromoter:
             if d == "forge/a":
                 raise RuntimeError("transient")
 
-        result = await promote_pending_candidates(
-            db,
-            tenant_id="t1",
-            fleet_id=None,
-            poison_checker=_fake_poison_never,
-            live_data_fetcher=await _fake_live_data_returns(None),
-            status_updater=flaky_updater,
-            min_cluster_size=3,
-            min_distinct_agents=3,
-            freshness_window_days=14,
-        )
+        with _patch_candidates([_doc_row("forge/a", a), _doc_row("forge/b", b)]):
+            result = await promote_pending_candidates(
+                tenant_id="t1",
+                fleet_id=None,
+                poison_checker=_fake_poison_never,
+                live_data_fetcher=await _fake_live_data_returns(None),
+                status_updater=flaky_updater,
+                min_cluster_size=3,
+                min_distinct_agents=3,
+                freshness_window_days=14,
+            )
         assert result.scanned == 2
         assert result.promoted == 1
         assert result.held == 1
@@ -601,24 +605,23 @@ class TestAutoPromoteClean:
     async def test_flag_off_routes_clean_candidate_to_staged(self):
         # Default behavior (flag off): even a clean candidate lands in
         # ``staged`` for human review.
-        db = _FakeDb([_FakeRow("forge/clean", _candidate_doc())])
         updates: list[tuple] = []
 
         async def updater(t, c, d, s):
             updates.append((t, c, d, s))
 
-        result = await promote_pending_candidates(
-            db,
-            tenant_id="t1",
-            fleet_id=None,
-            poison_checker=_fake_poison_never,
-            live_data_fetcher=await _fake_live_data_returns(None),
-            status_updater=updater,
-            min_cluster_size=3,
-            min_distinct_agents=3,
-            freshness_window_days=14,
-            auto_promote_clean=False,
-        )
+        with _patch_candidates([_doc_row("forge/clean", _candidate_doc())]):
+            result = await promote_pending_candidates(
+                tenant_id="t1",
+                fleet_id=None,
+                poison_checker=_fake_poison_never,
+                live_data_fetcher=await _fake_live_data_returns(None),
+                status_updater=updater,
+                min_cluster_size=3,
+                min_distinct_agents=3,
+                freshness_window_days=14,
+                auto_promote_clean=False,
+            )
         assert updates == [("t1", "skills", "forge/clean", "staged")]
         assert result.promoted == 1
         assert result.auto_approved == 0
@@ -626,24 +629,23 @@ class TestAutoPromoteClean:
 
     @pytest.mark.asyncio
     async def test_flag_on_clean_candidate_goes_straight_to_active(self):
-        db = _FakeDb([_FakeRow("forge/clean", _candidate_doc())])
         updates: list[tuple] = []
 
         async def updater(t, c, d, s):
             updates.append((t, c, d, s))
 
-        result = await promote_pending_candidates(
-            db,
-            tenant_id="t1",
-            fleet_id=None,
-            poison_checker=_fake_poison_never,
-            live_data_fetcher=await _fake_live_data_returns(None),
-            status_updater=updater,
-            min_cluster_size=3,
-            min_distinct_agents=3,
-            freshness_window_days=14,
-            auto_promote_clean=True,
-        )
+        with _patch_candidates([_doc_row("forge/clean", _candidate_doc())]):
+            result = await promote_pending_candidates(
+                tenant_id="t1",
+                fleet_id=None,
+                poison_checker=_fake_poison_never,
+                live_data_fetcher=await _fake_live_data_returns(None),
+                status_updater=updater,
+                min_cluster_size=3,
+                min_distinct_agents=3,
+                freshness_window_days=14,
+                auto_promote_clean=True,
+            )
         # Clean scan + flag on → active, skipping the inbox entirely.
         assert updates == [("t1", "skills", "forge/clean", "active")]
         assert result.promoted == 1
@@ -659,24 +661,23 @@ class TestAutoPromoteClean:
         doc = _candidate_doc(
             scan={"state": "clean", "critical": 0, "warn": 2, "findings": []}
         )
-        db = _FakeDb([_FakeRow("forge/warned", doc)])
         updates: list[tuple] = []
 
         async def updater(t, c, d, s):
             updates.append((t, c, d, s))
 
-        result = await promote_pending_candidates(
-            db,
-            tenant_id="t1",
-            fleet_id=None,
-            poison_checker=_fake_poison_never,
-            live_data_fetcher=await _fake_live_data_returns(None),
-            status_updater=updater,
-            min_cluster_size=3,
-            min_distinct_agents=3,
-            freshness_window_days=14,
-            auto_promote_clean=True,
-        )
+        with _patch_candidates([_doc_row("forge/warned", doc)]):
+            result = await promote_pending_candidates(
+                tenant_id="t1",
+                fleet_id=None,
+                poison_checker=_fake_poison_never,
+                live_data_fetcher=await _fake_live_data_returns(None),
+                status_updater=updater,
+                min_cluster_size=3,
+                min_distinct_agents=3,
+                freshness_window_days=14,
+                auto_promote_clean=True,
+            )
         assert updates == [("t1", "skills", "forge/warned", "active")]
         assert result.auto_approved == 1
 
@@ -695,7 +696,6 @@ class TestAutoPromoteClean:
         doc = _candidate_doc(
             scan={"state": "clean", "critical": 3, "warn": 0, "findings": []}
         )
-        db = _FakeDb([_FakeRow("forge/sketchy", doc)])
         updates: list[tuple] = []
 
         async def updater(t, c, d, s):
@@ -704,12 +704,14 @@ class TestAutoPromoteClean:
         # Force the gate to pass so we exercise the auto-approve
         # re-assertion in isolation (real G5 would hold this; we patch
         # it to prove the promoter's own check is the safety net).
-        with patch(
-            "core_api.services.skill_promoter.evaluate_auto_gates",
-            new=AsyncMock(return_value=AutoGateResult(promote=True, gates=())),
+        with (
+            _patch_candidates([_doc_row("forge/sketchy", doc)]),
+            patch(
+                "core_api.services.skill_promoter.evaluate_auto_gates",
+                new=AsyncMock(return_value=AutoGateResult(promote=True, gates=())),
+            ),
         ):
             result = await promote_pending_candidates(
-                db,
                 tenant_id="t1",
                 fleet_id=None,
                 poison_checker=_fake_poison_never,

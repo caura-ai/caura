@@ -34,9 +34,6 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.forge.forge_service import (
     ForgeConfig,
@@ -57,14 +54,18 @@ logger = logging.getLogger(__name__)
 # ── ForgeConfig resolution ────────────────────────────────────────
 
 
-async def _resolve_forge_config(db: AsyncSession, org_id: str) -> ForgeConfig:
+async def _resolve_forge_config(org_id: str) -> ForgeConfig:
     """Build a per-tenant ``ForgeConfig`` from org_settings overrides.
 
     Falls through to the dataclass defaults for any unset key — the
     Phase 0 ``DEFAULT_SETTINGS.skills_factory.forge`` block populates
     the same defaults, so the merged view is always concrete.
+
+    ``get_settings_for_display`` is fetched via the storage client (Fix 2
+    Phase 0) with a 5-min TTL cache; the ``db`` argument is vestigial there,
+    so we pass ``None``.
     """
-    settings = await get_settings_for_display(db, org_id)
+    settings = await get_settings_for_display(None, org_id)
     sf = (settings or {}).get("skills_factory") or {}
     forge = sf.get("forge") or {}
     # Source fallbacks from a ``ForgeConfig()`` instance rather than
@@ -90,15 +91,14 @@ async def _resolve_forge_config(db: AsyncSession, org_id: str) -> ForgeConfig:
     )
 
 
-async def _resolve_auto_promote_clean(db: AsyncSession, org_id: str) -> bool:
+async def _resolve_auto_promote_clean(org_id: str) -> bool:
     """Read ``skills_factory.sentinel.auto_promote_clean`` for a tenant.
 
     Default False (HITL preserved). ``get_settings_for_display`` is
     cached (5-min TTL), so the second fetch within a tick — alongside
-    ``_resolve_forge_config`` — is a cache hit, not a second DB
-    round-trip.
+    ``_resolve_forge_config`` — is a cache hit, not a second round-trip.
     """
-    settings = await get_settings_for_display(db, org_id)
+    settings = await get_settings_for_display(None, org_id)
     sf = (settings or {}).get("skills_factory") or {}
     sentinel = sf.get("sentinel") or {}
     return bool(sentinel.get("auto_promote_clean", False))
@@ -107,38 +107,31 @@ async def _resolve_auto_promote_clean(db: AsyncSession, org_id: str) -> bool:
 # ── Injectable factories ──────────────────────────────────────────
 
 
-def _make_memory_fetcher(db: AsyncSession):
-    """Bulk-load ``memories.content`` by id from the live DB.
+def _make_memory_fetcher(tenant_id: str):
+    """Bulk-load ``memories.content`` by id via core-storage-api.
 
-    Mirrors the dry-run CLI's fetcher. NULL-safe (the dry-run CLI's
-    same shape coerces None → empty string downstream).
+    Mirrors the dry-run CLI's fetcher. NULL-safe (storage coerces a NULL
+    ``content`` → empty string in the response). ``tenant_id`` scopes the
+    storage read so the fetch can't cross tenants.
     """
+    sc = get_storage_client()
 
     async def _fetch(memory_ids: list[str]) -> dict[str, str]:
         if not memory_ids:
             return {}
-        rows = (
-            await db.execute(
-                # Param-cast (text[] → uuid[]) preserves the btree
-                # index on ``memories.id`` — same shape as the
-                # session-trace entity-id query.
-                text("SELECT id::text AS id, content FROM memories WHERE id = ANY(CAST(:ids AS uuid[]))"),
-                {"ids": list(memory_ids)},
-            )
-        ).fetchall()
-        return {row.id: (row.content if row.content is not None else "") for row in rows}
+        rows = await sc.forge_memory_content_by_ids(tenant_id=tenant_id, memory_ids=list(memory_ids))
+        return {row["id"]: row.get("content") or "" for row in rows}
 
     return _fetch
 
 
-def _make_poison_checker(db: AsyncSession):
-    """Adapt :func:`is_fingerprint_poisoned` to the
+def _make_poison_checker():
+    """Adapt :func:`is_fingerprint_poisoned` (storage-backed) to the
     ``(tenant, fleet, fp) → bool`` shape the gate evaluator expects.
     """
 
     async def _check(tenant_id: str, fleet_id: str | None, fingerprint: str) -> bool:
         return await is_fingerprint_poisoned(
-            db,
             tenant_id=tenant_id,
             fleet_id=fleet_id,
             cluster_fingerprint=fingerprint,
@@ -212,7 +205,6 @@ async def _wire_llm_fn():
 
 
 async def run_forge_cron_tick(
-    db: AsyncSession,
     *,
     tenant_id: str,
     fleet_id: str | None,
@@ -220,6 +212,11 @@ async def run_forge_cron_tick(
 ) -> dict[str, int]:
     """One cron tick: mine fresh candidates + promote any that pass
     the auto-gates.
+
+    As of Fix 2 Ph5a this opens no DB session — every read/write the tick
+    needs (forge poison, session traces, outcome signals, candidate scan +
+    CAS status flip) goes through core-storage-api via the storage client.
+    ``tenant_id`` is threaded everywhere a session used to be.
 
     Returns a dict the lifecycle_audit row stores under ``stats``:
       * ``candidates_written`` — number of fresh candidates produced
@@ -234,20 +231,23 @@ async def run_forge_cron_tick(
     audit row ``failure`` with the exception text; the next tick
     retries on its normal schedule.
     """
-    cfg = await _resolve_forge_config(db, tenant_id)
-    auto_promote_clean = await _resolve_auto_promote_clean(db, tenant_id)
+    cfg = await _resolve_forge_config(tenant_id)
+    auto_promote_clean = await _resolve_auto_promote_clean(tenant_id)
     now = datetime.now(UTC)
     window_end = now
     window_start = now - timedelta(days=cfg.freshness_window_days)
 
     llm_fn = await _wire_llm_fn()
-    memory_fetcher = _make_memory_fetcher(db)
-    poison_checker = _make_poison_checker(db)
+    memory_fetcher = _make_memory_fetcher(tenant_id)
+    poison_checker = _make_poison_checker()
     candidate_writer = _make_candidate_writer()
     status_checker = _make_status_checker()
 
+    # ``run_forge_distill`` keeps a (now-vestigial) first positional arg for
+    # CLI / test-call-site compatibility; it no longer touches the DB —
+    # ``build_session_traces`` + the injected fetchers route through storage.
     forge_result = await run_forge_distill(
-        db,
+        None,
         tenant_id=tenant_id,
         fleet_id=fleet_id,
         window_start=window_start,
@@ -266,12 +266,11 @@ async def run_forge_cron_tick(
     # (poison hit, scan dirty, hash-binding stale) are held — they
     # surface on the next tick if conditions change.
     promote_result = await promote_pending_candidates(
-        db,
         tenant_id=tenant_id,
         fleet_id=fleet_id,
-        poison_checker=make_db_poison_checker(db),
-        live_data_fetcher=make_db_live_data_fetcher(db),
-        status_updater=make_db_status_updater(db, expected_status="candidate"),
+        poison_checker=make_db_poison_checker(),
+        live_data_fetcher=make_db_live_data_fetcher(),
+        status_updater=make_db_status_updater(expected_status="candidate"),
         min_cluster_size=cfg.min_cluster_size,
         min_distinct_agents=cfg.min_distinct_agents,
         freshness_window_days=cfg.freshness_window_days,

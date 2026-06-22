@@ -31,7 +31,6 @@ console without it being silent.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from . import (
     DEFAULT_SIGNAL_WEIGHTS,  # noqa: F401  (re-exported via __init__; kept here for consistency)
@@ -45,7 +44,7 @@ logger = logging.getLogger(__name__)
 kind: SignalKind = SignalKind.REPEAT_RECALL
 
 
-async def extract(query: SignalQuery, db: Any) -> list[SignalEvidence]:
+async def extract(query: SignalQuery) -> list[SignalEvidence]:
     """Phase 1 MVP returns []. Phase 2 swaps in the recall-log read.
 
     Returning [] is the safe default per plan §6 / plan §17 risk

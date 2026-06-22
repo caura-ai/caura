@@ -109,6 +109,7 @@ def _import_all_models():
     import common.models.background_task  # noqa: F401
     import common.models.dedup_review  # noqa: F401
     import common.models.organization_settings  # noqa: F401
+    import common.models.skill_factory  # noqa: F401
 
 
 @pytest.fixture(scope="session")

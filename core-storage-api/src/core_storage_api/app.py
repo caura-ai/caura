@@ -41,6 +41,7 @@ from core_storage_api.routers import (
     preview_router,
     purge_router,
     reports_router,
+    skill_factory_router,
     tasks_router,
     tenant_suppression_router,
     tenants_router,
@@ -122,6 +123,10 @@ def create_app() -> FastAPI:
     app.include_router(fleet_router, prefix=prefix)
     app.include_router(audit_router, prefix=prefix)
     app.include_router(reports_router, prefix=prefix)
+    # Fix 2 Ph5a: skill-factory pipeline reads/writes (forge poison,
+    # session traces, outcome-signal analytic reads) moved off core-api's
+    # direct DB pool. core-api calls these via its storage_client.
+    app.include_router(skill_factory_router, prefix=prefix)
     app.include_router(tasks_router, prefix=prefix)
     app.include_router(idempotency_router, prefix=prefix)
     app.include_router(lifecycle_audit_router, prefix=prefix)

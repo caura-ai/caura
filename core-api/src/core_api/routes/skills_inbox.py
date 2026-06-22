@@ -62,10 +62,15 @@ SKILLS_COLLECTION = "skills"
 # ── Flag gate ──────────────────────────────────────────────────────
 
 
-async def _require_skills_factory_enabled(db: AsyncSession, tenant_id: str) -> dict:
+async def _require_skills_factory_enabled(db: AsyncSession | None, tenant_id: str) -> dict:
     """Hot-path: read the raw settings row and short-circuit when the
     feature flag is off. Returns the resolved settings-for-display
     dict so each endpoint has the per-tenant caps in one fetch.
+
+    ``db`` is forwarded to ``get_raw_settings`` / ``get_settings_for_display``,
+    both of which ignore it (org settings route through core-storage-api as
+    of Fix 2 Phase 0). The Ph5a ``/reject`` route passes ``None``; the other
+    inbox routes still pass their request-scoped session.
     """
     raw = await get_raw_settings(db, tenant_id)
     enabled = (
@@ -569,14 +574,19 @@ async def reject(
     slug: str,
     body: RejectRequest,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ) -> ActionResponse:
     """Reject ``staged → rejected`` and write the cluster fingerprint
     to ``forge_rejected_fingerprints`` so the next Forge run skips
     that cluster for ``cooloff_days``.
+
+    Fix 2 Ph5a: the poison write goes through core-storage-api
+    (``write_rejected_fingerprint`` → ``sc.forge_write_rejected_fingerprint``)
+    rather than a request-scoped DB session, so this route no longer
+    depends on ``get_db`` (the settings gate + audit log already ignore
+    their ``db`` arg and route through storage).
     """
     tenant_id = _require_tenant(auth)
-    settings = await _require_skills_factory_enabled(db, tenant_id)
+    settings = await _require_skills_factory_enabled(None, tenant_id)
     _require_inbox_admin(auth)
     sf = (settings or {}).get("skills_factory") if isinstance(settings, dict) else {}
     default_cooloff = (sf or {}).get("rejection_cooloff_days", 30)
@@ -601,11 +611,22 @@ async def reject(
         )
 
     # TOCTOU guard: re-fetch the doc and confirm it's still in a
-    # rejectable status before we poison the cluster. Without this,
+    # rejectable status BEFORE we poison the cluster. Without this,
     # a concurrent Approve could flip the doc to ``active`` between
     # our initial load and this point — we'd then poison a cluster
     # that just shipped (and the next Forge run would refuse to
     # re-derive the now-deleted+re-needed skill for cooloff_days).
+    #
+    # Ph5a NOTE: the poison write now commits storage-side immediately
+    # (no shared SQLAlchemy transaction to roll back), so the pre-Ph5a
+    # "stage INSERT → reload → commit-or-rollback" dance is gone. We
+    # instead do BOTH reload guards up front and only issue the poison
+    # write once the doc is confirmed rejectable. The residual race
+    # (a concurrent Approve landing between this final reload and the
+    # poison write) leaves at most one harmless extra poison row — the
+    # exact worst case the pre-Ph5a code already documented and
+    # tolerated (the poison table dedups nothing and the cooloff on a
+    # shipped cluster is benign).
     doc = await _reload_and_assert_status(
         tenant_id=tenant_id,
         slug=slug,
@@ -622,27 +643,15 @@ async def reject(
             detail=f"skill {slug!r} has no fingerprint after reload; cannot poison cluster",
         )
 
-    # Two writes live on two separate commit paths:
-    #   1. ``write_rejected_fingerprint`` → SQLAlchemy session ``db``
-    #   2. ``_persist_status_transition`` → storage-client HTTP upsert
-    #
-    # Ordering matters: we stage the poison INSERT, then do a third
-    # TOCTOU reload BEFORE committing it. If the status check raises
-    # 409 (e.g. a concurrent Approve flipped the doc to ``active``),
-    # the exception propagates through SQLAlchemy's session and the
-    # poison row gets rolled back — we never poison a cluster whose
-    # skill just shipped. Only after the reload confirms the doc is
-    # still rejectable do we commit the poison row, then issue the
-    # HTTP upsert to flip status to ``rejected``.
-    #
-    # Worst-case ordering after commit: poison commits but the HTTP
-    # upsert errors out. That leaves an extra poison row whose
-    # cooloff is harmless (the doc still has its prior rejectable
-    # status, the operator can retry, and the poison table tolerates
-    # duplicate rows).
+    # Second TOCTOU reload — narrows the window before the poison write.
+    doc = await _reload_and_assert_status(
+        tenant_id=tenant_id,
+        slug=slug,
+        expected_statuses={"staged", "candidate", "quarantined"},
+    )
+
     try:
         await write_rejected_fingerprint(
-            db,
             tenant_id=tenant_id,
             fleet_id=doc.get("fleet_id"),
             cluster_fingerprint=fingerprint,
@@ -657,45 +666,36 @@ async def reject(
         # could still inject 0; surface as 422 rather than 500.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    # Third TOCTOU guard — a concurrent Approve may have flipped the
-    # doc to ``active`` between the prior reload and this point. The
-    # check runs BEFORE ``db.commit()`` so a 409 here rolls the
-    # poison row back via the session exit, leaving no durable
-    # poison artifact for a cluster whose skill just shipped.
-    doc = await _reload_and_assert_status(
-        tenant_id=tenant_id,
-        slug=slug,
-        expected_statuses={"staged", "candidate", "quarantined"},
-    )
-    await db.commit()
-
-    # Fourth TOCTOU guard — narrows the window between the commit
-    # above and the HTTP upsert below. The poison row is now durable
-    # in Postgres; if a concurrent Approve slipped between the third
-    # reload and the commit, this fourth reload catches it and the
-    # upsert never runs (the poison row stays, the doc stays active —
-    # operator can investigate the duplicate poison entry, which is
-    # harmless since the cluster already shipped).
-    doc = await _reload_and_assert_status(
-        tenant_id=tenant_id,
-        slug=slug,
-        expected_statuses={"staged", "candidate", "quarantined"},
-    )
-
-    prev, _ = await _persist_status_transition(
-        tenant_id=tenant_id,
-        fleet_id=doc.get("fleet_id"),
-        slug=slug,
-        doc=doc,
-        new_status="rejected",
-        extra_data_patches={"rejection_reason": body.reason},
-    )
-    # Best-effort audit. The poison row already committed above and
+    try:
+        prev, _ = await _persist_status_transition(
+            tenant_id=tenant_id,
+            fleet_id=doc.get("fleet_id"),
+            slug=slug,
+            doc=doc,
+            new_status="rejected",
+            extra_data_patches={"rejection_reason": body.reason},
+        )
+    except Exception:
+        # The poison row already committed storage-side (no shared txn to roll
+        # back). If the status flip fails HERE, the cluster is poisoned for
+        # cooloff_days while the doc still reads as a rejectable status — an
+        # inconsistent state an operator must reconcile by hand. Surface it
+        # loudly rather than letting it read as a generic 500, then re-raise.
+        logger.error(
+            "skill_inbox: reject status-flip FAILED after poison write for slug=%s — "
+            "the poison row is committed but the doc was NOT flipped to 'rejected'; "
+            "the cluster is silently blocked for %d days. Manual intervention required.",
+            slug,
+            cooloff,
+            exc_info=True,
+        )
+        raise
+    # Best-effort audit. The poison row already committed storage-side and
     # the doc-status upsert already landed in storage; an audit-row
     # failure must not 500 a successful reject.
     try:
         await log_action(
-            db,
+            None,
             tenant_id=tenant_id,
             action="skill_inbox_reject",
             resource_type="document",
@@ -712,7 +712,6 @@ async def reject(
                 "fingerprint": fingerprint,
             },
         )
-        await db.commit()
     except Exception:
         logger.error(
             "skill_inbox: audit log failed for reject slug=%s",

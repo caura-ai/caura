@@ -24,9 +24,8 @@ Plan §6 signal #2. Plan §3 schema field
 from __future__ import annotations
 
 import logging
-from typing import Any
 
-from sqlalchemy import text
+from core_api.clients.storage_client import get_storage_client
 
 from . import (
     DEFAULT_SIGNAL_WEIGHTS,
@@ -34,6 +33,7 @@ from . import (
     SignalEvidence,
     SignalKind,
     SignalQuery,
+    parse_observed_at,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,65 +41,34 @@ logger = logging.getLogger(__name__)
 kind: SignalKind = SignalKind.SUPERSESSION
 
 
-async def extract(query: SignalQuery, db: Any) -> list[SignalEvidence]:
+async def extract(query: SignalQuery) -> list[SignalEvidence]:
     """Find memories superseded WITHIN this window's trace.
 
-    The query returns one row per superseded (older) memory: it joins
-    ``memories AS new`` (the corrective) against ``memories AS old``
-    (the one being superseded). We emit one ``SignalEvidence`` per
-    superseded memory, keyed at the SUPERSEDED memory's
-    ``(run_id, agent_id)`` — so the FAILURE polarity lands on the
-    session that wrote the bad memory, not the session that found the
-    contradiction.
+    Emits one ``SignalEvidence`` per superseded (older) memory, keyed at
+    the SUPERSEDED memory's ``(run_id, agent_id)`` — so the FAILURE
+    polarity lands on the session that wrote the bad memory, not the
+    session that found the contradiction.
 
-    Window semantics: we use the ``new`` memory's ``created_at`` for
-    the window check (when the contradiction surfaced), not the
-    ``old`` memory's. This lets a memory written weeks ago still
-    accumulate failure evidence retroactively if it gets superseded
-    inside the current scan window.
+    Window semantics: the ``new`` memory's ``created_at`` drives the window
+    check (when the contradiction surfaced), so a memory written weeks ago
+    still accumulates failure evidence retroactively if superseded inside
+    the current scan window.
+
+    As of Fix 2 Ph5a the analytic read goes through core-storage-api
+    (``sc.outcome_supersession_signals``); the self-join on
+    ``supersedes_id`` + the cross-fleet isolation predicate on the OLD
+    memory live in ``PostgresService.outcome_supersession_signals``.
     """
     weight = DEFAULT_SIGNAL_WEIGHTS[SignalKind.SUPERSESSION]
 
-    sql = """
-        SELECT
-            old_mem.id           AS superseded_id,
-            old_mem.run_id       AS run_id,
-            old_mem.agent_id     AS agent_id,
-            new_mem.id           AS by_id,
-            new_mem.created_at   AS observed_at
-        FROM memories AS new_mem
-        JOIN memories AS old_mem
-          ON old_mem.id = new_mem.supersedes_id
-         AND old_mem.tenant_id = new_mem.tenant_id
-        WHERE new_mem.tenant_id = :tenant_id
-          AND new_mem.created_at >= :w_start
-          AND new_mem.created_at <  :w_end
-          AND (:fleet_id  IS NULL OR new_mem.fleet_id  = :fleet_id  OR new_mem.fleet_id IS NULL)
-          -- Cross-fleet isolation: the FAILURE polarity must land on
-          -- a trace inside the queried fleet, not just the corrective
-          -- memory that triggered the supersession. Without this, an
-          -- agent in fleet A correcting a fact written by fleet B
-          -- would erroneously land failure evidence on fleet B's
-          -- trace inside a fleet-A scan.
-          AND (:fleet_id  IS NULL OR old_mem.fleet_id  = :fleet_id  OR old_mem.fleet_id IS NULL)
-          AND (:run_id    IS NULL OR old_mem.run_id    = :run_id)
-          AND (:agent_id  IS NULL OR old_mem.agent_id  = :agent_id)
-          AND old_mem.run_id IS NOT NULL
-    """
-
-    rows = (
-        await db.execute(
-            text(sql),
-            {
-                "tenant_id": query.tenant_id,
-                "fleet_id": query.fleet_id,
-                "w_start": query.window_start,
-                "w_end": query.window_end,
-                "run_id": query.run_id,
-                "agent_id": query.agent_id,
-            },
-        )
-    ).fetchall()
+    rows = await get_storage_client().outcome_supersession_signals(
+        tenant_id=query.tenant_id,
+        fleet_id=query.fleet_id,
+        window_start=query.window_start,
+        window_end=query.window_end,
+        run_id=query.run_id,
+        agent_id=query.agent_id,
+    )
 
     out: list[SignalEvidence] = []
     for row in rows:
@@ -108,14 +77,14 @@ async def extract(query: SignalQuery, db: Any) -> list[SignalEvidence]:
                 kind=SignalKind.SUPERSESSION,
                 polarity=Polarity.FAILURE,
                 weight=weight,
-                memory_ids=(str(row.superseded_id),),
+                memory_ids=(str(row["superseded_id"]),),
                 details={
-                    "superseded_memory_id": str(row.superseded_id),
-                    "superseded_by_memory_id": str(row.by_id),
-                    "run_id": row.run_id,
-                    "agent_id": row.agent_id,
+                    "superseded_memory_id": str(row["superseded_id"]),
+                    "superseded_by_memory_id": str(row["by_id"]),
+                    "run_id": row["run_id"],
+                    "agent_id": row["agent_id"],
                 },
-                observed_at=row.observed_at,
+                observed_at=parse_observed_at(row.get("observed_at")),
             )
         )
 

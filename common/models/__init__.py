@@ -12,6 +12,7 @@ from common.models.fleet import FleetCommand, FleetNode
 from common.models.idempotency import IdempotencyResponse
 from common.models.lifecycle_audit import LifecycleAudit
 from common.models.memory import Memory
+from common.models.skill_factory import ForgeRejectedFingerprint, SessionTrace
 
 __all__ = [
     "Agent",
@@ -26,9 +27,11 @@ __all__ = [
     "Entity",
     "FleetCommand",
     "FleetNode",
+    "ForgeRejectedFingerprint",
     "IdempotencyResponse",
     "LifecycleAudit",
     "Memory",
     "MemoryEntityLink",
     "Relation",
+    "SessionTrace",
 ]

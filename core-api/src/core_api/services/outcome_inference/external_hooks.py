@@ -25,7 +25,6 @@ changes. Same contract, same return shape.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from . import (
     DEFAULT_SIGNAL_WEIGHTS,  # noqa: F401
@@ -39,7 +38,7 @@ logger = logging.getLogger(__name__)
 kind: SignalKind = SignalKind.EXTERNAL_HOOK
 
 
-async def extract(query: SignalQuery, db: Any) -> list[SignalEvidence]:
+async def extract(query: SignalQuery) -> list[SignalEvidence]:
     """Phase 1 MVP returns []. Enterprise / Phase 5 swaps in the
     real ingest-events read against an ``external_hooks_events``
     table (or equivalent) populated by webhook handlers.

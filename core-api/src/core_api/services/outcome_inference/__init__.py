@@ -114,6 +114,19 @@ DEFAULT_SIGNAL_WEIGHTS: dict[SignalKind, float] = {
 }
 
 
+def parse_observed_at(value: Any) -> datetime | None:
+    """Coerce a storage ``observed_at`` (ISO string, or already a datetime /
+    None) into a ``datetime | None`` for :class:`SignalEvidence`.
+
+    The outcome-signal reads cross the wire as JSON, so timestamps arrive as
+    ISO strings; the extractors call this to normalise before constructing
+    evidence.
+    """
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    return value
+
+
 @dataclass(frozen=True)
 class SignalQuery:
     """Inputs every extractor accepts.
@@ -148,7 +161,7 @@ class SignalExtractor(Protocol):
 
     kind: SignalKind
 
-    async def extract(self, query: SignalQuery, db: Any) -> list[SignalEvidence]: ...
+    async def extract(self, query: SignalQuery) -> list[SignalEvidence]: ...
 
 
 # Public re-exports.
@@ -159,4 +172,5 @@ __all__ = [
     "SignalExtractor",
     "SignalKind",
     "SignalQuery",
+    "parse_observed_at",
 ]

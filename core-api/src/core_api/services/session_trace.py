@@ -49,15 +49,13 @@ This module does NOT (intentionally):
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import text
-
+from core_api.clients.storage_client import get_storage_client
 from core_api.services.outcome_inference import (
     Polarity,
     SignalEvidence,
@@ -212,7 +210,6 @@ def summarize_evidence(evidence: list[SignalEvidence]) -> dict[str, Any]:
 
 
 async def build_session_traces(
-    db: Any,
     *,
     tenant_id: str,
     fleet_id: str | None,
@@ -222,6 +219,10 @@ async def build_session_traces(
 ) -> list[SessionTraceRow]:
     """Build session traces for the window. Returns the rows in
     memory; persists to ``session_traces`` when ``persist=True``.
+
+    As of Fix 2 Ph5a every read/write goes through core-storage-api (the
+    extractors, the memory-window + entity-links reads, and the upsert);
+    this function no longer takes a DB session.
 
     ``persist=False`` is the dry-run / eval-harness path — useful
     when calling the builder repeatedly during SF-105 fingerprint
@@ -238,7 +239,7 @@ async def build_session_traces(
 
     # 1. Run all 6 extractors concurrently.
     extractor_results = await asyncio.gather(
-        *(mod.extract(query, db) for mod in SIGNAL_MODULES),
+        *(mod.extract(query) for mod in SIGNAL_MODULES),
         return_exceptions=True,
     )
     all_evidence: list[SignalEvidence] = []
@@ -283,7 +284,6 @@ async def build_session_traces(
     #    (run_id, agent_id) group, including ones with no signal
     #    evidence (these become outcome_label='unknown').
     memories_by_trace = await _query_memories_in_window(
-        db,
         tenant_id=tenant_id,
         fleet_id=fleet_id,
         window_start=window_start,
@@ -300,7 +300,7 @@ async def build_session_traces(
     all_memory_ids: list[str] = sorted(
         {m.memory_id for members in memories_by_trace.values() for m in members}
     )
-    entities_by_memory = await _query_entity_ids_for_memories(db, memory_ids=all_memory_ids)
+    entities_by_memory = await _query_entity_ids_for_memories(tenant_id=tenant_id, memory_ids=all_memory_ids)
 
     out: list[SessionTraceRow] = []
     for (run_id, agent_id), members in memories_by_trace.items():
@@ -331,7 +331,7 @@ async def build_session_traces(
 
     # 5. Persist.
     if persist and out:
-        await _upsert_session_traces(db, out)
+        await _upsert_session_traces(tenant_id, out)
 
     logger.info(
         "session_trace_builder: built %d traces (success=%d failure=%d unknown=%d) "
@@ -352,147 +352,96 @@ async def build_session_traces(
 
 
 async def _query_memories_in_window(
-    db: Any,
     *,
     tenant_id: str,
     fleet_id: str | None,
     window_start: datetime,
     window_end: datetime,
 ) -> dict[tuple[str, str], list[_MemoryRow]]:
-    """Return memories grouped by ``(run_id, agent_id)``.
+    """Return memories grouped by ``(run_id, agent_id)`` via core-storage-api.
 
-    Memories without a ``run_id`` are SKIPPED — they don't belong to
-    any session-bounded trace and would inflate the trace count with
-    one-off agent writes.
+    Memories without a ``run_id`` are SKIPPED storage-side — they don't
+    belong to any session-bounded trace and would inflate the trace count
+    with one-off agent writes. The PG SQL lives in
+    ``PostgresService.session_memories_in_window``.
     """
-    sql = """
-        SELECT
-            m.id           AS memory_id,
-            m.run_id       AS run_id,
-            m.agent_id     AS agent_id,
-            m.fleet_id     AS fleet_id,
-            m.created_at   AS created_at
-        FROM memories AS m
-        WHERE m.tenant_id = :tenant_id
-          AND m.created_at >= :w_start
-          AND m.created_at <  :w_end
-          AND m.run_id IS NOT NULL
-          AND (:fleet_id IS NULL OR m.fleet_id = :fleet_id OR m.fleet_id IS NULL)
-        ORDER BY m.run_id, m.agent_id, m.created_at ASC
-    """
-    rows = (
-        await db.execute(
-            text(sql),
-            {
-                "tenant_id": tenant_id,
-                "fleet_id": fleet_id,
-                "w_start": window_start,
-                "w_end": window_end,
-            },
-        )
-    ).fetchall()
+    sc = get_storage_client()
+    rows = await sc.session_memories_in_window(
+        tenant_id=tenant_id,
+        fleet_id=fleet_id,
+        window_start=window_start,
+        window_end=window_end,
+    )
 
     grouped: dict[tuple[str, str], list[_MemoryRow]] = defaultdict(list)
     for row in rows:
-        grouped[(row.run_id, row.agent_id)].append(
+        created_at = row.get("created_at")
+        if isinstance(created_at, str):
+            created_at = datetime.fromisoformat(created_at)
+        grouped[(row["run_id"], row["agent_id"])].append(
             _MemoryRow(
-                memory_id=str(row.memory_id),
-                run_id=row.run_id,
-                agent_id=row.agent_id,
-                fleet_id=row.fleet_id,
-                created_at=row.created_at,
+                memory_id=str(row["memory_id"]),
+                run_id=row["run_id"],
+                agent_id=row["agent_id"],
+                fleet_id=row.get("fleet_id"),
+                created_at=created_at,
             )
         )
     return grouped
 
 
-async def _query_entity_ids_for_memories(db: Any, *, memory_ids: list[str]) -> dict[str, list[str]]:
-    """Resolve entities for a batch of memory ids via
-    ``memory_entity_links``. Returns ``{memory_id: [entity_id, ...]}``
-    with entity lists deduped and sorted for deterministic
-    fingerprint inputs later.
+async def _query_entity_ids_for_memories(*, tenant_id: str, memory_ids: list[str]) -> dict[str, list[str]]:
+    """Resolve entities for a batch of memory ids via core-storage-api.
+    Returns ``{memory_id: [entity_id, ...]}`` with entity lists deduped and
+    sorted for deterministic fingerprint inputs later.
 
     The caller passes EVERY memory id in the window in a single
-    invocation; we issue ONE SQL statement and partition the result
-    in Python. The previous shape (returning a flat ``list[str]``
-    per call) forced a per-trace call inside the
-    :func:`build_session_traces` loop, which was an N+1 against
-    ``memory_entity_links`` — observable as 100+ extra round-trips
-    on a busy fleet's Forge tick.
+    invocation; storage issues ONE SQL statement (the param-cast to
+    ``uuid[]`` keeps the index eligible — see
+    ``PostgresService.memory_entity_links_batch``) and we partition the
+    result in Python.
 
-    Empty input → empty dict (no query issued). Memory ids with no
-    links are absent from the returned dict (callers should default
-    to ``()`` / ``[]`` on lookup).
+    Empty input → empty dict (no call issued). Memory ids with no links are
+    absent from the returned dict (callers default to ``()`` / ``[]``).
     """
     if not memory_ids:
         return {}
-    # IMPORTANT: cast the PARAMETER to uuid[], not the column to text.
-    # ``memory_id::text = ANY(:memory_ids)`` would defeat any index on
-    # ``memory_entity_links.memory_id`` because the column is wrapped
-    # in a function call. ``CAST(:memory_ids AS uuid[])`` keeps the
-    # column reference index-eligible while still letting asyncpg
-    # bind the str list as text[]; PG converts text→uuid at bind time
-    # as long as the strings are valid UUIDs (they are — we round-
-    # tripped them via ``str(row.memory_id)`` from a uuid column
-    # earlier in the build).
-    sql = """
-        SELECT memory_id::text AS memory_id, entity_id::text AS entity_id
-        FROM memory_entity_links
-        WHERE memory_id = ANY(CAST(:memory_ids AS uuid[]))
-    """
-    rows = (
-        await db.execute(
-            text(sql),
-            {"memory_ids": list(memory_ids)},
-        )
-    ).fetchall()
+    sc = get_storage_client()
+    rows = await sc.session_trace_entity_links(tenant_id=tenant_id, memory_ids=list(memory_ids))
     grouped: dict[str, set[str]] = defaultdict(set)
     for row in rows:
-        grouped[row.memory_id].add(row.entity_id)
+        grouped[row["memory_id"]].add(row["entity_id"])
     return {mid: sorted(eids) for mid, eids in grouped.items()}
 
 
-async def _upsert_session_traces(db: Any, rows: list[SessionTraceRow]) -> None:
+async def _upsert_session_traces(tenant_id: str, rows: list[SessionTraceRow]) -> None:
     """Upsert into ``session_traces`` keyed by
-    ``(tenant_id, run_id, agent_id)`` (migration 021 unique
-    constraint). Re-running the builder over the same window is a
-    no-op for unchanged traces and a refresh for traces whose
-    evidence shifted.
+    ``(tenant_id, run_id, agent_id)`` (migration 021 unique constraint) via
+    core-storage-api. Re-running the builder over the same window is a no-op
+    for unchanged traces and a refresh for traces whose evidence shifted.
+
+    The ``INSERT ... ON CONFLICT ... DO UPDATE`` + jsonb casts live in
+    ``PostgresService.session_traces_upsert``; we hand it a batch of bind
+    dicts (datetimes → ISO strings for the JSON wire; jsonb fields as python
+    objects that storage json-dumps).
     """
     if not rows:
         return
+    sc = get_storage_client()
 
-    sql = """
-        INSERT INTO session_traces (
-            tenant_id, fleet_id, run_id, agent_id,
-            outcome_label, memory_ids, entity_ids,
-            signals_summary, goal_phrase, started_at, ended_at
-        )
-        VALUES (
-            :tenant_id, :fleet_id, :run_id, :agent_id,
-            :outcome_label,
-            :memory_ids::jsonb, :entity_ids::jsonb,
-            :signals_summary::jsonb, :goal_phrase,
-            :started_at, :ended_at
-        )
-        ON CONFLICT (tenant_id, run_id, agent_id) DO UPDATE SET
-            fleet_id         = EXCLUDED.fleet_id,
-            outcome_label    = EXCLUDED.outcome_label,
-            memory_ids       = EXCLUDED.memory_ids,
-            entity_ids       = EXCLUDED.entity_ids,
-            signals_summary  = EXCLUDED.signals_summary,
-            goal_phrase      = EXCLUDED.goal_phrase,
-            started_at       = EXCLUDED.started_at,
-            ended_at         = EXCLUDED.ended_at
-    """
-    # Bulk-execute one statement at a time (asyncpg supports
-    # ``executemany`` but the bind shape with jsonb casts is cleaner
-    # one-by-one and the volumes here are small — one Forge tick is
-    # typically <500 traces).
+    def _iso(value: Any) -> Any:
+        return value.isoformat() if isinstance(value, datetime) else value
+
+    traces: list[dict[str, Any]] = []
     for row in rows:
         bind = row.as_bind()
-        # JSONB params need to be JSON strings for asyncpg.
-        bind["memory_ids"] = json.dumps(bind["memory_ids"])
-        bind["entity_ids"] = json.dumps(bind["entity_ids"])
-        bind["signals_summary"] = json.dumps(bind["signals_summary"])
-        await db.execute(text(sql), bind)
+        bind["started_at"] = _iso(bind["started_at"])
+        bind["ended_at"] = _iso(bind["ended_at"])
+        # ``tenant_id`` is forced by the batch param storage-side; drop the
+        # per-row copy so the wire payload matches the endpoint contract.
+        # Assert it matched the batch tenant first — belt-and-braces against a
+        # smuggled cross-tenant row (storage also enforces the batch tenant).
+        assert bind.get("tenant_id") in (None, tenant_id), "per-row tenant_id must match batch tenant_id"
+        bind.pop("tenant_id", None)
+        traces.append(bind)
+    await sc.upsert_session_traces(tenant_id=tenant_id, traces=traces)

@@ -6,21 +6,21 @@ new tables required. The remaining four signals (repeat_recall,
 terminal_memory, cross_agent_reuse, external_hook) ship in later
 substages of SF-101 and get their own tests.
 
-Pure-unit: no DB required. The signal extractors execute one SQL
-statement each via ``db.execute(text(sql), params)``; we mock the
-async DB engine to return controlled rows and assert:
+Pure-unit: no DB required. As of Fix 2 Ph5a each signal extractor reads
+through the storage client (``get_storage_client().outcome_*_signals(...)``)
+rather than ``db.execute``; we patch the relevant client method per module
+to return controlled rows (as the storage response dicts) and assert:
 
   - polarity, weight, memory_ids, details shape
-  - window / tenant / run_id / agent_id binding
-  - SQL is parameterised (no string-interpolated tenant_id etc.)
+  - the client method is called with the query's tenant / window /
+    run_id / agent_id / params
   - default-weight defaults read from the registry
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -41,37 +41,31 @@ from core_api.services.outcome_inference import (
 )
 
 
-# ── Mock DB harness ────────────────────────────────────────────────
+# ── Storage-client mock harness ────────────────────────────────────
+#
+# Each extractor calls ONE storage-client method, named per module. The
+# tests patch ``<module>.get_storage_client`` to return a fake whose method
+# returns the seeded row dicts (the storage response shape — observed_at as
+# an ISO string, ids as strings).
+
+# Map each signal module → the storage-client method it calls.
+_CLIENT_METHOD = {
+    "contradictions": "outcome_contradiction_signals",
+    "supersessions": "outcome_supersession_signals",
+    "cross_agent_reuse": "outcome_cross_agent_reuse_signals",
+    "terminal_memory": "outcome_terminal_memory_signals",
+}
 
 
-@dataclass
-class _Row:
-    """Lightweight row stand-in. The extractors access attributes by
-    name (e.g. ``row.memory_id``) — a frozen dataclass keeps that
-    contract honest at test time."""
-
-    memory_id: str | None = None
-    superseded_id: str | None = None
-    run_id: str | None = None
-    agent_id: str | None = None
-    by_id: str | None = None
-    status: str | None = None
-    content: str | None = None
-    recall_count: int | None = None
-    observed_at: datetime | None = None
-
-
-def _mock_db(rows: list[_Row]) -> MagicMock:
-    """Build a mock DB whose ``execute(...).fetchall()`` returns
-    ``rows`` synchronously. The route uses
-    ``await db.execute(...)`` so ``execute`` itself is async; the
-    proxy it returns has a sync ``.fetchall()``.
-    """
-    db = MagicMock()
-    proxy = MagicMock()
-    proxy.fetchall.return_value = rows
-    db.execute = AsyncMock(return_value=proxy)
-    return db
+def _patch_signal_client(module, rows: list[dict]):
+    """Patch ``<module>.get_storage_client`` so the extractor's read
+    returns ``rows``. Returns ``(fake_client, patch_ctx)``; the fake's
+    method is an ``AsyncMock`` so the test can assert call args."""
+    method_name = _CLIENT_METHOD[module.__name__.rsplit(".", 1)[-1]]
+    fake = AsyncMock()
+    setattr(fake, method_name, AsyncMock(return_value=rows))
+    ctx = patch.object(module, "get_storage_client", return_value=fake)
+    return fake, ctx, method_name
 
 
 def _query(**overrides) -> SignalQuery:
@@ -150,25 +144,27 @@ class TestSupersessionExtractor:
 
     @pytest.mark.asyncio
     async def test_no_rows_returns_empty(self):
-        db = _mock_db(rows=[])
-        out = await supersessions.extract(_query(), db)
+        fake, ctx, method = _patch_signal_client(supersessions, [])
+        with ctx:
+            out = await supersessions.extract(_query())
         assert out == []
-        # Still issued the query (sanity: not short-circuiting on
-        # caller side either).
-        db.execute.assert_called_once()
+        # Still issued the read (sanity: not short-circuiting caller-side).
+        getattr(fake, method).assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_emits_failure_polarity_on_superseded_trace(self):
         rows = [
-            _Row(
-                superseded_id="old-mem-1",
-                run_id="run-A",
-                agent_id="sasha",
-                by_id="new-mem-1",
-                observed_at=datetime(2026, 5, 5, tzinfo=timezone.utc),
-            )
+            {
+                "superseded_id": "old-mem-1",
+                "run_id": "run-A",
+                "agent_id": "sasha",
+                "by_id": "new-mem-1",
+                "observed_at": "2026-05-05T00:00:00+00:00",
+            }
         ]
-        out = await supersessions.extract(_query(), _mock_db(rows))
+        _fake, ctx, _ = _patch_signal_client(supersessions, rows)
+        with ctx:
+            out = await supersessions.extract(_query())
         assert len(out) == 1
         ev = out[0]
         assert ev.kind == SignalKind.SUPERSESSION
@@ -186,14 +182,16 @@ class TestSupersessionExtractor:
     @pytest.mark.asyncio
     async def test_one_evidence_per_supersession(self):
         rows = [
-            _Row(superseded_id="m1", run_id="r1", agent_id="a1", by_id="n1",
-                 observed_at=datetime(2026, 5, 3, tzinfo=timezone.utc)),
-            _Row(superseded_id="m2", run_id="r2", agent_id="a2", by_id="n2",
-                 observed_at=datetime(2026, 5, 4, tzinfo=timezone.utc)),
-            _Row(superseded_id="m3", run_id="r1", agent_id="a1", by_id="n3",
-                 observed_at=datetime(2026, 5, 7, tzinfo=timezone.utc)),
+            {"superseded_id": "m1", "run_id": "r1", "agent_id": "a1", "by_id": "n1",
+             "observed_at": "2026-05-03T00:00:00+00:00"},
+            {"superseded_id": "m2", "run_id": "r2", "agent_id": "a2", "by_id": "n2",
+             "observed_at": "2026-05-04T00:00:00+00:00"},
+            {"superseded_id": "m3", "run_id": "r1", "agent_id": "a1", "by_id": "n3",
+             "observed_at": "2026-05-07T00:00:00+00:00"},
         ]
-        out = await supersessions.extract(_query(), _mock_db(rows))
+        _fake, ctx, _ = _patch_signal_client(supersessions, rows)
+        with ctx:
+            out = await supersessions.extract(_query())
         assert len(out) == 3
         # Each evidence keyed by the superseded memory; same trace can
         # accumulate multiple firings (e.g. an agent that wrote 3 bad
@@ -201,48 +199,24 @@ class TestSupersessionExtractor:
         assert {e.memory_ids[0] for e in out} == {"m1", "m2", "m3"}
 
     @pytest.mark.asyncio
-    async def test_sql_params_bind_query_inputs(self):
-        db = _mock_db(rows=[])
+    async def test_passes_query_inputs_to_client(self):
         q = _query(
             tenant_id="acme",
             fleet_id="ops-fleet",
             run_id="r-specific",
             agent_id="alice",
         )
-        await supersessions.extract(q, db)
-        # Inspect the bind params handed to execute(). The first
-        # positional arg is the text() SQL; the second is the params
-        # dict.
-        args, _ = db.execute.call_args
-        sql_clause, params = args
-        assert params["tenant_id"] == "acme"
-        assert params["fleet_id"] == "ops-fleet"
-        assert params["run_id"] == "r-specific"
-        assert params["agent_id"] == "alice"
-        assert params["w_start"] == q.window_start
-        assert params["w_end"] == q.window_end
-        # Belt-and-braces: tenant_id MUST be a parameter, NOT
-        # string-interpolated into the SQL.
-        assert "acme" not in str(sql_clause)
-
-    @pytest.mark.asyncio
-    async def test_fleet_filter_applies_to_old_memory_too(self):
-        """The FAILURE polarity lands on the SUPERSEDED memory's
-        trace. A fleet-scoped scan must filter on the OLD memory's
-        fleet_id, not just the corrective one — otherwise an
-        agent in fleet A correcting a memory written by fleet B
-        would erroneously land failure evidence on fleet B's trace
-        inside a fleet-A scan."""
-        db = _mock_db(rows=[])
-        await supersessions.extract(_query(fleet_id="A"), db)
-        args, _ = db.execute.call_args
-        sql_clause, _ = args
-        sql_text = str(sql_clause).lower()
-        # BOTH new_mem.fleet_id AND old_mem.fleet_id must be
-        # checked. Pin the literal presence of both clauses so a
-        # refactor can't silently drop one.
-        assert "new_mem.fleet_id" in sql_text
-        assert "old_mem.fleet_id" in sql_text
+        fake, ctx, method = _patch_signal_client(supersessions, [])
+        with ctx:
+            await supersessions.extract(q)
+        # The extractor threads the query's scope/window into the client read.
+        kwargs = getattr(fake, method).await_args.kwargs
+        assert kwargs["tenant_id"] == "acme"
+        assert kwargs["fleet_id"] == "ops-fleet"
+        assert kwargs["run_id"] == "r-specific"
+        assert kwargs["agent_id"] == "alice"
+        assert kwargs["window_start"] == q.window_start
+        assert kwargs["window_end"] == q.window_end
 
 
 # ── Contradiction extractor ───────────────────────────────────────
@@ -264,21 +238,25 @@ class TestContradictionExtractor:
 
     @pytest.mark.asyncio
     async def test_no_rows_returns_empty(self):
-        out = await contradictions.extract(_query(), _mock_db(rows=[]))
+        _fake, ctx, _ = _patch_signal_client(contradictions, [])
+        with ctx:
+            out = await contradictions.extract(_query())
         assert out == []
 
     @pytest.mark.asyncio
     async def test_outdated_status_emits_failure(self):
         rows = [
-            _Row(
-                memory_id="mem-1",
-                run_id="run-X",
-                agent_id="mira",
-                status="outdated",
-                observed_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
-            )
+            {
+                "memory_id": "mem-1",
+                "run_id": "run-X",
+                "agent_id": "mira",
+                "status": "outdated",
+                "observed_at": "2026-05-06T00:00:00+00:00",
+            }
         ]
-        out = await contradictions.extract(_query(), _mock_db(rows))
+        _fake, ctx, _ = _patch_signal_client(contradictions, rows)
+        with ctx:
+            out = await contradictions.extract(_query())
         assert len(out) == 1
         ev = out[0]
         assert ev.kind == SignalKind.CONTRADICTION
@@ -293,62 +271,50 @@ class TestContradictionExtractor:
     @pytest.mark.asyncio
     async def test_conflicted_status_emits_failure(self):
         rows = [
-            _Row(
-                memory_id="mem-2",
-                run_id="run-Y",
-                agent_id="kai",
-                status="conflicted",
-                observed_at=datetime(2026, 5, 7, tzinfo=timezone.utc),
-            )
+            {
+                "memory_id": "mem-2",
+                "run_id": "run-Y",
+                "agent_id": "kai",
+                "status": "conflicted",
+                "observed_at": "2026-05-07T00:00:00+00:00",
+            }
         ]
-        out = await contradictions.extract(_query(), _mock_db(rows))
+        _fake, ctx, _ = _patch_signal_client(contradictions, rows)
+        with ctx:
+            out = await contradictions.extract(_query())
         assert out[0].details["status"] == "conflicted"
         assert out[0].polarity == Polarity.FAILURE
 
     @pytest.mark.asyncio
-    async def test_sql_uses_status_array_bind(self):
-        db = _mock_db(rows=[])
-        await contradictions.extract(_query(tenant_id="acme"), db)
-        args, _ = db.execute.call_args
-        sql_clause, params = args
-        # The status set should be bound as a list (PG receives a
-        # text[] for ``= ANY(...)``), not interpolated.
-        assert params["contradicted_statuses"] == list(
-            contradictions.CONTRADICTED_STATUSES
-        )
-        # The tenant_id must not be string-interpolated either.
-        assert "acme" not in str(sql_clause)
+    async def test_passes_status_array_to_client(self):
+        fake, ctx, method = _patch_signal_client(contradictions, [])
+        with ctx:
+            await contradictions.extract(_query(tenant_id="acme"))
+        kwargs = getattr(fake, method).await_args.kwargs
+        # The status set is threaded as a list (storage binds it as a
+        # text[] for ``= ANY(...)``).
+        assert kwargs["contradicted_statuses"] == list(contradictions.CONTRADICTED_STATUSES)
+        assert kwargs["tenant_id"] == "acme"
 
     @pytest.mark.asyncio
     async def test_run_and_agent_filter_pass_through(self):
-        db = _mock_db(rows=[])
-        await contradictions.extract(
-            _query(run_id="run-Z", agent_id="alex"), db
-        )
-        _args, _ = db.execute.call_args
-        _sql, params = _args
-        assert params["run_id"] == "run-Z"
-        assert params["agent_id"] == "alex"
+        fake, ctx, method = _patch_signal_client(contradictions, [])
+        with ctx:
+            await contradictions.extract(_query(run_id="run-Z", agent_id="alex"))
+        kwargs = getattr(fake, method).await_args.kwargs
+        assert kwargs["run_id"] == "run-Z"
+        assert kwargs["agent_id"] == "alex"
 
     @pytest.mark.asyncio
-    async def test_window_boundaries_passed_as_params(self):
+    async def test_window_boundaries_passed_to_client(self):
         start = datetime(2026, 4, 1, tzinfo=timezone.utc)
         end = datetime(2026, 4, 15, tzinfo=timezone.utc)
-        db = _mock_db(rows=[])
-        await contradictions.extract(
-            _query(window_start=start, window_end=end), db
-        )
-        _args, _ = db.execute.call_args
-        _sql, params = _args
-        assert params["w_start"] == start
-        assert params["w_end"] == end
-        # The window is left-closed, right-open by SQL contract
-        # (``created_at >= w_start AND < w_end``). We assert the
-        # SQL text reflects that — drift here would silently shift
-        # outcome attribution by one tick.
-        sql_text = str(_sql)
-        assert ":w_start" in sql_text
-        assert ":w_end" in sql_text
+        fake, ctx, method = _patch_signal_client(contradictions, [])
+        with ctx:
+            await contradictions.extract(_query(window_start=start, window_end=end))
+        kwargs = getattr(fake, method).await_args.kwargs
+        assert kwargs["window_start"] == start
+        assert kwargs["window_end"] == end
 
 
 # ── Multi-signal independence ─────────────────────────────────────
@@ -361,15 +327,19 @@ class TestMultiSignalIndependence:
         # Running both extractors against unrelated rows must NOT
         # leak between them.
         sup_rows = [
-            _Row(superseded_id="s1", run_id="r1", agent_id="a1", by_id="n1",
-                 observed_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+            {"superseded_id": "s1", "run_id": "r1", "agent_id": "a1", "by_id": "n1",
+             "observed_at": "2026-05-05T00:00:00+00:00"}
         ]
         con_rows = [
-            _Row(memory_id="c1", run_id="r2", agent_id="a2", status="outdated",
-                 observed_at=datetime(2026, 5, 6, tzinfo=timezone.utc))
+            {"memory_id": "c1", "run_id": "r2", "agent_id": "a2", "status": "outdated",
+             "observed_at": "2026-05-06T00:00:00+00:00"}
         ]
-        sup_out = await supersessions.extract(_query(), _mock_db(sup_rows))
-        con_out = await contradictions.extract(_query(), _mock_db(con_rows))
+        _f1, ctx1, _ = _patch_signal_client(supersessions, sup_rows)
+        with ctx1:
+            sup_out = await supersessions.extract(_query())
+        _f2, ctx2, _ = _patch_signal_client(contradictions, con_rows)
+        with ctx2:
+            con_out = await contradictions.extract(_query())
         # Distinct kinds.
         assert sup_out[0].kind != con_out[0].kind
         # Distinct memory_ids surfaced.
@@ -381,13 +351,17 @@ class TestMultiSignalIndependence:
     async def test_extractors_safe_when_observed_at_none(self):
         # observed_at is nullable per the SignalEvidence schema; both
         # extractors must accept a row with no observed_at without
-        # crashing. (Happens when older memories predate updated_at
-        # tracking.)
-        for mod, rows in (
-            (supersessions, [_Row(superseded_id="s", run_id="r", agent_id="a", by_id="n")]),
-            (contradictions, [_Row(memory_id="c", run_id="r", agent_id="a", status="outdated")]),
-        ):
-            out = await mod.extract(_query(), _mock_db(rows))
+        # crashing. (Happens when older memories have no recall timestamp.)
+        cases = (
+            (supersessions, [{"superseded_id": "s", "run_id": "r", "agent_id": "a", "by_id": "n",
+                              "observed_at": None}]),
+            (contradictions, [{"memory_id": "c", "run_id": "r", "agent_id": "a", "status": "outdated",
+                               "observed_at": None}]),
+        )
+        for mod, rows in cases:
+            _fake, ctx, _ = _patch_signal_client(mod, rows)
+            with ctx:
+                out = await mod.extract(_query())
             assert len(out) == 1
             assert out[0].observed_at is None or isinstance(out[0].observed_at, datetime)
 
@@ -399,45 +373,45 @@ class TestMultiSignalIndependence:
 class TestWindowDegenerateCases:
     @pytest.mark.asyncio
     async def test_empty_window_returns_empty(self):
-        # window_start == window_end → no rows can satisfy
-        # ``created_at >= start AND < end``. The query still runs
-        # (Postgres returns 0 rows); our extractor returns [].
+        # window_start == window_end → storage returns 0 rows; the
+        # extractor returns [].
         same = datetime(2026, 5, 10, tzinfo=timezone.utc)
-        out = await supersessions.extract(
-            _query(window_start=same, window_end=same), _mock_db(rows=[])
-        )
+        _fake, ctx, _ = _patch_signal_client(supersessions, [])
+        with ctx:
+            out = await supersessions.extract(_query(window_start=same, window_end=same))
         assert out == []
 
     @pytest.mark.asyncio
     async def test_inverted_window_does_not_crash(self):
         # Caller passing window_end < window_start is a programmer
-        # error; we don't raise, we just return [] (consistent with
-        # SQL semantics).
-        out = await contradictions.extract(
-            _query(
-                window_start=datetime(2026, 5, 10, tzinfo=timezone.utc),
-                window_end=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            ),
-            _mock_db(rows=[]),
-        )
+        # error; we don't raise, we just return [] (storage returns 0 rows).
+        _fake, ctx, _ = _patch_signal_client(contradictions, [])
+        with ctx:
+            out = await contradictions.extract(
+                _query(
+                    window_start=datetime(2026, 5, 10, tzinfo=timezone.utc),
+                    window_end=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                )
+            )
         assert out == []
 
     @pytest.mark.asyncio
     async def test_wide_window_collects_all(self):
-        # A one-year window with many rows must collect every row the
-        # mock returns — the extractor does NOT impose its own LIMIT.
+        # A one-year window with many rows must collect every row storage
+        # returns — the extractor does NOT impose its own LIMIT.
         many = [
-            _Row(superseded_id=f"m{i}", run_id=f"r{i}", agent_id="a", by_id=f"n{i}",
-                 observed_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+            {"superseded_id": f"m{i}", "run_id": f"r{i}", "agent_id": "a", "by_id": f"n{i}",
+             "observed_at": "2026-05-05T00:00:00+00:00"}
             for i in range(50)
         ]
-        out = await supersessions.extract(
-            _query(
-                window_start=datetime(2026, 1, 1, tzinfo=timezone.utc),
-                window_end=datetime(2027, 1, 1, tzinfo=timezone.utc),
-            ),
-            _mock_db(many),
-        )
+        _fake, ctx, _ = _patch_signal_client(supersessions, many)
+        with ctx:
+            out = await supersessions.extract(
+                _query(
+                    window_start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    window_end=datetime(2027, 1, 1, tzinfo=timezone.utc),
+                )
+            )
         assert len(out) == 50
 
 
@@ -501,15 +475,17 @@ class TestTerminalMemoryExtractor:
     @pytest.mark.asyncio
     async def test_success_terminal_emits_success(self):
         rows = [
-            _Row(
-                memory_id="m1",
-                run_id="r1",
-                agent_id="sasha",
-                content="Shipped ✓ to eu-west",
-                observed_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
-            )
+            {
+                "memory_id": "m1",
+                "run_id": "r1",
+                "agent_id": "sasha",
+                "content": "Shipped ✓ to eu-west",
+                "observed_at": "2026-05-10T00:00:00+00:00",
+            }
         ]
-        out = await terminal_memory.extract(_query(), _mock_db(rows))
+        _fake, ctx, _ = _patch_signal_client(terminal_memory, rows)
+        with ctx:
+            out = await terminal_memory.extract(_query())
         assert len(out) == 1
         assert out[0].kind == SignalKind.TERMINAL_MEMORY
         assert out[0].polarity == Polarity.SUCCESS
@@ -520,36 +496,39 @@ class TestTerminalMemoryExtractor:
     @pytest.mark.asyncio
     async def test_failure_terminal_emits_failure(self):
         rows = [
-            _Row(memory_id="m1", run_id="r1", agent_id="kai",
-                 content="Blocked — DNS resolver hangs",
-                 observed_at=datetime(2026, 5, 10, tzinfo=timezone.utc))
+            {"memory_id": "m1", "run_id": "r1", "agent_id": "kai",
+             "content": "Blocked — DNS resolver hangs",
+             "observed_at": "2026-05-10T00:00:00+00:00"}
         ]
-        out = await terminal_memory.extract(_query(), _mock_db(rows))
+        _fake, ctx, _ = _patch_signal_client(terminal_memory, rows)
+        with ctx:
+            out = await terminal_memory.extract(_query())
         assert out[0].polarity == Polarity.FAILURE
 
     @pytest.mark.asyncio
     async def test_ambiguous_terminal_not_emitted(self):
         # Classifier returns None → no evidence at all.
         rows = [
-            _Row(memory_id="m1", run_id="r1", agent_id="a",
-                 content="Looking into it.",
-                 observed_at=datetime(2026, 5, 10, tzinfo=timezone.utc))
+            {"memory_id": "m1", "run_id": "r1", "agent_id": "a",
+             "content": "Looking into it.",
+             "observed_at": "2026-05-10T00:00:00+00:00"}
         ]
-        out = await terminal_memory.extract(_query(), _mock_db(rows))
+        _fake, ctx, _ = _patch_signal_client(terminal_memory, rows)
+        with ctx:
+            out = await terminal_memory.extract(_query())
         assert out == []
 
     @pytest.mark.asyncio
-    async def test_distinct_on_in_sql(self):
-        # SQL must use DISTINCT ON (run_id, agent_id) so we only
-        # classify the LAST memory of each session — not every memory
-        # in the window that happens to contain "shipped".
-        db = _mock_db(rows=[])
-        await terminal_memory.extract(_query(), db)
-        args, _ = db.execute.call_args
-        sql_clause, _ = args
-        sql_text = str(sql_clause).lower()
-        assert "distinct on" in sql_text
-        assert "(m.run_id, m.agent_id)" in sql_text
+    async def test_reads_via_terminal_memory_client(self):
+        # The DISTINCT ON (run_id, agent_id) terminal-pick now lives
+        # storage-side (pinned by the Ph5a storage integration test). Here
+        # we confirm the extractor reads via the dedicated client method
+        # with the query's scope.
+        fake, ctx, method = _patch_signal_client(terminal_memory, [])
+        with ctx:
+            await terminal_memory.extract(_query(tenant_id="acme"))
+        getattr(fake, method).assert_awaited_once()
+        assert getattr(fake, method).await_args.kwargs["tenant_id"] == "acme"
 
 
 # ── Cross-agent-reuse extractor ───────────────────────────────────
@@ -568,21 +547,25 @@ class TestCrossAgentReuseExtractor:
 
     @pytest.mark.asyncio
     async def test_no_rows_returns_empty(self):
-        out = await cross_agent_reuse.extract(_query(), _mock_db(rows=[]))
+        _fake, ctx, _ = _patch_signal_client(cross_agent_reuse, [])
+        with ctx:
+            out = await cross_agent_reuse.extract(_query())
         assert out == []
 
     @pytest.mark.asyncio
     async def test_load_bearing_emits_neutral(self):
         rows = [
-            _Row(
-                memory_id="m1",
-                run_id="r1",
-                agent_id="sasha",
-                recall_count=8,
-                observed_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
-            )
+            {
+                "memory_id": "m1",
+                "run_id": "r1",
+                "agent_id": "sasha",
+                "recall_count": 8,
+                "observed_at": "2026-05-10T00:00:00+00:00",
+            }
         ]
-        out = await cross_agent_reuse.extract(_query(), _mock_db(rows))
+        _fake, ctx, _ = _patch_signal_client(cross_agent_reuse, rows)
+        with ctx:
+            out = await cross_agent_reuse.extract(_query())
         assert len(out) == 1
         # Cross-agent reuse is NEUTRAL — it doesn't claim the
         # originating trace succeeded or failed, only that the
@@ -593,12 +576,12 @@ class TestCrossAgentReuseExtractor:
         assert out[0].details["threshold"] == cross_agent_reuse.DEFAULT_RECALL_COUNT_THRESHOLD
 
     @pytest.mark.asyncio
-    async def test_threshold_is_passed_in_sql_params(self):
-        db = _mock_db(rows=[])
-        await cross_agent_reuse.extract(_query(), db)
-        args, _ = db.execute.call_args
-        _sql, params = args
-        assert params["threshold"] == cross_agent_reuse.DEFAULT_RECALL_COUNT_THRESHOLD
+    async def test_threshold_is_passed_to_client(self):
+        fake, ctx, method = _patch_signal_client(cross_agent_reuse, [])
+        with ctx:
+            await cross_agent_reuse.extract(_query())
+        kwargs = getattr(fake, method).await_args.kwargs
+        assert kwargs["threshold"] == cross_agent_reuse.DEFAULT_RECALL_COUNT_THRESHOLD
 
 
 # ── Repeat-recall extractor (MVP stub) ────────────────────────────
@@ -615,16 +598,14 @@ class TestRepeatRecallStub:
         # MVP: until Phase 2 ships the recall-log table, the
         # extractor returns []. Documented behavior; tests pin it so
         # an accidental flip can't slip through.
-        out = await repeat_recall.extract(_query(), _mock_db(rows=[]))
+        out = await repeat_recall.extract(_query())
         assert out == []
 
-    @pytest.mark.asyncio
-    async def test_no_db_calls_in_stub(self):
-        # The stub MUST NOT issue a DB query — costless until the
-        # real implementation lands.
-        db = _mock_db(rows=[])
-        await repeat_recall.extract(_query(), db)
-        db.execute.assert_not_called()
+    def test_stub_does_not_import_storage_client(self):
+        # The stub MUST stay costless — it imports no storage client, so it
+        # can't issue any read until the real implementation lands. Pinning
+        # the absence of the symbol guards against an accidental wiring.
+        assert not hasattr(repeat_recall, "get_storage_client")
 
 
 # ── External-hooks extractor (MVP stub) ───────────────────────────
@@ -638,14 +619,12 @@ class TestExternalHooksStub:
 
     @pytest.mark.asyncio
     async def test_mvp_always_returns_empty(self):
-        out = await external_hooks.extract(_query(), _mock_db(rows=[]))
+        out = await external_hooks.extract(_query())
         assert out == []
 
-    @pytest.mark.asyncio
-    async def test_no_db_calls_in_stub(self):
-        db = _mock_db(rows=[])
-        await external_hooks.extract(_query(), db)
-        db.execute.assert_not_called()
+    def test_stub_does_not_import_storage_client(self):
+        # Same costless-stub invariant as repeat_recall.
+        assert not hasattr(external_hooks, "get_storage_client")
 
 
 # ── Registry: all 6 signals discoverable + uniquely keyed ────────

@@ -1327,6 +1327,35 @@ class CoreStorageClient:
     async def query_documents(self, data: dict) -> list[dict]:
         return await self._post("/documents/query", data, read=True)  # type: ignore[return-value]
 
+    async def update_document_status(
+        self,
+        *,
+        tenant_id: str,
+        collection: str,
+        doc_id: str,
+        new_status: str,
+        expected_status: str,
+    ) -> dict | None:
+        """Conditional (CAS) status flip on a document's ``data`` jsonb.
+
+        Returns ``{"updated": True, "doc_id": ...}`` when the row still
+        carried ``expected_status`` and was flipped; returns ``None`` when the
+        storage route 404s (CAS miss — a concurrent writer transitioned the
+        row, or it never existed). The caller raises ``AlreadyTransitionedError``
+        on ``None``. ``read=False`` (writer) — this is a write on the primary.
+        """
+        return await self._post_optional(
+            "/documents/update-status",
+            {
+                "tenant_id": tenant_id,
+                "collection": collection,
+                "doc_id": doc_id,
+                "new_status": new_status,
+                "expected_status": expected_status,
+            },
+            read=False,
+        )
+
     async def list_documents(
         self,
         tenant_id: str,
@@ -1358,6 +1387,197 @@ class CoreStorageClient:
         return await self._delete(
             f"/documents/{collection}/{doc_id}",
             **params,
+        )
+
+    # =====================================================================
+    # Skill factory pipeline (Fix 2 Ph5a)
+    # =====================================================================
+    #
+    # Forge poison memory, session-trace upsert, and the bespoke
+    # memory-window / outcome-signal analytic reads. Reads route to the
+    # replica (post-commit analytic queries — replica lag is harmless);
+    # writes hit the primary. Each takes an explicit tenant_id (+ fleet /
+    # window / params) — there are no RLS GUCs server-side.
+
+    async def forge_write_rejected_fingerprint(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        cluster_fingerprint: str,
+        rejected_by_agent: str,
+        cooloff_days: int,
+        reason: str | None = None,
+    ) -> str:
+        """Insert one ``forge_rejected_fingerprints`` row; return its id."""
+        payload: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "fleet_id": fleet_id,
+            "cluster_fingerprint": cluster_fingerprint,
+            "rejected_by_agent": rejected_by_agent,
+            "cooloff_days": cooloff_days,
+            "reason": reason,
+        }
+        result = await self._post("/forge/rejected-fingerprints", payload)
+        return result["id"]  # type: ignore[index,call-overload]
+
+    async def forge_is_fingerprint_poisoned(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        cluster_fingerprint: str,
+    ) -> bool:
+        """True iff a live cooloff row exists for this (tenant, fleet, fp)."""
+        result = await self._post(
+            "/forge/rejected-fingerprints/check",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "cluster_fingerprint": cluster_fingerprint,
+            },
+            read=True,
+        )
+        return bool(result.get("poisoned"))  # type: ignore[union-attr]
+
+    async def upsert_session_traces(self, *, tenant_id: str, traces: list[dict]) -> None:
+        """Batch-upsert ``session_traces`` rows (ON CONFLICT keyed by
+        tenant/run/agent). ``tenant_id`` scopes every row server-side."""
+        await self._post(
+            "/session-traces/upsert",
+            {"tenant_id": tenant_id, "traces": traces},
+        )
+
+    async def session_memories_in_window(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[dict]:
+        """Run-scoped memories in the window for trace enumeration."""
+        return await self._post(  # type: ignore[return-value]
+            "/session-traces/memories-window",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+            },
+            read=True,
+        )
+
+    async def session_trace_entity_links(self, *, tenant_id: str, memory_ids: list[str]) -> list[dict]:
+        """``(memory_id, entity_id)`` pairs for a batch of memory ids."""
+        return await self._post(  # type: ignore[return-value]
+            "/session-traces/entity-links",
+            {"tenant_id": tenant_id, "memory_ids": memory_ids},
+            read=True,
+        )
+
+    async def forge_memory_content_by_ids(self, *, tenant_id: str, memory_ids: list[str]) -> list[dict]:
+        """Bulk ``(id, content)`` by memory id for the forge memory fetcher."""
+        return await self._post(  # type: ignore[return-value]
+            "/forge/memories-content",
+            {"tenant_id": tenant_id, "memory_ids": memory_ids},
+            read=True,
+        )
+
+    async def outcome_contradiction_signals(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        window_start: datetime,
+        window_end: datetime,
+        contradicted_statuses: list[str],
+        run_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> list[dict]:
+        return await self._post(  # type: ignore[return-value]
+            "/outcome-signals/contradictions",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+                "contradicted_statuses": contradicted_statuses,
+                "run_id": run_id,
+                "agent_id": agent_id,
+            },
+            read=True,
+        )
+
+    async def outcome_supersession_signals(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        window_start: datetime,
+        window_end: datetime,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> list[dict]:
+        return await self._post(  # type: ignore[return-value]
+            "/outcome-signals/supersessions",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+                "run_id": run_id,
+                "agent_id": agent_id,
+            },
+            read=True,
+        )
+
+    async def outcome_cross_agent_reuse_signals(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        window_start: datetime,
+        window_end: datetime,
+        threshold: int,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> list[dict]:
+        return await self._post(  # type: ignore[return-value]
+            "/outcome-signals/cross-agent-reuse",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+                "threshold": threshold,
+                "run_id": run_id,
+                "agent_id": agent_id,
+            },
+            read=True,
+        )
+
+    async def outcome_terminal_memory_signals(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        window_start: datetime,
+        window_end: datetime,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> list[dict]:
+        return await self._post(  # type: ignore[return-value]
+            "/outcome-signals/terminal-memory",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+                "run_id": run_id,
+                "agent_id": agent_id,
+            },
+            read=True,
         )
 
     # =====================================================================
