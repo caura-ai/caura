@@ -117,12 +117,15 @@ async def test_update_embedding_wrong_tenant_is_noop(sc):
     mem_id = await _seed_memory(sc, owner)  # seeded without an embedding
     assert (await svc.memory_get_by_id(UUID(mem_id))).embedding is None
 
-    await sc.update_embedding(mem_id, _t(), fake_embedding("vector"))
+    # Wrong tenant matches no row -> route 404 -> client returns None, no write.
+    wrong = await sc.update_embedding(mem_id, _t(), fake_embedding("vector"))
+    assert wrong is None, "wrong-tenant embedding write 404s -> client None"
     assert (await svc.memory_get_by_id(UUID(mem_id))).embedding is None, (
         "wrong tenant must not write the embedding"
     )
 
-    await sc.update_embedding(mem_id, owner, fake_embedding("vector"))
+    ok = await sc.update_embedding(mem_id, owner, fake_embedding("vector"))
+    assert ok == {"ok": True}
     assert (await svc.memory_get_by_id(UUID(mem_id))).embedding is not None
 
 

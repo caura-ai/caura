@@ -1371,12 +1371,17 @@ async def update_embedding(memory_id: UUID, request: Request) -> dict:
     tenant_id = body.get("tenant_id")
     if not tenant_id:
         raise HTTPException(status_code=422, detail="tenant_id is required")
-    await _svc.memory_update_embedding(
+    updated = await _svc.memory_update_embedding(
         memory_id,
         tenant_id=tenant_id,
         embedding=body["embedding"],
         metadata=body.get("metadata"),
     )
+    if not updated:
+        # No row for this (id, tenant) — surface 404 rather than a silent
+        # 200 (consistent with PATCH /memories/{id}); the client returns
+        # None so callers don't count a no-op as a successful write.
+        raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found")
     return {"ok": True}
 
 

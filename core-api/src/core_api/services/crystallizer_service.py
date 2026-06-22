@@ -242,8 +242,12 @@ async def _remediate_missing_embeddings(
         embedding = await get_embedding(content)
         if embedding is None:
             continue
-        await sc.update_embedding(str(mem_id), tenant_id, embedding)
-        patched += 1
+        # Count only writes that actually landed: update_embedding returns
+        # None when the row didn't match (404), so a no-op never inflates
+        # the remediated tally. (Candidates are tenant-scoped, so a mismatch
+        # shouldn't occur here — this just keeps the counter honest.)
+        if await sc.update_embedding(str(mem_id), tenant_id, embedding) is not None:
+            patched += 1
 
     if patched:
         logger.info(

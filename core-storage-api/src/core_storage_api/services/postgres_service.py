@@ -706,19 +706,23 @@ class PostgresService:
         tenant_id: str,
         embedding: list[float],
         metadata: dict | None = None,
-    ) -> None:
+    ) -> bool:
         # ``tenant_id`` scopes the write to the row's home tenant: a
         # memory_id from another tenant matches no row, so a stale or
         # spoofed worker payload can never overwrite a foreign embedding.
+        # Returns whether a row matched so the route can surface a 404 on
+        # a no-op (mirrors memory_update / memory_update_status) instead of
+        # a silent 200 that lets callers over-count successful writes.
         async with get_session() as session:
             values: dict = {"embedding": embedding}
             if metadata is not None:
                 values["metadata_"] = metadata
-            await session.execute(
+            result = await session.execute(
                 sql_update(Memory)
                 .where(Memory.id == memory_id, Memory.tenant_id == tenant_id)
                 .values(**values)
             )
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
 
     # ------------------------------------------------------------------
     # B) Content hash / dedup
