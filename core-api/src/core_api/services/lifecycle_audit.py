@@ -118,46 +118,39 @@ class _CoreApiLifecycleAdapter:
         if not config.auto_insights_enabled:
             return 0
 
-        # Lazy imports — insights_service has heavy transitive deps
+        # Lazy import — insights_service has heavy transitive deps
         # (LLM clients, embedding providers) we don't want loading at
         # core-api startup just for the lifecycle adapter wiring.
-        from sqlalchemy import func, select
-
-        from common.models.memory import Memory
-        from core_api.db.session import async_session
+        #
+        # Fix 2 Ph5b: the activity gate + ``generate_insights`` are now
+        # storage-routed (no ``async_session`` / direct DB pool). The cheap
+        # two-query MAX(created_at) gate runs via
+        # ``insights_activity_gate``; ``generate_insights`` carries
+        # ``tenant_id`` explicitly (``db=None``) and storage-commits its own
+        # supersede/create/restore transactions.
         from core_api.services.insights_service import generate_insights
 
-        # Single session covers both the cheap activity gate and the
-        # heavier ``generate_insights`` pass — mirrors entity_link's
-        # pattern of one session per adapter call, explicit commit.
-        async with async_session() as db:
-            scope_filter = [
-                Memory.tenant_id == org_id,
-                Memory.deleted_at.is_(None),
-            ]
-            if fleet_id:
-                scope_filter.append(Memory.fleet_id == fleet_id)
-
-            latest_non_insight = await db.scalar(
-                select(func.max(Memory.created_at)).where(*scope_filter, Memory.memory_type != "insight")
-            )
-            if latest_non_insight is None:
+        gate = await self._storage.insights_activity_gate(tenant_id=org_id, fleet_id=fleet_id)
+        latest_non_insight_raw = gate.get("latest_non_insight")
+        if latest_non_insight_raw is None:
+            return 0
+        latest_insight_raw = gate.get("latest_insight")
+        # Parse the ISO strings back to datetimes so the comparison matches
+        # the original tz-aware ``created_at`` ``<=`` (robust to mixed UTC
+        # offsets, unlike a lexicographic string compare).
+        latest_non_insight = datetime.fromisoformat(latest_non_insight_raw)
+        if latest_insight_raw is not None:
+            latest_insight = datetime.fromisoformat(latest_insight_raw)
+            if latest_non_insight <= latest_insight:
                 return 0
 
-            latest_insight = await db.scalar(
-                select(func.max(Memory.created_at)).where(*scope_filter, Memory.memory_type == "insight")
-            )
-            if latest_insight is not None and latest_non_insight <= latest_insight:
-                return 0
-
-            result = await generate_insights(
-                db,
-                org_id,
-                focus="discover",
-                scope="fleet" if fleet_id else "all",
-                fleet_id=fleet_id,
-            )
-            await db.commit()
+        result = await generate_insights(
+            None,
+            org_id,
+            focus="discover",
+            scope="fleet" if fleet_id else "all",
+            fleet_id=fleet_id,
+        )
 
         return len(result.get("insight_memory_ids", []))
 

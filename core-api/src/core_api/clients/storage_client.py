@@ -1581,6 +1581,152 @@ class CoreStorageClient:
         )
 
     # =====================================================================
+    # Insights (Fix 2 Ph5b)
+    # =====================================================================
+    #
+    # Analytic memory reads (one per focus), the discover-sample row fetch
+    # (embedding included; numpy k-means stays client-side), the
+    # supersede/restore priors writes, and the lifecycle activity gate. The 6
+    # reads + the gate route to the replica (post-commit analytics — replica
+    # lag is harmless); the two priors writes hit the primary. Each takes an
+    # explicit tenant_id (+ scope params) — there are no RLS GUCs server-side.
+    # ``max_memories`` / ``sample_size`` forward the core-api tuning constants
+    # so they stay the single source of truth here.
+
+    async def insights_query_contradictions(
+        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
+    ) -> list[dict]:
+        return await self._post(  # type: ignore[return-value]
+            "/insights/contradictions",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": agent_id,
+                "scope": scope,
+                "max_memories": max_memories,
+            },
+            read=True,
+        )
+
+    async def insights_query_failures(
+        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
+    ) -> list[dict]:
+        return await self._post(  # type: ignore[return-value]
+            "/insights/failures",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": agent_id,
+                "scope": scope,
+                "max_memories": max_memories,
+            },
+            read=True,
+        )
+
+    async def insights_query_stale(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        agent_id: str,
+        scope: str,
+        thirty_days_ago: datetime,
+        fourteen_days_ago: datetime,
+        max_memories: int,
+    ) -> list[dict]:
+        return await self._post(  # type: ignore[return-value]
+            "/insights/stale",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": agent_id,
+                "scope": scope,
+                "thirty_days_ago": thirty_days_ago.isoformat(),
+                "fourteen_days_ago": fourteen_days_ago.isoformat(),
+                "max_memories": max_memories,
+            },
+            read=True,
+        )
+
+    async def insights_query_divergence(
+        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
+    ) -> list[dict]:
+        return await self._post(  # type: ignore[return-value]
+            "/insights/divergence",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": agent_id,
+                "scope": scope,
+                "max_memories": max_memories,
+            },
+            read=True,
+        )
+
+    async def insights_query_patterns(
+        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
+    ) -> list[dict]:
+        return await self._post(  # type: ignore[return-value]
+            "/insights/patterns",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": agent_id,
+                "scope": scope,
+                "max_memories": max_memories,
+            },
+            read=True,
+        )
+
+    async def insights_discover_sample(
+        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, sample_size: int
+    ) -> list[dict]:
+        """Sample active memories WITH embeddings for client-side k-means."""
+        return await self._post(  # type: ignore[return-value]
+            "/insights/discover-sample",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": agent_id,
+                "scope": scope,
+                "sample_size": sample_size,
+            },
+            read=True,
+        )
+
+    async def insights_supersede_priors(
+        self, *, tenant_id: str, agent_id: str, focus: str, scope: str, fleet_id: str | None = None
+    ) -> dict:
+        """Atomically select + outdate prior active insights; primary write."""
+        return await self._post(  # type: ignore[return-value]
+            "/insights/supersede-priors",
+            {
+                "tenant_id": tenant_id,
+                "agent_id": agent_id,
+                "focus": focus,
+                "scope": scope,
+                "fleet_id": fleet_id,
+            },
+            read=False,
+        )
+
+    async def insights_restore_priors(self, *, tenant_id: str, prior_ids: list[str]) -> dict:
+        """Restore previously-outdated priors to active; primary write."""
+        return await self._post(  # type: ignore[return-value]
+            "/insights/restore-priors",
+            {"tenant_id": tenant_id, "prior_ids": prior_ids},
+            read=False,
+        )
+
+    async def insights_activity_gate(self, *, tenant_id: str, fleet_id: str | None) -> dict:
+        """MAX(created_at) for non-insight vs insight memories (lifecycle gate)."""
+        return await self._post(  # type: ignore[return-value]
+            "/insights/activity-gate",
+            {"tenant_id": tenant_id, "fleet_id": fleet_id},
+            read=True,
+        )
+
+    # =====================================================================
     # Keystones (CAURA-000)
     # =====================================================================
     #

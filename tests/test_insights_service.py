@@ -2,11 +2,119 @@
 
 Unit tests (no DB): formatting, validation, fake provider, k-means.
 Integration tests (require DB): query functions, persistence, MCP tool.
+
+Fix 2 Ph5b: the insights service routes its analytic reads + the
+supersede/restore writes through core-storage-api (each its OWN committed
+connection storage-side). The rolled-back ``db`` fixture is therefore no
+longer visible to the service — integration tests SEED via a committed raw
+INSERT (``_seed_memory`` on the storage ``get_session``) and ASSERT via the
+storage client / committed reads, mirroring ``test_ph5b_insights_storage``.
+``db`` is passed as ``None`` to the service entrypoints (the storage-routed
+paths ignore it).
 """
 
-import pytest
+import json as _json
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
+import pytest
+from sqlalchemy import text
+
+from core_storage_api.services.postgres_service import get_session
 from tests.conftest import get_test_auth, uid as _uid
+
+
+async def _seed_memory(
+    *,
+    tenant_id: str,
+    content: str = "x",
+    agent_id: str = "agent-1",
+    fleet_id: str | None = None,
+    memory_type: str = "fact",
+    status: str = "active",
+    weight: float = 0.5,
+    recall_count: int = 0,
+    created_at: datetime | None = None,
+    subject_entity_id: str | None = None,
+    object_value: str | None = None,
+    embedding: list[float] | None = None,
+    metadata: dict | None = None,
+    visibility: str = "scope_team",
+) -> str:
+    """Committed raw INSERT mirroring test_ph5b's seed helper.
+
+    The rolled-back ``db`` fixture isn't visible to the storage-routed service,
+    so insights integration tests must seed through a committed (independent)
+    session like the storage write path.
+    """
+    created = created_at or datetime.now(UTC)
+    mem_id = str(uuid4())
+    emb_literal = "[" + ",".join(str(float(x)) for x in embedding) + "]" if embedding is not None else None
+    async with get_session() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO memories
+                    (id, tenant_id, fleet_id, agent_id, content, memory_type,
+                     status, weight, recall_count, created_at,
+                     subject_entity_id, object_value, embedding, metadata, visibility)
+                VALUES
+                    (CAST(:id AS uuid), :tenant_id, :fleet_id, :agent_id, :content, :memory_type,
+                     :status, :weight, :recall_count, :created_at,
+                     CAST(:subject_entity_id AS uuid), :object_value,
+                     CAST(:embedding AS vector), CAST(:metadata AS jsonb), :visibility)
+                """
+            ),
+            {
+                "id": mem_id,
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": agent_id,
+                "content": content,
+                "memory_type": memory_type,
+                "status": status,
+                "weight": weight,
+                "recall_count": recall_count,
+                "created_at": created,
+                "subject_entity_id": subject_entity_id,
+                "object_value": object_value,
+                "embedding": emb_literal,
+                "metadata": _json.dumps(metadata) if metadata is not None else None,
+                "visibility": visibility,
+            },
+        )
+    return mem_id
+
+
+async def _status_of(mem_id: str) -> str:
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                text("SELECT status FROM memories WHERE id = CAST(:id AS uuid)"), {"id": mem_id}
+            )
+        ).fetchone()
+    return row.status
+
+
+async def _insight_rows(tenant_id: str) -> list:
+    async with get_session() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT id::text AS id, metadata FROM memories "
+                    "WHERE tenant_id = :t AND memory_type = 'insight'"
+                ),
+                {"t": tenant_id},
+            )
+        ).fetchall()
+    return list(rows)
+
+
+async def _cleanup_tenant(tenant_id: str) -> None:
+    async with get_session() as session:
+        await session.execute(
+            text("DELETE FROM memories WHERE tenant_id = :t"), {"t": tenant_id}
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -265,26 +373,6 @@ class TestFocusValidation:
 # ---------------------------------------------------------------------------
 
 
-async def _write_memory(
-    client, content, memory_type="fact", weight=None, agent_id=None, fleet_id=None
-):
-    """Write a memory and return the response JSON."""
-    tag = _uid()
-    _, headers = get_test_auth()
-    body = {
-        "tenant_id": "default",
-        "content": f"{content} [{tag}]",
-        "agent_id": agent_id or f"insights-agent-{tag}",
-        "fleet_id": fleet_id or f"insights-fleet-{tag}",
-        "memory_type": memory_type,
-    }
-    if weight is not None:
-        body["weight"] = weight
-    resp = await client.post("/api/v1/memories", json=body, headers=headers)
-    assert resp.status_code == 201, f"Write failed: {resp.text}"
-    return resp.json()
-
-
 @pytest.mark.asyncio
 async def test_insights_patterns_empty(client):
     """Insights on a scoped agent with no memories returns empty findings."""
@@ -307,184 +395,146 @@ async def test_insights_patterns_empty(client):
 
 
 @pytest.mark.asyncio
-async def test_insights_stale_finds_old_memories(db):
+async def test_insights_stale_finds_old_memories():
     """Stale focus finds memories with zero recalls and old created_at."""
-    from datetime import datetime, timezone, timedelta
-    from common.models.memory import Memory
-
     tag = _uid()
     tenant_id = f"test-tenant-{tag}"
+    try:
+        await _seed_memory(
+            tenant_id=tenant_id,
+            agent_id="stale-agent",
+            fleet_id="stale-fleet",
+            content=f"Very old stale fact [{tag}]",
+            recall_count=0,
+            created_at=datetime.now(UTC) - timedelta(days=60),
+        )
 
-    # Create an old, never-recalled memory directly in DB
-    old_memory = Memory(
-        tenant_id=tenant_id,
-        agent_id="stale-agent",
-        fleet_id="stale-fleet",
-        memory_type="fact",
-        content=f"Very old stale fact [{tag}]",
-        weight=0.5,
-        status="active",
-        recall_count=0,
-        created_at=datetime.now(timezone.utc) - timedelta(days=60),
-        visibility="scope_team",
-    )
-    db.add(old_memory)
-    await db.flush()
+        from core_api.services.insights_service import _query_stale
 
-    from core_api.services.insights_service import _query_stale
-
-    results = await _query_stale(db, tenant_id, None, "stale-agent", "agent")
-    assert len(results) >= 1
-    assert any(tag in r["content"] for r in results)
+        results = await _query_stale(None, tenant_id, None, "stale-agent", "agent")
+        assert len(results) >= 1
+        assert any(tag in r["content"] for r in results)
+    finally:
+        await _cleanup_tenant(tenant_id)
 
 
 @pytest.mark.asyncio
-async def test_insights_patterns_returns_recent(db):
+async def test_insights_patterns_returns_recent():
     """Patterns focus returns recent memories."""
-    from common.models.memory import Memory
-
     tag = _uid()
     tenant_id = f"test-tenant-{tag}"
+    try:
+        for i in range(5):
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id="pattern-agent",
+                fleet_id="pattern-fleet",
+                content=f"Pattern test memory {i} [{tag}]",
+            )
 
-    for i in range(5):
-        mem = Memory(
-            tenant_id=tenant_id,
-            agent_id="pattern-agent",
-            fleet_id="pattern-fleet",
-            memory_type="fact",
-            content=f"Pattern test memory {i} [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_team",
-        )
-        db.add(mem)
-    await db.flush()
+        from core_api.services.insights_service import _query_patterns
 
-    from core_api.services.insights_service import _query_patterns
-
-    results = await _query_patterns(db, tenant_id, None, "pattern-agent", "agent")
-    assert len(results) == 5
+        results = await _query_patterns(None, tenant_id, None, "pattern-agent", "agent")
+        assert len(results) == 5
+    finally:
+        await _cleanup_tenant(tenant_id)
 
 
 @pytest.mark.asyncio
-async def test_insights_failures_finds_low_weight_recalled(db):
+async def test_insights_failures_finds_low_weight_recalled():
     """Failures focus finds low-weight memories that were recalled."""
-    from common.models.memory import Memory
-
     tag = _uid()
     tenant_id = f"test-tenant-{tag}"
-
-    mem = Memory(
-        tenant_id=tenant_id,
-        agent_id="fail-agent",
-        fleet_id="fail-fleet",
-        memory_type="fact",
-        content=f"Bad recalled fact [{tag}]",
-        weight=0.1,
-        status="active",
-        recall_count=5,
-        visibility="scope_team",
-    )
-    db.add(mem)
-    await db.flush()
-
-    from core_api.services.insights_service import _query_failures
-
-    results = await _query_failures(db, tenant_id, None, "fail-agent", "agent")
-    assert len(results) >= 1
-    assert any(tag in r["content"] for r in results)
-
-
-@pytest.mark.asyncio
-async def test_generate_insights_with_fake_provider(db):
-    """Full generate_insights with fake LLM provider produces valid output."""
-    from common.models.memory import Memory
-
-    tag = _uid()
-    tenant_id = f"test-tenant-{tag}"
-
-    # Create some memories for the patterns focus
-    for i in range(3):
-        mem = Memory(
+    try:
+        await _seed_memory(
             tenant_id=tenant_id,
-            agent_id="insight-gen-agent",
-            fleet_id="insight-gen-fleet",
-            memory_type="fact",
-            content=f"Generate insights test {i} [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_team",
+            agent_id="fail-agent",
+            fleet_id="fail-fleet",
+            content=f"Bad recalled fact [{tag}]",
+            weight=0.1,
+            recall_count=5,
         )
-        db.add(mem)
-    await db.flush()
 
-    from core_api.services.insights_service import generate_insights
+        from core_api.services.insights_service import _query_failures
 
-    result = await generate_insights(
-        db,
-        tenant_id=tenant_id,
-        focus="patterns",
-        scope="agent",
-        fleet_id=None,
-        agent_id="insight-gen-agent",
-    )
-
-    assert result["focus"] == "patterns"
-    assert result["scope"] == "agent"
-    assert result["memories_analyzed"] == 3
-    assert "findings" in result
-    assert "summary" in result
-    assert "insights_ms" in result
-    assert isinstance(result["findings"], list)
+        results = await _query_failures(None, tenant_id, None, "fail-agent", "agent")
+        assert len(results) >= 1
+        assert any(tag in r["content"] for r in results)
+    finally:
+        await _cleanup_tenant(tenant_id)
 
 
 @pytest.mark.asyncio
-async def test_insights_persists_as_memory(db):
-    """Insight findings are persisted as memories with type='insight'."""
-    from common.models.memory import Memory
-    from sqlalchemy import select
-
+async def test_generate_insights_with_fake_provider():
+    """Full generate_insights with fake LLM provider produces valid output."""
     tag = _uid()
     tenant_id = f"test-tenant-{tag}"
+    try:
+        for i in range(3):
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id="insight-gen-agent",
+                fleet_id="insight-gen-fleet",
+                content=f"Generate insights test {i} [{tag}]",
+            )
 
-    mem = Memory(
-        tenant_id=tenant_id,
-        agent_id="persist-agent",
-        fleet_id="persist-fleet",
-        memory_type="fact",
-        content=f"Persist test memory [{tag}]",
-        weight=0.5,
-        status="active",
-        recall_count=0,
-        visibility="scope_team",
-    )
-    db.add(mem)
-    await db.flush()
+        from core_api.services.insights_service import generate_insights
 
-    from core_api.services.insights_service import generate_insights
-
-    result = await generate_insights(
-        db,
-        tenant_id=tenant_id,
-        focus="patterns",
-        scope="agent",
-        agent_id="persist-agent",
-    )
-
-    # Check that insight memories were written
-    insight_ids = result.get("insight_memory_ids", [])
-    if insight_ids:
-        stmt = select(Memory).where(
-            Memory.tenant_id == tenant_id,
-            Memory.memory_type == "insight",
+        result = await generate_insights(
+            None,
+            tenant_id=tenant_id,
+            focus="patterns",
+            scope="agent",
+            fleet_id=None,
+            agent_id="insight-gen-agent",
         )
-        rows = (await db.execute(stmt)).scalars().all()
-        assert len(rows) >= 1
-        assert rows[0].memory_type == "insight"
-        assert rows[0].metadata_ is not None
-        assert rows[0].metadata_.get("insight_focus") == "patterns"
+
+        assert result["focus"] == "patterns"
+        assert result["scope"] == "agent"
+        assert result["memories_analyzed"] == 3
+        assert "findings" in result
+        assert "summary" in result
+        assert "insights_ms" in result
+        assert isinstance(result["findings"], list)
+    finally:
+        await _cleanup_tenant(tenant_id)
+
+
+@pytest.mark.asyncio
+async def test_insights_persists_as_memory():
+    """Insight findings are persisted as memories with type='insight'."""
+    tag = _uid()
+    tenant_id = f"test-tenant-{tag}"
+    try:
+        await _seed_memory(
+            tenant_id=tenant_id,
+            agent_id="persist-agent",
+            fleet_id="persist-fleet",
+            content=f"Persist test memory [{tag}]",
+        )
+
+        from core_api.services.insights_service import generate_insights
+
+        result = await generate_insights(
+            None,
+            tenant_id=tenant_id,
+            focus="patterns",
+            scope="agent",
+            agent_id="persist-agent",
+        )
+
+        # Insight memories are committed storage-side — assert via a committed read.
+        insight_ids = result.get("insight_memory_ids", [])
+        if insight_ids:
+            rows = await _insight_rows(tenant_id)
+            assert len(rows) >= 1
+            meta = rows[0].metadata
+            if isinstance(meta, str):
+                meta = _json.loads(meta)
+            assert meta is not None
+            assert meta.get("insight_focus") == "patterns"
+    finally:
+        await _cleanup_tenant(tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -506,526 +556,409 @@ class TestSupersedeScope:
     """P1: supersede query scope must match insight_scope + fleet_id."""
 
     @pytest.mark.asyncio
-    async def test_supersede_respects_fleet_id(self, db, monkeypatch):
+    async def test_supersede_respects_fleet_id(self, monkeypatch):
         """Only the insight matching (tenant, agent, focus, scope, fleet_id) is outdated."""
-        from common.models.memory import Memory
-        from sqlalchemy import select
-
         tag = _uid()
         tenant_id = f"test-tenant-{tag}"
         agent_id = f"agent-{tag}"
+        try:
+            # Prior insight for fleet-A
+            prior_a_id = await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=f"fleet-A-{tag}",
+                memory_type="insight",
+                content=f"[Insight/patterns] Prior A [{tag}]: desc",
+                metadata={"insight_focus": "patterns", "insight_scope": "fleet"},
+            )
+            # Prior insight for fleet-B (must NOT be outdated)
+            prior_b_id = await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=f"fleet-B-{tag}",
+                memory_type="insight",
+                content=f"[Insight/patterns] Prior B [{tag}]: desc",
+                metadata={"insight_focus": "patterns", "insight_scope": "fleet"},
+            )
+            # Also seed a fact so patterns query has data to analyze for fleet-A
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=f"fleet-A-{tag}",
+                memory_type="fact",
+                content=f"Some fact [{tag}]",
+            )
 
-        # Prior insight for fleet-A
-        prior_a = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=f"fleet-A-{tag}",
-            memory_type="insight",
-            content=f"[Insight/patterns] Prior A [{tag}]: desc",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_team",
-            metadata_={"insight_focus": "patterns", "insight_scope": "fleet"},
-        )
-        # Prior insight for fleet-B (must NOT be outdated)
-        prior_b = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=f"fleet-B-{tag}",
-            memory_type="insight",
-            content=f"[Insight/patterns] Prior B [{tag}]: desc",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_team",
-            metadata_={"insight_focus": "patterns", "insight_scope": "fleet"},
-        )
-        # Also seed a fact so patterns query has data to analyze for fleet-A
-        fact = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=f"fleet-A-{tag}",
-            memory_type="fact",
-            content=f"Some fact [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_team",
-        )
-        db.add_all([prior_a, prior_b, fact])
-        await db.flush()
-        prior_a_id = prior_a.id
-        prior_b_id = prior_b.id
+            await _stub_llm(
+                monkeypatch,
+                findings=[
+                    {
+                        "type": "patterns",
+                        "title": "New finding",
+                        "description": "desc",
+                        "confidence": 0.6,
+                        "related_memory_ids": [],
+                        "recommendation": "none",
+                    }
+                ],
+            )
 
-        await _stub_llm(
-            monkeypatch,
-            findings=[
-                {
-                    "type": "patterns",
-                    "title": "New finding",
-                    "description": "desc",
-                    "confidence": 0.6,
-                    "related_memory_ids": [],
-                    "recommendation": "none",
-                }
-            ],
-        )
+            from core_api.services.insights_service import generate_insights
 
-        from core_api.services.insights_service import generate_insights
+            await generate_insights(
+                None,
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="fleet",
+                fleet_id=f"fleet-A-{tag}",
+                agent_id=agent_id,
+            )
 
-        await generate_insights(
-            db,
-            tenant_id=tenant_id,
-            focus="patterns",
-            scope="fleet",
-            fleet_id=f"fleet-A-{tag}",
-            agent_id=agent_id,
-        )
-
-        # Re-fetch both priors
-        a_status = (
-            await db.execute(select(Memory.status).where(Memory.id == prior_a_id))
-        ).scalar_one()
-        b_status = (
-            await db.execute(select(Memory.status).where(Memory.id == prior_b_id))
-        ).scalar_one()
-
-        assert a_status == "outdated", "fleet-A prior should be outdated"
-        assert b_status == "active", "fleet-B prior must stay active"
+            assert await _status_of(prior_a_id) == "outdated", "fleet-A prior should be outdated"
+            assert await _status_of(prior_b_id) == "active", "fleet-B prior must stay active"
+        finally:
+            await _cleanup_tenant(tenant_id)
 
     @pytest.mark.asyncio
-    async def test_supersede_respects_insight_scope(self, db, monkeypatch):
+    async def test_supersede_respects_insight_scope(self, monkeypatch):
         """Priors with different insight_scope metadata must not be touched."""
-        from common.models.memory import Memory
-        from sqlalchemy import select
-
         tag = _uid()
         tenant_id = f"test-tenant-{tag}"
         agent_id = f"agent-{tag}"
+        try:
+            ap_id = await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=None,
+                memory_type="insight",
+                content=f"[Insight/patterns] Agent prior [{tag}]",
+                visibility="scope_agent",
+                metadata={"insight_focus": "patterns", "insight_scope": "agent"},
+            )
+            all_id = await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=None,
+                memory_type="insight",
+                content=f"[Insight/patterns] All prior [{tag}]",
+                visibility="scope_org",
+                metadata={"insight_focus": "patterns", "insight_scope": "all"},
+            )
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=None,
+                memory_type="fact",
+                content=f"Fact [{tag}]",
+                visibility="scope_agent",
+            )
 
-        prior_agent_scope = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=None,
-            memory_type="insight",
-            content=f"[Insight/patterns] Agent prior [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_agent",
-            metadata_={"insight_focus": "patterns", "insight_scope": "agent"},
-        )
-        prior_all_scope = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=None,
-            memory_type="insight",
-            content=f"[Insight/patterns] All prior [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_org",
-            metadata_={"insight_focus": "patterns", "insight_scope": "all"},
-        )
-        fact = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=None,
-            memory_type="fact",
-            content=f"Fact [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_agent",
-        )
-        db.add_all([prior_agent_scope, prior_all_scope, fact])
-        await db.flush()
-        ap_id = prior_agent_scope.id
-        all_id = prior_all_scope.id
+            await _stub_llm(
+                monkeypatch,
+                findings=[
+                    {
+                        "type": "patterns",
+                        "title": "New agent finding",
+                        "description": "desc",
+                        "confidence": 0.6,
+                        "related_memory_ids": [],
+                        "recommendation": "none",
+                    }
+                ],
+            )
 
-        await _stub_llm(
-            monkeypatch,
-            findings=[
-                {
-                    "type": "patterns",
-                    "title": "New agent finding",
-                    "description": "desc",
-                    "confidence": 0.6,
-                    "related_memory_ids": [],
-                    "recommendation": "none",
-                }
-            ],
-        )
+            from core_api.services.insights_service import generate_insights
 
-        from core_api.services.insights_service import generate_insights
+            await generate_insights(
+                None,
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                fleet_id=None,
+                agent_id=agent_id,
+            )
 
-        await generate_insights(
-            db,
-            tenant_id=tenant_id,
-            focus="patterns",
-            scope="agent",
-            fleet_id=None,
-            agent_id=agent_id,
-        )
-
-        ap_status = (
-            await db.execute(select(Memory.status).where(Memory.id == ap_id))
-        ).scalar_one()
-        all_status = (
-            await db.execute(select(Memory.status).where(Memory.id == all_id))
-        ).scalar_one()
-
-        assert ap_status == "outdated"
-        assert all_status == "active", "insight_scope='all' prior must stay active"
+            assert await _status_of(ap_id) == "outdated"
+            assert await _status_of(all_id) == "active", "insight_scope='all' prior must stay active"
+        finally:
+            await _cleanup_tenant(tenant_id)
 
 
 class TestSupersedeOrdering:
     """P0: supersede must run BEFORE create, with a rollback safety net."""
 
     @pytest.mark.asyncio
-    async def test_new_finding_persists_despite_similar_prior_insight(
-        self, db, monkeypatch
-    ):
+    async def test_new_finding_persists_despite_similar_prior_insight(self, monkeypatch):
         """A prior similar insight is outdated first, so the new finding persists.
 
         Because the reorder moves the prior to 'outdated' before create_memory
         runs, semantic-dedup (which only matches active/confirmed/pending rows)
         can't collide with it — regardless of embedding similarity.
         """
-        from common.models.memory import Memory
-        from sqlalchemy import select
-
         tag = _uid()
         tenant_id = f"test-tenant-{tag}"
         agent_id = f"agent-{tag}"
+        try:
+            prior_id = await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=None,
+                memory_type="insight",
+                content=f"[Insight/patterns] Old finding [{tag}]",
+                visibility="scope_agent",
+                metadata={"insight_focus": "patterns", "insight_scope": "agent"},
+            )
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=None,
+                memory_type="fact",
+                content=f"Fact [{tag}]",
+                visibility="scope_agent",
+            )
 
-        prior = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=None,
-            memory_type="insight",
-            content=f"[Insight/patterns] Old finding [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_agent",
-            metadata_={"insight_focus": "patterns", "insight_scope": "agent"},
-        )
-        fact = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=None,
-            memory_type="fact",
-            content=f"Fact [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_agent",
-        )
-        db.add_all([prior, fact])
-        await db.flush()
-        prior_id = prior.id
+            await _stub_llm(
+                monkeypatch,
+                findings=[
+                    {
+                        "type": "patterns",
+                        "title": "New finding",
+                        "description": "A fresh pattern",
+                        "confidence": 0.7,
+                        "related_memory_ids": [],
+                        "recommendation": "investigate",
+                    }
+                ],
+            )
 
-        await _stub_llm(
-            monkeypatch,
-            findings=[
-                {
-                    "type": "patterns",
-                    "title": "New finding",
-                    "description": "A fresh pattern",
-                    "confidence": 0.7,
-                    "related_memory_ids": [],
-                    "recommendation": "investigate",
-                }
-            ],
-        )
+            from core_api.services.insights_service import generate_insights
 
-        from core_api.services.insights_service import generate_insights
+            result = await generate_insights(
+                None,
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                fleet_id=None,
+                agent_id=agent_id,
+            )
 
-        result = await generate_insights(
-            db,
-            tenant_id=tenant_id,
-            focus="patterns",
-            scope="agent",
-            fleet_id=None,
-            agent_id=agent_id,
-        )
-
-        prior_status = (
-            await db.execute(select(Memory.status).where(Memory.id == prior_id))
-        ).scalar_one()
-        assert prior_status == "outdated"
-        assert len(result.get("insight_memory_ids", [])) >= 1
+            assert await _status_of(prior_id) == "outdated"
+            assert len(result.get("insight_memory_ids", [])) >= 1
+        finally:
+            await _cleanup_tenant(tenant_id)
 
     @pytest.mark.asyncio
-    async def test_priors_restored_when_all_findings_fail(self, db, monkeypatch):
+    async def test_priors_restored_when_all_findings_fail(self, monkeypatch):
         """If every create_memory raises, priors must be restored to active."""
-        from common.models.memory import Memory
-        from sqlalchemy import select
         from fastapi import HTTPException
         from core_api.services import insights_service
 
         tag = _uid()
         tenant_id = f"test-tenant-{tag}"
         agent_id = f"agent-{tag}"
+        try:
+            prior_id = await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=None,
+                memory_type="insight",
+                content=f"[Insight/patterns] Prior [{tag}]",
+                visibility="scope_agent",
+                metadata={"insight_focus": "patterns", "insight_scope": "agent"},
+            )
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=None,
+                memory_type="fact",
+                content=f"Fact [{tag}]",
+                visibility="scope_agent",
+            )
 
-        prior = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=None,
-            memory_type="insight",
-            content=f"[Insight/patterns] Prior [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_agent",
-            metadata_={"insight_focus": "patterns", "insight_scope": "agent"},
-        )
-        fact = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=None,
-            memory_type="fact",
-            content=f"Fact [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_agent",
-        )
-        db.add_all([prior, fact])
-        await db.flush()
-        prior_id = prior.id
+            await _stub_llm(
+                monkeypatch,
+                findings=[
+                    {
+                        "type": "patterns",
+                        "title": "Doomed",
+                        "description": "will fail",
+                        "confidence": 0.5,
+                        "related_memory_ids": [],
+                        "recommendation": "none",
+                    }
+                ],
+            )
 
-        await _stub_llm(
-            monkeypatch,
-            findings=[
-                {
-                    "type": "patterns",
-                    "title": "Doomed",
-                    "description": "will fail",
-                    "confidence": 0.5,
-                    "related_memory_ids": [],
-                    "recommendation": "none",
-                }
-            ],
-        )
+            async def failing_create_bulk(db, data, *, bulk_attempt_id):
+                raise HTTPException(status_code=409, detail="duplicate")
 
-        async def failing_create_bulk(db, data, *, bulk_attempt_id):
-            raise HTTPException(status_code=409, detail="duplicate")
+            # Patch the bulk path; ``_persist_findings`` persists every finding
+            # in a single ``create_memories_bulk`` call (audit finding #29). A
+            # failure here exercises the same "all findings failed → restore
+            # priors" code path — which now routes the restore through
+            # ``sc.insights_restore_priors`` (storage-committed).
+            import core_api.services.memory_service as ms_mod
 
-        # Patch the bulk path; ``_persist_findings`` now persists every
-        # finding in a single ``create_memories_bulk`` call (audit
-        # finding #29). A failure here exercises the same "all findings
-        # failed → restore priors" code path the previous per-call
-        # version protected.
-        import core_api.services.memory_service as ms_mod
+            monkeypatch.setattr(ms_mod, "create_memories_bulk", failing_create_bulk)
 
-        monkeypatch.setattr(ms_mod, "create_memories_bulk", failing_create_bulk)
+            result = await insights_service.generate_insights(
+                None,
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                fleet_id=None,
+                agent_id=agent_id,
+            )
 
-        result = await insights_service.generate_insights(
-            db,
-            tenant_id=tenant_id,
-            focus="patterns",
-            scope="agent",
-            fleet_id=None,
-            agent_id=agent_id,
-        )
-
-        prior_status = (
-            await db.execute(select(Memory.status).where(Memory.id == prior_id))
-        ).scalar_one()
-        assert prior_status == "active", (
-            "prior should be restored when all findings fail"
-        )
-        assert result.get("insight_memory_ids", []) == []
+            assert await _status_of(prior_id) == "active", (
+                "prior should be restored when all findings fail"
+            )
+            assert result.get("insight_memory_ids", []) == []
+        finally:
+            await _cleanup_tenant(tenant_id)
 
     @pytest.mark.asyncio
-    async def test_no_outdate_when_no_findings(self, db, monkeypatch):
+    async def test_no_outdate_when_no_findings(self, monkeypatch):
         """When findings list is empty, priors must not be outdated."""
-        from common.models.memory import Memory
-        from sqlalchemy import select
-
         tag = _uid()
         tenant_id = f"test-tenant-{tag}"
         agent_id = f"agent-{tag}"
+        try:
+            prior_id = await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=None,
+                memory_type="insight",
+                content=f"[Insight/patterns] Prior [{tag}]",
+                visibility="scope_agent",
+                metadata={"insight_focus": "patterns", "insight_scope": "agent"},
+            )
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=None,
+                memory_type="fact",
+                content=f"Fact [{tag}]",
+                visibility="scope_agent",
+            )
 
-        prior = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=None,
-            memory_type="insight",
-            content=f"[Insight/patterns] Prior [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_agent",
-            metadata_={"insight_focus": "patterns", "insight_scope": "agent"},
-        )
-        fact = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=None,
-            memory_type="fact",
-            content=f"Fact [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_agent",
-        )
-        db.add_all([prior, fact])
-        await db.flush()
-        prior_id = prior.id
+            await _stub_llm(monkeypatch, findings=[])
 
-        await _stub_llm(monkeypatch, findings=[])
+            from core_api.services.insights_service import generate_insights
 
-        from core_api.services.insights_service import generate_insights
+            await generate_insights(
+                None,
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                fleet_id=None,
+                agent_id=agent_id,
+            )
 
-        await generate_insights(
-            db,
-            tenant_id=tenant_id,
-            focus="patterns",
-            scope="agent",
-            fleet_id=None,
-            agent_id=agent_id,
-        )
-
-        prior_status = (
-            await db.execute(select(Memory.status).where(Memory.id == prior_id))
-        ).scalar_one()
-        assert prior_status == "active", (
-            "prior must stay active when there are no findings"
-        )
+            assert await _status_of(prior_id) == "active", (
+                "prior must stay active when there are no findings"
+            )
+        finally:
+            await _cleanup_tenant(tenant_id)
 
 
 class TestHallucinatedIds:
     """P2: LLM-supplied related_memory_ids must be filtered against shown batch."""
 
     @pytest.mark.asyncio
-    async def test_hallucinated_related_memory_ids_filtered(self, db, monkeypatch):
-        from common.models.memory import Memory
-
+    async def test_hallucinated_related_memory_ids_filtered(self, monkeypatch):
         tag = _uid()
         tenant_id = f"test-tenant-{tag}"
         agent_id = f"agent-{tag}"
+        try:
+            a_id = await _seed_memory(
+                tenant_id=tenant_id, agent_id=agent_id, fleet_id=None,
+                content=f"Fact A [{tag}]", visibility="scope_agent",
+            )
+            b_id = await _seed_memory(
+                tenant_id=tenant_id, agent_id=agent_id, fleet_id=None,
+                content=f"Fact B [{tag}]", visibility="scope_agent",
+            )
+            hallucinated = "00000000-0000-0000-0000-deadbeef1234"
 
-        mem_a = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=None,
-            memory_type="fact",
-            content=f"Fact A [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_agent",
-        )
-        mem_b = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=None,
-            memory_type="fact",
-            content=f"Fact B [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_agent",
-        )
-        db.add_all([mem_a, mem_b])
-        await db.flush()
-        a_id = str(mem_a.id)
-        b_id = str(mem_b.id)
-        hallucinated = "00000000-0000-0000-0000-deadbeef1234"
+            await _stub_llm(
+                monkeypatch,
+                findings=[
+                    {
+                        "type": "patterns",
+                        "title": "Finding",
+                        "description": "desc",
+                        "confidence": 0.6,
+                        "related_memory_ids": [a_id, hallucinated, b_id],
+                        "recommendation": "none",
+                    }
+                ],
+            )
 
-        await _stub_llm(
-            monkeypatch,
-            findings=[
-                {
-                    "type": "patterns",
-                    "title": "Finding",
-                    "description": "desc",
-                    "confidence": 0.6,
-                    "related_memory_ids": [a_id, hallucinated, b_id],
-                    "recommendation": "none",
-                }
-            ],
-        )
+            from core_api.services.insights_service import generate_insights
 
-        from core_api.services.insights_service import generate_insights
+            result = await generate_insights(
+                None,
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                fleet_id=None,
+                agent_id=agent_id,
+            )
 
-        result = await generate_insights(
-            db,
-            tenant_id=tenant_id,
-            focus="patterns",
-            scope="agent",
-            fleet_id=None,
-            agent_id=agent_id,
-        )
-
-        findings = result["findings"]
-        assert len(findings) == 1
-        # Order preserved for kept entries; hallucinated UUID dropped
-        assert findings[0]["related_memory_ids"] == [a_id, b_id]
+            findings = result["findings"]
+            assert len(findings) == 1
+            # Order preserved for kept entries; hallucinated UUID dropped. The
+            # shown batch is ordered created_at DESC, so b_id (seeded later)
+            # comes before a_id — assert as a set to stay order-agnostic on the
+            # source ordering while still proving the hallucinated id was dropped.
+            assert set(findings[0]["related_memory_ids"]) == {a_id, b_id}
+            assert hallucinated not in findings[0]["related_memory_ids"]
+        finally:
+            await _cleanup_tenant(tenant_id)
 
     @pytest.mark.asyncio
-    async def test_valid_related_memory_ids_pass_through(self, db, monkeypatch):
-        from common.models.memory import Memory
-
+    async def test_valid_related_memory_ids_pass_through(self, monkeypatch):
         tag = _uid()
         tenant_id = f"test-tenant-{tag}"
         agent_id = f"agent-{tag}"
+        try:
+            a_id = await _seed_memory(
+                tenant_id=tenant_id, agent_id=agent_id, fleet_id=None,
+                content=f"Fact A [{tag}]", visibility="scope_agent",
+            )
+            await _seed_memory(
+                tenant_id=tenant_id, agent_id=agent_id, fleet_id=None,
+                content=f"Fact B [{tag}]", visibility="scope_agent",
+            )
 
-        mem_a = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=None,
-            memory_type="fact",
-            content=f"Fact A [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_agent",
-        )
-        mem_b = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fleet_id=None,
-            memory_type="fact",
-            content=f"Fact B [{tag}]",
-            weight=0.5,
-            status="active",
-            recall_count=0,
-            visibility="scope_agent",
-        )
-        db.add_all([mem_a, mem_b])
-        await db.flush()
-        a_id = str(mem_a.id)
+            await _stub_llm(
+                monkeypatch,
+                findings=[
+                    {
+                        "type": "patterns",
+                        "title": "Finding",
+                        "description": "desc",
+                        "confidence": 0.6,
+                        "related_memory_ids": [a_id],
+                        "recommendation": "none",
+                    }
+                ],
+            )
 
-        await _stub_llm(
-            monkeypatch,
-            findings=[
-                {
-                    "type": "patterns",
-                    "title": "Finding",
-                    "description": "desc",
-                    "confidence": 0.6,
-                    "related_memory_ids": [a_id],
-                    "recommendation": "none",
-                }
-            ],
-        )
+            from core_api.services.insights_service import generate_insights
 
-        from core_api.services.insights_service import generate_insights
+            result = await generate_insights(
+                None,
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                fleet_id=None,
+                agent_id=agent_id,
+            )
 
-        result = await generate_insights(
-            db,
-            tenant_id=tenant_id,
-            focus="patterns",
-            scope="agent",
-            fleet_id=None,
-            agent_id=agent_id,
-        )
-
-        findings = result["findings"]
-        assert len(findings) == 1
-        assert findings[0]["related_memory_ids"] == [a_id]
+            findings = result["findings"]
+            assert len(findings) == 1
+            assert findings[0]["related_memory_ids"] == [a_id]
+        finally:
+            await _cleanup_tenant(tenant_id)

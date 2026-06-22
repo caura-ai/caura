@@ -118,7 +118,7 @@ async def get_or_create_agent(
     return agent
 
 
-async def lookup_agent(db: AsyncSession, tenant_id: str, agent_id: str) -> dict | None:
+async def lookup_agent(db: AsyncSession | None, tenant_id: str, agent_id: str) -> dict | None:
     sc = get_storage_client()
     return await sc.get_agent(agent_id, tenant_id)
 

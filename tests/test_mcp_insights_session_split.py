@@ -4,22 +4,24 @@ The handler previously held a single ``_mcp_session()`` open across
 the multi-second LLM round-trip in ``_run_llm_analysis``, pinning a
 pooled DB connection. The refactor splits the work into three phases:
 
-  1. Session 1 — trust + usage gates, query memories, resolve config.
-  2. No DB     — ``synthesize_insights`` (LLM-only).
-  3. Session 2 — ``_persist_findings`` + commit.
+  1. Phase 1 — trust + usage gates, query memories, resolve config.
+  2. No DB   — ``synthesize_insights`` (LLM-only).
+  3. Phase 3 — ``_persist_findings``.
 
-This module asserts the timing invariant with patched
-``_mcp_session`` (capture enter/exit timestamps) and patched
-``synthesize_insights`` (capture entry timestamp). A regression that
-moves the LLM call back inside the session would flip the order
-and fail.
+Fix 2 Ph5b: all three phases are now storage-routed via ``_no_db()``
+(``db=None``) — the analytic reads, gates, and supersede/restore/create
+go through core-storage-api, so no pooled DB connection is held at any
+point. This module still asserts the *phasing* invariant (phase-1 block
+closes BEFORE the LLM, phase-3 opens after) by patching the ``_no_db``
+context manager to capture enter/exit events; a regression that re-merges
+phases 1+2 around the LLM call would flip the order and fail.
 """
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -50,11 +52,11 @@ async def test_insights_closes_first_session_before_llm(mcp_env, monkeypatch):
     async def _captured_session():
         events.append("session-enter")
         try:
-            yield MagicMock(name="db")
+            yield None
         finally:
             events.append("session-exit")
 
-    monkeypatch.setattr(mcp_server, "_mcp_session", _captured_session)
+    monkeypatch.setattr(mcp_server, "_no_db", _captured_session)
 
     # Phase-1 collaborators
     monkeypatch.setattr(
@@ -142,11 +144,11 @@ async def test_insights_short_circuits_when_no_memories(mcp_env, monkeypatch):
     async def _counting_session():
         session_entries.append(1)
         try:
-            yield MagicMock(name="db")
+            yield None
         finally:
             pass
 
-    monkeypatch.setattr(mcp_server, "_mcp_session", _counting_session)
+    monkeypatch.setattr(mcp_server, "_no_db", _counting_session)
     monkeypatch.setattr(
         mcp_server, "_require_trust", AsyncMock(return_value=(3, False, None))
     )

@@ -34,6 +34,7 @@ from core_storage_api.routers import (
     fleet_router,
     health_router,
     idempotency_router,
+    insights_router,
     keystones_router,
     lifecycle_audit_router,
     memories_router,
@@ -127,6 +128,11 @@ def create_app() -> FastAPI:
     # session traces, outcome-signal analytic reads) moved off core-api's
     # direct DB pool. core-api calls these via its storage_client.
     app.include_router(skill_factory_router, prefix=prefix)
+    # Fix 2 Ph5b: insights analytic memory reads + supersede/restore writes +
+    # the lifecycle activity gate, moved off core-api's direct DB pool. core-api
+    # calls these via its storage_client; the LLM analysis + numpy k-means stay
+    # client-side.
+    app.include_router(insights_router, prefix=prefix)
     app.include_router(tasks_router, prefix=prefix)
     app.include_router(idempotency_router, prefix=prefix)
     app.include_router(lifecycle_audit_router, prefix=prefix)

@@ -49,11 +49,13 @@ async def check_and_increment(
 
 
 async def check_and_increment_by_tenant(
-    db: AsyncSession,
+    db: AsyncSession | None,
     tenant_id: str,
     operation: OperationType,
     count: int = 1,
 ) -> UsageCheckResult:
+    # ``db`` is ignored (usage accounting is a no-op stub in OSS). Accepts
+    # ``None`` so storage-routed callers (Fix 2 Ph5b insights) can forward it.
     return _allowed(operation)
 
 

@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 async def resolve_caller_and_gate(
-    db: AsyncSession,
+    db: AsyncSession | None,
     auth: AuthContext,
     *,
     tenant_id: str,

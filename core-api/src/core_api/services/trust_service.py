@@ -37,7 +37,7 @@ _MCP_ERROR_PREFIX = "Error (403): "
 
 
 async def require_trust(
-    db: AsyncSession,
+    db: AsyncSession | None,
     tenant_id: str,
     agent_id: str,
     min_level: int,

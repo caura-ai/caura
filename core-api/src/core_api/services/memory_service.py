@@ -1016,7 +1016,7 @@ async def _create_memory_legacy(db: AsyncSession, data: MemoryCreate) -> MemoryO
 
 
 async def create_memories_bulk(
-    db: AsyncSession,
+    db: AsyncSession | None,
     data: BulkMemoryCreate,
     *,
     bulk_attempt_id: str,

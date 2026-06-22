@@ -21,7 +21,20 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, bindparam, case, delete, false, func, literal_column, or_, select, text, tuple_
+from sqlalchemy import (
+    and_,
+    bindparam,
+    case,
+    delete,
+    distinct,
+    false,
+    func,
+    literal_column,
+    or_,
+    select,
+    text,
+    tuple_,
+)
 from sqlalchemy import update as sql_update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -5513,6 +5526,402 @@ class PostgresService:
             }
             for r in rows
         ]
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  INSIGHTS — analytic memory reads + supersede/restore writes
+    #  (Fix 2 Ph5b)
+    # ══════════════════════════════════════════════════════════════════════
+    #
+    # These port the SQLAlchemy ORM queries from the core-api insights service
+    # (services/insights_service.py ``_query_*`` + ``_persist_findings``) and
+    # the lifecycle_audit ``insights()`` activity gate VERBATIM. The 6 analytic
+    # READS use ``select(Memory)`` (sidesteps the asyncpg array-cast risk and
+    # matches ``memory_find_successors``); the supersede/restore UPDATEs use
+    # raw ``text()`` with ``ANY(CAST(:ids AS uuid[]))`` where it's natural.
+    #
+    # The ``scope`` argument reconstructs ``_scope_filters``: base
+    # ``tenant_id == :tid AND deleted_at IS NULL``; scope='agent' adds
+    # ``agent_id == :aid`` (+ fleet when given); scope='fleet' adds
+    # ``fleet_id == :fid``; scope='all' adds nothing. Every read also excludes
+    # ``memory_type != 'insight'`` (feedback-loop guard). Each takes an explicit
+    # ``tenant_id`` — there are no RLS GUCs server-side. Rows are returned as
+    # plain dicts in the ``_rows_to_dicts`` shape the core-api prompt formatter
+    # expects (NO embedding) except for discover-sample, which includes the
+    # embedding (client-side k-means).
+
+    @staticmethod
+    def _insights_scope_filters(tenant_id: str, fleet_id: str | None, agent_id: str, scope: str) -> list:
+        """Reconstruct ``insights_service._scope_filters`` ORM WHERE clauses."""
+        base = [Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None)]
+        if scope == "agent":
+            base.append(Memory.agent_id == agent_id)
+            if fleet_id:
+                base.append(Memory.fleet_id == fleet_id)
+        elif scope == "fleet":
+            if not fleet_id:
+                raise ValueError("fleet_id is required when scope is 'fleet'")
+            base.append(Memory.fleet_id == fleet_id)
+        # scope == "all": tenant-wide, no additional filters
+        return base
+
+    @staticmethod
+    def _insights_rows_to_dicts(rows, *, include_embedding: bool = False) -> list[dict]:
+        """Port ``insights_service._rows_to_dicts`` (NO embedding) so the
+        core-api prompt formatter consumes the same dict shape it did when it
+        held the rows directly. ``include_embedding`` adds the raw vector for
+        the discover-sample path (client-side k-means)."""
+        out: list[dict] = []
+        for r in rows:
+            d = {
+                "id": str(r.id),
+                "memory_type": r.memory_type,
+                "title": r.title or "",
+                "content": r.content,
+                "weight": r.weight,
+                "agent_id": r.agent_id,
+                "fleet_id": r.fleet_id,
+                "created_at": r.created_at.isoformat() if r.created_at else "",
+                "status": r.status,
+                "recall_count": r.recall_count or 0,
+                "last_recalled_at": r.last_recalled_at.isoformat() if r.last_recalled_at else None,
+                "supersedes_id": str(r.supersedes_id) if r.supersedes_id else None,
+                "subject_entity_id": str(r.subject_entity_id) if r.subject_entity_id else None,
+                "object_value": r.object_value,
+                "ts_valid_start": r.ts_valid_start.isoformat() if r.ts_valid_start else None,
+            }
+            if include_embedding:
+                # pgvector returns a numpy-ish sequence; normalise to a plain
+                # list of floats so it JSON-serialises over the HTTP boundary.
+                emb = r.embedding
+                d["embedding"] = [float(x) for x in emb] if emb is not None else None
+            out.append(d)
+        return out
+
+    async def insights_query_contradictions(
+        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
+    ) -> list[dict]:
+        """Memories that supersede others, are conflicted, or share entities
+        with divergent values. Ports ``_query_contradictions`` verbatim (the
+        3-step supersede / superseded-by-id / entity-divergence build), dedup
+        by id, capped at ``max_memories`` (``INSIGHTS_MAX_MEMORIES`` forwarded
+        from core-api — the tuning constant stays the single source of truth
+        on the core-api side, mirroring Ph5a's ``threshold`` param)."""
+        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
+        async with get_read_session() as session:
+            stmt = (
+                select(Memory)
+                .where(
+                    *base,
+                    Memory.status != "deleted",
+                    Memory.memory_type != "insight",
+                )
+                .where((Memory.supersedes_id.isnot(None)) | (Memory.status == "conflicted"))
+                .order_by(Memory.created_at.desc())
+                .limit(max_memories)
+            )
+            result = await session.execute(stmt)
+            rows = list(result.scalars().all())
+            seen_ids = {r.id for r in rows}
+
+            superseded_ids = [
+                r.supersedes_id
+                for r in rows
+                if r.supersedes_id is not None and r.supersedes_id not in seen_ids
+            ]
+            if superseded_ids and len(rows) < max_memories:
+                sup_stmt = (
+                    select(Memory)
+                    .where(
+                        *base,
+                        Memory.memory_type != "insight",
+                        Memory.id.in_(superseded_ids),
+                    )
+                    .limit(max_memories - len(rows))
+                )
+                sup_result = await session.execute(sup_stmt)
+                for r in sup_result.scalars().all():
+                    if r.id not in seen_ids:
+                        rows.append(r)
+                        seen_ids.add(r.id)
+
+            if len(rows) < max_memories:
+                remaining = max_memories - len(rows)
+                entity_stmt = (
+                    select(Memory.subject_entity_id)
+                    .where(
+                        *base,
+                        Memory.status != "deleted",
+                        Memory.memory_type != "insight",
+                        Memory.subject_entity_id.isnot(None),
+                        Memory.object_value.isnot(None),
+                    )
+                    .group_by(Memory.subject_entity_id)
+                    .having(func.count(distinct(Memory.object_value)) > 1)
+                    .limit(10)
+                )
+                entity_result = await session.execute(entity_stmt)
+                entity_ids = [r[0] for r in entity_result.all()]
+
+                if entity_ids:
+                    extra_stmt = (
+                        select(Memory)
+                        .where(
+                            *base,
+                            Memory.status != "deleted",
+                            Memory.memory_type != "insight",
+                            Memory.subject_entity_id.in_(entity_ids),
+                        )
+                        .order_by(Memory.created_at.desc())
+                        .limit(remaining)
+                    )
+                    extra_result = await session.execute(extra_stmt)
+                    for r in extra_result.scalars().all():
+                        if r.id not in seen_ids:
+                            rows.append(r)
+                            seen_ids.add(r.id)
+
+        return self._insights_rows_to_dicts(rows[:max_memories])
+
+    async def insights_query_failures(
+        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
+    ) -> list[dict]:
+        """Low-weight memories that were recalled (agents acted on weak info).
+        Ports ``_query_failures`` verbatim."""
+        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
+        async with get_read_session() as session:
+            stmt = (
+                select(Memory)
+                .where(
+                    *base,
+                    Memory.memory_type != "insight",
+                    Memory.weight < 0.3,
+                    Memory.recall_count > 0,
+                    Memory.status == "active",
+                )
+                .order_by(Memory.recall_count.desc(), Memory.weight.asc())
+                .limit(max_memories)
+            )
+            result = await session.execute(stmt)
+            return self._insights_rows_to_dicts(result.scalars().all())
+
+    async def insights_query_stale(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        agent_id: str,
+        scope: str,
+        thirty_days_ago: datetime,
+        fourteen_days_ago: datetime,
+        max_memories: int,
+    ) -> list[dict]:
+        """Memories likely outdated based on age + recall activity. Ports
+        ``_query_stale`` verbatim. The two age thresholds are passed from the
+        caller's clock (core-api) and bound as datetimes server-side."""
+        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
+        async with get_read_session() as session:
+            stmt = (
+                select(Memory)
+                .where(
+                    *base,
+                    Memory.memory_type != "insight",
+                    Memory.status == "active",
+                )
+                .where(
+                    ((Memory.recall_count == 0) & (Memory.created_at < thirty_days_ago))
+                    | (
+                        (Memory.weight < 0.3)
+                        & or_(
+                            Memory.last_recalled_at.is_(None),
+                            Memory.last_recalled_at < fourteen_days_ago,
+                        )
+                    )
+                )
+                .order_by(Memory.created_at.asc())
+                .limit(max_memories)
+            )
+            result = await session.execute(stmt)
+            return self._insights_rows_to_dicts(result.scalars().all())
+
+    async def insights_query_divergence(
+        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
+    ) -> list[dict]:
+        """Memories where multiple agents reference the same entities
+        differently. Ports ``_query_divergence`` verbatim: entity pre-query
+        (GROUP BY subject_entity_id HAVING COUNT(DISTINCT agent_id) >= 2) then
+        fetch; ``[]`` when no entity qualifies."""
+        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
+        async with get_read_session() as session:
+            entity_stmt = (
+                select(Memory.subject_entity_id)
+                .where(
+                    *base,
+                    Memory.memory_type != "insight",
+                    Memory.subject_entity_id.isnot(None),
+                )
+                .group_by(Memory.subject_entity_id)
+                .having(func.count(distinct(Memory.agent_id)) >= 2)
+                .limit(10)
+            )
+            entity_result = await session.execute(entity_stmt)
+            entity_ids = [r[0] for r in entity_result.all()]
+
+            if not entity_ids:
+                return []
+
+            mem_stmt = (
+                select(Memory)
+                .where(
+                    *base,
+                    Memory.status != "deleted",
+                    Memory.memory_type != "insight",
+                    Memory.subject_entity_id.in_(entity_ids),
+                )
+                .order_by(Memory.subject_entity_id, Memory.agent_id, Memory.created_at.desc())
+                .limit(max_memories)
+            )
+            result = await session.execute(mem_stmt)
+            return self._insights_rows_to_dicts(result.scalars().all())
+
+    async def insights_query_patterns(
+        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
+    ) -> list[dict]:
+        """Recent active memories for trend/pattern analysis. Ports
+        ``_query_patterns`` verbatim."""
+        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
+        async with get_read_session() as session:
+            stmt = (
+                select(Memory)
+                .where(
+                    *base,
+                    Memory.memory_type != "insight",
+                    Memory.status == "active",
+                )
+                .order_by(Memory.created_at.desc())
+                .limit(max_memories)
+            )
+            result = await session.execute(stmt)
+            return self._insights_rows_to_dicts(result.scalars().all())
+
+    async def insights_discover_sample(
+        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, sample_size: int
+    ) -> list[dict]:
+        """Sample active memories WITH embeddings for client-side k-means.
+        Ports ``_query_discover``'s row-fetch (the numpy clustering + cluster
+        build stay on the core-api side). Returns rows INCLUDING ``embedding``,
+        capped at ``sample_size`` (``INSIGHTS_DISCOVER_SAMPLE_SIZE`` forwarded
+        from core-api)."""
+        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
+        async with get_read_session() as session:
+            stmt = (
+                select(Memory)
+                .where(
+                    *base,
+                    Memory.status == "active",
+                    Memory.memory_type != "insight",
+                    Memory.embedding.isnot(None),
+                )
+                .order_by(Memory.created_at.desc())
+                .limit(sample_size)
+            )
+            result = await session.execute(stmt)
+            return self._insights_rows_to_dicts(result.scalars().all(), include_embedding=True)
+
+    async def insights_supersede_priors(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        focus: str,
+        scope: str,
+        fleet_id: str | None = None,
+    ) -> dict:
+        """Atomically select + outdate prior active insights for this
+        focus/scope/fleet. Ports ``_persist_findings`` prior-select + outdate
+        UPDATE into ONE transaction on the PRIMARY.
+
+        ``:focus`` / ``:scope`` compare text-to-text via the ``->>`` jsonb
+        text-accessor (NO jsonb cast). Returns ``{prior_ids, outdated_count}``.
+        """
+        # Single atomic UPDATE ... RETURNING: the returned ids are EXACTLY the
+        # rows THIS call transitioned active→outdated. A SELECT-then-UPDATE
+        # would capture ids a concurrent caller outdates first; the total-
+        # failure restore in _persist_findings would then re-activate the other
+        # caller's legitimately-outdated priors, leaving two insight generations
+        # active at once. The single statement locks + updates atomically, so a
+        # concurrent caller either sees zero active priors or blocks until commit.
+        async with get_session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    UPDATE memories
+                    SET status = 'outdated'
+                    WHERE tenant_id = :tenant_id
+                      AND agent_id = :agent_id
+                      AND memory_type = 'insight'
+                      AND status = 'active'
+                      AND deleted_at IS NULL
+                      AND metadata->>'insight_focus' = :focus
+                      AND metadata->>'insight_scope' = :scope
+                      AND (
+                          (CAST(:fleet_id AS text) IS NULL AND fleet_id IS NULL)
+                          OR fleet_id = :fleet_id
+                      )
+                    RETURNING id::text AS id
+                    """
+                ),
+                {
+                    "tenant_id": tenant_id,
+                    "agent_id": agent_id,
+                    "focus": focus,
+                    "scope": scope,
+                    "fleet_id": fleet_id,
+                },
+            )
+            prior_ids = [r.id for r in result.fetchall()]
+        return {"prior_ids": prior_ids, "outdated_count": len(prior_ids)}
+
+    async def insights_restore_priors(self, *, tenant_id: str, prior_ids: list[str]) -> dict:
+        """Restore previously-outdated prior insights to ``active`` (the
+        total-failure safety net in ``_persist_findings``). Scoped to
+        ``tenant_id`` so a smuggled id can't flip another tenant's row.
+        Returns ``{restored: rowcount}``."""
+        if not prior_ids:
+            return {"restored": 0}
+        async with get_session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    UPDATE memories
+                    SET status = 'active'
+                    WHERE id = ANY(CAST(:prior_ids AS uuid[]))
+                      AND status = 'outdated'
+                      AND tenant_id = :tenant_id
+                    """
+                ),
+                {"prior_ids": list(prior_ids), "tenant_id": tenant_id},
+            )
+            return {"restored": result.rowcount or 0}  # type: ignore[attr-defined]
+
+    async def insights_activity_gate(self, *, tenant_id: str, fleet_id: str | None) -> dict:
+        """Cheap two-query activity gate for the lifecycle insights pass.
+        Ports ``lifecycle_audit.insights()`` gate queries: ``MAX(created_at)``
+        for non-insight vs insight memories, scoped to tenant (+ fleet).
+        Returns ``{latest_non_insight: iso|null, latest_insight: iso|null}``."""
+        scope_filter = [Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None)]
+        if fleet_id:
+            scope_filter.append(Memory.fleet_id == fleet_id)
+        async with get_read_session() as session:
+            latest_non_insight = await session.scalar(
+                select(func.max(Memory.created_at)).where(*scope_filter, Memory.memory_type != "insight")
+            )
+            latest_insight = await session.scalar(
+                select(func.max(Memory.created_at)).where(*scope_filter, Memory.memory_type == "insight")
+            )
+        return {
+            "latest_non_insight": latest_non_insight.isoformat() if latest_non_insight else None,
+            "latest_insight": latest_insight.isoformat() if latest_insight else None,
+        }
 
     # ══════════════════════════════════════════════════════════════════════
     #  FLEET

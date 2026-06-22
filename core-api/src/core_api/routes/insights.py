@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.constants import INSIGHTS_FOCUS_MODES, VALID_SCOPES
-from core_api.db.session import get_db
 from core_api.services.audit_service import log_action
 from core_api.services.caller_identity import resolve_caller_and_gate
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
@@ -66,7 +64,6 @@ class InsightsRequest(BaseModel):
 async def generate_insights_endpoint(
     body: InsightsRequest,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Generate insights over stored memories.
 
@@ -95,8 +92,12 @@ async def generate_insights_endpoint(
 
     # Resolve the caller identity (verified > body > DEFAULT_AGENT_ID) and gate
     # the write on trust. Shared with evolve.py — see services/caller_identity.
+    # Fix 2 Ph5b: all DB access for insights is storage-routed, so this route
+    # holds no session — ``None`` is forwarded to the db-ignoring helpers
+    # (``resolve_caller_and_gate`` only passes db to the storage-routed
+    # ``require_trust``; ``check_and_increment`` / ``log_action`` ignore db).
     caller_agent_id = await resolve_caller_and_gate(
-        db,
+        None,
         auth,
         tenant_id=body.tenant_id,
         body_agent_id=body.agent_id,
@@ -104,12 +105,12 @@ async def generate_insights_endpoint(
         action="insights",
     )
 
-    await check_and_increment(db, body.tenant_id, "insights")
+    await check_and_increment(None, body.tenant_id, "insights")
 
     from core_api.services.insights_service import generate_insights
 
     result = await generate_insights(
-        db,
+        None,
         tenant_id=body.tenant_id,
         focus=body.focus,
         scope=body.scope,
@@ -118,12 +119,11 @@ async def generate_insights_endpoint(
     )
 
     await log_action(
-        db,
+        None,
         tenant_id=body.tenant_id,
         action="insights_generate",
         resource_type="insight",
         detail={"focus": body.focus, "scope": body.scope, "agent_id": caller_agent_id},
     )
-    await db.commit()
 
     return result

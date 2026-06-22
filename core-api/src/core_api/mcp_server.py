@@ -2437,14 +2437,14 @@ async def memclaw_insights(
     # Dynamic trust: scope='agent' requires trust ≥ 1, 'fleet'/'all' requires ≥ 2.
     min_level = 1 if scope == "agent" else 2
 
-    # Audit finding P3 (insights portion): prior implementation held a
-    # single ``_mcp_session()`` open across the multi-second LLM
-    # analysis round-trip, pinning a pooled DB connection during work
-    # that is entirely network-bound to the LLM provider. Restructured
-    # into three phases so the connection is released during the LLM:
-    #   1. session 1 — trust + usage gates, query memories, resolve config
-    #   2. no DB     — synthesize_insights (LLM)
-    #   3. session 2 — persist findings + commit
+    # Audit finding P3 (insights portion): the prior implementation held a
+    # single ``_mcp_session()`` open across the multi-second LLM analysis
+    # round-trip, pinning a pooled DB connection during work that is entirely
+    # network-bound to the LLM provider. The three-phase split is retained, and
+    # post-Fix-2-Ph5b every phase is storage-routed (no pooled connection held):
+    #   1. ``_no_db`` — trust + usage gates, query memories, resolve config
+    #   2. no DB      — synthesize_insights (LLM)
+    #   3. ``_no_db`` — persist findings (storage-routed; no commit)
     from core_api.services.insights_service import (
         _QUERY_DISPATCH,
         _DiscoverResult,
@@ -2454,8 +2454,12 @@ async def memclaw_insights(
     from core_api.services.organization_settings import resolve_config
 
     try:
-        # ── Phase 1: DB reads ──────────────────────────────────────
-        async with _mcp_session() as db:
+        # ── Phase 1: gates + storage-routed reads ──────────────────
+        # Fix 2 Ph5b: the trust/usage gates and the analytic memory reads are
+        # storage-routed (``_no_db()`` ⇒ db=None) — ``_require_trust`` /
+        # ``check_and_increment`` ignore db and the ``_QUERY_DISPATCH`` fns
+        # call core-storage-api. No pooled DB connection is held.
+        async with _no_db() as db:
             # Mirror the REST insights gate: ``require_trust`` soft-passes
             # a missing Agent row at ``DEFAULT_TRUST_LEVEL`` (read-only
             # ergonomics — see ``memclaw_list`` below for the intended
@@ -2513,10 +2517,12 @@ async def memclaw_insights(
         )
         findings = synth["findings"]
 
-        # ── Phase 3: persist findings + commit ─────────────────────
-        async with _mcp_session() as db:
+        # ── Phase 3: persist findings (storage-routed) ─────────────
+        # Fix 2 Ph5b: the supersede/restore + bulk-create inside
+        # ``_persist_findings`` are each storage-committed independently, so
+        # there's no session to open or commit here (``_no_db()`` ⇒ db=None).
+        async with _no_db() as db:
             insight_ids = await _persist_findings(db, tenant_id, agent_id, fleet_id, focus, scope, findings)
-            await db.commit()
 
         result = {
             "focus": focus,
