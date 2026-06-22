@@ -22,7 +22,7 @@ pubsub = ["google-cloud-pubsub>=2.23,<3"]
 dev = [
     "core-operations[test,pubsub]",
     "mypy>=1.13,<3.0",
-    "ruff>=0.8,<1.0",
+    "ruff>=0.15.18,<1.0",
 ]
 test = [
     "pytest>=8.3,<10.0",
