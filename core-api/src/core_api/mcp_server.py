@@ -782,7 +782,19 @@ async def memclaw_write(
             # REST write path uses. Without this, MCP writes succeed without
             # ever creating an Agent row, so a follow-up
             # PATCH /agents/{id}/trust 404s.
-            await enforce_fleet_write(db, tenant_id, agent_id, fleet_id)
+            agent = await enforce_fleet_write(db, tenant_id, agent_id, fleet_id)
+            # Mirror the REST write paths (routes/memories.py:937, :1125): an
+            # omitted fleet_id resolves to the caller's home fleet, so an MCP
+            # write scopes like a REST write instead of persisting
+            # fleet_id=NULL — a NULL-fleet row silently drops out of
+            # teammates' scope_team / fleet-filtered recall. Fires only when
+            # fleet_id is falsy, so an explicit (incl. cross-fleet) fleet_id
+            # is left untouched and still passes through the trust gate
+            # enforce_fleet_write applied above. If the agent has no home
+            # fleet (never been scoped), this is a no-op and the row stays
+            # NULL — unchanged from prior behavior.
+            if not fleet_id and agent.get("fleet_id"):
+                fleet_id = agent["fleet_id"]
             if content is not None:
                 await check_and_increment(db, tenant_id, "write")
                 result = await create_memory(
@@ -1721,7 +1733,13 @@ async def memclaw_doc(
                 # Mirror memclaw_write's agent registration so a doc upsert
                 # via MCP creates the Agent row on first contact and enforces
                 # cross-fleet trust gating. WRITE → home tenant only.
-                await enforce_fleet_write(db, tenant_id, agent_id, fleet_id)
+                write_agent = await enforce_fleet_write(db, tenant_id, agent_id, fleet_id)
+                # Same home-fleet resolution as memclaw_write: keep an omitted
+                # fleet_id from publishing a fleet_id=NULL doc/skill row that
+                # fleet-scoped teammates can't discover. No-op when the agent
+                # has no home fleet.
+                if not fleet_id and write_agent.get("fleet_id"):
+                    fleet_id = write_agent["fleet_id"]
                 await check_and_increment(db, tenant_id, "write")
                 row = await sc.upsert_document_xmax(
                     {

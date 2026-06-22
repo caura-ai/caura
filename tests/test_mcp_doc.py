@@ -306,6 +306,47 @@ async def test_doc_write_no_summary_stores_unindexed(mcp_env, monkeypatch):
     assert called["hit"] is False
 
 
+async def test_doc_write_omitted_fleet_resolves_home_fleet(mcp_env, monkeypatch):
+    """op=write resolves an omitted fleet_id to the agent's home fleet, so a
+    published doc/skill row isn't stranded at fleet_id=NULL (mirrors
+    memclaw_write; this is the path the 'publish a skill' flow uses)."""
+    sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
+    enforce = mcp_env["service"]("enforce_fleet_write")
+    enforce.return_value = {"agent_id": "a1", "fleet_id": "home-f", "trust_level": 1}
+
+    out = await mcp_server.memclaw_doc(
+        op="write",
+        collection="customers",
+        doc_id="acme",
+        data={"plan": "enterprise"},  # no summary → no embedding needed
+        agent_id="a1",
+    )
+    payload = parse_envelope(out)
+    assert payload["ok"] is True
+    # Backfilled to the home fleet; the trust gate still saw the original None.
+    assert sc.upsert_document_xmax.await_args.args[0]["fleet_id"] == "home-f"
+    assert enforce.await_args.args[3] is None
+
+
+async def test_doc_write_explicit_fleet_id_not_overridden(mcp_env, monkeypatch):
+    """An explicit fleet_id on op=write is never replaced by the home fleet."""
+    sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
+    enforce = mcp_env["service"]("enforce_fleet_write")
+    enforce.return_value = {"agent_id": "a1", "fleet_id": "home-f", "trust_level": 3}
+
+    out = await mcp_server.memclaw_doc(
+        op="write",
+        collection="customers",
+        doc_id="acme",
+        data={"plan": "pro"},
+        agent_id="a1",
+        fleet_id="explicit-f",
+    )
+    payload = parse_envelope(out)
+    assert payload["ok"] is True
+    assert sc.upsert_document_xmax.await_args.args[0]["fleet_id"] == "explicit-f"
+
+
 async def test_doc_write_summary_empty_string_is_rejected(mcp_env, monkeypatch):
     """When summary is provided but blank, embedding would be noise — reject."""
     monkeypatch.setattr(

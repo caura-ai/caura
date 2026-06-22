@@ -235,14 +235,59 @@ async def test_write_default_agent_in_standalone_ok(mcp_env):
     assert payload["id"] == "m-z"
 
 
-async def test_write_without_fleet_id_persists_null(mcp_env):
-    """Absent ``fleet_id`` → model carries ``None``. This is the current
-    server-side behavior; pairs with the skill guidance that tells
-    agents to pass the kwarg explicitly (URL param alone won't do it)."""
+async def test_write_without_fleet_id_no_home_fleet_persists_null(mcp_env):
+    """Absent ``fleet_id`` AND no home fleet on the agent → model carries
+    ``None``. The default ``mcp_env`` enforce stub echoes the passed
+    ``fleet_id`` (None here) as the agent's fleet, i.e. an agent never
+    scoped to a fleet — the home-fleet backfill is a no-op and the row
+    stays NULL (unchanged from prior behavior)."""
     mock = mcp_env["service"]("create_memory")
     mock.return_value = _OutStub()
 
     await mcp_server.memclaw_write(content="no fleet")
-    kwargs = mock.await_args.kwargs
-    model = kwargs.get("__self__", None) or mock.await_args.args[1]
+    model = mock.await_args.args[1]
     assert model.fleet_id is None
+
+
+async def test_write_omitted_fleet_resolves_home_fleet(mcp_env):
+    """Omitted ``fleet_id`` resolves to the agent's home fleet (REST parity,
+    routes/memories.py:937) instead of persisting NULL."""
+    enforce = mcp_env["service"]("enforce_fleet_write")
+    enforce.return_value = {"agent_id": "a1", "fleet_id": "home-f", "trust_level": 1}
+    cm = mcp_env["service"]("create_memory")
+    cm.return_value = _OutStub("m-hf")
+
+    await mcp_server.memclaw_write(content="x", agent_id="a1")  # fleet_id omitted
+
+    # The trust gate still saw the ORIGINAL (None) fleet_id — backfill happens
+    # after enforcement, so cross-fleet gating is unchanged.
+    assert enforce.await_args.args[3] is None
+    assert cm.await_args.args[1].fleet_id == "home-f"
+
+
+async def test_write_explicit_fleet_id_not_overridden(mcp_env):
+    """An explicit ``fleet_id`` is never replaced by the home fleet."""
+    enforce = mcp_env["service"]("enforce_fleet_write")
+    enforce.return_value = {"agent_id": "a1", "fleet_id": "home-f", "trust_level": 3}
+    cm = mcp_env["service"]("create_memory")
+    cm.return_value = _OutStub("m-x")
+
+    await mcp_server.memclaw_write(content="x", agent_id="a1", fleet_id="explicit-f")
+
+    assert enforce.await_args.args[3] == "explicit-f"
+    assert cm.await_args.args[1].fleet_id == "explicit-f"
+
+
+async def test_write_batch_omitted_fleet_resolves_home_fleet(mcp_env):
+    """Batch path resolves the home fleet at the top level — BulkMemoryItem
+    inherits fleet from the parent, so the whole batch lands in it."""
+    enforce = mcp_env["service"]("enforce_fleet_write")
+    enforce.return_value = {"agent_id": "a2", "fleet_id": "home-f", "trust_level": 1}
+    cmb = mcp_env["service"]("create_memories_bulk")
+    cmb.return_value = _OutStub("batch-hf")
+
+    await mcp_server.memclaw_write(
+        items=[{"content": "one"}, {"content": "two"}], agent_id="a2"
+    )
+
+    assert cmb.await_args.args[1].fleet_id == "home-f"
