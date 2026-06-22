@@ -25,7 +25,7 @@ argon2-cffi>=23.1
 cryptography>=42.0
 python-jose[cryptography]>=3.3
 pyotp>=2.9
-cachetools>=5.3
+cachetools>=7.1.4
 
 croniter>=2.0
 
