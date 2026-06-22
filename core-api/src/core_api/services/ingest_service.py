@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 import httpx
-import kreuzberg
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,6 +35,15 @@ from core_api.services.ingest_chunking import (
 )
 from core_api.services.memory_service import _content_hash, create_memories_bulk
 from core_api.services.organization_settings import resolve_config
+
+# Document extraction (PDF / Office / EPUB / …) is an optional ``ingest`` extra:
+# kreuzberg is ~64MB and is excluded from the default image to cut cold-start
+# pull + import time. When absent, the ingest endpoints return 501 (see
+# ``_extract_with_kreuzberg``); every other code path works unchanged.
+try:
+    import kreuzberg
+except ImportError:  # pragma: no cover - only in slim (no-ingest) builds
+    kreuzberg = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -418,7 +426,11 @@ def _check_hostname_safe(url: str) -> None:
 # extracted PDFs/Office docs and produce breadcrumb-tagged sections, instead
 # of dumping one giant plaintext blob. Created once at module load to avoid
 # rebuilding it on every request.
-_KREUZBERG_CFG = kreuzberg.ExtractionConfig(output_format=kreuzberg.OutputFormat.MARKDOWN)
+_KREUZBERG_CFG = (
+    kreuzberg.ExtractionConfig(output_format=kreuzberg.OutputFormat.MARKDOWN)
+    if kreuzberg is not None
+    else None
+)
 
 
 def decode_text_body(body: bytes, mime: str, encoding: str | None = None) -> str:
@@ -458,6 +470,11 @@ async def _extract_with_kreuzberg(body: bytes, mime: str) -> str:
     - Empty extracted content (image-only PDF with no Tesseract installed)
       → 422 — better to fail loudly than to send the LLM 0 bytes.
     """
+    if kreuzberg is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Document ingest is not available in this build — install the 'ingest' extra (kreuzberg).",
+        )
     try:
         result = await kreuzberg.extract_bytes(body, mime, _KREUZBERG_CFG)
     except kreuzberg.ParsingError as e:

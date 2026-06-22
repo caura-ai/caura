@@ -15,7 +15,9 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
+from core_api.services import ingest_service
 from core_api.services.ingest_service import (
     INGEST_MAX_INPUT_BYTES,
     MAX_INGEST_CONTENT_BYTES,
@@ -549,3 +551,14 @@ def test_unified_cap_is_3mb() -> None:
     assert INGEST_MAX_INPUT_BYTES == 3_000_000
     # MAX_INGEST_CONTENT_BYTES is kept as a back-compat alias.
     assert MAX_INGEST_CONTENT_BYTES == INGEST_MAX_INPUT_BYTES
+
+
+@pytest.mark.unit
+async def test_extract_with_kreuzberg_501_when_extra_absent(monkeypatch) -> None:
+    """Slim build (no ``ingest`` extra): kreuzberg is None, so the extractor
+    must fail clearly with 501 — not a NameError/500 — and point at the extra."""
+    monkeypatch.setattr(ingest_service, "kreuzberg", None)
+    with pytest.raises(HTTPException) as exc:
+        await ingest_service._extract_with_kreuzberg(b"%PDF-1.4 fake", "application/pdf")
+    assert exc.value.status_code == 501
+    assert "ingest" in exc.value.detail.lower()

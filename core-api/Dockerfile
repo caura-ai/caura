@@ -22,7 +22,13 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /usr/local/bin/uv
 COPY core-api/pyproject.toml core-api/uv.lock core-api/README.md* ./core-api/
 # Dummy src so the project metadata resolves during export.
 RUN mkdir -p core-api/src/core_api && touch core-api/src/core_api/__init__.py
-RUN uv export --frozen --no-dev --extra pubsub --no-emit-project \
+# Document-ingest (kreuzberg, ~64MB) is an opt-in extra — off by default to
+# keep the image small and cold-start fast. Build with --build-arg WITH_INGEST=1
+# for a deployment that serves the /ingest/* endpoints.
+ARG WITH_INGEST=0
+RUN EXTRAS="--extra pubsub"; \
+    if [ "$WITH_INGEST" = "1" ]; then EXTRAS="$EXTRAS --extra ingest"; fi; \
+    uv export --frozen --no-dev $EXTRAS --no-emit-project \
       --directory core-api -o /tmp/reqs.txt \
     && uv pip install --system --no-cache -r /tmp/reqs.txt
 

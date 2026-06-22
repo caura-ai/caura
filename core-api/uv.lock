@@ -365,7 +365,7 @@ wheels = [
 
 [[package]]
 name = "core-api"
-version = "2.15.0"
+version = "2.16.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -379,7 +379,6 @@ dependencies = [
     { name = "google-genai" },
     { name = "greenlet" },
     { name = "httpx" },
-    { name = "kreuzberg" },
     { name = "markdown-it-py" },
     { name = "mcp" },
     { name = "openai" },
@@ -405,12 +404,16 @@ dev = [
     { name = "aiosqlite" },
     { name = "google-cloud-pubsub" },
     { name = "httpx" },
+    { name = "kreuzberg" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "ruff" },
     { name = "types-croniter" },
+]
+ingest = [
+    { name = "kreuzberg" },
 ]
 pubsub = [
     { name = "google-cloud-pubsub" },
@@ -430,7 +433,7 @@ requires-dist = [
     { name = "argon2-cffi", specifier = ">=23.1" },
     { name = "asyncpg", specifier = ">=0.30,<1" },
     { name = "cachetools", specifier = ">=5.3" },
-    { name = "core-api", extras = ["test", "pubsub"], marker = "extra == 'dev'" },
+    { name = "core-api", extras = ["test", "pubsub", "ingest"], marker = "extra == 'dev'" },
     { name = "croniter", specifier = ">=2.0" },
     { name = "cryptography", specifier = ">=42.0" },
     { name = "fastapi", specifier = ">=0.115,<1" },
@@ -440,7 +443,7 @@ requires-dist = [
     { name = "greenlet", specifier = "<3.6.0" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27,<1.0" },
-    { name = "kreuzberg", specifier = ">=4.9,<5" },
+    { name = "kreuzberg", marker = "extra == 'ingest'", specifier = ">=4.9,<5" },
     { name = "markdown-it-py", specifier = ">=4.0,<5" },
     { name = "mcp", specifier = ">=1.26,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13,<3.0" },
@@ -466,7 +469,7 @@ requires-dist = [
     { name = "types-croniter", marker = "extra == 'dev'", specifier = ">=2.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
 ]
-provides-extras = ["pubsub", "dev", "test"]
+provides-extras = ["pubsub", "ingest", "dev", "test"]
 
 [[package]]
 name = "coverage"

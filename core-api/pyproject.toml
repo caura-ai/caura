@@ -48,13 +48,6 @@ dependencies = [
     "markdown-it-py>=4.0,<5",  # markdown AST walker
     "tiktoken>=0.10,<1",  # cl100k_base token counter for size caps
     "pysbd>=0.3,<1",  # sentence boundary detection for sub-chunk splits
-    # PR #8 (Tier-1 ingest, optional multi-format): Kreuzberg replaces
-    # what would otherwise be pypdf + python-docx + python-pptx + … (88+
-    # formats). Provides ``extract_bytes(data, mime) -> ExtractionResult``;
-    # text-PDF works out of the box, scanned-PDF OCR requires Tesseract on
-    # the host (deferred to a follow-up — image-only PDFs raise 422 for now).
-    # License Elastic-2.0.
-    "kreuzberg>=4.9,<5",
     # PR #9: FastAPI's UploadFile / Form support needs python-multipart at
     # runtime. Pulled in transitively today via ``mcp`` but declaring
     # explicitly so removing/upgrading mcp can't silently break uploads.
@@ -65,8 +58,14 @@ dependencies = [
 # Optional: required only when EVENT_BUS_BACKEND=pubsub (SaaS deployments).
 # Standalone installs default to the in-process bus and don't need this.
 pubsub = ["google-cloud-pubsub>=2.23,<3"]
+# Optional: multi-format document extraction for the /ingest/* endpoints.
+# Kreuzberg (~64MB, Elastic-2.0) is excluded from the default image to cut
+# cold-start pull + import time — the ingest endpoints return 501 without it
+# (see core_api.services.ingest_service guarded import). Build with
+# `--extra ingest` (Dockerfile: --build-arg WITH_INGEST=1) to enable ingest.
+ingest = ["kreuzberg>=4.9,<5"]
 dev = [
-    "core-api[test,pubsub]",
+    "core-api[test,pubsub,ingest]",
     "mypy>=1.13,<3.0",
     "ruff>=0.8,<1.0",
     "types-croniter>=2.0",
