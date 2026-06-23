@@ -28,7 +28,7 @@ This script probes that exact gap with two arms:
   If both succeed → S1 is closed; move to S2 (enrichment-lag race).
 
 Usage:
-    export MEMCLAW_API_URL=https://memclaw.net      # or memclaw.dev
+    export MEMCLAW_API_URL=https://memclaw.net
     export MEMCLAW_API_KEY=mc_...
     python scripts/repro_contradictions_proper_noun.py
 

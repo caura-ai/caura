@@ -24,7 +24,7 @@ prints a structured diagnostic dump showing exactly what the server
 reported.
 
 Usage:
-    export MEMCLAW_API_URL=https://memclaw.dev      # or https://memclaw.net
+    export MEMCLAW_API_URL=https://memclaw.net
     export MEMCLAW_API_KEY=mc_...
     python scripts/repro_contradictions_not_detected.py
 

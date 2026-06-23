@@ -670,8 +670,8 @@ def _derive_api_url_from_request(request: Request) -> str:
     When the endpoint sits behind a proxy (nginx, Cloud Run, etc.) the
     reverse proxy forwards the original scheme and host via
     ``X-Forwarded-Proto`` and ``X-Forwarded-Host``. We prefer those — that
-    way a ``curl https://memclaw.dev/api/v1/install-skill | bash`` yields a
-    script that keeps fetching from ``https://memclaw.dev``, not from the
+    way a ``curl https://memclaw.net/api/v1/install-skill | bash`` yields a
+    script that keeps fetching from ``https://memclaw.net``, not from the
     internal ``http://127.0.0.1:8000`` the upstream service sees.
     """
     scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
@@ -688,7 +688,7 @@ def _generate_skill_install_script(*, api_url: str, agent: str, api_key: str = "
 
     ``api_key`` — when non-empty, embedded into the script and forwarded
     as ``-H "X-API-Key: ..."`` on the internal curl calls. Required for
-    edge-auth-gated deploys (memclaw.dev's nginx rejects unauthenticated
+    edge-auth-gated deploys (memclaw.net's nginx rejects unauthenticated
     requests on every path). Empty when the deploy is standalone / lets
     the skill file be fetched without a key.
     """
@@ -769,7 +769,7 @@ async def install_skill_script(
         description=(
             "Override the server URL the script will install from. Auto-derived "
             "from the request Host (and X-Forwarded-Proto) when omitted — so "
-            "``curl https://memclaw.dev/api/v1/install-skill | bash`` just works."
+            "``curl https://memclaw.net/api/v1/install-skill | bash`` just works."
         ),
     ),
 ):

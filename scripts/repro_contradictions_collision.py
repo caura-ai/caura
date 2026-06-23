@@ -29,7 +29,7 @@ The verdict logic inspects the entity_links after the writes settle
 and reports which arm fired.
 
 Usage:
-    export MEMCLAW_API_URL=https://memclaw.dev
+    export MEMCLAW_API_URL=https://memclaw.net
     export MEMCLAW_API_KEY=mc_...
     export MEMCLAW_TENANT_ID=rantaig-...
     python scripts/repro_contradictions_collision.py

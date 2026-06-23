@@ -1,6 +1,6 @@
 # Upgrading the memclaw plugin
 
-**Audience:** operators running OpenClaw with the memclaw plugin against a memclaw server (memclaw.dev, memclaw.net, on-prem). Two flows are documented: the **automatic** path (heartbeat-driven) and the **manual** path (`/api/v1/install-plugin`).
+**Audience:** operators running OpenClaw with the memclaw plugin against a memclaw server (memclaw.net, on-prem). Two flows are documented: the **automatic** path (heartbeat-driven) and the **manual** path (`/api/v1/install-plugin`).
 
 ## When auto-upgrade runs
 

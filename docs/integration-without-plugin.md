@@ -1,6 +1,6 @@
 # Integrate with memclaw without the plugin
 
-**Audience:** developers building Python, Node, or any other SDK client against `memclaw.dev` or a self-hosted memclaw instance, without installing the OpenClaw plugin runtime.
+**Audience:** developers building Python, Node, or any other SDK client against `memclaw.net` or a self-hosted memclaw instance, without installing the OpenClaw plugin runtime.
 
 **Time to first tool call:** ~5 minutes.
 
@@ -10,7 +10,7 @@
 
 ## What you need
 
-- A tenant-scoped `mc_` credential — get one from `memclaw.dev/settings/api-keys` (or self-host).
+- A tenant-scoped `mc_` credential — get one from `memclaw.net/settings/api-keys` (or self-host).
 - An MCP client. Examples below use `mcp` (Python) and `curl`. The same flow works with `anthropic` (Python SDK's remote-MCP integration), `openai`, or any client that speaks MCP streamable-http.
 
 ---
@@ -19,11 +19,11 @@
 
 Every long-lived integration should bind to a named agent identity rather than calling under a tenant-scoped credential. Two ways:
 
-- **Dashboard (recommended for humans):** `memclaw.dev/settings/organization/api-credentials` — single-card wizard, one-time raw-key reveal, manages cross-tenant + read-scope settings.
+- **Dashboard (recommended for humans):** `memclaw.net/settings/organization/api-credentials` — single-card wizard, one-time raw-key reveal, manages cross-tenant + read-scope settings.
 - **API (for scripted provisioning, shown below):** `POST /api/v1/admin/agent-keys/provision` — atomic call that creates the Agent row eagerly so subsequent trust-elevation or fleet-assignment endpoints work immediately:
 
 ```bash
-curl -X POST https://memclaw.dev/api/v1/admin/agent-keys/provision \
+curl -X POST https://memclaw.net/api/v1/admin/agent-keys/provision \
   -H "X-API-Key: $MC_TENANT_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -62,7 +62,7 @@ Save `raw_key` immediately — it's only returned once. The returned credential 
 Before making real tool calls, confirm memclaw resolves your credentials the way you expect:
 
 ```bash
-curl https://memclaw.dev/api/v1/whoami \
+curl https://memclaw.net/api/v1/whoami \
   -H "X-API-Key: $AGENT_KEY"
 ```
 
@@ -108,7 +108,7 @@ from mcp.client.streamable_http import streamablehttp_client
 
 async def main():
     headers = {"X-API-Key": "mc_..."}   # agent-scoped credential
-    url = "https://memclaw.dev/mcp/"
+    url = "https://memclaw.net/mcp/"
 
     async with streamablehttp_client(url, headers=headers) as (read, write, _):
         async with ClientSession(read, write) as session:
@@ -139,7 +139,7 @@ msg = client.messages.create(
         "mcp_servers": [
             {
                 "type": "url",
-                "url": "https://memclaw.dev/mcp/",
+                "url": "https://memclaw.net/mcp/",
                 "name": "memclaw",
                 "authorization_token": "mc_...",   # agent-scoped credential
             }
@@ -158,7 +158,7 @@ The SDK forwards `authorization_token` as `Authorization: Bearer mc_…`. memcla
 The default `trust_level=1` lets the agent write to its home fleet. Elevate when you need cross-fleet writes, keystone authoring, or deletes:
 
 ```bash
-curl -X PATCH "https://memclaw.dev/api/v1/agents/quote-agent-na/trust?tenant_id=$TENANT_ID" \
+curl -X PATCH "https://memclaw.net/api/v1/agents/quote-agent-na/trust?tenant_id=$TENANT_ID" \
   -H "X-API-Key: $MC_TENANT_KEY" \
   -H "Content-Type: application/json" \
   -d '{"trust_level": 2}'
@@ -180,7 +180,7 @@ Keystones are mandatory rules that override conflicting instructions. Authoring 
 `scope=fleet`/`scope=tenant` rule needs trust ≥ 2 (see above).
 
 ```bash
-curl -X POST "https://memclaw.dev/api/v1/memclaw/keystones" \
+curl -X POST "https://memclaw.net/api/v1/memclaw/keystones" \
   -H "X-API-Key: $MC_TENANT_KEY" \
   -H "X-Agent-ID: quote-agent-na" \
   -H "Content-Type: application/json" \
@@ -211,7 +211,7 @@ AGENT_ID="quote-agent-na"
 FLEET_ID="na-sales"
 
 # 1. Provision agent + Agent row + trust + fleet in one call.
-RESP=$(curl -s -X POST https://memclaw.dev/api/v1/admin/agent-keys/provision \
+RESP=$(curl -s -X POST https://memclaw.net/api/v1/admin/agent-keys/provision \
   -H "X-API-Key: $TENANT_KEY" \
   -H "Content-Type: application/json" \
   -d "{\"agent_id\":\"$AGENT_ID\",\"initial_trust\":1,\"initial_fleet\":\"$FLEET_ID\"}")
@@ -219,10 +219,10 @@ AGENT_KEY=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdi
 # AGENT_KEY is an mc_… agent-scoped credential.
 
 # 2. Verify.
-curl -s https://memclaw.dev/api/v1/whoami -H "X-API-Key: $AGENT_KEY"
+curl -s https://memclaw.net/api/v1/whoami -H "X-API-Key: $AGENT_KEY"
 
 # 3. Use.
-curl -s https://memclaw.dev/api/v1/memories \
+curl -s https://memclaw.net/api/v1/memories \
   -H "X-API-Key: $AGENT_KEY" \
   -H "Content-Type: application/json" \
   -d "{\"tenant_id\":\"$TENANT_ID\",\"agent_id\":\"$AGENT_ID\",\"fleet_id\":\"$FLEET_ID\",\"content\":\"Hello world\"}"
