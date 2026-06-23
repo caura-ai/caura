@@ -839,7 +839,7 @@
         },
         "top_k": {
           "default": 5,
-          "description": "1-20.",
+          "description": "Max results, default 5. Values above 20 are capped to 20.",
           "title": "Top K",
           "type": "integer"
         }

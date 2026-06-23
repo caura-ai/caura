@@ -680,7 +680,7 @@
       },
       {
         "default": 5,
-        "description": "1-20.",
+        "description": "Max results, default 5. Values above 20 are capped to 20.",
         "name": "top_k",
         "required": false,
         "type": "int"

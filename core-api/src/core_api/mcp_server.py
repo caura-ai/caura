@@ -575,7 +575,9 @@ async def memclaw_recall(
     status: Annotated[str | None, Field(description="Filter by status.")] = None,
     fleet_ids: Annotated[list[str] | None, Field(description="Restrict fleets.")] = None,
     include_brief: Annotated[bool, Field(description="Add LLM summary.")] = False,
-    top_k: Annotated[int, Field(description="1-20.")] = DEFAULT_SEARCH_TOP_K,
+    top_k: Annotated[
+        int, Field(description="Max results, default 5. Values above 20 are capped to 20.")
+    ] = DEFAULT_SEARCH_TOP_K,
 ) -> str:
     """Hybrid semantic+keyword recall, with optional LLM brief."""
     t0 = time.perf_counter()
