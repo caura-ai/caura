@@ -7,6 +7,7 @@ from core_api.pipeline.steps.search import (
     ExtractTemporalHint,
     InjectSTMContext,
     LoadAndSerialize,
+    LogRecallEvent,
     ParallelEmbedAndEntityBoost,
     PostFilterResults,
     ResolveSearchProfile,
@@ -27,5 +28,6 @@ def build_search_pipeline() -> Pipeline:
             LoadAndSerialize(),
             InjectSTMContext(),
             TrackRecalls(),
+            LogRecallEvent(),
         ],
     )

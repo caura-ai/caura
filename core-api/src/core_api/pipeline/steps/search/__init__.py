@@ -5,6 +5,7 @@ from core_api.pipeline.steps.search.execute_scored_search import ExecuteScoredSe
 from core_api.pipeline.steps.search.extract_temporal_hint import ExtractTemporalHint
 from core_api.pipeline.steps.search.inject_stm_context import InjectSTMContext
 from core_api.pipeline.steps.search.load_and_serialize import LoadAndSerialize
+from core_api.pipeline.steps.search.log_recall_event import LogRecallEvent
 from core_api.pipeline.steps.search.parallel_embed_entity_boost import (
     ParallelEmbedAndEntityBoost,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "ExtractTemporalHint",
     "InjectSTMContext",
     "LoadAndSerialize",
+    "LogRecallEvent",
     "ParallelEmbedAndEntityBoost",
     "PostFilterResults",
     "ResolveSearchProfile",

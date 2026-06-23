@@ -106,6 +106,13 @@ DEFAULT_SETTINGS: dict = {
     "insights": {
         "auto_insights_enabled": None,
     },
+    "observability": {
+        # Opt-in (default off). When on, each agent-chosen ``memclaw_recall``
+        # call is logged (query + scope + candidate scores) to ``recall_event``
+        # / ``recall_candidate`` for "why aren't good memories recalled?"
+        # analysis. The plugin's automatic ``/search`` is never logged.
+        "recall_logging_enabled": None,
+    },
     "chunking": {
         "auto_chunk_enabled": None,
     },
@@ -460,6 +467,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "lifecycle.memory_retention_days": int,
     "entity_linking.auto_entity_linking_enabled": bool,
     "insights.auto_insights_enabled": bool,
+    "observability.recall_logging_enabled": bool,
     "chunking.auto_chunk_enabled": bool,
     "agents.require_agent_approval": bool,
     "entity_blocklist": list,
@@ -810,6 +818,13 @@ class ResolvedConfig:
     @property
     def auto_insights_enabled(self) -> bool:
         val = self._ts.get("insights", {}).get("auto_insights_enabled")
+        return val if val is not None else False
+
+    # Recall logging — opt-in (default False). When on, agent-chosen
+    # ``memclaw_recall`` calls are logged to recall_event / recall_candidate.
+    @property
+    def recall_logging_enabled(self) -> bool:
+        val = self._ts.get("observability", {}).get("recall_logging_enabled")
         return val if val is not None else False
 
     # Chunking

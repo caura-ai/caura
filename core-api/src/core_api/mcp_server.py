@@ -667,6 +667,7 @@ async def memclaw_recall(
             tenant_config=config,
             search_profile=agent_profile,
             readable_tenant_ids=_get_readable_tenants() or None,
+            source="mcp_recall",
         )
         # Cross-tenant read audit (F2): emit one event per source tenant when
         # the credential widened beyond home. Async queue — non-blocking.

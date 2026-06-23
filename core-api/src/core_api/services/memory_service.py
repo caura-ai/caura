@@ -3101,6 +3101,7 @@ async def search_memories(
     diagnostic: bool = False,
     diagnostic_ctx: dict | None = None,
     readable_tenant_ids: list[str] | None = None,
+    source: str = "search",
 ) -> list[MemoryOut]:
     # Diagnostic mode requires the pipeline path for score introspection
     if _USE_PIPELINE_SEARCH or diagnostic:
@@ -3122,6 +3123,7 @@ async def search_memories(
             diagnostic=diagnostic,
             diagnostic_ctx=diagnostic_ctx,
             readable_tenant_ids=readable_tenant_ids,
+            source=source,
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     return await _search_memories_legacy(
@@ -3160,6 +3162,7 @@ async def _search_memories_pipeline(
     diagnostic: bool = False,
     diagnostic_ctx: dict | None = None,
     readable_tenant_ids: list[str] | None = None,
+    source: str = "search",
 ) -> list[MemoryOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.search import build_search_pipeline
@@ -3183,6 +3186,7 @@ async def _search_memories_pipeline(
             "search_profile": search_profile,
             "diagnostic": diagnostic,
             "readable_tenant_ids": readable_tenant_ids,
+            "source": source,
         },
         tenant_config=tenant_config,
     )
