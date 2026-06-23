@@ -198,16 +198,15 @@ async def lifespan(app):
 
             init_standalone()
 
-        # Backfill agent rows for any memories written before agent tracking
+        # Backfill agent rows for any memories written before agent tracking.
+        # Fully storage-routed (backfill_agents → sc.backfill_from_memories), so
+        # no core-api DB session is opened here.
         try:
-            from core_api.db.session import async_session
             from core_api.services.agent_service import backfill_agents
 
-            async with async_session() as db:
-                count = await backfill_agents(db)
-                if count:
-                    await db.commit()
-                    print(f"[startup] Backfilled {count} agent(s) from memories")
+            count = await backfill_agents()
+            if count:
+                print(f"[startup] Backfilled {count} agent(s) from memories")
         except Exception as e:
             print(f"[startup] Agent backfill skipped: {e}")
 

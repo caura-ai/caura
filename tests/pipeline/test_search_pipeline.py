@@ -309,6 +309,27 @@ async def test_track_recalls_fire_and_forget():
     mock_db.commit.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_track_recalls_background_routes_to_storage():
+    """The background task routes the recall bump through the storage client
+    with stringified memory ids (no direct DB session)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from core_api.pipeline.steps.search.track_recalls import _track_recalls_background
+
+    ids = [uuid.uuid4(), uuid.uuid4()]
+
+    sc = MagicMock()
+    sc.increment_recall = AsyncMock(return_value=2)
+    with patch(
+        "core_api.pipeline.steps.search.track_recalls.get_storage_client",
+        return_value=sc,
+    ):
+        await _track_recalls_background(ids)
+
+    sc.increment_recall.assert_awaited_once_with([str(ids[0]), str(ids[1])])
+
+
 # ---------------------------------------------------------------------------
 # Fix A — Pipeline failure surfaces original error
 # ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 
+from core_api.clients.storage_client import get_storage_client
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 from core_api.tasks import track_task
@@ -36,17 +37,12 @@ def _mem_id(row) -> object:
 
 
 async def _persist(event: dict, candidates: list[dict]) -> None:
-    from common.models.recall_log import RecallCandidate, RecallEvent
-    from core_api.db.session import async_session
-
+    # Routes the write through core-storage (no core-api DB pool). The payload
+    # goes over JSON, so every value must already be JSON-safe — the candidate
+    # ``memory_id`` UUIDs are stringified at construction in ``execute`` and the
+    # event dict carries only str/int/float/None values (no UUID/datetime).
     try:
-        async with async_session() as db:
-            ev = RecallEvent(**event)
-            db.add(ev)
-            await db.flush()  # assign ev.id
-            for c in candidates:
-                db.add(RecallCandidate(recall_event_id=ev.id, **c))
-            await db.commit()
+        await get_storage_client().log_recall(event, candidates)
     except Exception:
         logger.warning("recall-event logging failed", exc_info=True)
 
@@ -80,7 +76,9 @@ class LogRecallEvent:
                 candidates.append(
                     {
                         "rank": rank,
-                        "memory_id": _mem_id(row),
+                        # JSON-safe: _mem_id returns a UUID — the payload now
+                        # crosses an HTTP boundary, so stringify it.
+                        "memory_id": str(_mem_id(row)),
                         "vec_sim": _f(getattr(row, "vec_sim", None)),
                         "final_score": _f(getattr(row, "score", None)),
                         "recall_boost": _f(getattr(row, "recall_boost", None)),
@@ -94,7 +92,7 @@ class LogRecallEvent:
                 candidates.append(
                     {
                         "rank": len(returned_rows) + offset + 1,
-                        "memory_id": _mem_id(row),
+                        "memory_id": str(_mem_id(row)),
                         "vec_sim": _f(getattr(row, "vec_sim", None)),
                         "final_score": _f(getattr(row, "score", None)),
                         "recall_boost": _f(getattr(row, "recall_boost", None)),

@@ -1012,6 +1012,43 @@ class CoreStorageClient:
         return result  # type: ignore[return-value]
 
     # =====================================================================
+    # Recall logging + capability usage (Fix 2 final cleanup — the last
+    # core-api direct-DB writes, now routed through storage). All three are
+    # fire-and-forget background writes, so ``read=False`` (writer fleet).
+    # Payloads MUST be JSON-safe: ``_post`` does NOT auto-encode UUIDs /
+    # datetimes, so callers stringify UUIDs + ISO-format datetimes first.
+    # =====================================================================
+
+    async def increment_recall(self, memory_ids: list[str]) -> int:
+        """Bump ``recall_count`` + ``last_recalled_at`` for memories by id.
+
+        ``memory_ids`` must already be stringified (the storage endpoint
+        re-parses each as a UUID). Returns the rows-updated count.
+        """
+        result = await self._post("/memories/increment-recall", {"memory_ids": memory_ids})
+        return result.get("updated", 0)  # type: ignore[union-attr]
+
+    async def log_recall(self, event: dict, candidates: list[dict]) -> str:
+        """Persist one ``recall_event`` + its ``recall_candidate`` rows, ONE txn.
+
+        ``event`` + every ``candidate`` dict must be JSON-safe — stringify
+        UUIDs (e.g. ``candidate["memory_id"]``) and ISO-format any datetimes
+        BEFORE calling. Returns the new ``recall_event.id`` as a string.
+        """
+        result = await self._post("/memories/recall-log", {"event": event, "candidates": candidates})
+        return result["recall_event_id"]  # type: ignore[index,return-value]
+
+    async def flush_capability_usage(self, rows: list[dict]) -> int:
+        """Bulk-append adoption-counter rows to ``capability_usage``.
+
+        Cross-tenant by design (each row carries its own ``tenant_id``); the
+        endpoint applies no per-tenant scoping. ``ts_bucket`` must be an ISO
+        string (JSON has no datetime). Returns the rows-inserted count.
+        """
+        result = await self._post("/capability-usage", {"rows": rows})
+        return result.get("inserted", 0)  # type: ignore[union-attr]
+
+    # =====================================================================
     # Entities
     # =====================================================================
 

@@ -330,8 +330,11 @@ async def enforce_update(
         )
 
 
-async def backfill_agents(db: AsyncSession) -> int:
-    """Create agent rows for any (tenant_id, agent_id) pairs in memories that don't have one yet."""
+async def backfill_agents() -> int:
+    """Create agent rows for any (tenant_id, agent_id) pairs in memories that
+    don't have one yet. Fully storage-routed (one ``sc.backfill_from_memories``
+    call) — no DB session needed.
+    """
     sc = get_storage_client()
     # Use the first available tenant_id — in standalone mode there's only one
     from core_api.standalone import get_standalone_tenant_id

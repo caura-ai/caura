@@ -103,6 +103,42 @@ async def test_record_usage_noop_when_unwired():
     cu.record_usage(capability="recall", transport="mcp", tenant_id="t1")
 
 
+async def test_default_flush_routes_to_storage_with_iso_ts_bucket(monkeypatch):
+    """``_default_flush`` posts rows through the storage client (no direct DB
+    session) and ISO-formats the ``datetime`` ``ts_bucket`` so the JSON payload
+    is serializable; the storage endpoint coerces it back to datetime."""
+    from datetime import UTC, datetime
+    from unittest.mock import AsyncMock, MagicMock
+
+    bucket = datetime(2026, 6, 23, 12, 0, tzinfo=UTC)
+    rows = [
+        {
+            "tenant_id": "t1",
+            "capability": "recall",
+            "op": None,
+            "transport": "mcp",
+            "ts_bucket": bucket,
+            "count": 3,
+            "error_count": 0,
+            "duration_ms_sum": 30,
+        }
+    ]
+
+    sc = MagicMock()
+    sc.flush_capability_usage = AsyncMock(return_value=1)
+    monkeypatch.setattr(cu, "get_storage_client", lambda: sc)
+
+    await cu._default_flush(rows)
+
+    sc.flush_capability_usage.assert_awaited_once()
+    sent = sc.flush_capability_usage.await_args.args[0]
+    assert sent[0]["ts_bucket"] == bucket.isoformat()
+    assert isinstance(sent[0]["ts_bucket"], str)
+    # other fields pass through unchanged
+    assert sent[0]["tenant_id"] == "t1"
+    assert sent[0]["count"] == 3
+
+
 # ── REST emitter (middleware route→capability map) ──────────────────────
 
 

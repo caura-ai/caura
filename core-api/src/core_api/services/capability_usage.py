@@ -28,6 +28,8 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 
+from core_api.clients.storage_client import get_storage_client
+
 logger = logging.getLogger(__name__)
 
 # Tenant values that are not real orgs — never attribute usage to them.
@@ -186,18 +188,19 @@ class CapabilityUsageAggregator:
 
 
 async def _default_flush(rows: list[dict]) -> None:
-    """Append rows to ``capability_usage`` via a plain (RLS-free) session.
+    """Append rows to ``capability_usage`` via the storage client (RLS-free).
 
-    Cross-tenant by design — the flush carries many tenants' counters in
-    one batch, so it runs WITHOUT an ``app.tenant_id`` context. The table
-    has no RLS policy, so the insert is unrestricted (see the migration).
+    Cross-tenant by design — the flush carries many tenants' counters in one
+    batch, so storage applies no per-tenant scoping (each row carries its own
+    ``tenant_id`` grouping dimension); the table has no RLS policy.
+
+    ``ts_bucket`` is a ``datetime`` here (``_drain_rows``), but the payload now
+    crosses an HTTP/JSON boundary — httpx can't encode a bare datetime — so it
+    is ISO-formatted before the call. The storage endpoint coerces the ISO
+    string back to ``datetime`` for the timestamptz column.
     """
-    from common.models.capability_usage import CapabilityUsage
-    from core_api.db.session import async_session
-
-    async with async_session() as session:
-        session.add_all([CapabilityUsage(**r) for r in rows])
-        await session.commit()
+    payload = [{**r, "ts_bucket": r["ts_bucket"].isoformat()} for r in rows]
+    await get_storage_client().flush_capability_usage(payload)
 
 
 # Module-level singleton bound at lifespan startup. None → recording is a

@@ -107,3 +107,23 @@ async def test_logs_event_with_returned_and_near_misses(monkeypatch):
     # raw cosine + final score are captured (this is the signal we were missing)
     assert candidates[0]["vec_sim"] == 0.60
     assert candidates[0]["final_score"] == 0.58
+    # memory_id is stringified — the payload now crosses an HTTP/JSON boundary,
+    # so every candidate id must be a str (UUIDs aren't JSON-serializable).
+    assert all(isinstance(c["memory_id"], str) for c in candidates)
+
+
+@pytest.mark.asyncio
+async def test_persist_routes_to_storage_client():
+    """``_persist`` posts the event + candidates through the storage client
+    (no direct DB session) and swallows failures."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    event = {"tenant_id": "t1", "source": "mcp_recall"}
+    candidates = [{"rank": 1, "memory_id": str(uuid.uuid4()), "returned": True}]
+
+    sc = MagicMock()
+    sc.log_recall = AsyncMock(return_value="evt-1")
+    with patch.object(mod, "get_storage_client", return_value=sc):
+        await mod._persist(event, candidates)
+
+    sc.log_recall.assert_awaited_once_with(event, candidates)
