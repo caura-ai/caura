@@ -1086,21 +1086,32 @@ describe("shared SKILL.md (plugin/skills/memclaw/SKILL.md)", () => {
 
   test("required body sections are present", () => {
     const skill = readSharedSkill();
-    assert.ok(skill.includes("## Your identity"), "missing identity section");
+    assert.ok(skill.includes("## 0 · Identity"), "missing identity section");
     assert.ok(skill.includes("`agent_id`"), "missing agent_id");
     assert.ok(skill.includes("`fleet_id`"), "missing fleet_id");
-    assert.ok(skill.includes("## The three rules"), "missing three rules");
-    assert.ok(skill.includes("## Trust levels"), "missing trust section");
-    assert.ok(skill.includes("## Sharing"), "missing sharing section");
-    assert.ok(skill.includes("## Session loop"), "missing session loop");
+    assert.ok(skill.includes("## 2 · The loop"), "missing the loop");
+    assert.ok(skill.includes("## 6 · Trust and sharing"), "missing trust/sharing section");
+    assert.ok(
+      skill.includes("## 12 · Reuse and publish workflows"),
+      "missing skills-collection section",
+    );
   });
 
-  test("identity section uses MUST language", () => {
+  test("identity section pins both ids and the never-fabricate rule", () => {
+    // The canonical skill explains the *why* rather than leaning on MUST
+    // walls (deliberate, per skill-authoring guidance). The load-bearing
+    // invariant is that identity still covers both ids and forbids
+    // fabricating/impersonating an agent_id.
     const skill = readSharedSkill();
-    const idx = skill.indexOf("## Your identity");
-    assert.ok(idx >= 0);
-    const section = skill.slice(idx, skill.indexOf("## The three rules"));
-    assert.ok(section.includes("MUST"), "identity section lacks MUST language");
+    const idx = skill.indexOf("## 0 · Identity");
+    assert.ok(idx >= 0, "missing identity section");
+    const section = skill.slice(idx, skill.indexOf("## 1 ·"));
+    assert.ok(section.includes("`agent_id`"), "identity section missing agent_id");
+    assert.ok(section.includes("`fleet_id`"), "identity section missing fleet_id");
+    assert.ok(
+      section.includes("Never fabricate"),
+      "identity section must forbid fabricating/impersonating an agent_id",
+    );
   });
 
   test("Rule 3 describes delete as soft-delete requiring trust 3", () => {
@@ -1114,31 +1125,39 @@ describe("shared SKILL.md (plugin/skills/memclaw/SKILL.md)", () => {
     );
   });
 
-  test("holds the deep-dive tool reference relocated from TOOLS.md", () => {
-    // The tool cards, decision tree, constraints, and error codes were moved
-    // out of the bootstrap-every-turn TOOLS.md into this on-demand file as
-    // part of the per-turn token-footprint reduction. Each section must land
-    // here or the model loses the reference entirely.
+  test("holds the deep-dive tool reference (judgment + behaviors, not signature cards)", () => {
+    // Per-tool signatures are deferred to the live MCP schemas and the
+    // injected TOOLS.md; the on-demand SKILL.md carries the judgment those
+    // can't express. Each section must land here or the model loses it.
     const skill = readSharedSkill();
     assert.ok(skill.includes("## Tool reference"), "missing ## Tool reference section");
-    assert.ok(skill.includes("### Tool cards"), "missing ### Tool cards");
     assert.ok(skill.includes("### Which tool, when"), "missing ### Which tool, when");
-    assert.ok(skill.includes("### Constraints that matter"), "missing ### Constraints that matter");
-    assert.ok(skill.includes("### Error codes"), "missing ### Error codes");
+    assert.ok(
+      skill.includes("### Behaviors the schema won't tell you"),
+      "missing ### Behaviors the schema won't tell you",
+    );
+    assert.ok(skill.includes("### Constraints & errors"), "missing ### Constraints & errors");
   });
 
-  test("all 10 tool cards are present in SKILL.md", () => {
+  test("every plugin-exposed tool is named in SKILL.md (signatures deferred)", () => {
     const skill = readSharedSkill();
+    // The plugin exposes these 11 tools; each must be named so the model
+    // knows the surface. Signatures live in the MCP schemas + injected
+    // TOOLS.md, so we assert names, not signature cards.
     for (const tool of [
       "memclaw_recall", "memclaw_write", "memclaw_manage", "memclaw_list",
       "memclaw_doc", "memclaw_entity_get", "memclaw_tune",
-      "memclaw_insights", "memclaw_evolve", "memclaw_stats",
+      "memclaw_insights", "memclaw_evolve", "memclaw_stats", "memclaw_keystones",
     ]) {
-      assert.ok(
-        skill.includes(`**\`${tool}(`) || skill.includes(`\`${tool}(`),
-        `SKILL.md missing tool card for ${tool}`,
-      );
+      assert.ok(skill.includes(tool), `SKILL.md does not mention ${tool}`);
     }
+    // keystones_set is withheld from plugin agents (plugin_exposed=false in
+    // tools.ts) — it must NOT appear as a callable tool, only as the
+    // "not available to plugin agents" note.
+    assert.ok(
+      !/`memclaw_keystones_set\(/.test(skill),
+      "plugin SKILL.md must not present keystones_set as a callable tool",
+    );
   });
 
   test("error codes appear verbatim in SKILL.md", () => {
@@ -1334,8 +1353,12 @@ describe("buildAgentsMd", () => {
 
     const skill = readFileSync(SHARED_SKILL_PATH, "utf-8");
     assert.ok(
-      skill.includes("NEVER delete memories you merely disagree with"),
-      "SKILL.md must carry the 'merely disagree' framing for op=delete",
+      skill.includes("Supersede, don't delete"),
+      "SKILL.md must carry the supersede-over-delete framing",
+    );
+    assert.ok(
+      skill.includes("Deleting when you should supersede"),
+      "SKILL.md anti-patterns must flag delete-instead-of-supersede",
     );
     assert.ok(
       skill.includes("soft-delete"),
@@ -1359,9 +1382,14 @@ describe("buildAgentsMd", () => {
       skill.includes("Orchestrator + subagent"),
       "SKILL.md missing orchestrator/subagent protocol",
     );
-    assert.ok(skill.includes("Prohibitions"), "SKILL.md missing prohibitions section");
-    assert.ok(skill.includes("NEVER fabricate"));
-    assert.ok(skill.includes("NEVER silently drop"));
+    // Prohibitions folded into the canonical "### Anti-patterns" list; the
+    // load-bearing guards must survive there.
+    assert.ok(skill.includes("### Anti-patterns"), "SKILL.md missing anti-patterns section");
+    assert.ok(skill.includes("inventing UUIDs"), "SKILL.md must forbid inventing ids/UUIDs");
+    assert.ok(
+      skill.includes("Silently dropping a denied call"),
+      "SKILL.md must forbid silently dropping a denied call",
+    );
   });
 
   test("nudges the model to open the memclaw skill before the first MemClaw call", () => {

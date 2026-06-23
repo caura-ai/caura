@@ -8,8 +8,13 @@ The adapter at ``static/skills/memclaw/SKILL.md`` is served by
 It is *intentionally* maintained independently of the OpenClaw plugin's
 SKILL.md. These tests pin the invariants specific to the direct-MCP
 distribution: runtime-neutral frontmatter, no OpenClaw config gate, no
-references to the plugin-runtime-generated TOOLS.md, and the four
-content additions this file carries.
+references to the plugin-runtime-generated TOOLS.md, the canonical section
+structure, and the content value-adds this file carries.
+
+Structure note: the adapter defers per-tool *signatures* to the live MCP tool
+schemas (always in context when the tools are) and instead documents the
+behaviors a parameter list can't express — so these tests assert tool *names*
+and the "Behaviors the schema won't tell you" section, not signature cards.
 """
 
 from __future__ import annotations
@@ -18,6 +23,23 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ADAPTER_PATH = REPO_ROOT / "static" / "skills" / "memclaw" / "SKILL.md"
+
+# Every tool the canonical adapter documents (direct-MCP exposes all 12,
+# including keystones_set — which the OpenClaw plugin variant withholds).
+ALL_TOOLS = (
+    "memclaw_recall",
+    "memclaw_write",
+    "memclaw_manage",
+    "memclaw_list",
+    "memclaw_doc",
+    "memclaw_entity_get",
+    "memclaw_tune",
+    "memclaw_insights",
+    "memclaw_evolve",
+    "memclaw_stats",
+    "memclaw_keystones",
+    "memclaw_keystones_set",
+)
 
 
 def _read_adapter() -> str:
@@ -68,38 +90,40 @@ def test_has_no_tools_md_references() -> None:
 def test_contains_required_body_sections() -> None:
     skill = _read_adapter()
     required = [
-        "## Your identity",
-        "## The three rules",
-        "## Trust levels",
-        "## Sharing",
-        "## Containers",
-        "## Session loop",
+        "## 0 · Identity",
+        "## 1 · Session start",
+        "## 2 · The loop",
+        "## 3 · How and when to write a memory",
+        "## 5 · Two stores, one rule",
+        "## 6 · Trust and sharing",
         "## Tool reference",
-        "### Tool cards",
         "### Which tool, when",
-        "### Constraints that matter",
-        "### Error codes",
+        "### Behaviors the schema won't tell you",
+        "### Anti-patterns",
+        "### Constraints & errors",
     ]
     for heading in required:
         assert heading in skill, f"adapter missing section {heading!r}"
 
 
-def test_contains_all_nine_tool_cards() -> None:
+def test_documents_every_tool_by_name() -> None:
+    """The adapter defers parameter signatures to the MCP schemas, but every
+    tool must still be named (in 'Which tool, when' / 'Behaviors') so the
+    model knows the surface exists. Presence by name, not by signature card."""
     skill = _read_adapter()
-    for tool in (
-        "memclaw_recall",
-        "memclaw_write",
-        "memclaw_manage",
-        "memclaw_list",
-        "memclaw_doc",
-        "memclaw_entity_get",
-        "memclaw_tune",
-        "memclaw_insights",
-        "memclaw_evolve",
-    ):
-        # Accept both **`tool(` (bolded) and `tool(` (plain) to tolerate
-        # formatting drift; the test's purpose is presence, not style.
-        assert f"`{tool}(" in skill, f"adapter missing tool card for {tool}"
+    for tool in ALL_TOOLS:
+        assert tool in skill, f"adapter does not mention {tool}"
+
+
+def test_does_not_reintroduce_signature_cards() -> None:
+    """Regression guard for the schema-deferral decision: the adapter should
+    NOT carry per-tool signature cards (``memclaw_x(arg, ...)``) that merely
+    duplicate the always-in-context MCP tool schemas."""
+    skill = _read_adapter()
+    assert "`memclaw_recall(" not in skill and "`memclaw_write(" not in skill, (
+        "adapter reintroduced signature cards; signatures live in the MCP "
+        "tool schemas — keep the lean 'Behaviors the schema won't tell you' form"
+    )
 
 
 def test_contains_error_codes_verbatim() -> None:
@@ -121,27 +145,27 @@ def test_footer_references_direct_mcp_install_targets() -> None:
     )
 
 
-def test_contains_direct_mcp_specific_content_additions() -> None:
-    """Pins the value-adds this adapter carries beyond the canonical plugin
-    SKILL.md. These landed from lived usage — hybrid-pattern,
-    collection-listing convention, where-filter scalar gotcha, anti-patterns
-    subsection. If you remove one, justify it; if you add a new one, add it
+def test_contains_canonical_content_invariants() -> None:
+    """Pins the load-bearing facts and value-adds of the canonical adapter.
+    If you remove one, justify it; if you add a new must-keep fact, add it
     here so it can't silently fall back out.
     """
     skill = _read_adapter()
     must_contain = [
-        # Foundation (present in canonical too; guards against regression)
-        "Rule 1 — Recall before you start",
-        "Rule 2 — Write when something matters",
-        "Rule 3 — Supersede, don't delete",
-        "Auto-registered at trust 1 on your first write",
-        # Direct-MCP-specific additions
-        "Cross-store discovery",  # hybrid-pattern for doc discoverability
-        'op="list_collections"',  # real op for enumerating collections
-        'op="search"',  # semantic search over docs
-        'data["summary"]',  # opt-in semantic indexing on write
-        "scalar exact-match only",  # memclaw_doc where-filter gotcha
-        "### Anti-patterns",  # explicit don't-do-this subsection
+        # The loop + write discipline
+        "most-binding-first",          # orient ordering
+        "## 3 · How and when to write a memory",
+        # Grounded accuracy facts (must not regress)
+        "home fleet",                  # fleet_id resolves home fleet on omit (post-#465)
+        "private by default",          # evolve failure -> private rule by default
+        # Two-stores hybrid pattern
+        "Cross-store discovery",       # pointer-memory workaround
+        "op=list_collections",         # enumerate collections
+        "op=search",                   # semantic search over docs
+        'data["summary"]',             # opt-in semantic indexing on write
+        "scalar exact-match only",     # memclaw_doc where-filter gotcha
+        # Trust self-awareness
+        "trust 1",                     # auto-register tier
     ]
     for phrase in must_contain:
         assert phrase in skill, f"adapter missing {phrase!r}"

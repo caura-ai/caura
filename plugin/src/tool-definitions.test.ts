@@ -188,10 +188,12 @@ describe("createToolFromSpec factory", () => {
 
 describe("drift checks across tool surface artefacts", () => {
   // SKILL.md ships with the plugin and is read on demand by every agent;
-  // it MUST list every plugin-exposed tool as a tool card. Without this
-  // gate, adding a tool (e.g. memclaw_stats in #64) silently leaves
-  // SKILL.md a version behind and agents see the wrong tool count.
-  test("SKILL.md has a tool card for every tool in MEMCLAW_TOOLS", () => {
+  // it MUST name every plugin-exposed tool. Per-tool *signatures* are
+  // deferred to the live MCP schemas + injected TOOLS.md, so this gate
+  // asserts presence by name (not a signature card). Without it, adding a
+  // tool (e.g. memclaw_stats in #64) silently leaves SKILL.md a version
+  // behind and agents see the wrong tool surface.
+  test("SKILL.md names every tool in MEMCLAW_TOOLS", () => {
     const skillPath = join(
       import.meta.dirname,
       "..",
@@ -201,10 +203,9 @@ describe("drift checks across tool surface artefacts", () => {
     );
     const skill = readFileSync(skillPath, "utf-8");
     for (const name of MEMCLAW_TOOLS) {
-      const marker = "**`" + name + "(";
       assert.ok(
-        skill.includes(marker),
-        `SKILL.md is missing tool card for ${name} (expected line starting with ${marker})`,
+        skill.includes(name),
+        `SKILL.md does not mention ${name}`,
       );
     }
   });

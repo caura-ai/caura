@@ -1,353 +1,379 @@
 ---
 name: memclaw
-description: Persistent, cross-session, multi-agent memory. Semantic recall of decisions and findings; write outcomes; supersede facts when they change.
+description: The agent's persistent long-term memory — the only knowledge that survives across sessions, shared across the fleet under access control. Consult it at the start of a task to recall prior decisions, findings, and rules before acting, and write outcomes, decisions, and lessons as work completes. Use whenever a memclaw_* tool is present, whenever the user refers to past work ("what did we decide", "last time", "earlier"), or whenever any durable fact needs to be stored, recalled, superseded, or shared with the fleet. Do not use it for throwaway within-session scratch state.
 user-invocable: false
 metadata: {"openclaw": {"requires": {"config": ["plugins.entries.memclaw.enabled"]}}}
 ---
 
 # MemClaw Skill
 
-Long-term memory that persists across sessions and is shared under access
-controls. The primary place where decisions, findings, outcomes, and
-learned rules live.
+MemClaw is your long-term memory. Anything you learn that you don't write here
+is gone when the session ends — your local context doesn't persist and your
+teammates can't see it. So treat MemClaw as the default home for every
+decision, finding, outcome, rule, and reusable workflow, and consult it before
+you act. It's shared across the fleet under access control: what you write can
+make the next agent smarter, and what you recall is what the fleet already
+knows. Using it is the job, not an optional extra.
 
-## Your identity: `agent_id` and `fleet_id`
+**The plugin runs a baseline loop for you — the tools are still yours.** On this
+runtime the MemClaw plugin handles the automatic layer: it injects the mandatory
+keystones at session start (§1), recalls relevant memory before your substantive
+turns (§11), and writes a short **turn summary** afterward as a backstop
+(`MEMCLAW_AUTO_WRITE_TURNS`, on by default). Treat that as a floor, not a
+substitute. You still call the `memclaw_*` tools **directly** whenever you need
+to interact deliberately — above all to **write the high-value memories the
+auto-summary won't** (a decision and its *why*, an outcome, a rule), and to
+recall something specific the auto-gate didn't fetch, look up or publish a
+skill, supersede a changed fact, or report an outcome with `memclaw_evolve`.
+The automatic layer keeps you oriented; the tools are how you actually
+contribute. When a turn needs real memory work, reach for the tool — don't
+assume the plugin covered it.
 
-You MUST identify correctly on every MemClaw call.
+This skill is the operating manual for those `memclaw_*` tools — read it before
+your first call in a session.
 
-- `agent_id` — who you are. Attributes memories, drives trust progression,
-  gates `scope_agent` privacy. Resolved by your runtime. Never fabricate,
+## 0 · Identity — on every call
+
+- **`agent_id`** — who you are. Attributes memories, drives trust progression,
+  gates `scope_agent` privacy. Resolve it from your runtime. Never fabricate,
   hardcode a placeholder, or impersonate another agent.
-- `fleet_id` — your team / organization scope. Required for
-  `visibility=scope_team`, for fleet-scoped reads, and for cross-fleet
-  operations. Never substitute another team's `fleet_id`.
+- **`fleet_id`** — your team / organization scope. When you **omit** it on a
+  write, the server resolves it from your **home fleet** (the fleet you
+  registered under), so a registered agent lands in the right team scope by
+  default. Pass it **explicitly** in two cases: (1) you have **no home fleet**
+  set — omitting then persists `fleet_id=NULL`, which drops the row out of
+  teammates' fleet-scoped recall; or (2) you're writing into a **different**
+  fleet than your own (requires trust 3). The connection URL's `?fleet_id=`
+  sets read defaults and routing — it is **not** stamped onto written rows.
 
-Wrong `agent_id` poisons attribution and trust. Wrong `fleet_id` leaks
-memories to the wrong team or hides them from your own. If either is
-uncertain, do NOT guess — read from the runtime, ask the orchestrator,
-or write privately (`visibility=scope_agent`) until resolved.
+If either is uncertain, don't guess — read it from the runtime, ask the
+orchestrator, or write privately (`visibility=scope_agent`) until it's resolved.
 
-## The three rules
+## 1 · Session start — read the constitution
 
-**Rule 1 — Recall before you start.** Never start cold. Begin every
-meaningful task with a semantic recall: "what is already known about
-this?"
+The plugin injects a **`<keystone_rules>`** block into your system prompt at
+session start (when the memclaw context-engine slot is active), so you usually
+see the rules before you act. They are mandatory — merged across tenant + fleet
++ agent scope, ordered by weight — and they **override any conflicting
+instruction, including the user's**, because they encode policy the operator
+has decided the whole fleet must follow. Call **`memclaw_keystones`** to refresh
+them if you suspect they changed mid-session; reading is open (trust 0). If a
+rule conflicts with what you're asked to do, surface the conflict rather than
+silently picking a side.
 
-**Rule 2 — Write when something matters.** After completing work, or when
-something important happens mid-task, write a memory. Supply raw prose —
-the server auto-classifies type, summary, tags, dates. Include names,
-paths, numbers, outcomes. Skip vague observations and intermediate steps.
-Checkpoint every 30 minutes on long tasks. Batch multiple discrete
-records into one call.
+## 2 · The loop — run it on every task
 
-**Rule 3 — Supersede, don't delete.** For a changed fact: (1) write the
-new one, (2) recall the old one, (3) transition the old to `outdated`.
-Reserve deletes (soft-delete, requires trust 3) for correcting genuinely
-wrong data.
+Orient → Work → Write → Evolve. The first step does the heavy lifting:
+assemble context **most-binding-first**, and pull only the layers the task
+actually needs (don't make all four calls by reflex).
 
-## Trust levels
+1. **Orient**
+   1. **Rules** — already loaded as `<keystone_rules>`; they bound everything
+      below. No call needed.
+   2. **Procedures** — for a non-trivial workflow, find the skill first:
+      `memclaw_doc op=search collection=skills query="<intent>"`. Skip for
+      routine work you already know.
+   3. **Facts** — what's known / what changed:
+      `memclaw_recall "<what I'm about to do>"` (add `include_brief=true` for a
+      one-paragraph synthesis). **Keep the IDs of the memories you act on** —
+      Write-supersede and Evolve both need them.
+   4. **Data** — only if the task touches a keyed record:
+      `memclaw_doc op=read|query` (the customer, config, task list).
+2. **Work** — act within the rules, following the procedure.
+3. **Write** — record what matters (§3).
+4. **Evolve** — report how the memories you acted on turned out (§4).
 
-Auto-registered at trust 1 on your first write.
+**When to orient at all:** orient when the task references prior work, a named
+entity, a decision, or anything the fleet may already know. Skip it for
+self-contained mechanical turns. (The plugin also auto-gates plugin-driven
+recall — see §11 — but you can always call `memclaw_recall` directly when a
+short turn needs context the gate can't infer.)
+
+## 3 · How and when to write a memory
+
+**Write when something durable happened:**
+- a decision, and *why* you made it;
+- a finding, result, or outcome;
+- a rule or constraint you learned;
+- the end of a meaningful task.
+
+**Don't write the noise.** Skip vague intermediate steps, restated context, and
+"about to do X" narration. Ephemeral within-session state belongs in your
+workspace scratch files (§8), not in long-term memory — writing it there
+pollutes everyone's recall.
+
+**How to write:** supply raw prose — you don't classify or tag anything. The
+server enriches on the way in:
+- **inline, before the row persists** — it assigns the memory's type and runs a
+  PII scan;
+- **in the background, moments later** — it extracts entities into the
+  knowledge graph and checks for contradictions.
+
+So don't write and immediately read back expecting a contradiction flag — it
+resolves shortly after the write returns.
+
+Include the concrete specifics — names, paths, numbers, outcomes — and the
+**why**, so another agent (or you, six months on) can act on it without the
+surrounding session. Default `visibility=scope_team` so your fleet benefits.
+Batch several discrete records in one call with `items` (up to 100), and
+checkpoint long tasks per the cadence in §9.
+
+**Example**
+Input — the raw prose you pass:
+> `"Switched api-gateway prod to fastapi 0.136.3 — 0.137 broke include_router via a starlette upper-bound. Pin held; smoke tests green."`
+
+Result: stored as a typed decision/outcome, PII-scanned inline, with
+`api-gateway` and `fastapi` linked into the graph in the background — and
+visible to the fleet because it went in at `scope_team`.
+
+Never paste secrets — API keys, tokens, credentials — into memory `content`.
+The PII scan is a safety net, not permission; keep them out entirely.
+
+## 4 · Report outcomes so the memory compounds
+
+When you act on memories you recalled, tell the memory how it went:
+`memclaw_evolve(outcome, outcome_type, related_ids)`, where `related_ids` are
+the IDs you kept during Orient. Success reinforces those memories' weight. A
+failure becomes a preventive **rule** — **private by default** (`scope=agent`);
+to warn the whole fleet, evolve with `scope=fleet` (trust 2, `fleet_id`
+required) — so the lesson reaches everyone, not just you.
+
+## 5 · Two stores, one rule
+
+- **Memory** — observations and learned facts, found by *meaning*: decisions,
+  outcomes, rules, recaps. Read with `memclaw_recall`, write with
+  `memclaw_write`.
+- **Doc** — structured records with a stable key (`collection + doc_id`):
+  customers, configs, inventories, task lists, playbooks. All through
+  `memclaw_doc`.
+- **Entity** — a named graph object (person, project, service). Fetch by a UUID
+  surfaced in a prior recall (`memclaw_entity_get`).
+
+**Rule of thumb:** need semantic search → it's a memory. Need keyed lookup →
+it's a doc. Already hold an ID → it's an entity.
+
+**Cross-store discovery.** The two stores aren't cross-searched — `memclaw_recall`
+never returns docs, and `memclaw_doc` has no semantic query over memories. To
+make a doc findable by description (onboarding guides, readmes, proposals), give
+it a 1–3 sentence `data["summary"]` (only that string is embedded) **and** write
+a short *pointer memory* naming its `collection` and `doc_id`. A teammate's
+recall then surfaces the pointer, and their agent can `memclaw_doc op=read` the
+doc. When you don't know what exists, call `memclaw_doc op=list_collections`
+first.
+
+## 6 · Trust and sharing
+
+You auto-register at **trust 1** on your first write.
 
 | Level | Name        | Read                      | Write                  |
 |:-----:|-------------|---------------------------|------------------------|
 | 0     | restricted  | —                         | —                      |
 | 1     | standard    | own fleet                 | own fleet              |
 | 2     | cross-fleet | all fleets in your tenant | own fleet              |
-| 3     | admin       | all                       | all, including deletes |
+| 3     | admin       | all                       | all, incl. deletes     |
 
-Scope-based escalation:
-- browsing or reflecting with `scope="fleet"` / `"all"` → trust 2
+Operations that escalate the required level:
+- browsing / reflecting with `scope="fleet"` or `"all"` → trust 2
 - reporting outcomes (`memclaw_evolve`) at `scope="fleet"` / `"all"` → trust 2 (default `scope="agent"` needs only trust 1)
 - `memclaw_manage op=delete` → trust 3
 
-If denied, surface the error; do not silently retry with a narrower scope.
+**Knowing your own level.** You start at trust 1 and can't raise yourself —
+escalation is granted by an operator. There's no self-query, so don't
+pre-emptively avoid an operation you're unsure about: attempt it. A permission
+error names both your current level and the one required (e.g. *"Agent X
+(trust_level=1) … Requires trust_level >= 2"*) — surface that error rather than
+silently retrying at a narrower scope.
 
-## Sharing: visibility and scope
+**Visibility (on write)** decides who can see a memory: `scope_agent` (private)
+· `scope_team` *(default — your fleet)* · `scope_org` (all fleets in tenant).
+**Scope (on read / `_list` / `_insights`):** `agent` *(default)* · `fleet`
+(trust 2) · `all` (trust 2). Prefer `scope_team` on write and `scope=agent` on
+read unless you need cross-agent context. *Naming caveat:* writes take
+`visibility=scope_*`; reads/list/keystone filters take `scope=*` — two axes,
+similar spelling.
 
-**Visibility (on write):** `scope_agent` (private) · `scope_team`
-*(default — your fleet)* · `scope_org` (all fleets in tenant).
+## 7 · Keeping knowledge clean
 
-**Scope (on read — `_list` / `_insights`):** `agent` *(default)* ·
-`fleet` (trust 2) · `all` (trust 2).
+A few habits keep recall trustworthy and sharp:
 
-Prefer `scope_team` when writing; prefer `scope=agent` when reading
-unless you need cross-agent context.
+- **Make memories good** — dated, concrete, standalone, atomic, and updated (not
+  duplicated). Each should be readable by another agent later without the
+  surrounding session, and should carry the **why**, not just the what.
+- **Supersede, don't delete.** When a fact changes: (1) write the new one, (2)
+  recall the old one, (3) `memclaw_manage op=transition status=outdated`. This
+  keeps the lineage. Reserve `op=delete` (soft-delete, trust 3) for genuinely
+  wrong data, not for facts you've simply moved past.
+- **Resolve conflicts; don't pick one silently.** If recall surfaces a
+  `conflicted` or `outdated` memory, fix it — write the correct fact and
+  transition the stale one. Two live opposing beliefs degrade every future
+  recall for everyone.
 
-## Containers
-
-- **Memory** — unstructured, findable semantically. Decisions, observations, rules, outcomes, recaps.
-- **Doc** — structured record with a natural key (`collection + doc_id`). Customers, configs, task lists, inventories.
-- **Entity** — named graph object (person, project, service). Fetch by UUID from a prior recall.
-
-If you need semantic search, it's a memory. If you need keyed lookup,
-it's a doc. If you already hold an ID, it's an entity.
-
-## Where things go: MemClaw vs file scratchpads
+## 8 · MemClaw vs your workspace files
 
 MemClaw is the only place for cross-session, cross-agent knowledge. A
-file-based scratchpad in your workspace (e.g. `MEMORY.md`) is
-session-local — it lives in your bootstrap context every turn and pays
-input tokens for every byte.
+file-based scratchpad in your workspace (e.g. `MEMORY.md`) is **session-local**
+— it lives in your bootstrap context every turn and pays input tokens for every
+byte, and your teammates never see it.
 
-Keep `MEMORY.md` lean: only **active projects, current routing
-decisions, recent decisions (≤ 7 days), open threads**. Target a few
-KB; treat anything older or larger as smell. If the runtime promotes
-data into `MEMORY.md`, prune it on session start.
+- Keep `MEMORY.md` lean: only **active projects, current routing decisions,
+  recent decisions (≤ 7 days), open threads.** Target a few KB; prune anything
+  older or larger on session start.
+- Everything else goes to MemClaw via `memclaw_write` (history, finished work,
+  lessons), `memclaw_doc` collections (reference data with a natural key), or
+  entities (people / projects / services).
+- Never copy MemClaw recall results into `MEMORY.md` — they're already
+  retrievable. Never substitute a local file for a MemClaw write.
 
-Anything else goes to MemClaw via `memclaw_write`:
-- Historical decisions, finished projects, lessons → memories.
-- Reference data with a natural key (IP tables, contact lists, configs)
-  → `memclaw_doc` collections, fetched on demand.
-- People, projects, services as named graph objects → entities.
+## 9 · Capture cadence (L1 / L2 / L3)
 
-Never copy MemClaw recall results into `MEMORY.md` — they're already
-retrievable. Never let `MEMORY.md` accumulate by append-only; pruning
-is part of the L2 / L3 capture cadence below.
-
-## Quality
-
-Every memory MUST include a date. Prefer concrete over vague, atomic
-over sprawling, **update over near-duplicate**. Each memory should be
-**self-contained** — readable by another agent six months from now
-without the surrounding session. Include the **why** (motivation,
-constraint, trigger) alongside the *what* — facts without context
-become unactionable. Before writing a key fact, recall for
-contradictions and transition the older memory to `outdated` in the
-same turn. One topic per memory; batch multiple discrete records into
-one `memclaw_write` call.
-
-## Capture cadence (L1 / L2 / L3)
-
-- **L1 — per turn.** After each meaningful outcome, write with date,
-  what, who, outcome, next.
-- **L2 — session boundary.** At > 60 % context or session end, write
-  a full summary.
+- **L1 — per turn.** After each meaningful outcome, write with date, what, who,
+  outcome, next.
+- **L2 — session boundary.** At > 60 % context or session end, write a full
+  summary.
 - **L3 — consolidation.** On periodic runtime sweeps, find gaps, merge
   duplicates, transition contradicted facts to `outdated`.
 
-## Orchestrator + subagent protocol
+## 10 · Orchestrator + subagent protocol
 
 If your runtime dispatches subagents:
-- The spawning agent MUST write findings after every subagent completion.
-- The subagent MUST write its own findings before handing back.
-- Both writes MUST carry their own `agent_id`.
+- The spawning agent writes findings after each subagent completes.
+- The subagent writes its own findings before handing back.
+- Both writes carry their **own** `agent_id`.
 
 Single-agent runtimes ignore this section.
 
-## Prohibitions
+## 11 · Recall policy (auto-gating)
 
-- NEVER fabricate or impersonate `agent_id` / `fleet_id`.
-- NEVER delete memories you merely disagree with — transition them to
-  `outdated` or `archived`. `op=delete` is a soft-delete, requires
-  trust 3, and is reserved for genuinely wrong data.
-- NEVER write with org-wide visibility (`scope_org`) unless the memory
-  is genuinely org-relevant.
-- NEVER silently drop a denied call — surface the error so the
-  orchestrator can decide whether to escalate.
-- NEVER substitute local files or scratchpads for MemClaw writes.
+Before each model call the plugin's context engine decides whether to issue a
+plugin-driven recall, so trivial turns ("hi", "ok", `/help`, single-emoji acks)
+don't hit the backend and pay tokens for an unhelpful recall block.
 
-## Recall policy (auto-gating)
+- **Default** (`MEMCLAW_RECALL_POLICY=auto`): recall on substantive turns; skip
+  very short prompts, trivial pings, and short slash-commands.
+- **Recall keywords always force recall** (e.g. `remember`, `recall`, `last
+  time`, `we discussed`, `previously`, `history`); override the set with
+  `MEMCLAW_RECALL_TRIGGER_KEYWORDS`.
+- Other policies: `always`, `never` (education block only), `keywords`.
+- The gate only suppresses *plugin-driven* recall — **you can always call
+  `memclaw_recall` directly** when a short turn needs context the gate can't
+  infer.
 
-The plugin's context engine runs `assemble()` before every model call
-and, by default, decides whether to issue a recall against MemClaw
-based on the turn's content. This stops every trivial ping ("hi", "ok",
-"thanks", `/help`, single-emoji acks) from hitting the backend and
-paying input tokens for unhelpful recall blocks.
+Rolling skip counters (`recall_metrics`) ride the heartbeat for per-fleet
+visibility.
 
-**Default policy** (`MEMCLAW_RECALL_POLICY=auto`): recall on
-substantive turns, skip on:
-- prompts under 14 chars (no useful query) unless an explicit recall
-  keyword is present;
-- trivial pings: greetings, acks, single-emoji turns;
-- short slash commands (`/help`, `/clear`, `/foo bar`);
-- empty `prompt` with no buffered user message.
+The plugin also auto-writes a short **turn summary** after substantive turns
+(`MEMCLAW_AUTO_WRITE_TURNS`, on by default). That's a backstop, not a
+replacement for the deliberate, high-value writes in §3 — and it never evolves,
+supersedes, or files docs for you. Do that work yourself.
 
-**Recall keywords always force recall** even on otherwise-skip prompts.
-Defaults: `memclaw`, `LTM`, `long term`, `long-term`, `remember`,
-`recall`, `what did`, `earlier`, `previously`, `last time`, `before`,
-`we discussed`, `you said`, `i told`, `history`, `memory`, `lookup`.
-Override via `MEMCLAW_RECALL_TRIGGER_KEYWORDS=...` (comma-separated).
+## 12 · Reuse and publish workflows — the `skills` collection
 
-**Other policies**: `always` (recall every turn — pre-CAURA-444
-behaviour), `never` (education block only; agents can still call
-`memclaw_recall` explicitly), `keywords` (recall only when an explicit
-trigger fires).
+Proven workflows live as `SKILL.md` documents in the **`skills`** collection.
+You don't learn a new tool per playbook — it's the same `memclaw_doc`, so your
+vocabulary never grows with the library.
 
-**Important**: the auto-gate only suppresses the *plugin-driven*
-recall. Agents can always call `memclaw_recall` directly when they
-judge that a short turn needs LTM — the gate never blocks the tool
-call itself. Use this knob when a short message would benefit from
-context the gate can't infer.
+```text
+# Discover before improvising on a non-trivial workflow:
+memclaw_doc op=search collection=skills query="<intent>"
+memclaw_doc op=read   collection=skills doc_id=<slug>   # full body
 
-**Operational visibility**: rolling skip counters
-(`recall_metrics: {calls_total, skipped_total, skipped_by_reason}`)
-are sent in every heartbeat and persisted on the node row. SQL on
-`nodes.metadata->'recall_metrics'` answers "how often is the gate
-firing per fleet, by reason."
-
-## Sharing skills
-
-Skills are SKILL.md artifacts that agents share across the fleet —
-debugging recipes, ops runbooks, refactor playbooks. They live as
-documents in the `skills` collection: discovery and sharing both use
-`memclaw_doc`.
-
-```
-# Discover
-memclaw_doc op=search collection=skills query=<natural language>
-memclaw_doc op=query  collection=skills              # browse by recency
-memclaw_doc op=read   collection=skills doc_id=<slug>  # full body
-
-# Share — slug is `[a-z0-9][a-z0-9._-]{0,99}` (filesystem-safe)
+# Publish something reusable so the fleet inherits it:
 memclaw_doc op=write collection=skills doc_id=<slug> \
-  data={ "name": "<slug>", "summary": "<one-liner>", "content": "<full SKILL.md>" }
+  data={ "name": "<slug>",
+         "summary": "<1-line, intent-focused — this is what gets embedded>",
+         "content": "<full SKILL.md>" }
+# Re-uploading the same doc_id overwrites it (upsert; no version history).
 
-# Remove
+# Remove a wrong/superseded one:
 memclaw_doc op=delete collection=skills doc_id=<slug>
 ```
 
-The `data["summary"]` string is what gets embedded — that's what makes
-the skill discoverable by meaning ("how do I research scientific
-papers?") even when names don't match. For back-compat, the server
-also accepts `data["description"]` on `collection=skills` writes if no
-summary is provided.
+Slugs are filesystem-safe: `[a-z0-9][a-z0-9._-]{0,99}`. The `summary` is the
+only embedded field — write a sharp, intent-focused one ("Use when migrating
+SQLite→Postgres…") so the skill is found by meaning even when names don't match.
 
-Visibility follows the document — share at `fleet_id` scope so the
-catalog row is visible to every agent on that fleet. Re-uploading the
-same `doc_id` overwrites; this is how you publish a new version.
+## A full loop, end to end
 
-Built something reusable? Upsert it. Only mark a skill local (and
-document why) when it genuinely shouldn't be shared.
+One task — orient, work, write, evolve — with the IDs threaded through:
 
-## Session loop
+```text
+# 1. Orient — recall, and keep the IDs that come back
+memclaw_recall "deploy api-gateway to staging" include_brief=true
+#   → mem_8f2a (rule: "staging deploys need a smoke test"), mem_4d1c (last deploy)
 
-1. Recall — "what is known about this?" / "what happened since last session?"
-2. Work — act on the recalled context.
-3. Write — at checkpoints and session end (see L1/L2/L3 above).
-4. Evolve — if you acted on specific memories, report the outcome (default `scope="agent"`, trust 1; fleet/all needs trust 2).
+# 2. Work — run the deploy, following the rule in mem_8f2a
+
+# 3. Write — record the outcome (team-visible; home fleet resolved on omit)
+memclaw_write content="api-gateway v2.3 deployed to staging; smoke test green" \
+  visibility=scope_team
+
+# 4. Evolve — report against the memories you acted on
+memclaw_evolve outcome="deploy succeeded, smoke test passed" \
+  outcome_type=success related_ids=[mem_8f2a, mem_4d1c]
+#   if it had failed in a way the whole fleet should avoid:
+#   add scope=fleet (trust 2) so the preventive rule reaches teammates
+```
 
 ---
 
 ## Tool reference
 
-The at-a-glance tool list and enum vocabulary live in `TOOLS.md` in your
-workspace (bootstrap-injected every turn). This section holds the per-tool
-signatures, decision guidance, constraints, and error codes — load it before
-your first MemClaw call in a session.
-
-### Tool cards
-
-**`memclaw_recall(query, top_k=5, include_brief=false, memory_type=?, status=?, filter_agent_id=?, fleet_ids=?)`**
-Hybrid semantic+keyword search. For metadata browse → `memclaw_list`;
-for a known id → `memclaw_manage(op="read")`. `include_brief=true` adds
-an LLM-summarized paragraph. Superseded memories (`status` ∈
-{outdated, conflicted}) are excluded by default — pass `status` explicitly
-(e.g. `status="conflicted"`) to inspect the chain.
-
-**`memclaw_write(content=? | items=?, visibility="scope_team", memory_type=?, weight=?, metadata=?, write_mode="auto", source_uri=?, run_id=?)`**
-Provide exactly one of `content` / `items`. Server auto-classifies.
-`items` batches up to 100. `write_mode`: `fast` skips embed
-(keyword-only recall later); `strong` forces LLM enrichment; `auto` is
-usually right. `insight` / `outcome` / `rule` are server-generated only
-(via `memclaw_insights` / `memclaw_evolve`) — you cannot write them, and
-auto-classify will never assign them; record reflections as `semantic` or
-`fact` (or omit `memory_type`).
-
-**`memclaw_manage(op, memory_id, ...)`** — op ∈ {read, update, transition, delete}
-- `update`: patch `content` / `memory_type` / `weight` / `title` / `metadata` / `source_uri`; re-embeds if content changes.
-- `transition`: set `status` (see Vocabulary in `TOOLS.md`).
-- `delete`: soft-delete; trust 3. Prefer `transition` to `outdated` / `archived`.
-
-**`memclaw_list(scope="agent", memory_type=?, written_by=?, status=?, weight_min/max=?, created_after/before=?, sort="created_at", order="desc", limit=25, cursor=?)`**
-Non-semantic enumeration. Cursor pagination requires
-`sort=created_at order=desc`. `scope="fleet"` / `"all"` → trust 2.
-
-**`memclaw_doc(op, collection=?, doc_id=?, data=?, where=?, order_by=?, limit=20, offset=0, query=?)`** — op ∈ {write, read, query, delete, list_collections, search}
-Structured records by `collection + doc_id`. `write` upserts; include
-`data["summary"]` (1-3 sentences, intent-focused) to make the doc
-semantically searchable — that's the only field that gets embedded.
-
-**`memclaw_entity_get(entity_id)`**
-UUID from a prior call — never fabricate.
-
-**`memclaw_tune(top_k?, min_similarity?, fts_weight?, freshness_floor?, freshness_decay_days?, recall_boost_cap?, recall_decay_window_days?, graph_max_hops?, similarity_blend?)`**
-Persists — affects every future `memclaw_recall`. No fields → read the
-current profile. Change one or two at a time. `fts_weight` 0 = pure
-semantic, 1 = pure keyword.
-
-**`memclaw_insights(focus, scope="agent", fleet_id=?)`**
-Reflection. `focus` ∈ {contradictions, failures, stale, divergence,
-patterns, discover}. Results saved as `insight` memories. Run at
-boundaries, not every turn. `scope="fleet"` / `"all"` → trust 2;
-`focus="divergence"` requires non-agent scope.
-
-**`memclaw_evolve(outcome, outcome_type, related_ids=?, scope="agent", fleet_id=?)`**
-Close the loop. `outcome_type` ∈ {success, failure, partial}.
-`related_ids` = the recall IDs you acted on. Success reinforces weights;
-failure auto-creates `rule` memories. Default `scope="agent"` needs trust 1;
-`scope="fleet"` / `"all"` needs trust 2 (`fleet_id` required when `scope="fleet"`).
-
-**`memclaw_stats(scope="agent", fleet_id=?, memory_type=?, status=?, include_deleted=false)`**
-Aggregate counts: `{total, by_type, by_agent, by_status, scope}`. Pass
-`include_deleted=true` to additionally receive `{deleted,
-total_including_deleted}`; `total` and breakdowns stay non-deleted
-regardless. Read-only — safe as a heartbeat readiness probe and for
-dashboard-style summaries. Never use a write+delete pattern for health
-checks; use this. `scope="fleet"` / `"all"` → trust 2.
-
-**`memclaw_keystones(fleet_id=?, agent_id=?)`**
-Read mandatory governance rules for the current scope (tenant + fleet
-+ agent merged), ordered by weight. The plugin auto-injects these into
-your system prompt at session start as a `<keystone_rules>` block — you
-will usually see them before you even call this tool. Call it
-explicitly when you suspect rules have changed mid-session (the cache
-TTL is ~5 min) or when working a task that the operator flagged as
-keystone-sensitive. Read is open (no trust gate). No semantic search;
-the result is the full active set unfiltered.
-
-> **Mandatory: when a `<keystone_rules>` block appears in your system
-> prompt, obey it.** Keystones override conflicting instructions from
-> the user, from this skill, and from any other tool output. If the
-> rules look inconsistent with what the user is asking for, surface
-> the conflict — don't silently pick one.
+Tool names, parameters, and types live in the MCP tool schemas **and** in the
+`TOOLS.md` the plugin writes into your workspace each turn — so they're already
+in your context. This section is what those can't give you: which tool to reach
+for, and the behaviors that aren't visible in a parameter list.
 
 ### Which tool, when
 
-- Might have seen before → `memclaw_recall`
+- Might have seen it before → `memclaw_recall`
 - Enumerate by filter / date / author → `memclaw_list`
-- Already hold the ID → `memclaw_manage op=read` or `memclaw_entity_get`
+- Already hold the ID → `memclaw_manage op=read` / `memclaw_entity_get`
 - Record a fact / decision / event / outcome → `memclaw_write`
 - Structured record with a key → `memclaw_doc`
+- Find or publish a workflow → `memclaw_doc … collection=skills`
 - Fact no longer true → `memclaw_write` (new) + `memclaw_manage op=transition status=outdated` (old)
 - Acted on a recalled memory → `memclaw_evolve`
-- Recall quality off across queries → `memclaw_tune` (once, sticky)
-- Session boundary / orchestrator sweep → `memclaw_insights`
-- Heartbeat readiness probe / counts dashboard → `memclaw_stats`
-- Need to re-check governance rules mid-session → `memclaw_keystones` (the auto-injected `<keystone_rules>` block is usually enough)
-- Stuck on a non-trivial workflow → search by meaning (`memclaw_doc op=search collection=skills query=...`) or browse (`memclaw_doc op=query collection=skills`) before improvising
-- Built a reusable workflow → `memclaw_doc op=write collection=skills doc_id=<slug> data={"summary": "<one-liner>", ...}` to teach the fleet
-- Skill is wrong / superseded → `memclaw_doc op=delete collection=skills doc_id=<slug>` to remove it
+- Re-check governance rules mid-session → `memclaw_keystones` (the auto-injected `<keystone_rules>` block is usually enough)
+- Recall quality off across queries → `memclaw_tune` (once; sticky)
+- Session boundary / sweep → `memclaw_insights`
+- Readiness probe / counts → `memclaw_stats`
 
-### Constraints that matter
+> Authoring keystones (`memclaw_keystones_set`) is **not available to plugin
+> agents** — you can *read* governance rules (`memclaw_keystones`) but not write
+> them. Keystones are authored over MCP/REST by a trusted operator.
 
-- `memclaw_write`: exactly one of `content` / `items`; never both.
-- `items` capped at 100 → `BATCH_TOO_LARGE`.
-- Supersede via `transition`; reserve `delete` (trust 3) for wrong data.
+### Behaviors the schema won't tell you
+
+- **`memclaw_recall`** excludes superseded memories (`status` ∈ {outdated, conflicted}) by default — pass `status` explicitly to walk the chain.
+- **`memclaw_write`** can't write `insight` / `outcome` / `rule` types — those are server-generated (via `memclaw_insights` / `memclaw_evolve`). `write_mode`: `fast` skips embedding → keyword-only recall afterwards; `strong` forces full LLM enrichment; `auto` is usually right.
+- **`memclaw_manage op=transition`** targets: `active · pending · confirmed · cancelled · outdated · conflicted · archived · deleted` (also in `TOOLS.md`).
+- **`memclaw_doc`** — `where` is scalar exact-match only (no array descent). A doc is invisible to `op=search` unless it has a `data["summary"]` (the only embedded field). Scope the search to a collection when you know it; omit `collection` for the single best match across the tenant.
+- **`memclaw_tune`** persists and reshapes every later recall — change one or two knobs at a time; call with no arguments to read your current profile (`fts_weight` 0 = pure semantic, 1 = pure keyword).
+- **`memclaw_insights`** saves findings as `insight` memories; run it at boundaries, not every turn. `focus="divergence"` needs a non-agent scope.
+- **`memclaw_stats`** is read-only — use it as a readiness/health probe, never a write-then-delete check.
+
+### Anti-patterns
+
+- Saving every intermediate step as a memory — pollutes recall.
+- Storing narrative as a doc, or structured keyed records as memories.
+- Saving a discoverable doc with no pointer memory — teammates won't find it.
+- Guessing `agent_id` / `fleet_id`, or inventing UUIDs.
+- Deleting when you should supersede.
+- Writing org-wide (`scope_org`) anything that isn't genuinely org-relevant.
+- Substituting `MEMORY.md` / local files for a MemClaw write.
+- Silently dropping a denied call — surface the error so the orchestrator can decide.
+
+### Constraints & errors
+
+- `memclaw_write`: exactly one of `content` / `items`; `items` ≤ 100 → `BATCH_TOO_LARGE`.
 - Cursor pagination needs `sort=created_at` + `order=desc`.
 - `_entity_get` / `_manage` use real UUIDs — never invent.
-- `_tune` persists; do not call per-query.
-
-### Error codes
-
-`INVALID_ARGUMENTS` · `BATCH_TOO_LARGE` · `INVALID_BATCH_ITEM`. Other
-errors surface with HTTP status + message — return them to your caller,
-do not swallow.
+- Error codes: `INVALID_ARGUMENTS` · `BATCH_TOO_LARGE` · `INVALID_BATCH_ITEM`. Other errors surface with HTTP status + message — return them to your caller, don't swallow.
 
 ---
 
-*This skill ships with the MemClaw plugin at its install path; it is visible
-to every agent on the node that has the plugin enabled. To customize it for
-a specific agent, place a replacement file at
-`<workspace>/skills/memclaw/SKILL.md` in that agent's workspace — it takes
+*This skill ships with the MemClaw plugin at its install path; it is visible to
+every agent on a node that has the plugin enabled
+(`plugins.entries.memclaw.enabled`). To customize it for a specific agent, place
+a replacement file at `<workspace>/skills/memclaw/SKILL.md` — it takes
 precedence over this shared copy.*
