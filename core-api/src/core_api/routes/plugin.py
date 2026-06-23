@@ -663,6 +663,20 @@ async def install_plugin_script_post(
 
 _VALID_SKILL_AGENTS = {"claude-code", "codex", "both"}
 
+# Skills installable via ``/install-skill?skill=…`` and served at
+# ``/skill/{skill}``. Strictly allowlisted — the value is interpolated into a
+# filesystem path and the generated script, so an arbitrary value must never
+# reach either. ``memclaw`` is the default (the operational manual); the
+# opt-in ``company-brain`` posture skill layers on top of it.
+_SKILL_LABELS = {"memclaw": "MemClaw", "company-brain": "Company Brain"}
+_VALID_SKILLS = frozenset(_SKILL_LABELS)
+_static_skills_dir = Path(__file__).resolve().parent.parent.parent.parent.parent / "static" / "skills"
+# Precomputed name → SKILL.md path map. Keys are the constant allowlist, so
+# the request's ``skill`` value is only ever a dict KEY (membership / lookup),
+# never a path segment — the served path is always one of these fixed
+# constants. That keeps user input out of the path expression entirely.
+_SKILL_FILES = {name: _static_skills_dir / name / "SKILL.md" for name in _SKILL_LABELS}
+
 
 def _derive_api_url_from_request(request: Request) -> str:
     """Pick the URL the caller used to reach this endpoint.
@@ -679,12 +693,16 @@ def _derive_api_url_from_request(request: Request) -> str:
     return f"{scheme}://{host}"
 
 
-def _generate_skill_install_script(*, api_url: str, agent: str, api_key: str = "") -> str:
-    """Bash installer for the direct-MCP memclaw skill (Claude Code / Codex).
+def _generate_skill_install_script(
+    *, api_url: str, agent: str, api_key: str = "", skill: str = "memclaw"
+) -> str:
+    """Bash installer for a direct-MCP skill (Claude Code / Codex).
 
-    Fetches ``static/skills/memclaw/SKILL.md`` (served by the
-    ``/skill/memclaw`` endpoint) and writes it to the user-scope skills
-    dir(s) for the selected agent runtime(s).
+    Fetches ``static/skills/<skill>/SKILL.md`` (served by the
+    ``/skill/<skill>`` endpoint) and writes it to the user-scope skills
+    dir(s) for the selected agent runtime(s). ``skill`` is one of
+    {@link _VALID_SKILLS} (validated by the caller); ``memclaw`` is the
+    default and renders the original installer byte-for-byte.
 
     ``api_key`` — when non-empty, embedded into the script and forwarded
     as ``-H "X-API-Key: ..."`` on the internal curl calls. Required for
@@ -700,11 +718,15 @@ def _generate_skill_install_script(*, api_url: str, agent: str, api_key: str = "
     # Only emit the ``-H X-API-Key: …`` flag when a key was supplied.
     # Otherwise the header becomes an empty string and curl rejects.
     key_header = ' -H "X-API-Key: $MEMCLAW_API_KEY"' if api_key else ""
-    skill_url = '"$MEMCLAW_API_URL/api/v1/skill/memclaw"'
+    # ``skill`` is allowlisted by the caller, so interpolating it into the
+    # path and URL is safe. For skill="memclaw" every line below is identical
+    # to the original installer.
+    label = _SKILL_LABELS[skill]
+    skill_url = f'"$MEMCLAW_API_URL/api/v1/skill/{skill}"'
     blocks = []
     if install_claude:
         blocks.append(
-            'CLAUDE_DIR="$HOME/.claude/skills/memclaw"\n'
+            f'CLAUDE_DIR="$HOME/.claude/skills/{skill}"\n'
             'mkdir -p "$CLAUDE_DIR" || { echo "ERROR: mkdir $CLAUDE_DIR"; exit 1; }\n'
             f'curl -sf{key_header} {skill_url} > "$CLAUDE_DIR/SKILL.md" || '
             '{ echo "ERROR: fetch failed"; exit 1; }\n'
@@ -712,7 +734,7 @@ def _generate_skill_install_script(*, api_url: str, agent: str, api_key: str = "
         )
     if install_codex:
         blocks.append(
-            'CODEX_DIR="$HOME/.agents/skills/memclaw"\n'
+            f'CODEX_DIR="$HOME/.agents/skills/{skill}"\n'
             'mkdir -p "$CODEX_DIR" || { echo "ERROR: mkdir $CODEX_DIR"; exit 1; }\n'
             f'curl -sf{key_header} {skill_url} > "$CODEX_DIR/SKILL.md" || '
             '{ echo "ERROR: fetch failed"; exit 1; }\n'
@@ -728,7 +750,7 @@ def _generate_skill_install_script(*, api_url: str, agent: str, api_key: str = "
     # the warning and should contain no "API-Key" text at all).
     if api_key:
         header_line = (
-            "# Installer for the MemClaw direct-MCP skill. Contains a "
+            f"# Installer for the {label} direct-MCP skill. Contains a "
             "tenant-scoped credential —\n"
             "# treat as sensitive; do not paste the rendered script into "
             "shared channels.\n"
@@ -744,7 +766,7 @@ def _generate_skill_install_script(*, api_url: str, agent: str, api_key: str = "
 MEMCLAW_API_URL={safe_api_url}
 {key_assign}
 
-echo "=== MemClaw Skill Installer (direct-MCP) ==="
+echo "=== {label} Skill Installer (direct-MCP) ==="
 echo ""
 echo "Fetching SKILL.md from $MEMCLAW_API_URL and installing to:"
 
@@ -755,7 +777,7 @@ echo "=== Installation complete ==="
 echo ""
 echo "Next steps:"
 echo "  1. Restart your agent (Claude Code / Codex) — skills are loaded at startup."
-echo "  2. Your agent now has MemClaw usage guidance available on-demand."
+echo "  2. Your agent now has {label} usage guidance available on-demand."
 echo "  3. To update the skill, re-run this installer."
 """
 
@@ -764,6 +786,10 @@ echo "  3. To update the skill, re-run this installer."
 async def install_skill_script(
     request: Request,
     agent: str = Query(default="both", description="claude-code | codex | both"),
+    skill: str = Query(
+        default="memclaw",
+        description="Which skill to install: memclaw (default) | company-brain",
+    ),
     api_url: str | None = Query(
         default=None,
         description=(
@@ -775,11 +801,11 @@ async def install_skill_script(
 ):
     """Bash installer for the direct-MCP memclaw skill.
 
-    Serves a shell script that fetches the SKILL.md adapter and writes it to
-    ``~/.claude/skills/memclaw/`` (Claude Code) and/or ``~/.agents/skills/memclaw/``
-    (Codex). Designed for ``curl -s ... | bash`` use by teammates who have
-    already connected via ``claude mcp add`` or the equivalent Codex MCP
-    registration.
+    Serves a shell script that fetches the SKILL.md adapter for the requested
+    skill (default: memclaw) and writes it to the user-scope skills directory
+    for the selected agent runtime(s). Designed for ``curl -s ... | bash`` use
+    by teammates who have already connected via ``claude mcp add`` or the
+    equivalent Codex MCP registration.
 
     - Forwards the caller's ``X-API-Key`` into the generated script so the
       script's internal curl calls pass auth (required on edge-gated deploys).
@@ -792,9 +818,16 @@ async def install_skill_script(
             f"Invalid 'agent' parameter. Expected one of: {sorted(_VALID_SKILL_AGENTS)}. Got: {agent!r}",
             status_code=400,
         )
+    if skill not in _VALID_SKILLS:
+        return PlainTextResponse(
+            f"Invalid 'skill' parameter. Expected one of: {sorted(_VALID_SKILLS)}. Got: {skill!r}",
+            status_code=400,
+        )
     resolved_api_url = api_url if api_url else _derive_api_url_from_request(request)
     api_key = request.headers.get("x-api-key", "")
-    script = _generate_skill_install_script(api_url=resolved_api_url, agent=agent, api_key=api_key)
+    script = _generate_skill_install_script(
+        api_url=resolved_api_url, agent=agent, api_key=api_key, skill=skill
+    )
     return PlainTextResponse(script, media_type="text/plain")
 
 
@@ -811,6 +844,26 @@ async def skill_memclaw():
     if not _skill_md_path.is_file():
         return PlainTextResponse("skill not found", status_code=404)
     return _skill_md_path.read_text(encoding="utf-8")
+
+
+@router.get("/skill/{skill}", response_class=PlainTextResponse)
+async def skill_by_name(skill: str):
+    """Serve a direct-MCP SKILL.md adapter by name (allowlisted).
+
+    Pairs with ``/install-skill?skill=…``. Public, auth-free — generic usage
+    guidance with no tenant data. ``memclaw`` is also served by the explicit
+    ``/skill/memclaw`` route above (registered first, so it wins for that
+    name and keeps the default path unchanged); this handles the rest of the
+    allowlist (e.g. ``company-brain``).
+
+    ``skill`` is used only as a key into the precomputed ``_SKILL_FILES`` map,
+    so the served path is always a fixed constant — the request value never
+    becomes a path segment (no path-injection surface).
+    """
+    path = _SKILL_FILES.get(skill)
+    if path is None or not path.is_file():
+        return PlainTextResponse("skill not found", status_code=404)
+    return path.read_text(encoding="utf-8")
 
 
 # Non-versioned aliases for the install bootstrap. The generated install

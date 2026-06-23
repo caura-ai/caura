@@ -519,9 +519,10 @@ bash /tmp/install-memclaw-skill.sh
 
 | Query param | Effect |
 |---|---|
-| (none) | Install for both Claude Code and Codex (default) |
-| `?agent=claude-code` | Only Claude Code → `~/.claude/skills/memclaw/SKILL.md` |
-| `?agent=codex` | Only Codex → `~/.agents/skills/memclaw/SKILL.md` |
+| (none) | Install the **memclaw** skill for both Claude Code and Codex (default) |
+| `?agent=claude-code` | Only Claude Code → `~/.claude/skills/<skill>/SKILL.md` |
+| `?agent=codex` | Only Codex → `~/.agents/skills/<skill>/SKILL.md` |
+| `?skill=company-brain` | Install the optional **Company Brain** posture skill instead of memclaw (see below; combine with `?agent=`) |
 
 #### Verify
 
@@ -535,6 +536,22 @@ Re-run the installer any time to pull the latest version.
 
 OpenClaw-plugin users get the skill automatically when the plugin
 installs; skip this step.
+
+#### Optional: the Company Brain skill
+
+`memclaw` teaches the agent the tools. **`company-brain`** is a thin,
+concept-first *posture* skill that layers on top: it frames the agent as one
+mind in a shared **Company Brain** and defers all tool mechanics back to the
+`memclaw` skill. Install it alongside `memclaw` when you want that framing:
+
+```bash
+curl -s "https://memclaw.net/api/v1/install-skill?skill=company-brain" | bash
+```
+
+It installs to `~/.claude/skills/company-brain/SKILL.md` (Claude Code) and/or
+`~/.agents/skills/company-brain/SKILL.md` (Codex), and obeys the same
+`?agent=` filter. The default install (no `?skill=`) is unchanged — it
+installs `memclaw` only.
 
 ---
 
@@ -984,7 +1001,7 @@ All paths are prefixed with `/api/v1` unless noted. Request and response shapes 
 | Settings | `GET/PUT /settings` |
 | System | `GET /health`, `GET /version`, `GET /tool-descriptions`, `GET /audit-log` |
 | MCP | `POST /mcp` (Streamable HTTP transport, mounted at app root) |
-| Bootstrap (plugin) | `GET /plugin-source`, `GET /plugin-source-hash`, `GET/POST /install-plugin`, `GET /install-skill`, `GET /skill/memclaw`. Aliased under `/api` (no `/v1`) for one-line installers. |
+| Bootstrap (plugin) | `GET /plugin-source`, `GET /plugin-source-hash`, `GET/POST /install-plugin`, `GET /install-skill[?skill=memclaw\|company-brain]`, `GET /skill/{memclaw\|company-brain}`. Aliased under `/api` (no `/v1`) for one-line installers. |
 
 #### Plugin environment variables
 

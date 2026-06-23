@@ -14,10 +14,9 @@ Covers two fixes that landed together:
 
 from __future__ import annotations
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
-import pytest
 
 from core_api.routes.plugin import router
 
@@ -123,3 +122,74 @@ def test_codex_only_skips_claude_block():
     assert resp.status_code == 200
     assert "$HOME/.agents/skills/memclaw" in resp.text
     assert "$HOME/.claude/skills/memclaw" not in resp.text
+
+
+# --- skill selector (?skill=) -------------------------------------------------
+
+
+def test_default_skill_is_memclaw_and_unchanged():
+    """No ``?skill=`` → the installer is the original memclaw installer:
+    memclaw paths, the /skill/memclaw fetch URL, the 'MemClaw' title, and no
+    trace of company-brain. Guards the 'default load is unaffected' contract."""
+    client = _client()
+    resp = client.get("/api/v1/install-skill?agent=both")
+    assert resp.status_code == 200
+    script = resp.text
+    assert "=== MemClaw Skill Installer (direct-MCP) ===" in script
+    assert "$HOME/.claude/skills/memclaw" in script
+    assert "$HOME/.agents/skills/memclaw" in script
+    assert "/api/v1/skill/memclaw" in script
+    assert "company-brain" not in script
+
+
+def test_skill_company_brain_installs_to_company_brain_dirs():
+    """``?skill=company-brain`` swaps the skill name through the paths, the
+    fetch URL, and the title — and never touches the memclaw dirs."""
+    client = _client()
+    resp = client.get("/api/v1/install-skill?agent=both&skill=company-brain")
+    assert resp.status_code == 200
+    script = resp.text
+    assert "=== Company Brain Skill Installer (direct-MCP) ===" in script
+    assert "$HOME/.claude/skills/company-brain" in script
+    assert "$HOME/.agents/skills/company-brain" in script
+    assert "/api/v1/skill/company-brain" in script
+    assert "skills/memclaw" not in script
+
+
+def test_invalid_skill_returns_400():
+    client = _client()
+    resp = client.get("/api/v1/install-skill?skill=not-a-real-skill")
+    assert resp.status_code == 400
+    assert "Invalid 'skill' parameter" in resp.text
+
+
+def test_skill_param_is_allowlisted_no_path_traversal():
+    """A traversal-looking value is rejected by the allowlist, never used to
+    build a path."""
+    client = _client()
+    resp = client.get("/api/v1/install-skill?skill=../../etc/passwd")
+    assert resp.status_code == 400
+    assert "Invalid 'skill' parameter" in resp.text
+
+
+# --- /skill/{skill} serving route ---------------------------------------------
+
+
+def test_serve_memclaw_skill_still_works():
+    client = _client()
+    resp = client.get("/api/v1/skill/memclaw")
+    assert resp.status_code == 200
+    assert "name: memclaw" in resp.text
+
+
+def test_serve_company_brain_skill():
+    client = _client()
+    resp = client.get("/api/v1/skill/company-brain")
+    assert resp.status_code == 200
+    assert "name: company-brain" in resp.text
+
+
+def test_serve_unknown_skill_returns_404():
+    client = _client()
+    resp = client.get("/api/v1/skill/not-a-real-skill")
+    assert resp.status_code == 404
