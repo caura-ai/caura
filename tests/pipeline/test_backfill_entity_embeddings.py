@@ -1,20 +1,15 @@
-"""Unit tests for BackfillEntityEmbeddings.
+"""Unit tests for the BackfillEntityEmbeddings pipeline step.
 
-Regression anchor (prod 2026-06-16): the bulk-update execute raised
-``sqlalchemy.exc.InvalidRequestError: No primary key value supplied for
-column(s) entities.id; per-row ORM Bulk UPDATE by Primary Key requires
-that records contain primary key values``. ``session.execute(update(Entity),
-[param dicts])`` routes to SQLAlchemy's ORM Bulk UPDATE by Primary Key, which
-needs each dict keyed by ``id`` — but the dicts key the PK off a custom
-``eid`` bindparam, so it failed. (The earlier prod 2026-06-13 ``InvalidRequestError:
-bulk synchronize ...`` on the same ORM path was only silenced by
-``synchronize_session=False``, which masked this second failure mode.) The fix:
-target the Core table ``update(Entity.__table__)`` — a plain executemany UPDATE
-with no ORM bulk-by-PK behaviour. Every backfill batch failed (6 occurrences in
-~10h; entity name_embeddings silently not backfilled). Same ``entity_linking_full``
-family as the discover_cross_links (#337) and infer_relations (#341) fixes.
+Partially DB-free as of Fix 2 Ph6: the NULL-embedding read and the embedding
+write-back route through core-storage-api (``sc.list_null_embedding_entities``
+/ ``sc.set_entity_embeddings``), but the LLM ``get_embedding`` loop stays in
+core-api. These mock the storage client + embedder and assert the step:
+read → per-row embed → write, mapping ``backfill_count`` into ``ctx.data``.
 
-Mock-based — assert the statement is a Core UPDATE, not an ORM-enabled one.
+The Core ``update(Entity.__table__)`` executemany regression anchor (prod
+2026-06-16: ``update(Entity)`` routed to ORM Bulk UPDATE by Primary Key and
+raised "No primary key value supplied for column(s) entities.id") now lives
+storage-side in ``tests/test_ph6_entity_linking_storage.py`` against the real DB.
 """
 
 from __future__ import annotations
@@ -33,59 +28,81 @@ from core_api.pipeline.steps.entity_linking.backfill_entity_embeddings import (
 TENANT = "test-tenant"
 
 
-def _mock_result(rows):
-    m = MagicMock()
-    m.all.return_value = rows
-    return m
-
-
-def _ctx(db, **extra):
-    ctx = PipelineContext(db=db, data={"tenant_id": TENANT, **extra})
-    return ctx
+def _ctx(**extra):
+    return PipelineContext(db=None, data={"tenant_id": TENANT, **extra})
 
 
 @pytest.mark.asyncio
-async def test_bulk_update_targets_core_table_not_orm_entity():
-    """The backfill UPDATE must be a Core ``update(Entity.__table__)``, not an
-    ORM ``update(Entity)``. The ORM form routes ``session.execute(stmt, [params])``
-    through "ORM Bulk UPDATE by Primary Key" and raised "No primary key value
-    supplied for column(s) entities.id" in prod (2026-06-16). A Core statement
-    carries no ORM compile plugin, so it never takes that path."""
-    eid = uuid.uuid4()
-    db = AsyncMock()
-    db.execute.side_effect = [
-        _mock_result([(eid, "Globex")]),  # 1. select NULL-embedding entities
-        _mock_result([]),  # 2. the bulk UPDATE
-    ]
-    db.flush = AsyncMock()
+async def test_read_embed_write_roundtrip():
+    """Read NULL-embedding rows → embed each → write back via storage."""
+    eid = str(uuid.uuid4())
+    sc = MagicMock()
+    sc.list_null_embedding_entities = AsyncMock(return_value=[{"id": eid, "canonical_name": "Globex"}])
+    sc.set_entity_embeddings = AsyncMock(return_value=1)
 
     async def _fake_embed(text, tenant_config):
         return [0.1] * 8
 
-    with patch(
-        "core_api.pipeline.steps.entity_linking.backfill_entity_embeddings.get_embedding",
-        new=_fake_embed,
+    with (
+        patch(
+            "core_api.pipeline.steps.entity_linking.backfill_entity_embeddings.get_storage_client",
+            return_value=sc,
+        ),
+        patch(
+            "core_api.pipeline.steps.entity_linking.backfill_entity_embeddings.get_embedding",
+            new=_fake_embed,
+        ),
     ):
-        ctx = _ctx(db)  # tenant_config defaults to None
+        ctx = _ctx()
         result = await BackfillEntityEmbeddings().execute(ctx)
 
     assert result.outcome == StepOutcome.SUCCESS
     assert ctx.data["backfill_count"] == 1
-
-    update_stmt, exec_params = db.execute.call_args_list[1].args
-    assert update_stmt.is_dml
-    assert update_stmt.table.name == "entities"
-    # No ORM compile plugin => plain Core UPDATE => no "ORM Bulk UPDATE by
-    # Primary Key" path (which is what raised in prod).
-    assert "compile_state_plugin" not in update_stmt._propagate_attrs
-    # The custom-bindparam executemany param list is passed through unchanged.
-    assert exec_params == [{"eid": eid, "emb": [0.1] * 8}]
+    # The write carries the {id, embedding} shape the set-embeddings endpoint
+    # expects — storage binds the PK off a custom ``eid`` bindparam.
+    write_kwargs = sc.set_entity_embeddings.await_args.kwargs
+    assert write_kwargs["tenant_id"] == TENANT
+    assert write_kwargs["updates"] == [{"id": eid, "embedding": [0.1] * 8}]
 
 
 @pytest.mark.asyncio
 async def test_no_null_embedding_entities_skips():
-    db = AsyncMock()
-    db.execute.side_effect = [_mock_result([])]
-    db.flush = AsyncMock()
-    result = await BackfillEntityEmbeddings().execute(_ctx(db))
+    sc = MagicMock()
+    sc.list_null_embedding_entities = AsyncMock(return_value=[])
+    sc.set_entity_embeddings = AsyncMock()
+    with patch(
+        "core_api.pipeline.steps.entity_linking.backfill_entity_embeddings.get_storage_client",
+        return_value=sc,
+    ):
+        result = await BackfillEntityEmbeddings().execute(_ctx())
     assert result.outcome == StepOutcome.SKIPPED
+    sc.set_entity_embeddings.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_embed_failure_skips_row_but_does_not_fail_step():
+    eid = str(uuid.uuid4())
+    sc = MagicMock()
+    sc.list_null_embedding_entities = AsyncMock(return_value=[{"id": eid, "canonical_name": "Globex"}])
+    sc.set_entity_embeddings = AsyncMock(return_value=0)
+
+    async def _boom(text, tenant_config):
+        raise RuntimeError("provider down")
+
+    with (
+        patch(
+            "core_api.pipeline.steps.entity_linking.backfill_entity_embeddings.get_storage_client",
+            return_value=sc,
+        ),
+        patch(
+            "core_api.pipeline.steps.entity_linking.backfill_entity_embeddings.get_embedding",
+            new=_boom,
+        ),
+    ):
+        ctx = _ctx()
+        result = await BackfillEntityEmbeddings().execute(ctx)
+
+    # All rows failed to embed → no write call, count stays 0, step succeeds.
+    assert result.outcome == StepOutcome.SUCCESS
+    assert ctx.data["backfill_count"] == 0
+    sc.set_entity_embeddings.assert_not_awaited()

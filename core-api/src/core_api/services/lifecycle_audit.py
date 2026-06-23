@@ -169,24 +169,25 @@ class _CoreApiLifecycleAdapter:
         if not config.auto_entity_linking_enabled:
             return 0
         # Lazy imports — same rationale as crystallize above.
-        from core_api.db.session import async_session
+        # The entity-linking steps are now DB-free (Fix 2 Ph6): each folds its
+        # multi-statement transaction into one atomic core-storage-api call, so
+        # this caller no longer opens an ``async_session`` / commits. The
+        # context carries no DB session (``db=None``).
         from core_api.pipeline.compositions.entity_linking import (
             build_full_entity_linking_pipeline,
         )
         from core_api.pipeline.context import PipelineContext
 
-        async with async_session() as db:
-            ctx = PipelineContext(
-                db=db,
-                data={
-                    "tenant_id": org_id,
-                    **({"fleet_id": fleet_id} if fleet_id else {}),
-                },
-            )
-            pipeline = build_full_entity_linking_pipeline()
-            await pipeline.run(ctx)
-            await db.commit()
-            links_created = ctx.data.get("links_created", 0)
+        ctx = PipelineContext(
+            db=None,
+            data={
+                "tenant_id": org_id,
+                **({"fleet_id": fleet_id} if fleet_id else {}),
+            },
+        )
+        pipeline = build_full_entity_linking_pipeline()
+        await pipeline.run(ctx)
+        links_created = ctx.data.get("links_created", 0)
         return int(links_created)
 
     async def forge_distill(self, *, org_id: str, fleet_id: str | None, run_label: str) -> int:

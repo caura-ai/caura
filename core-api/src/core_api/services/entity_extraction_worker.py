@@ -8,6 +8,9 @@ from uuid import UUID
 from common.embedding import get_embedding
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
+    CROSS_LINK_MEMORY_BATCH_SIZE,
+    CROSS_LINK_SIMILARITY_THRESHOLD,
+    CROSS_LINK_TEXT_VERIFY,
     ENTITY_NAME_BLOCKLIST,
     ENTITY_RESOLUTION_THRESHOLD,
     MIN_ENTITY_NAME_LENGTH,
@@ -64,30 +67,29 @@ async def _discover_cross_links_for_memory(
     tenant_id: str,
     fleet_id: str | None,
 ) -> None:
-    """Run cross-link discovery for a single memory after entity extraction."""
-    from core_api.db.session import async_session
-    from core_api.pipeline.context import PipelineContext
-    from core_api.pipeline.steps.entity_linking.discover_cross_links import DiscoverCrossLinks
+    """Run cross-link discovery for a single memory after entity extraction.
 
-    async with async_session() as db:
-        ctx = PipelineContext(
-            db=db,
-            data={
-                "tenant_id": tenant_id,
-                "target_memory_ids": [memory_id],
-                **({"fleet_id": fleet_id} if fleet_id else {}),
-            },
+    DB-free as of Fix 2 Ph6: the discover-cross-links step folds its candidate
+    read + LATERAL match + ON-CONFLICT insert into one atomic core-storage-api
+    call, so this calls the storage client directly (the single-step
+    PipelineContext indirection — and its ``async_session`` — is no longer
+    needed). Targeted mode keys off ``target_memory_ids``.
+    """
+    resp = await get_storage_client().discover_cross_links(
+        tenant_id=tenant_id,
+        fleet_id=fleet_id,
+        batch_size=CROSS_LINK_MEMORY_BATCH_SIZE,
+        threshold=CROSS_LINK_SIMILARITY_THRESHOLD,
+        text_verify=CROSS_LINK_TEXT_VERIFY,
+        target_memory_ids=[memory_id],
+    )
+    links = resp.get("links_created", 0)
+    if links:
+        logger.info(
+            "Cross-link discovery created %d links for memory %s",
+            links,
+            memory_id,
         )
-        step = DiscoverCrossLinks()
-        await step.execute(ctx)
-        await db.commit()
-        links = ctx.data.get("links_created", 0)
-        if links:
-            logger.info(
-                "Cross-link discovery created %d links for memory %s",
-                links,
-                memory_id,
-            )
 
 
 async def process_entity_extraction(

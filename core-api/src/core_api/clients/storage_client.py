@@ -1190,6 +1190,125 @@ class CoreStorageClient:
     async def find_broken_entity_links(self, tenant_id: str) -> list[dict]:
         return await self._get_list("/entities/broken-links", tenant_id=tenant_id)
 
+    # ---------------------------------------------------------------------
+    # Entity-linking pipeline (Fix 2 Ph6) — thin wrappers over the coarse
+    # run-op endpoints that fold each entity-linking step into one atomic
+    # storage txn. The 4 pipeline steps call these instead of holding a
+    # direct DB session; tuning constants are passed from ``core_api.constants``.
+    # ---------------------------------------------------------------------
+
+    async def resolve_entities(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        batch_size: int,
+        threshold: float,
+        candidate_limit: int,
+    ) -> dict:
+        """Merge duplicate entities (full resolve step, ONE atomic txn with a
+        SAVEPOINT per dupe). Returns ``{merge_count, clusters, cluster_errors,
+        merged_entity_ids}`` (or ``{error, cluster_errors}`` when every cluster
+        failed)."""
+        return await self._post(  # type: ignore[return-value]
+            "/entities/resolve",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "batch_size": batch_size,
+                "threshold": threshold,
+                "candidate_limit": candidate_limit,
+            },
+            read=False,
+        )
+
+    async def discover_cross_links(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        batch_size: int,
+        threshold: float,
+        text_verify: bool,
+        target_memory_ids: list | None = None,
+    ) -> dict:
+        """Link under-connected memories to similar entities (targeted when
+        ``target_memory_ids`` is non-empty, else batch). Returns
+        ``{links_created}``."""
+        return await self._post(  # type: ignore[return-value]
+            "/entities/discover-cross-links",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "batch_size": batch_size,
+                "threshold": threshold,
+                "text_verify": text_verify,
+                "target_memory_ids": [str(mid) for mid in target_memory_ids] if target_memory_ids else None,
+            },
+            read=False,
+        )
+
+    async def infer_relations(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        batch_size: int,
+        min_cooccurrence: int,
+        reinforce_delta: float,
+        max_relation_weight: float,
+    ) -> dict:
+        """Infer 'related_to' relations from co-occurrence (ONE atomic txn).
+        Returns ``{relations_created, relations_reinforced}``."""
+        return await self._post(  # type: ignore[return-value]
+            "/entities/infer-relations",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "batch_size": batch_size,
+                "min_cooccurrence": min_cooccurrence,
+                "reinforce_delta": reinforce_delta,
+                "max_relation_weight": max_relation_weight,
+            },
+            read=False,
+        )
+
+    async def list_null_embedding_entities(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        batch_size: int,
+    ) -> list[dict]:
+        """Entities needing a name embedding (read half of backfill). Returns a
+        list of ``{id, canonical_name}`` dicts for the core-api LLM embed loop."""
+        resp = await self._post(
+            "/entities/list-null-embeddings",
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "batch_size": batch_size,
+            },
+            read=True,
+        )
+        return resp["rows"]  # type: ignore[index,return-value]
+
+    async def set_entity_embeddings(
+        self,
+        *,
+        tenant_id: str,
+        updates: list[dict],
+    ) -> int:
+        """Write back computed name embeddings (write half of backfill, ONE
+        atomic txn). ``updates`` is ``[{id, embedding:[float,...]}, ...]``.
+        Returns the count written."""
+        resp = await self._post(
+            "/entities/set-embeddings",
+            {"tenant_id": tenant_id, "updates": updates},
+            read=False,
+        )
+        return resp["backfill_count"]  # type: ignore[index,return-value]
+
     # =====================================================================
     # Agents
     # =====================================================================

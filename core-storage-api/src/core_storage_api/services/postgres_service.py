@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -199,6 +199,34 @@ def _relation_weight(relation_type: str, row_weight: float) -> float:
         DEFAULT_RELATION_TYPE_WEIGHT,
     )
     return type_w * row_weight
+
+
+# ---------------------------------------------------------------------------
+# Union-Find helpers (entity-resolution clustering — Fix 2 Ph6)
+# ---------------------------------------------------------------------------
+#
+# Ported byte-for-byte from
+# ``core_api/pipeline/steps/entity_linking/resolve_entities.py`` so the
+# duplicate-entity clustering keeps identical semantics now that the merge runs
+# storage-side. core-storage-api must not import from ``core_api``.
+
+
+def _entity_uf_find(parent: dict[UUID, UUID], x: UUID) -> UUID:
+    while parent[x] != x:
+        parent[x] = parent[parent[x]]  # path compression
+        x = parent[x]
+    return x
+
+
+def _entity_uf_union(parent: dict[UUID, UUID], rank: dict[UUID, int], a: UUID, b: UUID) -> None:
+    ra, rb = _entity_uf_find(parent, a), _entity_uf_find(parent, b)
+    if ra == rb:
+        return
+    if rank[ra] < rank[rb]:
+        ra, rb = rb, ra
+    parent[rb] = ra
+    if rank[ra] == rank[rb]:
+        rank[ra] += 1
 
 
 # Cached at import time so the per-row column-name filter on the bulk
@@ -4402,6 +4430,732 @@ class PostgresService:
                 {**params, "lim": limit},
             )
             return list(result.all())  # type: ignore[arg-type]
+
+    # ------------------------------------------------------------------
+    # Entity-linking pipeline (Fix 2 Ph6 — resolve / cross-links /
+    # relation-inference / embedding-backfill, all routed off core-api's
+    # direct DB access). Tuning constants travel in the request body
+    # (storage must not import ``core_api``). SQL/ORM is ported VERBATIM
+    # from the four ``core_api/pipeline/steps/entity_linking/*`` steps.
+    # ------------------------------------------------------------------
+
+    async def entity_resolve_duplicates(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        batch_size: int,
+        threshold: float,
+        candidate_limit: int,
+    ) -> dict:
+        """Merge duplicate entities whose name embeddings exceed ``threshold``.
+
+        Folds the entire ``resolve_entities`` step into ONE ``get_session()``
+        transaction so the per-dupe ``begin_nested()`` SAVEPOINT semantics — an
+        HTTP boundary cannot express a SAVEPOINT — survive the move:
+
+        * R1 pgvector LATERAL pair-find (read-your-writes on the SAME write
+          session; NOT ``get_read_session`` — the merge loop re-reads rows it
+          mutates).
+        * union-find clustering (ports ``_find``/``_union`` verbatim via the
+          module-level ``_entity_uf_*`` helpers).
+        * per cluster: R2 load + canonical pick (longest name, smallest UUID on
+          tie); per-cluster try/except continue-on-error.
+        * per dupe: ``session.begin_nested()`` SAVEPOINT around R4-R13.
+
+        Returns ``{merge_count, clusters, cluster_errors, merged_entity_ids}``
+        mirroring the step's ``StepResult.detail``. Reproduces the "all clusters
+        failed → error" branch as ``{"error": ...}`` in the dict (the caller
+        maps it to a FAILED StepResult)."""
+        fleet_clause = ""
+        params: dict = {
+            "tenant_id": tenant_id,
+            "threshold": threshold,
+            "batch_size": batch_size,
+            "candidate_limit": candidate_limit,
+        }
+        if fleet_id is not None:
+            fleet_clause = "AND fleet_id = :fleet_id"
+            params["fleet_id"] = fleet_id
+
+        pair_sql = text(f"""
+            WITH batch AS (
+                SELECT id, canonical_name, entity_type, name_embedding
+                FROM entities
+                WHERE tenant_id = :tenant_id
+                  AND name_embedding IS NOT NULL
+                  {fleet_clause}
+                ORDER BY id
+                LIMIT :batch_size
+            )
+            SELECT b.id AS id_a, nb.id AS id_b,
+                   b.canonical_name AS name_a, nb.canonical_name AS name_b,
+                   b.entity_type,
+                   nb.sim
+            FROM batch b
+            JOIN LATERAL (
+                SELECT e.id, e.canonical_name,
+                       1 - (e.name_embedding <=> b.name_embedding) AS sim
+                FROM entities e
+                WHERE e.tenant_id = :tenant_id
+                  AND e.name_embedding IS NOT NULL
+                  AND e.id > b.id
+                  AND e.entity_type = b.entity_type
+                  {fleet_clause}
+                  AND (1 - (e.name_embedding <=> b.name_embedding)) >= :threshold
+                ORDER BY e.name_embedding <=> b.name_embedding
+                LIMIT :candidate_limit
+            ) nb ON true
+        """)
+
+        async with get_session() as session:
+            rows = (await session.execute(pair_sql, params)).all()
+            if not rows:
+                # ``skipped`` lets the core-api step reproduce the source's
+                # early ``StepResult(SKIPPED)`` ONLY for the no-pairs case
+                # (the source returns SUCCESS(0) when pairs exist but nothing
+                # merges).
+                return {
+                    "skipped": True,
+                    "merge_count": 0,
+                    "clusters": 0,
+                    "cluster_errors": 0,
+                    "merged_entity_ids": [],
+                }
+
+            # ── union-find clustering ──────────────────────────────────
+            all_ids: set[UUID] = set()
+            for r in rows:
+                all_ids.add(r.id_a)
+                all_ids.add(r.id_b)
+
+            parent: dict[UUID, UUID] = {uid: uid for uid in all_ids}
+            rank: dict[UUID, int] = dict.fromkeys(all_ids, 0)
+
+            for r in rows:
+                _entity_uf_union(parent, rank, r.id_a, r.id_b)
+
+            clusters: dict[UUID, list[UUID]] = defaultdict(list)
+            for uid in all_ids:
+                clusters[_entity_uf_find(parent, uid)].append(uid)
+
+            # ── Process each cluster ───────────────────────────────────
+            merge_count = 0
+            merged_ids: list[UUID] = []
+            clusters_processed = 0
+            cluster_errors = 0
+
+            for root, cluster_ids in clusters.items():
+                if len(cluster_ids) < 2:
+                    continue
+
+                try:
+                    before = len(merged_ids)
+                    await self._entity_merge_cluster(session, cluster_ids, merged_ids, tenant_id)
+                    actual_merges = len(merged_ids) - before
+                    merge_count += actual_merges
+                    if actual_merges > 0:
+                        clusters_processed += 1
+                except Exception:
+                    cluster_errors += 1
+                    logger.exception(
+                        "Failed to merge entity cluster root=%s (%d members)",
+                        root,
+                        len(cluster_ids),
+                    )
+
+            if clusters_processed == 0 and cluster_errors > 0:
+                return {
+                    "error": "all clusters failed to merge",
+                    "cluster_errors": cluster_errors,
+                }
+
+            return {
+                "merge_count": merge_count,
+                "clusters": clusters_processed,
+                "cluster_errors": cluster_errors,
+                "merged_entity_ids": [str(eid) for eid in merged_ids],
+            }
+
+    async def _entity_merge_cluster(
+        self,
+        session: AsyncSession,
+        cluster_ids: list[UUID],
+        merged_ids: list[UUID],
+        tenant_id: str,
+    ) -> None:
+        """Pick canonical entity and merge all duplicates into it."""
+
+        # ── pick canonical (longest name, smallest UUID on tie) ──
+        entities = (
+            (
+                await session.execute(
+                    select(Entity).where(
+                        Entity.id.in_(cluster_ids),
+                        Entity.tenant_id == tenant_id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        if not entities:
+            return
+
+        canonical = max(
+            entities,
+            key=lambda e: (len(e.canonical_name), -e.id.int),
+        )
+        dupes = [e for e in entities if e.id != canonical.id]
+
+        # ── merge each duplicate (savepoint per dupe) ──
+        for dupe in dupes:
+            async with session.begin_nested():  # SAVEPOINT per dupe
+                await self._entity_merge_dupe_into_canonical(session, canonical, dupe, tenant_id)
+            merged_ids.append(dupe.id)
+
+    async def _entity_merge_dupe_into_canonical(
+        self,
+        session: AsyncSession,
+        canonical: Entity,
+        dupe: Entity,
+        tenant_id: str,
+    ) -> None:
+        """Re-point links/relations, merge aliases, delete duplicate."""
+        db = session
+        canonical_id = canonical.id
+        dupe_id = dupe.id
+
+        # 4a. Repoint MemoryEntityLink (scoped via memories.tenant_id) ──
+        await db.execute(
+            text("""
+                DELETE FROM memory_entity_links
+                WHERE entity_id = :dupe_id
+                  AND memory_id IN (
+                    SELECT mel.memory_id FROM memory_entity_links mel
+                    JOIN memories m ON m.id = mel.memory_id
+                      AND m.tenant_id = :tenant_id
+                    WHERE mel.entity_id = :canonical_id
+                  )
+            """),
+            {"dupe_id": dupe_id, "canonical_id": canonical_id, "tenant_id": tenant_id},
+        )
+        await db.execute(
+            text("""
+                UPDATE memory_entity_links
+                SET entity_id = :canonical_id
+                WHERE entity_id = :dupe_id
+                  AND memory_id IN (
+                    SELECT m.id FROM memories m
+                    WHERE m.tenant_id = :tenant_id
+                  )
+            """),
+            {"dupe_id": dupe_id, "canonical_id": canonical_id, "tenant_id": tenant_id},
+        )
+
+        # 4b. Repoint Relations (from_entity_id) ───────────────────────
+        # Preserve the higher weight before deleting conflicting dupe relations.
+        await db.execute(
+            text("""
+                UPDATE relations r_canonical
+                SET weight = GREATEST(r_canonical.weight, r_dupe.weight)
+                FROM relations r_dupe
+                WHERE r_dupe.from_entity_id = :dupe_id
+                  AND r_dupe.tenant_id = :tenant_id
+                  AND r_canonical.from_entity_id = :canonical_id
+                  AND r_canonical.tenant_id = :tenant_id
+                  AND r_canonical.relation_type = r_dupe.relation_type
+                  AND r_canonical.to_entity_id = r_dupe.to_entity_id
+            """),
+            {"dupe_id": dupe_id, "canonical_id": canonical_id, "tenant_id": tenant_id},
+        )
+        # Delete dupe's outgoing relations that would become self-loops
+        # (dupe→canonical) or duplicates of canonical's existing relations.
+        await db.execute(
+            text("""
+                DELETE FROM relations
+                WHERE from_entity_id = :dupe_id
+                  AND tenant_id = :tenant_id
+                  AND (
+                    to_entity_id = :canonical_id
+                    OR (tenant_id, relation_type, to_entity_id) IN (
+                        SELECT tenant_id, relation_type, to_entity_id
+                        FROM relations WHERE from_entity_id = :canonical_id
+                          AND tenant_id = :tenant_id
+                    )
+                  )
+            """),
+            {"dupe_id": dupe_id, "canonical_id": canonical_id, "tenant_id": tenant_id},
+        )
+        await db.execute(
+            text("""
+                UPDATE relations
+                SET from_entity_id = :canonical_id
+                WHERE from_entity_id = :dupe_id
+                  AND tenant_id = :tenant_id
+            """),
+            {"dupe_id": dupe_id, "canonical_id": canonical_id, "tenant_id": tenant_id},
+        )
+
+        # 4c. Repoint Relations (to_entity_id) ─────────────────────────
+        # Preserve the higher weight before deleting conflicting dupe relations.
+        await db.execute(
+            text("""
+                UPDATE relations r_canonical
+                SET weight = GREATEST(r_canonical.weight, r_dupe.weight)
+                FROM relations r_dupe
+                WHERE r_dupe.to_entity_id = :dupe_id
+                  AND r_dupe.tenant_id = :tenant_id
+                  AND r_canonical.to_entity_id = :canonical_id
+                  AND r_canonical.tenant_id = :tenant_id
+                  AND r_canonical.from_entity_id = r_dupe.from_entity_id
+                  AND r_canonical.relation_type = r_dupe.relation_type
+            """),
+            {"dupe_id": dupe_id, "canonical_id": canonical_id, "tenant_id": tenant_id},
+        )
+        # Delete dupe's incoming relations that would become self-loops
+        # (canonical→dupe) or duplicates of canonical's existing relations.
+        await db.execute(
+            text("""
+                DELETE FROM relations
+                WHERE to_entity_id = :dupe_id
+                  AND tenant_id = :tenant_id
+                  AND (
+                    from_entity_id = :canonical_id
+                    OR (tenant_id, from_entity_id, relation_type) IN (
+                        SELECT tenant_id, from_entity_id, relation_type
+                        FROM relations WHERE to_entity_id = :canonical_id
+                          AND tenant_id = :tenant_id
+                    )
+                  )
+            """),
+            {"dupe_id": dupe_id, "canonical_id": canonical_id, "tenant_id": tenant_id},
+        )
+        await db.execute(
+            text("""
+                UPDATE relations
+                SET to_entity_id = :canonical_id
+                WHERE to_entity_id = :dupe_id
+                  AND tenant_id = :tenant_id
+            """),
+            {"dupe_id": dupe_id, "canonical_id": canonical_id, "tenant_id": tenant_id},
+        )
+
+        # 4d. Merge aliases ─────────────────────────────────────────────
+        canonical_attrs = dict(canonical.attributes or {})
+        dupe_attrs = dict(dupe.attributes or {})
+        aliases: set[str] = set(canonical_attrs.get("_aliases", []))
+        aliases.add(canonical.canonical_name)
+        aliases.add(dupe.canonical_name)
+        aliases.update(dupe_attrs.get("_aliases", []))
+        canonical_attrs["_aliases"] = sorted(aliases)  # sorted for determinism
+        canonical.attributes = canonical_attrs
+
+        # 4e. Delete duplicate entity ──────────────────────────────────
+        await db.delete(dupe)
+
+    async def entity_discover_cross_links(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        batch_size: int,
+        threshold: float,
+        text_verify: bool,
+        target_memory_ids: list | None,
+    ) -> dict:
+        """Link under-connected memories to similar entities (both modes).
+
+        Folds D1/D2 candidate-find + D3 pgvector LATERAL + the Python
+        text-verify filter + D4 bulk ON-CONFLICT insert into ONE
+        ``get_session()`` transaction. ``target_memory_ids`` (non-empty) selects
+        targeted mode (D1); otherwise batch mode (D2). Returns
+        ``{links_created}``.
+
+        D4 keeps the single multi-VALUES ``pg_insert(...).values(rows)`` form
+        (CAURA-686) — NOT ``execute(stmt, rows)`` (executemany kills RETURNING)."""
+        # ── 1. Find candidate memories ──────────────────────────────
+        fleet_clause = "AND m.fleet_id = :fleet_id" if fleet_id else ""
+
+        async with get_session() as session:
+            if target_memory_ids:
+                # Targeted mode: specific memories (e.g. after entity extraction)
+                candidates = (
+                    await session.execute(
+                        text(f"""
+                            SELECT m.id, m.content, m.embedding
+                            FROM memories m
+                            WHERE m.id = ANY(CAST(:memory_ids AS uuid[]))
+                              AND m.tenant_id = :tenant_id
+                              AND m.deleted_at IS NULL
+                              AND m.status = 'active'
+                              AND m.embedding IS NOT NULL
+                              {fleet_clause}
+                        """),
+                        {
+                            "tenant_id": tenant_id,
+                            "memory_ids": [str(mid) for mid in target_memory_ids],
+                            **({"fleet_id": fleet_id} if fleet_id else {}),
+                        },
+                    )
+                ).all()
+            else:
+                # Batch mode: under-connected memories (lifecycle / scheduled)
+                candidates = (
+                    await session.execute(
+                        text(f"""
+                            SELECT m.id, m.content, m.embedding
+                            FROM memories m
+                            LEFT JOIN memory_entity_links mel ON mel.memory_id = m.id
+                            WHERE m.tenant_id = :tenant_id
+                              AND m.deleted_at IS NULL
+                              AND m.status = 'active'
+                              AND m.embedding IS NOT NULL
+                              {fleet_clause}
+                            GROUP BY m.id
+                            HAVING COUNT(mel.entity_id) < 3
+                            ORDER BY m.created_at DESC
+                            LIMIT :batch_size
+                        """),
+                        {
+                            "tenant_id": tenant_id,
+                            **({"fleet_id": fleet_id} if fleet_id else {}),
+                            "batch_size": batch_size,
+                        },
+                    )
+                ).all()
+
+            if not candidates:
+                # ``skipped`` so the step can reproduce the source's
+                # StepOutcome.SKIPPED on the no-candidates case (parity with
+                # resolve/backfill; keeps pipeline skipped_count accurate).
+                return {"skipped": True, "links_created": 0}
+
+            # ── 2. Find similar entities for all candidate memories (LATERAL JOIN) ──
+            entity_fleet_clause = "AND e.fleet_id = :fleet_id" if fleet_id else ""
+            memory_id_strs = [str(row[0]) for row in candidates]
+            # ``content`` is only consulted by the text-verify filter below; skip
+            # building the map (and holding every candidate's content in memory)
+            # when text-verify is off.
+            content_map = {row[0]: row[1] for row in candidates} if text_verify else {}
+
+            lateral_query = text(f"""
+                SELECT m.id AS memory_id,
+                       e.id AS entity_id, e.canonical_name, e.attributes, e.sim
+                FROM (SELECT id, embedding FROM memories
+                      WHERE id = ANY(CAST(:memory_ids AS uuid[])) AND tenant_id = :tenant_id) m
+                JOIN LATERAL (
+                    SELECT e.id, e.canonical_name, e.attributes,
+                           1 - (e.name_embedding <=> m.embedding) AS sim
+                    FROM entities e
+                    WHERE e.tenant_id = :tenant_id
+                      AND e.name_embedding IS NOT NULL
+                      AND (1 - (e.name_embedding <=> m.embedding)) >= :threshold
+                      {entity_fleet_clause}
+                    ORDER BY e.name_embedding <=> m.embedding
+                    LIMIT 10
+                ) e ON true
+                ORDER BY m.id, e.sim DESC
+            """)
+
+            lateral_rows = (
+                await session.execute(
+                    lateral_query,
+                    {
+                        "tenant_id": tenant_id,
+                        "memory_ids": memory_id_strs,
+                        "threshold": threshold,
+                        **({"fleet_id": fleet_id} if fleet_id else {}),
+                    },
+                )
+            ).all()
+
+            # Filter candidates in Python, then bulk-insert
+            to_insert: list[dict] = []
+            for memory_id, entity_id, canonical_name, attributes, _sim in lateral_rows:
+                if text_verify:
+                    content = content_map.get(memory_id, "")
+                    names_to_check = [canonical_name]
+                    if attributes and isinstance(attributes, dict):
+                        names_to_check.extend(attributes.get("_aliases", []))
+                    content_lower = content.lower() if content else ""
+                    if not any(n.lower() in content_lower for n in names_to_check):
+                        continue
+                to_insert.append({"memory_id": memory_id, "entity_id": entity_id})
+
+            links_created = 0
+            if to_insert:
+                # Single multi-VALUES statement via ``pg_insert(...).values(rows)``
+                # (the CAURA-686 pattern) — NOT ``execute(stmt, rows)``, which
+                # takes SQLAlchemy's executemany path where RETURNING rows are
+                # unavailable and ``result.all()`` raises ResourceClosedError.
+                # memory_entity_links has a composite PK (memory_id, entity_id)
+                # and no surrogate ``id`` column, so RETURNING must reference
+                # real columns; with ON CONFLICT DO NOTHING only actually-
+                # inserted rows return, keeping the count accurate.
+                rows = [{**row, "role": "mentioned"} for row in to_insert]
+                insert_link_returning = (
+                    pg_insert(MemoryEntityLink)
+                    .values(rows)
+                    .on_conflict_do_nothing(index_elements=["memory_id", "entity_id"])
+                    .returning(MemoryEntityLink.memory_id, MemoryEntityLink.entity_id)
+                )
+                result = await session.execute(insert_link_returning)
+                links_created = len(result.all())
+
+            logger.info(
+                "Created %d cross-links for %d candidate memories (tenant %s)",
+                links_created,
+                len(candidates),
+                tenant_id,
+            )
+            return {"links_created": links_created}
+
+    async def entity_infer_relations(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        batch_size: int,
+        min_cooccurrence: int,
+        reinforce_delta: float,
+        max_relation_weight: float,
+    ) -> dict:
+        """Infer 'related_to' relations from entity co-occurrence.
+
+        Folds I1 co-occurrence + I2 existing-relations + the reinforce-vs-create
+        Python split + I3 reinforce UPDATE + I4 ON-CONFLICT INSERT into ONE
+        ``get_session()`` transaction. Tuning (``min_cooccurrence``,
+        ``reinforce_delta``, ``max_relation_weight``) arrives in the body.
+
+        I3 binds the Python-clamped ``:new_weight`` directly — NOT
+        ``LEAST(:a,:b)`` over untyped binds (asyncpg DatatypeMismatchError, prod
+        2026-06-13). Returns ``{relations_created, relations_reinforced}``."""
+        # ── 1. Co-occurrence query ────────────────────────────────────
+        entity_fleet_clause = "AND fleet_id = :fleet_id" if fleet_id else ""
+        memory_fleet_clause = "AND mem.fleet_id = :fleet_id" if fleet_id else ""
+        async with get_session() as session:
+            cooccurrences = (
+                await session.execute(
+                    text(f"""
+                        WITH tenant_entity_ids AS (
+                            SELECT id FROM entities
+                            WHERE tenant_id = :tenant_id
+                              {entity_fleet_clause}
+                        )
+                        SELECT a.entity_id AS from_id, b.entity_id AS to_id,
+                               COUNT(*) AS cooccur
+                        FROM memory_entity_links a
+                        JOIN memory_entity_links b
+                          ON a.memory_id = b.memory_id
+                          AND a.entity_id < b.entity_id
+                        JOIN memories mem
+                          ON mem.id = a.memory_id
+                          AND mem.tenant_id = :tenant_id
+                          AND mem.deleted_at IS NULL
+                          {memory_fleet_clause}
+                        WHERE a.entity_id IN (SELECT id FROM tenant_entity_ids)
+                          AND b.entity_id IN (SELECT id FROM tenant_entity_ids)
+                        GROUP BY a.entity_id, b.entity_id
+                        HAVING COUNT(*) >= :min_cooccurrence
+                        ORDER BY cooccur DESC
+                        LIMIT :batch_size
+                    """),
+                    {
+                        "tenant_id": tenant_id,
+                        **({"fleet_id": fleet_id} if fleet_id else {}),
+                        "min_cooccurrence": min_cooccurrence,
+                        "batch_size": batch_size,
+                    },
+                )
+            ).all()
+
+            if not cooccurrences:
+                # ``skipped`` so the step reproduces the source's SKIPPED on the
+                # no-co-occurrence case (parity with resolve/backfill).
+                return {"skipped": True, "relations_created": 0, "relations_reinforced": 0}
+
+            # ── 2. Bulk-fetch existing 'related_to' relations for all pairs ─
+            # Scoped by tenant_id only (not fleet_id) so fleet-scoped runs can
+            # reinforce relations created by full runs; the unique constraint
+            # uq_relations_natural_key does not include fleet_id.
+            all_entity_ids = {eid for row in cooccurrences for eid in (row[0], row[1])}
+            existing_rows = (
+                await session.execute(
+                    text("""
+                        SELECT from_entity_id, to_entity_id, id, weight
+                        FROM relations
+                        WHERE tenant_id = :tenant_id
+                          AND relation_type = 'related_to'
+                          AND (from_entity_id = ANY(CAST(:ids AS uuid[])) OR to_entity_id = ANY(CAST(:ids AS uuid[])))
+                    """),
+                    {
+                        "tenant_id": tenant_id,
+                        "ids": [str(eid) for eid in all_entity_ids],
+                    },
+                )
+            ).all()
+
+            # Build lookup: frozenset({from_id, to_id}) -> (rel_id, weight)
+            existing_map: dict[frozenset, tuple] = {
+                frozenset({r[0], r[1]}): (r[2], r[3]) for r in existing_rows
+            }
+
+            # ── 3. Split into reinforce vs. create batches ────────────────
+            reinforce_batch: list[dict] = []
+            insert_batch: list[dict] = []
+
+            for from_id, to_id, cooccur in cooccurrences:
+                pair_key = frozenset({from_id, to_id})
+                existing = existing_map.get(pair_key)
+
+                if existing:
+                    rel_id, current_weight = existing
+                    new_weight = min(
+                        current_weight + cooccur * reinforce_delta,
+                        max_relation_weight,
+                    )
+                    reinforce_batch.append(
+                        {
+                            "rel_id": rel_id,
+                            # Already clamped to max_relation_weight above — bound
+                            # directly below (no SQL-side LEAST), matching the
+                            # INSERT path's ``:weight``.
+                            "new_weight": new_weight,
+                            "tenant_id": tenant_id,
+                        }
+                    )
+                else:
+                    weight = min(cooccur * reinforce_delta, max_relation_weight)
+                    insert_batch.append(
+                        {
+                            "tenant_id": tenant_id,
+                            "fleet_id": fleet_id,
+                            "from_id": from_id,
+                            "to_id": to_id,
+                            "weight": weight,
+                        }
+                    )
+
+            # ── 4. Execute batched UPDATEs ────────────────────────────────
+            relations_reinforced = 0
+            if reinforce_batch:
+                await session.execute(
+                    # ``SET weight = :new_weight`` NOT ``LEAST(:new_weight, :max_weight)``:
+                    # Postgres resolves ``LEAST`` over two untyped bind params as
+                    # ``text`` and then rejects the assignment to the
+                    # double-precision ``weight`` column (asyncpg
+                    # DatatypeMismatchError, prod 2026-06-13). Direct assignment
+                    # infers the column type from context; new_weight is already
+                    # clamped in Python.
+                    text("""
+                        UPDATE relations
+                        SET weight = :new_weight
+                        WHERE id = :rel_id AND tenant_id = :tenant_id
+                    """),
+                    reinforce_batch,
+                )
+                relations_reinforced = len(reinforce_batch)
+
+            # ── 5. Execute batched INSERTs ────────────────────────────────
+            relations_created = 0
+            if insert_batch:
+                result = await session.execute(
+                    text("""
+                        INSERT INTO relations
+                            (tenant_id, fleet_id, from_entity_id, relation_type,
+                             to_entity_id, weight)
+                        VALUES
+                            (:tenant_id, :fleet_id, :from_id, 'related_to',
+                             :to_id, :weight)
+                        ON CONFLICT ON CONSTRAINT uq_relations_natural_key
+                        DO NOTHING
+                    """),
+                    insert_batch,
+                )
+                rc = result.rowcount  # type: ignore[attr-defined]
+                relations_created = rc if rc >= 0 else len(insert_batch)
+
+            logger.info(
+                "Inferred relations for tenant %s: created=%d reinforced=%d",
+                tenant_id,
+                relations_created,
+                relations_reinforced,
+            )
+            return {
+                "relations_created": relations_created,
+                "relations_reinforced": relations_reinforced,
+            }
+
+    async def entity_list_null_embeddings(
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        batch_size: int,
+    ) -> list[dict]:
+        """Entities whose ``name_embedding`` is NULL (read half of backfill).
+
+        Ports B1 verbatim. Read-only → ``get_read_session()``. Returns
+        ``[{id, canonical_name}, ...]`` for core-api's LLM embed loop."""
+        fleet_clause = "AND fleet_id = :fleet_id" if fleet_id else ""
+        async with get_read_session() as session:
+            rows = (
+                await session.execute(
+                    text(f"""
+                        SELECT id, canonical_name
+                        FROM entities
+                        WHERE tenant_id = :tenant_id
+                          AND name_embedding IS NULL
+                          {fleet_clause}
+                        LIMIT :batch_size
+                    """),
+                    {
+                        "tenant_id": tenant_id,
+                        **({"fleet_id": fleet_id} if fleet_id else {}),
+                        "batch_size": batch_size,
+                    },
+                )
+            ).all()
+        return [{"id": str(eid), "canonical_name": canonical_name} for eid, canonical_name in rows]
+
+    async def entity_set_embeddings(
+        self,
+        *,
+        tenant_id: str,
+        updates: list[dict],
+    ) -> int:
+        """Write back computed name embeddings (write half of backfill).
+
+        Ports B3 verbatim: a Core ``update(Entity.__table__)`` executemany — NOT
+        ``update(Entity)`` (ORM bulk-by-PK requires ``id`` in each dict →
+        InvalidRequestError, prod 2026-06-16). Each update is
+        ``{"id": <uuid str>, "embedding": [float, ...]}``; tenant-scoped. Returns the
+        count of rows written (``len(updates)``)."""
+        if not updates:
+            return 0
+        params = [{"eid": UUID(u["id"]), "emb": u["embedding"]} for u in updates]
+        async with get_session() as session:
+            await session.execute(
+                # Target the Core ``entities`` table, NOT the ORM-mapped ``Entity``.
+                # ``session.execute(update(Entity), <list of param dicts>)`` routes to
+                # SQLAlchemy's "ORM Bulk UPDATE by Primary Key", which requires every
+                # dict to carry the PK column ``id`` — but our dicts key the PK off a
+                # custom ``eid`` bindparam in the WHERE clause, so that path raised
+                # ``InvalidRequestError: No primary key value supplied for column(s)
+                # entities.id`` (prod 2026-06-16). ``update(Entity.__table__)`` is a
+                # plain Core executemany UPDATE that honours the custom bindparams and
+                # has no ORM bulk-by-PK or session-synchronisation behaviour at all.
+                sql_update(Entity.__table__)
+                .where(
+                    Entity.__table__.c.id == bindparam("eid"),
+                    Entity.__table__.c.tenant_id == tenant_id,
+                )
+                .values(name_embedding=bindparam("emb")),
+                params,
+            )
+        return len(updates)
 
     # ══════════════════════════════════════════════════════════════════════
     #  AGENTS

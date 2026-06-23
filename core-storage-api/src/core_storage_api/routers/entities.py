@@ -19,6 +19,25 @@ router = APIRouter(prefix="/entities", tags=["Entities"])
 _svc = PostgresService()
 
 
+def _require(body: dict, key: str) -> str:
+    """Fail-closed required-field guard (mirrors evolve.py)."""
+    val = body.get(key)
+    if not val:
+        raise HTTPException(status_code=422, detail=f"{key} is required")
+    return val
+
+
+def _require_number(body: dict, key: str) -> float:
+    """Fail-closed numeric guard — 422 on missing / non-numeric.
+
+    ``bool`` is a subclass of ``int`` but is never a valid tuning value here,
+    so reject it explicitly."""
+    val = body.get(key)
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise HTTPException(status_code=422, detail=f"{key} (number) is required")
+    return float(val)
+
+
 def _validate_input_idxs(items: list[dict]) -> None:
     """Ensure each bulk-endpoint item has a unique, in-range ``input_idx``.
 
@@ -458,6 +477,133 @@ async def find_orphaned_entities(tenant_id: str) -> list[dict]:
 async def find_broken_entity_links(tenant_id: str) -> list[dict]:
     rows = await _svc.entity_find_broken_links(tenant_id, fleet_id=None)
     return [{"memory_id": str(row[0]), "entity_id": str(row[1])} for row in rows]
+
+
+# ------------------------------------------------------------------
+# Entity-linking pipeline (Fix 2 Ph6) — coarse run-op endpoints that
+# fold the four core-api entity-linking steps' direct DB access behind
+# HTTP. Each validates its OWN contract (don't trust core-api): 422 on
+# missing tenant_id / non-numeric tuning params / non-list inputs. All
+# tuning constants travel in the body (storage must not import core_api).
+# Placed ABOVE the parameterised ``/{entity_id}`` routes so the literal
+# paths win the match.
+# ------------------------------------------------------------------
+
+
+@router.post("/resolve")
+async def resolve_entities(request: Request) -> dict:
+    """Merge duplicate entities (the full ``resolve_entities`` step) in ONE
+    atomic txn with a SAVEPOINT per duplicate.
+
+    Body ``{tenant_id, fleet_id?, batch_size, threshold, candidate_limit}``.
+    Returns ``{merge_count, clusters, cluster_errors, merged_entity_ids}``."""
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    batch_size = int(_require_number(body, "batch_size"))
+    threshold = _require_number(body, "threshold")
+    candidate_limit = int(_require_number(body, "candidate_limit"))
+    return await _svc.entity_resolve_duplicates(
+        tenant_id=tenant_id,
+        fleet_id=body.get("fleet_id"),
+        batch_size=batch_size,
+        threshold=threshold,
+        candidate_limit=candidate_limit,
+    )
+
+
+@router.post("/discover-cross-links")
+async def discover_cross_links(request: Request) -> dict:
+    """Link under-connected memories to similar entities (targeted + batch),
+    ONE atomic txn.
+
+    Body ``{tenant_id, fleet_id?, batch_size, threshold, text_verify,
+    target_memory_ids?}``. A non-empty ``target_memory_ids`` selects targeted
+    mode. Returns ``{links_created}``. 422 on a malformed UUID in
+    ``target_memory_ids`` (surfaced as a clean error instead of a 500 from the
+    ``ANY(CAST(... AS uuid[]))`` cast)."""
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    batch_size = int(_require_number(body, "batch_size"))
+    threshold = _require_number(body, "threshold")
+    target_memory_ids = body.get("target_memory_ids")
+    if target_memory_ids is not None:
+        if not isinstance(target_memory_ids, list):
+            raise HTTPException(status_code=422, detail="target_memory_ids (list) is required")
+        try:
+            for mid in target_memory_ids:
+                UUID(str(mid))
+        except (ValueError, AttributeError) as exc:
+            raise HTTPException(status_code=422, detail=f"invalid target_memory_ids: {exc}") from exc
+    return await _svc.entity_discover_cross_links(
+        tenant_id=tenant_id,
+        fleet_id=body.get("fleet_id"),
+        batch_size=batch_size,
+        threshold=threshold,
+        text_verify=bool(body.get("text_verify", True)),
+        target_memory_ids=target_memory_ids,
+    )
+
+
+@router.post("/infer-relations")
+async def infer_relations(request: Request) -> dict:
+    """Infer 'related_to' relations from co-occurrence (the
+    ``infer_relations`` step), ONE atomic txn.
+
+    Body ``{tenant_id, fleet_id?, batch_size, min_cooccurrence,
+    reinforce_delta, max_relation_weight}``. Returns
+    ``{relations_created, relations_reinforced}``."""
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    batch_size = int(_require_number(body, "batch_size"))
+    min_cooccurrence = int(_require_number(body, "min_cooccurrence"))
+    reinforce_delta = _require_number(body, "reinforce_delta")
+    max_relation_weight = _require_number(body, "max_relation_weight")
+    return await _svc.entity_infer_relations(
+        tenant_id=tenant_id,
+        fleet_id=body.get("fleet_id"),
+        batch_size=batch_size,
+        min_cooccurrence=min_cooccurrence,
+        reinforce_delta=reinforce_delta,
+        max_relation_weight=max_relation_weight,
+    )
+
+
+@router.post("/list-null-embeddings")
+async def list_null_embeddings(request: Request) -> dict:
+    """Entities needing a name embedding (read half of backfill).
+
+    Body ``{tenant_id, fleet_id?, batch_size}``. Returns
+    ``{rows:[{id, canonical_name}, ...]}``."""
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    batch_size = int(_require_number(body, "batch_size"))
+    rows = await _svc.entity_list_null_embeddings(
+        tenant_id=tenant_id,
+        fleet_id=body.get("fleet_id"),
+        batch_size=batch_size,
+    )
+    return {"rows": rows}
+
+
+@router.post("/set-embeddings")
+async def set_embeddings(request: Request) -> dict:
+    """Write back computed name embeddings (write half of backfill), ONE
+    atomic txn.
+
+    Body ``{tenant_id, updates:[{id, embedding:[float,...]}, ...]}``. Returns
+    ``{backfill_count}``. 422 on a malformed ``id`` UUID in ``updates``."""
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    updates = body.get("updates")
+    if not isinstance(updates, list):
+        raise HTTPException(status_code=422, detail="updates (list) is required")
+    try:
+        for u in updates:
+            UUID(str(u["id"]))
+    except (ValueError, AttributeError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"invalid updates: {exc}") from exc
+    backfill_count = await _svc.entity_set_embeddings(tenant_id=tenant_id, updates=updates)
+    return {"backfill_count": backfill_count}
 
 
 # ------------------------------------------------------------------
