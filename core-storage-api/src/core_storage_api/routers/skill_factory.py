@@ -18,17 +18,11 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
 
+from core_storage_api.routers._validation import _require
 from core_storage_api.services.postgres_service import PostgresService
 
 router = APIRouter(tags=["SkillFactory"])
 _svc = PostgresService()
-
-
-def _require(body: dict, key: str) -> str:
-    val = body.get(key)
-    if not val:
-        raise HTTPException(status_code=422, detail=f"{key} is required")
-    return val
 
 
 def _parse_window(body: dict) -> tuple[datetime, datetime]:

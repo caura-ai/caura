@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
+from core_storage_api.routers._validation import _require, _require_number
 from core_storage_api.services.postgres_service import PostgresService
 
 router = APIRouter(tags=["Evolve"])
@@ -34,13 +35,6 @@ _svc = PostgresService()
 # is an independent service and must not depend on the core-api package. Keep in
 # sync if the scope vocabulary changes.
 _VALID_SCOPES = {"agent", "fleet", "all"}
-
-
-def _require(body: dict, key: str) -> str:
-    val = body.get(key)
-    if not val:
-        raise HTTPException(status_code=422, detail=f"{key} is required")
-    return val
 
 
 @router.post("/evolve/filter-by-scope")
@@ -98,15 +92,15 @@ async def evolve_apply_weights(request: Request) -> dict:
     ids = body.get("ids")
     if not isinstance(ids, list):
         raise HTTPException(status_code=422, detail="ids (list) is required")
-    for key in ("delta", "floor", "cap"):
-        if not isinstance(body.get(key), (int, float)):
-            raise HTTPException(status_code=422, detail=f"{key} (number) is required")
+    delta = _require_number(body, "delta")
+    floor = _require_number(body, "floor")
+    cap = _require_number(body, "cap")
     return await _svc.evolve_apply_weights(
         tenant_id=tenant_id,
         ids=ids,
-        delta=float(body["delta"]),
-        floor=float(body["floor"]),
-        cap=float(body["cap"]),
+        delta=delta,
+        floor=floor,
+        cap=cap,
         rule_id=body.get("rule_id"),
         outcome_id=body.get("outcome_id"),
     )

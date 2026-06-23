@@ -6,6 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 
+from core_storage_api.routers._validation import _require, _require_number
 from core_storage_api.schemas import (
     ENTITY_FIELDS,
     MEMORY_ENTITY_LINK_FIELDS,
@@ -17,25 +18,6 @@ from core_storage_api.services.postgres_service import PostgresService
 
 router = APIRouter(prefix="/entities", tags=["Entities"])
 _svc = PostgresService()
-
-
-def _require(body: dict, key: str) -> str:
-    """Fail-closed required-field guard (mirrors evolve.py)."""
-    val = body.get(key)
-    if not val:
-        raise HTTPException(status_code=422, detail=f"{key} is required")
-    return val
-
-
-def _require_number(body: dict, key: str) -> float:
-    """Fail-closed numeric guard — 422 on missing / non-numeric.
-
-    ``bool`` is a subclass of ``int`` but is never a valid tuning value here,
-    so reject it explicitly."""
-    val = body.get(key)
-    if isinstance(val, bool) or not isinstance(val, (int, float)):
-        raise HTTPException(status_code=422, detail=f"{key} (number) is required")
-    return float(val)
 
 
 def _validate_input_idxs(items: list[dict]) -> None:
