@@ -720,6 +720,24 @@ async def get_type_distribution(
     return {"type_distribution": stats.get("type_distribution", {})}
 
 
+@router.get("/entity-coverage")
+async def get_entity_coverage(
+    tenant_id: str,
+    fleet_id: str | None = None,
+) -> dict:
+    """Crystallizer entity-extraction coverage: distinct memories with >=1 entity
+    link. The caller divides by total memories for the pct."""
+    count = await _svc.memory_entity_coverage_count(tenant_id, fleet_id)
+    return {"memories_with_entities": count}
+
+
+@router.get("/audit-usage")
+async def get_audit_usage(tenant_id: str) -> dict:
+    """Crystallizer usage metrics from audit_log: top agent activity + peak
+    hours. (search_write_ratio is omitted — no usage_counters in OSS.)"""
+    return await _svc.memory_audit_usage_stats(tenant_id)
+
+
 @router.get("/recent")
 async def get_recent_memories(
     tenant_id: str,

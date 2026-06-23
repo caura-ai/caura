@@ -2155,6 +2155,93 @@ class PostgresService:
             result = await session.execute(stmt)
             return result.scalar() or 0
 
+    async def memory_entity_coverage_count(
+        self,
+        tenant_id: str,
+        fleet_id: str | None = None,
+    ) -> int:
+        """Count distinct memories that have at least one entity link.
+
+        Ports the crystallizer ``_compute_health`` cross-table COUNT; the
+        coverage pct is computed caller-side against total memories. The query
+        is a fully static string (no f-string interpolation) — fleet stays
+        optional via ``CAST(:fleet_id AS text) IS NULL``. The CAST is required
+        so asyncpg can type the bound NULL; a bare ``:fleet_id IS NULL`` raises
+        "could not determine data type of parameter" (CAURA-595 cast gotcha).
+        """
+        params: dict = {"tenant_id": tenant_id, "fleet_id": fleet_id}
+        async with get_read_session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT COUNT(DISTINCT mel.memory_id)
+                    FROM memory_entity_links mel
+                    JOIN memories m ON m.id = mel.memory_id
+                    WHERE m.tenant_id = :tenant_id
+                      AND (
+                          CAST(:fleet_id AS text) IS NULL
+                          OR m.fleet_id = CAST(:fleet_id AS text)
+                      )
+                      AND m.deleted_at IS NULL
+                    """
+                ),
+                params,
+            )
+            return result.scalar() or 0
+
+    async def memory_audit_usage_stats(self, tenant_id: str) -> dict:
+        """Agent-activity + peak-hours from ``audit_log`` (crystallizer usage).
+
+        Ports the two ``_compute_usage`` audit_log queries. The
+        ``search_write_ratio`` query is intentionally NOT ported — its
+        ``usage_counters`` table does not exist in the OSS schema.
+
+        Tweaks vs the source query, all scoping to memory-attributed activity
+        without changing real totals: ``agent_id IS NOT NULL`` drops the
+        meaningless null-agent group, the ``searches`` FILTER is scoped to
+        ``resource_type = 'memory'`` for symmetry with ``writes``, and
+        ``peak_hours`` is likewise scoped to ``resource_type = 'memory'`` so
+        non-memory events (entity extraction, etc.) can't distort the top hours.
+        """
+        async with get_read_session() as session:
+            agents = await session.execute(
+                text(
+                    """
+                    SELECT a.agent_id,
+                           COUNT(*) FILTER (
+                               WHERE a.action = 'create' AND a.resource_type = 'memory'
+                           ) AS writes,
+                           COUNT(*) FILTER (
+                               WHERE a.action = 'search' AND a.resource_type = 'memory'
+                           ) AS searches
+                    FROM audit_log a
+                    WHERE a.tenant_id = :tenant_id AND a.agent_id IS NOT NULL
+                    GROUP BY a.agent_id
+                    ORDER BY writes DESC
+                    LIMIT 20
+                    """
+                ),
+                {"tenant_id": tenant_id},
+            )
+            agent_activity = [
+                {"agent_id": row[0], "writes": row[1], "searches": row[2]} for row in agents.all()
+            ]
+            hours = await session.execute(
+                text(
+                    """
+                    SELECT EXTRACT(hour FROM a.created_at)::int AS hr, COUNT(*) AS cnt
+                    FROM audit_log a
+                    WHERE a.tenant_id = :tenant_id AND a.resource_type = 'memory'
+                    GROUP BY hr
+                    ORDER BY cnt DESC
+                    LIMIT 3
+                    """
+                ),
+                {"tenant_id": tenant_id},
+            )
+            peak_hours = [{"hour": row[0], "count": row[1]} for row in hours.all()]
+        return {"agent_activity": agent_activity, "peak_hours": peak_hours}
+
     async def memory_count_all(self) -> int:
         # Exclude soft-deleted rows so the public counter matches the live,
         # queryable footprint — same predicate every other count in this
