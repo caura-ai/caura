@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp as ASGIApplication
 from starlette.types import Receive, Scope, Send
 
-from common.structlog_config import configure_logging
+from common.structlog_config import configure_logging, reroute_third_party_loggers
 from core_api.config import settings as app_settings
 
 # Must run before any other module-level `logging.getLogger(...)` call emits
@@ -114,6 +114,17 @@ class SecurityHeadersMiddleware:
 
 @asynccontextmanager
 async def lifespan(app):
+    # Re-route third-party loggers (uvicorn / fastmcp / mcp / slowapi) to the
+    # root handler now that they're all imported. ``configure_logging()`` at
+    # import time (above) already runs this routing, but those libraries are
+    # imported AFTER that call (slowapi / mcp_server below, uvicorn by the
+    # server) — so the import-time pass no-ops for them (it logs a "rerouting
+    # was a no-op" warning) and their records never reach the JSON/GCP handler.
+    # Most consequentially, FastMCP's "Error executing tool ..." tool-error
+    # lines were invisible in prod logs. The re-route is idempotent, so this
+    # post-import re-run from the ASGI lifespan startup safely routes them.
+    reroute_third_party_loggers()
+
     # Increase default thread pool for concurrent LLM calls via asyncio.to_thread()
     import asyncio as _aio
     from concurrent.futures import ThreadPoolExecutor

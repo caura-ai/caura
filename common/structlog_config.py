@@ -395,7 +395,7 @@ def _route_third_party_to_root() -> None:
         # ``Config.configure_logging`` runs at server start).
         if not lg.handlers and lg.propagate:
             logging.getLogger(__name__).warning(
-                "logger %r has no own handlers at rerouting time; rerouting was a no-op (library may not be imported yet — call _route_third_party_to_root from an ASGI lifespan startup handler if this is a uvicorn-fronted service)",
+                "logger %r has no own handlers at rerouting time; rerouting was a no-op (library may not be imported yet — call reroute_third_party_loggers from an ASGI lifespan startup handler if this is a uvicorn-fronted service)",
                 name,
             )
             continue
@@ -427,6 +427,19 @@ def _route_third_party_to_root() -> None:
         # preserved.
         if had_own_handlers:
             lg.setLevel(logging.NOTSET)
+
+
+def reroute_third_party_loggers() -> None:
+    """Public entry point to (re-)route third-party loggers to the root handler.
+
+    ``configure_logging`` already calls this routing at import time, but on a
+    uvicorn-fronted service the third-party libraries (uvicorn / fastmcp / mcp
+    / slowapi) usually aren't imported yet at that point, so that pass no-ops
+    for them. Call this from the ASGI lifespan startup — after those libraries
+    are imported — to route them. Idempotent (guarded by the per-logger
+    snapshot), so the re-call is safe.
+    """
+    _route_third_party_to_root()
 
 
 def _reset_for_testing() -> None:
