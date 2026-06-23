@@ -28,6 +28,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import text
 
+from common.constants import VECTOR_DIM
 from common.embedding.providers.fake import fake_embedding
 from common.models import Entity, Memory, MemoryEntityLink, Relation
 from core_storage_api.services.postgres_service import get_session
@@ -562,5 +563,63 @@ async def test_set_embeddings_invalid_uuid_in_updates_422(storage_http):
     resp = await storage_http.post(
         f"{_PREFIX}/set-embeddings",
         json={"tenant_id": "t", "updates": [{"id": "not-a-uuid", "embedding": [0.1]}]},
+    )
+    assert resp.status_code == 422
+
+
+async def test_set_embeddings_missing_embedding_422(storage_http):
+    # valid id but no ``embedding`` key would KeyError -> 500 in the service;
+    # the router fail-closes to 422.
+    resp = await storage_http.post(
+        f"{_PREFIX}/set-embeddings",
+        json={"tenant_id": "t", "updates": [{"id": "00000000-0000-0000-0000-000000000001"}]},
+    )
+    assert resp.status_code == 422
+
+
+async def test_set_embeddings_non_list_embedding_422(storage_http):
+    resp = await storage_http.post(
+        f"{_PREFIX}/set-embeddings",
+        json={"tenant_id": "t", "updates": [{"id": "00000000-0000-0000-0000-000000000001", "embedding": "nope"}]},
+    )
+    assert resp.status_code == 422
+
+
+async def test_set_embeddings_non_numeric_embedding_422(storage_http):
+    # a correct-length list of non-numbers passes isinstance(list) but 500s at
+    # the pgvector codec — the router must reject it as 422.
+    resp = await storage_http.post(
+        f"{_PREFIX}/set-embeddings",
+        json={"tenant_id": "t", "updates": [{"id": "00000000-0000-0000-0000-000000000001", "embedding": ["a"] * VECTOR_DIM}]},
+    )
+    assert resp.status_code == 422
+
+
+async def test_set_embeddings_bool_embedding_422(storage_http):
+    # bool is an int subclass — without an explicit carve-out [true,...] would
+    # pass the numeric check and either 500 or silently store 0|1. Must 422.
+    resp = await storage_http.post(
+        f"{_PREFIX}/set-embeddings",
+        json={"tenant_id": "t", "updates": [{"id": "00000000-0000-0000-0000-000000000001", "embedding": [True] * VECTOR_DIM}]},
+    )
+    assert resp.status_code == 422
+
+
+async def test_set_embeddings_empty_embedding_422(storage_http):
+    # an empty embedding is a dimension mismatch (len 0 != VECTOR_DIM) -> 500 at
+    # the DB layer; the router 422s it.
+    resp = await storage_http.post(
+        f"{_PREFIX}/set-embeddings",
+        json={"tenant_id": "t", "updates": [{"id": "00000000-0000-0000-0000-000000000001", "embedding": []}]},
+    )
+    assert resp.status_code == 422
+
+
+async def test_set_embeddings_wrong_dimension_embedding_422(storage_http):
+    # a numeric list of the wrong length hits PG's vector(VECTOR_DIM) check -> 500;
+    # the router 422s it.
+    resp = await storage_http.post(
+        f"{_PREFIX}/set-embeddings",
+        json={"tenant_id": "t", "updates": [{"id": "00000000-0000-0000-0000-000000000001", "embedding": [0.1, 0.2, 0.3]}]},
     )
     assert resp.status_code == 422

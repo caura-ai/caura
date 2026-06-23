@@ -6,6 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 
+from common.constants import VECTOR_DIM
 from core_storage_api.routers._validation import _require, _require_number
 from core_storage_api.schemas import (
     ENTITY_FIELDS,
@@ -573,7 +574,8 @@ async def set_embeddings(request: Request) -> dict:
     atomic txn.
 
     Body ``{tenant_id, updates:[{id, embedding:[float,...]}, ...]}``. Returns
-    ``{backfill_count}``. 422 on a malformed ``id`` UUID in ``updates``."""
+    ``{backfill_count}``. 422 on a malformed ``id`` UUID, or an ``embedding``
+    that isn't a list of exactly ``VECTOR_DIM`` numbers, in ``updates``."""
     body: dict = await request.json()
     tenant_id = _require(body, "tenant_id")
     updates = body.get("updates")
@@ -582,6 +584,20 @@ async def set_embeddings(request: Request) -> dict:
     try:
         for u in updates:
             UUID(str(u["id"]))
+            # Validate ``embedding`` fully: the service does ``u["embedding"]``
+            # (KeyError) and binds it straight to the ``vector(VECTOR_DIM)``
+            # column, so anything malformed reaches the asyncpg/pgvector codec
+            # and 500s otherwise. Reject: missing key, non-list, wrong length
+            # (incl. empty), non-numeric elements, and bools (``bool`` is an
+            # ``int`` subclass that serialises wrong / silently stores 0|1 —
+            # same carve-out as ``_require_number``).
+            emb = u["embedding"]
+            if (
+                not isinstance(emb, list)
+                or len(emb) != VECTOR_DIM
+                or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in emb)
+            ):
+                raise ValueError(f"embedding must be a list of {VECTOR_DIM} numbers")
     except (ValueError, AttributeError, KeyError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=f"invalid updates: {exc}") from exc
     backfill_count = await _svc.entity_set_embeddings(tenant_id=tenant_id, updates=updates)
