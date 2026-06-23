@@ -73,7 +73,9 @@ from common.models import (
     MemoryEntityLink,
     Relation,
 )
+from common.models.capability_usage import CapabilityUsage
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
+from common.models.recall_log import RecallCandidate, RecallEvent
 from common.organization_settings_merge import deep_merge, diff_settings
 from core_storage_api.observability import db_measure
 from core_storage_api.schemas import MEMORY_LIST_FIELDS, orm_to_dict
@@ -2627,11 +2629,12 @@ class PostgresService:
     # G) Recall tracking
     # ------------------------------------------------------------------
 
-    async def memory_increment_recall(self, memory_ids: list[UUID]) -> None:
+    async def memory_increment_recall(self, memory_ids: list[UUID]) -> int:
+        """Bump recall_count/last_recalled_at by id; returns rows actually updated."""
         if not memory_ids:
-            return
+            return 0
         async with get_session() as session:
-            await session.execute(
+            result = await session.execute(
                 sql_update(Memory)
                 .where(Memory.id.in_(memory_ids))
                 .values(
@@ -2639,6 +2642,97 @@ class PostgresService:
                     last_recalled_at=func.now(),
                 )
             )
+            # Real rowcount, not the input count — stale/deleted ids that match
+            # no row must not inflate the reported "updated" total.
+            return result.rowcount or 0  # type: ignore[attr-defined]
+
+    async def recall_log_write(self, event: dict, candidates: list[dict]) -> str:
+        """Persist one ``recall_event`` + N ``recall_candidate`` rows, ONE txn.
+
+        Ports the fire-and-forget write that used to live in core-api's
+        ``log_recall_event._persist`` (a direct ``async_session`` insert that
+        regressed the storage-boundary rule). The ``event`` dict carries the
+        row's own ``tenant_id`` (``recall_event`` is tenant-scoped by that
+        column); each candidate is stamped with the freshly-assigned
+        ``recall_event_id`` so the two inserts share one transaction. Returns
+        the new ``recall_event.id`` as a string.
+
+        ``event``/``candidates`` keys must be valid model columns — the router
+        validates ``tenant_id``/``source`` presence up front; any unexpected
+        key would raise a clean ``TypeError`` from the model constructor here.
+        """
+        async with get_session() as session:
+            ev = RecallEvent(**event)
+            session.add(ev)
+            # flush assigns ev.id (server_default gen_random_uuid()) before the
+            # candidate rows reference it — both still inside the single
+            # ``get_session`` transaction that commits on context exit.
+            await session.flush()
+            for c in candidates:
+                session.add(RecallCandidate(recall_event_id=ev.id, **c))
+            return str(ev.id)
+
+    # ------------------------------------------------------------------
+    # G2) Doc-hash idempotency (ingest write-path gate)
+    # ------------------------------------------------------------------
+
+    async def find_prior_ingest_by_doc_hash(self, tenant_id: str, doc_hash: str) -> list[Memory]:
+        """Return memories from the most-recent prior ingest of identical content.
+
+        Ports ``ingest_service._find_prior_ingest_by_doc_hash`` verbatim: a
+        non-deleted, tenant-scoped row whose metadata carries the same
+        ``doc_hash`` and was tagged ``source="ingest"``. When several runs
+        match, only the memories of the newest ``run_id`` are returned.
+
+        Runs on ``get_session`` (the WRITER), NOT ``get_read_session``: this is
+        a write-path idempotency gate — replica lag would miss a just-committed
+        prior ingest and re-ingest the same document. ``metadata_->>'key'`` text
+        extraction matches the source's ``.astext`` filter.
+        """
+        async with get_session() as session:
+            stmt = (
+                select(Memory)
+                .where(
+                    Memory.tenant_id == tenant_id,
+                    Memory.metadata_["doc_hash"].astext == doc_hash,
+                    Memory.metadata_["source"].astext == "ingest",
+                    Memory.deleted_at.is_(None),
+                )
+                .order_by(Memory.created_at.desc())
+            )
+            result = await session.execute(stmt)
+            rows: list[Memory] = list(result.scalars().all())
+        if not rows:
+            return []
+        # Newest run wins (top-level ``run_id`` column is the single source of
+        # truth for batch identity). Guard the NULL case: ``r.run_id == None`` is
+        # truthy in Python, so an anonymous (run_id IS NULL) newest row would
+        # otherwise collapse EVERY null-run_id ingest across runs into one
+        # result — return just the single newest row instead.
+        newest_run_id = rows[0].run_id
+        if newest_run_id is None:
+            return [rows[0]]
+        return [r for r in rows if r.run_id == newest_run_id]
+
+    # ------------------------------------------------------------------
+    # G3) Capability-usage analytics flush (cross-tenant, RLS-free)
+    # ------------------------------------------------------------------
+
+    async def capability_usage_insert(self, rows: list[dict]) -> int:
+        """Bulk-append adoption-counter rows to ``capability_usage``, ONE txn.
+
+        Ports core-api's ``capability_usage._default_flush``. This table is
+        intentionally CROSS-TENANT / RLS-free (migration 023): one flush batch
+        carries many tenants' counters, so NO per-tenant scoping is applied —
+        each row carries its own ``tenant_id`` grouping dimension. Append-only
+        (no unique constraint, no upsert); consumers SUM at query time. Returns
+        the number of rows inserted.
+        """
+        if not rows:
+            return 0
+        async with get_session() as session:
+            session.add_all([CapabilityUsage(**r) for r in rows])
+        return len(rows)
 
     # ------------------------------------------------------------------
     # H) Entity links (memory side)

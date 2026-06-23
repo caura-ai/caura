@@ -13,6 +13,7 @@ from common.events.lifecycle_purge_request import (
     MEMORY_RETENTION_MIN_DAYS,
 )
 from core_storage_api.observability import bind_timer, log_request
+from core_storage_api.routers._validation import _require
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import PostgresService
 
@@ -1161,6 +1162,99 @@ async def redistribute(request: Request) -> dict:
         memory_ids=memory_ids,
         target_agent_id=target_agent_id,
     )
+
+
+# ------------------------------------------------------------------
+# Fix 2 final-cleanup (PR1) — recall tracking + ingest idempotency.
+#
+# Three literal-path endpoints folding the last core-api direct-DB sites
+# behind HTTP. Each validates its OWN contract (don't trust core-api):
+# 422 on missing/non-list/missing-field bodies. MUST stay ABOVE the
+# parameterised ``/{memory_id}`` block so segments like ``increment-recall``
+# / ``recall-log`` / ``prior-ingest-by-doc-hash`` aren't parsed as a UUID.
+# ------------------------------------------------------------------
+
+
+@router.post("/increment-recall")
+async def increment_recall(request: Request) -> dict:
+    """Bump ``recall_count`` + ``last_recalled_at`` for many memories by id.
+
+    Exposes the existing ``PostgresService.memory_increment_recall`` (a by-id
+    UPDATE; no tenant scope — matches its prior in-process semantics from
+    core-api's ``track_recalls`` hook). Body: ``{"memory_ids": [str,...]}`` →
+    ``{"updated": int}``. Fail-closed 422 if ``memory_ids`` is missing/not a
+    list; a malformed UUID 422s (mirrors the evolve/entities validation
+    pattern) rather than 500ing inside the service.
+    """
+    body: dict = await request.json()
+    raw_ids = body.get("memory_ids")
+    if not isinstance(raw_ids, list):
+        raise HTTPException(status_code=422, detail="'memory_ids' must be a list")
+    if not raw_ids:
+        return {"updated": 0}
+    try:
+        memory_ids = [UUID(str(mid)) for mid in raw_ids]
+    except (ValueError, AttributeError) as exc:
+        raise HTTPException(status_code=422, detail=f"invalid UUID in memory_ids: {exc}") from exc
+    updated = await _svc.memory_increment_recall(memory_ids)
+    return {"updated": updated}
+
+
+@router.post("/recall-log")
+async def recall_log(request: Request) -> dict:
+    """Persist one ``recall_event`` + its ``recall_candidate`` rows, ONE txn.
+
+    Ports core-api's ``log_recall_event._persist`` write. Body: ``{"event":
+    {tenant_id, source, ...}, "candidates": [{rank, memory_id, ...}, ...]}`` →
+    ``{"recall_event_id": str}``. The event carries its own ``tenant_id``
+    (``recall_event`` is tenant-scoped by that column). Fail-closed 422 on a
+    missing ``event`` object or a missing ``event.tenant_id`` / ``event.source``
+    (both NOT NULL columns); ``candidates`` defaults to ``[]`` when absent.
+    """
+    body: dict = await request.json()
+    event = body.get("event")
+    if not isinstance(event, dict):
+        raise HTTPException(status_code=422, detail="'event' object is required")
+    _require(event, "tenant_id")
+    _require(event, "source")
+    candidates = body.get("candidates")
+    if candidates is None:
+        candidates = []
+    elif not isinstance(candidates, list):
+        # Explicit None sentinel — ``... or []`` would coerce falsy non-None
+        # values (0, False, "") to [] and slip them past this guard.
+        raise HTTPException(status_code=422, detail="'candidates' must be a list")
+    try:
+        recall_event_id = await _svc.recall_log_write(event, candidates)
+    except (TypeError, KeyError) as exc:
+        # An unexpected/missing column in event/candidates would raise from the
+        # model constructor — surface as a client 422 rather than a 500. Generic
+        # detail so raw payload contents don't echo across the boundary.
+        raise HTTPException(
+            status_code=422, detail=f"invalid recall-log payload: {type(exc).__name__}"
+        ) from exc
+    return {"recall_event_id": recall_event_id}
+
+
+@router.post("/prior-ingest-by-doc-hash")
+async def prior_ingest_by_doc_hash(request: Request) -> dict:
+    """Doc-hash idempotency lookup for the ingest write path.
+
+    Ports ``ingest_service._find_prior_ingest_by_doc_hash``: returns the
+    memories of the most-recent prior ingest of identical content for this
+    tenant (``metadata_->>'doc_hash'`` match, ``source='ingest'``, not deleted),
+    or ``[]``. Body: ``{"tenant_id": str, "doc_hash": str}`` → ``{"rows":
+    [memory dicts]}``. POST (not GET) keeps body-based validation consistent
+    with the sibling endpoints. Fail-closed 422 on a missing field. Rows use
+    ``MEMORY_LIST_FIELDS`` (no embedding/search_vector) — ``ingest_preview``
+    consumes ``run_id``, ``content``, ``memory_type``, ``source_uri`` and
+    ``metadata_`` (salience), none of which is the vector.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    doc_hash = _require(body, "doc_hash")
+    rows = await _svc.find_prior_ingest_by_doc_hash(tenant_id, doc_hash)
+    return {"rows": [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in rows]}
 
 
 # ------------------------------------------------------------------

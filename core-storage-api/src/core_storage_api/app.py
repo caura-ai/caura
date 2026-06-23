@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 from collections.abc import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from common.structlog_config import configure_logging
 from core_storage_api.config import settings
@@ -28,6 +30,7 @@ from core_storage_api.middleware import RejectWritesOnReaderMiddleware
 from core_storage_api.routers import (
     agents_router,
     audit_router,
+    capability_usage_router,
     debug_router,
     documents_router,
     entities_router,
@@ -83,6 +86,14 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
         redirect_slashes=False,
     )
+
+    @app.exception_handler(json.JSONDecodeError)
+    async def _malformed_json_handler(request: Request, exc: json.JSONDecodeError) -> JSONResponse:
+        # Every router parses the body with a bare ``await request.json()``;
+        # malformed JSON would otherwise surface as an unhandled 500. Convert it
+        # to a fail-closed 422 app-wide so the body-validation contract holds at
+        # the transport layer too (rather than guarding 100+ call sites).
+        return JSONResponse(status_code=422, content={"detail": "request body must be valid JSON"})
 
     # Order matters: Starlette executes middlewares in reverse registration
     # order (last added = outermost). Register the reader filter FIRST so
@@ -164,6 +175,11 @@ def create_app() -> FastAPI:
     # Behind the same private-VPC posture as everything else here —
     # not exposed via the gateway.
     app.include_router(debug_router, prefix=prefix)
+    # Fix 2 final-cleanup (PR1): adoption-counter flush, moved off core-api's
+    # direct DB pool. Intentionally cross-tenant / RLS-free (migration 023) —
+    # one flush batch carries many tenants' counters. core-api's in-process
+    # aggregator POSTs here on its flush interval via the storage_client.
+    app.include_router(capability_usage_router, prefix=prefix)
 
     return app
 

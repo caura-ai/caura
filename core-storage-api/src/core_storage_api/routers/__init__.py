@@ -1,5 +1,6 @@
 from core_storage_api.routers.agents import router as agents_router
 from core_storage_api.routers.audit import router as audit_router
+from core_storage_api.routers.capability_usage import router as capability_usage_router
 from core_storage_api.routers.debug import router as debug_router
 from core_storage_api.routers.documents import router as documents_router
 from core_storage_api.routers.entities import router as entities_router
@@ -23,6 +24,7 @@ from core_storage_api.routers.tenants import router as tenants_router
 __all__ = [
     "agents_router",
     "audit_router",
+    "capability_usage_router",
     "debug_router",
     "documents_router",
     "entities_router",
