@@ -277,7 +277,9 @@ async def _create_memory_pipeline(db: AsyncSession, data: MemoryCreate) -> Memor
             tenant_config=stm_config,
         )
         pipeline = build_stm_write_pipeline()
-        await pipeline.run(ctx)
+        result = await pipeline.run(ctx)
+        if result.failed:
+            raise HTTPException(status_code=500, detail="STM write pipeline failed unexpectedly")
         return ctx.data["stm_response"]
 
     # Resolve tenant config BEFORE building the pipeline
@@ -291,7 +293,9 @@ async def _create_memory_pipeline(db: AsyncSession, data: MemoryCreate) -> Memor
 
         # Phase 1: Enrichment (always runs)
         enrichment_pipeline = build_enrichment_pipeline()
-        await enrichment_pipeline.run(ctx)
+        enrichment_result = await enrichment_pipeline.run(ctx)
+        if enrichment_result.failed:
+            raise HTTPException(status_code=500, detail="Memory enrichment pipeline failed unexpectedly")
 
         fields = ctx.data["memory_fields"]
 
@@ -363,10 +367,21 @@ async def _create_memory_pipeline(db: AsyncSession, data: MemoryCreate) -> Memor
     _exc: BaseException | None = None
     try:
         try:
-            await pipeline.run(ctx)
+            result = await pipeline.run(ctx)
         except BaseException as e:
             _exc = e
             raise
+
+        # The runner records a failed step and STOPS without re-raising
+        # (runner.py breaks on StepResult(FAILED)), AND logs it with full
+        # traceback + step/timing. Surface it here instead of falling through
+        # to ``ctx.data["memory"]`` below, which would mask the real failure as
+        # a cryptic ``KeyError: 'memory'`` (e.g. an MCP write whose
+        # ``load_tenant_config`` step raised "requires a DB session"). No
+        # re-log — the runner already logged the failing step.
+        if result.failed:
+            _exc = HTTPException(status_code=500, detail="Memory write pipeline failed unexpectedly")
+            raise _exc
 
         memory = ctx.data["memory"]
         return _memory_to_out(
@@ -563,7 +578,9 @@ async def _handle_auto_chunk_from_ctx(db: AsyncSession, data: MemoryCreate, ctx:
     from core_api.pipeline.compositions.write import build_persist_pipeline
 
     persist_pipeline = build_persist_pipeline()
-    await persist_pipeline.run(ctx)
+    persist_result = await persist_pipeline.run(ctx)
+    if persist_result.failed:
+        raise HTTPException(status_code=500, detail="Memory write pipeline failed unexpectedly")
 
     memory = ctx.data["memory"]
     return _memory_to_out(
