@@ -125,7 +125,7 @@ class CheckSemanticDuplicate:
         # Surface candidates down to the JUDGE band so this step can
         # decide auto-reject vs judge-dispatch vs accept by tier.
         sem_dup = await _find_semantic_duplicate(
-            ctx.require_db,
+            ctx.db,  # storage-routed (ignores db) — tolerate the db=None STM path
             data.tenant_id,
             data.fleet_id,
             embedding,

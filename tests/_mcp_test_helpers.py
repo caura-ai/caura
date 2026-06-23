@@ -146,7 +146,12 @@ def mcp_env(monkeypatch):
 
     monkeypatch.setattr(mcp_server, "_check_auth", lambda: None)
     monkeypatch.setattr(mcp_server, "_get_tenant", lambda: tenant)
-    monkeypatch.setattr(mcp_server, "_mcp_session", fake_session)
+    # Fix 2 Ph5b (PR2): ``_mcp_session`` was deleted once ``memclaw_evolve`` —
+    # its last consumer — migrated to ``_no_db()``. Every MCP handler now opens
+    # ``_no_db()`` (yields None; storage-routed services carry tenant context
+    # explicitly). Patch it with the MagicMock-yielding session so handlers that
+    # still bind ``async with _no_db() as db`` get a harmless stand-in.
+    monkeypatch.setattr(mcp_server, "_no_db", fake_session)
 
     # Stub out usage metering so it doesn't hit the DB.
     monkeypatch.setattr(mcp_server, "check_and_increment", AsyncMock(return_value=None))

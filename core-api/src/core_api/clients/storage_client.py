@@ -1727,6 +1727,68 @@ class CoreStorageClient:
         )
 
     # =====================================================================
+    # Evolve (Fix 2 Ph5b, PR2)
+    # =====================================================================
+    #
+    # The scope-filter SELECT (read → replica; the filter is a pre-write
+    # visibility check and replica lag is harmless) and the atomic
+    # weight-adjust + rule→outcome backfill (write → primary, ONE txn). Each
+    # takes an explicit tenant_id (+ scope params) — there are no RLS GUCs
+    # server-side. The dedup / UUID-parse / cap / rounding / skip-reason logic
+    # stays client-side in ``evolve_service``; only the DB passes route here.
+
+    async def evolve_filter_by_scope(
+        self,
+        *,
+        tenant_id: str,
+        caller_agent_id: str,
+        fleet_id: str | None,
+        scope: str,
+        ids: list[str],
+    ) -> list[str]:
+        """Return the subset of ``ids`` the caller can touch under ``scope``."""
+        resp = await self._post(
+            "/evolve/filter-by-scope",
+            {
+                "tenant_id": tenant_id,
+                "caller_agent_id": caller_agent_id,
+                "fleet_id": fleet_id,
+                "scope": scope,
+                "ids": ids,
+            },
+            read=True,
+        )
+        return resp["allowed_ids"]  # type: ignore[index,return-value]
+
+    async def evolve_apply_weights(
+        self,
+        *,
+        tenant_id: str,
+        ids: list[str],
+        delta: float,
+        floor: float,
+        cap: float,
+        rule_id: str | None = None,
+        outcome_id: str | None = None,
+    ) -> dict:
+        """Clamp-adjust weights + (atomically) backfill the rule→outcome link;
+        primary write, ONE transaction. Returns
+        ``{adjustments:[{id, old_weight, new_weight}], backfilled}``."""
+        return await self._post(  # type: ignore[return-value]
+            "/evolve/apply-weights",
+            {
+                "tenant_id": tenant_id,
+                "ids": ids,
+                "delta": delta,
+                "floor": floor,
+                "cap": cap,
+                "rule_id": rule_id,
+                "outcome_id": outcome_id,
+            },
+            read=False,
+        )
+
+    # =====================================================================
     # Keystones (CAURA-000)
     # =====================================================================
     #

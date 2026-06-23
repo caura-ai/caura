@@ -23,7 +23,6 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field, ValidationError
-from sqlalchemy import text as sa_text
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
@@ -40,7 +39,6 @@ from core_api.constants import (
     VALID_SCOPES,
     VERSION,
 )
-from core_api.db.session import async_session
 from core_api.errors import code_for_status
 from core_api.pagination import decode_cursor, encode_cursor
 from core_api.schemas import (
@@ -426,35 +424,21 @@ def _check_write_scope() -> CallToolResult | None:
     return _READ_ONLY_ERROR
 
 
-@contextlib.asynccontextmanager
-async def _mcp_session():
-    """Session with RLS tenant context set from MCP auth."""
-    async with async_session() as session:
-        tenant_id = _get_tenant()
-        if tenant_id and tenant_id not in (_UNAUTH, _ADMIN, _NO_AUTH):
-            await session.execute(
-                sa_text("SELECT set_config('app.tenant_id', :tid, true)"),
-                {"tid": tenant_id},
-            )
-        else:
-            await session.execute(sa_text("SELECT set_config('app.tenant_id', '', true)"))
-        # Plumb the cross-tenant read set as a second GUC alongside
-        # ``app.tenant_id``. Deployments may extend RLS policies to honor
-        # it for reads; OSS-default deployments use the app-layer filter.
-        readable = _get_readable_tenants()
-        await session.execute(
-            sa_text("SELECT set_config('app.readable_tenant_ids', :csv, true)"),
-            {"csv": ",".join(readable) if readable else ""},
-        )
-        yield session
+# Fix 2 Ph5b (PR2 — evolve) removed the last ``_mcp_session()`` consumer
+# (``memclaw_evolve`` now opens ``_no_db()`` like every other migrated tool),
+# so the RLS-GUC session helper and its ``async_session`` import / ``sa_text``
+# helper were deleted. Every MCP tool is storage-routed; tenant isolation is
+# carried by explicit ``tenant_id`` / ``readable_tenant_ids`` arguments, NOT by
+# session-scoped GUCs.
 
 
 @contextlib.asynccontextmanager
 async def _no_db():
     """Yield ``None`` in place of a DB session.
 
-    Fix 2 Phase 4 routed the 9 ready MCP tools through the core-storage-api
-    HTTP client, so they no longer set RLS GUCs via ``_mcp_session()``. The
+    Fix 2 routed every MCP tool through the core-storage-api HTTP client, so
+    none set RLS GUCs via a session helper (the prior ``_mcp_session()`` was
+    deleted once ``memclaw_evolve`` migrated in Ph5b PR2). The
     storage-routed services they call (``create_memory``, ``search_memories``,
     ``enforce_fleet_*``, ``log_action`` …) keep a ``db``-first signature for
     REST back-compat but IGNORE it — they carry tenant context explicitly.
@@ -2598,10 +2582,12 @@ async def memclaw_evolve(
     # single ``_mcp_session()`` open across the rule-generation LLM
     # round-trip — multiple seconds during which a pooled DB connection
     # was pinned for work that is entirely network-bound to the LLM
-    # provider. Three-phase restructure (same pattern as insights):
-    #   1. session 1 — trust + usage gates, filter_by_scope, resolve_config
-    #   2. no DB     — _maybe_generate_rule (LLM)
-    #   3. session 2 — _apply_outcome_to_db (weights + persist + backfill + commit)
+    # provider. The three-phase split is retained, and post-Fix-2-Ph5b-PR2
+    # every phase is storage-routed (no pooled connection held):
+    #   1. ``_no_db`` — trust + usage gates, filter_by_scope, resolve_config
+    #   2. no DB      — _maybe_generate_rule (LLM)
+    #   3. ``_no_db`` — _apply_outcome_to_db (persist + weights + backfill;
+    #                   storage-committed, no local commit)
     from core_api.services.evolve_service import (
         _apply_outcome_to_db,
         _filter_by_scope,
@@ -2611,8 +2597,12 @@ async def memclaw_evolve(
     from core_api.services.organization_settings import resolve_config
 
     try:
-        # ── Phase 1: DB reads ──────────────────────────────────────
-        async with _mcp_session() as db:
+        # ── Phase 1: gates + storage-routed reads ──────────────────
+        # Fix 2 Ph5b (PR2): the trust/usage gates and the scope-filter read are
+        # storage-routed (``_no_db()`` ⇒ db=None) — ``_require_trust`` /
+        # ``check_and_increment`` ignore db and ``_filter_by_scope`` calls
+        # core-storage-api. No pooled DB connection is held.
+        async with _no_db() as db:
             # Mirror the REST evolve gate (and ``memclaw_insights`` above):
             # block unregistered agents on the write path so the
             # outcome/rule memories + audit-log rows have a real
@@ -2679,8 +2669,11 @@ async def memclaw_evolve(
             fleet_id,
         )
 
-        # ── Phase 3: persist + commit ──────────────────────────────
-        async with _mcp_session() as db:
+        # ── Phase 3: persist (storage-routed) ──────────────────────
+        # Fix 2 Ph5b (PR2): the rule/outcome create_memory writes + the atomic
+        # weight-adjust/backfill all route through core-storage-api, so there's
+        # no session to open or commit here (``_no_db()`` ⇒ db=None).
+        async with _no_db() as db:
             result = await _apply_outcome_to_db(
                 db,
                 tenant_id=tenant_id,

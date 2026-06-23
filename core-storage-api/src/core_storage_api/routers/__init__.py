@@ -3,6 +3,7 @@ from core_storage_api.routers.audit import router as audit_router
 from core_storage_api.routers.debug import router as debug_router
 from core_storage_api.routers.documents import router as documents_router
 from core_storage_api.routers.entities import router as entities_router
+from core_storage_api.routers.evolve import router as evolve_router
 from core_storage_api.routers.fleet import router as fleet_router
 from core_storage_api.routers.health import router as health_router
 from core_storage_api.routers.idempotency import router as idempotency_router
@@ -25,6 +26,7 @@ __all__ = [
     "debug_router",
     "documents_router",
     "entities_router",
+    "evolve_router",
     "fleet_router",
     "health_router",
     "idempotency_router",

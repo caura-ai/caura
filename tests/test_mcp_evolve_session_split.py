@@ -4,14 +4,18 @@ The handler previously held a single ``_mcp_session()`` open across
 the rule-generation LLM round-trip in ``_generate_rule``, pinning a
 pooled DB connection. The refactor splits the work into three phases:
 
-  1. Session 1 — trust + usage gates, ``_filter_by_scope``, resolve config.
-  2. No DB     — ``_maybe_generate_rule`` (LLM).
-  3. Session 2 — ``_apply_outcome_to_db`` (weights + persist + backfill + commit).
+  1. Phase 1 — trust + usage gates, ``_filter_by_scope``, resolve config.
+  2. No DB   — ``_maybe_generate_rule`` (LLM).
+  3. Phase 3 — ``_apply_outcome_to_db`` (persist + weights + backfill).
 
-This module asserts the timing invariant with a patched
-``_mcp_session`` capturing enter/exit events and a patched
-``_maybe_generate_rule`` recording its entry. A regression that
-re-merges phases 1+2 would flip the order and fail.
+Fix 2 Ph5b (PR2): all three phases are now storage-routed via ``_no_db()``
+(``db=None``) — the scope filter, gates, rule/outcome create, and the atomic
+weight-adjust/backfill go through core-storage-api, so no pooled DB connection
+is held at any point (``_mcp_session`` was deleted; evolve was its last
+consumer). This module still asserts the *phasing* invariant (phase-1 block
+closes BEFORE the LLM, phase-3 opens after) by patching the ``_no_db`` context
+manager to capture enter/exit events; a regression that re-merges phases 1+2
+around the LLM call would flip the order and fail.
 """
 
 from __future__ import annotations
@@ -48,13 +52,13 @@ async def _run_evolve_capturing_apply_kwargs(monkeypatch, *, related_ids, filter
 
     @asynccontextmanager
     async def _session():
-        yield MagicMock(name="db")
+        yield None
 
     async def _spy_apply(_db, **kwargs):
         captured.update(kwargs)
         return _APPLY_OUTCOME_RESULT
 
-    monkeypatch.setattr(mcp_server, "_mcp_session", _session)
+    monkeypatch.setattr(mcp_server, "_no_db", _session)
     monkeypatch.setattr(mcp_server, "_require_trust", AsyncMock(return_value=(3, False, None)))
     monkeypatch.setattr(mcp_server, "check_and_increment", AsyncMock())
     monkeypatch.setattr(
@@ -146,11 +150,11 @@ async def test_evolve_closes_first_session_before_llm(mcp_env, monkeypatch):
     async def _captured_session():
         events.append("session-enter")
         try:
-            yield MagicMock(name="db")
+            yield None
         finally:
             events.append("session-exit")
 
-    monkeypatch.setattr(mcp_server, "_mcp_session", _captured_session)
+    monkeypatch.setattr(mcp_server, "_no_db", _captured_session)
     monkeypatch.setattr(
         mcp_server, "_require_trust", AsyncMock(return_value=(3, False, None))
     )
@@ -227,11 +231,11 @@ async def test_evolve_uses_two_distinct_sessions(mcp_env, monkeypatch):
         nonlocal session_count
         session_count += 1
         try:
-            yield MagicMock(name=f"db-{session_count}")
+            yield None
         finally:
             pass
 
-    monkeypatch.setattr(mcp_server, "_mcp_session", _counting_session)
+    monkeypatch.setattr(mcp_server, "_no_db", _counting_session)
     monkeypatch.setattr(
         mcp_server, "_require_trust", AsyncMock(return_value=(3, False, None))
     )

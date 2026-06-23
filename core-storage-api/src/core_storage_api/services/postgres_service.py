@@ -5924,6 +5924,161 @@ class PostgresService:
         }
 
     # ══════════════════════════════════════════════════════════════════════
+    #  EVOLVE — scope-filter read + atomic weight-adjust/backfill write
+    #  (Fix 2 Ph5b, PR2)
+    # ══════════════════════════════════════════════════════════════════════
+    #
+    # Ports the two raw-DB passes the core-api evolve service held against
+    # ``memories`` (services/evolve_service.py): the ``_filter_by_scope``
+    # SELECT and the ``_ADJUST_WEIGHTS_BULK_SQL`` CTE + ``_BACKFILL_RULE_OUTCOME_SQL``
+    # UPDATE. The filter-by-scope READ uses ``select(Memory.id)`` (sidesteps the
+    # asyncpg array-cast risk, mirrors insights/skill_factory); the apply-weights
+    # WRITE ports the CTE + jsonb_set backfill VERBATIM as raw ``text()`` (ORM-
+    # awkward) inside ONE transaction so the weight clamp and the rule→outcome
+    # backfill commit atomically. The ``IN :mids`` expanding-bindparam from the
+    # source becomes ``ANY(CAST(:ids AS uuid[]))`` for the asyncpg driver. Each
+    # method takes an explicit ``tenant_id`` and scopes every statement by it —
+    # there are no RLS GUCs server-side. The dedup / UUID-parse / cap / rounding
+    # / skip-reason logic stays client-side in ``_adjust_weights`` /
+    # ``_filter_by_scope``; only the DB passes move here.
+
+    async def evolve_filter_by_scope(
+        self,
+        *,
+        tenant_id: str,
+        caller_agent_id: str,
+        fleet_id: str | None,
+        scope: str,
+        ids: list[str],
+    ) -> list[str]:
+        """Return the subset of ``ids`` visible to the caller under ``scope``.
+
+        Ports ``_filter_by_scope``'s SELECT verbatim: base
+        ``id IN (...) AND tenant_id == :tid AND deleted_at IS NULL``; scope
+        ='agent' adds ``agent_id == :caller``, scope='fleet' adds
+        ``fleet_id == :fid`` (fleet_id required), scope='all' adds nothing.
+        Uses ``select(Memory.id).where(Memory.id.in_(...))`` (UUID objects,
+        not stringified) so the asyncpg array-cast risk is avoided and
+        canonical-form mismatches don't drop valid ids. Returns the matched
+        ids as plain strings; the caller maps these back to its first-seen
+        ordering + tallies ``out_of_scope_count``."""
+        if not ids:
+            return []
+        if scope == "fleet" and fleet_id is None:
+            raise ValueError("evolve_filter_by_scope: fleet_id is required when scope is 'fleet'")
+        uuids = [UUID(s) for s in ids]
+        stmt = (
+            select(Memory.id)
+            .where(Memory.id.in_(uuids))
+            .where(Memory.tenant_id == tenant_id)
+            .where(Memory.deleted_at.is_(None))
+        )
+        if scope == "agent":
+            stmt = stmt.where(Memory.agent_id == caller_agent_id)
+        elif scope == "fleet":
+            stmt = stmt.where(Memory.fleet_id == fleet_id)
+        async with get_read_session() as session:
+            result = await session.execute(stmt)
+            return [str(row[0]) for row in result]
+
+    async def evolve_apply_weights(
+        self,
+        *,
+        tenant_id: str,
+        ids: list[str],
+        delta: float,
+        floor: float,
+        cap: float,
+        rule_id: str | None = None,
+        outcome_id: str | None = None,
+    ) -> dict:
+        """Clamp-and-adjust weights for ``ids`` and (atomically) backfill the
+        rule→outcome link, in ONE transaction.
+
+        Stmt 1 ports ``_ADJUST_WEIGHTS_BULK_SQL`` verbatim: an ``old_vals`` CTE
+        captures the pre-update weight, the UPDATE clamps
+        ``GREATEST(:floor, LEAST(:cap, weight + :delta))`` and RETURNs
+        ``(id, old_weight, new_weight)``. The source's ``id IN :mids``
+        expanding bindparam becomes ``ANY(CAST(:ids AS uuid[]))`` for asyncpg.
+
+        Stmt 2 ports ``_BACKFILL_RULE_OUTCOME_SQL`` verbatim and runs ONLY when
+        both ``rule_id`` and ``outcome_id`` are present: a ``jsonb_set`` of
+        ``metadata.source_outcome_id`` on the rule memory. Folding it into this
+        endpoint keeps the weight clamp + the backfill in a single storage
+        transaction so evolve's documented split-commit isn't widened into two
+        HTTP calls.
+
+        Every statement is scoped by ``tenant_id``. Returns
+        ``{adjustments:[{id, old_weight, new_weight}], backfilled: bool}`` —
+        the caller (``_adjust_weights``) applies rounding / ordering / the
+        ``delta`` + ``memory_id`` key shape from these rows."""
+        if not ids:
+            return {"adjustments": [], "backfilled": False}
+        async with get_session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    WITH old_vals AS (
+                        SELECT id, weight AS old_weight
+                          FROM memories
+                         WHERE id = ANY(CAST(:ids AS uuid[]))
+                           AND tenant_id = :tid
+                           AND deleted_at IS NULL
+                    )
+                    UPDATE memories
+                       SET weight = GREATEST(:floor, LEAST(:cap, weight + :delta))
+                      FROM old_vals
+                     WHERE memories.id = old_vals.id
+                       AND memories.tenant_id = :tid
+                       AND memories.deleted_at IS NULL
+                    RETURNING memories.id AS id, old_vals.old_weight AS old_weight,
+                              memories.weight AS new_weight
+                    """
+                ),
+                {
+                    "ids": list(ids),
+                    "tid": tenant_id,
+                    "floor": floor,
+                    "cap": cap,
+                    "delta": delta,
+                },
+            )
+            adjustments = [
+                {
+                    "id": str(row.id),
+                    "old_weight": float(row.old_weight),
+                    "new_weight": float(row.new_weight),
+                }
+                for row in result.fetchall()
+            ]
+            backfilled = False
+            if rule_id and outcome_id:
+                br = await session.execute(
+                    text(
+                        """
+                        UPDATE memories
+                           SET metadata = jsonb_set(
+                               -- ``metadata::jsonb`` cast: legacy/test rows store
+                               -- the column as ``json`` (CAURA-595 drift); without
+                               -- it COALESCE(json, '{}'::jsonb) raises CannotCoerceError.
+                               -- Mirrors memory_update's metadata-merge.
+                               COALESCE(metadata::jsonb, '{}'::jsonb),
+                               '{source_outcome_id}',
+                               to_jsonb(CAST(:outcome_id AS text))
+                           )
+                         WHERE id = CAST(:rule_id AS uuid) AND tenant_id = :tid
+                        """
+                    ),
+                    {"rule_id": rule_id, "outcome_id": outcome_id, "tid": tenant_id},
+                )
+                # Report ``backfilled`` honestly: a soft-deleted, never-committed,
+                # or cross-tenant ``rule_id`` matches 0 rows, so the link wasn't
+                # actually written. ``rowcount`` is reliable for an UPDATE on the
+                # asyncpg dialect (parsed from the ``UPDATE N`` command tag).
+                backfilled = (br.rowcount or 0) > 0  # type: ignore[attr-defined]
+        return {"adjustments": adjustments, "backfilled": backfilled}
+
+    # ══════════════════════════════════════════════════════════════════════
     #  FLEET
     # ══════════════════════════════════════════════════════════════════════
 

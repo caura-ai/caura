@@ -138,16 +138,16 @@ async def test_recall_auth_failure_shortcircuits(monkeypatch):
 
 
 async def test_recall_brief_runs_after_search_no_db_held(mcp_env, monkeypatch):
-    """Audit P3 (post-Fix-2-Phase-4): recall no longer opens ``_mcp_session``,
-    so a pooled DB connection can never be pinned across the multi-second LLM
-    brief. We assert the structural invariant directly: the brief runs strictly
-    AFTER ``search_memories`` returns, and ``_mcp_session`` is never entered."""
-    import contextlib
+    """Audit P3 (post-Fix-2): recall holds no pooled DB connection across the
+    multi-second LLM brief — it is fully storage-routed. Fix 2 Ph5b (PR2)
+    deleted ``_mcp_session`` entirely (evolve was its last consumer), so the
+    "never opens _mcp_session" guard is now structurally guaranteed by the
+    helper's absence; we assert the remaining structural invariant: the brief
+    runs strictly AFTER ``search_memories`` returns."""
     import time as _time
 
     search_returned_at: dict = {"t": None}
     brief_started_at: dict = {"t": None}
-    session_opened: dict = {"v": False}
 
     async def _tracking_search(*_args, **_kwargs):
         search_returned_at["t"] = _time.perf_counter()
@@ -157,14 +157,10 @@ async def test_recall_brief_runs_after_search_no_db_held(mcp_env, monkeypatch):
         brief_started_at["t"] = _time.perf_counter()
         return {"summary": "anything"}
 
-    @contextlib.asynccontextmanager
-    async def _tracking_session():
-        session_opened["v"] = True
-        yield None
-
     monkeypatch.setattr(mcp_server, "search_memories", _tracking_search)
     monkeypatch.setattr(mcp_server, "summarize_memories", _tracking_summarize)
-    monkeypatch.setattr(mcp_server, "_mcp_session", _tracking_session)
+    # ``_mcp_session`` no longer exists to patch; recall opens ``_no_db()`` only.
+    assert not hasattr(mcp_server, "_mcp_session")
     _wire_recall_deps(monkeypatch)
 
     await mcp_server.memclaw_recall(query="x", include_brief=True)
@@ -173,9 +169,6 @@ async def test_recall_brief_runs_after_search_no_db_held(mcp_env, monkeypatch):
     assert brief_started_at["t"] is not None, "brief never ran"
     assert brief_started_at["t"] >= search_returned_at["t"], (
         "brief LLM call started before search returned"
-    )
-    assert session_opened["v"] is False, (
-        "recall must not open _mcp_session post-Phase-4"
     )
 
 

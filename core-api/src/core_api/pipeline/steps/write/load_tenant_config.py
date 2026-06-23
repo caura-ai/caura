@@ -15,7 +15,11 @@ class LoadTenantConfig:
         from core_api.services.organization_settings import resolve_config
 
         data = ctx.data["input"]
-        tenant_config = await resolve_config(ctx.require_db, data.tenant_id)
+        # ``ctx.db`` (nullable), NOT ``require_db``: ``resolve_config`` ignores
+        # ``db`` entirely (settings load through core-storage-api since Fix 2
+        # Phase 0), so the STM/db=None write path (e.g. evolve's outcome/rule
+        # persist) must not be forced to carry a pooled session just for config.
+        tenant_config = await resolve_config(ctx.db, data.tenant_id)
         ctx.data["tenant_config"] = tenant_config
         ctx.tenant_config = tenant_config
         return None

@@ -31,6 +31,7 @@ from core_storage_api.routers import (
     debug_router,
     documents_router,
     entities_router,
+    evolve_router,
     fleet_router,
     health_router,
     idempotency_router,
@@ -133,6 +134,11 @@ def create_app() -> FastAPI:
     # calls these via its storage_client; the LLM analysis + numpy k-means stay
     # client-side.
     app.include_router(insights_router, prefix=prefix)
+    # Fix 2 Ph5b (PR2): evolve scope-filter read + the atomic weight-adjust/
+    # backfill write, moved off core-api's direct DB pool. core-api calls these
+    # via its storage_client; the rule-generation LLM round-trip stays
+    # client-side.
+    app.include_router(evolve_router, prefix=prefix)
     app.include_router(tasks_router, prefix=prefix)
     app.include_router(idempotency_router, prefix=prefix)
     app.include_router(lifecycle_audit_router, prefix=prefix)

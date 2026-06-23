@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.constants import EVOLVE_OUTCOME_TYPES, VALID_SCOPES
-from core_api.db.session import get_db
 from core_api.services.audit_service import log_action
 from core_api.services.caller_identity import resolve_caller_and_gate
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
@@ -87,7 +85,6 @@ class EvolveRequest(BaseModel):
 async def report_outcome_endpoint(
     body: EvolveRequest,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Report an action outcome to evolve memory weights and generate rules.
 
@@ -120,8 +117,13 @@ async def report_outcome_endpoint(
 
     # Resolve the caller identity (verified > body > DEFAULT_AGENT_ID) and gate
     # the write on trust. Shared with insights.py — see services/caller_identity.
+    # Fix 2 Ph5b (PR2): all DB access for evolve is storage-routed, so this route
+    # holds no session — ``None`` is forwarded to the db-ignoring helpers
+    # (``resolve_caller_and_gate`` only passes db to the storage-routed
+    # ``require_trust``; ``check_and_increment`` / ``report_outcome`` /
+    # ``log_action`` ignore db). There is no local session to commit.
     caller_agent_id = await resolve_caller_and_gate(
-        db,
+        None,
         auth,
         tenant_id=body.tenant_id,
         body_agent_id=body.agent_id,
@@ -129,7 +131,7 @@ async def report_outcome_endpoint(
         action="evolve",
     )
 
-    await check_and_increment(db, body.tenant_id, "evolve")
+    await check_and_increment(None, body.tenant_id, "evolve")
 
     from core_api.services.evolve_service import report_outcome
 
@@ -140,7 +142,7 @@ async def report_outcome_endpoint(
     # simply malformed in a way Pydantic couldn't catch.
     try:
         result = await report_outcome(
-            db,
+            None,
             tenant_id=body.tenant_id,
             outcome=body.outcome,
             outcome_type=body.outcome_type,
@@ -153,7 +155,7 @@ async def report_outcome_endpoint(
         raise HTTPException(status_code=422, detail=str(e)) from e
 
     await log_action(
-        db,
+        None,
         tenant_id=body.tenant_id,
         action="evolve_report",
         resource_type="outcome",
@@ -164,6 +166,5 @@ async def report_outcome_endpoint(
             "related_ids": body.related_ids,
         },
     )
-    await db.commit()
 
     return result

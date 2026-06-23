@@ -106,7 +106,7 @@ class WriteMemoryRow:
         if _hooks.audit_log:
             try:
                 await _hooks.audit_log(
-                    ctx.require_db,
+                    ctx.db,  # log_action ignores db (storage-routed) — allow STM path
                     tenant_id=data.tenant_id,
                     agent_id=data.agent_id,
                     action="create",
