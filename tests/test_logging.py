@@ -168,6 +168,32 @@ def test_route_third_party_to_root_recall_after_handlerless_reroute_no_warning(
         _third_party_logger_original_state.clear()
 
 
+def test_route_third_party_to_root_pristine_logger_no_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A pristine listed logger (no own handlers, propagate=True) already
+    propagates to the root handler, so the 'nothing to reroute' note is DEBUG,
+    not a misleading WARNING. The old WARNING falsely implied records wouldn't
+    reach GCP, when they do via propagation (prod: ``mcp.server.*`` lands as
+    structured JSON)."""
+    target = logging.getLogger(_THIRD_PARTY_LOGGERS_TO_REROUTE[0])
+    _third_party_logger_original_state.clear()
+    for h in list(target.handlers):
+        target.removeHandler(h)
+    target.propagate = True  # pristine: handler-less + propagating
+    try:
+        with caplog.at_level(logging.WARNING, logger="common.structlog_config"):
+            _route_third_party_to_root()
+        assert not [
+            r
+            for r in caplog.records
+            if "no-op" in r.getMessage() or "nothing to reroute" in r.getMessage()
+        ], "a pristine handler-less logger must not WARN — it already reaches root"
+    finally:
+        target.propagate = True
+        _third_party_logger_original_state.clear()
+
+
 def test_route_third_party_to_root_preserves_operator_set_level_when_no_handlers() -> (
     None
 ):

@@ -387,15 +387,20 @@ def _route_third_party_to_root() -> None:
         # emit a spurious WARNING about rerouting being a no-op.
         if name in _third_party_logger_original_state:
             continue
-        # Library may not have initialised this logger yet — there's nothing
-        # to reroute right now. Don't snapshot the empty state (would freeze
-        # us into "no work to do" forever) and warn the operator at WARNING
-        # so they notice in Cloud Logging if a uvicorn-fronted service is
-        # calling configure_logging at module import (before uvicorn's own
-        # ``Config.configure_logging`` runs at server start).
+        # Library hasn't installed its own handlers and still propagates — there
+        # is nothing to reroute, and crucially nothing is LOST: a handler-less,
+        # propagate=True logger already flows to the root handler (verified in
+        # prod — ``mcp.server.*`` / ``uvicorn.error`` records reach GCP as
+        # structured JSON this way). So this is the benign steady state, not a
+        # routing failure. Log at DEBUG, not WARNING — the old WARNING was a
+        # misleading false alarm (~per instance start) implying records wouldn't
+        # reach GCP. Don't snapshot the empty state (would freeze us into "no
+        # work to do" forever) so a later reroute can still act if the library
+        # ever installs handlers / sets propagate=False.
         if not lg.handlers and lg.propagate:
-            logging.getLogger(__name__).warning(
-                "logger %r has no own handlers at rerouting time; rerouting was a no-op (library may not be imported yet — call reroute_third_party_loggers from an ASGI lifespan startup handler if this is a uvicorn-fronted service)",
+            logging.getLogger(__name__).debug(
+                "logger %r has no own handlers at rerouting time; nothing to "
+                "reroute — it already propagates to the root handler",
                 name,
             )
             continue
