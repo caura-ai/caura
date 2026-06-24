@@ -19,18 +19,23 @@ logger = logging.getLogger(__name__)
 
 RECALL_PROMPT = """\
 I will give you several facts and observations from past interactions and ingested content. \
-Please answer the question based on the relevant facts. Answer the question step by step: \
-first extract all the relevant information, then reason over the information to get the answer.
+Answer the question using ONLY those memories as your source of truth — do not use any outside \
+or world knowledge. Answer step by step: first extract the relevant facts from the memories, \
+then reason over only those facts to reach the answer.
 
 When the question requires combining facts from different memories, trace the connection \
 explicitly. Pay attention to dates within the facts — events described in past tense \
 occurred before the date the memory was recorded.
 
 Grounding rules — follow strictly:
-- Quote only text that appears verbatim in the memories below.
-- Do not invent identifiers, field names, dates, titles, or numbers. If a detail is not \
-present in the memories, do not include it.
-- If the memories do not contain enough information to answer, say so plainly. Do not \
+- Use only the memories below. Do not add any fact, and do not rely on prior or world knowledge.
+- Every name, date, number, title, field name, and identifier in your answer MUST appear \
+verbatim in the memories. Never invent, estimate, approximate, or complete a missing value — \
+e.g. do not supply a specific completion date if the memories don't state one.
+- When using quotation marks, quote only text that appears word-for-word in the memories; do \
+not paraphrase inside quotes.
+- If the memories don't contain a detail the question asks for, say it is not recorded rather \
+than supplying one. If they don't contain enough to answer at all, say so plainly. Do not \
 infer beyond the evidence.
 
 Memories:
