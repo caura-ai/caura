@@ -17,6 +17,31 @@ _engine: AsyncEngine | None = None
 _read_engine: AsyncEngine | None = None
 
 
+def _schema_is_at_head(connection: Connection, head: str | None) -> bool:
+    """True when the DB's Alembic revision already equals ``head``.
+
+    Lets a replica that isn't the one running the migration start serving as
+    soon as the schema is current — WITHOUT acquiring the migration advisory
+    lock — instead of queueing behind every other booting replica to acquire
+    the lock and run a redundant no-op ``upgrade``. That serialized
+    acquire-then-no-op is what pushed tail replicas past the Cloud Run startup
+    probe during multi-replica scale-ups (prod 2026-06-24 02:04: storage-writer
+    instances killed on a 240s STARTUP TCP probe DEADLINE_EXCEEDED).
+
+    ``head`` (the script head) is computed once by the caller and passed in —
+    it's constant for the process lifetime, so the per-poll follower check stays
+    a single ``alembic_version`` SELECT rather than re-walking the migrations
+    directory each poll. Returns False on a fresh DB (no ``alembic_version`` row
+    → current is None), so the bootstrap/stamp path still runs under the lock.
+    """
+    # Deferred alembic import to match this module's existing convention
+    # (``init_database`` imports ``command``/``Config`` inside the function).
+    from alembic.runtime.migration import MigrationContext
+
+    current = MigrationContext.configure(connection).get_current_revision()
+    return current is not None and current == head
+
+
 def _build_engine(url: str) -> AsyncEngine:
     return create_async_engine(
         url,
@@ -76,6 +101,7 @@ async def init_database() -> None:
 
     from alembic import command
     from alembic.config import Config
+    from alembic.script import ScriptDirectory
     from sqlalchemy import text
 
     engine = get_engine()
@@ -83,6 +109,23 @@ async def init_database() -> None:
 
     alembic_cfg = Config()
     alembic_cfg.set_main_option("script_location", migrations_dir)
+
+    # The script head is constant for the process lifetime — compute it once
+    # (a migrations-dir walk) and reuse it for every at-head check, so the
+    # follower poll loop below stays a single ``alembic_version`` SELECT per
+    # poll rather than re-walking the migrations directory each time.
+    schema_head = ScriptDirectory.from_config(alembic_cfg).get_current_head()
+
+    # Fast path: if the schema is already at head there's no migration to run,
+    # so start serving immediately without contending on the advisory lock.
+    # This is the steady-state boot (nothing pending), and it lets
+    # simultaneously-booting replicas skip the lock entirely when there's no
+    # work — only a genuine pending migration falls through to the serialized
+    # leader/follower path below.
+    async with engine.connect() as check_conn:
+        if await check_conn.run_sync(_schema_is_at_head, schema_head):
+            logger.info("Schema already at head — starting without migration lock")
+            return
 
     # Session-scoped advisory lock on a dedicated connection so it survives
     # the per-migration commits Alembic performs — migrations that use
@@ -119,6 +162,15 @@ async def init_database() -> None:
             )
             if got:
                 break
+            # Not the leader. Start as soon as the leader's migration lands
+            # (schema reaches head) WITHOUT acquiring the lock — so every
+            # waiting follower unblocks together when the migration completes,
+            # instead of serializing through acquire→no-op-upgrade→release one
+            # at a time (whose tail exceeded the startup probe). Reuse the
+            # AUTOCOMMIT ``lock_conn`` for the read — no per-poll connection churn.
+            if await lock_conn.run_sync(_schema_is_at_head, schema_head):
+                logger.info("Migration completed by another replica — starting without lock")
+                return
             now = loop.time()
             if now >= deadline:
                 raise TimeoutError(
