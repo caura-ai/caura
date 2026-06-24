@@ -48,7 +48,7 @@ def _search_ctx(tenant_id: str, readable: list[str] | None):
         # Skip the per-tenant slot context manager (already-acquired path).
         "_storage_slot_acquired": True,
     }
-    return PipelineContext(db=None, data=data)
+    return PipelineContext(data=data)
 
 
 async def _run_scored_search(monkeypatch, tenant_id: str, readable: list[str] | None) -> dict:

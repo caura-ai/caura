@@ -6,11 +6,9 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings
-from core_api.db.session import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +129,6 @@ class PromoteRequest(BaseModel):
 async def promote_stm(
     body: PromoteRequest,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     _check_stm_enabled()
     auth.enforce_read_only()
@@ -149,7 +146,6 @@ async def promote_stm(
 
     result = await promote(
         content=body.content,
-        db=db,
         tenant_id=tenant_id,
         agent_id=body.agent_id,
         fleet_id=body.fleet_id,

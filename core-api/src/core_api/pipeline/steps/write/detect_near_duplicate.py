@@ -83,13 +83,14 @@ class DetectNearDuplicate:
         # LLM call on the fast path (latency-critical), accept the
         # false-positive cost (advisory signal only, no hard reject),
         # and let callers decide what to do with the candidate.
-        sem_dup = await _find_semantic_duplicate(
-            ctx.db,  # storage-routed (ignores db) — tolerate the db=None STM path
-            data.tenant_id,
-            data.fleet_id,
-            embedding,
-            visibility=data.visibility or "scope_team",
-            min_similarity=SEMANTIC_DEDUP_JUDGE_THRESHOLD,
+        sem_dup = (
+            await _find_semantic_duplicate(  # storage-routed (ignores db) — tolerate the db=None STM path
+                data.tenant_id,
+                data.fleet_id,
+                embedding,
+                visibility=data.visibility or "scope_team",
+                min_similarity=SEMANTIC_DEDUP_JUDGE_THRESHOLD,
+            )
         )
         metadata["near_dup_check_ms"] = round((time.perf_counter() - t_dedup) * 1000, 1)
 

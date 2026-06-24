@@ -168,7 +168,6 @@ class ForgeRunResult:
 
 
 async def run_forge_distill(
-    db: Any,
     *,
     tenant_id: str,
     fleet_id: str | None,

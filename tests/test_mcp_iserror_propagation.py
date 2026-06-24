@@ -164,7 +164,7 @@ async def test_b4_insights_unregistered_agent_sets_iserror(mcp_env, monkeypatch)
     """``memclaw_insights`` with ``_require_trust`` returning ``not_found=True``
     is one of the two ``"Error (403): Agent ... is not registered"`` sites."""
 
-    async def _not_found(db, tenant_id, agent_id, min_level):
+    async def _not_found(tenant_id, agent_id, min_level):
         return 0, True, None
 
     monkeypatch.setattr(mcp_server, "_require_trust", _not_found)
@@ -180,7 +180,7 @@ async def test_b4_evolve_unregistered_agent_sets_iserror(mcp_env, monkeypatch):
     """``memclaw_evolve`` with ``_require_trust`` returning ``not_found=True``
     is the second ``"Error (403): Agent ... is not registered"`` site."""
 
-    async def _not_found(db, tenant_id, agent_id, min_level):
+    async def _not_found(tenant_id, agent_id, min_level):
         return 0, True, None
 
     monkeypatch.setattr(mcp_server, "_require_trust", _not_found)

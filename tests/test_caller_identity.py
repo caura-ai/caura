@@ -23,9 +23,7 @@ async def test_standalone_operator_bypasses_gate(monkeypatch):
     evolve/insights (the test env runs IS_STANDALONE=true)."""
     gate = AsyncMock()
     monkeypatch.setattr(caller_identity, "require_trust", gate)
-    result = await resolve_caller_and_gate(
-        AsyncMock(),
-        _auth(),
+    result = await resolve_caller_and_gate(        _auth(),
         tenant_id="default",
         body_agent_id=None,
         scope="agent",
@@ -40,9 +38,7 @@ async def test_admin_bypasses_gate(monkeypatch):
     standalone check even runs."""
     gate = AsyncMock()
     monkeypatch.setattr(caller_identity, "require_trust", gate)
-    result = await resolve_caller_and_gate(
-        AsyncMock(),
-        _auth(is_admin=True),
+    result = await resolve_caller_and_gate(        _auth(is_admin=True),
         tenant_id="t",
         body_agent_id=None,
         scope="fleet",
@@ -57,9 +53,7 @@ async def test_asserted_unregistered_identity_403(monkeypatch):
     bypass only applies when NO identity is asserted. Unregistered → 403."""
     monkeypatch.setattr(caller_identity, "require_trust", AsyncMock(return_value=(1, True, None)))
     with pytest.raises(HTTPException) as exc:
-        await resolve_caller_and_gate(
-            AsyncMock(),
-            _auth(),
+        await resolve_caller_and_gate(            _auth(),
             tenant_id="t",
             body_agent_id="ghost",
             scope="agent",
@@ -72,9 +66,7 @@ async def test_asserted_unregistered_identity_403(monkeypatch):
 async def test_verified_registered_identity_passes(monkeypatch):
     """Gateway-verified identity is gated and, when registered at trust, wins."""
     monkeypatch.setattr(caller_identity, "require_trust", AsyncMock(return_value=(2, False, None)))
-    result = await resolve_caller_and_gate(
-        AsyncMock(),
-        _auth(agent_id="backend-dev"),
+    result = await resolve_caller_and_gate(        _auth(agent_id="backend-dev"),
         tenant_id="t",
         body_agent_id=None,
         scope="fleet",

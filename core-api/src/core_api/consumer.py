@@ -98,7 +98,7 @@ async def handle_memory_enriched(event: Event) -> None:
     # configured action (drop / keep-private / flag) now — the fast-mode
     # counterpart to the synchronous GovernanceDecision step. ``resolve_config``
     # tolerates a None session (cache-first; cold-miss opens its own).
-    gov_cfg = await resolve_config(None, payload.tenant_id)
+    gov_cfg = await resolve_config(payload.tenant_id)
     if await remediate_after_enrichment(memory, gov_cfg):
         # Row was dropped by policy — skip contradiction detection on it.
         logger.info(

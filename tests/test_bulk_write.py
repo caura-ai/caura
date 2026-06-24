@@ -244,7 +244,7 @@ class TestBulkUsageCheck:
         from core_api.services.usage_service import bulk_check_and_increment
 
         db = AsyncMock()
-        result = await bulk_check_and_increment(db, "test-tenant", 20)
+        result = await bulk_check_and_increment("test-tenant", 20)
         assert result.allowed is True
         assert result.operation == "write"
 
@@ -254,7 +254,7 @@ class TestBulkUsageCheck:
         from core_api.services.usage_service import bulk_check_and_increment
 
         db = AsyncMock()
-        result = await bulk_check_and_increment(db, "test-tenant", 5)
+        result = await bulk_check_and_increment("test-tenant", 5)
         assert result.allowed is True
 
     @pytest.mark.asyncio
@@ -263,7 +263,7 @@ class TestBulkUsageCheck:
         from core_api.services.usage_service import bulk_check_and_increment
 
         db = AsyncMock()
-        result = await bulk_check_and_increment(db, "test-tenant", 100)
+        result = await bulk_check_and_increment("test-tenant", 100)
         assert result.allowed is True
 
 

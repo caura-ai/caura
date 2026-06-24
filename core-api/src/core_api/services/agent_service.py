@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_TRUST_LEVEL
@@ -15,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 
 async def get_or_create_agent(
-    db: AsyncSession,
     tenant_id: str,
     agent_id: str,
     fleet_id: str | None = None,
@@ -101,7 +99,6 @@ async def get_or_create_agent(
         create_payload["search_profile"] = inherited_search_profile
     agent = await sc.create_or_update_agent(create_payload)
     await log_action(
-        db,
         tenant_id=tenant_id,
         agent_id=agent_id,
         action="agent_registered",
@@ -118,19 +115,18 @@ async def get_or_create_agent(
     return agent
 
 
-async def lookup_agent(db: AsyncSession | None, tenant_id: str, agent_id: str) -> dict | None:
+async def lookup_agent(tenant_id: str, agent_id: str) -> dict | None:
     sc = get_storage_client()
     return await sc.get_agent(agent_id, tenant_id)
 
 
 async def enforce_fleet_write(
-    db: AsyncSession,
     tenant_id: str,
     agent_id: str,
     fleet_id: str | None,
 ) -> dict:
     """Enforce write permissions. Returns the agent (auto-created if new)."""
-    agent = await get_or_create_agent(db, tenant_id, agent_id, fleet_id)
+    agent = await get_or_create_agent(tenant_id, agent_id, fleet_id)
 
     # Agents can always write to their home fleet (or tenant-wide if no fleet specified)
     if fleet_id is None or fleet_id == agent.get("fleet_id"):
@@ -147,13 +143,12 @@ async def enforce_fleet_write(
 
 
 async def enforce_fleet_read(
-    db: AsyncSession,
     tenant_id: str,
     agent_id: str,
     fleet_id: str | None,
 ) -> None:
     """Enforce read permissions for search/list (read-only — never creates agents)."""
-    agent = await lookup_agent(db, tenant_id, agent_id)
+    agent = await lookup_agent(tenant_id, agent_id)
 
     # Unknown agent — allow the read (agent registration happens on writes)
     if not agent:
@@ -173,7 +168,6 @@ async def enforce_fleet_read(
 
 
 async def authorize_memory_access(
-    db: AsyncSession,
     tenant_id: str,
     caller_agent_id: str | None,
     *,
@@ -218,7 +212,7 @@ async def authorize_memory_access(
             write=write,
         )
     # scope_team / unknown visibility: fleet-gated by the trust ladder.
-    agent = await lookup_agent(db, tenant_id, caller_agent_id)
+    agent = await lookup_agent(tenant_id, caller_agent_id)
     return memory_access_allowed_for_agent(
         agent,
         caller_agent_id,
@@ -260,7 +254,6 @@ def memory_access_allowed_for_agent(
 
 
 async def enforce_memory_read(
-    db: AsyncSession,
     tenant_id: str,
     caller_agent_id: str | None,
     memory: Any,
@@ -272,7 +265,6 @@ async def enforce_memory_read(
     existence of another fleet's/agent's memory_id to an unauthorized caller.
     """
     allowed = await authorize_memory_access(
-        db,
         tenant_id,
         caller_agent_id,
         visibility=getattr(memory, "visibility", None),
@@ -284,12 +276,11 @@ async def enforce_memory_read(
 
 
 async def enforce_delete(
-    db: AsyncSession,
     tenant_id: str,
     agent_id: str,
 ) -> None:
     """Enforce delete permissions."""
-    agent = await lookup_agent(db, tenant_id, agent_id)
+    agent = await lookup_agent(tenant_id, agent_id)
     if not agent:
         raise HTTPException(
             status_code=403,
@@ -305,13 +296,12 @@ async def enforce_delete(
 
 
 async def enforce_update(
-    db: AsyncSession,
     tenant_id: str,
     agent_id: str,
     memory_owner_agent_id: str,
 ) -> None:
     """Enforce update permissions. Level 0-2 can only update own memories; level 3 can update any."""
-    agent = await lookup_agent(db, tenant_id, agent_id)
+    agent = await lookup_agent(tenant_id, agent_id)
     if not agent:
         raise HTTPException(
             status_code=403,
@@ -345,14 +335,13 @@ async def backfill_agents() -> int:
 
 
 async def update_trust_level(
-    db: AsyncSession,
     tenant_id: str,
     agent_id: str,
     trust_level: int,
     fleet_id: str | None = None,
 ) -> dict:
     """Update an agent's trust level (and optionally fleet). Returns the updated agent."""
-    agent = await lookup_agent(db, tenant_id, agent_id)
+    agent = await lookup_agent(tenant_id, agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
 

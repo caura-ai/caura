@@ -97,7 +97,6 @@ async def generate_insights_endpoint(
     # (``resolve_caller_and_gate`` only passes db to the storage-routed
     # ``require_trust``; ``check_and_increment`` / ``log_action`` ignore db).
     caller_agent_id = await resolve_caller_and_gate(
-        None,
         auth,
         tenant_id=body.tenant_id,
         body_agent_id=body.agent_id,
@@ -105,12 +104,11 @@ async def generate_insights_endpoint(
         action="insights",
     )
 
-    await check_and_increment(None, body.tenant_id, "insights")
+    await check_and_increment(body.tenant_id, "insights")
 
     from core_api.services.insights_service import generate_insights
 
     result = await generate_insights(
-        None,
         tenant_id=body.tenant_id,
         focus=body.focus,
         scope=body.scope,
@@ -119,7 +117,6 @@ async def generate_insights_endpoint(
     )
 
     await log_action(
-        None,
         tenant_id=body.tenant_id,
         action="insights_generate",
         resource_type="insight",

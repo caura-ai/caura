@@ -37,7 +37,7 @@ def patch_lookup(monkeypatch):
     """Install a fake ``lookup_agent`` returning a controlled agent dict."""
 
     def _set(*, fleet_id=None, trust_level=0, exists=True):
-        async def fake_lookup(db, tenant_id, agent_id):
+        async def fake_lookup(tenant_id, agent_id):
             if not exists:
                 return None
             return {"agent_id": agent_id, "fleet_id": fleet_id, "trust_level": trust_level}
@@ -48,9 +48,7 @@ def patch_lookup(monkeypatch):
 
 
 async def _call(caller, visibility, owner, fleet, *, write=False):
-    return await authorize_memory_access(
-        None,
-        "tenant-x",
+    return await authorize_memory_access("tenant-x",
         caller,
         visibility=visibility,
         owner_agent_id=owner,
@@ -200,7 +198,7 @@ def as_agent(monkeypatch):
     """
     from core_api.app import app
     from core_api.auth import AuthContext, get_auth_context
-    from core_api.db.session import set_current_tenant
+    from core_api.tenant_context import set_current_tenant
 
     def _install(tenant_id: str, agent_id: str | None):
         async def _dep():

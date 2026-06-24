@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 
 from fastapi import HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.agent_ids import DEFAULT_AGENT_ID
 from core_api.auth import AuthContext
@@ -30,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 async def resolve_caller_and_gate(
-    db: AsyncSession | None,
     auth: AuthContext,
     *,
     tenant_id: str,
@@ -73,7 +71,7 @@ async def resolve_caller_and_gate(
     # are keyed to caller_agent_id, so an unregistered name corrupts the audit
     # trail. require_trust soft-passes a missing row (read ergonomics), so
     # re-block not_found explicitly here.
-    _, not_found, terr = await require_trust(db, tenant_id, caller_agent_id, min_level=min_level)
+    _, not_found, terr = await require_trust(tenant_id, caller_agent_id, min_level=min_level)
     if not_found:
         raise HTTPException(
             status_code=403,

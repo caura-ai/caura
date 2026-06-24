@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import hashlib
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from common.governance import Finding
 from core_api.services.audit_service import log_action
 
@@ -114,7 +112,6 @@ def mark_pii_flagged(metadata: dict, findings: list[Finding]) -> None:
 
 
 async def emit_governance_audit(
-    db: AsyncSession | None,
     *,
     tenant_id: str,
     agent_id: str | None,
@@ -137,7 +134,6 @@ async def emit_governance_audit(
     under sustained overload) — the request hot path is never blocked for them.
     """
     await log_action(
-        db,
         tenant_id=tenant_id,
         agent_id=agent_id,
         action=action,

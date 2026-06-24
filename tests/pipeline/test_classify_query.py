@@ -41,7 +41,7 @@ def _make_ctx(query: str, *, fts_weight: float = 0.3, **extra_data) -> PipelineC
         "search_params": sp,
         **extra_data,
     }
-    return PipelineContext(db=AsyncMock(), data=data)
+    return PipelineContext(data=data)
 
 
 def _mock_sc(**overrides) -> AsyncMock:

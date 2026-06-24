@@ -4,11 +4,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
-from core_api.db.session import get_db
 from core_api.services.crystallizer_service import run_crystallization
 
 router = APIRouter(tags=["Memory Crystallizer"])
@@ -50,15 +48,13 @@ class ReportSummaryOut(BaseModel):
 async def trigger_crystallization(
     body: CrystallizeRequest,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Trigger crystallization for a tenant (analysis + auto-curate)."""
     auth.enforce_tenant(body.tenant_id)
     from core_api.services.organization_settings import resolve_config
 
-    config = await resolve_config(db, body.tenant_id)
+    config = await resolve_config(body.tenant_id)
     report_id = await run_crystallization(
-        db,
         body.tenant_id,
         body.fleet_id,
         trigger="manual",
@@ -70,7 +66,6 @@ async def trigger_crystallization(
 @router.post("/crystallize/all", response_model=CrystallizeAllResult)
 async def trigger_crystallization_all(
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Trigger crystallization for ALL tenants (nightly batch)."""
     auth.enforce_admin()
@@ -82,9 +77,8 @@ async def trigger_crystallization_all(
     for tid in tenant_ids:
         from core_api.services.organization_settings import resolve_config
 
-        config = await resolve_config(db, tid)
+        config = await resolve_config(tid)
         report_id = await run_crystallization(
-            db,
             tid,
             fleet_id=None,
             trigger="scheduled",

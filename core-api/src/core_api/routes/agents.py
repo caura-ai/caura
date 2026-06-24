@@ -1,9 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
-from core_api.db.session import get_db
 from core_api.schemas import AgentOut, AgentTrustUpdate, SearchProfileUpdate
 from core_api.services.agent_service import update_trust_level
 from core_api.services.audit_service import log_action
@@ -46,7 +44,6 @@ async def patch_agent_trust(
     body: AgentTrustUpdate,
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Update an agent's trust level (and optionally fleet)."""
     auth.enforce_tenant(tenant_id)
@@ -54,13 +51,11 @@ async def patch_agent_trust(
     # be able to PATCH its own (or a peer's) trust_level to self-promote.
     auth.enforce_not_agent_credential("change agent trust levels")
     agent = await update_trust_level(
-        db,
         tenant_id,
         agent_id,
         body.trust_level,
         fleet_id=body.fleet_id,
     )
-    await db.commit()
     return AgentOut.model_validate(agent)
 
 
@@ -151,7 +146,6 @@ async def delete_agent(
     agent_id: str,
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Delete an agent. Memories written by this agent are NOT deleted."""
     auth.enforce_read_only()
@@ -165,11 +159,9 @@ async def delete_agent(
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
     await log_action(
-        db,
         tenant_id=tenant_id,
         action="delete",
         resource_type="agent",
         detail={"agent_id": agent_id, "fleet_id": agent.get("fleet_id")},
     )
     await sc.delete_agent(agent_id, tenant_id)
-    await db.commit()

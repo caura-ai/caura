@@ -296,7 +296,7 @@ async def test_mcp_recall_brief_contains_both_keys(mcp_env, monkeypatch):
         AsyncMock(return_value=_minimal_config(recall_enabled=True)),
     )
     monkeypatch.setattr(
-        "core_api.repositories.agent_repo.get_by_id", AsyncMock(return_value=None)
+        "core_api.clients.storage_client.CoreStorageClient.get_agent", AsyncMock(return_value=None)
     )
 
     from core_api import mcp_server

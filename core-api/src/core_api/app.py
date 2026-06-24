@@ -177,7 +177,6 @@ async def lifespan(app):
                 'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
             )
         _dangerous = {
-            "postgres_password": "changeme",
             "jwt_secret": "change-me-in-production",
         }
         for var, bad_val in _dangerous.items():
@@ -210,17 +209,13 @@ async def lifespan(app):
         except Exception as e:
             print(f"[startup] Agent backfill skipped: {e}")
 
-        # Wire service hooks (audit + recall tracking)
-        from core_api.repositories import memory_repo
+        # Wire service hooks (audit). Recall tracking now routes directly through
+        # the storage client (increment_recall) at each call site; the on_recall
+        # hook was removed with core-api's repositories/DB pool.
         from core_api.services.audit_service import log_action
         from core_api.services.hooks import ServiceHooks, configure_hooks
 
-        configure_hooks(
-            ServiceHooks(
-                audit_log=log_action,
-                on_recall=memory_repo.increment_recall,
-            )
-        )
+        configure_hooks(ServiceHooks(audit_log=log_action))
 
         # CAURA-628: bind + start the audit batch flusher. ``log_action``
         # checks for an active queue and falls back to a synchronous

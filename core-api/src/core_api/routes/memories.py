@@ -21,13 +21,8 @@ from fastapi import (
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.exc import TimeoutError as SQLATimeoutError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
-from common.models.memory import Memory
 from core_api.agent_ids import DEFAULT_AGENT_ID
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
@@ -36,7 +31,6 @@ from core_api.constants import (
     DEFAULT_LIST_LIMIT,
     MAX_LIST_LIMIT,
 )
-from core_api.db.session import get_db
 from core_api.middleware.idempotency import (
     IDEMPOTENCY_HEADER,
     IdempotencyGuard,
@@ -152,68 +146,13 @@ def _missing_agent_id_error() -> RequestValidationError:
     )
 
 
-async def _stats_fallback(tenant_id: str, fleet_id: str | None) -> dict:
-    """Map storage-api's ``memory_compute_health_stats`` shape onto the
-    flat ``{total, by_type, by_agent, by_status}`` shape both stats
-    endpoints return. ``by_agent`` is empty because storage-api doesn't
-    compute it; ``partial: True`` flags the degradation so callers can
-    distinguish a real empty tenant from a degraded response.
-
-    The two stats routes return bare dicts (no ``response_model``), so
-    the ``partial`` field survives FastAPI serialisation. If a
-    ``response_model`` is added later, include ``partial`` in the schema
-    or the degradation signal will be silently stripped.
-    """
-    try:
-        fallback = await get_storage_client().get_memory_stats(tenant_id=tenant_id, fleet_id=fleet_id)
-    except httpx.HTTPError as exc:
-        # Storage-api is also down. Without this catch the httpx
-        # exception would propagate through the route's ``except`` block
-        # as a 500 with raw internal detail (storage-api URL, etc.).
-        logger.warning(
-            "memory_stats fallback: storage-api request failed",
-            extra={"tenant_id": tenant_id, "fleet_id": fleet_id, "error": str(exc)},
-            exc_info=True,
-        )
-        raise HTTPException(
-            status_code=503,
-            detail="memory stats unavailable: primary DB and storage-api fallback both failed",
-        ) from None
-    if not fallback:
-        # ``storage_client._get`` returns ``{}`` on 404 (treated as
-        # absent). The httpx-error case is handled above. So an empty
-        # ``fallback`` here means storage-api 404'd, but since we got
-        # here only because the primary DB blew up, we can't tell a
-        # real empty tenant from a storage-api hiccup. 503 surfaces the
-        # cascading failure instead of returning a plausible-looking
-        # ``total: 0`` to a live tenant.
-        logger.warning(
-            "memory_stats fallback: storage-api returned 404 or empty response "
-            "(cannot distinguish empty tenant from cascading failure)",
-            extra={"tenant_id": tenant_id, "fleet_id": fleet_id},
-        )
-        raise HTTPException(
-            status_code=503,
-            detail="memory stats unavailable: primary DB and storage-api fallback both failed",
-        ) from None
-    return {
-        "total": fallback.get("total", fallback.get("total_memories", 0)),
-        "by_type": fallback.get("type_distribution", {}),
-        "by_agent": {},
-        "by_status": fallback.get("status_distribution", {}),
-        "partial": True,
-    }
-
-
 @router.get("/tenants")
 async def list_tenants(
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Return distinct tenant IDs that have memories."""
     auth.enforce_admin()
-    result = await db.execute(select(Memory.tenant_id).where(Memory.deleted_at.is_(None)).distinct())
-    return sorted([row[0] for row in result.all()])
+    return sorted(await get_storage_client().list_active_tenants())
 
 
 @router.get("/fleets")
@@ -258,7 +197,6 @@ async def list_memories(
     limit: int = Query(default=DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT),
     include_deleted: bool = Query(default=False),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """List memories with filtering, sorting, and pagination.
 
@@ -293,7 +231,7 @@ async def list_memories(
     # dashboard intends.
     caller_agent_id = auth.agent_id or agent_id
     if auth.tenant_id and tenant_id and caller_agent_id and fleet_id:
-        await enforce_fleet_read(db, tenant_id, caller_agent_id, fleet_id)
+        await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
 
     # Cursor-based pagination (only applies to created_at descending sort)
     if cursor and (sort != "created_at" or order != "desc"):
@@ -308,37 +246,36 @@ async def list_memories(
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid cursor")
 
-    from core_api.repositories import memory_repo as _repo
-
     # `agent_id` in the REST route is both the author filter AND the
     # visibility-scoping identity. When present, the caller can see their
     # own scope_agent memories. When absent, scope_agent memories are
     # hidden (safe default — fixes the scope_agent visibility gap).
     # Cross-tenant widening: when the caller's credential carries a
-    # readable set wider than home AND didn't pin tenant_id, the
-    # repo widens to ``tenant_id = ANY($readable)``. Pinning to one
-    # tenant keeps the result scoped (the gate above already verified
-    # the caller may read it).
-    rows = await _repo.list_by_filters(
-        db,
-        tenant_id=tenant_id or "",
-        caller_agent_id=caller_agent_id,  # visibility scoping (authenticated identity)
-        fleet_id=fleet_id,
-        written_by=agent_id,  # author filter (query param)
-        memory_type=memory_type,
-        status=status,
-        run_id=run_id,
-        include_deleted=include_deleted,
-        sort=sort,
-        order=order,
-        limit=limit,
-        offset=offset,
-        cursor_ts=c_ts,
-        cursor_id=c_id,
-        readable_tenant_ids=(
+    # readable set wider than home AND didn't pin tenant_id, storage
+    # widens to ``tenant_id = ANY($readable)``. Pinning to one tenant
+    # keeps the result scoped (the gate above already verified access).
+    # Routed through core-storage-api (same visibility predicate + cursor
+    # + readable-set widening the MCP list path uses).
+    list_payload: dict = {
+        "tenant_id": tenant_id or "",
+        "caller_agent_id": caller_agent_id,  # visibility scoping (authenticated identity)
+        "fleet_id": fleet_id,
+        "written_by": agent_id,  # author filter (query param)
+        "memory_type": memory_type,
+        "status": status,
+        "run_id": run_id,
+        "include_deleted": include_deleted,
+        "sort": sort,
+        "order": order,
+        "limit": limit,
+        "offset": offset,
+        "cursor_ts": c_ts.isoformat() if c_ts else None,
+        "cursor_id": str(c_id) if c_id else None,
+        "readable_tenant_ids": (
             auth.readable_tenant_ids if auth.is_cross_tenant_read and not tenant_id_explicit else None
         ),
-    )
+    }
+    rows = await get_storage_client().list_memories_by_filters(list_payload)
 
     has_more = len(rows) > limit
     items = [_memory_to_out(m) for m in rows[:limit]]
@@ -346,18 +283,17 @@ async def list_memories(
     next_cursor = None
     if has_more and items:
         last = rows[limit - 1]
-        next_cursor = encode_cursor(last.created_at, last.id)
+        next_cursor = encode_cursor(datetime.fromisoformat(last["created_at"]), UUID(last["id"]))
 
     # Cross-tenant audit (F2): count per-tenant from served rows.
     source_tenants = auth.source_tenants_for_audit()
     if source_tenants and auth.is_cross_tenant_read and not tenant_id_explicit:
         counts: dict[str, int] = {}
         for row in rows[:limit]:
-            rt = getattr(row, "tenant_id", None)
+            rt = row.get("tenant_id")
             if rt:
                 counts[rt] = counts.get(rt, 0) + 1
         await log_cross_tenant_read(
-            db,
             home_tenant_id=auth.tenant_id,
             home_agent_id=auth.agent_id,
             source_tenants=source_tenants,
@@ -377,7 +313,6 @@ async def memory_stats(
     status: str | None = Query(default=None),
     include_deleted: bool = Query(default=False),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     tenant_id_explicit = bool(tenant_id)
     if tenant_id:
@@ -387,57 +322,22 @@ async def memory_stats(
             raise HTTPException(status_code=400, detail="tenant_id is required")
         tenant_id = auth.tenant_id
 
-    try:
-        from core_api.services.memory_stats import compute_memory_stats
-
-        return await compute_memory_stats(
-            db,
-            tenant_id=tenant_id,
-            fleet_id=fleet_id,
-            agent_id=agent_id,
-            memory_type=memory_type,
-            status=status,
-            include_deleted=include_deleted,
-            # Aggregate across the readable set when the caller has
-            # cross-tenant read AND didn't pin tenant_id. Pinning to a
-            # specific tenant returns just that tenant's stats.
-            readable_tenant_ids=(
+    # Type/agent/status breakdown (GROUPING SETS) via core-storage-api. Aggregates
+    # across the readable set when the caller has cross-tenant read AND didn't pin
+    # tenant_id; pinning to a specific tenant returns just that tenant's stats.
+    return await get_storage_client().memory_stats_breakdown(
+        {
+            "tenant_id": tenant_id,
+            "fleet_id": fleet_id,
+            "agent_id": agent_id,
+            "memory_type": memory_type,
+            "status": status,
+            "include_deleted": include_deleted,
+            "readable_tenant_ids": (
                 auth.readable_tenant_ids if auth.is_cross_tenant_read and not tenant_id_explicit else None
             ),
-        )
-    except (OperationalError, SQLATimeoutError):
-        # Connection pool exhaustion / connection drop / per-query timeout
-        # are the transient failure modes worth degrading for. Programming
-        # errors (ProgrammingError, IntegrityError, DataError) keep
-        # bubbling so they surface as 500s. ``warning`` not ``exception``
-        # so a sustained pool-exhaustion event doesn't flood logs with
-        # full tracebacks at ERROR; ``exc_info=True`` keeps the traceback
-        # for diagnosis. Fallback can only honour tenant_id+fleet_id (the
-        # filters storage-api accepts) and never returns the soft-deleted
-        # count; if the caller asked for an agent_id/memory_type/status
-        # subset or include_deleted=True, returning a degraded answer
-        # would lie to them — re-raise instead.
-        if not tenant_id or agent_id or memory_type or status or include_deleted:
-            # ``OperationalError`` / ``SQLATimeoutError`` are transient
-            # pool-exhaustion / connection-drop / per-query timeout
-            # conditions — surface as 503 so load balancers and clients
-            # treat them as retryable. A bare ``raise`` would default
-            # to 500 and trip alerting rules sized for programming
-            # bugs.
-            logger.warning(
-                "memory_stats: direct DB query failed; raising 503 "
-                "(unsupported filters or missing tenant_id)",
-                exc_info=True,
-            )
-            raise HTTPException(
-                status_code=503,
-                detail="memory stats unavailable: database connection failed",
-            ) from None
-        logger.warning(
-            "memory_stats: direct DB query failed; falling back to storage-api",
-            exc_info=True,
-        )
-        return await _stats_fallback(tenant_id, fleet_id)
+        }
+    )
 
 
 @router.get("/memories/count")
@@ -479,7 +379,6 @@ async def delete_all_memories(
     memory_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
     body: dict | None = Body(default=None),
 ):
     """Soft-delete all matching memories for a tenant.
@@ -501,7 +400,7 @@ async def delete_all_memories(
     # the tenant. Tenant/user credentials (no gateway X-Agent-ID → the tenant
     # owner) keep full reach (dashboard reset, tagged cleanup) unchanged.
     if auth.tenant_id and auth.agent_id:
-        await enforce_delete(db, tenant_id, auth.agent_id)
+        await enforce_delete(tenant_id, auth.agent_id)
     exclude_ids = (body or {}).get("exclude_ids", [])
     metadata_filter = (body or {}).get("metadata_filter") or {}
     if metadata_filter:
@@ -547,7 +446,6 @@ async def delete_all_memories(
     )
     # Audit stays a decoupled async POST (not folded into the storage txn).
     await log_action(
-        db,
         tenant_id=tenant_id,
         action="bulk_delete",
         resource_type="memory",
@@ -566,7 +464,6 @@ async def delete_all_memories(
 async def bulk_delete_by_ids(
     body: dict = Body(...),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Soft-delete memories by a list of IDs."""
     tenant_id = body.get("tenant_id")
@@ -579,14 +476,13 @@ async def bulk_delete_by_ids(
     # credential must be admin-trust (>= 3) to bulk-delete by id; this also
     # closes the cross-fleet/agent delete (the ids are otherwise unscoped).
     if auth.tenant_id and auth.agent_id:
-        await enforce_delete(db, tenant_id, auth.agent_id)
+        await enforce_delete(tenant_id, auth.agent_id)
     if not ids or len(ids) > 1000:
         raise HTTPException(status_code=400, detail="ids must be 1-1000 items")
 
     deleted = await get_storage_client().soft_delete_by_ids(tenant_id, ids)
     # Audit stays a decoupled async POST (not folded into the storage txn).
     await log_action(
-        db,
         tenant_id=tenant_id,
         action="bulk_delete",
         resource_type="memory",
@@ -600,7 +496,6 @@ async def get_memory(
     memory_id: UUID,
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Get a single memory with full details including embedding and entity links."""
     from fastapi.responses import JSONResponse
@@ -628,7 +523,6 @@ async def get_memory(
         # dependency stays only until the authz-helper ``db`` params are dropped
         # in the dedicated cleanup phase (then this read opens no connection).
         allowed = await authorize_memory_access(
-            db,
             tenant_id,
             auth.agent_id,
             visibility=memory.get("visibility"),
@@ -700,7 +594,6 @@ async def get_contradictions(
     memory_id: UUID,
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Return contradiction detector findings for this memory.
 
@@ -753,7 +646,6 @@ async def get_contradictions(
     # ``get_db`` dependency stays only until the authz-helper ``db`` params are
     # dropped in the dedicated cleanup phase.
     allowed = await authorize_memory_access(
-        db,
         tenant_id,
         auth.agent_id,
         visibility=memory.get("visibility"),
@@ -859,7 +751,6 @@ async def write_memory(
     body: MemoryCreate,
     response: Response,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
     idempotency_key: str | None = Header(None, alias=IDEMPOTENCY_HEADER),
 ):
     auth.enforce_read_only()
@@ -908,21 +799,19 @@ async def write_memory(
     # queueing requests until they time out at the worker layer. Only
     # the new-write path is gated; replays returned above bypass it.
     async with per_tenant_slot("write", body.tenant_id):
-        return await _write_memory_inner(body, response, auth, db, _idem)
+        return await _write_memory_inner(body, response, auth, _idem)
 
 
 async def _write_memory_inner(
     body: MemoryCreate,
     response: Response,
     auth: AuthContext,
-    db: AsyncSession,
     idem: IdempotencyGuard | None,
 ):
     from core_api.services.organization_settings import resolve_config
 
-    write_config = await resolve_config(db, body.tenant_id)
+    write_config = await resolve_config(body.tenant_id)
     agent = await get_or_create_agent(
-        db,
         body.tenant_id,
         body.agent_id,
         body.fleet_id,
@@ -938,12 +827,12 @@ async def _write_memory_inner(
         body.fleet_id = agent["fleet_id"]
     usage = None
     if auth.tenant_id:  # skip enforcement + metering for admin
-        await enforce_fleet_write(db, body.tenant_id, body.agent_id, body.fleet_id)
-        usage = await check_and_increment(db, body.tenant_id, "write")
+        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
+        usage = await check_and_increment(body.tenant_id, "write")
     if usage:
         response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
         response.headers["X-RateLimit-Remaining"] = str(usage.get("remaining", "unlimited"))
-    result = await create_memory(db, body)
+    result = await create_memory(body)
     # STM writes return STMWriteResponse (different shape from MemoryOut)
     if isinstance(result, STMWriteResponse):
         stm_body = result.model_dump(mode="json")
@@ -992,7 +881,6 @@ async def write_memories_bulk(
     body: BulkMemoryCreate,
     response: Response,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
     idempotency_key: str | None = Header(None, alias=IDEMPOTENCY_HEADER),
     bulk_attempt_id: str | None = Header(None, alias=BULK_ATTEMPT_ID_HEADER),
 ):
@@ -1083,7 +971,7 @@ async def write_memories_bulk(
         # carry on the cached response.
         return JSONResponse(content=_body, status_code=_status)
     async with per_tenant_slot("write", body.tenant_id):
-        return await _write_memories_bulk_inner(body, response, auth, db, _idem, bulk_attempt_id)
+        return await _write_memories_bulk_inner(body, response, auth, _idem, bulk_attempt_id)
 
 
 def _bulk_response(result: BulkMemoryResponse) -> JSONResponse:
@@ -1117,24 +1005,23 @@ async def _write_memories_bulk_inner(
     body: BulkMemoryCreate,
     response: Response,
     auth: AuthContext,
-    db: AsyncSession,
     idem: IdempotencyGuard | None,
     bulk_attempt_id: str,
 ):
-    agent = await get_or_create_agent(db, body.tenant_id, body.agent_id, body.fleet_id)
+    agent = await get_or_create_agent(body.tenant_id, body.agent_id, body.fleet_id)
     if not body.fleet_id and agent.get("fleet_id"):
         body.fleet_id = agent["fleet_id"]
     usage = None
     if auth.tenant_id:  # skip enforcement + metering for admin
-        await enforce_fleet_write(db, body.tenant_id, body.agent_id, body.fleet_id)
-        usage = await bulk_check_and_increment(db, body.tenant_id, len(body.items))
+        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
+        usage = await bulk_check_and_increment(body.tenant_id, len(body.items))
     if usage:
         response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
         response.headers["X-RateLimit-Remaining"] = str(usage.get("remaining", "unlimited"))
 
     try:
         result = await asyncio.wait_for(
-            create_memories_bulk(db, body, bulk_attempt_id=bulk_attempt_id),
+            create_memories_bulk(body, bulk_attempt_id=bulk_attempt_id),
             timeout=app_settings.bulk_request_timeout_seconds,
         )
     except (TimeoutError, httpx.TimeoutException):
@@ -1251,7 +1138,6 @@ async def delete_memory(
     tenant_id: str = Query(...),
     agent_id: str | None = Query(default=None),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
@@ -1260,14 +1146,13 @@ async def delete_memory(
     # trust gate by omitting/spoofing ``agent_id``.
     caller_agent_id = auth.agent_id or agent_id
     if auth.tenant_id and caller_agent_id:
-        await enforce_delete(db, tenant_id, caller_agent_id)
+        await enforce_delete(tenant_id, caller_agent_id)
         # Cross-fleet / scope_agent row authorization (write threshold).
         # ``get_memory_for_tenant`` already filters out soft-deleted /
         # cross-tenant rows server-side, so a returned row is live + owned.
         target = await get_storage_client().get_memory_for_tenant(tenant_id, str(memory_id))
         if target:
             allowed = await authorize_memory_access(
-                db,
                 tenant_id,
                 caller_agent_id,
                 visibility=target.get("visibility"),
@@ -1284,9 +1169,8 @@ async def delete_memory(
                 )
     # ``soft_delete_memory`` already routes the fetch + delete through the
     # storage client (and logs its own ``soft_delete`` audit row).
-    await soft_delete_memory(db, memory_id, tenant_id)
+    await soft_delete_memory(memory_id, tenant_id)
     await log_action(
-        db,
         tenant_id=tenant_id,
         # Attribute to the effective identity (gateway X-Agent-ID wins over
         # the query param) — logging the raw param attributed a gateway
@@ -1304,7 +1188,6 @@ async def update_memory_status(
     body: dict,
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Update memory status (e.g., active → confirmed)."""
     auth.enforce_read_only()
@@ -1328,7 +1211,6 @@ async def update_memory_status(
     # (no-op for tenant-scoped dashboard credentials, where auth.agent_id is None).
     if auth.agent_id:
         allowed = await authorize_memory_access(
-            db,
             tenant_id,
             auth.agent_id,
             visibility=memory.get("visibility"),
@@ -1346,7 +1228,6 @@ async def update_memory_status(
 
     # Audit stays a decoupled async POST (not folded into the storage txn).
     await log_action(
-        db,
         tenant_id=tenant_id,
         agent_id=memory.get("agent_id"),
         action="status_update",
@@ -1376,7 +1257,6 @@ async def update_memory_endpoint(
         ),
     ),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Update a memory. Only provide fields you want to change.
 
@@ -1413,11 +1293,10 @@ async def update_memory_endpoint(
             )
         body.metadata_mode = metadata_mode
     if auth.tenant_id:  # skip usage metering for admin
-        await check_and_increment(db, tenant_id, "write")
+        await check_and_increment(tenant_id, "write")
     # Authenticated agent identity (gateway X-Agent-ID) takes precedence over
     # the caller-supplied query param for trust/fleet enforcement.
     return await update_memory(
-        db,
         memory_id,
         tenant_id,
         body,
@@ -1432,7 +1311,6 @@ async def search(
     body: SearchRequest,
     response: Response,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     # Read endpoint — honors cross-tenant readable set. The SQL
     # widens to readable_tenant_ids inside search_memories so the
@@ -1440,14 +1318,13 @@ async def search(
     # (typically home, but explicit source queries work too).
     auth.enforce_readable_tenant(body.tenant_id)
     async with per_tenant_slot("search", body.tenant_id):
-        return await _search_inner(body, response, auth, db)
+        return await _search_inner(body, response, auth)
 
 
 async def _search_inner(
     body: SearchRequest,
     response: Response,
     auth: AuthContext,
-    db: AsyncSession,
 ):
     usage = None
     _agent = None
@@ -1463,12 +1340,12 @@ async def _search_inner(
     if auth.tenant_id:  # skip for admin
         if eff_agent_id:
             fleet_id_hint = body.fleet_ids[0] if body.fleet_ids and len(body.fleet_ids) == 1 else None
-            _agent = await get_or_create_agent(db, body.tenant_id, eff_agent_id, fleet_id_hint)
+            _agent = await get_or_create_agent(body.tenant_id, eff_agent_id, fleet_id_hint)
             if not body.fleet_ids and _agent.get("fleet_id") and _agent.get("trust_level", 0) < 2:
                 body.fleet_ids = [_agent["fleet_id"]]  # Force fleet scoping for trust < 2
             if body.fleet_ids and len(body.fleet_ids) == 1:
-                await enforce_fleet_read(db, body.tenant_id, eff_agent_id, body.fleet_ids[0])
-        usage = await check_and_increment(db, body.tenant_id, "search")
+                await enforce_fleet_read(body.tenant_id, eff_agent_id, body.fleet_ids[0])
+        usage = await check_and_increment(body.tenant_id, "search")
     if usage:
         response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
         response.headers["X-RateLimit-Remaining"] = str(usage.get("remaining", "unlimited"))
@@ -1478,12 +1355,11 @@ async def _search_inner(
     success = True
     results: list = []
     try:
-        config = await resolve_config(db, body.tenant_id)
+        config = await resolve_config(body.tenant_id)
         # Widen the read predicate when the caller authenticated with
         # a cross-tenant key. Single-tenant keys leave
         # ``readable_tenant_ids = [tenant_id]`` so this is a no-op.
         results = await search_memories(
-            db,
             tenant_id=body.tenant_id,
             query=body.query,
             fleet_ids=body.fleet_ids,
@@ -1529,7 +1405,6 @@ async def _search_inner(
 async def ingest_preview_endpoint(
     body: IngestRequest,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Extract facts from a URL or text for preview (no writes).
 
@@ -1538,7 +1413,7 @@ async def ingest_preview_endpoint(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
-    return await ingest_preview(db, body)
+    return await ingest_preview(body)
 
 
 @router.post("/ingest/commit")
@@ -1547,15 +1422,14 @@ async def ingest_commit_endpoint(
     request: Request,
     body: IngestCommitRequest,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Write previewed facts as memories."""
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
     if auth.tenant_id:  # skip for admin
-        await check_and_increment(db, body.tenant_id, "write")
-    return await ingest_commit(db, body)
+        await check_and_increment(body.tenant_id, "write")
+    return await ingest_commit(body)
 
 
 @router.post("/ingest/file")
@@ -1566,7 +1440,6 @@ async def ingest_file_endpoint(
     fleet_id: str | None = Form(None),
     agent_id: str | None = Form(None),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """PR #9: multipart file upload entry point.
 
@@ -1616,7 +1489,7 @@ async def ingest_file_endpoint(
     filename = (file.filename or "").strip() or None
     kwargs["source_uri"] = f"upload:{filename}" if filename else "upload"
     req = IngestRequest(**kwargs)
-    return await ingest_preview(db, req)
+    return await ingest_preview(req)
 
 
 @router.post("/ingest/undo/{run_id}")
@@ -1624,7 +1497,6 @@ async def ingest_undo_endpoint(
     run_id: str,
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """A3 (PR #6): soft-delete every memory tagged with the given run_id.
 
@@ -1667,7 +1539,6 @@ async def ingest_undo_endpoint(
 
     # Audit stays a decoupled async POST (not folded into the storage txn).
     await log_action(
-        db,
         tenant_id=tenant_id,
         action="ingest_undo",
         resource_type="memory",
@@ -1682,11 +1553,10 @@ async def recall_endpoint(
     request: Request,
     body: SearchRequest,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Search memories and return an LLM-synthesized context summary.
 
-    Audit P3 (extended to REST): the legacy ``recall(db, ...)`` wrapper
+    Audit P3 (extended to REST): the legacy ``recall(...)`` wrapper
     held the FastAPI-injected DB session across the multi-second LLM
     brief, pinning a pooled connection. Load-test gate flagged
     ``slo-p95-recall_brief`` (6.9 s vs 5 s target) and
@@ -1704,12 +1574,12 @@ async def recall_endpoint(
     if auth.tenant_id:
         if body.filter_agent_id:
             fleet_id_hint = body.fleet_ids[0] if body.fleet_ids and len(body.fleet_ids) == 1 else None
-            _agent = await get_or_create_agent(db, body.tenant_id, body.filter_agent_id, fleet_id_hint)
+            _agent = await get_or_create_agent(body.tenant_id, body.filter_agent_id, fleet_id_hint)
             if not body.fleet_ids and _agent.get("fleet_id") and _agent.get("trust_level", 0) < 2:
                 body.fleet_ids = [_agent["fleet_id"]]
             if body.fleet_ids and len(body.fleet_ids) == 1:
-                await enforce_fleet_read(db, body.tenant_id, body.filter_agent_id, body.fleet_ids[0])
-        await check_and_increment(db, body.tenant_id, "search")
+                await enforce_fleet_read(body.tenant_id, body.filter_agent_id, body.fleet_ids[0])
+        await check_and_increment(body.tenant_id, "search")
 
     from core_api.services.memory_service import search_memories
     from core_api.services.organization_settings import resolve_config
@@ -1718,9 +1588,8 @@ async def recall_endpoint(
     t0 = time.perf_counter()
 
     # ── Phase 1: DB-bound — config + search ──────────────────────
-    config = await resolve_config(db, body.tenant_id)
+    config = await resolve_config(body.tenant_id)
     memories = await search_memories(
-        db,
         tenant_id=body.tenant_id,
         query=body.query,
         fleet_ids=body.fleet_ids,
@@ -1739,7 +1608,6 @@ async def recall_endpoint(
     # Release the pooled DB connection before the LLM round-trip.
     # FastAPI's outer ``get_db`` ``async with`` will re-close on exit —
     # idempotent, so it's a no-op there.
-    await db.close()
 
     # ── Phase 2: LLM brief (no DB held) ──────────────────────────
     return await summarize_memories(
@@ -1763,7 +1631,6 @@ async def redistribute_memories(
     tenant_id: str = Query(...),
     agent_id: str = Query(..., description="Requesting agent (must be trust_level >= 3)"),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Bulk-reassign memories to a different agent.
 
@@ -1795,7 +1662,7 @@ async def redistribute_memories(
         )
 
     # Verify requesting agent is admin
-    caller = await lookup_agent(db, tenant_id, agent_id)
+    caller = await lookup_agent(tenant_id, agent_id)
     if caller is None or caller.get("trust_level", 0) < 3:
         raise HTTPException(
             status_code=403,
@@ -1803,7 +1670,7 @@ async def redistribute_memories(
         )
 
     # Verify target agent exists and is not restricted
-    target = await lookup_agent(db, tenant_id, body.target_agent_id)
+    target = await lookup_agent(tenant_id, body.target_agent_id)
     if target is None:
         raise HTTPException(
             status_code=404,
@@ -1818,7 +1685,7 @@ async def redistribute_memories(
 
     # Usage quota
     if auth.tenant_id:  # skip usage metering for admin tokens
-        await bulk_check_and_increment(db, tenant_id, len(body.memory_ids))
+        await bulk_check_and_increment(tenant_id, len(body.memory_ids))
 
     # The SELECT … FOR UPDATE, the moved/promoted/skipped/from_agents loop,
     # the scope_agent→scope_team auto-promotion, and the not_found computation
@@ -1833,7 +1700,6 @@ async def redistribute_memories(
 
     # Audit stays a decoupled async POST (not folded into the storage txn).
     await log_action(
-        db,
         tenant_id=tenant_id,
         agent_id=agent_id,
         action="redistribute",

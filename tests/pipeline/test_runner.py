@@ -76,7 +76,7 @@ class TrackingStep:
 async def test_success_pipeline():
     """All steps succeed — result reflects step count and no failures."""
     db = AsyncMock()
-    ctx = PipelineContext(db=db)
+    ctx = PipelineContext()
     pipeline = Pipeline("test", [SuccessStep(), SuccessStep()])
 
     result = await pipeline.run(ctx)
@@ -92,7 +92,7 @@ async def test_success_pipeline():
 async def test_skip_counted():
     """Skipped steps are counted in skipped_count."""
     db = AsyncMock()
-    ctx = PipelineContext(db=db)
+    ctx = PipelineContext()
     pipeline = Pipeline("test", [SuccessStep(), SkipStep()])
 
     result = await pipeline.run(ctx)
@@ -106,7 +106,7 @@ async def test_skip_counted():
 async def test_fail_short_circuits():
     """Non-HTTP exception fails pipeline and stops execution."""
     db = AsyncMock()
-    ctx = PipelineContext(db=db)
+    ctx = PipelineContext()
     after = TrackingStep("after_fail")
     pipeline = Pipeline("test", [FailStep(), after])
 
@@ -123,7 +123,7 @@ async def test_fail_short_circuits():
 async def test_http_exception_propagates():
     """HTTPException raised by a step propagates directly (not wrapped)."""
     db = AsyncMock()
-    ctx = PipelineContext(db=db)
+    ctx = PipelineContext()
     pipeline = Pipeline("test", [HttpErrorStep()])
 
     with pytest.raises(HTTPException) as exc_info:
@@ -136,7 +136,7 @@ async def test_http_exception_propagates():
 async def test_step_execution_order():
     """Steps execute in declared order."""
     db = AsyncMock()
-    ctx = PipelineContext(db=db)
+    ctx = PipelineContext()
     pipeline = Pipeline(
         "test",
         [
@@ -155,7 +155,7 @@ async def test_step_execution_order():
 async def test_per_step_timing():
     """Each step result is recorded in pipeline result."""
     db = AsyncMock()
-    ctx = PipelineContext(db=db)
+    ctx = PipelineContext()
     pipeline = Pipeline("test", [SuccessStep()])
 
     result = await pipeline.run(ctx)
@@ -168,7 +168,7 @@ async def test_per_step_timing():
 async def test_empty_pipeline():
     """Pipeline with no steps completes successfully."""
     db = AsyncMock()
-    ctx = PipelineContext(db=db)
+    ctx = PipelineContext()
     pipeline = Pipeline("empty", [])
 
     result = await pipeline.run(ctx)

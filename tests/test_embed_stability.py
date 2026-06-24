@@ -61,8 +61,7 @@ def _ctx(*, enrichment: bool = True) -> PipelineContext:
         enrichment_provider="fake" if enrichment else "none",
     )
     return PipelineContext(
-        db=AsyncMock(),
-        data={"input": _input(), "content_hash": "f" * 64},
+                data={"input": _input(), "content_hash": "f" * 64},
         tenant_config=tenant_config,
     )
 

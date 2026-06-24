@@ -34,11 +34,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
-from core_api.db.session import get_db
 from core_api.services.audit_service import log_action
 from core_api.services.forge.poison import write_rejected_fingerprint
 from core_api.services.forge.sentinel_scan import scan_skill_doc
@@ -62,17 +60,15 @@ SKILLS_COLLECTION = "skills"
 # ── Flag gate ──────────────────────────────────────────────────────
 
 
-async def _require_skills_factory_enabled(db: AsyncSession | None, tenant_id: str) -> dict:
+async def _require_skills_factory_enabled(tenant_id: str) -> dict:
     """Hot-path: read the raw settings row and short-circuit when the
     feature flag is off. Returns the resolved settings-for-display
     dict so each endpoint has the per-tenant caps in one fetch.
 
-    ``db`` is forwarded to ``get_raw_settings`` / ``get_settings_for_display``,
-    both of which ignore it (org settings route through core-storage-api as
-    of Fix 2 Phase 0). The Ph5a ``/reject`` route passes ``None``; the other
-    inbox routes still pass their request-scoped session.
+    Org settings route through core-storage-api (Fix 2 Phase 0), so no DB
+    session is involved.
     """
-    raw = await get_raw_settings(db, tenant_id)
+    raw = await get_raw_settings(tenant_id)
     enabled = (
         isinstance(raw, dict)
         and isinstance(raw.get("skills_factory"), dict)
@@ -83,7 +79,7 @@ async def _require_skills_factory_enabled(db: AsyncSession | None, tenant_id: st
             status_code=403,
             detail="SKILLS_FACTORY_DISABLED — set org_settings.skills_factory.enabled=true to use the inbox",
         )
-    return await get_settings_for_display(db, tenant_id)
+    return await get_settings_for_display(tenant_id)
 
 
 def _require_tenant(auth: AuthContext) -> str:
@@ -338,7 +334,6 @@ async def list_inbox(
     # (silently empty list) and ``limit=10_000`` (DoS via wide query).
     limit: int = Query(50, ge=1, le=200),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ) -> InboxListResponse:
     """List ``status='staged'`` skill candidates for the tenant.
 
@@ -347,7 +342,7 @@ async def list_inbox(
     enforces).
     """
     tenant_id = _require_tenant(auth)
-    settings = await _require_skills_factory_enabled(db, tenant_id)
+    settings = await _require_skills_factory_enabled(tenant_id)
     max_pending = (
         ((settings.get("skills_factory") or {}).get("inbox_max_pending"))
         if isinstance(settings, dict)
@@ -437,14 +432,13 @@ async def list_inbox(
 async def approve(
     slug: str,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ) -> ActionResponse:
     """Promote ``staged → active``. Pre-apply rescan via Sentinel
     blocks the transition if the doc became unsafe between propose
     and apply.
     """
     tenant_id = _require_tenant(auth)
-    settings = await _require_skills_factory_enabled(db, tenant_id)
+    settings = await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)
     sf = (settings or {}).get("skills_factory") if isinstance(settings, dict) else {}
     body_max = (sf or {}).get("body_max_bytes", 40_000)
@@ -547,7 +541,6 @@ async def approve(
     # should NOT 500 the operator — we log + swallow.
     try:
         await log_action(
-            db,
             tenant_id=tenant_id,
             action="skill_inbox_approve",
             resource_type="document",
@@ -559,7 +552,6 @@ async def approve(
             resource_id=doc.get("doc_id") or slug,  # type: ignore[arg-type]
             detail={"slug": slug, "previous_status": prev},
         )
-        await db.commit()
     except Exception:
         logger.error(
             "skill_inbox: audit log failed for approve slug=%s",
@@ -586,7 +578,7 @@ async def reject(
     their ``db`` arg and route through storage).
     """
     tenant_id = _require_tenant(auth)
-    settings = await _require_skills_factory_enabled(None, tenant_id)
+    settings = await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)
     sf = (settings or {}).get("skills_factory") if isinstance(settings, dict) else {}
     default_cooloff = (sf or {}).get("rejection_cooloff_days", 30)
@@ -695,7 +687,6 @@ async def reject(
     # failure must not 500 a successful reject.
     try:
         await log_action(
-            None,
             tenant_id=tenant_id,
             action="skill_inbox_reject",
             resource_type="document",
@@ -731,14 +722,13 @@ async def quarantine(
     slug: str,
     body: QuarantineRequest,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ) -> ActionResponse:
     """Move to ``quarantined`` for security review. Does NOT touch the
     poison table — quarantine is reversible by a security admin; only
     Reject crystallizes a poison row.
     """
     tenant_id = _require_tenant(auth)
-    await _require_skills_factory_enabled(db, tenant_id)
+    await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)
     doc = await _load_doc_or_404(tenant_id=tenant_id, slug=slug)
     data = doc.get("data") or {}
@@ -762,7 +752,6 @@ async def quarantine(
     # Best-effort audit; status transition already persisted.
     try:
         await log_action(
-            db,
             tenant_id=tenant_id,
             action="skill_inbox_quarantine",
             resource_type="document",
@@ -774,7 +763,6 @@ async def quarantine(
             resource_id=doc.get("doc_id") or slug,  # type: ignore[arg-type]
             detail={"slug": slug, "previous_status": prev, "reason": body.reason},
         )
-        await db.commit()
     except Exception:
         logger.error(
             "skill_inbox: audit log failed for quarantine slug=%s",
@@ -789,14 +777,13 @@ async def defer(
     slug: str,
     body: DeferRequest,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ) -> ActionResponse:
     """Defer — leaves the doc in ``staged`` so Forge can revise it on
     the next run. Stamps ``deferred_at`` so the inbox can sort
     deferred items to the bottom + show "deferred N days ago".
     """
     tenant_id = _require_tenant(auth)
-    await _require_skills_factory_enabled(db, tenant_id)
+    await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)
     doc = await _load_doc_or_404(tenant_id=tenant_id, slug=slug)
     data = doc.get("data") or {}
@@ -831,7 +818,6 @@ async def defer(
     # Best-effort audit; defer mark already persisted.
     try:
         await log_action(
-            db,
             tenant_id=tenant_id,
             action="skill_inbox_defer",
             resource_type="document",
@@ -843,7 +829,6 @@ async def defer(
             resource_id=doc.get("doc_id") or slug,  # type: ignore[arg-type]
             detail={"slug": slug, "reason": body.reason},
         )
-        await db.commit()
     except Exception:
         logger.error(
             "skill_inbox: audit log failed for defer slug=%s",
@@ -858,7 +843,6 @@ async def edit(
     slug: str,
     body: EditRequest,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ) -> ActionResponse:
     """Edit content / description / summary, then rehash + rescan.
     Stays ``staged``. Plan §10 acceptance:
@@ -868,7 +852,7 @@ async def edit(
     Raw markdown only (per OQ-D — no WYSIWYG in MVP).
     """
     tenant_id = _require_tenant(auth)
-    settings = await _require_skills_factory_enabled(db, tenant_id)
+    settings = await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)
     sf = (settings or {}).get("skills_factory") if isinstance(settings, dict) else {}
     desc_max = (sf or {}).get("description_max_bytes", 160)
@@ -1014,7 +998,6 @@ async def edit(
     # Best-effort audit; edit already persisted via the upsert above.
     try:
         await log_action(
-            db,
             tenant_id=tenant_id,
             action="skill_inbox_edit",
             resource_type="document",
@@ -1030,7 +1013,6 @@ async def edit(
                 "scan_state": scan.state,
             },
         )
-        await db.commit()
     except Exception:
         logger.error(
             "skill_inbox: audit log failed for edit slug=%s",

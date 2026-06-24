@@ -57,7 +57,7 @@ def _ctx(*, mode: str | None) -> PipelineContext:
     data: dict = {"input": _input(), "content_hash": "f" * 64}
     if mode is not None:
         data["resolved_write_mode"] = mode
-    return PipelineContext(db=AsyncMock(), data=data, tenant_config=_tenant_config())
+    return PipelineContext(data=data, tenant_config=_tenant_config())
 
 
 # ---------------------------------------------------------------------------

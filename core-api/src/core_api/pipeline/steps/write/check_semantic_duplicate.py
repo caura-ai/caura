@@ -124,13 +124,14 @@ class CheckSemanticDuplicate:
         t_dedup = time.perf_counter()
         # Surface candidates down to the JUDGE band so this step can
         # decide auto-reject vs judge-dispatch vs accept by tier.
-        sem_dup = await _find_semantic_duplicate(
-            ctx.db,  # storage-routed (ignores db) — tolerate the db=None STM path
-            data.tenant_id,
-            data.fleet_id,
-            embedding,
-            visibility=data.visibility or "scope_team",
-            min_similarity=SEMANTIC_DEDUP_JUDGE_THRESHOLD,
+        sem_dup = (
+            await _find_semantic_duplicate(  # storage-routed (ignores db) — tolerate the db=None STM path
+                data.tenant_id,
+                data.fleet_id,
+                embedding,
+                visibility=data.visibility or "scope_team",
+                min_similarity=SEMANTIC_DEDUP_JUDGE_THRESHOLD,
+            )
         )
         metadata["semantic_dedup_ms"] = round((time.perf_counter() - t_dedup) * 1000, 1)
 

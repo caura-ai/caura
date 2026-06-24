@@ -7,8 +7,8 @@ from fastapi.security import APIKeyHeader
 
 from core_api.config import settings
 from core_api.constants import API_KEY_HEADER
-from core_api.db.session import set_current_tenant, set_readable_tenants
 from core_api.suppression import is_tenant_suppressed
+from core_api.tenant_context import set_current_tenant, set_readable_tenants
 
 logger = logging.getLogger(__name__)
 

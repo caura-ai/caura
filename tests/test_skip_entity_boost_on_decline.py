@@ -56,13 +56,12 @@ def _boost_ctx(extra: dict | None = None) -> PipelineContext:
     }
     if extra:
         data.update(extra)
-    return PipelineContext(db=AsyncMock(), data=data)
+    return PipelineContext(data=data)
 
 
 def _classify_ctx() -> PipelineContext:
     return PipelineContext(
-        db=AsyncMock(),
-        data={
+                data={
             "query": "What is Comet 0002's launch_date?",
             "tenant_id": "t1",
             "fleet_ids": ["fleet-1"],

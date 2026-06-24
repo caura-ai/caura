@@ -3,12 +3,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_ENTITY_LIMIT, MAX_LIST_LIMIT
-from core_api.db.session import get_db
 from core_api.schemas import (
     EntityOut,
     EntityUpsert,
@@ -32,7 +30,6 @@ async def list_entities(
     search: str | None = Query(default=None),
     limit: int = Query(default=DEFAULT_ENTITY_LIMIT, ge=1, le=MAX_LIST_LIMIT),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """List all entities for a tenant.
 
@@ -52,7 +49,6 @@ async def list_entities(
 
     if auth.is_cross_tenant_read and tenant_id != auth.tenant_id:
         await log_cross_tenant_read(
-            db,
             home_tenant_id=auth.tenant_id,
             home_agent_id=auth.agent_id,
             source_tenants=[tenant_id],
@@ -79,7 +75,6 @@ async def get_graph(
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Return full knowledge graph (entities + relations) for a tenant.
 
@@ -101,7 +96,6 @@ async def get_graph(
 
     if auth.is_cross_tenant_read and tenant_id != auth.tenant_id:
         await log_cross_tenant_read(
-            db,
             home_tenant_id=auth.tenant_id,
             home_agent_id=auth.agent_id,
             source_tenants=[tenant_id],
@@ -144,13 +138,12 @@ async def get_graph(
 async def upsert_entity_route(
     body: EntityUpsert,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
     if auth.tenant_id:
-        await check_and_increment(db, body.tenant_id, "write")
+        await check_and_increment(body.tenant_id, "write")
     # NOTE: entity upsert uses its own connection (storage-api HTTP
     # client); not atomic with the ``check_and_increment`` quota
     # bump above. ``db`` is intentionally dropped at the call site so
@@ -165,18 +158,16 @@ async def get_entity_route(
     entity_id: UUID,
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Fetch a single entity. Mirrors ``GET /memories/{memory_id}`` —
     reads widen via ``readable_tenant_ids``; foreign-tenant reads are
     audited to the source tenant."""
     auth.enforce_readable_tenant(tenant_id)
-    entity = await get_entity(db, entity_id, tenant_id, caller_agent_id=auth.agent_id)
+    entity = await get_entity(entity_id, tenant_id, caller_agent_id=auth.agent_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
     if auth.is_cross_tenant_read and tenant_id != auth.tenant_id:
         await log_cross_tenant_read(
-            db,
             home_tenant_id=auth.tenant_id,
             home_agent_id=auth.agent_id,
             source_tenants=[tenant_id],
@@ -190,11 +181,10 @@ async def get_entity_route(
 async def upsert_relation_route(
     body: RelationUpsert,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
     if auth.tenant_id:
-        await check_and_increment(db, body.tenant_id, "write")
-    return await upsert_relation(db, body)
+        await check_and_increment(body.tenant_id, "write")
+    return await upsert_relation(body)

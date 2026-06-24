@@ -41,7 +41,7 @@ async def _seed_memories(db, count: int = 3) -> list[MemoryOut]:
             persist=True,
             entity_links=[],
         )
-        result = await create_memory(db, data)
+        result = await create_memory(data)
         results.append(result)
     return results
 
@@ -63,8 +63,7 @@ async def test_resolve_search_profile_defaults():
     )
 
     ctx = PipelineContext(
-        db=AsyncMock(),
-        data={
+                data={
             "query": "test query",
             "top_k": 5,
             "search_profile": None,
@@ -92,8 +91,7 @@ async def test_extract_temporal_hint_today():
     )
 
     ctx = PipelineContext(
-        db=AsyncMock(),
-        data={"query": "what happened today"},
+                data={"query": "what happened today"},
     )
     step = ExtractTemporalHint()
     await step.execute(ctx)
@@ -112,8 +110,7 @@ async def test_extract_temporal_hint_none():
     )
 
     ctx = PipelineContext(
-        db=AsyncMock(),
-        data={"query": "favorite color"},
+                data={"query": "favorite color"},
     )
     step = ExtractTemporalHint()
     await step.execute(ctx)
@@ -133,8 +130,7 @@ async def test_extract_temporal_hint_sets_date_range():
     )
 
     ctx = PipelineContext(
-        db=AsyncMock(),
-        data={"query": "what happened two months ago"},
+                data={"query": "what happened two months ago"},
     )
     step = ExtractTemporalHint()
     await step.execute(ctx)
@@ -157,8 +153,7 @@ async def test_extract_temporal_hint_uses_valid_at_as_reference():
 
     ref = datetime(2026, 4, 14, 12, 0, 0)
     ctx = PipelineContext(
-        db=AsyncMock(),
-        data={"query": "notes from two weeks ago", "valid_at": ref},
+                data={"query": "notes from two weeks ago", "valid_at": ref},
     )
     step = ExtractTemporalHint()
     await step.execute(ctx)
@@ -191,8 +186,7 @@ async def test_post_filter_results():
         ),
     ]
     ctx = PipelineContext(
-        db=AsyncMock(),
-        data={
+                data={
             "raw_rows": rows,
             "search_params": {"min_similarity": 0.5},
         },
@@ -251,8 +245,7 @@ async def test_load_and_serialize_uses_preloaded_entity_links():
 
     mock_db = AsyncMock()
     ctx = PipelineContext(
-        db=mock_db,
-        data={"filtered_rows": [row]},
+                data={"filtered_rows": [row]},
     )
     step = LoadAndSerialize()
     await step.execute(ctx)
@@ -290,8 +283,7 @@ async def test_track_recalls_fire_and_forget():
 
     mock_db = AsyncMock()
     ctx = PipelineContext(
-        db=mock_db,
-        data={"filtered_rows": rows},
+                data={"filtered_rows": rows},
     )
 
     with patch("core_api.pipeline.steps.search.track_recalls.track_task") as mock_track:
@@ -352,7 +344,7 @@ async def test_pipeline_failure_includes_error_detail():
         async def execute(self, ctx):
             raise ValueError("something broke in scoring")
 
-    ctx = PipelineContext(db=AsyncMock(), data={})
+    ctx = PipelineContext(data={})
     pipeline = Pipeline("test", [FailingStep()])
     result = await pipeline.run(ctx)
 
@@ -391,9 +383,7 @@ async def test_search_pipeline_failure_logs_error_not_in_detail():
         from core_api.services.memory_service import _search_memories_pipeline
 
         with pytest.raises(HTTPException) as exc_info:
-            await _search_memories_pipeline(
-                db=AsyncMock(),
-                tenant_id="t1",
+            await _search_memories_pipeline(                tenant_id="t1",
                 query="test",
             )
 
@@ -426,8 +416,7 @@ async def test_parallel_embed_gather_has_timeout():
     )
 
     ctx = PipelineContext(
-        db=AsyncMock(),
-        data={
+                data={
             "query": "test",
             "tenant_id": "t1",
             "tenant_config": None,
@@ -479,9 +468,7 @@ async def test_pipeline_search_returns_results(db):
     try:
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(
-            db,
-            tenant_id=tid,
+        results = await search_memories(tenant_id=tid,
             query="quick brown fox",
             fleet_ids=[FLEET_ID],
             caller_agent_id=AGENT_ID,
@@ -506,9 +493,7 @@ async def test_legacy_search_returns_results(db):
     try:
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(
-            db,
-            tenant_id=tid,
+        results = await search_memories(tenant_id=tid,
             query="quick brown fox",
             fleet_ids=[FLEET_ID],
             caller_agent_id=AGENT_ID,
@@ -543,10 +528,10 @@ async def test_search_pipeline_equivalence(db):
     }
 
     memory_service._USE_PIPELINE_SEARCH = False
-    legacy_results = await _search_memories_legacy(db, **kwargs)
+    legacy_results = await _search_memories_legacy(**kwargs)
 
     memory_service._USE_PIPELINE_SEARCH = True
-    pipeline_results = await _search_memories_pipeline(db, **kwargs)
+    pipeline_results = await _search_memories_pipeline(**kwargs)
     memory_service._USE_PIPELINE_SEARCH = False
 
     assert len(legacy_results) == len(pipeline_results), (
@@ -573,9 +558,7 @@ async def test_search_pipeline_empty_results(db):
     try:
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(
-            db,
-            tenant_id=f"nonexistent-tenant-{uuid.uuid4().hex[:8]}",
+        results = await search_memories(tenant_id=f"nonexistent-tenant-{uuid.uuid4().hex[:8]}",
             query="zzz no match zzz",
         )
         assert results == []

@@ -28,12 +28,10 @@ from typing import Literal
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Response
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.config import settings as app_settings
-from core_api.db.session import get_db
 from core_api.services.audit_service import log_action
 from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
@@ -72,7 +70,6 @@ class KeystoneSetRequest(BaseModel):
 
 
 async def _enforce_author_trust(
-    db: AsyncSession,
     tenant_id: str,
     agent_id: str,
     *,
@@ -103,7 +100,7 @@ async def _enforce_author_trust(
     # validation). See ``_is_standalone_admin``.
     if standalone_admin:
         return
-    _trust, not_found, terr = await _require_trust(db, tenant_id, agent_id, min_level=min_level)
+    _trust, not_found, terr = await _require_trust(tenant_id, agent_id, min_level=min_level)
     if not_found:
         raise HTTPException(
             status_code=403,
@@ -257,7 +254,6 @@ async def upsert_keystone(
     body: KeystoneSetRequest,
     x_agent_id: str | None = Header(default=None, alias="X-Agent-ID"),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Upsert a keystone rule. Trust ≥ 1 for self-authored ``scope=agent``
     rules; ≥ 2 otherwise. See module docstring."""
@@ -277,7 +273,7 @@ async def upsert_keystone(
     # the full floor (which may be 2 once the stored shape is known) is
     # re-enforced after the storage read.
     await _enforce_author_trust(
-        db, body.tenant_id, caller_agent_id, min_level=1, standalone_admin=standalone_admin
+        body.tenant_id, caller_agent_id, min_level=1, standalone_admin=standalone_admin
     )
 
     sc = get_storage_client()
@@ -306,7 +302,7 @@ async def upsert_keystone(
     # victim's name at trust 1.
     min_level = _effective_min_for_caller(scope_floor, caller_verified)
     await _enforce_author_trust(
-        db, body.tenant_id, caller_agent_id, min_level=min_level, standalone_admin=standalone_admin
+        body.tenant_id, caller_agent_id, min_level=min_level, standalone_admin=standalone_admin
     )
     # TOCTOU narrowing: re-fetch the stored row immediately before the
     # upsert and abort with 409 if the shape changed. A legitimate
@@ -359,7 +355,6 @@ async def upsert_keystone(
         raise _surface_storage_error(exc) from exc
 
     await log_action(
-        db,
         tenant_id=body.tenant_id,
         agent_id=caller_agent_id,
         action="keystone.set",
@@ -375,7 +370,6 @@ async def upsert_keystone(
             "via": "rest",
         },
     )
-    await db.commit()
     return doc
 
 
@@ -390,7 +384,6 @@ async def delete_keystone(
     tenant_id: str = Query(...),
     x_agent_id: str | None = Header(default=None, alias="X-Agent-ID"),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Remove a keystone rule. Trust ≥ 1 to delete a self-authored
     ``scope=agent`` rule; ≥ 2 otherwise. The rule is fetched first so
@@ -410,7 +403,7 @@ async def delete_keystone(
     # queries into one without losing either guarantee. Skipped for the
     # standalone single-tenant operator (see ``_is_standalone_admin``).
     if not standalone_admin:
-        trust, not_found, terr = await _require_trust(db, tenant_id, caller_agent_id, min_level=1)
+        trust, not_found, terr = await _require_trust(tenant_id, caller_agent_id, min_level=1)
         # Anti-probing: an unregistered caller must NOT learn whether a
         # ``doc_id`` exists (404 would leak presence; trust check below
         # would 403). 403 unconditionally on missing identity.
@@ -482,7 +475,6 @@ async def delete_keystone(
         raise HTTPException(status_code=404, detail="Keystone not found")
 
     await log_action(
-        db,
         tenant_id=tenant_id,
         agent_id=caller_agent_id,
         action="keystone.delete",
@@ -490,5 +482,4 @@ async def delete_keystone(
         resource_id=None,
         detail={"doc_id": doc_id, "via": "rest"},
     )
-    await db.commit()
     return {"deleted": True, "doc_id": doc_id}

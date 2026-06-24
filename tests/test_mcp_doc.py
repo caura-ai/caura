@@ -325,7 +325,7 @@ async def test_doc_write_omitted_fleet_resolves_home_fleet(mcp_env, monkeypatch)
     assert payload["ok"] is True
     # Backfilled to the home fleet; the trust gate still saw the original None.
     assert sc.upsert_document_xmax.await_args.args[0]["fleet_id"] == "home-f"
-    assert enforce.await_args.args[3] is None
+    assert enforce.await_args.args[2] is None
 
 
 async def test_doc_write_explicit_fleet_id_not_overridden(mcp_env, monkeypatch):
@@ -1204,7 +1204,7 @@ async def test_skills_factory_enabled_fails_closed_on_settings_error(
         raise RuntimeError("settings store down")
 
     monkeypatch.setattr(mcp_server, "_skills_factory_flag", _boom)
-    result = await mcp_server._skills_factory_enabled(mcp_env["db"], "test-tenant")
+    result = await mcp_server._skills_factory_enabled("test-tenant")
     assert result is True
 
 

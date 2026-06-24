@@ -1,8 +1,7 @@
 import logging
 from typing import Any, Literal
-from urllib.parse import quote
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
@@ -14,34 +13,9 @@ logger = logging.getLogger(__name__)
 # the database container and the app. Legacy ``ALLOYDB_*`` aliases are
 # accepted for back-compat and will be dropped in a future major.
 class Settings(BaseSettings):
-    postgres_host: str = Field(
-        default="127.0.0.1",
-        validation_alias=AliasChoices("POSTGRES_HOST", "ALLOYDB_HOST"),
-    )
-    postgres_port: int = Field(
-        default=5432,
-        validation_alias=AliasChoices("POSTGRES_PORT", "ALLOYDB_PORT"),
-    )
-    postgres_user: str = Field(
-        default="memclaw",
-        validation_alias=AliasChoices("POSTGRES_USER", "ALLOYDB_USER"),
-    )
-    postgres_password: SecretStr = Field(
-        default=SecretStr("changeme"),
-        validation_alias=AliasChoices("POSTGRES_PASSWORD", "ALLOYDB_PASSWORD"),
-    )
-    postgres_database: str = Field(
-        default="memclaw",
-        validation_alias=AliasChoices("POSTGRES_DB", "POSTGRES_DATABASE", "ALLOYDB_DATABASE"),
-    )
-    postgres_use_iam_auth: bool = Field(
-        default=False,
-        validation_alias=AliasChoices("POSTGRES_USE_IAM_AUTH", "ALLOYDB_USE_IAM_AUTH"),
-    )
-    postgres_require_ssl: bool = Field(
-        default=True,
-        validation_alias=AliasChoices("POSTGRES_REQUIRE_SSL", "ALLOYDB_REQUIRE_SSL"),
-    )
+    # NOTE: core-api holds no DB connection — all database access goes through
+    # core-storage-api over HTTP (rule 6440b9a6). The former ``postgres_*`` /
+    # ``db_pool_*`` settings + ``database_url`` were removed with the engine.
     api_key: str | None = None  # legacy, deprecated
     admin_api_key: str | None = None
     memclaw_api_key: str | None = None  # Optional: when set, all non-admin requests must present this key
@@ -99,8 +73,6 @@ class Settings(BaseSettings):
     use_llm_for_memory_creation: bool = True
     sentry_dsn: str = ""  # Set to enable Sentry error tracking
     redis_url: str = ""  # e.g. redis://localhost:6379/0. Empty = in-memory fallback.
-    db_pool_size: int = 50
-    db_max_overflow: int = 50
     cors_origins: str = "http://localhost:3000"
     # Request-wide budget enforced by RequestTimeoutMiddleware. 45s fits
     # comfortably under the 120s gateway/Cloud Run cap (CAURA-623 raised
@@ -393,21 +365,6 @@ class Settings(BaseSettings):
         except (CroniterBadCronError, ValueError) as exc:
             raise ValueError(f"Invalid cron expression {v!r}: {exc}") from exc
         return v
-
-    @property
-    def database_url(self) -> str:
-        # Percent-encode the user + password so credentials containing
-        # URL-reserved chars (@, :, /, ?, #) or whitespace don't silently
-        # produce a malformed URL and an opaque asyncpg connection error.
-        # quote(..., safe='') is correct for URL authority components —
-        # quote_plus would encode spaces as ``+`` (form-encoding), which
-        # is not valid in the userinfo section of a URL.
-        user = quote(self.postgres_user, safe="")
-        password = quote(self.postgres_password.get_secret_value(), safe="")
-        return (
-            f"postgresql+asyncpg://{user}:{password}"
-            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_database}"
-        )
 
     @model_validator(mode="after")
     def _remap_deprecated_vertex(self) -> "Settings":

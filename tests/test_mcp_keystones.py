@@ -98,7 +98,7 @@ async def test_keystones_set_trust_denied(mcp_env, monkeypatch):
     """Low-trust agent must be rejected — keystones override user instructions,
     so a compromised agent cannot be allowed to plant one."""
 
-    async def _deny(db, tenant_id, agent_id, min_level):
+    async def _deny(tenant_id, agent_id, min_level):
         return 0, False, "INSUFFICIENT_TRUST level 1 required"
 
     monkeypatch.setattr(mcp_server, "_require_trust", _deny)
@@ -191,7 +191,7 @@ def _capture_trust(monkeypatch, allow: bool = True, trust_level: int = 3):
     """
     calls: list[int] = []
 
-    async def _probe(db, tenant_id, agent_id, min_level):
+    async def _probe(tenant_id, agent_id, min_level):
         calls.append(min_level)
         if allow:
             return trust_level, False, None

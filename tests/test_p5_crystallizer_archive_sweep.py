@@ -40,7 +40,7 @@ def _memory_row(mid: UUID) -> dict:
     }
 
 
-async def _stub_resolve_config(_db, _tenant_id):
+async def _stub_resolve_config(_tenant_id):
     """Bypass DB lookup — return an object with the attributes
     ``_run_crystallization`` reads from ``config``. Only
     ``_crystallize_cluster`` actually touches it; that call is mocked
@@ -104,8 +104,7 @@ async def test_archive_sweep_uses_one_bulk_get_for_all_candidates():
             AsyncMock(return_value=type("_MemOut", (), {"id": uuid4()})()),
         ),
     ):
-        await _run_crystallization(
-            db=None, tenant_id="t1", fleet_id=None, hygiene=hygiene
+        await _run_crystallization(tenant_id="t1", fleet_id=None, hygiene=hygiene
         )
 
     # Exactly one bulk-get; per-row get_memory never fired.
@@ -155,8 +154,7 @@ async def test_archive_sweep_collapses_to_one_batch_per_cluster():
             AsyncMock(return_value=type("_MemOut", (), {"id": uuid4()})()),
         ),
     ):
-        result = await _run_crystallization(
-            db=None, tenant_id="t1", fleet_id=None, hygiene=hygiene
+        result = await _run_crystallization(tenant_id="t1", fleet_id=None, hygiene=hygiene
         )
 
     assert sc.update_memory_status.call_count == 0, (
@@ -219,8 +217,7 @@ async def test_archive_sweep_drops_skipped_rows_from_archived_count():
             AsyncMock(return_value=type("_MemOut", (), {"id": uuid4()})()),
         ),
     ):
-        result = await _run_crystallization(
-            db=None, tenant_id="t1", fleet_id=None, hygiene=hygiene
+        result = await _run_crystallization(tenant_id="t1", fleet_id=None, hygiene=hygiene
         )
 
     assert result["memories_archived"] == 2  # ``c`` was skipped
@@ -242,8 +239,7 @@ async def test_archive_sweep_skips_bulk_get_when_no_candidates():
             _stub_resolve_config,
         ),
     ):
-        result = await _run_crystallization(
-            db=None, tenant_id="t1", fleet_id=None, hygiene=hygiene
+        result = await _run_crystallization(tenant_id="t1", fleet_id=None, hygiene=hygiene
         )
 
     assert sc.bulk_get_memories.call_count == 0
@@ -295,8 +291,7 @@ async def test_archive_sweep_handles_none_slots_for_deleted_memories():
             AsyncMock(return_value=type("_MemOut", (), {"id": uuid4()})()),
         ),
     ):
-        result = await _run_crystallization(
-            db=None, tenant_id="t1", fleet_id=None, hygiene=hygiene
+        result = await _run_crystallization(tenant_id="t1", fleet_id=None, hygiene=hygiene
         )
 
     # Cluster shrank from 4 → 3 after dropping the None slot; still

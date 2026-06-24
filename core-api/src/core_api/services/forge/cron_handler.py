@@ -65,7 +65,7 @@ async def _resolve_forge_config(org_id: str) -> ForgeConfig:
     Phase 0) with a 5-min TTL cache; the ``db`` argument is vestigial there,
     so we pass ``None``.
     """
-    settings = await get_settings_for_display(None, org_id)
+    settings = await get_settings_for_display(org_id)
     sf = (settings or {}).get("skills_factory") or {}
     forge = sf.get("forge") or {}
     # Source fallbacks from a ``ForgeConfig()`` instance rather than
@@ -98,7 +98,7 @@ async def _resolve_auto_promote_clean(org_id: str) -> bool:
     cached (5-min TTL), so the second fetch within a tick — alongside
     ``_resolve_forge_config`` — is a cache hit, not a second round-trip.
     """
-    settings = await get_settings_for_display(None, org_id)
+    settings = await get_settings_for_display(org_id)
     sf = (settings or {}).get("skills_factory") or {}
     sentinel = sf.get("sentinel") or {}
     return bool(sentinel.get("auto_promote_clean", False))
@@ -247,7 +247,6 @@ async def run_forge_cron_tick(
     # CLI / test-call-site compatibility; it no longer touches the DB —
     # ``build_session_traces`` + the injected fetchers route through storage.
     forge_result = await run_forge_distill(
-        None,
         tenant_id=tenant_id,
         fleet_id=fleet_id,
         window_start=window_start,

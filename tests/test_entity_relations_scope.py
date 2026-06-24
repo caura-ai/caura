@@ -91,7 +91,7 @@ def patch_lookup(monkeypatch):
 
         calls = {"n": 0}
 
-        async def fake(db, tenant_id, agent_id):
+        async def fake(tenant_id, agent_id):
             calls["n"] += 1
             if not exists:
                 return None
@@ -106,7 +106,7 @@ def patch_lookup(monkeypatch):
 async def _get(caller_agent_id):
     from core_api.services.entity_service import get_entity
 
-    return await get_entity(None, uuid.uuid4(), "t", caller_agent_id=caller_agent_id)
+    return await get_entity(uuid.uuid4(), "t", caller_agent_id=caller_agent_id)
 
 
 async def test_relations_filtered_for_agent_credential(fake_storage, patch_lookup):

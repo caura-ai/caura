@@ -282,17 +282,13 @@ def agent_id():
 
 
 @pytest.fixture(scope="session")
-async def _setup_app_db():
-    """Ensure the APP's database (used by FastAPI routes) has schema + seed data."""
-    from core_api.db.session import engine as app_engine
-    from common.models.base import Base
+async def _setup_app_db(_setup_schema):
+    """Standalone seed + audit hooks for the FastAPI app.
 
-    _import_all_models()
-
-    async with app_engine.begin() as conn:
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        await conn.run_sync(Base.metadata.create_all)
-
+    Schema is created by ``_setup_schema`` on the shared test engine; core-api
+    routes reach the DB only through the storage client (bridged in-process by
+    the autouse ``_patch_storage_client``), so core-api itself holds no engine.
+    """
     # Initialise standalone mode so the default tenant exists
     from core_api.standalone import init_standalone
 

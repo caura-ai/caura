@@ -68,7 +68,7 @@ def captured(monkeypatch):
         write_raise_for={},
     )
 
-    async def fake_resolve_config(db, tenant_id):
+    async def fake_resolve_config(tenant_id):
         state.resolve_config_calls.append(tenant_id)
         return SimpleNamespace(
             enrichment_provider="fake",
@@ -88,7 +88,7 @@ def captured(monkeypatch):
             if h in state.bulk_find_result
         }
 
-    async def fake_create_memories_bulk(db, data, *, bulk_attempt_id):
+    async def fake_create_memories_bulk(data, *, bulk_attempt_id):
         """Stand-in for ``create_memories_bulk`` — translates the audit
         scenarios the legacy per-fact tests modelled (409 from
         create_memory, generic raise from create_memory) into the bulk
@@ -217,7 +217,7 @@ def captured(monkeypatch):
 async def test_every_write_uses_strong_mode(captured):
     """All ingest writes set write_mode='strong'."""
     req = _request("t1", "fact one", "fact two", "fact three")
-    await ingest_service.ingest_commit(db=None, request=req)
+    await ingest_service.ingest_commit(request=req)
 
     assert len(captured.writes) == 3
     for mc in captured.writes:
@@ -232,7 +232,7 @@ async def test_run_id_on_column_and_source_in_metadata(captured):
     ``metadata.ingest_run_id`` write. The metadata only retains the
     ``source`` discriminator + ``ingest_url`` for provenance."""
     req = _request("t1", "fact one")
-    result = await ingest_service.ingest_commit(db=None, request=req)
+    result = await ingest_service.ingest_commit(request=req)
 
     assert len(captured.writes) == 1
     mc = captured.writes[0]
@@ -253,7 +253,7 @@ async def test_parent_document_written_once_per_batch(captured):
     ``data`` payload carries the batch's provenance + a summary string
     for embedding (semantic search over uploads)."""
     req = _request("t1", "fact one", "fact two", "fact three")
-    result = await ingest_service.ingest_commit(db=None, request=req)
+    result = await ingest_service.ingest_commit(request=req)
 
     assert len(captured.parent_doc_writes) == 1
     payload = captured.parent_doc_writes[0]
@@ -297,7 +297,7 @@ async def test_parent_document_skipped_when_zero_created(captured):
     )
 
     req = _request("t1", "fact one", "fact two")
-    result = await ingest_service.ingest_commit(db=None, request=req)
+    result = await ingest_service.ingest_commit(request=req)
 
     assert result["memories_created"] == 0
     assert result["skipped_duplicates"] == 2
@@ -316,7 +316,7 @@ async def test_resolve_config_called_once_before_loop(captured):
     """``resolve_config`` runs exactly once at the top — pre-warming the cache
     so the per-fact pipeline doesn't race on the shared session."""
     req = _request("t1", "f1", "f2", "f3", "f4", "f5")
-    await ingest_service.ingest_commit(db=None, request=req)
+    await ingest_service.ingest_commit(request=req)
 
     assert captured.resolve_config_calls == ["t1"]
 
@@ -335,7 +335,7 @@ async def test_writes_run_in_parallel_under_semaphore(captured):
     req = _request("t1", *(f"fact {i}" for i in range(8)))
 
     t0 = time.perf_counter()
-    result = await ingest_service.ingest_commit(db=None, request=req)
+    result = await ingest_service.ingest_commit(request=req)
     elapsed = time.perf_counter() - t0
 
     assert result["memories_created"] == 8
@@ -366,7 +366,7 @@ async def test_pre_loop_dedup_skips_known_hashes_before_writes(captured):
     captured.bulk_find_result = {hashes[1], hashes[3]}  # "beta" and "delta" are dups
 
     req = _request("t1", *facts)
-    result = await ingest_service.ingest_commit(db=None, request=req)
+    result = await ingest_service.ingest_commit(request=req)
 
     assert result["facts_extracted"] == 5
     assert result["memories_created"] == 3
@@ -381,7 +381,7 @@ async def test_pre_loop_dedup_skips_known_hashes_before_writes(captured):
 async def test_pre_loop_dedup_calls_bulk_find_with_all_hashes(captured):
     """The dedup query receives every incoming fact's hash, not a subset."""
     req = _request("t1", "f1", "f2", "f3")
-    await ingest_service.ingest_commit(db=None, request=req)
+    await ingest_service.ingest_commit(request=req)
 
     assert len(captured.bulk_find_calls) == 1
     tenant_id, hashes = captured.bulk_find_calls[0]
@@ -406,7 +406,7 @@ async def test_pre_loop_dedup_failure_falls_through_to_per_fact_path(
     monkeypatch.setattr(ingest_service, "get_storage_client", lambda: captured_sc)
 
     req = _request("t1", "f1", "f2", "f3")
-    result = await ingest_service.ingest_commit(db=None, request=req)
+    result = await ingest_service.ingest_commit(request=req)
 
     assert result["memories_created"] == 3
     assert result["skipped_duplicates"] == 0
@@ -422,7 +422,7 @@ async def test_pre_loop_dedup_failure_falls_through_to_per_fact_path(
 async def test_empty_facts_list_is_a_noop(captured):
     """No facts → no DB writes, no bulk_find, but still returns a valid run_id."""
     req = _request("t1")  # no facts
-    result = await ingest_service.ingest_commit(db=None, request=req)
+    result = await ingest_service.ingest_commit(request=req)
 
     assert result["facts_extracted"] == 0
     assert result["memories_created"] == 0
@@ -443,7 +443,7 @@ async def test_in_loop_409_still_counts_as_skipped(captured):
     captured.write_409_for = {_content_hash("t1", None, facts[0])}
 
     req = _request("t1", *facts)
-    result = await ingest_service.ingest_commit(db=None, request=req)
+    result = await ingest_service.ingest_commit(request=req)
 
     assert result["memories_created"] == 0
     assert result["skipped_duplicates"] == 1
@@ -454,7 +454,7 @@ async def test_in_loop_409_still_counts_as_skipped(captured):
 async def test_url_provenance_request_level_wins(captured):
     """Caller-supplied request.url wins for back-compat with the dashboard."""
     req = _request("t1", "f1", url="https://example.com/doc.md")
-    await ingest_service.ingest_commit(db=None, request=req)
+    await ingest_service.ingest_commit(request=req)
 
     assert captured.writes[0].source_uri == "https://example.com/doc.md"
     assert captured.writes[0].metadata["ingest_url"] == "https://example.com/doc.md"
@@ -487,7 +487,7 @@ async def test_per_fact_source_uri_used_when_no_request_url(captured):
             ),
         ],
     )
-    await ingest_service.ingest_commit(db=None, request=req)
+    await ingest_service.ingest_commit(request=req)
 
     for w in captured.writes:
         assert w.source_uri == "https://example.com/doc1"
@@ -512,7 +512,7 @@ async def test_request_url_overrides_fact_source_uri(captured):
             ),
         ],
     )
-    await ingest_service.ingest_commit(db=None, request=req)
+    await ingest_service.ingest_commit(request=req)
 
     assert captured.writes[0].source_uri == "https://override.example/canonical"
     assert (
@@ -526,7 +526,7 @@ async def test_request_url_overrides_fact_source_uri(captured):
 async def test_text_input_fallback_when_neither_set(captured):
     """Neither request.url nor fact.source_uri → 'text-input'."""
     req = _request("t1", "plain content fact")  # _request doesn't set source_uri
-    await ingest_service.ingest_commit(db=None, request=req)
+    await ingest_service.ingest_commit(request=req)
 
     assert captured.writes[0].source_uri == "text-input"
     assert captured.writes[0].metadata["ingest_url"] is None
@@ -556,7 +556,7 @@ async def test_invalid_suggested_type_raises_422_before_any_work(captured):
         ],
     )
     with pytest.raises(HTTPException) as exc:
-        await ingest_service.ingest_commit(db=None, request=req)
+        await ingest_service.ingest_commit(request=req)
 
     assert exc.value.status_code == 422
     assert "🦀garbage" in exc.value.detail
@@ -577,7 +577,7 @@ async def test_valid_suggested_types_pass_through(captured):
         tenant_id="t1",
         facts=[IngestFact(content=f"Fact {t}", suggested_type=t) for t in MEMORY_TYPES],
     )
-    result = await ingest_service.ingest_commit(db=None, request=req)
+    result = await ingest_service.ingest_commit(request=req)
     assert result["memories_created"] == len(MEMORY_TYPES)
 
 
@@ -607,7 +607,7 @@ async def test_non_409_http_error_increments_errored_not_raises(captured, caplog
 
     req = _request("t1", *facts)
     with caplog.at_level(logging.WARNING, logger="core_api.services.ingest_service"):
-        result = await ingest_service.ingest_commit(db=None, request=req)
+        result = await ingest_service.ingest_commit(request=req)
 
     # The good facts went through; the bad one didn't blow up the batch
     assert result["memories_created"] == 2
@@ -634,7 +634,7 @@ async def test_generic_exception_logs_and_increments_errored(captured, caplog):
 
     req = _request("t1", *facts)
     with caplog.at_level(logging.WARNING, logger="core_api.services.ingest_service"):
-        result = await ingest_service.ingest_commit(db=None, request=req)
+        result = await ingest_service.ingest_commit(request=req)
 
     assert result["memories_created"] == 2
     assert result["errored"] == 1
@@ -663,7 +663,7 @@ async def test_mixed_outcomes_all_three_counted_correctly(captured):
     # fact-d, fact-e succeed
 
     req = _request("t1", *facts)
-    result = await ingest_service.ingest_commit(db=None, request=req)
+    result = await ingest_service.ingest_commit(request=req)
 
     assert result["facts_extracted"] == 5
     assert result["memories_created"] == 2  # d, e
@@ -689,7 +689,7 @@ async def test_all_facts_error_does_not_raise(captured):
     }
 
     req = _request("t1", *facts)
-    result = await ingest_service.ingest_commit(db=None, request=req)
+    result = await ingest_service.ingest_commit(request=req)
 
     assert result["memories_created"] == 0
     assert result["skipped_duplicates"] == 0
@@ -702,6 +702,6 @@ async def test_all_facts_error_does_not_raise(captured):
 async def test_response_always_carries_errored_field(captured):
     """``errored`` is a stable response field even when zero."""
     req = _request("t1", "f1")
-    result = await ingest_service.ingest_commit(db=None, request=req)
+    result = await ingest_service.ingest_commit(request=req)
     assert "errored" in result
     assert result["errored"] == 0

@@ -42,7 +42,7 @@ def _out_stub(mid: str):
 async def test_list_scope_agent_allowed_at_trust_1(mcp_env, monkeypatch):
     """scope='agent' (default) only requires trust ≥ 1."""
 
-    async def _trust_1(db, tenant_id, agent_id, min_level):  # noqa: ARG001
+    async def _trust_1(tenant_id, agent_id, min_level):  # noqa: ARG001
         if min_level > 1:
             return (
                 1,
@@ -62,7 +62,7 @@ async def test_list_scope_agent_allowed_at_trust_1(mcp_env, monkeypatch):
 async def test_list_scope_fleet_blocked_at_trust_1(mcp_env, monkeypatch):
     """scope='fleet' requires trust ≥ 2; trust-1 agent is rejected."""
 
-    async def _trust_1(db, tenant_id, agent_id, min_level):  # noqa: ARG001
+    async def _trust_1(tenant_id, agent_id, min_level):  # noqa: ARG001
         if min_level > 1:
             return (
                 1,
@@ -80,7 +80,7 @@ async def test_list_scope_fleet_blocked_at_trust_1(mcp_env, monkeypatch):
 async def test_list_scope_all_blocked_at_trust_1(mcp_env, monkeypatch):
     """scope='all' requires trust ≥ 2; trust-1 agent is rejected."""
 
-    async def _trust_1(db, tenant_id, agent_id, min_level):  # noqa: ARG001
+    async def _trust_1(tenant_id, agent_id, min_level):  # noqa: ARG001
         if min_level > 1:
             return (
                 1,
@@ -207,7 +207,7 @@ async def test_list_include_deleted_requires_trust_3(mcp_env, monkeypatch):
     ``PostgresService.memory_list_by_filters``; the trust gate is core-api's, so
     we assert the flag core-api forwards.)"""
 
-    async def _trust_2(db, tenant_id, agent_id, min_level):  # noqa: ARG001
+    async def _trust_2(tenant_id, agent_id, min_level):  # noqa: ARG001
         return 2, False, None
 
     monkeypatch.setattr(mcp_server, "_require_trust", _trust_2)
@@ -221,7 +221,7 @@ async def test_list_include_deleted_honored_at_trust_3(mcp_env, monkeypatch):
     """Trust 3 with include_deleted=True forwards ``include_deleted=True`` to
     storage (which then drops the deleted_at filter)."""
 
-    async def _trust_3(db, tenant_id, agent_id, min_level):  # noqa: ARG001
+    async def _trust_3(tenant_id, agent_id, min_level):  # noqa: ARG001
         return 3, False, None
 
     monkeypatch.setattr(mcp_server, "_require_trust", _trust_3)

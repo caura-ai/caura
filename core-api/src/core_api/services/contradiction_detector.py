@@ -17,8 +17,6 @@ import uuid as _uuid
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from core_api.cache import cache_set_nx
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
@@ -201,7 +199,7 @@ async def detect_contradictions_async(
         if not new_memory or new_memory.get("deleted_at") is not None:
             return
 
-        tenant_config = await resolve_config(None, tenant_id)
+        tenant_config = await resolve_config(tenant_id)
         contradictions = await _detect(new_memory, embedding, tenant_config)
         n_conflicts = len(contradictions) if contradictions else 0
 
@@ -231,7 +229,6 @@ async def detect_contradictions_async(
 
 
 async def detect_contradictions(
-    db: AsyncSession,
     new_memory,
     embedding: list[float],
     tenant_config=None,
@@ -1636,7 +1633,7 @@ async def detect_contradictions_by_entities_async(
         if not new_memory or new_memory.get("deleted_at") is not None:
             return
 
-        tenant_config = await resolve_config(None, tenant_id)
+        tenant_config = await resolve_config(tenant_id)
 
         # A4 #13 — re-judge Path A's verdict (if any) before the
         # standard entity-overlap detection. Phases are independent:

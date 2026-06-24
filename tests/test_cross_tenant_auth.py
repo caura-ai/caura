@@ -16,7 +16,7 @@ import pytest
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings
-from core_api.db.session import get_readable_tenants
+from core_api.tenant_context import get_readable_tenants
 
 
 @pytest.fixture
@@ -205,96 +205,6 @@ def test_source_tenants_for_audit_empty_for_admin_tenant_none():
     assert ctx.source_tenants_for_audit() == []
 
 
-# ── Repository widening (predicate-shape unit tests) ────────────────
-#
-# Verifies the SQL predicate flips from ``tenant_id = $1`` to
-# ``tenant_id IN ($readable)`` when the caller passes a non-empty
-# ``readable_tenant_ids`` list. The audit at
-# ``report-comprehensive-audit-2026-05-18.md`` flagged that the
-# widening was implemented for recall+search only — these tests
-# guard the wider sweep (list, stats, doc surfaces) from regressing.
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_list_by_filters_widens_to_readable_set(db):
-    """Invoke the real ``MemoryRepository.list_by_filters`` and verify
-    that passing ``readable_tenant_ids`` returns rows from EVERY tenant
-    in the set, not just ``tenant_id``.
-
-    Audit T3: the prior version of this test mirrored the predicate
-    logic with a hand-rolled ``select(Memory)`` — it asserted on what
-    a literal ``Memory.tenant_id.in_(...)`` would compile to, never
-    invoking the repo function. A refactor that changed the visibility
-    predicate or the column path would silently break the cross-tenant
-    contract while this test stayed green. This rewrite exercises the
-    real call path: seed rows in two tenants, call ``list_by_filters``,
-    and assert the result set crosses tenants only when widened.
-    """
-    import hashlib
-    import uuid as _uuid
-
-    from common.models.memory import Memory
-    from core_api.repositories.memory_repository import MemoryRepository
-
-    suffix = _uuid.uuid4().hex[:8]
-    home = f"home-{suffix}"
-    sibling = f"sibling-{suffix}"
-
-    def _seed(tenant_id: str, content: str) -> Memory:
-        m = Memory(
-            tenant_id=tenant_id,
-            fleet_id=None,
-            agent_id=f"agent-{suffix}",
-            memory_type="fact",
-            content=content,
-            content_hash=hashlib.sha256(content.encode()).hexdigest(),
-            weight=0.5,
-            visibility="scope_team",
-            status="active",
-        )
-        db.add(m)
-        return m
-
-    home_mem = _seed(home, f"home-fact-{suffix}")
-    sibling_mem = _seed(sibling, f"sibling-fact-{suffix}")
-    await db.flush()
-
-    repo = MemoryRepository()
-
-    # Single-tenant path: readable_tenant_ids omitted → only home rows.
-    rows = await repo.list_by_filters(db, tenant_id=home, limit=50)
-    row_ids = {r.id for r in rows}
-    assert home_mem.id in row_ids
-    assert sibling_mem.id not in row_ids, (
-        "single-tenant query leaked a sibling-tenant row"
-    )
-
-    # Single-tenant path with explicit single-element readable list →
-    # same as above (still only home). This is the safety net for
-    # auth-context plumbing that always sends ``readable_tenant_ids``
-    # even on single-tenant credentials.
-    rows_single_list = await repo.list_by_filters(
-        db, tenant_id=home, readable_tenant_ids=[home], limit=50
-    )
-    row_ids_single = {r.id for r in rows_single_list}
-    assert sibling_mem.id not in row_ids_single
-
-    # Cross-tenant path: readable_tenant_ids includes the sibling →
-    # both rows surface.
-    rows_wide = await repo.list_by_filters(
-        db,
-        tenant_id=home,
-        readable_tenant_ids=[home, sibling],
-        limit=50,
-    )
-    row_ids_wide = {r.id for r in rows_wide}
-    assert home_mem.id in row_ids_wide
-    assert sibling_mem.id in row_ids_wide, (
-        "cross-tenant widening did not return sibling-tenant rows"
-    )
-
-
 @pytest.mark.unit
 async def test_log_cross_tenant_read_noop_for_single_tenant():
     """Audit emission helper: zero events when source_tenants is empty
@@ -306,9 +216,7 @@ async def test_log_cross_tenant_read_noop_for_single_tenant():
     from core_api.services.audit_service import log_cross_tenant_read
 
     with patch("core_api.services.audit_service.log_action", new=AsyncMock()) as mock:
-        await log_cross_tenant_read(
-            db=None,
-            home_tenant_id="home",
+        await log_cross_tenant_read(            home_tenant_id="home",
             home_agent_id="agent-1",
             source_tenants=[],
             surface="memclaw_recall",
@@ -327,9 +235,7 @@ async def test_log_cross_tenant_read_emits_per_source_tenant():
     from core_api.services.audit_service import log_cross_tenant_read
 
     with patch("core_api.services.audit_service.log_action", new=AsyncMock()) as mock:
-        await log_cross_tenant_read(
-            db=None,
-            home_tenant_id="home",
+        await log_cross_tenant_read(            home_tenant_id="home",
             home_agent_id="agent-1",
             source_tenants=["src-a", "src-b"],
             surface="memclaw_recall",

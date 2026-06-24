@@ -54,7 +54,7 @@ async def _run_evolve_capturing_apply_kwargs(monkeypatch, *, related_ids, filter
     async def _session():
         yield None
 
-    async def _spy_apply(_db, **kwargs):
+    async def _spy_apply(**kwargs):
         captured.update(kwargs)
         return _APPLY_OUTCOME_RESULT
 
@@ -106,7 +106,7 @@ async def test_evolve_passes_all_required_apply_outcome_kwargs(mcp_env, monkeypa
     )
     # Raises TypeError "missing a required argument" if any required kwarg
     # (incl. weight_adjustment_skipped_reason) is absent from the call.
-    real_sig.bind(MagicMock(name="db"), **captured)
+    real_sig.bind(**captured)
     assert "weight_adjustment_skipped_reason" in captured
 
 

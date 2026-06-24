@@ -55,7 +55,6 @@ class GovernanceScanContent:
         if gov.action == "drop":
             # Audit BEFORE raising (resource_id unknown — nothing persists).
             await emit_governance_audit(
-                ctx.db,
                 tenant_id=data.tenant_id,
                 agent_id=data.agent_id,
                 action=ACTION_PII_DROP,
@@ -74,7 +73,6 @@ class GovernanceScanContent:
             # place so every downstream consumer (hash, dedup, embed, store)
             # sees the masked form.
             await emit_governance_audit(
-                ctx.db,
                 tenant_id=data.tenant_id,
                 agent_id=data.agent_id,
                 action=ACTION_PII_MASK,
@@ -88,7 +86,6 @@ class GovernanceScanContent:
         mark_pii_flagged(metadata, findings)
         data.metadata = metadata
         await emit_governance_audit(
-            ctx.db,
             tenant_id=data.tenant_id,
             agent_id=data.agent_id,
             action=ACTION_PII_FLAG,

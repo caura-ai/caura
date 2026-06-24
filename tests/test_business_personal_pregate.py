@@ -71,8 +71,7 @@ def _cfg(*, nb=None, enrichment_provider=None) -> ResolvedConfig:
 
 def _ctx(data, *, cfg, mode="strong") -> PipelineContext:
     return PipelineContext(
-        db=None,
-        data={"input": data, "resolved_write_mode": mode},
+                data={"input": data, "resolved_write_mode": mode},
         tenant_config=cfg,
     )
 

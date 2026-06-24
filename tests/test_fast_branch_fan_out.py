@@ -66,8 +66,7 @@ def _ctx(
     memory_id: uuid.UUID | None = None,
 ) -> PipelineContext:
     return PipelineContext(
-        db=AsyncMock(),
-        data={
+                data={
             "input": _input(),
             "memory": {"id": memory_id or uuid.uuid4()},
             "embedding": embedding,

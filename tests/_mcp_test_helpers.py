@@ -158,7 +158,7 @@ def mcp_env(monkeypatch):
 
     # `_require_trust` is exercised directly in tests that need it; here we
     # pre-emptively bypass it so handlers under test don't fail on agent lookup.
-    async def _always_allow(db, tenant_id, agent_id, min_level):
+    async def _always_allow(tenant_id, agent_id, min_level):
         return 3, False, None  # max trust, not_found=False, no error
 
     monkeypatch.setattr(mcp_server, "_require_trust", _always_allow)
@@ -167,7 +167,7 @@ def mcp_env(monkeypatch):
     # in unit tests there's no real DB, so stub it as a no-op returning the
     # caller's identity. Tests that want to assert the call replace this via
     # ``service("enforce_fleet_write")``.
-    async def _stub_enforce_fleet_write(db, tenant_id, agent_id, fleet_id):
+    async def _stub_enforce_fleet_write(tenant_id, agent_id, fleet_id):
         return {
             "agent_id": agent_id,
             "tenant_id": tenant_id,

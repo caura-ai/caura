@@ -65,9 +65,7 @@ async def test_response_includes_weight_adjustment_skipped_reason_field():
             new=AsyncMock(return_value="00000000-0000-0000-0000-000000000001"),
         ),
     ):
-        result = await report_outcome(
-            db,
-            tenant_id="t1",
+        result = await report_outcome(tenant_id="t1",
             outcome="passing test",
             outcome_type="success",
             related_ids=None,
@@ -114,9 +112,7 @@ async def _run(
         "core_api.services.evolve_service",
         **{k: v for k, v in base_patches.items()},
     ):
-        return await report_outcome(
-            db,
-            tenant_id="t1",
+        return await report_outcome(tenant_id="t1",
             outcome="report",
             outcome_type=outcome_type,
             related_ids=related_ids,

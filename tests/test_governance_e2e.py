@@ -94,7 +94,7 @@ async def _seed_governance(
         gov["pii"] = pii
     if non_business is not None:
         gov["non_business"] = non_business
-    await update_settings(db, tenant_id, {"governance": gov})
+    await update_settings(tenant_id, {"governance": gov})
     invalidate_cache(tenant_id)
 
 
@@ -161,7 +161,7 @@ async def test_pii_mask_stores_redacted_content_and_audits(db):
     tenant = _tenant()
     await _seed_governance(db, tenant, pii={"enabled": True, "action": "mask"})
     content = f"Reach me at john.doe@example.com or card 4111 1111 1111 1111.{_PADDING}"
-    result = await create_memory(db, _make_input(tenant, content))
+    result = await create_memory(_make_input(tenant, content))
 
     assert isinstance(result, MemoryOut)
     # The stored/returned content is the masked form — proves the scan mutated
@@ -185,7 +185,7 @@ async def test_pii_drop_rejects_write_and_persists_nothing(db):
     await _seed_governance(db, tenant, pii={"enabled": True, "action": "drop"})
     content = f"My card is 4111 1111 1111 1111, please remember it.{_PADDING}"
     with pytest.raises(HTTPException) as exc:
-        await create_memory(db, _make_input(tenant, content))
+        await create_memory(_make_input(tenant, content))
     assert exc.value.status_code == 422
 
     # The drop is audited BEFORE the reject; nothing is persisted.
@@ -205,7 +205,7 @@ async def test_pii_flag_keeps_content_and_marks_metadata(db):
     tenant = _tenant()
     await _seed_governance(db, tenant, pii={"enabled": True, "action": "flag"})
     content = f"Ping me on john.doe@example.com about the rollout.{_PADDING}"
-    result = await create_memory(db, _make_input(tenant, content))
+    result = await create_memory(_make_input(tenant, content))
 
     assert "john.doe@example.com" in result.content  # flag does not redact
     assert result.metadata is not None
@@ -223,7 +223,7 @@ async def test_pii_category_toggle_limits_scope(db):
         pii={"enabled": True, "action": "mask", "categories": {"email": True}},
     )
     content = f"Email john.doe@example.com, card 4111 1111 1111 1111.{_PADDING}"
-    result = await create_memory(db, _make_input(tenant, content))
+    result = await create_memory(_make_input(tenant, content))
     assert "john.doe@example.com" not in result.content  # email masked
     assert "4111 1111 1111 1111" in result.content  # card not in scope
 
@@ -232,7 +232,7 @@ async def test_governance_disabled_is_a_noop(db):
     tenant = _tenant()
     # No governance seeded at all → gate skips, content untouched, no audit.
     content = f"Email john.doe@example.com, card 4111 1111 1111 1111.{_PADDING}"
-    result = await create_memory(db, _make_input(tenant, content))
+    result = await create_memory(_make_input(tenant, content))
     assert "john.doe@example.com" in result.content
     assert "4111 1111 1111 1111" in result.content
     assert await _governance_audit_rows(tenant) == []
@@ -247,8 +247,7 @@ async def test_pii_mask_runs_in_every_write_mode(db, write_mode):
     tenant = _tenant()
     await _seed_governance(db, tenant, pii={"enabled": True, "action": "mask"})
     content = f"Contact john.doe@example.com for access.{_PADDING}"
-    result = await create_memory(
-        db, _make_input(tenant, content, write_mode=write_mode)
+    result = await create_memory(_make_input(tenant, content, write_mode=write_mode)
     )
     assert "john.doe@example.com" not in result.content
     rows = await _governance_audit_rows(tenant)
@@ -276,7 +275,7 @@ async def test_personal_content_kept_private(db, monkeypatch):
         non_business={"enabled": True, "disposition": "keep_private"},
     )
     _inject_enrichment(monkeypatch, business_relevance="personal")
-    result = await create_memory(db, _make_input(tenant, _NEUTRAL, write_mode="strong"))
+    result = await create_memory(_make_input(tenant, _NEUTRAL, write_mode="strong"))
     assert result.visibility == "scope_agent"  # retained, but agent-private
     rows = await _governance_audit_rows(tenant)
     assert any(r["action"] == "nonbusiness_keep_private" for r in rows), rows
@@ -291,7 +290,7 @@ async def test_personal_content_dropped(db, monkeypatch):
     )
     _inject_enrichment(monkeypatch, business_relevance="personal")
     with pytest.raises(HTTPException) as exc:
-        await create_memory(db, _make_input(tenant, _NEUTRAL, write_mode="strong"))
+        await create_memory(_make_input(tenant, _NEUTRAL, write_mode="strong"))
     assert exc.value.status_code == 422
     rows = await _governance_audit_rows(tenant)
     assert any(r["action"] == "nonbusiness_drop" for r in rows), rows
@@ -305,7 +304,7 @@ async def test_business_content_flows_through(db, monkeypatch):
         non_business={"enabled": True, "disposition": "drop"},
     )
     _inject_enrichment(monkeypatch, business_relevance="business")
-    result = await create_memory(db, _make_input(tenant, _NEUTRAL, write_mode="strong"))
+    result = await create_memory(_make_input(tenant, _NEUTRAL, write_mode="strong"))
     assert isinstance(result, MemoryOut)
     assert result.visibility != "scope_agent"  # business content stored normally
     assert not any(
@@ -322,7 +321,7 @@ async def test_non_business_store_disposition_is_noop(db, monkeypatch):
         non_business={"enabled": True, "disposition": "store"},
     )
     _inject_enrichment(monkeypatch, business_relevance="personal")
-    result = await create_memory(db, _make_input(tenant, _NEUTRAL, write_mode="strong"))
+    result = await create_memory(_make_input(tenant, _NEUTRAL, write_mode="strong"))
     # store = no enforcement; classification is recorded, nothing dropped/hidden.
     assert result.visibility != "scope_agent"
     assert (result.metadata or {}).get("business_relevance") == "personal"
@@ -338,7 +337,7 @@ async def test_llm_pii_signal_drops(db, monkeypatch):
     # No regex-detectable PII in content; only the LLM signal flags it.
     _inject_enrichment(monkeypatch, contains_pii=True, pii_types=["health"])
     with pytest.raises(HTTPException) as exc:
-        await create_memory(db, _make_input(tenant, _NEUTRAL, write_mode="strong"))
+        await create_memory(_make_input(tenant, _NEUTRAL, write_mode="strong"))
     assert exc.value.status_code == 422
     rows = await _governance_audit_rows(tenant)
     drop = next((r for r in rows if r["action"] == "pii_drop"), None)
@@ -361,7 +360,7 @@ async def test_both_gates_act_on_one_memory(db, monkeypatch):
         pii_types=["health"],
         business_relevance="personal",
     )
-    result = await create_memory(db, _make_input(tenant, _NEUTRAL, write_mode="strong"))
+    result = await create_memory(_make_input(tenant, _NEUTRAL, write_mode="strong"))
     assert (result.metadata or {}).get("contains_pii") is True
     assert result.visibility == "scope_agent"
     actions = {r["action"] for r in await _governance_audit_rows(tenant)}
@@ -388,8 +387,7 @@ async def test_bulk_drop_rejects_only_the_pii_item(db):
     await _seed_governance(db, tenant, pii={"enabled": True, "action": "drop"})
     clean = f"Quarterly planning notes for the team.{_PADDING}"
     dirty = f"Customer card 4111 1111 1111 1111 is on file.{_PADDING}"
-    resp = await create_memories_bulk(
-        db, _bulk(tenant, [clean, dirty]), bulk_attempt_id=uuid.uuid4().hex
+    resp = await create_memories_bulk(_bulk(tenant, [clean, dirty]), bulk_attempt_id=uuid.uuid4().hex
     )
     assert resp.results[0].status == "created"
     assert resp.results[1].status == "error"
@@ -403,8 +401,7 @@ async def test_bulk_mask_redacts_stored_item(db):
     tenant = _tenant()
     await _seed_governance(db, tenant, pii={"enabled": True, "action": "mask"})
     dirty = f"Reach me at jane.roe@example.com about the deal.{_PADDING}"
-    resp = await create_memories_bulk(
-        db, _bulk(tenant, [dirty]), bulk_attempt_id=uuid.uuid4().hex
+    resp = await create_memories_bulk(_bulk(tenant, [dirty]), bulk_attempt_id=uuid.uuid4().hex
     )
     assert resp.results[0].status == "created"
     mem = await get_storage_client().get_memory(resp.results[0].id)
@@ -419,8 +416,7 @@ async def test_bulk_flag_marks_stored_metadata(db):
     tenant = _tenant()
     await _seed_governance(db, tenant, pii={"enabled": True, "action": "flag"})
     dirty = f"Ping jane.roe@example.com for the rollout plan.{_PADDING}"
-    resp = await create_memories_bulk(
-        db, _bulk(tenant, [dirty]), bulk_attempt_id=uuid.uuid4().hex
+    resp = await create_memories_bulk(_bulk(tenant, [dirty]), bulk_attempt_id=uuid.uuid4().hex
     )
     assert resp.results[0].status == "created"
     mem = await get_storage_client().get_memory(resp.results[0].id)

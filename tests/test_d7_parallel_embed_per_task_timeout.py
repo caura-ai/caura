@@ -62,8 +62,7 @@ def _make_ctx() -> PipelineContext:
     (the D step's existing test) — same keys, same default ``graph_max_hops``.
     """
     return PipelineContext(
-        db=AsyncMock(),
-        data={
+                data={
             "query": "test",
             "tenant_id": "t1",
             "tenant_config": None,

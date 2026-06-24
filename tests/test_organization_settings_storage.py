@@ -119,12 +119,12 @@ def test_resolved_config_tenant_override_wins():
 
 
 async def test_get_empty_returns_empty_dict(db):
-    raw = await get_raw_settings(db, _tid())
+    raw = await get_raw_settings(_tid())
     assert raw == {}
 
 
 async def test_get_display_empty_returns_schema_with_nulls(db):
-    display = await get_settings_for_display(db, _tid())
+    display = await get_settings_for_display(_tid())
     # Every schema key from DEFAULT_SETTINGS should be present
     for key in DEFAULT_SETTINGS:
         assert key in display
@@ -134,13 +134,11 @@ async def test_get_display_empty_returns_schema_with_nulls(db):
 
 async def test_update_persists_overrides(db):
     tid = _tid()
-    await update_settings(
-        db,
-        tid,
+    await update_settings(tid,
         {"enrichment": {"provider": "vertex", "model": "gemini-2.0-flash"}},
     )
 
-    raw = await get_raw_settings(db, tid)
+    raw = await get_raw_settings(tid)
     assert raw["enrichment"]["provider"] == "vertex"
     assert raw["enrichment"]["model"] == "gemini-2.0-flash"
 
@@ -148,13 +146,12 @@ async def test_update_persists_overrides(db):
 async def test_update_merges_nested_keys(db):
     """Partial update of one nested key doesn't wipe sibling keys in the same block."""
     tid = _tid()
-    await update_settings(
-        db, tid, {"enrichment": {"provider": "openai", "model": "gpt-4"}}
+    await update_settings(tid, {"enrichment": {"provider": "openai", "model": "gpt-4"}}
     )
     invalidate_cache(tid)
-    await update_settings(db, tid, {"enrichment": {"provider": "vertex"}})
+    await update_settings(tid, {"enrichment": {"provider": "vertex"}})
 
-    raw = await get_raw_settings(db, tid)
+    raw = await get_raw_settings(tid)
     assert raw["enrichment"]["provider"] == "vertex"
     assert raw["enrichment"]["model"] == "gpt-4"  # preserved
 
@@ -162,20 +159,18 @@ async def test_update_merges_nested_keys(db):
 async def test_update_partial_preserves_other_features(db):
     """Updating security_audit doesn't clear a previously-set enrichment override."""
     tid = _tid()
-    await update_settings(db, tid, {"enrichment": {"provider": "openai"}})
+    await update_settings(tid, {"enrichment": {"provider": "openai"}})
     invalidate_cache(tid)
-    await update_settings(db, tid, {"security_audit": {"schedule_enabled": True}})
+    await update_settings(tid, {"security_audit": {"schedule_enabled": True}})
 
-    raw = await get_raw_settings(db, tid)
+    raw = await get_raw_settings(tid)
     assert raw["enrichment"]["provider"] == "openai"
     assert raw["security_audit"]["schedule_enabled"] is True
 
 
 async def test_audit_row_written_on_change(db):
     tid = _tid()
-    await update_settings(
-        db,
-        tid,
+    await update_settings(tid,
         {"enrichment": {"provider": "vertex"}},
         changed_by="user-123",
     )
@@ -196,7 +191,7 @@ async def test_audit_row_written_on_change(db):
 async def test_audit_no_row_on_noop(db):
     """PUT with identical payload to the current state writes neither row."""
     tid = _tid()
-    await update_settings(db, tid, {"enrichment": {"provider": "vertex"}})
+    await update_settings(tid, {"enrichment": {"provider": "vertex"}})
 
     before = await db.execute(
         text("SELECT count(*) FROM organization_settings_audit WHERE org_id = :tid"),
@@ -205,7 +200,7 @@ async def test_audit_no_row_on_noop(db):
     before_count = before.scalar() or 0
 
     invalidate_cache(tid)
-    await update_settings(db, tid, {"enrichment": {"provider": "vertex"}})
+    await update_settings(tid, {"enrichment": {"provider": "vertex"}})
 
     after = await db.execute(
         text("SELECT count(*) FROM organization_settings_audit WHERE org_id = :tid"),
@@ -217,10 +212,10 @@ async def test_audit_no_row_on_noop(db):
 
 async def test_resolve_config_reads_from_db(db):
     tid = _tid()
-    await update_settings(db, tid, {"security_audit": {"schedule_enabled": True}})
+    await update_settings(tid, {"security_audit": {"schedule_enabled": True}})
     invalidate_cache(tid)
 
-    cfg = await resolve_config(db, tid)
+    cfg = await resolve_config(tid)
     assert cfg.security_audit_schedule_enabled is True
 
 
@@ -231,7 +226,7 @@ async def test_cache_hit_avoids_storage_fetch(db, monkeypatch):
     """Second call to get_raw_settings for the same tenant should not re-fetch
     from core-storage-api — the TTL cache short-circuits before the HTTP call."""
     tid = _tid()
-    await get_raw_settings(db, tid)  # populates cache with {} (one storage fetch)
+    await get_raw_settings(tid)  # populates cache with {} (one storage fetch)
 
     calls = {"n": 0}
     sc = get_storage_client()
@@ -243,8 +238,8 @@ async def test_cache_hit_avoids_storage_fetch(db, monkeypatch):
 
     monkeypatch.setattr(sc, "get_org_settings", counting_get)
 
-    await get_raw_settings(db, tid)
-    await get_raw_settings(db, tid)
+    await get_raw_settings(tid)
+    await get_raw_settings(tid)
     assert calls["n"] == 0, "Cache hits should not fetch from storage"
 
 
@@ -252,11 +247,11 @@ async def test_update_invalidates_local_cache(db):
     """After update_settings, the next read returns the new value without waiting for TTL."""
     tid = _tid()
     # Prime cache with empty
-    assert await get_raw_settings(db, tid) == {}
+    assert await get_raw_settings(tid) == {}
 
-    await update_settings(db, tid, {"security_audit": {"alerts_enabled": True}})
+    await update_settings(tid, {"security_audit": {"alerts_enabled": True}})
 
-    raw = await get_raw_settings(db, tid)
+    raw = await get_raw_settings(tid)
     assert raw["security_audit"]["alerts_enabled"] is True
 
 
@@ -275,10 +270,10 @@ async def test_get_raw_settings_works_when_db_is_none(db):
     tid = _tid()
     # Seed an override row (via the storage-client write path) so we can prove
     # the db=None read actually fetched and cached it.
-    await update_settings(db, tid, {"enrichment": {"provider": "openai"}})
+    await update_settings(tid, {"enrichment": {"provider": "openai"}})
     ts_svc._settings_cache.clear()  # discard the warm cache from update_settings
 
-    raw = await get_raw_settings(None, tid)
+    raw = await get_raw_settings(tid)
 
     assert raw["enrichment"]["provider"] == "openai"
     # Cache populated by the storage fetch — next call is a cache hit.
@@ -286,15 +281,15 @@ async def test_get_raw_settings_works_when_db_is_none(db):
 
 
 async def test_resolve_config_works_without_db_session(db):
-    """End-to-end: ``resolve_config(None, tenant_id)`` (the path the
+    """End-to-end: ``resolve_config(tenant_id)`` (the path the
     fire-and-forget contradiction detector + the CAURA-595 Phase 5a
     consumer take) must return a usable ``ResolvedConfig`` without a
     request-scoped session in scope."""
     tid = _tid()
-    await update_settings(db, tid, {"enrichment": {"provider": "openai"}})
+    await update_settings(tid, {"enrichment": {"provider": "openai"}})
     ts_svc._settings_cache.clear()
 
-    config = await resolve_config(None, tid)
+    config = await resolve_config(tid)
 
     assert config.enrichment_provider == "openai"
 
@@ -311,7 +306,7 @@ async def test_get_raw_settings_skips_storage_fetch_on_cache_hit(monkeypatch):
 
     monkeypatch.setattr(get_storage_client(), "get_org_settings", _fail_fetch)
 
-    raw = await get_raw_settings(None, tid)
+    raw = await get_raw_settings(tid)
     assert raw == {"enrichment": {"provider": "anthropic"}}
 
 

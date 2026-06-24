@@ -30,7 +30,7 @@ class TestOutcomeTypeValidation:
         from core_api.services.evolve_service import report_outcome
 
         with pytest.raises(ValueError) as exc_info:
-            await report_outcome(None, "t1", outcome="test", outcome_type="invalid")
+            await report_outcome("t1", outcome="test", outcome_type="invalid")
         assert "invalid" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
@@ -269,8 +269,7 @@ async def test_evolve_success_increases_weight(db, sc):
 
     from core_api.services.evolve_service import _adjust_weights
 
-    _, _, adjustments = await _adjust_weights(
-        None, tenant_id, [mid], "success", "evolve-test-agent"
+    _, _, adjustments = await _adjust_weights(tenant_id, [mid], "success", "evolve-test-agent"
     )
 
     assert len(adjustments) == 1
@@ -292,8 +291,7 @@ async def test_evolve_failure_decreases_weight(db, sc):
 
     from core_api.services.evolve_service import _adjust_weights
 
-    _, _, adjustments = await _adjust_weights(
-        None, tenant_id, [mid], "failure", "evolve-test-agent"
+    _, _, adjustments = await _adjust_weights(tenant_id, [mid], "failure", "evolve-test-agent"
     )
 
     assert len(adjustments) == 1
@@ -314,8 +312,7 @@ async def test_evolve_partial_slight_increase(db, sc):
 
     from core_api.services.evolve_service import _adjust_weights
 
-    _, _, adjustments = await _adjust_weights(
-        None, tenant_id, [mid], "partial", "evolve-test-agent"
+    _, _, adjustments = await _adjust_weights(tenant_id, [mid], "partial", "evolve-test-agent"
     )
 
     assert len(adjustments) == 1
@@ -335,8 +332,7 @@ async def test_evolve_weight_floor(db, sc):
 
     from core_api.services.evolve_service import _adjust_weights
 
-    _, _, adjustments = await _adjust_weights(
-        None, tenant_id, [mid], "failure", "evolve-test-agent"
+    _, _, adjustments = await _adjust_weights(tenant_id, [mid], "failure", "evolve-test-agent"
     )
 
     assert len(adjustments) == 1
@@ -354,8 +350,7 @@ async def test_evolve_weight_cap(db, sc):
 
     from core_api.services.evolve_service import _adjust_weights
 
-    _, _, adjustments = await _adjust_weights(
-        None, tenant_id, [mid], "success", "evolve-test-agent"
+    _, _, adjustments = await _adjust_weights(tenant_id, [mid], "success", "evolve-test-agent"
     )
 
     assert len(adjustments) == 1
@@ -371,8 +366,7 @@ async def test_evolve_nonexistent_memory_skipped(db):
 
     from core_api.services.evolve_service import _adjust_weights
 
-    _, _, adjustments = await _adjust_weights(
-        None, tenant_id, [fake_id], "success", "test-agent"
+    _, _, adjustments = await _adjust_weights(tenant_id, [fake_id], "success", "test-agent"
     )
     assert len(adjustments) == 0
 
@@ -385,8 +379,7 @@ async def test_evolve_invalid_uuid_skipped(db):
 
     from core_api.services.evolve_service import _adjust_weights
 
-    _, _, adjustments = await _adjust_weights(
-        None, tenant_id, ["not-a-uuid"], "success", "test-agent"
+    _, _, adjustments = await _adjust_weights(tenant_id, ["not-a-uuid"], "success", "test-agent"
     )
     assert len(adjustments) == 0
 
@@ -405,8 +398,7 @@ async def test_evolve_truncates_related_ids_above_cap(db, caplog):
     oversized = [f"not-a-uuid-{i}" for i in range(EVOLVE_MAX_RELATED_IDS + 10)]
 
     with caplog.at_level(logging.WARNING, logger="core_api.services.evolve_service"):
-        _, _, adjustments = await _adjust_weights(
-            None, tenant_id, oversized, "success", "test-agent"
+        _, _, adjustments = await _adjust_weights(tenant_id, oversized, "success", "test-agent"
         )
 
     assert adjustments == []
@@ -443,9 +435,7 @@ async def test_evolve_no_related_ids():
 
     from core_api.services.evolve_service import report_outcome
 
-    result = await report_outcome(
-        None,
-        tenant_id=tenant_id,
+    result = await report_outcome(tenant_id=tenant_id,
         outcome=f"Something happened [{tag}]",
         outcome_type="success",
         related_ids=None,
@@ -472,9 +462,7 @@ async def test_evolve_persists_outcome_memory():
 
     from core_api.services.evolve_service import report_outcome
 
-    result = await report_outcome(
-        None,
-        tenant_id=tenant_id,
+    result = await report_outcome(tenant_id=tenant_id,
         outcome=f"Test outcome [{tag}]",
         outcome_type="failure",
         related_ids=None,
@@ -504,7 +492,7 @@ async def test_evolve_generate_rule_returns_valid_structure(sc):
     # callers resolve the tenant config first and pass it in. This
     # lets the MCP tool close its session before the LLM round-trip.
     # Fix 2 Ph5b (PR2): resolve_config is storage-routed; db=None.
-    config = await resolve_config(None, tenant_id)
+    config = await resolve_config(tenant_id)
 
     # A10: _generate_rule now returns (skip_reason, rule_dict) tuple.
     reason, rule = await _generate_rule(
@@ -549,9 +537,7 @@ async def test_evolve_failure_with_related_ids_adjusts_and_records(sc):
 
     from core_api.services.evolve_service import report_outcome
 
-    result = await report_outcome(
-        None,
-        tenant_id=tenant_id,
+    result = await report_outcome(tenant_id=tenant_id,
         outcome=f"Failed because of bad info [{tag}]",
         outcome_type="failure",
         related_ids=[mid],
@@ -579,9 +565,7 @@ async def test_evolve_success_no_rule(sc):
 
     from core_api.services.evolve_service import report_outcome
 
-    result = await report_outcome(
-        None,
-        tenant_id=tenant_id,
+    result = await report_outcome(tenant_id=tenant_id,
         outcome=f"Worked great [{tag}]",
         outcome_type="success",
         related_ids=[mid],
@@ -599,9 +583,7 @@ async def test_evolve_response_shape():
 
     from core_api.services.evolve_service import report_outcome
 
-    result = await report_outcome(
-        None,
-        tenant_id=tenant_id,
+    result = await report_outcome(tenant_id=tenant_id,
         outcome=f"Test shape [{tag}]",
         outcome_type="partial",
         related_ids=None,
@@ -642,7 +624,7 @@ class TestWhitespaceOutcomeRejection:
         from core_api.services.evolve_service import report_outcome
 
         with pytest.raises(ValueError) as exc_info:
-            await report_outcome(None, "t1", outcome="", outcome_type="success")
+            await report_outcome("t1", outcome="", outcome_type="success")
         assert "non-empty" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
@@ -650,8 +632,7 @@ class TestWhitespaceOutcomeRejection:
         from core_api.services.evolve_service import report_outcome
 
         with pytest.raises(ValueError) as exc_info:
-            await report_outcome(
-                None, "t1", outcome="   \n\t  ", outcome_type="success"
+            await report_outcome("t1", outcome="   \n\t  ", outcome_type="success"
             )
         assert "non-empty" in str(exc_info.value).lower()
 
@@ -670,8 +651,7 @@ class TestScopeValidation:
         from core_api.services.evolve_service import report_outcome
 
         with pytest.raises(ValueError) as exc_info:
-            await report_outcome(
-                None, "t1", outcome="x", outcome_type="success", scope="bogus"
+            await report_outcome("t1", outcome="x", outcome_type="success", scope="bogus"
             )
         assert "scope" in str(exc_info.value).lower()
 
@@ -680,9 +660,7 @@ class TestScopeValidation:
         from core_api.services.evolve_service import report_outcome
 
         with pytest.raises(ValueError) as exc_info:
-            await report_outcome(
-                None,
-                "t1",
+            await report_outcome("t1",
                 outcome="x",
                 outcome_type="success",
                 scope="fleet",
@@ -708,9 +686,7 @@ async def test_filter_by_scope_agent_drops_other_agents_memories():
     mine_b, _ = await _seed_memory_committed(tenant_id, agent_id="agent-a")
     other, _ = await _seed_memory_committed(tenant_id, agent_id="agent-b")
 
-    kept, dropped = await _filter_by_scope(
-        None,
-        tenant_id=tenant_id,
+    kept, dropped = await _filter_by_scope(tenant_id=tenant_id,
         caller_agent_id="agent-a",
         fleet_id=None,
         scope="agent",
@@ -731,9 +707,7 @@ async def test_filter_by_scope_fleet_drops_other_fleets():
     ours, _ = await _seed_memory_committed(tenant_id, agent_id="a", fleet_id="fleet-x")
     theirs, _ = await _seed_memory_committed(tenant_id, agent_id="b", fleet_id="fleet-y")
 
-    kept, dropped = await _filter_by_scope(
-        None,
-        tenant_id=tenant_id,
+    kept, dropped = await _filter_by_scope(tenant_id=tenant_id,
         caller_agent_id="a",
         fleet_id="fleet-x",
         scope="fleet",
@@ -754,9 +728,7 @@ async def test_filter_by_scope_all_keeps_everything_in_tenant():
     m1, _ = await _seed_memory_committed(tenant_id, agent_id="a", fleet_id="fa")
     m2, _ = await _seed_memory_committed(tenant_id, agent_id="b", fleet_id="fb")
 
-    kept, dropped = await _filter_by_scope(
-        None,
-        tenant_id=tenant_id,
+    kept, dropped = await _filter_by_scope(tenant_id=tenant_id,
         caller_agent_id="a",
         fleet_id=None,
         scope="all",
@@ -775,9 +747,7 @@ async def test_filter_by_scope_drops_invalid_uuid_and_missing():
     tenant_id = f"test-tenant-{tag}"
     mine, _ = await _seed_memory_committed(tenant_id, agent_id="a")
 
-    kept, dropped = await _filter_by_scope(
-        None,
-        tenant_id=tenant_id,
+    kept, dropped = await _filter_by_scope(tenant_id=tenant_id,
         caller_agent_id="a",
         fleet_id=None,
         scope="agent",
@@ -792,9 +762,7 @@ async def test_filter_by_scope_empty_input():
     """None / empty input returns ([], 0) without touching storage."""
     from core_api.services.evolve_service import _filter_by_scope
 
-    kept, dropped = await _filter_by_scope(
-        None,
-        tenant_id="t1",
+    kept, dropped = await _filter_by_scope(tenant_id="t1",
         caller_agent_id="a",
         fleet_id=None,
         scope="agent",
@@ -822,9 +790,7 @@ async def test_evolve_scope_agent_filters_out_other_agent_ids():
     mine, _ = await _seed_memory_committed(tenant_id, agent_id="caller-a", weight=0.5)
     other, _ = await _seed_memory_committed(tenant_id, agent_id="agent-b", weight=0.5)
 
-    result = await report_outcome(
-        None,
-        tenant_id=tenant_id,
+    result = await report_outcome(tenant_id=tenant_id,
         outcome=f"agent-scope test [{tag}]",
         outcome_type="success",
         related_ids=[mine, other],
@@ -849,9 +815,7 @@ async def test_evolve_scope_all_adjusts_any_memory():
     m1, _ = await _seed_memory_committed(tenant_id, agent_id="caller")
     m2, _ = await _seed_memory_committed(tenant_id, agent_id="other")
 
-    result = await report_outcome(
-        None,
-        tenant_id=tenant_id,
+    result = await report_outcome(tenant_id=tenant_id,
         outcome=f"all-scope test [{tag}]",
         outcome_type="success",
         related_ids=[m1, m2],
@@ -880,9 +844,7 @@ async def test_evolve_outcome_memory_visibility_matches_scope():
         tag = _uid()
         tenant_id = f"test-tenant-{tag}"
 
-        result = await report_outcome(
-            None,
-            tenant_id=tenant_id,
+        result = await report_outcome(tenant_id=tenant_id,
             outcome=f"vis test {scope} [{tag}]",
             outcome_type="success",
             related_ids=None,
@@ -919,7 +881,7 @@ class TestMCPHandlerTrustGating:
 
         captured: dict = {}
 
-        async def fake_require_trust(db, tenant_id, agent_id, min_level):
+        async def fake_require_trust(tenant_id, agent_id, min_level):
             captured["min_level"] = min_level
             return 3, False, None  # allow
 
@@ -959,7 +921,7 @@ class TestMCPHandlerTrustGating:
 
         captured: dict = {}
 
-        async def fake_require_trust(db, tenant_id, agent_id, min_level):
+        async def fake_require_trust(tenant_id, agent_id, min_level):
             captured["min_level"] = min_level
             return 3, False, None
 
@@ -988,7 +950,7 @@ class TestMCPHandlerTrustGating:
 
         captured: dict = {}
 
-        async def fake_require_trust(db, tenant_id, agent_id, min_level):
+        async def fake_require_trust(tenant_id, agent_id, min_level):
             captured["min_level"] = min_level
             return 3, False, None
 
@@ -1015,7 +977,7 @@ class TestMCPHandlerTrustGating:
         from core_api import mcp_server
         from core_api.services import evolve_service
 
-        async def fake_require_trust(db, tenant_id, agent_id, min_level):
+        async def fake_require_trust(tenant_id, agent_id, min_level):
             return 0, False, "Error (403): Agent 'x' (trust_level=0) < required 2."
 
         monkeypatch.setattr(mcp_server, "_require_trust", fake_require_trust)

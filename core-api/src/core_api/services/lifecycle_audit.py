@@ -81,7 +81,7 @@ class _CoreApiLifecycleAdapter:
         hygiene/health checks that ``run_crystallization`` runs even
         when its own ``auto_crystallize`` parameter is False.
         """
-        config = await resolve_config(None, org_id)
+        config = await resolve_config(org_id)
         if not config.auto_crystallize_enabled:
             return 0
         active = await self._storage.count_active(org_id, fleet_id)
@@ -114,7 +114,7 @@ class _CoreApiLifecycleAdapter:
         Returns the number of insight memories produced (audit row's
         ``stats.insights_created``).
         """
-        config = await resolve_config(None, org_id)
+        config = await resolve_config(org_id)
         if not config.auto_insights_enabled:
             return 0
 
@@ -145,7 +145,6 @@ class _CoreApiLifecycleAdapter:
                 return 0
 
         result = await generate_insights(
-            None,
             org_id,
             focus="discover",
             scope="fleet" if fleet_id else "all",
@@ -165,7 +164,7 @@ class _CoreApiLifecycleAdapter:
         Honors ``auto_entity_linking_enabled`` — orgs with the flag
         off return 0 without running the LLM pipeline.
         """
-        config = await resolve_config(None, org_id)
+        config = await resolve_config(org_id)
         if not config.auto_entity_linking_enabled:
             return 0
         # Lazy imports — same rationale as crystallize above.
@@ -282,7 +281,7 @@ async def resolve_publisher_kwargs(action: str, org_id: str) -> dict:
     takes a settings dependency.
     """
     if action == "purge-soft-deleted":
-        config = await resolve_config(None, org_id)
+        config = await resolve_config(org_id)
         return {"retention_days": config.memory_retention_days}
     if action == "forge-distill":
         # ``publish_forge_distill_request`` requires ``run_label``; the

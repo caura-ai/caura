@@ -39,7 +39,7 @@ async def test_skills_factory_enabled_lists_opted_in_org(db):
     """End-to-end JSONB filter: an org that flips ``skills_factory.enabled`` via
     the settings write path shows up in the discovery list (read via storage-api)."""
     org = _org()
-    await update_settings(None, org, {"skills_factory": {"enabled": True}})
+    await update_settings(org, {"skills_factory": {"enabled": True}})
     invalidate_cache(org)
 
     enabled = await list_tenants_with_skills_factory_enabled(db)

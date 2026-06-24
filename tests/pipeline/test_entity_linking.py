@@ -29,7 +29,7 @@ TENANT = "test-tenant"
 
 def _make_ctx(**extra_data):
     # ``db=None`` — the step no longer touches a DB session.
-    return PipelineContext(db=None, data={"tenant_id": TENANT, **extra_data})
+    return PipelineContext(data={"tenant_id": TENANT, **extra_data})
 
 
 def _patch_sc(resp: dict) -> tuple:

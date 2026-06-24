@@ -550,9 +550,7 @@ class TestForgeRunOrchestration:
     async def test_no_traces_no_candidates(self, monkeypatch):
         self._patch_build(monkeypatch, [])
         captured, writer = _capture_writer()
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="test-run",
+        result = await run_forge_distill(            run_label="test-run",
             tenant_id="t1", fleet_id="f1",
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -570,9 +568,7 @@ class TestForgeRunOrchestration:
         # 4 traces, all entity-overlapping, 4 distinct agents.
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="test-run",
+        result = await run_forge_distill(            run_label="test-run",
             tenant_id="acme", fleet_id="ops",
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -614,9 +610,7 @@ class TestForgeRunOrchestration:
         ]
         self._patch_build(monkeypatch, traces)
         captured, writer = _capture_writer()
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="test-run",
+        result = await run_forge_distill(            run_label="test-run",
             tenant_id="t1", fleet_id=None,
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -635,9 +629,7 @@ class TestForgeRunOrchestration:
         # 2 traces (below default min_cluster_size=3).
         self._patch_build(monkeypatch, _passing_traces(2))
         captured, writer = _capture_writer()
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="test-run",
+        result = await run_forge_distill(            run_label="test-run",
             tenant_id="t1", fleet_id=None,
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -659,9 +651,7 @@ class TestForgeRunOrchestration:
         ]
         self._patch_build(monkeypatch, traces)
         captured, writer = _capture_writer()
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="test-run",
+        result = await run_forge_distill(            run_label="test-run",
             tenant_id="t1", fleet_id=None,
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -678,9 +668,7 @@ class TestForgeRunOrchestration:
     async def test_poison_skip_does_not_write(self, monkeypatch):
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="test-run",
+        result = await run_forge_distill(            run_label="test-run",
             tenant_id="t1", fleet_id=None,
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -715,9 +703,7 @@ class TestForgeRunOrchestration:
             return json.dumps(_golden_llm_response(slug=f"deploy-eu-west-dns-{call_counter['n']}"))
 
         captured, writer = _capture_writer()
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="test-run",
+        result = await run_forge_distill(            run_label="test-run",
             tenant_id="t1", fleet_id=None,
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -753,9 +739,7 @@ class TestForgeRunOrchestration:
 
         captured, writer = _capture_writer()
         cfg = ForgeConfig(max_writes_per_run=1)
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="test-run",
+        result = await run_forge_distill(            run_label="test-run",
             tenant_id="t1", fleet_id=None,
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -799,9 +783,7 @@ class TestForgeRunResultTimestamps:
         captured, writer = _capture_writer()
 
         before = datetime.now(timezone.utc)
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="test-run",
+        result = await run_forge_distill(            run_label="test-run",
             tenant_id="t1", fleet_id="f1",
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -864,9 +846,7 @@ class TestForgeRunResilience:
             return json.dumps(_golden_llm_response(slug=f"s-{call['n']}"))
 
         captured, writer = _capture_writer()
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="test-run",
+        result = await run_forge_distill(            run_label="test-run",
             tenant_id="t1", fleet_id=None,
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -897,9 +877,7 @@ class TestForgeRunResilience:
             return {m: f"content {m}" for m in mids}
 
         captured, writer = _capture_writer()
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="test-run",
+        result = await run_forge_distill(            run_label="test-run",
             tenant_id="t1", fleet_id=None,
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -925,9 +903,7 @@ class TestForgeRunResilience:
             return False
 
         captured, writer = _capture_writer()
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="test-run",
+        result = await run_forge_distill(            run_label="test-run",
             tenant_id="t1", fleet_id=None,
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -961,9 +937,7 @@ class TestForgeRunResilience:
             return json.dumps(_golden_llm_response(slug=f"c-{call['n']}"))
 
         captured, writer = _capture_writer()
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="test-run",
+        result = await run_forge_distill(            run_label="test-run",
             tenant_id="t1", fleet_id=None,
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -996,9 +970,7 @@ class TestForgeRunResilience:
             if slug == "slug-1":
                 raise RuntimeError("simulated UNIQUE violation")
 
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="test-run",
+        result = await run_forge_distill(            run_label="test-run",
             tenant_id="t1", fleet_id=None,
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -1034,9 +1006,7 @@ class TestForgeRunLabel:
     async def test_run_label_lands_on_result(self, monkeypatch):
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        result = await run_forge_distill(
-            _MockDb(),
-            run_label="forge-cron-20260607T1845",
+        result = await run_forge_distill(            run_label="forge-cron-20260607T1845",
             tenant_id="t1", fleet_id=None,
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -1051,9 +1021,7 @@ class TestForgeRunLabel:
     async def test_run_label_stamped_on_every_candidate(self, monkeypatch):
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        await run_forge_distill(
-            _MockDb(),
-            run_label="forge-cron-acme-20260607T1845",
+        await run_forge_distill(            run_label="forge-cron-acme-20260607T1845",
             tenant_id="acme", fleet_id="ops",
             window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
             window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -1104,9 +1072,7 @@ class TestForgeStatusCheckerGuard:
         # status_checker reports the target is already 'active' —
         # operator-approved. Don't clobber.
         async def existing_active(_t, _c, _d): return "active"
-        result = await run_forge_distill(
-            _MockDb(),
-            candidate_writer=writer,
+        result = await run_forge_distill(            candidate_writer=writer,
             status_checker=existing_active,
             **self._kw(),
         )
@@ -1123,9 +1089,7 @@ class TestForgeStatusCheckerGuard:
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
         async def existing(*_): return status
-        result = await run_forge_distill(
-            _MockDb(),
-            candidate_writer=writer,
+        result = await run_forge_distill(            candidate_writer=writer,
             status_checker=existing,
             **self._kw(),
         )
@@ -1139,9 +1103,7 @@ class TestForgeStatusCheckerGuard:
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
         async def existing_candidate(*_): return "candidate"
-        result = await run_forge_distill(
-            _MockDb(),
-            candidate_writer=writer,
+        result = await run_forge_distill(            candidate_writer=writer,
             status_checker=existing_candidate,
             **self._kw(),
         )
@@ -1155,9 +1117,7 @@ class TestForgeStatusCheckerGuard:
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
         async def no_existing(*_): return None
-        result = await run_forge_distill(
-            _MockDb(),
-            candidate_writer=writer,
+        result = await run_forge_distill(            candidate_writer=writer,
             status_checker=no_existing,
             **self._kw(),
         )
@@ -1170,9 +1130,7 @@ class TestForgeStatusCheckerGuard:
         # candidate gets written. Eval harness path.
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        result = await run_forge_distill(
-            _MockDb(),
-            candidate_writer=writer,
+        result = await run_forge_distill(            candidate_writer=writer,
             # status_checker omitted entirely
             **self._kw(),
         )
@@ -1190,9 +1148,7 @@ class TestForgeStatusCheckerGuard:
         import hashlib
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        await run_forge_distill(
-            _MockDb(),
-            candidate_writer=writer,
+        await run_forge_distill(            candidate_writer=writer,
             **self._kw(),
         )
         assert len(captured) == 1
@@ -1211,9 +1167,7 @@ class TestForgeStatusCheckerGuard:
         ``state='clean'`` so candidates pass through without flag."""
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        await run_forge_distill(
-            _MockDb(),
-            candidate_writer=writer,
+        await run_forge_distill(            candidate_writer=writer,
             **self._kw(),
         )
         doc = captured[0]["data"]
@@ -1268,9 +1222,7 @@ class TestForgeStatusCheckerGuard:
         # module's local binding.
         import core_api.services.forge.forge_service as svc
         monkeypatch.setattr(svc, "scan_skill_doc", fatal_scan)
-        result = await run_forge_distill(
-            _MockDb(),
-            candidate_writer=writer,
+        result = await run_forge_distill(            candidate_writer=writer,
             **self._kw(),
         )
         # Sentinel-fatal lands in its OWN bucket — poisoned-fingerprint
@@ -1289,9 +1241,7 @@ class TestForgeStatusCheckerGuard:
         inbox query, etc.)."""
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        result = await run_forge_distill(
-            _MockDb(),
-            candidate_writer=writer,
+        result = await run_forge_distill(            candidate_writer=writer,
             **self._kw(),
         )
         assert result.candidates_written == 1
@@ -1313,9 +1263,7 @@ class TestForgeStatusCheckerGuard:
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
         async def boom(*_): raise RuntimeError("simulated storage hiccup")
-        result = await run_forge_distill(
-            _MockDb(),
-            candidate_writer=writer,
+        result = await run_forge_distill(            candidate_writer=writer,
             status_checker=boom,
             **self._kw(),
         )
@@ -1357,8 +1305,8 @@ class TestForgeDeterminism:
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
         )
-        await run_forge_distill(_MockDb(), candidate_writer=w1, **kw)
-        await run_forge_distill(_MockDb(), candidate_writer=w2, **kw)
+        await run_forge_distill(candidate_writer=w1, **kw)
+        await run_forge_distill(candidate_writer=w2, **kw)
         assert len(cap1) == 1 and len(cap2) == 1
         fp1 = cap1[0]["data"]["cluster_fingerprint"]
         fp2 = cap2[0]["data"]["cluster_fingerprint"]

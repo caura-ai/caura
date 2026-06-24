@@ -201,7 +201,7 @@ class _FakeConfig:
     graph_expand = False
 
 
-async def _fake_resolve_config(db, tenant_id):  # noqa: ARG001
+async def _fake_resolve_config(tenant_id):  # noqa: ARG001
     return _FakeConfig()
 
 

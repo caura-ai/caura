@@ -119,9 +119,7 @@ async def test_pipeline_overhead_bounded_relative_to_legacy(db):
     try:
         # ── Warmup (prime imports, caches, connections) ──
         memory_service._USE_PIPELINE_WRITE = False
-        await create_memory(
-            db,
-            MemoryCreate(
+        await create_memory(MemoryCreate(
                 tenant_id=LEGACY_TENANT,
                 fleet_id=FLEET_ID,
                 agent_id=AGENT_ID,
@@ -131,9 +129,7 @@ async def test_pipeline_overhead_bounded_relative_to_legacy(db):
             ),
         )
         memory_service._USE_PIPELINE_WRITE = True
-        await create_memory(
-            db,
-            MemoryCreate(
+        await create_memory(MemoryCreate(
                 tenant_id=PIPELINE_TENANT,
                 fleet_id=FLEET_ID,
                 agent_id=AGENT_ID,
@@ -149,7 +145,7 @@ async def test_pipeline_overhead_bounded_relative_to_legacy(db):
         for i in range(ITERATIONS):
             data = _make_input(LEGACY_TENANT, i)
             t0 = time.perf_counter()
-            result = await create_memory(db, data)
+            result = await create_memory(data)
             legacy_latencies.append((time.perf_counter() - t0) * 1000)
             assert isinstance(result, MemoryOut)
 
@@ -160,7 +156,7 @@ async def test_pipeline_overhead_bounded_relative_to_legacy(db):
         for i in range(ITERATIONS):
             data = _make_input(PIPELINE_TENANT, i, write_mode="strong")
             t0 = time.perf_counter()
-            result = await create_memory(db, data)
+            result = await create_memory(data)
             pipeline_latencies.append((time.perf_counter() - t0) * 1000)
             assert isinstance(result, MemoryOut)
 

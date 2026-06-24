@@ -18,7 +18,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from core_api.auth import AuthContext, get_auth_context
-from core_api.db.session import get_db
 from core_api.middleware.ingest_body_size import IngestBodySizeMiddleware
 from core_api.routes.memories import router
 from core_api.services.ingest_service import INGEST_MAX_INPUT_BYTES
@@ -43,8 +42,6 @@ def _build_app(monkeypatch, fake_preview_response: dict | None = None) -> TestCl
     app.dependency_overrides[get_auth_context] = lambda: AuthContext(
         tenant_id=None, is_admin=True
     )
-    # Override DB → returns a sentinel; the stubbed ingest_preview ignores it
-    app.dependency_overrides[get_db] = lambda: object()
 
     preview_mock = AsyncMock(
         return_value=fake_preview_response or {"facts": [], "sections": 0}
@@ -126,7 +123,7 @@ class TestIngestFileEndpoint:
         assert resp.status_code == 200, resp.text
         assert resp.json()["sections"] == 1
         # Verify the text was passed through unchanged (line endings intact)
-        called_req = preview_mock.call_args.args[1]
+        called_req = preview_mock.call_args.args[0]
         assert "# Title" in called_req.content
         assert "\n\n" in called_req.content
         # Filename survives as upload:<name> on source_uri so each derived
@@ -144,7 +141,7 @@ class TestIngestFileEndpoint:
             data={"tenant_id": "t1"},
         )
         assert resp.status_code == 200, resp.text
-        called_req = preview_mock.call_args.args[1]
+        called_req = preview_mock.call_args.args[0]
         assert called_req.source_uri == "upload"
 
     def test_uploads_csv_preserves_rows(self, monkeypatch) -> None:
@@ -156,7 +153,7 @@ class TestIngestFileEndpoint:
             data={"tenant_id": "t1"},
         )
         assert resp.status_code == 200, resp.text
-        called_req = preview_mock.call_args.args[1]
+        called_req = preview_mock.call_args.args[0]
         # Row breaks must survive — otherwise the LLM sees one mashed line.
         assert "\n" in called_req.content
         assert called_req.content == "a,b\n1,2\n3,4"
@@ -181,7 +178,7 @@ class TestIngestFileEndpoint:
             data={"tenant_id": "t1"},
         )
         assert resp.status_code == 200, resp.text
-        called_req = preview_mock.call_args.args[1]
+        called_req = preview_mock.call_args.args[0]
         assert called_req.source_uri == "upload:report.pdf"
 
     def test_uploads_pdf_routes_through_kreuzberg(self, monkeypatch) -> None:
@@ -207,7 +204,7 @@ class TestIngestFileEndpoint:
             data={"tenant_id": "t1"},
         )
         assert resp.status_code == 200, resp.text
-        called_req = preview_mock.call_args.args[1]
+        called_req = preview_mock.call_args.args[0]
         assert "Extracted Heading" in called_req.content
 
     def test_unsupported_mime_returns_422(self, monkeypatch) -> None:
@@ -245,7 +242,7 @@ class TestIngestFileEndpoint:
             data={"tenant_id": "t1", "focus": "release notes"},
         )
         assert resp.status_code == 200, resp.text
-        called_req = preview_mock.call_args.args[1]
+        called_req = preview_mock.call_args.args[0]
         assert called_req.focus == "release notes"
 
 

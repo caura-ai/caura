@@ -12,7 +12,6 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
@@ -273,7 +272,7 @@ def _scope_filters(tenant_id, fleet_id, agent_id, scope):
 # client-side before the round-trip.
 
 
-async def _query_contradictions(db, tenant_id, fleet_id, agent_id, scope) -> list[dict]:
+async def _query_contradictions(tenant_id, fleet_id, agent_id, scope) -> list[dict]:
     """Fetch memories that supersede others, are conflicted, or share entities with divergent values."""
     _scope_filters(tenant_id, fleet_id, agent_id, scope)
     sc = get_storage_client()
@@ -286,7 +285,7 @@ async def _query_contradictions(db, tenant_id, fleet_id, agent_id, scope) -> lis
     )
 
 
-async def _query_failures(db, tenant_id, fleet_id, agent_id, scope) -> list[dict]:
+async def _query_failures(tenant_id, fleet_id, agent_id, scope) -> list[dict]:
     """Fetch low-weight memories that were recalled (agents acted on weak info)."""
     _scope_filters(tenant_id, fleet_id, agent_id, scope)
     sc = get_storage_client()
@@ -299,7 +298,7 @@ async def _query_failures(db, tenant_id, fleet_id, agent_id, scope) -> list[dict
     )
 
 
-async def _query_stale(db, tenant_id, fleet_id, agent_id, scope) -> list[dict]:
+async def _query_stale(tenant_id, fleet_id, agent_id, scope) -> list[dict]:
     """Fetch memories that are likely outdated based on age and recall activity."""
     _scope_filters(tenant_id, fleet_id, agent_id, scope)
     # Age thresholds computed on the caller's clock and bound server-side.
@@ -318,7 +317,7 @@ async def _query_stale(db, tenant_id, fleet_id, agent_id, scope) -> list[dict]:
     )
 
 
-async def _query_divergence(db, tenant_id, fleet_id, agent_id, scope) -> list[dict]:
+async def _query_divergence(tenant_id, fleet_id, agent_id, scope) -> list[dict]:
     """Fetch memories where multiple agents reference the same entities differently."""
     _scope_filters(tenant_id, fleet_id, agent_id, scope)
     sc = get_storage_client()
@@ -331,7 +330,7 @@ async def _query_divergence(db, tenant_id, fleet_id, agent_id, scope) -> list[di
     )
 
 
-async def _query_patterns(db, tenant_id, fleet_id, agent_id, scope) -> list[dict]:
+async def _query_patterns(tenant_id, fleet_id, agent_id, scope) -> list[dict]:
     """Fetch recent active memories for trend/pattern analysis."""
     _scope_filters(tenant_id, fleet_id, agent_id, scope)
     sc = get_storage_client()
@@ -380,7 +379,7 @@ def _numpy_kmeans(data, k, max_iters=20):
     return labels, centroids
 
 
-async def _query_discover(db, tenant_id, fleet_id, agent_id, scope) -> _DiscoverResult:
+async def _query_discover(tenant_id, fleet_id, agent_id, scope) -> _DiscoverResult:
     """Sample memories with embeddings and cluster them in vector space.
 
     Fix 2 Ph5b: only the row sample routes through storage
@@ -583,7 +582,6 @@ def _fake_insights() -> dict:
 
 
 async def _persist_findings(
-    db: AsyncSession | None,
     tenant_id: str,
     agent_id: str,
     fleet_id: str | None,
@@ -744,7 +742,7 @@ async def _persist_findings(
 
     insight_ids: list[str | None] = []
     try:
-        response = await create_memories_bulk(db, bulk_data, bulk_attempt_id=bulk_attempt_id)
+        response = await create_memories_bulk(bulk_data, bulk_attempt_id=bulk_attempt_id)
     except Exception:
         logger.exception("Bulk persist of insight findings failed entirely")
         insight_ids = [None] * len(findings)
@@ -885,7 +883,6 @@ async def synthesize_insights(
 
 
 async def generate_insights(
-    db: AsyncSession | None,
     tenant_id: str,
     focus: str,
     scope: str = "agent",
@@ -939,7 +936,7 @@ async def generate_insights(
 
     # 1. Query memories based on focus
     query_fn = _QUERY_DISPATCH[focus]
-    memories_or_clusters = await query_fn(db, tenant_id, fleet_id, agent_id, scope)
+    memories_or_clusters = await query_fn(tenant_id, fleet_id, agent_id, scope)
 
     if focus == "discover" and isinstance(memories_or_clusters, _DiscoverResult):
         is_clustered = memories_or_clusters.is_clustered
@@ -961,7 +958,7 @@ async def generate_insights(
     # 2. Resolve tenant config for LLM provider
     from core_api.services.organization_settings import resolve_config
 
-    config = await resolve_config(db, tenant_id)
+    config = await resolve_config(tenant_id)
 
     # 3-5. LLM analysis (no DB). Delegated to ``synthesize_insights`` so
     # MCP callers that want to release their session before the LLM
@@ -979,7 +976,7 @@ async def generate_insights(
     # bulk-create and restore are each storage-committed independently — there
     # is no caller-side transaction to commit (``db`` is now None on the
     # storage-routed paths).
-    insight_ids = await _persist_findings(db, tenant_id, agent_id, fleet_id, focus, scope, findings)
+    insight_ids = await _persist_findings(tenant_id, agent_id, fleet_id, focus, scope, findings)
 
     return {
         "focus": focus,

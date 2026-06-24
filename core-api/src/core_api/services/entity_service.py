@@ -1,8 +1,6 @@
 import logging
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     ENTITY_RESOLUTION_THRESHOLD,
@@ -16,7 +14,6 @@ from core_api.schemas import (
     RelationUpsert,
     RelationUpsertOut,
 )
-from core_api.services.hooks import get_hooks
 
 logger = logging.getLogger(__name__)
 
@@ -136,9 +133,7 @@ async def upsert_entity(
     )
 
 
-async def get_entity(
-    db: AsyncSession, entity_id: UUID, tenant_id: str, caller_agent_id: str | None = None
-) -> EntityOut | None:
+async def get_entity(entity_id: UUID, tenant_id: str, caller_agent_id: str | None = None) -> EntityOut | None:
     sc = get_storage_client()
     result = await sc.get_entity_with_linked_memories(str(entity_id))
     if not result:
@@ -167,7 +162,7 @@ async def get_entity(
         # Resolve the caller's agent row ONCE — the per-memory loop used to
         # issue an identical lookup_agent round-trip for every scope_team
         # row (N+1 over the entity's linked memories).
-        caller_agent = await lookup_agent(db, tenant_id, caller_agent_id)
+        caller_agent = await lookup_agent(tenant_id, caller_agent_id)
         linked_memories_raw = [
             mem
             for mem in linked_memories_raw
@@ -267,13 +262,11 @@ async def get_entity(
         for rel in relations_raw
     ]
 
-    # Increment recall_count for linked memories via hooks
+    # Increment recall_count for linked memories via storage.
     memory_ids = [mem.get("id") for mem in linked_memories_raw if mem.get("id")]
-    _hooks = get_hooks()
-    if memory_ids and _hooks.on_recall:
+    if memory_ids:
         try:
-            # on_recall hook still expects db; pass it through for now
-            await _hooks.on_recall(db, memory_ids)
+            await get_storage_client().increment_recall([str(m) for m in memory_ids])
         except Exception:
             pass  # Non-critical
 
@@ -289,7 +282,7 @@ async def get_entity(
     )
 
 
-async def upsert_relation(db: AsyncSession, data: RelationUpsert) -> RelationUpsertOut:
+async def upsert_relation(data: RelationUpsert) -> RelationUpsertOut:
     sc = get_storage_client()
 
     # Storage API does an actual UPSERT (``ON CONFLICT DO UPDATE`` on

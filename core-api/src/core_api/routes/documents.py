@@ -7,12 +7,10 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.embedding import get_embedding
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
-from core_api.db.session import get_db
 from core_api.middleware.idempotency import IDEMPOTENCY_HEADER, idempotency_for
 from core_api.middleware.rate_limit import write_limit
 from core_api.services.agent_service import enforce_delete
@@ -174,7 +172,6 @@ async def upsert_document(
     request: Request,
     body: DocWriteRequest,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
     idempotency_key: str | None = Header(None, alias=IDEMPOTENCY_HEADER),
 ):
     """Upsert a document. If collection+doc_id exists, data is replaced."""
@@ -213,10 +210,10 @@ async def upsert_document(
     # Disabled tenants pay one TTL-cached lookup + one dict-get, not
     # the full DEFAULT_SETTINGS deep-merge per write.
     if body.collection == SKILLS_COLLECTION:
-        raw_settings = await get_raw_settings(db, body.tenant_id)
+        raw_settings = await get_raw_settings(body.tenant_id)
         sf_enabled = raw_settings.get("skills_factory", {}).get("enabled") is True
         if sf_enabled:
-            settings_display = await get_settings_for_display(db, body.tenant_id)
+            settings_display = await get_settings_for_display(body.tenant_id)
             sf_settings = settings_display.get("skills_factory", {})
             # ``forge`` source is reserved for the internal lifecycle
             # worker; no external HTTP caller is treated as internal in
@@ -263,7 +260,7 @@ async def upsert_document(
             body.data = normalized
 
     if auth.tenant_id:
-        await check_and_increment(db, body.tenant_id, "write")
+        await check_and_increment(body.tenant_id, "write")
 
     # Resolve which string in `data` gets embedded. Only data["summary"]
     # is embeddable; skills writes also accept data["description"] for
@@ -325,7 +322,6 @@ async def upsert_document(
     if doc is None:
         raise HTTPException(status_code=500, detail="Document upsert returned no rows")
     await log_action(
-        db,
         tenant_id=body.tenant_id,
         action="doc_upsert",
         resource_type="document",
@@ -336,7 +332,6 @@ async def upsert_document(
             "indexed": embedding is not None,
         },
     )
-    await db.commit()
     out = _dict_to_out(doc)
     if _idem:
         await _idem.record(out.model_dump(mode="json"), 200)
@@ -432,7 +427,6 @@ async def query_documents(
 async def installable_skills(
     body: InstallableSkillsRequest,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Skills an agent harness should INSTALL onto a node's disk.
 
@@ -463,7 +457,7 @@ async def installable_skills(
     # path's cache-first ``get_raw_settings`` (returns just the tenant's
     # override dict — cheap, aggressively cached).
     try:
-        raw_settings = await get_raw_settings(db, body.tenant_id)
+        raw_settings = await get_raw_settings(body.tenant_id)
     except Exception:
         logger.exception(
             "skills_factory flag lookup failed for %s; cannot gate installable skills",
@@ -521,7 +515,6 @@ async def delete_document(
     tenant_id: str = Query(...),
     collection: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Delete a document by collection + doc_id."""
     auth.enforce_tenant(tenant_id)
@@ -530,19 +523,17 @@ async def delete_document(
     # admin-trust (>= 3) to delete documents (which carry customer records /
     # configs). Tenant/user credentials (no X-Agent-ID) are unaffected.
     if auth.tenant_id and auth.agent_id:
-        await enforce_delete(db, tenant_id, auth.agent_id)
+        await enforce_delete(tenant_id, auth.agent_id)
     sc = get_storage_client()
     deleted = await sc.delete_document(tenant_id=tenant_id, collection=collection, doc_id=doc_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Document not found")
     await log_action(
-        db,
         tenant_id=tenant_id,
         action="doc_delete",
         resource_type="document",
         detail={"collection": collection, "doc_id": doc_id},
     )
-    await db.commit()
 
 
 # ── Vector search + collections enumeration ──
@@ -559,7 +550,6 @@ async def delete_document(
 async def search_documents(
     body: DocSearchRequest,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Vector search over indexed documents. Mirror of MCP ``memclaw_doc op=search``.
 
@@ -572,7 +562,7 @@ async def search_documents(
         # Rate-limit against the home tenant (not every tenant in the
         # readable set) — mirrors recall's pattern. The home tenant pays
         # the search-budget cost for the widened query.
-        await check_and_increment(db, auth.tenant_id, "search")
+        await check_and_increment(auth.tenant_id, "search")
 
     query_embedding = await get_embedding(body.query)
     if query_embedding is None:
@@ -609,7 +599,6 @@ async def search_documents(
             if rt:
                 counts[rt] = counts.get(rt, 0) + 1
         await log_cross_tenant_read(
-            db,
             home_tenant_id=auth.tenant_id,
             home_agent_id=auth.agent_id,
             source_tenants=source_tenants,

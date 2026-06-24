@@ -6,12 +6,9 @@ optionally generates preventive rules via LLM on failure/partial outcomes.
 """
 
 import asyncio
-import contextlib
 import logging
 import time
 from uuid import UUID
-
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.constants import (
     EVOLVE_FAILURE_DELTA,
@@ -153,7 +150,6 @@ Respond with JSON:
 
 
 async def _filter_by_scope(
-    db: AsyncSession | None,
     tenant_id: str,
     caller_agent_id: str,
     fleet_id: str | None,
@@ -257,7 +253,6 @@ async def _filter_by_scope(
 
 
 async def _adjust_weights(
-    db: AsyncSession | None,
     tenant_id: str,
     related_ids: list[str],
     outcome_type: str,
@@ -517,7 +512,6 @@ async def _generate_rule(
 
 
 async def _persist_outcome(
-    db: AsyncSession | None,
     tenant_id: str,
     agent_id: str,
     fleet_id: str | None,
@@ -572,15 +566,11 @@ async def _persist_outcome(
         write_mode="fast",
     )
 
-    # Savepoint isolates a DB error inside create_memory so the outer
-    # transaction stays usable. Outcome persistence is mandatory (unlike
-    # the rule), so re-raise after the savepoint rolls back to signal
-    # failure to the caller. With db=None (storage-routed MCP path) there
-    # is no session to isolate — create_memory commits independently.
-    savepoint = db.begin_nested() if db is not None else contextlib.nullcontext()
+    # Outcome persistence is mandatory (unlike the rule): create_memory commits
+    # independently via the storage client, so re-raise on failure to signal
+    # the caller.
     try:
-        async with savepoint:
-            result = await create_memory(db, data)
+        result = await create_memory(data)
     except Exception:
         logger.exception("evolve: failed to persist outcome")
         raise
@@ -588,7 +578,6 @@ async def _persist_outcome(
 
 
 async def _persist_rule(
-    db: AsyncSession | None,
     tenant_id: str,
     agent_id: str,
     fleet_id: str | None,
@@ -639,15 +628,11 @@ async def _persist_rule(
         write_mode="fast",
     )
 
-    # Savepoint isolates the rule write: if create_memory raises after dirtying
-    # the session (e.g. a side-effect DB write fails before the HTTP call), the
-    # outer transaction can still proceed with weight adjustments and the
-    # outcome write without the session being in a failed state. With db=None
-    # (storage-routed MCP path) there is no session to isolate.
-    savepoint = db.begin_nested() if db is not None else contextlib.nullcontext()
+    # Rule persistence is best-effort: create_memory commits independently via
+    # the storage client, so a failure here is logged and swallowed (returns
+    # None) without blocking the weight adjustments and outcome write.
     try:
-        async with savepoint:
-            result = await create_memory(db, data)
+        result = await create_memory(data)
         return str(result.id)
     except Exception:
         logger.exception("evolve: failed to persist rule")
@@ -658,7 +643,6 @@ async def _persist_rule(
 
 
 async def report_outcome(
-    db: AsyncSession | None,
     tenant_id: str,
     outcome: str,
     outcome_type: str,
@@ -730,7 +714,6 @@ async def report_outcome(
     else:
         original_count = len(related_ids)
         related_ids, out_of_scope_count = await _filter_by_scope(
-            db,
             tenant_id=tenant_id,
             caller_agent_id=agent_id,
             fleet_id=fleet_id,
@@ -756,7 +739,7 @@ async def report_outcome(
     # Resolve tenant config up front so ``_maybe_generate_rule`` can be
     # called without any DB dependency. Both REST (here) and MCP
     # (``memclaw_evolve``) feed config in the same way.
-    config = await resolve_config(db, tenant_id)
+    config = await resolve_config(tenant_id)
 
     # Phase 1: Generate rule BEFORE touching weights. The MCP tool
     # closes its DB session between this phase and ``_apply_outcome_to_db``
@@ -774,7 +757,6 @@ async def report_outcome(
     )
 
     return await _apply_outcome_to_db(
-        db,
         tenant_id=tenant_id,
         agent_id=agent_id,
         fleet_id=fleet_id,
@@ -835,7 +817,6 @@ async def _maybe_generate_rule(
 
 
 async def _apply_outcome_to_db(
-    db: AsyncSession | None,
     *,
     tenant_id: str,
     agent_id: str,
@@ -888,7 +869,7 @@ async def _apply_outcome_to_db(
                 threshold=EVOLVE_RULE_CONFIDENCE_THRESHOLD,
             )
         else:
-            rule_memory_id = await _persist_rule(db, tenant_id, agent_id, fleet_id, rule_result, scope=scope)
+            rule_memory_id = await _persist_rule(tenant_id, agent_id, fleet_id, rule_result, scope=scope)
             if rule_memory_id is None:
                 rule_skipped_reason = "persist_failed"
                 _log_rule_skip(rule_skipped_reason, tenant_id, outcome_type)
@@ -903,7 +884,6 @@ async def _apply_outcome_to_db(
     # real deltas live in the report_outcome response built below and in the
     # audit log; nothing reads the persisted ``metadata.weight_adjustments``.
     outcome_id = await _persist_outcome(
-        db,
         tenant_id,
         agent_id,
         fleet_id,
@@ -926,7 +906,6 @@ async def _apply_outcome_to_db(
         # not rewritten, and the per-id post-clamp deltas live in the response's
         # ``weight_adjustments`` below.
         adjust_skip_reason, _processed_ids, weight_adjustments = await _adjust_weights(
-            db,
             tenant_id,
             related_ids,
             outcome_type,

@@ -14,8 +14,8 @@ from core_api.constants import (
     DEFAULT_RELATION_TYPE_WEIGHT,
     GRAPH_HOP_BOOST,
     RELATION_TYPE_WEIGHTS,
+    _relation_weight,
 )
-from core_api.services.memory_service import _relation_weight
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +216,7 @@ class TestExpandGraphRelationWeights:
             sc, tenant_id, fleet_id, manager_id, seed_id, "manages",
         )
 
-        result = await expand_graph(db, [seed_id], tenant_id, fleet_id)
+        result = await expand_graph([seed_id], tenant_id, fleet_id)
         assert seed_id in result
         assert manager_id in result
         hop, weight = result[manager_id]
@@ -236,7 +236,7 @@ class TestExpandGraphRelationWeights:
             sc, tenant_id, fleet_id, team_id, building_id, "located_in",
         )
 
-        result = await expand_graph(db, [team_id], tenant_id, fleet_id)
+        result = await expand_graph([team_id], tenant_id, fleet_id)
         hop, weight = result[building_id]
         assert hop == 1
         assert weight == RELATION_TYPE_WEIGHTS["located_in"]
@@ -258,7 +258,7 @@ class TestExpandGraphRelationWeights:
             sc, tenant_id, fleet_id, person_id, team_id, "manages",
         )
 
-        result = await expand_graph(db, [team_id], tenant_id, fleet_id)
+        result = await expand_graph([team_id], tenant_id, fleet_id)
         _, weight = result[person_id]
         assert weight == RELATION_TYPE_WEIGHTS["manages"]
 
@@ -270,7 +270,7 @@ class TestExpandGraphRelationWeights:
         seed = await self._create_entity(sc, tenant_id, fleet_id, "seed entity")
         seed_id = uuid.UUID(seed["id"])
 
-        result = await expand_graph(db, [seed_id], tenant_id, fleet_id)
+        result = await expand_graph([seed_id], tenant_id, fleet_id)
         hop, weight = result[seed_id]
         assert hop == 0
         assert weight == 1.0
@@ -289,6 +289,6 @@ class TestExpandGraphRelationWeights:
             sc, tenant_id, fleet_id, a_id, b_id, "depends_on", weight=0.5,
         )
 
-        result = await expand_graph(db, [a_id], tenant_id, fleet_id)
+        result = await expand_graph([a_id], tenant_id, fleet_id)
         _, weight = result[b_id]
         assert weight == pytest.approx(RELATION_TYPE_WEIGHTS["depends_on"] * 0.5)

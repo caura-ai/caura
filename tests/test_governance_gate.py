@@ -73,7 +73,7 @@ def _ctx(data, *, cfg, enrichment=None, mode="strong") -> PipelineContext:
     }
     if enrichment is not None:
         d["enrichment"] = enrichment
-    return PipelineContext(db=None, data=d, tenant_config=cfg)
+    return PipelineContext(data=d, tenant_config=cfg)
 
 
 def _enr(

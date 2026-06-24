@@ -166,33 +166,6 @@ class TestContradictionVisibilityScoping:
     """
 
     @pytest.mark.asyncio
-    async def test_find_similar_candidates_includes_visibility_filter(self):
-        """Verify _find_similar_candidates adds a visibility WHERE clause to the query."""
-        from core_api.repositories import memory_repo
-
-        new_memory = MagicMock()
-        new_memory.tenant_id = "t1"
-        new_memory.fleet_id = "f1"
-        new_memory.visibility = "scope_org"
-        new_memory.id = uuid4()
-
-        mock_db = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.all.return_value = []
-        mock_db.execute = AsyncMock(return_value=mock_result)
-
-        embedding = [0.1] * VECTOR_DIM
-        await memory_repo.find_similar_candidates(mock_db, new_memory, embedding)
-
-        # Inspect the compiled SQL statement passed to db.execute
-        call_args = mock_db.execute.call_args
-        stmt = call_args[0][0]
-        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
-        assert "visibility" in compiled, (
-            "Query must include a visibility filter to scope candidates"
-        )
-
-    @pytest.mark.asyncio
     async def test_rdf_path_includes_fleet_id_filter(self):
         """RDF contradiction path filters by fleet_id, providing implicit
         visibility scoping for scope_team memories."""

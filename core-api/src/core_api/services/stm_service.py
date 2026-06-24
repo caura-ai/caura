@@ -56,7 +56,6 @@ async def clear_bulletin(tenant_id: str, fleet_id: str) -> None:
 
 async def promote(
     content: str,
-    db: Any,
     tenant_id: str,
     agent_id: str,
     fleet_id: str | None = None,
@@ -77,4 +76,4 @@ async def promote(
         write_mode="fast",
         metadata={"promoted_from": "stm"},
     )
-    return await create_memory(db, data)
+    return await create_memory(data)

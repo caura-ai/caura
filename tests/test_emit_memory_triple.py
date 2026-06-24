@@ -47,8 +47,7 @@ def _input(content: str, subject_id=None, extra_links=None, **kwargs) -> MemoryC
 
 def _ctx(data: MemoryCreate, *, flag: bool = True) -> PipelineContext:
     return PipelineContext(
-        db=AsyncMock(),
-        data={"input": data, "memory_fields": {"metadata": {}}},
+                data={"input": data, "memory_fields": {"metadata": {}}},
         tenant_config=SimpleNamespace(triple_emission_enabled=flag),
     )
 

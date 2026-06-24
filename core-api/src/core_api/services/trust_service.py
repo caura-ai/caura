@@ -25,8 +25,6 @@ applies only to the gate decision.
 
 from __future__ import annotations
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from core_api.constants import DEFAULT_TRUST_LEVEL
 
 # Keep the prefix in one place so ``parse_trust_error`` and ``require_trust``
@@ -37,7 +35,6 @@ _MCP_ERROR_PREFIX = "Error (403): "
 
 
 async def require_trust(
-    db: AsyncSession | None,
     tenant_id: str,
     agent_id: str,
     min_level: int,
@@ -84,7 +81,7 @@ async def require_trust(
     """
     from core_api.services.agent_service import lookup_agent
 
-    agent = await lookup_agent(db, tenant_id, agent_id)
+    agent = await lookup_agent(tenant_id, agent_id)
     if agent is None:
         # Soft-pass: a missing row is not a permission failure. Use the
         # platform default trust so the gate matches what the agent would

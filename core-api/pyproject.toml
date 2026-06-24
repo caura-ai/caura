@@ -141,7 +141,6 @@ ignore_errors = true
 
 [[tool.mypy.overrides]]
 module = [
-    "core_api.repositories.*",
     "core_api.providers.local_embedding",
     "core_api.providers._registry",
     "core_api.services.*",
@@ -152,7 +151,6 @@ module = [
     "core_api.mcp_server",
     "core_api.app",
     "core_api.auth",
-    "core_api.db.session",
 ]
 ignore_errors = true
 

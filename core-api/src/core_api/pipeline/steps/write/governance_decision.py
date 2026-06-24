@@ -66,7 +66,6 @@ class GovernanceDecision:
         if pii_cfg.enabled and enr.contains_pii:
             if pii_cfg.action == "drop":
                 await emit_governance_audit(
-                    ctx.db,
                     tenant_id=data.tenant_id,
                     agent_id=data.agent_id,
                     action=ACTION_PII_DROP,
@@ -87,7 +86,6 @@ class GovernanceDecision:
             if enr.pii_types:
                 metadata["pii_types"] = enr.pii_types
             await emit_governance_audit(
-                ctx.db,
                 tenant_id=data.tenant_id,
                 agent_id=data.agent_id,
                 action=ACTION_PII_FLAG,
@@ -104,7 +102,6 @@ class GovernanceDecision:
         if nb_cfg.enabled and getattr(enr, "business_relevance", "business") == "personal":
             if nb_cfg.disposition == "drop":
                 await emit_governance_audit(
-                    ctx.db,
                     tenant_id=data.tenant_id,
                     agent_id=data.agent_id,
                     action=ACTION_NB_DROP,
@@ -121,7 +118,6 @@ class GovernanceDecision:
                 data.visibility = "scope_agent"
                 metadata["nonbusiness_kept_private"] = True
                 await emit_governance_audit(
-                    ctx.db,
                     tenant_id=data.tenant_id,
                     agent_id=data.agent_id,
                     action=ACTION_NB_KEEP_PRIVATE,

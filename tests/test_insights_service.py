@@ -325,8 +325,7 @@ class TestScopeFilters:
         from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as exc_info:
-            await generate_insights(
-                None, "t1", focus="patterns", scope="fleet", fleet_id=None
+            await generate_insights("t1", focus="patterns", scope="fleet", fleet_id=None
             )
         assert exc_info.value.status_code == 422
         assert "fleet_id" in exc_info.value.detail.lower()
@@ -355,7 +354,7 @@ class TestFocusValidation:
         from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as exc_info:
-            await generate_insights(None, "t1", focus="invalid", scope="agent")
+            await generate_insights("t1", focus="invalid", scope="agent")
         assert exc_info.value.status_code == 422
 
     @pytest.mark.asyncio
@@ -364,7 +363,7 @@ class TestFocusValidation:
         from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as exc_info:
-            await generate_insights(None, "t1", focus="patterns", scope="invalid")
+            await generate_insights("t1", focus="patterns", scope="invalid")
         assert exc_info.value.status_code == 422
 
 
@@ -411,7 +410,7 @@ async def test_insights_stale_finds_old_memories():
 
         from core_api.services.insights_service import _query_stale
 
-        results = await _query_stale(None, tenant_id, None, "stale-agent", "agent")
+        results = await _query_stale(tenant_id, None, "stale-agent", "agent")
         assert len(results) >= 1
         assert any(tag in r["content"] for r in results)
     finally:
@@ -434,7 +433,7 @@ async def test_insights_patterns_returns_recent():
 
         from core_api.services.insights_service import _query_patterns
 
-        results = await _query_patterns(None, tenant_id, None, "pattern-agent", "agent")
+        results = await _query_patterns(tenant_id, None, "pattern-agent", "agent")
         assert len(results) == 5
     finally:
         await _cleanup_tenant(tenant_id)
@@ -457,7 +456,7 @@ async def test_insights_failures_finds_low_weight_recalled():
 
         from core_api.services.insights_service import _query_failures
 
-        results = await _query_failures(None, tenant_id, None, "fail-agent", "agent")
+        results = await _query_failures(tenant_id, None, "fail-agent", "agent")
         assert len(results) >= 1
         assert any(tag in r["content"] for r in results)
     finally:
@@ -480,9 +479,7 @@ async def test_generate_insights_with_fake_provider():
 
         from core_api.services.insights_service import generate_insights
 
-        result = await generate_insights(
-            None,
-            tenant_id=tenant_id,
+        result = await generate_insights(tenant_id=tenant_id,
             focus="patterns",
             scope="agent",
             fleet_id=None,
@@ -515,9 +512,7 @@ async def test_insights_persists_as_memory():
 
         from core_api.services.insights_service import generate_insights
 
-        result = await generate_insights(
-            None,
-            tenant_id=tenant_id,
+        result = await generate_insights(tenant_id=tenant_id,
             focus="patterns",
             scope="agent",
             agent_id="persist-agent",
@@ -605,9 +600,7 @@ class TestSupersedeScope:
 
             from core_api.services.insights_service import generate_insights
 
-            await generate_insights(
-                None,
-                tenant_id=tenant_id,
+            await generate_insights(tenant_id=tenant_id,
                 focus="patterns",
                 scope="fleet",
                 fleet_id=f"fleet-A-{tag}",
@@ -669,9 +662,7 @@ class TestSupersedeScope:
 
             from core_api.services.insights_service import generate_insights
 
-            await generate_insights(
-                None,
-                tenant_id=tenant_id,
+            await generate_insights(tenant_id=tenant_id,
                 focus="patterns",
                 scope="agent",
                 fleet_id=None,
@@ -733,9 +724,7 @@ class TestSupersedeOrdering:
 
             from core_api.services.insights_service import generate_insights
 
-            result = await generate_insights(
-                None,
-                tenant_id=tenant_id,
+            result = await generate_insights(tenant_id=tenant_id,
                 focus="patterns",
                 scope="agent",
                 fleet_id=None,
@@ -789,7 +778,7 @@ class TestSupersedeOrdering:
                 ],
             )
 
-            async def failing_create_bulk(db, data, *, bulk_attempt_id):
+            async def failing_create_bulk(data, *, bulk_attempt_id):
                 raise HTTPException(status_code=409, detail="duplicate")
 
             # Patch the bulk path; ``_persist_findings`` persists every finding
@@ -801,9 +790,7 @@ class TestSupersedeOrdering:
 
             monkeypatch.setattr(ms_mod, "create_memories_bulk", failing_create_bulk)
 
-            result = await insights_service.generate_insights(
-                None,
-                tenant_id=tenant_id,
+            result = await insights_service.generate_insights(tenant_id=tenant_id,
                 focus="patterns",
                 scope="agent",
                 fleet_id=None,
@@ -846,9 +833,7 @@ class TestSupersedeOrdering:
 
             from core_api.services.insights_service import generate_insights
 
-            await generate_insights(
-                None,
-                tenant_id=tenant_id,
+            await generate_insights(tenant_id=tenant_id,
                 focus="patterns",
                 scope="agent",
                 fleet_id=None,
@@ -897,9 +882,7 @@ class TestHallucinatedIds:
 
             from core_api.services.insights_service import generate_insights
 
-            result = await generate_insights(
-                None,
-                tenant_id=tenant_id,
+            result = await generate_insights(tenant_id=tenant_id,
                 focus="patterns",
                 scope="agent",
                 fleet_id=None,
@@ -948,9 +931,7 @@ class TestHallucinatedIds:
 
             from core_api.services.insights_service import generate_insights
 
-            result = await generate_insights(
-                None,
-                tenant_id=tenant_id,
+            result = await generate_insights(tenant_id=tenant_id,
                 focus="patterns",
                 scope="agent",
                 fleet_id=None,

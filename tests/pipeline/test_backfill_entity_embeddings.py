@@ -29,7 +29,7 @@ TENANT = "test-tenant"
 
 
 def _ctx(**extra):
-    return PipelineContext(db=None, data={"tenant_id": TENANT, **extra})
+    return PipelineContext(data={"tenant_id": TENANT, **extra})
 
 
 @pytest.mark.asyncio

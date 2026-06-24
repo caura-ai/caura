@@ -52,8 +52,7 @@ async def test_validate_step_rejects_short_content():
     from core_api.pipeline.steps.write.check_content_length import CheckContentLength
 
     ctx = PipelineContext(
-        db=AsyncMock(),
-        data={"input": _make_input(content="hi")},
+                data={"input": _make_input(content="hi")},
     )
     step = CheckContentLength()
 
@@ -80,7 +79,7 @@ async def test_compute_content_hash_skips_cache_lookup_when_embedding_deferred(
 
     # ``inline_embedding`` is a derived property from ``deployment_mode``.
     monkeypatch.setattr(settings, "deployment_mode", "deferred")
-    ctx = PipelineContext(db=AsyncMock(), data={"input": _make_input()})
+    ctx = PipelineContext(data={"input": _make_input()})
 
     mock_sc = AsyncMock()
     with patch(
@@ -109,7 +108,7 @@ async def test_compute_content_hash_still_looks_up_when_embedding_inline(
     from core_api.pipeline.steps.write.compute_content_hash import ComputeContentHash
 
     monkeypatch.setattr(settings, "deployment_mode", "inline")
-    ctx = PipelineContext(db=AsyncMock(), data={"input": _make_input()})
+    ctx = PipelineContext(data={"input": _make_input()})
 
     mock_sc = AsyncMock()
     mock_sc.find_embedding_by_content_hash.return_value = [0.1, 0.2, 0.3]
@@ -135,8 +134,7 @@ async def test_check_exact_duplicate_records_dedup_lookup_ms():
     from core_api.pipeline.steps.write.check_exact_duplicate import CheckExactDuplicate
 
     ctx = PipelineContext(
-        db=AsyncMock(),
-        data={"input": _make_input(), "content_hash": "deadbeef"},
+                data={"input": _make_input(), "content_hash": "deadbeef"},
     )
     mock_sc = AsyncMock()
     mock_sc.find_by_content_hash.return_value = None  # no duplicate
@@ -162,8 +160,7 @@ async def test_apply_enrichment_step_defaults():
     )
 
     ctx = PipelineContext(
-        db=AsyncMock(),
-        data={
+                data={
             "input": _make_input(),
             "enrichment": None,
         },
@@ -195,7 +192,7 @@ async def test_pipeline_path_creates_memory(db):
         from core_api.services.memory_service import create_memory
 
         data = _make_input()
-        result = await create_memory(db, data)
+        result = await create_memory(data)
 
         assert isinstance(result, MemoryOut)
         assert result.tenant_id == TENANT_ID
@@ -228,7 +225,7 @@ async def test_pipeline_emits_memory_write_latency_log(db, caplog):
             content="CAURA-682 Phase 1 latency log emission test — unique content for hash dedup."
         )
         with caplog.at_level(logging.INFO, logger="core_api.services.memory_service"):
-            await create_memory(db, data)
+            await create_memory(data)
 
         latency_records = [
             r for r in caplog.records if r.getMessage() == "memory_write_latency"
@@ -307,7 +304,7 @@ async def test_pipeline_emits_latency_log_on_pipeline_failure(db, caplog):
             patch.object(Pipeline, "run", _boom),
         ):
             with pytest.raises(HTTPException) as exc_info:
-                await create_memory(db, data)
+                await create_memory(data)
             assert exc_info.value.status_code == 504
 
         latency_records = [
@@ -341,7 +338,7 @@ async def test_legacy_path_creates_memory(db):
         data = _make_input(
             content="Legacy path baseline test memory — unique content to avoid hash collision with pipeline path test."
         )
-        result = await create_memory(db, data)
+        result = await create_memory(data)
 
         assert isinstance(result, MemoryOut)
         assert result.tenant_id == TENANT_ID
@@ -362,7 +359,7 @@ async def test_pipeline_extract_only(db):
 
         extract_content = f"Pipeline extract-only test memory — unique {uuid.uuid4().hex[:8]} — should NOT be persisted."
         data = _make_input(content=extract_content, persist=False)
-        result = await create_memory(db, data)
+        result = await create_memory(data)
 
         assert isinstance(result, MemoryOut)
         assert result.content == data.content
@@ -391,11 +388,11 @@ async def test_pipeline_hash_dedup(db):
         data = _make_input(
             content="Unique content for hash dedup test in pipeline write refactor."
         )
-        await create_memory(db, data)
+        await create_memory(data)
 
         # Second write with same content should 409
         with pytest.raises(HTTPException) as exc_info:
-            await create_memory(db, data)
+            await create_memory(data)
         assert exc_info.value.status_code == 409
     finally:
         memory_service._USE_PIPELINE_WRITE = original
@@ -414,7 +411,7 @@ async def test_pipeline_quality_gate(db):
 
         data = _make_input(content="hi")
         with pytest.raises(HTTPException) as exc_info:
-            await create_memory(db, data)
+            await create_memory(data)
         assert exc_info.value.status_code == 422
     finally:
         memory_service._USE_PIPELINE_WRITE = original
@@ -435,12 +432,12 @@ async def test_pipeline_equivalence(db):
     # Legacy path
     memory_service._USE_PIPELINE_WRITE = False
     data_legacy = _make_input(content=content_a)
-    result_legacy = await _create_memory_legacy(db, data_legacy)
+    result_legacy = await _create_memory_legacy(data_legacy)
 
     # Pipeline path
     memory_service._USE_PIPELINE_WRITE = True
     data_pipeline = _make_input(content=content_b)
-    result_pipeline = await _create_memory_pipeline(db, data_pipeline)
+    result_pipeline = await _create_memory_pipeline(data_pipeline)
 
     # Reset
     memory_service._USE_PIPELINE_WRITE = False
@@ -526,8 +523,7 @@ async def test_merge_enrichment_sets_pending_in_fast_mode():
     )
 
     ctx = PipelineContext(
-        db=AsyncMock(),
-        data={
+                data={
             "input": _make_input(),
             "enrichment": None,
             "resolved_write_mode": "fast",
@@ -550,8 +546,7 @@ async def test_merge_enrichment_no_pending_in_strong_mode():
     )
 
     ctx = PipelineContext(
-        db=AsyncMock(),
-        data={
+                data={
             "input": _make_input(),
             "enrichment": None,
             "resolved_write_mode": "strong",
@@ -591,8 +586,7 @@ async def test_schedule_background_tasks_fast_mode_fires_full_fan_out():
     )()
 
     ctx = PipelineContext(
-        db=AsyncMock(),
-        data={
+                data={
             "input": _make_input(),
             "memory": mock_memory,
             "embedding": [0.1] * VECTOR_DIM,
@@ -632,8 +626,7 @@ async def test_schedule_background_tasks_strong_mode_fires_entity_and_contradict
     )()
 
     ctx = PipelineContext(
-        db=AsyncMock(),
-        data={
+                data={
             "input": _make_input(),
             "memory": mock_memory,
             "embedding": [0.1] * VECTOR_DIM,
@@ -671,7 +664,7 @@ async def test_fast_mode_creates_memory_with_pending_enrichment(db):
             content="Fast mode test memory — should store quickly with deferred enrichment for the write mode dial.",
             write_mode="fast",
         )
-        result = await create_memory(db, data)
+        result = await create_memory(data)
 
         assert isinstance(result, MemoryOut)
         assert result.tenant_id == TENANT_ID
@@ -696,7 +689,7 @@ async def test_strong_mode_creates_memory_same_as_today(db):
             content="Strong mode test memory — should run full enrichment inline for the write mode dial test.",
             write_mode="strong",
         )
-        result = await create_memory(db, data)
+        result = await create_memory(data)
 
         assert isinstance(result, MemoryOut)
         assert result.metadata is not None
@@ -722,7 +715,7 @@ async def test_auto_mode_decision_type_routes_to_strong(db):
             write_mode="auto",
             memory_type="decision",
         )
-        result = await create_memory(db, data)
+        result = await create_memory(data)
 
         assert isinstance(result, MemoryOut)
         assert result.metadata is not None

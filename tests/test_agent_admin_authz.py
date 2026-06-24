@@ -43,7 +43,7 @@ def test_enforce_not_agent_credential_allows_user_and_admin():
 def as_agent():
     from core_api.app import app
     from core_api.auth import AuthContext as _AC, get_auth_context
-    from core_api.db.session import set_current_tenant
+    from core_api.tenant_context import set_current_tenant
 
     def _install(tenant_id, agent_id):
         async def _dep():

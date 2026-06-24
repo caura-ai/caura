@@ -96,8 +96,7 @@ class TestFindSemanticDuplicateMocked:
         mock_sc.find_semantic_duplicate = AsyncMock(return_value=None)
 
         with patch("core_api.services.memory_service.get_storage_client", return_value=mock_sc):
-            result = await _find_semantic_duplicate(
-                None, "tenant-1", None, [0.1] * VECTOR_DIM,
+            result = await _find_semantic_duplicate("tenant-1", None, [0.1] * VECTOR_DIM,
             )
         assert result is None
 
@@ -110,8 +109,7 @@ class TestFindSemanticDuplicateMocked:
         mock_sc.find_semantic_duplicate = AsyncMock(return_value=mock_memory)
 
         with patch("core_api.services.memory_service.get_storage_client", return_value=mock_sc):
-            result = await _find_semantic_duplicate(
-                None, "tenant-1", None, [0.1] * VECTOR_DIM,
+            result = await _find_semantic_duplicate("tenant-1", None, [0.1] * VECTOR_DIM,
             )
         assert result is mock_memory
 
@@ -124,8 +122,7 @@ class TestFindSemanticDuplicateMocked:
         mock_sc.find_semantic_duplicate = AsyncMock(return_value=None)
 
         with patch("core_api.services.memory_service.get_storage_client", return_value=mock_sc):
-            await _find_semantic_duplicate(
-                None, "tenant-1", "fleet-a", [0.1] * VECTOR_DIM,
+            await _find_semantic_duplicate("tenant-1", "fleet-a", [0.1] * VECTOR_DIM,
             )
 
         call_data = mock_sc.find_semantic_duplicate.call_args[0][0]
@@ -141,8 +138,7 @@ class TestFindSemanticDuplicateMocked:
 
         exclude = uuid4()
         with patch("core_api.services.memory_service.get_storage_client", return_value=mock_sc):
-            await _find_semantic_duplicate(
-                None, "tenant-1", None, [0.1] * VECTOR_DIM, exclude_id=exclude,
+            await _find_semantic_duplicate("tenant-1", None, [0.1] * VECTOR_DIM, exclude_id=exclude,
             )
 
         call_data = mock_sc.find_semantic_duplicate.call_args[0][0]
@@ -245,7 +241,7 @@ class TestSemanticDedupIntegration:
 
         # Exact same embedding should be found
         emb = fake_embedding(content)
-        dup = await _find_semantic_duplicate(db, tenant_id, None, emb)
+        dup = await _find_semantic_duplicate(tenant_id, None, emb)
         assert dup is not None
 
     # -- Near-duplicate caught --
@@ -259,7 +255,7 @@ class TestSemanticDedupIntegration:
 
         # Close embedding (noise-perturbed) should still be caught
         emb = close_embedding(base_content)
-        dup = await _find_semantic_duplicate(db, tenant_id, None, emb)
+        dup = await _find_semantic_duplicate(tenant_id, None, emb)
         assert dup is not None
 
     # -- Below-threshold passes --
@@ -271,7 +267,7 @@ class TestSemanticDedupIntegration:
         await self._insert_memory(db, tenant_id, "Alice prefers dark mode")
 
         emb = fake_embedding("The server is running on port 8080")
-        dup = await _find_semantic_duplicate(db, tenant_id, None, emb)
+        dup = await _find_semantic_duplicate(tenant_id, None, emb)
         assert dup is None
 
     # -- Fleet isolation --
@@ -286,7 +282,7 @@ class TestSemanticDedupIntegration:
         await self._insert_memory(db, tenant_id, content, fleet_id="fleet-a")
 
         # Search in fleet-b should find nothing
-        dup = await _find_semantic_duplicate(db, tenant_id, "fleet-b", emb)
+        dup = await _find_semantic_duplicate(tenant_id, "fleet-b", emb)
         assert dup is None
 
     # -- Deleted memory doesn't block --
@@ -302,7 +298,7 @@ class TestSemanticDedupIntegration:
         )
 
         emb = fake_embedding(content)
-        dup = await _find_semantic_duplicate(db, tenant_id, None, emb)
+        dup = await _find_semantic_duplicate(tenant_id, None, emb)
         assert dup is None
 
     # -- Archived memory doesn't block --
@@ -315,7 +311,7 @@ class TestSemanticDedupIntegration:
         await self._insert_memory(db, tenant_id, content, status="archived")
 
         emb = fake_embedding(content)
-        dup = await _find_semantic_duplicate(db, tenant_id, None, emb)
+        dup = await _find_semantic_duplicate(tenant_id, None, emb)
         assert dup is None
 
     # -- 409 response includes memory ID --
@@ -328,7 +324,7 @@ class TestSemanticDedupIntegration:
         mem = await self._insert_memory(db, tenant_id, content)
 
         emb = fake_embedding(content)
-        dup = await _find_semantic_duplicate(db, tenant_id, None, emb)
+        dup = await _find_semantic_duplicate(tenant_id, None, emb)
         assert dup is not None
         assert dup["id"] == mem["id"]
 
@@ -347,8 +343,7 @@ class TestSemanticDedupIntegration:
         )
 
         emb = fake_embedding(existing_content)
-        dup = await _find_semantic_duplicate(
-            db, tenant_id, None, emb, exclude_id=updating_mem["id"],
+        dup = await _find_semantic_duplicate(tenant_id, None, emb, exclude_id=updating_mem["id"],
         )
         assert dup is not None
 
@@ -363,8 +358,7 @@ class TestSemanticDedupIntegration:
 
         # Same embedding but excluding self
         emb = fake_embedding(content)
-        dup = await _find_semantic_duplicate(
-            db, tenant_id, None, emb, exclude_id=mem["id"],
+        dup = await _find_semantic_duplicate(tenant_id, None, emb, exclude_id=mem["id"],
         )
         assert dup is None
 
@@ -408,7 +402,7 @@ class TestSemanticDedupBenchmarks:
         times = []
         for _ in range(20):
             t0 = time.perf_counter()
-            await _find_semantic_duplicate(db, tenant_id, None, emb)
+            await _find_semantic_duplicate(tenant_id, None, emb)
             times.append((time.perf_counter() - t0) * 1000)
 
         mean_ms = statistics.mean(times)
@@ -432,7 +426,7 @@ class TestSemanticDedupBenchmarks:
         times = []
         for _ in range(20):
             t0 = time.perf_counter()
-            await _find_semantic_duplicate(db, tenant_id, None, emb)
+            await _find_semantic_duplicate(tenant_id, None, emb)
             times.append((time.perf_counter() - t0) * 1000)
 
         mean_ms = statistics.mean(times)

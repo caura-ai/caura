@@ -672,3 +672,14 @@ MIN_COOCCURRENCE_FOR_RELATION = 2
 RELATION_REINFORCE_DELTA = 0.1
 MAX_RELATION_WEIGHT = 1.0
 RELATION_INFERENCE_BATCH_SIZE = 500
+
+
+def _relation_weight(relation_type: str, row_weight: float) -> float:
+    """Compute effective weight for a relation edge.
+
+    Combines the per-type semantic weight (from RELATION_TYPE_WEIGHTS) with the
+    per-row weight stored in the DB (default 1.0). Relocated here from the
+    deleted ``repositories`` package (Fix 2 final cleanup).
+    """
+    type_w = RELATION_TYPE_WEIGHTS.get(relation_type.lower(), DEFAULT_RELATION_TYPE_WEIGHT)
+    return type_w * row_weight

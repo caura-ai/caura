@@ -55,7 +55,7 @@ class TestCreateMemoryQualityGate:
         from core_api.services.memory_service import create_memory
 
         with pytest.raises(HTTPException) as exc_info:
-            await create_memory(mock_db, make_data(" "))
+            await create_memory(make_data(" "))
         assert exc_info.value.status_code == 422
         assert "too short" in exc_info.value.detail
 
@@ -64,7 +64,7 @@ class TestCreateMemoryQualityGate:
         from core_api.services.memory_service import create_memory
 
         with pytest.raises(HTTPException) as exc_info:
-            await create_memory(mock_db, make_data("ok"))
+            await create_memory(make_data("ok"))
         assert exc_info.value.status_code == 422
 
     async def test_rejects_whitespace_padded_short(self, mock_db, make_data):
@@ -73,7 +73,7 @@ class TestCreateMemoryQualityGate:
         from core_api.services.memory_service import create_memory
 
         with pytest.raises(HTTPException) as exc_info:
-            await create_memory(mock_db, make_data("  hi  "))
+            await create_memory(make_data("  hi  "))
         assert exc_info.value.status_code == 422
 
     async def test_rejects_exactly_9_chars(self, mock_db, make_data):
@@ -81,7 +81,7 @@ class TestCreateMemoryQualityGate:
         from core_api.services.memory_service import create_memory
 
         with pytest.raises(HTTPException) as exc_info:
-            await create_memory(mock_db, make_data("123456789"))
+            await create_memory(make_data("123456789"))
         assert exc_info.value.status_code == 422
 
     async def test_accepts_exactly_10_chars(self, mock_db, make_data):
@@ -91,7 +91,7 @@ class TestCreateMemoryQualityGate:
 
         # Should NOT raise a 422 "too short" — may succeed or raise other errors
         try:
-            await create_memory(mock_db, make_data("1234567890"))
+            await create_memory(make_data("1234567890"))
         except HTTPException as exc:
             assert exc.status_code != 422 or "too short" not in str(exc.detail)
         except Exception:

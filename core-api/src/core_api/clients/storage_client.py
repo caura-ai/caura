@@ -811,6 +811,31 @@ class CoreStorageClient:
             params["fleet_id"] = fleet_id
         return await self._get("/memories/type-distribution", **params) or {}
 
+    async def get_entity_coverage(
+        self,
+        tenant_id: str,
+        fleet_id: str | None = None,
+    ) -> int:
+        """Distinct memories with >=1 entity link (crystallizer entity-coverage)."""
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if fleet_id is not None:
+            params["fleet_id"] = fleet_id
+        result = await self._get("/memories/entity-coverage", **params) or {}
+        return int(result.get("memories_with_entities", 0))
+
+    async def get_audit_usage(self, tenant_id: str) -> dict:
+        """Agent-activity + peak-hours from audit_log (crystallizer usage)."""
+        return await self._get("/memories/audit-usage", tenant_id=tenant_id) or {}
+
+    async def find_prior_ingest_by_doc_hash(self, tenant_id: str, doc_hash: str) -> list[dict]:
+        """Prior ingest rows for a doc_hash (idempotency cache; write-path read)."""
+        result = await self._post(
+            "/memories/prior-ingest-by-doc-hash",
+            {"tenant_id": tenant_id, "doc_hash": doc_hash},
+            read=False,
+        )
+        return result.get("rows", []) if isinstance(result, dict) else []
+
     async def get_recent_memories(
         self,
         tenant_id: str,

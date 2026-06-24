@@ -1,13 +1,13 @@
 """Memory Crystallizer engine — hygiene checks, health metrics, usage analysis, and memory crystallization."""
 
+import asyncio
 import logging
 import time
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import text
+import httpx
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.clients.storage_client import get_storage_client
 
@@ -77,7 +77,6 @@ If the input contains no meaningful information worth preserving, return an empt
 
 
 async def run_crystallization(
-    db: AsyncSession,
     tenant_id: str,
     fleet_id: str | None = None,
     trigger: str = "manual",
@@ -130,8 +129,8 @@ async def run_crystallization(
     health: dict = {}
     checks_total += 1
     try:
-        health = await _compute_health(db, tenant_id, fleet_id)
-    except (SQLAlchemyError, ValueError, RuntimeError):
+        health = await _compute_health(tenant_id, fleet_id)
+    except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError):
         logger.exception("Crystallizer health computation failed for tenant %s", tenant_id)
         health = {"error": True}
         checks_failed += 1
@@ -140,8 +139,8 @@ async def run_crystallization(
     usage: dict = {}
     checks_total += 1
     try:
-        usage = await _compute_usage(db, tenant_id, fleet_id)
-    except (SQLAlchemyError, ValueError, RuntimeError):
+        usage = await _compute_usage(tenant_id, fleet_id)
+    except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError):
         logger.exception("Crystallizer usage computation failed for tenant %s", tenant_id)
         usage = {"error": True}
         checks_failed += 1
@@ -149,7 +148,7 @@ async def run_crystallization(
     # --- Remediate missing embeddings ---
     try:
         await _remediate_missing_embeddings(tenant_id, fleet_id)
-    except (SQLAlchemyError, ValueError, RuntimeError):
+    except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError):
         logger.exception("Embedding remediation failed for tenant %s (non-blocking)", tenant_id)
 
     # --- Issues ---
@@ -169,8 +168,8 @@ async def run_crystallization(
     }
     if auto_crystallize:
         try:
-            crystallization = await _run_crystallization(db, tenant_id, fleet_id, hygiene)
-        except (SQLAlchemyError, ValueError, RuntimeError):
+            crystallization = await _run_crystallization(tenant_id, fleet_id, hygiene)
+        except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError):
             logger.exception("Crystallization failed for tenant %s (non-blocking)", tenant_id)
             crystallization["error"] = True
 
@@ -265,7 +264,6 @@ async def _remediate_missing_embeddings(
 
 
 async def _run_crystallization(
-    db: AsyncSession,
     tenant_id: str,
     fleet_id: str | None,
     hygiene: dict,
@@ -273,7 +271,7 @@ async def _run_crystallization(
     """Identify clusters of noisy/redundant memories and crystallize them via LLM."""
     from core_api.services.organization_settings import resolve_config
 
-    config = await resolve_config(db, tenant_id)
+    config = await resolve_config(tenant_id)
 
     sc = get_storage_client()
 
@@ -342,7 +340,6 @@ async def _run_crystallization(
         for fact in extracted:
             try:
                 mem_out = await create_memory(
-                    db,
                     MemoryCreate(
                         tenant_id=tenant_id,
                         fleet_id=fleet_id,
@@ -626,35 +623,21 @@ async def _check_broken_entity_links(
 
 
 async def _compute_health(
-    db: AsyncSession,
     tenant_id: str,
     fleet_id: str | None,
 ) -> dict:
     sc = get_storage_client()
-    # Memory stats from storage API
-    health = await sc.get_memory_stats(tenant_id, fleet_id)
+    # The three storage reads are independent — fetch them concurrently rather
+    # than paying three serial HTTP round-trips. (Entity coverage runs a
+    # cross-table join that lives in the storage API now.)
+    health, coverage, with_entities = await asyncio.gather(
+        sc.get_memory_stats(tenant_id, fleet_id),
+        sc.get_embedding_coverage(tenant_id, fleet_id),
+        sc.get_entity_coverage(tenant_id, fleet_id),
+    )
     total = health.get("total_memories", 0)
-
-    # Embedding coverage from storage API
-    coverage = await sc.get_embedding_coverage(tenant_id, fleet_id)
     health["embedding_coverage_pct"] = coverage.get("coverage_pct", 0.0)
-
-    # Entity extraction coverage (cross-table join -- stays as direct SQL for now)
-    if db is not None:
-        from core_api.repositories import scope_sql as _scope_sql
-
-        scope, params = _scope_sql(tenant_id, fleet_id)
-        r = await db.execute(
-            text(f"""
-            SELECT COUNT(DISTINCT mel.memory_id)
-            FROM memory_entity_links mel
-            JOIN memories m ON m.id = mel.memory_id
-            WHERE {scope} AND m.deleted_at IS NULL
-        """),
-            params,
-        )
-        with_entities = r.scalar() or 0
-        health["entity_coverage_pct"] = round(with_entities / total * 100, 1) if total > 0 else 0.0
+    health["entity_coverage_pct"] = round(with_entities / total * 100, 1) if total > 0 else 0.0
 
     return health
 
@@ -665,73 +648,31 @@ async def _compute_health(
 
 
 async def _compute_usage(
-    db: AsyncSession,
     tenant_id: str,
     fleet_id: str | None,
 ) -> dict:
     sc = get_storage_client()
-    # Memory-table usage stats from storage API
-    stats = await sc.get_memory_stats(tenant_id, fleet_id)
-    type_dist = await sc.get_type_distribution(tenant_id, fleet_id)
+    # Memory-table stats, type distribution, and audit usage are independent
+    # storage reads — fetch them concurrently rather than serially.
+    stats, type_dist, audit = await asyncio.gather(
+        sc.get_memory_stats(tenant_id, fleet_id),
+        sc.get_type_distribution(tenant_id, fleet_id),
+        sc.get_audit_usage(tenant_id),
+    )
     usage: dict = {
         "total_memories": stats.get("total_memories", 0),
         "type_distribution": type_dist,
     }
 
-    # Agent activity from audit_log (cross-table -- stays as direct SQL)
-    if db is not None:
-        r = await db.execute(
-            text("""
-            SELECT a.agent_id,
-                   COUNT(*) FILTER (WHERE a.action = 'create' AND a.resource_type = 'memory') AS writes,
-                   COUNT(*) FILTER (WHERE a.action = 'search') AS searches
-            FROM audit_log a
-            WHERE a.tenant_id = :tenant_id
-            GROUP BY a.agent_id
-            ORDER BY writes DESC
-            LIMIT 20
-        """),
-            {"tenant_id": tenant_id},
-        )
-        usage["agent_activity"] = [
-            {"agent_id": row[0], "writes": row[1], "searches": row[2]} for row in r.all()
-        ]
-
-        # Search/write ratio from usage_counters (cross-table)
-        r = await db.execute(
-            text("""
-            SELECT SUM(writes), SUM(searches)
-            FROM usage_counters
-            WHERE tenant_id = :tenant_id
-        """),
-            {"tenant_id": tenant_id},
-        )
-        urow = r.one_or_none()
-        total_writes = urow[0] if urow else 0
-        total_searches = urow[1] if urow else 0
-        usage["total_writes"] = total_writes
-        usage["total_searches"] = total_searches
-        usage["search_write_ratio"] = round(total_searches / total_writes, 2) if total_writes > 0 else None
-
-        # Peak hours from audit_log (cross-table)
-        r = await db.execute(
-            text("""
-            SELECT EXTRACT(hour FROM a.created_at)::int AS hr, COUNT(*) AS cnt
-            FROM audit_log a
-            WHERE a.tenant_id = :tenant_id
-            GROUP BY hr
-            ORDER BY cnt DESC
-            LIMIT 3
-        """),
-            {"tenant_id": tenant_id},
-        )
-        usage["peak_hours"] = [{"hour": row[0], "count": row[1]} for row in r.all()]
-    else:
-        usage["agent_activity"] = []
-        usage["total_writes"] = 0
-        usage["total_searches"] = 0
-        usage["search_write_ratio"] = None
-        usage["peak_hours"] = []
+    # Agent activity + peak hours from audit_log (fetched above via storage API).
+    # ``search_write_ratio`` (and its total_writes/total_searches) is intentionally
+    # dropped — the ``usage_counters`` table does not exist in the OSS schema; the
+    # keys are kept as 0/None for response-shape parity.
+    usage["agent_activity"] = audit.get("agent_activity", [])
+    usage["peak_hours"] = audit.get("peak_hours", [])
+    usage["total_writes"] = 0
+    usage["total_searches"] = 0
+    usage["search_write_ratio"] = None
 
     return usage
 

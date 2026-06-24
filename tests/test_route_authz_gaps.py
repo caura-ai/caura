@@ -39,7 +39,7 @@ def as_auth(monkeypatch):
     """
     from core_api.app import app
     from core_api.auth import AuthContext, get_auth_context
-    from core_api.db.session import set_current_tenant
+    from core_api.tenant_context import set_current_tenant
 
     def _install(tenant_id: str, agent_id: str | None = None, **kwargs):
         async def _dep():
@@ -246,10 +246,9 @@ async def test_delete_audit_attributes_gateway_agent(client, as_auth, sc):
     """A gateway agent credential deleting WITHOUT the agent_id query param
     must be attributed to its verified identity, not None."""
     from sqlalchemy import select
-    from sqlalchemy.ext.asyncio import AsyncSession
 
     from common.models.audit import AuditLog
-    from core_api.db.session import engine as app_engine
+    from core_storage_api.services.postgres_service import get_read_session
 
     tenant = f"tenant-{_uid()}"
     await _seed_agent(sc, tenant, "deleter-agent", 3)
@@ -270,7 +269,7 @@ async def test_delete_audit_attributes_gateway_agent(client, as_auth, sc):
     resp = await client.delete(f"/api/v1/memories/{memory_id}?tenant_id={tenant}")
     assert resp.status_code == 204, resp.text
 
-    async with AsyncSession(app_engine) as session:
+    async with get_read_session() as session:
         rows = (
             (
                 await session.execute(

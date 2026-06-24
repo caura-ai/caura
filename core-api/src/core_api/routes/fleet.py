@@ -7,14 +7,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import NODE_OFFLINE_SECONDS, NODE_STALE_SECONDS
-from core_api.db.session import get_db
 from core_api.services.audit_service import log_action
 from core_api.services.organization_settings import get_raw_settings
 from core_api.version_compat import (
@@ -172,7 +170,6 @@ class CommandResultIn(BaseModel):
 async def create_fleet(
     body: FleetCreateIn,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Explicitly create a fleet (team) within a tenant."""
     auth.enforce_read_only()
@@ -203,13 +200,11 @@ async def create_fleet(
         }
     )
     await log_action(
-        db,
         tenant_id=body.tenant_id,
         action="create",
         resource_type="fleet",
         detail={"fleet_id": body.fleet_id, "display_name": body.display_name},
     )
-    await db.commit()
     return {"ok": True, "fleet_id": body.fleet_id, "tenant_id": body.tenant_id}
 
 
@@ -242,7 +237,6 @@ async def delete_fleet(
     fleet_id: str,
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Delete a fleet and all its nodes. Memories are NOT deleted (they retain fleet_id for history)."""
     auth.enforce_read_only()
@@ -258,13 +252,11 @@ async def delete_fleet(
     # Delete all commands for fleet nodes, then delete nodes
     await sc.delete_fleet(tenant_id=tenant_id, fleet_id=fleet_id)
     await log_action(
-        db,
         tenant_id=tenant_id,
         action="delete",
         resource_type="fleet",
         detail={"fleet_id": fleet_id, "nodes_deleted": node_count},
     )
-    await db.commit()
 
 
 @router.post("/fleet/{fleet_id}/purge")
@@ -272,7 +264,6 @@ async def purge_fleet(
     fleet_id: str,
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Permanently purge a fleet's entire footprint within a tenant.
 
@@ -297,13 +288,11 @@ async def purge_fleet(
     sc = get_storage_client()
     counts = await sc.purge_fleet_data(tenant_id, fleet_id)
     await log_action(
-        db,
         tenant_id=tenant_id,
         action="purge",
         resource_type="fleet",
         detail={"fleet_id": fleet_id, "deleted": counts},
     )
-    await db.commit()
     return {"ok": True, "tenant_id": tenant_id, "fleet_id": fleet_id, "deleted": counts}
 
 
@@ -354,12 +343,12 @@ def _semver_lt(a: str | None, b: str | None) -> bool:
         return False
 
 
-async def _auto_upgrade_enabled_for_tenant(db: AsyncSession, tenant_id: str) -> bool:
+async def _auto_upgrade_enabled_for_tenant(tenant_id: str) -> bool:
     """Default true; per-tenant flip via
     ``organization_settings.memclaw.auto_upgrade_enabled = false``.
     """
     try:
-        raw = await get_raw_settings(db, tenant_id)
+        raw = await get_raw_settings(tenant_id)
         flag = raw.get("memclaw", {}).get("auto_upgrade_enabled")
         # None (no override) → use the global default (true).
         return flag is not False
@@ -401,7 +390,6 @@ def _has_recent_deploy_command_from_list(pending: list) -> bool:
 
 async def _maybe_queue_auto_upgrade(
     *,
-    db: AsyncSession,
     sc,
     body: "HeartbeatIn",
     pending_commands: list,
@@ -470,7 +458,7 @@ async def _maybe_queue_auto_upgrade(
         and body.deploy_blocked_until < now_ms + MAX_BLOCK_MS
     ):
         return False
-    if not await _auto_upgrade_enabled_for_tenant(db, body.tenant_id):
+    if not await _auto_upgrade_enabled_for_tenant(body.tenant_id):
         return False
     if _has_recent_deploy_command_from_list(pending_commands):
         return False
@@ -583,7 +571,6 @@ async def _maybe_queue_auto_upgrade(
 async def heartbeat(
     body: HeartbeatIn,
     auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
 ):
     """Plugin pushes status; receives pending commands in response."""
     auth.enforce_tenant(body.tenant_id)
@@ -689,7 +676,6 @@ async def heartbeat(
             display_name = raw_dn[:255] if isinstance(raw_dn, str) else None
             try:
                 await get_or_create_agent(
-                    db,
                     tenant_id=body.tenant_id,
                     agent_id=agent_key,
                     fleet_id=body.fleet_id,
@@ -707,36 +693,6 @@ async def heartbeat(
                     exc_info=True,
                 )
                 failed_agents.append(str(agent_key))
-                # Clear any ``PendingRollbackError`` left on the session
-                # by the failed call (e.g. a flush that hit
-                # IntegrityError) so subsequent iterations of the loop
-                # can use the session normally instead of cascading
-                # rollback errors. Best-effort — if the rollback itself
-                # fails the session is still poisoned, but we can't do
-                # better than swallow and continue.
-                try:
-                    await db.rollback()
-                except Exception:
-                    pass
-        # Persist any audit rows (``agent_registered``) that
-        # ``get_or_create_agent`` queued on the local session. The
-        # storage-api's agent row was already committed by the HTTP
-        # call inside the loop; this is just for the audit side-effect.
-        # Guarded because a per-agent failure inside the loop above can
-        # leave the SQLAlchemy session in an error state — without the
-        # try/except, a ``PendingRollbackError`` here would 500 the
-        # heartbeat and drop the pending-commands response, which is
-        # the route's actual contract. Same posture as the per-agent
-        # exception swallow: best-effort observability, never break
-        # the heartbeat.
-        try:
-            await db.commit()
-        except Exception:
-            logger.warning(
-                "fleet.heartbeat: failed to commit audit rows for tenant=%s",
-                body.tenant_id,
-                exc_info=True,
-            )
         # Summary log so the committed audit trail is recoverable: the
         # individual per-agent warnings above are stack-traced but not
         # easy to correlate; this single line tells the on-call exactly
@@ -792,7 +748,7 @@ async def heartbeat(
     node_id_for_queue = node.get("id") if isinstance(node, dict) else None
     if node_id_for_queue:
         queued_new = await _maybe_queue_auto_upgrade(
-            db=db, sc=sc, body=body, pending_commands=pending, node_id=str(node_id_for_queue)
+            sc=sc, body=body, pending_commands=pending, node_id=str(node_id_for_queue)
         )
     else:
         queued_new = False

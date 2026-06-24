@@ -77,33 +77,33 @@ def test_known_broken_set_is_frozen():
 async def test_auto_upgrade_enabled_default_true(monkeypatch):
     """No tenant override → enabled (the global default)."""
 
-    async def _fake(_db, _tid):
+    async def _fake(_tid):
         return {}  # no override
 
     monkeypatch.setattr("core_api.routes.fleet.get_raw_settings", _fake)
-    assert await fleet_mod._auto_upgrade_enabled_for_tenant(None, "tenant-1") is True
+    assert await fleet_mod._auto_upgrade_enabled_for_tenant("tenant-1") is True
 
 
 @pytest.mark.asyncio
 async def test_auto_upgrade_enabled_override_false(monkeypatch):
     """Tenant override `memclaw.auto_upgrade_enabled = false` → disabled."""
 
-    async def _fake(_db, _tid):
+    async def _fake(_tid):
         return {"memclaw": {"auto_upgrade_enabled": False}}
 
     monkeypatch.setattr("core_api.routes.fleet.get_raw_settings", _fake)
-    assert await fleet_mod._auto_upgrade_enabled_for_tenant(None, "tenant-1") is False
+    assert await fleet_mod._auto_upgrade_enabled_for_tenant("tenant-1") is False
 
 
 @pytest.mark.asyncio
 async def test_auto_upgrade_enabled_override_true(monkeypatch):
     """Tenant override `memclaw.auto_upgrade_enabled = true` → enabled."""
 
-    async def _fake(_db, _tid):
+    async def _fake(_tid):
         return {"memclaw": {"auto_upgrade_enabled": True}}
 
     monkeypatch.setattr("core_api.routes.fleet.get_raw_settings", _fake)
-    assert await fleet_mod._auto_upgrade_enabled_for_tenant(None, "tenant-1") is True
+    assert await fleet_mod._auto_upgrade_enabled_for_tenant("tenant-1") is True
 
 
 @pytest.mark.asyncio
@@ -112,11 +112,11 @@ async def test_auto_upgrade_fail_open_on_settings_error(monkeypatch):
     on the plugin side prevents loops in the worst case).
     """
 
-    async def _fake(_db, _tid):
+    async def _fake(_tid):
         raise RuntimeError("settings backend down")
 
     monkeypatch.setattr("core_api.routes.fleet.get_raw_settings", _fake)
-    assert await fleet_mod._auto_upgrade_enabled_for_tenant(None, "tenant-1") is True
+    assert await fleet_mod._auto_upgrade_enabled_for_tenant("tenant-1") is True
 
 
 # ---------------------------------------------------------------------------
@@ -176,14 +176,12 @@ async def test_maybe_queue_auto_upgrade_skips_for_known_broken(monkeypatch):
     """Plugin v2.3.0 → no deploy command (loop-prevention denylist)."""
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.3.0"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -196,14 +194,12 @@ async def test_maybe_queue_auto_upgrade_skips_when_current(monkeypatch):
     """plugin_version == VERSION → no deploy."""
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.4.0"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -216,14 +212,12 @@ async def test_maybe_queue_auto_upgrade_skips_when_newer(monkeypatch):
     """plugin_version > VERSION (dev install) → no downgrade."""
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.5.0-dev"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -236,7 +230,7 @@ async def test_maybe_queue_auto_upgrade_skips_when_blocked(monkeypatch):
     """deploy_blocked_until in the future → skip (cooldown signal)."""
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
@@ -245,9 +239,7 @@ async def test_maybe_queue_auto_upgrade_skips_when_blocked(monkeypatch):
     from datetime import UTC, datetime
 
     near_future_ms = int(datetime.now(UTC).timestamp() * 1000) + 3600_000
-    await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.3.5", deploy_blocked_until=near_future_ms),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -270,15 +262,13 @@ async def test_maybe_queue_auto_upgrade_ignores_absurd_block_cap(monkeypatch):
     # exercising the absurd-block-cap branch, not the new gate.
     monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "0.0.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
     absurd_future_ms = 99999999999999  # year 5138
-    await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.3.5", deploy_blocked_until=absurd_future_ms),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -293,14 +283,12 @@ async def test_maybe_queue_auto_upgrade_skips_when_disabled(monkeypatch):
     """tenant has auto_upgrade_enabled = false → skip."""
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
 
-    async def _disabled(_db, _tid):
+    async def _disabled(_tid):
         return False
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _disabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -313,14 +301,12 @@ async def test_maybe_queue_auto_upgrade_skips_when_already_pending(monkeypatch):
     """An existing pending deploy → skip (don't double-queue)."""
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage(pending=[{"command": "deploy", "payload": {}}])
-    await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -350,14 +336,12 @@ async def test_maybe_queue_auto_upgrade_skips_pre_manifest_aware(
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.6.0")
     monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "2.6.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body(stale_version),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -377,14 +361,12 @@ async def test_maybe_queue_auto_upgrade_allowed_at_or_above_floor(monkeypatch):
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.6.1")
     monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "2.6.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.6.0"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -438,14 +420,12 @@ async def test_maybe_queue_auto_upgrade_queues_deploy_for_old_version(monkeypatc
     # is for an already-manifest-aware client; the new floor has its own tests.
     monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "0.0.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -467,14 +447,12 @@ async def test_maybe_queue_auto_upgrade_skips_when_plugin_version_missing(monkey
     """No plugin_version on payload (very old plugin) → skip."""
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=fleet_mod.HeartbeatIn(tenant_id="tenant-1", node_name="node-a"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -608,7 +586,7 @@ async def test_maybe_queue_auto_upgrade_skips_when_acked_deploy_in_flight(monkey
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
     monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "0.0.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
@@ -619,9 +597,7 @@ async def test_maybe_queue_auto_upgrade_skips_when_acked_deploy_in_flight(monkey
 
     sc = _FakeStorage()
     sc.in_flight_fn = _has_in_flight
-    queued = await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -640,7 +616,7 @@ async def test_maybe_queue_auto_upgrade_queues_when_no_in_flight(monkeypatch):
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
     monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "0.0.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
@@ -650,9 +626,7 @@ async def test_maybe_queue_auto_upgrade_queues_when_no_in_flight(monkeypatch):
 
     sc = _FakeStorage()
     sc.in_flight_fn = _no_in_flight
-    queued = await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -671,7 +645,7 @@ async def test_maybe_queue_auto_upgrade_fails_open_on_repo_error(monkeypatch):
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
     monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "0.0.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
@@ -681,9 +655,7 @@ async def test_maybe_queue_auto_upgrade_fails_open_on_repo_error(monkeypatch):
 
     sc = _FakeStorage()
     sc.in_flight_fn = _throws
-    queued = await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -703,7 +675,7 @@ async def test_maybe_queue_auto_upgrade_skips_pending_before_querying_repo(monke
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
     monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "0.0.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
@@ -718,9 +690,7 @@ async def test_maybe_queue_auto_upgrade_skips_pending_before_querying_repo(monke
 
     sc = _FakeStorage(pending=[{"id": "x", "command": "deploy"}])
     sc.in_flight_fn = _has_in_flight
-    queued = await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -769,7 +739,7 @@ def _enable_upgrade(monkeypatch):
     monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
     monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "0.0.0")
 
-    async def _enabled(_db, _tid):
+    async def _enabled(_tid):
         return True
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
@@ -789,9 +759,7 @@ async def test_attempt_budget_skips_when_exhausted(monkeypatch):
 
     sc = _FakeStorage()
     sc.count_fn = _count
-    queued = await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -816,9 +784,7 @@ async def test_attempt_budget_allows_under_cap(monkeypatch):
 
     sc = _FakeStorage()
     sc.count_fn = _count
-    queued = await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -840,9 +806,7 @@ async def test_attempt_budget_fresh_target_gets_fresh_budget(monkeypatch):
 
     sc = _FakeStorage()
     sc.count_fn = _count
-    queued = await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -863,9 +827,7 @@ async def test_attempt_budget_fails_open_on_repo_error(monkeypatch):
 
     sc = _FakeStorage()
     sc.count_fn = _boom
-    queued = await fleet_mod._maybe_queue_auto_upgrade(
-        db=None,
-        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",

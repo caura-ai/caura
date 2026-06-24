@@ -46,8 +46,7 @@ def _capture(monkeypatch):
 
 def _ctx(source, enabled, returned_rows, raw_rows):
     return PipelineContext(
-        db=AsyncMock(),
-        data={
+                data={
             "source": source,
             "query": "what is our brand rule",
             "tenant_id": "t1",

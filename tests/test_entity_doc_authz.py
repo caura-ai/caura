@@ -70,7 +70,7 @@ def patch_lookup(monkeypatch):
     def _set(*, fleet_id=None, trust_level=0, exists=True):
         from core_api.services import agent_service
 
-        async def fake(db, tenant_id, agent_id):
+        async def fake(tenant_id, agent_id):
             return (
                 None
                 if not exists
@@ -108,7 +108,7 @@ async def test_entity_filters_scope_agent_and_cross_fleet(fake_storage, patch_lo
     )
     patch_lookup(fleet_id="fleet-alpha", trust_level=1)  # bob: fleet-alpha, trust 1
 
-    out = await get_entity(MagicMock(), uuid.uuid4(), "t", caller_agent_id="bob")
+    out = await get_entity(uuid.uuid4(), "t", caller_agent_id="bob")
     contents = {m.content for m in out.linked_memories}
     assert "alice private" not in contents
     assert "other fleet team" not in contents
@@ -122,7 +122,7 @@ async def test_entity_unfiltered_for_tenant_credential(fake_storage):
     from core_api.services.entity_service import get_entity
 
     fake_storage([_mem("alice", "scope_agent", "fleet-beta", "alice private")])
-    out = await get_entity(MagicMock(), uuid.uuid4(), "t", caller_agent_id=None)
+    out = await get_entity(uuid.uuid4(), "t", caller_agent_id=None)
     assert "alice private" in {m.content for m in out.linked_memories}
 
 
@@ -133,7 +133,7 @@ async def test_entity_unfiltered_for_tenant_credential(fake_storage):
 def as_agent():
     from core_api.app import app
     from core_api.auth import AuthContext, get_auth_context
-    from core_api.db.session import set_current_tenant
+    from core_api.tenant_context import set_current_tenant
 
     def _install(tenant_id, agent_id):
         async def _dep():

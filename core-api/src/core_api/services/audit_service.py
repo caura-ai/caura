@@ -24,8 +24,6 @@ from __future__ import annotations
 import logging
 from uuid import UUID, uuid4
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.audit_queue import get_audit_queue
 
@@ -41,7 +39,6 @@ async def _post_audit_sync(payload: dict) -> None:
 
 
 async def log_action(
-    db: AsyncSession | None,
     *,
     tenant_id: str,
     agent_id: str | None = None,
@@ -117,7 +114,6 @@ async def log_action(
 
 
 async def log_cross_tenant_read(
-    db: AsyncSession,
     *,
     home_tenant_id: str | None,
     home_agent_id: str | None,
@@ -145,7 +141,6 @@ async def log_cross_tenant_read(
         return
     for src in source_tenants:
         await log_action(
-            db,
             tenant_id=src,
             agent_id=home_agent_id,
             action="cross_tenant_read",

@@ -250,9 +250,7 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(
-            db,
-            tenant_id=tenant_id,
+        results = await search_memories(tenant_id=tenant_id,
             query="Secret plan",
             fleet_ids=[fleet_id],
             caller_agent_id="agent-B",
@@ -278,9 +276,7 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(
-            db,
-            tenant_id=tenant_id,
+        results = await search_memories(tenant_id=tenant_id,
             query="private note about the project",
             fleet_ids=[fleet_id],
             caller_agent_id="agent-A",
@@ -306,9 +302,7 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(
-            db,
-            tenant_id=tenant_id,
+        results = await search_memories(tenant_id=tenant_id,
             query="Fleet-wide status update",
             fleet_ids=[fleet_id],
         )
@@ -332,9 +326,7 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(
-            db,
-            tenant_id=tenant_id,
+        results = await search_memories(tenant_id=tenant_id,
             query="Fleet-A confidential data point",
             fleet_ids=["fleet-B"],
         )
@@ -358,9 +350,7 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(
-            db,
-            tenant_id=tenant_id,
+        results = await search_memories(tenant_id=tenant_id,
             query="Company-wide policy announcement",
             fleet_ids=["fleet-B"],
         )
@@ -384,9 +374,7 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(
-            db,
-            tenant_id=tenant_id,
+        results = await search_memories(tenant_id=tenant_id,
             query="Org-level insight shared across all fleets",
         )
         contents = [r.content for r in results]
@@ -417,9 +405,7 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(
-            db,
-            tenant_id=tenant_id,
+        results = await search_memories(tenant_id=tenant_id,
             query="Multi-fleet memory",
             fleet_ids=["fleet-A", "fleet-B"],
         )
@@ -452,9 +438,7 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(
-            db,
-            tenant_id=tenant_id,
+        results = await search_memories(tenant_id=tenant_id,
             query="fleet memory for test",
             fleet_ids=["fleet-A"],
         )
@@ -522,9 +506,7 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(
-            db,
-            tenant_id=tenant_id,
+        results = await search_memories(tenant_id=tenant_id,
             query="Admin test memory",
             fleet_ids=[fleet_id],
         )
@@ -591,9 +573,7 @@ class TestBackwardCompatibility:
         from core_api.services.memory_service import search_memories
 
         # Standard search — no new params
-        results = await search_memories(
-            db,
-            tenant_id=tenant_id,
+        results = await search_memories(tenant_id=tenant_id,
             query="Backward compat search test",
             fleet_ids=[fleet_id],
         )
@@ -648,7 +628,7 @@ class TestDedupWithVisibility:
             content="The quarterly revenue report shows 15% growth",
             visibility="scope_team",
         )
-        result1 = await create_memory(db, mc1)
+        result1 = await create_memory(mc1)
         assert result1 is not None
 
         mc2 = MemoryCreate(
@@ -659,7 +639,7 @@ class TestDedupWithVisibility:
             visibility="scope_team",
         )
         with pytest.raises(HTTPException) as exc_info:
-            await create_memory(db, mc2)
+            await create_memory(mc2)
         assert exc_info.value.status_code == 409
 
     @pytest.mark.xfail(
@@ -683,7 +663,7 @@ class TestDedupWithVisibility:
             content="Cross-visibility dedup test: identical content",
             visibility="scope_org",
         )
-        result1 = await create_memory(db, mc1)
+        result1 = await create_memory(mc1)
         assert result1 is not None
 
         mc2 = MemoryCreate(
@@ -693,7 +673,7 @@ class TestDedupWithVisibility:
             content="Cross-visibility dedup test: identical content",
             visibility="scope_team",
         )
-        result2 = await create_memory(db, mc2)
+        result2 = await create_memory(mc2)
         # Both should exist since different visibility scopes
         assert result2 is not None
         assert result2.id != result1.id

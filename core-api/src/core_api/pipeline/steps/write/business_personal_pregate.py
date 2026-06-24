@@ -69,7 +69,6 @@ class BusinessPersonalPregate:
                     provider,
                 )
                 await emit_governance_audit(
-                    ctx.db,
                     tenant_id=data.tenant_id,
                     agent_id=data.agent_id,
                     action=ACTION_NB_PREGATE_UNAVAILABLE,
@@ -104,7 +103,6 @@ class BusinessPersonalPregate:
         threshold = pregate.min_confidence or 0.0
         if result.business_relevance == "personal" and result.confidence >= threshold:
             await emit_governance_audit(
-                ctx.db,
                 tenant_id=data.tenant_id,
                 agent_id=data.agent_id,
                 action=ACTION_NB_PREGATE_DROP,

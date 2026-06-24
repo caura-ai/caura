@@ -53,9 +53,9 @@ async def test_write_registers_agent(mcp_env):
     enforce.assert_awaited_once()
     args = enforce.await_args.args
     # Signature: (db, tenant_id, agent_id, fleet_id)
-    assert args[1] == mcp_env["tenant"]
-    assert args[2] == "a1"
-    assert args[3] == "f1"
+    assert args[0] == mcp_env["tenant"]
+    assert args[1] == "a1"
+    assert args[2] == "f1"
 
 
 async def test_write_batch_registers_agent(mcp_env):
@@ -69,8 +69,8 @@ async def test_write_batch_registers_agent(mcp_env):
     )
     enforce.assert_awaited_once()
     args = enforce.await_args.args
-    assert args[2] == "a2"
-    assert args[3] == "f2"
+    assert args[1] == "a2"
+    assert args[2] == "f2"
 
 
 async def test_write_batch_happy_path(mcp_env):
@@ -168,7 +168,7 @@ async def test_write_passes_visibility_through(mcp_env):
 
     await mcp_server.memclaw_write(content="shared fact", visibility="scope_org")
     kwargs = mock.await_args.kwargs
-    model = kwargs.get("__self__", None) or mock.await_args.args[1]
+    model = kwargs.get("__self__", None) or mock.await_args.args[0]
     assert model.visibility == "scope_org"
 
 
@@ -190,7 +190,7 @@ async def test_write_passes_fleet_id_kwarg_through(mcp_env):
         content="memo for caura-rnd-fleet", fleet_id="caura-rnd-fleet"
     )
     kwargs = mock.await_args.kwargs
-    model = kwargs.get("__self__", None) or mock.await_args.args[1]
+    model = kwargs.get("__self__", None) or mock.await_args.args[0]
     assert model.fleet_id == "caura-rnd-fleet"
 
 
@@ -245,7 +245,7 @@ async def test_write_without_fleet_id_no_home_fleet_persists_null(mcp_env):
     mock.return_value = _OutStub()
 
     await mcp_server.memclaw_write(content="no fleet")
-    model = mock.await_args.args[1]
+    model = mock.await_args.args[0]
     assert model.fleet_id is None
 
 
@@ -261,8 +261,8 @@ async def test_write_omitted_fleet_resolves_home_fleet(mcp_env):
 
     # The trust gate still saw the ORIGINAL (None) fleet_id — backfill happens
     # after enforcement, so cross-fleet gating is unchanged.
-    assert enforce.await_args.args[3] is None
-    assert cm.await_args.args[1].fleet_id == "home-f"
+    assert enforce.await_args.args[2] is None
+    assert cm.await_args.args[0].fleet_id == "home-f"
 
 
 async def test_write_explicit_fleet_id_not_overridden(mcp_env):
@@ -274,8 +274,8 @@ async def test_write_explicit_fleet_id_not_overridden(mcp_env):
 
     await mcp_server.memclaw_write(content="x", agent_id="a1", fleet_id="explicit-f")
 
-    assert enforce.await_args.args[3] == "explicit-f"
-    assert cm.await_args.args[1].fleet_id == "explicit-f"
+    assert enforce.await_args.args[2] == "explicit-f"
+    assert cm.await_args.args[0].fleet_id == "explicit-f"
 
 
 async def test_write_batch_omitted_fleet_resolves_home_fleet(mcp_env):
@@ -290,4 +290,4 @@ async def test_write_batch_omitted_fleet_resolves_home_fleet(mcp_env):
         items=[{"content": "one"}, {"content": "two"}], agent_id="a2"
     )
 
-    assert cmb.await_args.args[1].fleet_id == "home-f"
+    assert cmb.await_args.args[0].fleet_id == "home-f"

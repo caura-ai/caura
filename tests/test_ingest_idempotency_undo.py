@@ -49,7 +49,7 @@ def test_doc_hash_deterministic_for_same_inputs():
 
 @pytest.fixture
 def fake_tenant_config(monkeypatch):
-    async def _fake(db, tenant_id):
+    async def _fake(tenant_id):
         return SimpleNamespace(
             enrichment_provider="fake",
             enrichment_enabled=False,
@@ -68,21 +68,24 @@ async def test_cache_hit_returns_cached_facts_without_llm(
     facts with cached=True, the prior run_id, and chunk_ms=0."""
     # Stand up two prior memories as if a previous ingest happened
     prior_run_id = "00000000-1111-2222-3333-444444444444"
-    prior_memory = MagicMock()
-    prior_memory.content = "The Eiffel Tower is 330 meters tall."
-    prior_memory.memory_type = "fact"
-    prior_memory.source_uri = "text-input"
-    # ``run_id`` now lives on the top-level column (single source of truth
-    # after the parent-doc PR) — preview cache-hit reads it from there
-    # instead of the old ``metadata.ingest_run_id`` JSONB key.
-    prior_memory.run_id = prior_run_id
-    prior_memory.metadata_ = {
-        "source": "ingest",
-        "doc_hash": "irrelevant",
-        "salience": 0.85,
+    # Storage returns plain dict rows (orm_to_dict over MEMORY_LIST_FIELDS),
+    # not ORM objects — keys are the column names. ``run_id`` now lives on the
+    # top-level column (single source of truth after the parent-doc PR) —
+    # preview cache-hit reads it from there instead of the old
+    # ``metadata.ingest_run_id`` JSONB key.
+    prior_memory = {
+        "content": "The Eiffel Tower is 330 meters tall.",
+        "memory_type": "fact",
+        "source_uri": "text-input",
+        "run_id": prior_run_id,
+        "metadata_": {
+            "source": "ingest",
+            "doc_hash": "irrelevant",
+            "salience": 0.85,
+        },
     }
 
-    async def _fake_lookup(db, tenant_id, doc_hash):
+    async def _fake_lookup(tenant_id, doc_hash):
         return [prior_memory]
 
     monkeypatch.setattr(ingest_service, "_find_prior_ingest_by_doc_hash", _fake_lookup)
@@ -98,13 +101,13 @@ async def test_cache_hit_returns_cached_facts_without_llm(
     monkeypatch.setattr(ingest_service, "_chunk_content", _fake_chunk)
 
     req = IngestRequest(tenant_id="t1", content="The Eiffel Tower is 330 meters tall.")
-    resp = await ingest_service.ingest_preview(db=None, request=req)
+    resp = await ingest_service.ingest_preview(request=req)
 
     assert resp["cached"] is True
     assert resp["run_id"] == prior_run_id
     assert resp["chunk_ms"] == 0
     assert len(resp["facts"]) == 1
-    assert resp["facts"][0]["content"] == prior_memory.content
+    assert resp["facts"][0]["content"] == prior_memory["content"]
     assert resp["facts"][0]["salience"] == 0.85
     assert not llm_called, "LLM should not be invoked on a cache hit"
 
@@ -115,7 +118,7 @@ async def test_cache_miss_runs_llm_normally(monkeypatch, fake_tenant_config):
     """No prior memories → cache miss → LLM runs, response carries doc_hash
     so the next caller can echo it back to commit for future cache hits."""
 
-    async def _no_cache(db, tenant_id, doc_hash):
+    async def _no_cache(tenant_id, doc_hash):
         return []
 
     monkeypatch.setattr(ingest_service, "_find_prior_ingest_by_doc_hash", _no_cache)
@@ -132,7 +135,7 @@ async def test_cache_miss_runs_llm_normally(monkeypatch, fake_tenant_config):
     monkeypatch.setattr(ingest_service, "_chunk_content", _fake_chunk)
 
     req = IngestRequest(tenant_id="t1", content="Mercury orbits the Sun every 88 days.")
-    resp = await ingest_service.ingest_preview(db=None, request=req)
+    resp = await ingest_service.ingest_preview(request=req)
 
     assert resp.get("cached") is not True
     assert "doc_hash" in resp
@@ -140,60 +143,20 @@ async def test_cache_miss_runs_llm_normally(monkeypatch, fake_tenant_config):
         "t1", "Mercury orbits the Sun every 88 days."
     )
     assert len(resp["facts"]) == 1
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_cache_hit_picks_only_most_recent_run(monkeypatch):
-    """If memories from two prior runs share a doc_hash, only the newest run's
-    memories are returned. ``_find_prior_ingest_by_doc_hash`` does the filtering;
-    we exercise the same logic by constructing a mock DB result."""
-    # ``run_id`` is on the top-level column now — the filtering query
-    # uses ``rows[0].run_id`` instead of ``metadata['ingest_run_id']``.
-    older_mem = MagicMock()
-    older_mem.run_id = "older-run-id"
-    older_mem.metadata_ = {"source": "ingest", "doc_hash": "h"}
-    older_mem.content = "older fact"
-    older_mem.memory_type = "fact"
-    older_mem.source_uri = "text-input"
-    newer_mem = MagicMock()
-    newer_mem.run_id = "newer-run-id"
-    newer_mem.metadata_ = {"source": "ingest", "doc_hash": "h"}
-    newer_mem.content = "newer fact"
-    newer_mem.memory_type = "fact"
-    newer_mem.source_uri = "text-input"
-
-    # _find_prior_ingest_by_doc_hash orders by created_at desc and filters
-    # to the newest run_id. Simulate the inputs and verify the filter.
-    fake_db = MagicMock()
-    mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = [newer_mem, older_mem]
-    fake_db.execute = AsyncMock(return_value=mock_result)
-    facts = await ingest_service._find_prior_ingest_by_doc_hash(fake_db, "t1", "h")
-    # Only the memory tagged with newer-run-id is kept
-    assert facts == [newer_mem]
-
-
-# ---------------------------------------------------------------------------
-# A2: commit stamps doc_hash on metadata when caller echoes it
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_commit_stamps_doc_hash_in_metadata_when_echoed(monkeypatch):
     """When the caller sends doc_hash back to commit, every written memory's
     metadata.doc_hash is populated. This is what enables future A2 hits."""
     writes: list = []
 
-    async def _fake_resolve_config(db, tenant_id):
+    async def _fake_resolve_config(tenant_id):
         return SimpleNamespace(
             enrichment_provider="fake",
             enrichment_enabled=False,
             default_write_mode="fast",
         )
 
-    async def _fake_bulk(db, data, *, bulk_attempt_id):
+    async def _fake_bulk(data, *, bulk_attempt_id):
         from core_api.schemas import BulkItemResult, BulkMemoryResponse
         import uuid as _uuid
 
@@ -230,7 +193,7 @@ async def test_commit_stamps_doc_hash_in_metadata_when_echoed(monkeypatch):
             IngestFact(content="Real fact B about something.", suggested_type="fact"),
         ],
     )
-    result = await ingest_service.ingest_commit(db=None, request=req)
+    result = await ingest_service.ingest_commit(request=req)
 
     assert result["memories_created"] == 2
     for w in writes:
@@ -245,14 +208,14 @@ async def test_commit_does_not_stamp_doc_hash_when_omitted(monkeypatch):
     A2 cache."""
     writes: list = []
 
-    async def _fake_resolve_config(db, tenant_id):
+    async def _fake_resolve_config(tenant_id):
         return SimpleNamespace(
             enrichment_provider="fake",
             enrichment_enabled=False,
             default_write_mode="fast",
         )
 
-    async def _fake_bulk(db, data, *, bulk_attempt_id):
+    async def _fake_bulk(data, *, bulk_attempt_id):
         from core_api.schemas import BulkItemResult, BulkMemoryResponse
         import uuid as _uuid
 
@@ -289,7 +252,7 @@ async def test_commit_does_not_stamp_doc_hash_when_omitted(monkeypatch):
             )
         ],
     )
-    await ingest_service.ingest_commit(db=None, request=req)
+    await ingest_service.ingest_commit(request=req)
 
     assert len(writes) == 1
     assert "doc_hash" not in writes[0].metadata
@@ -303,14 +266,14 @@ async def test_commit_stamps_salience_when_present_on_ingestfact(monkeypatch):
     surface salience on the cached preview)."""
     writes: list = []
 
-    async def _fake_resolve_config(db, tenant_id):
+    async def _fake_resolve_config(tenant_id):
         return SimpleNamespace(
             enrichment_provider="fake",
             enrichment_enabled=False,
             default_write_mode="fast",
         )
 
-    async def _fake_bulk(db, data, *, bulk_attempt_id):
+    async def _fake_bulk(data, *, bulk_attempt_id):
         from core_api.schemas import BulkItemResult, BulkMemoryResponse
         import uuid as _uuid
 
@@ -349,5 +312,5 @@ async def test_commit_stamps_salience_when_present_on_ingestfact(monkeypatch):
             )
         ],
     )
-    await ingest_service.ingest_commit(db=None, request=req)
+    await ingest_service.ingest_commit(request=req)
     assert writes[0].metadata["salience"] == 0.85

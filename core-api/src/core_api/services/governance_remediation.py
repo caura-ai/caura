@@ -67,7 +67,6 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> bool:
             # would leave an untracked deletion in the tamper-evident log, whereas
             # an audit-then-failed-delete leaves a remediable "intended to drop" trace.
             await emit_governance_audit(
-                None,
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 action=ACTION_PII_DROP,
@@ -86,7 +85,6 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> bool:
         # the configured intent in the detail so compliance can tell this apart
         # from a genuine flag policy.
         await emit_governance_audit(
-            None,
             tenant_id=tenant_id,
             agent_id=agent_id,
             action=ACTION_PII_FLAG,
@@ -105,7 +103,6 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> bool:
         if nb_cfg.disposition == "drop":
             # Audit before the destructive delete (see the PII-drop branch above).
             await emit_governance_audit(
-                None,
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 action=ACTION_NB_DROP,
@@ -120,7 +117,6 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> bool:
         if nb_cfg.disposition == "keep_private":
             await sc.update_memory(memory_id, tenant_id, {"visibility": "scope_agent"})
             await emit_governance_audit(
-                None,
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 action=ACTION_NB_KEEP_PRIVATE,

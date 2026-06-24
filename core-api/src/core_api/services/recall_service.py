@@ -5,8 +5,6 @@ import logging
 import time
 from datetime import UTC, datetime
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from core_api.constants import (
     DEFAULT_SEARCH_TOP_K,
     MEMORY_RECALL_SUMMARY_MAX_TOKENS,
@@ -225,7 +223,6 @@ async def summarize_memories(
 
 
 async def recall(
-    db: AsyncSession,
     tenant_id: str,
     query: str,
     fleet_ids: list[str] | None = None,
@@ -258,10 +255,9 @@ async def recall(
 
     from core_api.services.organization_settings import resolve_config
 
-    config = await resolve_config(db, tenant_id)
+    config = await resolve_config(tenant_id)
     diagnostic_ctx: dict = {} if diagnostic else {}
     memories = await search_memories(
-        db,
         tenant_id=tenant_id,
         query=query,
         fleet_ids=fleet_ids,

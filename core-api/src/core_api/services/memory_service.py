@@ -11,7 +11,6 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
@@ -112,7 +111,6 @@ def _auto_chunk_request_id() -> str:
 
 
 async def _find_semantic_duplicate(
-    db: AsyncSession,
     tenant_id: str,
     fleet_id: str | None,
     embedding: list[float],
@@ -236,16 +234,16 @@ def _memory_to_out(
     )
 
 
-async def create_memory(db: AsyncSession, data: MemoryCreate) -> MemoryOut:
+async def create_memory(data: MemoryCreate) -> MemoryOut:
     if not data.agent_id:
         raise ValueError("agent_id must be resolved before calling create_memory")
     if _USE_PIPELINE_WRITE:
-        return await _create_memory_pipeline(db, data)
+        return await _create_memory_pipeline(data)
     logger.warning("legacy write path invoked; this path is deprecated and scheduled for removal")
-    return await _create_memory_legacy(db, data)
+    return await _create_memory_legacy(data)
 
 
-async def _create_memory_pipeline(db: AsyncSession, data: MemoryCreate) -> MemoryOut:
+async def _create_memory_pipeline(data: MemoryCreate) -> MemoryOut:
     """Pipeline-based create_memory — same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.write import (
         build_enrichment_pipeline,
@@ -270,9 +268,8 @@ async def _create_memory_pipeline(db: AsyncSession, data: MemoryCreate) -> Memor
         # Resolve config so the deterministic governance gate runs on STM too.
         # STM bypasses enrichment, so only the deterministic scan applies (no
         # LLM free-form / business-relevance signal) — a scoped limitation.
-        stm_config = await resolve_config(db, data.tenant_id)
+        stm_config = await resolve_config(data.tenant_id)
         ctx = PipelineContext(
-            db=db,
             data={"input": data, "t0": time.perf_counter()},
             tenant_config=stm_config,
         )
@@ -283,13 +280,13 @@ async def _create_memory_pipeline(db: AsyncSession, data: MemoryCreate) -> Memor
         return ctx.data["stm_response"]
 
     # Resolve tenant config BEFORE building the pipeline
-    tenant_config = await resolve_config(db, data.tenant_id)
+    tenant_config = await resolve_config(data.tenant_id)
 
     # Extract-only and auto-chunk branches: always use the original enrichment+persist flow
     if not data.persist or (
         len(data.content) > CHUNKING_THRESHOLD_CHARS and tenant_config.auto_chunk_enabled
     ):
-        ctx = PipelineContext(db=db, data={"input": data, "t0": time.perf_counter()})
+        ctx = PipelineContext(data={"input": data, "t0": time.perf_counter()})
 
         # Phase 1: Enrichment (always runs)
         enrichment_pipeline = build_enrichment_pipeline()
@@ -330,13 +327,12 @@ async def _create_memory_pipeline(db: AsyncSession, data: MemoryCreate) -> Memor
             )
 
         # Branch: auto-chunk
-        return await _handle_auto_chunk_from_ctx(db, data, ctx)
+        return await _handle_auto_chunk_from_ctx(data, ctx)
 
     # Standard persist path: resolve write mode and pick pipeline
     resolved_mode = _resolve_write_mode(data, tenant_config)
 
     ctx = PipelineContext(
-        db=db,
         data={
             "input": data,
             "t0": time.perf_counter(),
@@ -431,7 +427,7 @@ async def _create_memory_pipeline(db: AsyncSession, data: MemoryCreate) -> Memor
         )
 
 
-async def _handle_auto_chunk_from_ctx(db: AsyncSession, data: MemoryCreate, ctx: object) -> MemoryOut:
+async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> MemoryOut:
     """Auto-chunking branch using pipeline context enrichment results."""
     from core_api.services.ingest_service import _chunk_content
 
@@ -503,7 +499,6 @@ async def _handle_auto_chunk_from_ctx(db: AsyncSession, data: MemoryCreate, ctx:
         if _hooks.audit_log:
             try:
                 await _hooks.audit_log(
-                    db,
                     tenant_id=data.tenant_id,
                     agent_id=data.agent_id,
                     action="create",
@@ -589,7 +584,7 @@ async def _handle_auto_chunk_from_ctx(db: AsyncSession, data: MemoryCreate, ctx:
     )
 
 
-async def _create_memory_legacy(db: AsyncSession, data: MemoryCreate) -> MemoryOut:
+async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
     # -- Content quality gate -- reject before any LLM work --
     if len(data.content.strip()) < CRYSTALLIZER_SHORT_CONTENT_CHARS:
         raise HTTPException(
@@ -602,7 +597,7 @@ async def _create_memory_legacy(db: AsyncSession, data: MemoryCreate) -> MemoryO
     # -- Resolve per-tenant LLM config (falls back to global) --
     from core_api.services.organization_settings import resolve_config
 
-    tenant_config = await resolve_config(db, data.tenant_id)
+    tenant_config = await resolve_config(data.tenant_id)
 
     # -- Compute content hash early for embedding dedup --
     ch = _content_hash(data.tenant_id, data.fleet_id, data.content) if data.persist else None
@@ -773,7 +768,6 @@ async def _create_memory_legacy(db: AsyncSession, data: MemoryCreate) -> MemoryO
             if _hooks.audit_log:
                 try:
                     await _hooks.audit_log(
-                        db,
                         tenant_id=data.tenant_id,
                         agent_id=data.agent_id,
                         action="create",
@@ -864,7 +858,6 @@ async def _create_memory_legacy(db: AsyncSession, data: MemoryCreate) -> MemoryO
     if tenant_config.semantic_dedup_enabled and embedding is not None:
         t_dedup = time.perf_counter()
         sem_dup = await _find_semantic_duplicate(
-            db,
             data.tenant_id,
             data.fleet_id,
             embedding,
@@ -965,7 +958,6 @@ async def _create_memory_legacy(db: AsyncSession, data: MemoryCreate) -> MemoryO
     if _hooks.audit_log:
         try:
             await _hooks.audit_log(
-                db,
                 tenant_id=data.tenant_id,
                 agent_id=data.agent_id,
                 action="create",
@@ -1033,7 +1025,6 @@ async def _create_memory_legacy(db: AsyncSession, data: MemoryCreate) -> MemoryO
 
 
 async def create_memories_bulk(
-    db: AsyncSession | None,
     data: BulkMemoryCreate,
     *,
     bulk_attempt_id: str,
@@ -1076,7 +1067,7 @@ async def create_memories_bulk(
     # -- Resolve per-tenant config once --
     from core_api.services.organization_settings import resolve_config
 
-    tenant_config = await resolve_config(db, data.tenant_id)
+    tenant_config = await resolve_config(data.tenant_id)
 
     # -- Batch embeddings + parallel enrichment (valid items only). Short
     # items are skipped so we don't spend provider budget on content
@@ -1097,7 +1088,6 @@ async def create_memories_bulk(
                 continue
             if gov_pii.action == "drop":
                 await emit_governance_audit(
-                    db,
                     tenant_id=data.tenant_id,
                     agent_id=data.agent_id,
                     action=ACTION_PII_DROP,
@@ -1109,7 +1099,6 @@ async def create_memories_bulk(
                 governance_errors[i] = "rejected by content policy: sensitive data detected"
             elif gov_pii.action == "mask":
                 await emit_governance_audit(
-                    db,
                     tenant_id=data.tenant_id,
                     agent_id=data.agent_id,
                     action=ACTION_PII_MASK,
@@ -1121,7 +1110,6 @@ async def create_memories_bulk(
                 mark_pii_flagged(md, findings)
                 item.metadata = md
                 await emit_governance_audit(
-                    db,
                     tenant_id=data.tenant_id,
                     agent_id=data.agent_id,
                     action=ACTION_PII_FLAG,
@@ -1516,7 +1504,6 @@ async def create_memories_bulk(
                 track_task(
                     tracked_task(
                         _hooks.audit_log(
-                            db,
                             tenant_id=data.tenant_id,
                             agent_id=data.agent_id,
                             action="create",
@@ -1820,7 +1807,7 @@ async def _reembed_memory(
         # want the backoff.
         await asyncio.sleep(EMBEDDING_REEMBED_DELAY_S)
     try:
-        tenant_config = await resolve_config(None, tenant_id)
+        tenant_config = await resolve_config(tenant_id)
     except Exception:
         logger.warning("Failed to resolve tenant config for re-embed (tenant=%s)", tenant_id, exc_info=True)
         tenant_config = None
@@ -1924,7 +1911,7 @@ async def _reembed_memories_bulk(
     if not items:
         return
     try:
-        tenant_config = await resolve_config(None, tenant_id)
+        tenant_config = await resolve_config(tenant_id)
     except Exception:
         # Config miss: continue with None so get_embeddings_batch can
         # use its default provider rather than stranding the whole batch.
@@ -2119,7 +2106,7 @@ async def _enrich_memory_background(
     from core_api.services.task_tracker import tracked_task
 
     try:
-        tenant_config = await resolve_config(None, tenant_id)
+        tenant_config = await resolve_config(tenant_id)
     except Exception:
         logger.exception("Background enrichment: failed to resolve config for memory %s", memory_id)
         return
@@ -2316,7 +2303,7 @@ async def _enrich_memory_background(
         logger.exception("Background enrichment error for memory %s", memory_id)
 
 
-async def soft_delete_memory(db: AsyncSession, memory_id: UUID, tenant_id: str) -> None:
+async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> None:
     sc = get_storage_client()
     mem = await sc.get_memory_for_tenant(tenant_id, str(memory_id))
     if not mem:
@@ -2328,7 +2315,6 @@ async def soft_delete_memory(db: AsyncSession, memory_id: UUID, tenant_id: str) 
     if _hooks.audit_log:
         try:
             await _hooks.audit_log(
-                db,
                 tenant_id=tenant_id,
                 agent_id=mem.get("agent_id"),
                 action="soft_delete",
@@ -2340,7 +2326,6 @@ async def soft_delete_memory(db: AsyncSession, memory_id: UUID, tenant_id: str) 
 
 
 async def update_memory(
-    db: AsyncSession,
     memory_id: UUID,
     tenant_id: str,
     data: MemoryUpdate,
@@ -2358,12 +2343,11 @@ async def update_memory(
     if agent_id:
         from core_api.services.agent_service import authorize_memory_access, enforce_update
 
-        await enforce_update(db, tenant_id, agent_id, mem.get("agent_id"))
+        await enforce_update(tenant_id, agent_id, mem.get("agent_id"))
         # Cross-fleet / scope_agent row authorization (write threshold) — the
         # same fleet/scope contract the list/search paths enforce, so a by-id
         # PATCH can't mutate a peer fleet's row.
         allowed = await authorize_memory_access(
-            db,
             tenant_id,
             agent_id,
             visibility=mem.get("visibility"),
@@ -2388,7 +2372,7 @@ async def update_memory(
     new_embedding = None
     # Content change: re-embed, re-hash, check dedup
     if content_changed:
-        tenant_config = await resolve_config(db, tenant_id)
+        tenant_config = await resolve_config(tenant_id)
         new_embedding = await get_embedding(data.content, tenant_config)
         new_hash = _content_hash(tenant_id, mem.get("fleet_id"), data.content)
 
@@ -2404,7 +2388,6 @@ async def update_memory(
         # Semantic dedup on content change (exclude self; skip when new embedding is None)
         if tenant_config.semantic_dedup_enabled and new_embedding is not None:
             sem_dup = await _find_semantic_duplicate(
-                db,
                 tenant_id,
                 mem.get("fleet_id"),
                 new_embedding,
@@ -2547,7 +2530,6 @@ async def update_memory(
     if _hooks.audit_log and (changes or patch):
         try:
             await _hooks.audit_log(
-                db,
                 tenant_id=tenant_id,
                 agent_id=agent_id or mem.get("agent_id"),
                 action="update",
@@ -2563,7 +2545,7 @@ async def update_memory(
 
     # Post-commit async tasks for content changes
     if content_changed:
-        tenant_config = await resolve_config(db, tenant_id)
+        tenant_config = await resolve_config(tenant_id)
         if tenant_config.entity_extraction_enabled:
             track_task(
                 tracked_task(
@@ -2608,12 +2590,7 @@ async def update_memory(
     return _dict_to_memory_out(updated, entity_links=entity_links)
 
 
-# Re-exported from EntityRepository for backward compatibility (tests, pipeline steps).
-from core_api.repositories.entity_repository import _relation_weight  # noqa: F401
-
-
 async def expand_graph(
-    db: AsyncSession,
     seed_entity_ids: list[UUID],
     tenant_id: str,
     fleet_id: str | None,
@@ -2828,7 +2805,6 @@ async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
 
 
 async def _entity_boost_pipeline(
-    db: AsyncSession,
     query: str,
     tenant_id: str,
     fleet_ids: list[str] | None,
@@ -2874,7 +2850,6 @@ async def _entity_boost_pipeline(
             # Graph expansion
             if graph_expand and graph_max_hops > 0:
                 entity_hops = await expand_graph(
-                    db,
                     matched_entity_ids,
                     tenant_id,
                     fleet_ids[0] if fleet_ids and len(fleet_ids) == 1 else None,
@@ -3084,7 +3059,6 @@ def _extract_temporal_date_range(
 
 
 async def search_memories(
-    db: AsyncSession,
     tenant_id: str,
     query: str,
     fleet_ids: list[str] | None = None,
@@ -3106,7 +3080,6 @@ async def search_memories(
     # Diagnostic mode requires the pipeline path for score introspection
     if _USE_PIPELINE_SEARCH or diagnostic:
         return await _search_memories_pipeline(
-            db,
             tenant_id,
             query,
             fleet_ids=fleet_ids,
@@ -3127,7 +3100,6 @@ async def search_memories(
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     return await _search_memories_legacy(
-        db,
         tenant_id,
         query,
         fleet_ids=fleet_ids,
@@ -3145,7 +3117,6 @@ async def search_memories(
 
 
 async def _search_memories_pipeline(
-    db: AsyncSession,
     tenant_id: str,
     query: str,
     fleet_ids: list[str] | None = None,
@@ -3169,7 +3140,6 @@ async def _search_memories_pipeline(
     from core_api.pipeline.context import PipelineContext
 
     ctx = PipelineContext(
-        db=db,
         data={
             "query": query,
             "tenant_id": tenant_id,
@@ -3218,7 +3188,6 @@ async def _search_memories_pipeline(
 
 
 async def _search_memories_legacy(
-    db: AsyncSession,
     tenant_id: str,
     query: str,
     fleet_ids: list[str] | None = None,
@@ -3256,7 +3225,7 @@ async def _search_memories_legacy(
     # Parallel: embedding + entity pipeline
     emb_task = asyncio.ensure_future(_get_or_cache_embedding(query, tenant_id, tenant_config))
     ent_task = asyncio.ensure_future(
-        _entity_boost_pipeline(db, query, tenant_id, fleet_ids, graph_expand, _graph_max_hops)
+        _entity_boost_pipeline(query, tenant_id, fleet_ids, graph_expand, _graph_max_hops)
     )
     try:
         embedding, (boosted_memory_ids, memory_boost_factor) = await asyncio.gather(emb_task, ent_task)
@@ -3349,11 +3318,10 @@ async def _search_memories_legacy(
         )
 
     # Increment recall_count and update last_recalled_at for returned memories
-    _hooks = get_hooks()
-    if memory_ids and _hooks.on_recall:
+    if memory_ids:
         try:
-            await _hooks.on_recall(db, memory_ids)
+            await get_storage_client().increment_recall([str(m) for m in memory_ids])
         except Exception:
-            logger.debug("Recall tracking hook failed (non-critical)", exc_info=True)
+            logger.debug("Recall tracking failed (non-critical)", exc_info=True)
 
     return results

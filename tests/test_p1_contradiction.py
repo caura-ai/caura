@@ -524,7 +524,7 @@ class TestContradictionIntegration:
 
         emb = fake_embedding("Alice lives in Haifa")
 
-        contradictions = await detect_contradictions(db, new, emb)
+        contradictions = await detect_contradictions(new, emb)
 
         assert len(contradictions) >= 1
         assert str(contradictions[0].old_memory_id) == old["id"]
@@ -554,7 +554,7 @@ class TestContradictionIntegration:
             "core_api.services.contradiction_detector.settings"
         ) as mock_settings:
             mock_settings.entity_extraction_provider = "fake"
-            contradictions = await detect_contradictions(db, new, emb)
+            contradictions = await detect_contradictions(new, emb)
 
         # The fake heuristic should detect negation + overlap
         assert len(contradictions) >= 1
@@ -573,75 +573,9 @@ class TestContradictionIntegration:
             "core_api.services.contradiction_detector.settings"
         ) as mock_settings:
             mock_settings.entity_extraction_provider = "fake"
-            contradictions = await detect_contradictions(db, new, emb)
+            contradictions = await detect_contradictions(new, emb)
 
         assert len(contradictions) == 0
-
-    async def test_candidate_limit_allows_more_checks(self, db, sc, tenant_id):
-        """With limit=8, we can find contradictions beyond the old limit of 3."""
-        from common.embedding import fake_embedding
-        from core_api.repositories import memory_repo
-
-        # Create 6 similar memories via storage client (committed, visible across sessions)
-        base_content = "The server response time is under 100ms"
-        for i in range(6):
-            content = f"{base_content} for endpoint {i}"
-            emb_i = fake_embedding(content)
-            ch = hashlib.sha256(f"{tenant_id}:None:{content}".encode()).hexdigest()
-            await sc.create_memory(
-                {
-                    "tenant_id": tenant_id,
-                    "agent_id": "test-agent",
-                    "memory_type": "fact",
-                    "content": content,
-                    "embedding": emb_i,
-                    "content_hash": ch,
-                    "weight": 0.5,
-                    "status": "active",
-                    "visibility": "scope_team",
-                }
-            )
-
-        # Create the "new" memory via storage client too
-        new_content = base_content
-        emb = fake_embedding(new_content)
-        ch_new = hashlib.sha256(f"{tenant_id}:None:{new_content}".encode()).hexdigest()
-        new_mem = await sc.create_memory(
-            {
-                "tenant_id": tenant_id,
-                "agent_id": "test-agent",
-                "memory_type": "fact",
-                "content": new_content,
-                "embedding": emb,
-                "content_hash": ch_new,
-                "weight": 0.5,
-                "status": "active",
-                "visibility": "scope_team",
-            }
-        )
-
-        # Build a lightweight stand-in with the attributes find_similar_candidates needs
-        new_proxy = MagicMock()
-        new_proxy.id = new_mem["id"]
-        new_proxy.tenant_id = tenant_id
-        new_proxy.fleet_id = None
-        new_proxy.visibility = "scope_team"
-
-        candidates = await memory_repo.find_similar_candidates(db, new_proxy, emb)
-        # With old limit of 3, we'd only get 3. Now we can get up to 8.
-        # Exact count depends on similarity — at minimum should be > 3
-        # if the fake embeddings are similar enough.
-        assert len(candidates) <= CONTRADICTION_CANDIDATE_MAX
-
-
-# ---------------------------------------------------------------------------
-# Benchmark tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.benchmark
-class TestContradictionBenchmarks:
-    """Measure overhead of contradiction detection logic."""
 
     def test_fake_contradiction_check_latency(self):
         """Fake heuristic should be sub-microsecond."""

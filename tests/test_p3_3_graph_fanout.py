@@ -195,8 +195,7 @@ class TestGraphFanoutIntegration:
 
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(
-            db, tenant_id, "python programming", fleet_ids=[fleet_id], top_k=10,
+        results = await search_memories(tenant_id, "python programming", fleet_ids=[fleet_id], top_k=10,
         )
         # All 5 should be searchable (boosted or not)
         assert len(results) >= 1
@@ -215,8 +214,7 @@ class TestGraphFanoutIntegration:
         await db.commit()
 
         # Should complete without error and return at most `limit` results
-        results = await search_memories(
-            db, tenant_id, "popular topic", fleet_ids=[fleet_id], top_k=10,
+        results = await search_memories(tenant_id, "popular topic", fleet_ids=[fleet_id], top_k=10,
         )
         assert len(results) <= 10
         assert len(results) >= 1

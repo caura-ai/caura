@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 OperationType = Literal["write", "search", "recall", "insights", "evolve"]
 
 
@@ -40,7 +38,6 @@ def _allowed(op: str) -> UsageCheckResult:
 
 
 async def check_and_increment(
-    db: AsyncSession,
     org_id,
     operation: OperationType,
     count: int = 1,
@@ -49,7 +46,6 @@ async def check_and_increment(
 
 
 async def check_and_increment_by_tenant(
-    db: AsyncSession | None,
     tenant_id: str,
     operation: OperationType,
     count: int = 1,
@@ -60,7 +56,6 @@ async def check_and_increment_by_tenant(
 
 
 async def bulk_check_and_increment(
-    db: AsyncSession,
     tenant_id: str,
     count: int,
 ) -> UsageCheckResult:

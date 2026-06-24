@@ -62,7 +62,7 @@ def _ctx(*, enrichment: bool = False, cached_embedding=None) -> PipelineContext:
     if cached_embedding is not None:
         data["cached_embedding"] = cached_embedding
     return PipelineContext(
-        db=AsyncMock(), data=data, tenant_config=_tenant_config(enrichment=enrichment)
+        data=data, tenant_config=_tenant_config(enrichment=enrichment)
     )
 
 

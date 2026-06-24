@@ -123,7 +123,6 @@ async def report_outcome_endpoint(
     # ``require_trust``; ``check_and_increment`` / ``report_outcome`` /
     # ``log_action`` ignore db). There is no local session to commit.
     caller_agent_id = await resolve_caller_and_gate(
-        None,
         auth,
         tenant_id=body.tenant_id,
         body_agent_id=body.agent_id,
@@ -131,7 +130,7 @@ async def report_outcome_endpoint(
         action="evolve",
     )
 
-    await check_and_increment(None, body.tenant_id, "evolve")
+    await check_and_increment(body.tenant_id, "evolve")
 
     from core_api.services.evolve_service import report_outcome
 
@@ -142,7 +141,6 @@ async def report_outcome_endpoint(
     # simply malformed in a way Pydantic couldn't catch.
     try:
         result = await report_outcome(
-            None,
             tenant_id=body.tenant_id,
             outcome=body.outcome,
             outcome_type=body.outcome_type,
@@ -155,7 +153,6 @@ async def report_outcome_endpoint(
         raise HTTPException(status_code=422, detail=str(e)) from e
 
     await log_action(
-        None,
         tenant_id=body.tenant_id,
         action="evolve_report",
         resource_type="outcome",

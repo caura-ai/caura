@@ -83,9 +83,7 @@ async def test_list_entities_single_tenant_blocked_from_foreign(monkeypatch):
             entity_type=None,
             search=None,
             limit=50,
-            auth=auth,
-            db=MagicMock(),
-        )
+            auth=auth,        )
     assert exc.value.status_code == 403
 
 
@@ -103,9 +101,7 @@ async def test_list_entities_cross_tenant_credential_allowed(monkeypatch):
         entity_type=None,
         search=None,
         limit=50,
-        auth=auth,
-        db=MagicMock(),
-    )
+        auth=auth,    )
     assert sc.list_entities.await_count == 1
     assert isinstance(result, list) and len(result) == 1
     # Cross-tenant read emits an audit event TO the source tenant.
@@ -131,9 +127,7 @@ async def test_list_entities_home_tenant_does_not_audit(monkeypatch):
         entity_type=None,
         search=None,
         limit=50,
-        auth=auth,
-        db=MagicMock(),
-    )
+        auth=auth,    )
     spy.assert_not_awaited()
 
 
@@ -150,9 +144,7 @@ async def test_list_entities_single_tenant_does_not_audit(monkeypatch):
         entity_type=None,
         search=None,
         limit=50,
-        auth=auth,
-        db=MagicMock(),
-    )
+        auth=auth,    )
     spy.assert_not_awaited()
 
 
@@ -172,9 +164,7 @@ async def test_get_graph_cross_tenant_credential_allowed(monkeypatch):
     await entities_routes.get_graph(
         tenant_id="tenant-B",
         fleet_id=None,
-        auth=auth,
-        db=MagicMock(),
-    )
+        auth=auth,    )
     assert sc.get_full_graph.await_count == 1
     spy.assert_awaited_once()
     assert spy.await_args.kwargs["surface"] == "rest_graph"
@@ -189,9 +179,7 @@ async def test_get_graph_single_tenant_blocked_from_foreign(monkeypatch):
         await entities_routes.get_graph(
             tenant_id="tenant-B",
             fleet_id=None,
-            auth=auth,
-            db=MagicMock(),
-        )
+            auth=auth,        )
     assert exc.value.status_code == 403
 
 
@@ -216,9 +204,7 @@ async def test_get_entity_cross_tenant_credential_allowed(monkeypatch):
     result = await entities_routes.get_entity_route(
         entity_id=_FAKE_ENTITY_ID,
         tenant_id="tenant-B",
-        auth=auth,
-        db=MagicMock(),
-    )
+        auth=auth,    )
     assert result is fake_entity
     spy.assert_awaited_once()
     assert spy.await_args.kwargs["surface"] == "rest_entity_get"
@@ -237,9 +223,7 @@ async def test_get_entity_not_found_does_not_audit(monkeypatch):
         await entities_routes.get_entity_route(
             entity_id=_FAKE_ENTITY_ID,
             tenant_id="tenant-B",
-            auth=auth,
-            db=MagicMock(),
-        )
+            auth=auth,        )
     assert exc.value.status_code == 404
     spy.assert_not_awaited()
 
@@ -251,9 +235,7 @@ async def test_get_entity_single_tenant_blocked_from_foreign(monkeypatch):
         await entities_routes.get_entity_route(
             entity_id=_FAKE_ENTITY_ID,
             tenant_id="tenant-B",
-            auth=auth,
-            db=MagicMock(),
-        )
+            auth=auth,        )
     assert exc.value.status_code == 403
 
 

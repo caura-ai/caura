@@ -314,12 +314,11 @@ async def test_rest_memories_list_emits_cross_tenant_audit(monkeypatch):
     # The route does a late import of ``memory_repo`` so we patch it
     # at the source.
     monkeypatch.setattr(
-        "core_api.repositories.memory_repo.list_by_filters",
-        AsyncMock(return_value=[_MemoryRow("home"), _MemoryRow("sibling")]),
+        "core_api.clients.storage_client.CoreStorageClient.list_memories_by_filters",
+        AsyncMock(return_value=[_memory_row_dict("home"), _memory_row_dict("sibling")]),
     )
 
     auth = _cross_tenant_auth()
-    db = MagicMock()
 
     await memories_routes.list_memories(
         tenant_id=None,  # broad — triggers widening
@@ -336,7 +335,6 @@ async def test_rest_memories_list_emits_cross_tenant_audit(monkeypatch):
         limit=25,
         include_deleted=False,
         auth=auth,
-        db=db,
     )
 
     spy.assert_awaited_once()
@@ -379,9 +377,8 @@ async def test_rest_documents_search_emits_cross_tenant_audit(monkeypatch):
         top_k=5,
     )
     auth = _cross_tenant_auth()
-    db = MagicMock()
 
-    await documents_routes.search_documents(body=body, auth=auth, db=db)
+    await documents_routes.search_documents(body=body, auth=auth,)
 
     spy.assert_awaited()
     kwargs = spy.await_args.kwargs

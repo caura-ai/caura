@@ -116,7 +116,7 @@ async def process_entity_extraction(
         # so per-tenant routing was dead code.
         from core_api.services.organization_settings import resolve_config
 
-        tenant_cfg = await resolve_config(None, tenant_id)
+        tenant_cfg = await resolve_config(tenant_id)
 
         graph = await extract_entities_from_content(content, memory_type, tenant_config=tenant_cfg)
         if not graph.entities:
@@ -401,7 +401,6 @@ async def process_entity_extraction(
             to_id = name_to_id.get(rel.to_entity)
             if from_id and to_id:
                 await upsert_relation(
-                    None,
                     RelationUpsert(
                         tenant_id=tenant_id,
                         fleet_id=fleet_id,
@@ -415,7 +414,6 @@ async def process_entity_extraction(
 
         # Audit log
         await log_action(
-            None,
             tenant_id=tenant_id,
             agent_id=agent_id,
             action="entity_extraction",

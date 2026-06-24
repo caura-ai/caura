@@ -26,7 +26,6 @@ from dataclasses import dataclass
 
 from cachetools import TTLCache
 from croniter import CroniterBadCronError, croniter
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.events.base import Event
 from common.events.factory import get_event_bus
@@ -997,30 +996,20 @@ def invalidate_cache(tenant_id: str) -> None:
     logger.info("organization_settings cache invalidated for %s", tenant_id)
 
 
-async def resolve_config(db: AsyncSession | None, tenant_id: str) -> ResolvedConfig:
+async def resolve_config(tenant_id: str) -> ResolvedConfig:
     """Resolve config for a tenant: tenant override → global env default.
 
-    ``db`` is retained for call-site back-compat and is IGNORED — settings now
-    load through core-storage-api (Fix 2 Phase 0). Fire-and-forget callers
-    (post-commit contradiction detection, the CAURA-595 ENRICHED consumer)
-    pass ``None`` and resolve correctly via the same storage-client path.
+    Settings load through core-storage-api (Fix 2 Phase 0).
     """
-    raw = await get_raw_settings(db, tenant_id)
+    raw = await get_raw_settings(tenant_id)
     return ResolvedConfig(raw)
 
 
-async def get_raw_settings(db: AsyncSession | None, tenant_id: str) -> dict:
+async def get_raw_settings(tenant_id: str) -> dict:
     """Return the tenant's raw override dict, or ``{}`` if no overrides set.
 
-    Cache-first (5-min TTL); on a miss, fetched via core-storage-api.
-
-    ``db`` is retained for call-site back-compat and is IGNORED: there is no
-    longer a direct DB read here (Fix 2 Phase 0 routed it through the storage
-    client per the "no DB outside core-storage-api" rule). The old
-    ``db is None`` self-session fallback is therefore gone — request-scoped and
-    fire-and-forget callers (the ENRICHED consumer, post-commit detection) now
-    take the identical storage-client path, so a cold cache no longer needs a
-    DB session in scope (the original CAURA-595 Phase 5a crash mode).
+    Cache-first (5-min TTL); on a miss, fetched via core-storage-api (Fix 2
+    Phase 0 routed this through the storage client — no direct DB read).
     """
     cached = _settings_cache.get(tenant_id)
     if cached is not None:
@@ -1036,14 +1025,13 @@ async def _load_and_cache(tenant_id: str) -> dict:
     return resolved
 
 
-async def get_settings_for_display(db: AsyncSession | None, tenant_id: str) -> dict:
+async def get_settings_for_display(tenant_id: str) -> dict:
     """Return ``DEFAULT_SETTINGS`` merged with the tenant's overrides for UI display."""
-    raw = await get_raw_settings(db, tenant_id)
+    raw = await get_raw_settings(tenant_id)
     return _deep_merge(DEFAULT_SETTINGS, raw)
 
 
 async def update_settings(
-    db: AsyncSession | None,
     tenant_id: str,
     new_settings: dict,
     *,
@@ -1055,11 +1043,10 @@ async def update_settings(
     so callers can echo back the resulting state. No-ops when the submitted
     payload introduces no actual changes.
 
-    ``db`` is retained for call-site back-compat and is IGNORED — the
-    transactional upsert (``FOR UPDATE`` read → flat diff → JSONB ``||`` merge →
-    audit row, one transaction) now runs server-side in core-storage-api (Fix 2
-    Phase 0). Validation, the TTL-cache invalidate, and the ``SETTINGS_CHANGED``
-    broadcast stay here.
+    The transactional upsert (``FOR UPDATE`` read → flat diff → JSONB ``||``
+    merge → audit row, one transaction) runs server-side in core-storage-api
+    (Fix 2 Phase 0). Validation, the TTL-cache invalidate, and the
+    ``SETTINGS_CHANGED`` broadcast stay here.
     """
     _check_keys(new_settings, DEFAULT_SETTINGS)
     _validate_leaf_types(new_settings)

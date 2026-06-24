@@ -40,8 +40,7 @@ class TestSTMWritePipeline:
             write_mode="stm",
         )
         ctx = PipelineContext(
-            db=None,
-            data={"input": data, "t0": time.perf_counter()},
+                        data={"input": data, "t0": time.perf_counter()},
         )
         pipeline = build_stm_write_pipeline()
         result = await pipeline.run(ctx)
@@ -75,8 +74,7 @@ class TestSTMWritePipeline:
             write_mode="stm",
         )
         ctx = PipelineContext(
-            db=None,
-            data={"input": data, "t0": time.perf_counter()},
+                        data={"input": data, "t0": time.perf_counter()},
         )
         pipeline = build_stm_write_pipeline()
         result = await pipeline.run(ctx)
@@ -103,8 +101,7 @@ class TestSTMWritePipeline:
             write_mode="stm",
         )
         ctx = PipelineContext(
-            db=None,
-            data={"input": data, "t0": time.perf_counter()},
+                        data={"input": data, "t0": time.perf_counter()},
         )
         pipeline = build_stm_write_pipeline()
         result = await pipeline.run(ctx)
@@ -130,8 +127,7 @@ class TestSTMWritePipeline:
             write_mode="stm",
         )
         ctx = PipelineContext(
-            db=None,
-            data={"input": data, "t0": time.perf_counter()},
+                        data={"input": data, "t0": time.perf_counter()},
         )
         pipeline = build_stm_write_pipeline()
         with pytest.raises(HTTPException) as exc_info:
@@ -206,8 +202,7 @@ class TestSTMService:
             write_mode="stm",
         )
         ctx = PipelineContext(
-            db=None,
-            data={"input": data, "t0": time.perf_counter()},
+                        data={"input": data, "t0": time.perf_counter()},
         )
         await build_stm_write_pipeline().run(ctx)
 
@@ -240,7 +235,7 @@ class TestSTMService:
             visibility="scope_agent",
             write_mode="stm",
         )
-        ctx = PipelineContext(db=None, data={"input": data})
+        ctx = PipelineContext(data={"input": data})
         await ResolveSTMTarget().execute(ctx)
         assert ctx.data["stm_target"] == "notes"
 
@@ -258,7 +253,7 @@ class TestSTMService:
             visibility="scope_team",
             write_mode="stm",
         )
-        ctx = PipelineContext(db=None, data={"input": data})
+        ctx = PipelineContext(data={"input": data})
         await ResolveSTMTarget().execute(ctx)
         assert ctx.data["stm_target"] == "bulletin"
         assert ctx.data["stm_fleet_id"] == "fleet-1"
@@ -277,7 +272,7 @@ class TestSTMService:
             visibility="scope_org",
             write_mode="stm",
         )
-        ctx = PipelineContext(db=None, data={"input": data})
+        ctx = PipelineContext(data={"input": data})
         await ResolveSTMTarget().execute(ctx)
         assert ctx.data["stm_target"] == "bulletin"
 
@@ -313,8 +308,7 @@ class TestInjectSTMContext:
         )
 
         ctx = PipelineContext(
-            db=None,
-            data={
+                        data={
                 "tenant_id": "t1",
                 "caller_agent_id": "agent-1",
                 "fleet_ids": None,
@@ -342,8 +336,7 @@ class TestInjectSTMContext:
         from core_api.pipeline.step import StepOutcome
 
         ctx = PipelineContext(
-            db=None,
-            data={"tenant_id": "t1", "results": []},
+                        data={"tenant_id": "t1", "results": []},
         )
 
         with patch("core_api.config.settings") as mock_settings:
@@ -395,8 +388,7 @@ class TestInjectSTMContext:
         )
 
         ctx = PipelineContext(
-            db=None,
-            data={
+                        data={
                 "tenant_id": "t1",
                 "caller_agent_id": "agent-1",
                 "fleet_ids": None,

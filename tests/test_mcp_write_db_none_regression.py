@@ -1,7 +1,7 @@
 """Regression: the MCP / STM write path runs ``create_memory`` with ``db=None``.
 
 The MCP ``memclaw_write`` tool opens ``_no_db()`` (yields ``None``) and calls
-``create_memory(db=None, ...)`` — the storage-routed write path. Before Fix 2
+``create_memory(...)`` — the storage-routed write path. Before Fix 2
 Ph5b PR2 (#472), four ``write_fast`` steps (``load_tenant_config``,
 ``detect_near_duplicate``, ``check_semantic_duplicate``, and
 ``write_memory_row``'s audit hook) called ``ctx.require_db``, which **raises** on
@@ -71,7 +71,7 @@ def _make_input(tenant_id: str, content: str, **kwargs) -> MemoryCreate:
 
 @pytest.mark.parametrize("write_mode", ["fast", "strong"])
 async def test_create_memory_tolerates_db_none(db, write_mode):
-    """``create_memory(db=None)`` runs the full write pipeline without a session
+    """``create_memory()`` runs the full write pipeline without a session
     and persists the row — the exact shape the MCP write path uses. ``fast``
     covers ``load_tenant_config`` + ``detect_near_duplicate`` + ``write_memory_row``;
     ``strong`` additionally covers ``check_semantic_duplicate`` (the other
@@ -80,8 +80,7 @@ async def test_create_memory_tolerates_db_none(db, write_mode):
     tenant = _tenant()
     content = f"The Eiffel Tower is in Paris ({write_mode} mode)." + _PADDING
 
-    result = await create_memory(
-        None, _make_input(tenant, content, write_mode=write_mode)
+    result = await create_memory(_make_input(tenant, content, write_mode=write_mode)
     )
 
     assert isinstance(result, MemoryOut)

@@ -630,8 +630,8 @@ async def memclaw_recall(
         # the agent lookup + write quota pin to the HOME tenant, while the READ
         # (search + audit) widens via ``readable_tenant_ids`` exactly as before.
         sc = get_storage_client()
-        await check_and_increment(None, tenant_id, "search")
-        config = await resolve_config(None, tenant_id)
+        await check_and_increment(tenant_id, "search")
+        config = await resolve_config(tenant_id)
         # Agent profile + fleet-scope signals are HOME-tenant only — never
         # widened by the readable set.
         _ag = await sc.get_agent(agent_id, tenant_id)
@@ -648,14 +648,13 @@ async def memclaw_recall(
             if ag_fleet and ag_trust < 2:
                 fleet_ids = [ag_fleet]
         if fleet_ids and len(fleet_ids) == 1:
-            await enforce_fleet_read(None, tenant_id, agent_id, fleet_ids[0])
+            await enforce_fleet_read(tenant_id, agent_id, fleet_ids[0])
         # Cross-tenant recall widens via readable_tenant_ids when the caller
         # authenticated with a cross-tenant credential (kind=cross_tenant) — the
         # gateway plumbs ``X-Readable-Tenant-IDs`` and the MCP middleware parks
         # it on ``_readable_tenant_ids_var``. Single-tenant credentials leave
         # the var empty; ``search_memories`` falls back to the home tenant only.
         results = await search_memories(
-            None,
             tenant_id=tenant_id,
             query=query,
             fleet_ids=fleet_ids,
@@ -677,7 +676,6 @@ async def memclaw_recall(
         source_tenants = [t for t in readable if t and t != tenant_id]
         if source_tenants:
             await log_cross_tenant_read(
-                None,
                 home_tenant_id=tenant_id,
                 home_agent_id=agent_id,
                 source_tenants=source_tenants,
@@ -762,14 +760,14 @@ async def memclaw_write(
     # tenant, and no readable-set widening on the write path. ``_no_db()`` yields
     # ``None`` (no RLS session) while keeping the storage-routed services'
     # ``db``-first signatures satisfied.
-    async with _no_db() as db:
+    async with _no_db():
         try:
             # Register the calling agent (auto-create row on first write) and
             # enforce trust gating for cross-fleet writes — same surface the
             # REST write path uses. Without this, MCP writes succeed without
             # ever creating an Agent row, so a follow-up
             # PATCH /agents/{id}/trust 404s.
-            agent = await enforce_fleet_write(db, tenant_id, agent_id, fleet_id)
+            agent = await enforce_fleet_write(tenant_id, agent_id, fleet_id)
             # Mirror the REST write paths (routes/memories.py:937, :1125): an
             # omitted fleet_id resolves to the caller's home fleet, so an MCP
             # write scopes like a REST write instead of persisting
@@ -783,9 +781,8 @@ async def memclaw_write(
             if not fleet_id and agent.get("fleet_id"):
                 fleet_id = agent["fleet_id"]
             if content is not None:
-                await check_and_increment(db, tenant_id, "write")
+                await check_and_increment(tenant_id, "write")
                 result = await create_memory(
-                    db,
                     MemoryCreate(
                         tenant_id=tenant_id,
                         fleet_id=fleet_id,
@@ -852,7 +849,7 @@ async def memclaw_write(
             # to it; the trade-off is acceptable to keep this path
             # simple. If a use case needs MCP retry idempotency, the
             # client can pass an explicit token via metadata.
-            result = await create_memories_bulk(db, bulk_data, bulk_attempt_id=f"mcp:{uuid4()}")
+            result = await create_memories_bulk(bulk_data, bulk_attempt_id=f"mcp:{uuid4()}")
             return _with_latency(_serialize(result), t0)
         except HTTPException as e:
             # Idempotent retry-safe duplicate: when create_memory raises 409
@@ -953,7 +950,7 @@ async def memclaw_manage(
     # pre-migration, which scoped every ``get_by_id_for_tenant`` to ``tenant_id``
     # and never consulted ``readable_tenant_ids``).
     sc = get_storage_client()
-    async with _no_db() as db:
+    async with _no_db():
         try:
             if op == "bulk_delete":
                 if not memory_ids:
@@ -981,14 +978,13 @@ async def memclaw_manage(
                 # trust>=3 admin agent retains tenant-wide delete (parity with
                 # enforce_fleet_write). No-op for tenant-scoped credentials.
                 if caller_agent_id:
-                    await enforce_delete(db, tenant_id, caller_agent_id)
+                    await enforce_delete(tenant_id, caller_agent_id)
                 # HOME-tenant scoped soft-delete: the storage method applies the
                 # exact pre-migration predicate (tenant_id + id IN (...) +
                 # deleted_at IS NULL → set deleted_at=now, status='deleted') and
                 # returns the affected count. No cross-tenant widening.
                 deleted_count = await sc.soft_delete_by_ids(tenant_id, [str(u) for u in uids])
                 await log_action(
-                    db,
                     tenant_id=tenant_id,
                     agent_id=agent_id,
                     action="bulk_delete",
@@ -1015,7 +1011,6 @@ async def memclaw_manage(
                 # Fleet/agent-scope authorization (mirrors op=read): the
                 # supersession chain would otherwise leak a scoped row by id.
                 if not await authorize_memory_access(
-                    db,
                     tenant_id,
                     caller_agent_id,
                     visibility=this.get("visibility"),
@@ -1067,7 +1062,6 @@ async def memclaw_manage(
                 # agent can't read a peer's scoped row by id. NOT_FOUND (not
                 # PERMISSION_DENIED) to avoid confirming the id exists.
                 if not await authorize_memory_access(
-                    db,
                     tenant_id,
                     caller_agent_id,
                     visibility=memory.get("visibility"),
@@ -1116,7 +1110,6 @@ async def memclaw_manage(
                     return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
                 # Cross-fleet / scope_agent authorization (write threshold).
                 if not await authorize_memory_access(
-                    db,
                     tenant_id,
                     caller_agent_id,
                     visibility=memory.get("visibility"),
@@ -1134,7 +1127,6 @@ async def memclaw_manage(
                 old_status = memory.get("status")
                 await sc.update_memory_status(str(uid), status, tenant_id=tenant_id)
                 await log_action(
-                    db,
                     tenant_id=tenant_id,
                     agent_id=memory.get("agent_id"),
                     action="status_update",
@@ -1169,17 +1161,16 @@ async def memclaw_manage(
                     )
                 # WRITE → home tenant only. ``update_memory`` is storage-routed
                 # and scopes the row to the explicit ``tenant_id``.
-                await check_and_increment(db, tenant_id, "write")
-                result = await update_memory(db, uid, tenant_id, MemoryUpdate(**fields), agent_id=agent_id)
+                await check_and_increment(tenant_id, "write")
+                result = await update_memory(uid, tenant_id, MemoryUpdate(**fields), agent_id=agent_id)
                 return _with_latency(_serialize(result), t0)
             # op == "delete" — WRITE → home tenant only.
             if caller_agent_id:
                 # Trust gate (>= 3) + cross-fleet / scope_agent row authorization,
                 # mirroring REST DELETE /memories/{id}.
-                await enforce_delete(db, tenant_id, caller_agent_id)
+                await enforce_delete(tenant_id, caller_agent_id)
                 target = await sc.get_memory_for_tenant(tenant_id, str(uid))
                 if target and not await authorize_memory_access(
-                    db,
                     tenant_id,
                     caller_agent_id,
                     visibility=target.get("visibility"),
@@ -1194,7 +1185,7 @@ async def memclaw_manage(
                         ),
                         t0,
                     )
-            await soft_delete_memory(db, uid, tenant_id)
+            await soft_delete_memory(uid, tenant_id)
             return _with_latency(f"Memory {memory_id} deleted.", t0)
         except HTTPException as e:
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
@@ -1225,7 +1216,7 @@ async def memclaw_entity_get(
     # isolation is carried by the explicit ``tenant_id`` + ``caller_agent_id``
     # the service already forwards to the storage client.
     try:
-        result = await get_entity(None, uid, _get_tenant(), caller_agent_id=_get_agent_id())
+        result = await get_entity(uid, _get_tenant(), caller_agent_id=_get_agent_id())
     except HTTPException as e:
         return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
     except httpx.HTTPStatusError as e:
@@ -1280,7 +1271,7 @@ async def memclaw_tune(
     # targets that agent's PK (``agent["id"]``). No cross-tenant widening — a
     # tune never touches a foreign tenant's agent row.
     try:
-        agent = await get_or_create_agent(None, tenant_id, agent_id)
+        agent = await get_or_create_agent(tenant_id, agent_id)
         current = agent.get("search_profile") or {}
         if updates:
             current.update(updates)
@@ -1316,7 +1307,7 @@ _SKILL_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 _AGENT_VISIBLE_SKILL_STATUS = "active"
 
 
-async def _skills_factory_flag(db: Any, tenant_id: str) -> bool:
+async def _skills_factory_flag(tenant_id: str) -> bool:
     """Strict opt-in check — RAISES on a settings-lookup failure.
 
     Is ``skills_factory.enabled`` true for this tenant? Callers that gate
@@ -1327,7 +1318,7 @@ async def _skills_factory_flag(db: Any, tenant_id: str) -> bool:
     ``get_raw_settings`` is cache-first (5-min TTL), so this is a cheap
     hot-path check.
     """
-    raw = await get_raw_settings(db, tenant_id)
+    raw = await get_raw_settings(tenant_id)
     return (
         isinstance(raw, dict)
         and isinstance(raw.get("skills_factory"), dict)
@@ -1335,7 +1326,7 @@ async def _skills_factory_flag(db: Any, tenant_id: str) -> bool:
     )
 
 
-async def _skills_factory_enabled(db: Any, tenant_id: str) -> bool:
+async def _skills_factory_enabled(tenant_id: str) -> bool:
     """Non-raising opt-in check for the active-only skill-read filter
     (read / query / search) — fails CLOSED on a settings-lookup failure.
 
@@ -1353,7 +1344,7 @@ async def _skills_factory_enabled(db: Any, tenant_id: str) -> bool:
     ALL skill gates fail-closed: write/delete abort, reads filter.
     """
     try:
-        return await _skills_factory_flag(db, tenant_id)
+        return await _skills_factory_flag(tenant_id)
     except Exception:
         logger.warning(
             "skills_factory flag lookup failed for %s; failing CLOSED — active-only "
@@ -1499,7 +1490,7 @@ async def memclaw_doc(
     readable = _get_readable_tenants() or None
     READ_OPS = {"list_collections", "read", "query", "search"}
 
-    async with _no_db() as db:
+    async with _no_db():
         try:
             if op == "list_collections":
                 collections_resp = await sc.list_document_collections(
@@ -1517,7 +1508,7 @@ async def memclaw_doc(
                 # One COUNT, only when a skills row is present AND the
                 # tenant opted in.
                 if any(name == SKILLS_COLLECTION for name, _ in rows) and await _skills_factory_enabled(
-                    db, tenant_id
+                    tenant_id
                 ):
                     active_count = await sc.document_count_in_collection(
                         tenant_id,
@@ -1596,7 +1587,7 @@ async def memclaw_doc(
                     # it fails we must NOT fall through and upsert the
                     # skill unvalidated — abort the write instead.
                     try:
-                        settings_display = await get_settings_for_display(db, tenant_id)
+                        settings_display = await get_settings_for_display(tenant_id)
                     except Exception:
                         logger.exception(
                             "skills_factory settings lookup failed for %s; cannot gate write",
@@ -1720,14 +1711,14 @@ async def memclaw_doc(
                 # Mirror memclaw_write's agent registration so a doc upsert
                 # via MCP creates the Agent row on first contact and enforces
                 # cross-fleet trust gating. WRITE → home tenant only.
-                write_agent = await enforce_fleet_write(db, tenant_id, agent_id, fleet_id)
+                write_agent = await enforce_fleet_write(tenant_id, agent_id, fleet_id)
                 # Same home-fleet resolution as memclaw_write: keep an omitted
                 # fleet_id from publishing a fleet_id=NULL doc/skill row that
                 # fleet-scoped teammates can't discover. No-op when the agent
                 # has no home fleet.
                 if not fleet_id and write_agent.get("fleet_id"):
                     fleet_id = write_agent["fleet_id"]
-                await check_and_increment(db, tenant_id, "write")
+                await check_and_increment(tenant_id, "write")
                 row = await sc.upsert_document_xmax(
                     {
                         "tenant_id": tenant_id,
@@ -1784,7 +1775,7 @@ async def memclaw_doc(
                 # The collection check short-circuits the flag lookup for
                 # non-skills reads.
                 if _doc_field(doc, "collection") == SKILLS_COLLECTION:
-                    caller_opted_in = await _skills_factory_enabled(db, tenant_id)
+                    caller_opted_in = await _skills_factory_enabled(tenant_id)
                     if _skill_hidden_from_agent(
                         doc, caller_tenant_id=tenant_id, caller_opted_in=caller_opted_in
                     ):
@@ -1817,7 +1808,7 @@ async def memclaw_doc(
                         # (which assumes-enabled on error and would emit
                         # the confusing pointer to a non-opted-in tenant).
                         try:
-                            opted_in = await _skills_factory_flag(db, tenant_id)
+                            opted_in = await _skills_factory_flag(tenant_id)
                         except Exception:
                             logger.exception(
                                 "skills_factory flag lookup failed for %s; cannot gate query",
@@ -1854,7 +1845,7 @@ async def memclaw_doc(
                         # helper — fail-closed by FILTERING on a settings
                         # outage (consistent with op=read), never errors a
                         # plain query.
-                        caller_opted_in = await _skills_factory_enabled(db, tenant_id)
+                        caller_opted_in = await _skills_factory_enabled(tenant_id)
                         if caller_opted_in:
                             effective_where["status"] = _AGENT_VISIBLE_SKILL_STATUS
                 # READ — widens via ``readable_tenant_ids`` for cross-tenant.
@@ -1915,7 +1906,7 @@ async def memclaw_doc(
                 # filter in SQL without excluding non-skills collections.
                 search_status = None
                 scoped_skills_opted_in = collection == SKILLS_COLLECTION and await _skills_factory_enabled(
-                    db, tenant_id
+                    tenant_id
                 )
                 if scoped_skills_opted_in:
                     search_status = _AGENT_VISIBLE_SKILL_STATUS
@@ -1950,7 +1941,7 @@ async def memclaw_doc(
                     caller_opted_in = (
                         scoped_skills_opted_in
                         if collection == SKILLS_COLLECTION
-                        else await _skills_factory_enabled(db, tenant_id)
+                        else await _skills_factory_enabled(tenant_id)
                     )
                     pairs = [
                         d
@@ -1967,7 +1958,6 @@ async def memclaw_doc(
                         if rt:
                             counts[rt] = counts.get(rt, 0) + 1
                     await log_cross_tenant_read(
-                        db,
                         home_tenant_id=tenant_id,
                         home_agent_id=agent_id,
                         source_tenants=source_tenants,
@@ -2005,7 +1995,7 @@ async def memclaw_doc(
             # Admin-trust (>= 3) gate for agent credentials, parity with memory
             # deletes — a routine trust-1 agent must not destroy tenant documents.
             if caller_agent_id:
-                await enforce_delete(db, tenant_id, caller_agent_id)
+                await enforce_delete(tenant_id, caller_agent_id)
             # Active-only existence gate for skills: an agent must not be
             # able to delete (or probe the existence of) a non-active
             # skill via MCP — those are operator-managed through the
@@ -2026,7 +2016,7 @@ async def memclaw_doc(
             # Short-circuits for non-skills collections (never touches
             # settings).
             try:
-                skills_gate_on = collection == SKILLS_COLLECTION and await _skills_factory_flag(db, tenant_id)
+                skills_gate_on = collection == SKILLS_COLLECTION and await _skills_factory_flag(tenant_id)
             except Exception:
                 logger.exception("skills_factory flag lookup failed for %s; cannot gate delete", tenant_id)
                 return _with_latency(
@@ -2155,9 +2145,9 @@ async def memclaw_list(
     # for scope!='agent' (exactly as before); scope='agent' stays home-only and
     # forces ``written_by`` to the caller. ``caller_agent_id`` carries the
     # scope_agent visibility gate explicitly to storage.
-    async with _no_db() as db:
+    async with _no_db():
         try:
-            trust, _, terr = await _require_trust(db, tenant_id, agent_id, min_level=min_level)
+            trust, _, terr = await _require_trust(tenant_id, agent_id, min_level=min_level)
             if terr:
                 return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
 
@@ -2236,7 +2226,6 @@ async def memclaw_list(
                     if rt:
                         counts[rt] = counts.get(rt, 0) + 1
                 await log_cross_tenant_read(
-                    db,
                     home_tenant_id=tenant_id,
                     home_agent_id=agent_id,
                     source_tenants=source_tenants,
@@ -2323,8 +2312,8 @@ async def memclaw_stats(
     # and to the caller's own visibility (``agent_id`` doubles as the visibility
     # identity); scope='fleet'/'all' widens via ``readable_tenant_ids`` exactly
     # as before.
-    async with _no_db() as db:
-        trust, _, terr = await _require_trust(db, tenant_id, agent_id, min_level=min_level)
+    async with _no_db():
+        trust, _, terr = await _require_trust(tenant_id, agent_id, min_level=min_level)
         if terr:
             return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
 
@@ -2355,7 +2344,6 @@ async def memclaw_stats(
             if source_tenants and scope != "agent":
                 # by_tenant breakdown is already in stats — reuse for the audit.
                 await log_cross_tenant_read(
-                    db,
                     home_tenant_id=tenant_id,
                     home_agent_id=agent_id,
                     source_tenants=source_tenants,
@@ -2446,7 +2434,7 @@ async def memclaw_insights(
         # storage-routed (``_no_db()`` ⇒ db=None) — ``_require_trust`` /
         # ``check_and_increment`` ignore db and the ``_QUERY_DISPATCH`` fns
         # call core-storage-api. No pooled DB connection is held.
-        async with _no_db() as db:
+        async with _no_db():
             # Mirror the REST insights gate: ``require_trust`` soft-passes
             # a missing Agent row at ``DEFAULT_TRUST_LEVEL`` (read-only
             # ergonomics — see ``memclaw_list`` below for the intended
@@ -2454,7 +2442,7 @@ async def memclaw_insights(
             # audit-log rows keyed to ``agent_id``. Without a registered
             # row backing the name, attribution becomes unverifiable, so
             # re-block unregistered agents on the write path.
-            _, not_found, terr = await _require_trust(db, tenant_id, agent_id, min_level=min_level)
+            _, not_found, terr = await _require_trust(tenant_id, agent_id, min_level=min_level)
             if not_found:
                 return _with_latency(
                     _error_response(
@@ -2465,8 +2453,8 @@ async def memclaw_insights(
                 )
             if terr:
                 return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
-            await check_and_increment(db, tenant_id, "insights")
-            memories_or_clusters = await _QUERY_DISPATCH[focus](db, tenant_id, fleet_id, agent_id, scope)
+            await check_and_increment(tenant_id, "insights")
+            memories_or_clusters = await _QUERY_DISPATCH[focus](tenant_id, fleet_id, agent_id, scope)
             if focus == "discover" and isinstance(memories_or_clusters, _DiscoverResult):
                 is_clustered = memories_or_clusters.is_clustered
                 memories_or_clusters = memories_or_clusters.data
@@ -2491,7 +2479,7 @@ async def memclaw_insights(
                     ),
                     t0,
                 )
-            config = await resolve_config(db, tenant_id)
+            config = await resolve_config(tenant_id)
         # ── Session closed. The LLM analysis runs with no DB held. ──
 
         # ── Phase 2: LLM (no DB) ───────────────────────────────────
@@ -2508,8 +2496,8 @@ async def memclaw_insights(
         # Fix 2 Ph5b: the supersede/restore + bulk-create inside
         # ``_persist_findings`` are each storage-committed independently, so
         # there's no session to open or commit here (``_no_db()`` ⇒ db=None).
-        async with _no_db() as db:
-            insight_ids = await _persist_findings(db, tenant_id, agent_id, fleet_id, focus, scope, findings)
+        async with _no_db():
+            insight_ids = await _persist_findings(tenant_id, agent_id, fleet_id, focus, scope, findings)
 
         result = {
             "focus": focus,
@@ -2605,12 +2593,12 @@ async def memclaw_evolve(
         # storage-routed (``_no_db()`` ⇒ db=None) — ``_require_trust`` /
         # ``check_and_increment`` ignore db and ``_filter_by_scope`` calls
         # core-storage-api. No pooled DB connection is held.
-        async with _no_db() as db:
+        async with _no_db():
             # Mirror the REST evolve gate (and ``memclaw_insights`` above):
             # block unregistered agents on the write path so the
             # outcome/rule memories + audit-log rows have a real
             # registered ``agent_id`` backing them.
-            _, not_found, terr = await _require_trust(db, tenant_id, agent_id, min_level=min_level)
+            _, not_found, terr = await _require_trust(tenant_id, agent_id, min_level=min_level)
             if not_found:
                 return _with_latency(
                     _error_response(
@@ -2621,7 +2609,7 @@ async def memclaw_evolve(
                 )
             if terr:
                 return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
-            await check_and_increment(db, tenant_id, "evolve")
+            await check_and_increment(tenant_id, "evolve")
 
             # A15: classify why no weights will move, mirroring the REST
             # report_outcome path. _apply_outcome_to_db requires this slug;
@@ -2636,7 +2624,6 @@ async def memclaw_evolve(
             else:
                 original_count = len(in_scope_ids)
                 in_scope_ids, out_of_scope_count = await _filter_by_scope(
-                    db,
                     tenant_id=tenant_id,
                     caller_agent_id=agent_id,
                     fleet_id=fleet_id,
@@ -2658,7 +2645,7 @@ async def memclaw_evolve(
                         caller_agent_id=agent_id,
                         fleet_id=fleet_id,
                     )
-            config = await resolve_config(db, tenant_id)
+            config = await resolve_config(tenant_id)
         # ── Session closed. The LLM rule generation runs with no DB held. ──
 
         # ── Phase 2: LLM (no DB) ───────────────────────────────────
@@ -2676,9 +2663,8 @@ async def memclaw_evolve(
         # Fix 2 Ph5b (PR2): the rule/outcome create_memory writes + the atomic
         # weight-adjust/backfill all route through core-storage-api, so there's
         # no session to open or commit here (``_no_db()`` ⇒ db=None).
-        async with _no_db() as db:
+        async with _no_db():
             result = await _apply_outcome_to_db(
-                db,
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 fleet_id=fleet_id,
@@ -2870,7 +2856,7 @@ async def memclaw_keystones_set(
     # storage-side — so the ``db.commit()`` calls are gone. Tenant isolation is
     # unchanged: every keystone op is scoped to the explicit home ``tenant_id``
     # (writes never widen to a readable set).
-    async with _no_db() as db:
+    async with _no_db():
         # The whole body sits inside the try so the catch-all also covers
         # ``_require_trust`` and the trust-error return paths — any of which can
         # raise errors that aren't ``HTTPStatusError`` or ``HTTPException``.
@@ -2909,7 +2895,7 @@ async def memclaw_keystones_set(
                 # can't probe doc_id existence via sc.get_document) and
                 # the scope-derived floor check.
                 trust, early_not_found, _early_terr = await _require_trust(
-                    db, tenant_id, caller_agent_id, min_level=1
+                    tenant_id, caller_agent_id, min_level=1
                 )
                 if early_not_found:
                     return _with_latency(
@@ -2993,7 +2979,7 @@ async def memclaw_keystones_set(
                 # because deletes don't charge the write budget (mirrors
                 # the REST route skipping ``enforce_usage_limits`` on
                 # DELETE).
-                await check_and_increment(db, tenant_id, "write")
+                await check_and_increment(tenant_id, "write")
                 # Storage owns scope/weight/fleet/agent shape validation;
                 # surface its 422s directly so we don't drift from the
                 # canonical error list.
@@ -3020,7 +3006,6 @@ async def memclaw_keystones_set(
                     payload["author_user_id"] = author_user_id
                 doc = await sc.upsert_keystone(payload)
                 await log_action(
-                    db,
                     tenant_id=tenant_id,
                     agent_id=caller_agent_id,
                     action="keystone.set",
@@ -3048,7 +3033,7 @@ async def memclaw_keystones_set(
             # for the minimum the caller could possibly need (1), then
             # compare the returned trust level against the scope-derived
             # floor below.
-            trust, not_found, terr = await _require_trust(db, tenant_id, caller_agent_id, min_level=1)
+            trust, not_found, terr = await _require_trust(tenant_id, caller_agent_id, min_level=1)
             if not_found:
                 return _with_latency(
                     _error_response(
@@ -3115,7 +3100,6 @@ async def memclaw_keystones_set(
             if not deleted:
                 return _with_latency(_error_response("NOT_FOUND", f"Keystone '{doc_id}' not found."), t0)
             await log_action(
-                db,
                 tenant_id=tenant_id,
                 agent_id=caller_agent_id,
                 action="keystone.delete",

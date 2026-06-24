@@ -42,14 +42,14 @@ def fake_chunker(monkeypatch):
 def fake_tenant_config(monkeypatch):
     """Stub resolve_config + A2 cache lookup so preview doesn't need a real DB."""
 
-    async def _fake(db, tenant_id):
+    async def _fake(tenant_id):
         return SimpleNamespace(
             enrichment_provider="fake",
             enrichment_enabled=False,
             default_write_mode="fast",
         )
 
-    async def _fake_no_cache(db, tenant_id, doc_hash):
+    async def _fake_no_cache(tenant_id, doc_hash):
         # A2: tests that don't care about caching get an unconditional miss.
         # The dedicated A2 tests below override this.
         return []
@@ -73,7 +73,7 @@ async def test_source_uri_stamped_text_input(fake_chunker, fake_tenant_config):
         {"content": "Fact A", "suggested_type": "fact"},
         {"content": "Fact B", "suggested_type": "decision"},
     ]
-    resp = await ingest_service.ingest_preview(db=None, request=req)
+    resp = await ingest_service.ingest_preview(request=req)
 
     assert len(resp["facts"]) == 2
     for f in resp["facts"]:
@@ -90,7 +90,7 @@ async def test_source_uri_stamped_url(fake_chunker, fake_tenant_config, monkeypa
 
     monkeypatch.setattr(ingest_service, "_fetch_url_text", _stub_fetch)
     req = IngestRequest(tenant_id="t1", url="https://example.com/article")
-    resp = await ingest_service.ingest_preview(db=None, request=req)
+    resp = await ingest_service.ingest_preview(request=req)
 
     assert resp["facts"]
     for f in resp["facts"]:
@@ -108,7 +108,7 @@ async def test_source_uri_request_override_beats_default(fake_chunker, fake_tena
         content="A meaningful sentence about distributed systems.",
         source_uri="upload:report.pdf",
     )
-    resp = await ingest_service.ingest_preview(db=None, request=req)
+    resp = await ingest_service.ingest_preview(request=req)
 
     assert resp["facts"]
     for f in resp["facts"]:
@@ -128,7 +128,7 @@ async def test_existing_source_uri_in_fact_not_overwritten(fake_chunker, fake_te
         }
     ]
     req = IngestRequest(tenant_id="t1", content="A meaningful sentence here.")
-    resp = await ingest_service.ingest_preview(db=None, request=req)
+    resp = await ingest_service.ingest_preview(request=req)
 
     assert resp["facts"][0]["source_uri"] == "custom://override"
 
@@ -144,7 +144,7 @@ async def test_content_length_under_cap_no_truncated_flag(fake_chunker, fake_ten
     """Input well under cap → content_length = len(input), no truncated flag."""
     text = "A" * 5_000
     req = IngestRequest(tenant_id="t1", content=text)
-    resp = await ingest_service.ingest_preview(db=None, request=req)
+    resp = await ingest_service.ingest_preview(request=req)
 
     assert resp["content_length"] == 5_000
     assert "truncated" not in resp
@@ -165,7 +165,7 @@ async def test_large_content_now_fans_out_to_multiple_sections(fake_chunker, fak
     )
     full_text = paragraph * 800  # ~80k chars
     req = IngestRequest(tenant_id="t1", content=full_text)
-    resp = await ingest_service.ingest_preview(db=None, request=req)
+    resp = await ingest_service.ingest_preview(request=req)
 
     assert resp["content_length"] == len(full_text)
     assert "truncated" not in resp, "post-PR#7 there's no truncate; response should not have the flag"
@@ -193,7 +193,7 @@ async def test_short_circuit_skips_llm(fake_chunker, fake_tenant_config, content
         # empty string → IngestPreview's own 400 path, not the short-circuit
         return
     req = IngestRequest(tenant_id="t1", content=content)
-    resp = await ingest_service.ingest_preview(db=None, request=req)
+    resp = await ingest_service.ingest_preview(request=req)
 
     assert resp["facts"] == []
     assert resp["chunk_ms"] == 0
@@ -208,7 +208,7 @@ async def test_short_circuit_threshold_boundary(fake_chunker, fake_tenant_config
     """Exactly MIN chars → goes to LLM (boundary is < not <=)."""
     content = "x" * ingest_service._INGEST_MIN_CONTENT_CHARS  # exactly 20
     req = IngestRequest(tenant_id="t1", content=content)
-    resp = await ingest_service.ingest_preview(db=None, request=req)
+    resp = await ingest_service.ingest_preview(request=req)
 
     assert "skipped_reason" not in resp
     assert fake_chunker.calls, "Expected _chunk_content to be called at threshold"
@@ -222,7 +222,7 @@ async def test_whitespace_only_still_short_circuits_regardless_of_size(fake_chun
     is just the plain skipped_reason since we no longer truncate.)"""
     content = " " * 60_000
     req = IngestRequest(tenant_id="t1", content=content)
-    resp = await ingest_service.ingest_preview(db=None, request=req)
+    resp = await ingest_service.ingest_preview(request=req)
 
     assert resp["skipped_reason"] == "content_too_short"
     assert resp["chunk_ms"] == 0
