@@ -5,12 +5,17 @@ must use these repositories instead of executing SQL directly.
 """
 
 
+_VALID_TABLE_ALIASES = frozenset({"m", "a", "e", "d", "f", "r", "t", "mem"})
+
+
 def scope_sql(
     tenant_id: str,
     fleet_id: str | None,
     table: str = "m",
 ) -> tuple[str, dict]:
     """Build a WHERE clause fragment for tenant + optional fleet scoping."""
+    if table not in _VALID_TABLE_ALIASES:
+        raise ValueError(f"Invalid table alias: {table}")
     clause = f"{table}.tenant_id = :tenant_id"
     params: dict = {"tenant_id": tenant_id}
     if fleet_id is not None:
