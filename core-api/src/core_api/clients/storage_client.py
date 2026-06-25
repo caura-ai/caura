@@ -1239,7 +1239,7 @@ class CoreStorageClient:
     async def get_memory_ids_by_entity_ids(
         self,
         entity_ids: list[str],
-    ) -> list[tuple]:
+    ) -> list[dict]:
         result = await self._post(
             "/entities/memory-ids-by-entity-ids",
             {"entity_ids": entity_ids},
