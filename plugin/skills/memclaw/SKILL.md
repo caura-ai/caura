@@ -226,8 +226,9 @@ byte, and your teammates never see it.
 
 ## 9 · Capture cadence (L1 / L2 / L3)
 
-- **L1 — per turn.** After each meaningful outcome, write with date, what, who,
-  outcome, next.
+- **L1 — per task.** At task completion or a real decision point (not every
+  turn), write with date, what, who, outcome, next. Tool-by-tool progress is
+  not an L1 write — that's scratchpad (§3).
 - **L2 — session boundary.** At > 60 % context or session end, write a full
   summary.
 - **L3 — consolidation.** On periodic runtime sweeps, find gaps, merge

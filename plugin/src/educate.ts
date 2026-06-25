@@ -401,13 +401,14 @@ to other agents → write it to MemClaw.
 operations). Never fabricate. If uncertain, write privately
 (\`visibility=scope_agent\`) until resolved.
 
-**Completion contract.** No silent completions — every meaningful
-outcome MUST produce a write. No write = not done. Checkpoint every
-30 min on long tasks.
+**What to write.** Durable knowledge, not activity. Tool calls, command
+output, and intermediate steps are scratchpad, not memories — they
+pollute recall. Write only what helps another agent in a *later
+session*; if it dies with this task, don't.
 
 **Write triggers.** Task done · bug · deploy · decision · API change ·
 blocker · commitment · config change · error pattern · skill created
-or updated. If in doubt: write.
+or updated. If in doubt, don't.
 
 **Skills.** Team-knowledge catalog at \`collection=skills\`. Search via
 \`memclaw_doc op=search collection=skills\` (\`memclaw_recall\` is YOUR

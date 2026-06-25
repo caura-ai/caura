@@ -1375,7 +1375,7 @@ describe("buildAgentsMd", () => {
     // (on-demand). This test guards against the move regressing.
     const skill = readFileSync(SHARED_SKILL_PATH, "utf-8");
     assert.ok(skill.includes("Capture cadence"), "SKILL.md missing L1/L2/L3 capture cadence");
-    assert.ok(skill.includes("L1 — per turn"));
+    assert.ok(skill.includes("L1 — per task"));
     assert.ok(skill.includes("L2 — session boundary"));
     assert.ok(skill.includes("L3 — consolidation"));
     assert.ok(
