@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.12.0](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.11.0...plugin-v2.12.0) (2026-06-25)
+
+
+### Features
+
+* **skill:** curb trivial memory writes in agent guidance ([#494](https://github.com/caura-ai/caura-memclaw/issues/494)) ([d7bca1f](https://github.com/caura-ai/caura-memclaw/commit/d7bca1f9e7a9a38279d3d48f8e717505247bd474))
+
 ## [2.11.0](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.10.1...plugin-v2.11.0) (2026-06-24)
 
 
