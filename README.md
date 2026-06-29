@@ -480,6 +480,40 @@ The client discovers 12 tools automatically:
 
 > **Skill sharing** is now done via `memclaw_doc` — agents share a `SKILL.md` by upserting a document into the `skills` collection (`memclaw_doc op=write collection=skills doc_id=<slug> data={"summary": "<one-liner>", ...}`). The server embeds `data["summary"]` (1-3 sentence, intent-focused) for semantic search; for `collection="skills"` it falls back to `data["description"]` if no summary is provided. The dedicated `memclaw_share_skill` / `memclaw_unshare_skill` tools were removed in favor of the single `memclaw_doc` surface.
 
+### Skill Factory
+
+Sharing a skill by hand (above) is the floor. **Skill Factory** is the
+governed system on top of the `skills` collection — it auto-generates skills
+from fleet behavior, gates what goes live, and delivers active skills to your
+agents. It's **opt-in per tenant and off by default**: until you set
+`skills_factory.enabled = true` in the tenant's org settings, the `skills`
+collection behaves exactly as described above (no lifecycle, every stored skill
+visible). Three pillars:
+
+- **Authoring — agents *and* Forge.** Agents author skills directly via
+  `memclaw_doc op=write collection=skills`. **Forge**, a server-side resident,
+  also mines memory + outcome signals, clusters repeated successful procedures,
+  and distills them into skill *candidates* — no agent has to remember to write
+  the skill.
+- **Governance — a lifecycle.** Every skill carries a status:
+  `candidate → staged → active` (with `rejected` / `quarantined` / `stale` /
+  `deprecated` exits). Six automated gates plus a Sentinel content scan decide
+  what may be promoted, and a **Skills Inbox** lets an operator approve, edit,
+  reject, or quarantine staged skills. An agent write lands as `staged`, never
+  instantly `active`.
+- **Delivery — pull and push.** Agents *pull* active skills over MCP
+  (`memclaw_doc op=search`/`op=read`), or the **OpenClaw plugin** *pushes* them:
+  its reconciler fetches every active skill from `POST /api/v1/skills/installable`
+  and writes each to the node's skill directory, optionally registering that
+  directory on OpenClaw's load path. Both tiers serve **active-only** once the
+  feature is enabled.
+
+Deep dives: [`docs/mcp-skill-delivery.md`](docs/mcp-skill-delivery.md) (the
+active-only delivery contract + plugin reconcile targets) and
+[`docs/operator-forge-cron.md`](docs/operator-forge-cron.md) (scheduling Forge).
+The full operator/developer guide lives in the
+[MemClaw docs → Skill Factory](https://memclaw.net/docs/skill-factory).
+
 ### Install the skill (Claude Code & Codex)
 
 Install MemClaw's usage guide as a **skill** so your agent knows *when* and
