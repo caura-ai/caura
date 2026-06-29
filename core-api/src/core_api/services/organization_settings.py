@@ -107,10 +107,17 @@ DEFAULT_SETTINGS: dict = {
     },
     "observability": {
         # Opt-in (default off). When on, each agent-chosen ``memclaw_recall``
-        # call is logged (query + scope + candidate scores) to ``recall_event``
-        # / ``recall_candidate`` for "why aren't good memories recalled?"
-        # analysis. The plugin's automatic ``/search`` is never logged.
+        # call is logged (query + scope + candidate scores + below-floor
+        # near-misses) to ``recall_event`` / ``recall_candidate`` for "why
+        # aren't good memories recalled?" analysis.
         "recall_logging_enabled": None,
+        # Opt-in (default off). When on, the plugin's automatic ``/search``
+        # path is ALSO logged — but in a lighter form: returned candidates
+        # only (id + scores), no below-floor near-misses, since ``/search``
+        # is high-volume. Independent of ``recall_logging_enabled`` so it can
+        # be enabled for a short diagnostic window on a couple of tenants and
+        # then turned back off.
+        "search_recall_logging_enabled": None,
     },
     "chunking": {
         "auto_chunk_enabled": None,
@@ -467,6 +474,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "entity_linking.auto_entity_linking_enabled": bool,
     "insights.auto_insights_enabled": bool,
     "observability.recall_logging_enabled": bool,
+    "observability.search_recall_logging_enabled": bool,
     "chunking.auto_chunk_enabled": bool,
     "agents.require_agent_approval": bool,
     "entity_blocklist": list,
@@ -824,6 +832,14 @@ class ResolvedConfig:
     @property
     def recall_logging_enabled(self) -> bool:
         val = self._ts.get("observability", {}).get("recall_logging_enabled")
+        return val if val is not None else False
+
+    # Search-path recall logging — opt-in (default False). When on, the
+    # automatic ``/search`` path is logged too (lighter: returned-only, no
+    # near-misses). Independent of ``recall_logging_enabled``.
+    @property
+    def search_recall_logging_enabled(self) -> bool:
+        val = self._ts.get("observability", {}).get("search_recall_logging_enabled")
         return val if val is not None else False
 
     # Chunking

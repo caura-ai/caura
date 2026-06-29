@@ -5,10 +5,13 @@ returned top-k *and* a few near-misses below the similarity floor) so we can
 answer "why aren't good memories recalled?" — distinguishing *nobody asked*
 from *just missed the cutoff* from *outranked*.
 
-Gating (both cheap, evaluated before any DB work):
-  1. ``source == "mcp_recall"`` — ONLY the agent-chosen tool. The plugin's
-     automatic ``/search`` is never logged.
-  2. ``tenant_config.recall_logging_enabled`` — per-tenant opt-in (default off).
+Gating (cheap, evaluated before any DB work) — two independent modes:
+  * ``source == "mcp_recall"`` + ``tenant_config.recall_logging_enabled``
+    → FULL log: returned candidates + a few below-floor near-misses.
+  * ``source == "search"`` (the plugin's automatic path) +
+    ``tenant_config.search_recall_logging_enabled`` → LIGHT log: returned
+    candidates only (no near-misses), since ``/search`` is high-volume.
+  * anything else → not logged.
 
 The actual writes run fire-and-forget in a background task (its own session),
 exactly like ``TrackRecalls`` — zero added request latency, and any failure is
@@ -54,12 +57,20 @@ class LogRecallEvent:
 
     async def execute(self, ctx: PipelineContext) -> StepResult | None:
         try:
-            # Gate 1: only the agent-chosen tool.
-            if ctx.data.get("source") != "mcp_recall":
-                return None
-            # Gate 2: per-tenant opt-in.
+            source = ctx.data.get("source")
             cfg = ctx.tenant_config
-            if not getattr(cfg, "recall_logging_enabled", False):
+            # Two independent, per-tenant opt-in modes. ``mcp_recall`` (the
+            # agent-chosen tool) logs the full picture incl. near-misses;
+            # ``search`` (the high-volume automatic path) logs returned-only.
+            if source == "mcp_recall":
+                if not getattr(cfg, "recall_logging_enabled", False):
+                    return None
+                include_near_misses = True
+            elif source == "search":
+                if not getattr(cfg, "search_recall_logging_enabled", False):
+                    return None
+                include_near_misses = False
+            else:
                 return None
 
             sp = ctx.data.get("search_params", {}) or {}
@@ -86,8 +97,13 @@ class LogRecallEvent:
                     }
                 )
             # Near-misses: raw candidates not returned (below floor / outside
-            # top_k), best-first, capped.
-            near = [r for r in raw_rows if _mem_id(r) not in returned_ids][:_NEAR_MISS_LIMIT]
+            # top_k), best-first, capped. Skipped for the high-volume
+            # ``search`` path.
+            near = (
+                [r for r in raw_rows if _mem_id(r) not in returned_ids][:_NEAR_MISS_LIMIT]
+                if include_near_misses
+                else []
+            )
             for offset, row in enumerate(near):
                 candidates.append(
                     {
@@ -104,7 +120,7 @@ class LogRecallEvent:
             event = {
                 "tenant_id": ctx.data.get("tenant_id"),
                 "agent_id": ctx.data.get("caller_agent_id"),
-                "source": "mcp_recall",
+                "source": source,
                 "query_text": ctx.data.get("query"),
                 "strategy": strategy,
                 "filter_agent_id": ctx.data.get("filter_agent_id"),

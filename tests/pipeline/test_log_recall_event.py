@@ -1,15 +1,17 @@
 """Unit tests for LogRecallEvent — gating + candidate construction (no DB).
 
-The step must:
-  - skip unless source == "mcp_recall" (plugin /search is never logged),
-  - skip unless the tenant opted in (recall_logging_enabled),
-  - otherwise emit one event + returned candidates + capped near-misses.
-The actual DB write (`_persist`) and `track_task` are patched out.
+Two independent, per-tenant opt-in modes:
+  - source == "mcp_recall" + recall_logging_enabled
+      → FULL log: returned candidates + capped below-floor near-misses.
+  - source == "search" + search_recall_logging_enabled
+      → LIGHT log: returned candidates only (no near-misses).
+  - any other source, or the relevant flag off → not logged.
+The actual write (`_persist`, which posts to the storage client) and
+`track_task` are patched out.
 """
 
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -27,8 +29,11 @@ def _row(vec_sim, score, recall_boost=1.0):
     )
 
 
-def _cfg(enabled):
-    return SimpleNamespace(recall_logging_enabled=enabled)
+def _cfg(recall=False, search=False):
+    return SimpleNamespace(
+        recall_logging_enabled=recall,
+        search_recall_logging_enabled=search,
+    )
 
 
 def _capture(monkeypatch):
@@ -40,13 +45,13 @@ def _capture(monkeypatch):
         return "coro-sentinel"
 
     monkeypatch.setattr(mod, "_persist", fake_persist)
-    monkeypatch.setattr(mod, "track_task", lambda coro: None)
+    monkeypatch.setattr(mod, "track_task", lambda _coro: None)
     return captured
 
 
-def _ctx(source, enabled, returned_rows, raw_rows):
+def _ctx(source, cfg, returned_rows, raw_rows):
     return PipelineContext(
-                data={
+        data={
             "source": source,
             "query": "what is our brand rule",
             "tenant_id": "t1",
@@ -59,34 +64,43 @@ def _ctx(source, enabled, returned_rows, raw_rows):
             "filtered_rows": returned_rows,
             "raw_rows": raw_rows,
         },
-        tenant_config=_cfg(enabled),
+        tenant_config=cfg,
     )
 
 
 @pytest.mark.asyncio
-async def test_skips_when_source_is_not_mcp_recall(monkeypatch):
+async def test_skips_search_when_search_flag_off(monkeypatch):
     captured = _capture(monkeypatch)
-    ctx = _ctx("search", True, [_row(0.6, 0.55)], [_row(0.6, 0.55)])
-    await LogRecallEvent().execute(ctx)
-    assert captured == []  # plugin /search must never be logged
-
-
-@pytest.mark.asyncio
-async def test_skips_when_tenant_not_opted_in(monkeypatch):
-    captured = _capture(monkeypatch)
-    ctx = _ctx("mcp_recall", False, [_row(0.6, 0.55)], [_row(0.6, 0.55)])
+    # recall_logging_enabled on, but the search flag is off → /search not logged.
+    ctx = _ctx("search", _cfg(recall=True, search=False), [_row(0.6, 0.55)], [_row(0.6, 0.55)])
     await LogRecallEvent().execute(ctx)
     assert captured == []
 
 
 @pytest.mark.asyncio
-async def test_logs_event_with_returned_and_near_misses(monkeypatch):
+async def test_skips_mcp_when_recall_flag_off(monkeypatch):
+    captured = _capture(monkeypatch)
+    ctx = _ctx("mcp_recall", _cfg(recall=False, search=True), [_row(0.6, 0.55)], [_row(0.6, 0.55)])
+    await LogRecallEvent().execute(ctx)
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_skips_unknown_source(monkeypatch):
+    captured = _capture(monkeypatch)
+    ctx = _ctx("bulk", _cfg(recall=True, search=True), [_row(0.6, 0.55)], [_row(0.6, 0.55)])
+    await LogRecallEvent().execute(ctx)
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_logs_returned_and_near_misses(monkeypatch):
     captured = _capture(monkeypatch)
     returned = [_row(0.60, 0.58), _row(0.55, 0.54)]
     # raw_rows = the two returned + 7 below-floor near-misses
     near = [_row(0.28 - i * 0.01, 0.2) for i in range(7)]
     raw = returned + near
-    ctx = _ctx("mcp_recall", True, returned, raw)
+    ctx = _ctx("mcp_recall", _cfg(recall=True), returned, raw)
 
     await LogRecallEvent().execute(ctx)
 
@@ -108,6 +122,30 @@ async def test_logs_event_with_returned_and_near_misses(monkeypatch):
     assert candidates[0]["final_score"] == 0.58
     # memory_id is stringified — the payload now crosses an HTTP/JSON boundary,
     # so every candidate id must be a str (UUIDs aren't JSON-serializable).
+    assert all(isinstance(c["memory_id"], str) for c in candidates)
+
+
+@pytest.mark.asyncio
+async def test_search_logs_returned_only_no_near_misses(monkeypatch):
+    captured = _capture(monkeypatch)
+    returned = [_row(0.60, 0.58), _row(0.55, 0.54)]
+    near = [_row(0.28 - i * 0.01, 0.2) for i in range(7)]
+    raw = returned + near
+    ctx = _ctx("search", _cfg(search=True), returned, raw)
+
+    await LogRecallEvent().execute(ctx)
+
+    assert len(captured) == 1
+    event, candidates = captured[0]
+    assert event["source"] == "search"
+    assert event["result_count"] == 2
+    # LIGHT mode: only the 2 returned rows, NO near-misses.
+    assert len(candidates) == 2
+    assert [c["returned"] for c in candidates] == [True, True]
+    assert [c["rank"] for c in candidates] == [1, 2]
+    # scores still captured for the returned rows.
+    assert candidates[0]["vec_sim"] == 0.60
+    assert candidates[0]["final_score"] == 0.58
     assert all(isinstance(c["memory_id"], str) for c in candidates)
 
 
