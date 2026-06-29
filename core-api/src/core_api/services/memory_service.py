@@ -15,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot, per_tenant_storage_slot
+from core_api.services.agent_identity import ReservedAgentIdError, enforce_reserved_write_id
 from core_api.tasks import track_task
 
 try:
@@ -237,6 +238,12 @@ def _memory_to_out(
 async def create_memory(data: MemoryCreate) -> MemoryOut:
     if not data.agent_id:
         raise ValueError("agent_id must be resolved before calling create_memory")
+    # Reserved-id guard (`main` fix): single chokepoint for REST + MCP + STM.
+    # data.agent_id is already the resolved effective identity here.
+    try:
+        enforce_reserved_write_id(data.agent_id)
+    except ReservedAgentIdError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if _USE_PIPELINE_WRITE:
         return await _create_memory_pipeline(data)
     logger.warning("legacy write path invoked; this path is deprecated and scheduled for removal")
@@ -1050,6 +1057,14 @@ async def create_memories_bulk(
     ``client_request_id`` so input order is preserved without relying on
     Postgres ``RETURNING`` order.
     """
+    if not data.agent_id:
+        raise ValueError("agent_id must be resolved before calling create_memories_bulk")
+    # Reserved-id guard (`main` fix): the batch attributes every item to the
+    # parent's resolved agent_id, so one check covers the whole batch.
+    try:
+        enforce_reserved_write_id(data.agent_id)
+    except ReservedAgentIdError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     sc = get_storage_client()
     t0 = time.perf_counter()
     items = data.items

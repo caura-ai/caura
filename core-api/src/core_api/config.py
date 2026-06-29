@@ -49,6 +49,18 @@ class Settings(BaseSettings):
     # ``inline_embedding`` / ``inline_enrichment`` helpers; Phase 3
     # (this revision) deleted the legacy flags + derivation validator.
     deployment_mode: Literal["inline", "deferred"] = "inline"
+    # Reserved-agent-id write guard (`main` identity fix). Bare `agent_id="main"`
+    # is the plugin's unset default; many installs collapse onto it. Phase 1:
+    #   allow  → legacy behavior / instant rollback
+    #   warn   → attribute as today but log `reserved_agent_write` (observe)
+    #   reject → 409 with guidance; a write supplying a unique agent_id passes
+    # Roll out warn → (measure) → reject. The bare-`main` delete gates on reject.
+    reserved_agent_id_policy: Literal["allow", "warn", "reject"] = "warn"
+    # Phase 2 (spoof hardening), ships dark: bind a write's agent_id to the
+    # verified credential identity (auth.agent_id), ignoring a client-supplied
+    # body override. Enable ONLY after the reserved-`main` credentials are
+    # re-identified — otherwise it pins them back onto `main`.
+    bind_write_identity_to_auth: bool = False
     # Outer cap on the inline embed+enrich gather in ParallelEmbedEnrich.
     # Was hardcoded at 20.0 — too tight under load once embedding moved
     # off the hot path (CAURA-594) and enrichment LLM became the sole
