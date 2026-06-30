@@ -58,6 +58,13 @@ dependencies = [
 # Optional: required only when EVENT_BUS_BACKEND=pubsub (SaaS deployments).
 # Standalone installs default to the in-process bus and don't need this.
 pubsub = ["google-cloud-pubsub>=2.23,<3"]
+# Datadog APM tracer (CAURA-0000 observability POC). Opt-in: the app runs under
+# ``ddtrace-run`` only in the Caura SaaS deploy (see Dockerfile /
+# docker-entrypoint.sh). Kept out of the default install so OSS / on-prem /
+# local images carry zero Datadog code. Build with `--extra datadog`
+# (Dockerfile: --build-arg DD_APM_ENABLED=true). Auto-instruments FastAPI /
+# SQLAlchemy / asyncpg / httpx / redis with no code changes.
+datadog = ["ddtrace>=4.10.6"]
 # Optional: multi-format document extraction for the /ingest/* endpoints.
 # Kreuzberg (~64MB, Elastic-2.0) is excluded from the default image to cut
 # cold-start pull + import time — the ingest endpoints return 501 without it
