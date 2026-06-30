@@ -29,10 +29,11 @@ def _row(vec_sim, score, recall_boost=1.0):
     )
 
 
-def _cfg(recall=False, search=False):
+def _cfg(recall=False, search=False, near_miss_rate=0.0):
     return SimpleNamespace(
         recall_logging_enabled=recall,
         search_recall_logging_enabled=search,
+        search_recall_near_miss_sample_rate=near_miss_rate,
     )
 
 
@@ -147,6 +148,26 @@ async def test_search_logs_returned_only_no_near_misses(monkeypatch):
     assert candidates[0]["vec_sim"] == 0.60
     assert candidates[0]["final_score"] == 0.58
     assert all(isinstance(c["memory_id"], str) for c in candidates)
+
+
+@pytest.mark.asyncio
+async def test_search_keeps_near_misses_when_sampled(monkeypatch):
+    # near_miss_rate=1.0 → always sampled (random.random() < 1.0 is always True),
+    # so the /search path keeps near-misses on this event.
+    captured = _capture(monkeypatch)
+    returned = [_row(0.60, 0.58), _row(0.55, 0.54)]
+    near = [_row(0.28 - i * 0.01, 0.2) for i in range(7)]
+    raw = returned + near
+    ctx = _ctx("search", _cfg(search=True, near_miss_rate=1.0), returned, raw)
+
+    await LogRecallEvent().execute(ctx)
+
+    assert len(captured) == 1
+    event, candidates = captured[0]
+    assert event["source"] == "search"
+    # 2 returned + capped 5 near-misses = 7 (same cap as mcp_recall).
+    assert len(candidates) == 7
+    assert [c["returned"] for c in candidates] == [True, True, False, False, False, False, False]
 
 
 @pytest.mark.asyncio

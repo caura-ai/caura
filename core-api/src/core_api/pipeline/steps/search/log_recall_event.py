@@ -10,7 +10,11 @@ Gating (cheap, evaluated before any DB work) — two independent modes:
     → FULL log: returned candidates + a few below-floor near-misses.
   * ``source == "search"`` (the plugin's automatic path) +
     ``tenant_config.search_recall_logging_enabled`` → LIGHT log: returned
-    candidates only (no near-misses), since ``/search`` is high-volume.
+    candidates only, since ``/search`` is high-volume. Below-floor
+    near-misses are kept on a sampled fraction of events
+    (``search_recall_near_miss_sample_rate``, default 0.0) so the
+    "just-missed" distribution is still estimable without the full
+    candidate-row volume.
   * anything else → not logged.
 
 The actual writes run fire-and-forget in a background task (its own session),
@@ -21,6 +25,7 @@ swallowed so logging can never break a recall.
 from __future__ import annotations
 
 import logging
+import random
 
 from core_api.clients.storage_client import get_storage_client
 from core_api.pipeline.context import PipelineContext
@@ -69,7 +74,11 @@ class LogRecallEvent:
             elif source == "search":
                 if not getattr(cfg, "search_recall_logging_enabled", False):
                     return None
-                include_near_misses = False
+                # Returned-only by default; keep near-misses on a sampled
+                # fraction so the "just-missed" tail stays estimable on the
+                # high-volume path.
+                rate = getattr(cfg, "search_recall_near_miss_sample_rate", 0.0) or 0.0
+                include_near_misses = rate > 0 and random.random() < rate
             else:
                 return None
 
