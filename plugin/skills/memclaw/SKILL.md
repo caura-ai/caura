@@ -441,3 +441,182 @@ every agent on a node that has the plugin enabled
 (`plugins.entries.memclaw.enabled`). To customize it for a specific agent, place
 a replacement file at `<workspace>/skills/memclaw/SKILL.md` — it takes
 precedence over this shared copy.*
+
+---
+
+## Appendix A · Hermes Agent Configuration
+
+MemClaw is configured as an MCP server in `~/.hermes/config.yaml`:
+
+```yaml
+mcp_servers:
+  memclaw:
+    url: http://192.168.1.53:8000/mcp
+    headers:
+      X-Tenant-ID: default
+      X-Agent-ID: hermes-orchestrator
+    connect_timeout: 60
+    timeout: 120
+```
+
+### Identity header priority
+
+The server resolves identity in this order (first match wins):
+1. `X-Agent-ID` header (set in config — guarantees identity, model never forgets)
+2. Body `agent_id` arg on each tool call
+3. Deployment default (`memclaw-caura-memclaw-c8624d-406` — shared bucket, avoid)
+
+### REST API (supplement to MCP)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `GET /api/v1/health` | GET | Health check |
+| `GET /api/v1/status` | GET | Full status with dependencies |
+| `GET /api/v1/stats` | GET | Aggregate counts |
+| `GET /api/v1/memories?agent_id=...` | GET | List memories |
+| `POST /api/v1/memories` | POST | Create memory |
+| `POST /api/v1/recall` | POST | Semantic search |
+
+REST does **not** include procedures, keystones, insights, evolve, tune, manage, or doc. Those are MCP-only.
+
+### Monitoring
+
+```bash
+hermes mcp test memclaw                         # "✓ Connected" + "✓ Tools discovered: 20"
+curl -s http://192.168.1.53:8000/api/v1/health  # Direct health check
+grep -i memclaw ~/.hermes/logs/mcp-stderr.log    # MCP error log
+```
+
+---
+
+## Appendix B · E2E Test Results (2026-06-30, all 20 tools)
+
+30 operations tested. **28/30 PASS (93.3%)**. All failures by-design.
+
+### Core Memory
+
+| Tool | Op | Status | Latency | Notes |
+|------|----|--------|---------|-------|
+| `memclaw_write` | content | PASS | 590ms | Returns UUID; fast mode; auto-classifies |
+| `memclaw_recall` | query | PASS | 297ms | Hybrid semantic+keyword; similarity scores |
+| `memclaw_list` | filter/sort | PASS | 19ms | Cursor pagination |
+| `memclaw_manage` | read | PASS | 14ms | Full details with metadata |
+| `memclaw_manage` | update | PASS | 714ms | Patches content+weight, re-embeds |
+| `memclaw_manage` | transition | PASS | 25ms | Status changes |
+| `memclaw_stats` | aggregate | PASS | 26ms | Breakdowns by type/agent/status |
+
+### Procedures
+
+| Tool | Op | Status | Latency | Notes |
+|------|----|--------|---------|-------|
+| `memclaw_procedure_suggest` | ranked list | PASS | 847ms | Scored with breakdown |
+| `memclaw_procedure_write` | create | PASS | 505ms | Stores with embedding |
+| `memclaw_procedure_record` | outcome | PASS | 31ms | Updates reliability (0.5→0.667) |
+| `memclaw_procedure_manage` | stats | PASS | 12ms | Reliability + quarantine status |
+
+### Governance
+
+| Tool | Op | Status | Latency | Notes |
+|------|----|--------|---------|-------|
+| `memclaw_keystones` | read | PASS | 51ms | 0 rules is normal |
+| `memclaw_keystones_set` | set | FAIL | 15ms | Trust 1 < 2 (by design) |
+
+### Documents
+
+| Tool | Op | Status | Latency | Notes |
+|------|----|--------|---------|-------|
+| `memclaw_doc` | write | PASS | 359ms | Upserts, auto-indexes |
+| `memclaw_doc` | read | PASS | 9ms | By collection+doc_id |
+| `memclaw_doc` | query | PASS | 16ms | where dict filter |
+| `memclaw_doc` | search | PASS | 466ms | Cross-collection semantic |
+| `memclaw_doc` | list_collections | PASS | 23ms | Names + counts |
+| `memclaw_doc` | delete | FAIL | 8ms | Fleet policy blocks (by design) |
+
+### Analytics
+
+| Tool | Op | Status | Latency | Notes |
+|------|----|--------|---------|-------|
+| `memclaw_evolve` | outcome | PASS | 427ms | Adjusts weights, generates rules |
+| `memclaw_insights` | patterns | PASS | 467ms | 6 focus modes |
+| `memclaw_tune` | get | PASS | 8ms | Returns current profile |
+
+### Entity, Env, Session, Misc
+
+| Tool | Op | Status | Latency | Notes |
+|------|----|--------|---------|-------|
+| `memclaw_entity_get` | lookup | PASS | 134ms | Entity + linked memories |
+| `memclaw_env` | upsert | PASS | 21ms | Infra facts tenant-wide |
+| `memclaw_env` | list | PASS | 19ms | All env truths |
+| `memclaw_env` | verify | PASS | 27ms | Bumps verification_count |
+| `memclaw_session_start` | (default) | FAIL | 18ms | body agent_id needs fleet_id; use headers |
+| `memclaw_review` | low-weight | PASS | 13ms | Flags below threshold |
+| `memclaw_export` | bulk | PASS | 21ms | Paginated with cursor |
+
+**Failures (all by-design):**
+- `memclaw_keystones_set` — trust gating (register first)
+- `memclaw_doc delete` — fleet policy blocks destructive ops
+- `memclaw_session_start` — body arg requires fleet_id; use headers instead
+
+---
+
+## Appendix C · Troubleshooting
+
+### 1. UPSTREAM_TIMEOUT on recall
+**Symptom**: `Search embedding timed out` after ~10s
+**Cause**: Embedding service (OpenAI) slow or unreachable
+**Fix**: Retry with shorter query, or use `memclaw_list` for non-semantic browsing
+
+### 2. context_features validation error
+**Symptom**: `Input should be a valid dictionary`
+**Cause**: Passing list instead of dict
+**Fix**: `context_features = {'docker': True}` not `['docker']`
+
+### 3. keystones_set FORBIDDEN
+**Symptom**: `Agent 'X' (trust_level=1) < required 2`
+**Cause**: Unregistered agent at trust 1
+**Fix**: Write one memory first (`memclaw_write`), then retry
+
+### 4. session_start INVALID_ARGUMENTS
+**Symptom**: `agent_id requires fleet_id`
+**Cause**: Body `agent_id` arg requires `fleet_id` too
+**Fix**: Omit body `agent_id` (rely on header) or pass both
+
+### 5. Fleet-scope FORBIDDEN
+**Symptom**: `fleet 'X' is not writable by principals of fleet 'Y'`
+**Cause**: Fleet membership policy
+**Fix**: Write to your home fleet or omit `fleet_id` (null fleet)
+
+### 6. doc delete FORBIDDEN
+**Symptom**: `principals of fleet are not permitted to delete memories`
+**Cause**: Fleet policy blocks destructive doc ops
+**Fix**: Update to empty/stale state instead, or transition to archived
+
+### 7. Identity headers not taking effect
+**Symptom**: agent_id still shows default after config change
+**Cause**: MCP connections cached at session start
+**Fix**: `/reload-mcp` or start a new session
+
+### 8. Slow writes (10-12s)
+**Symptom**: `memclaw_write` takes 10+ seconds
+**Cause**: Embedding generation latency
+**Expected**: Normal; `write_mode: fast` helps but embedding still takes time
+
+### 9. Duplicate memory on write
+**Symptom**: `status: duplicate` with `existing_id`
+**Cause**: Near-duplicate already exists
+**Fix**: Use `existing_id` field instead of `id`
+
+### 10. evolve CONFLICT
+**Symptom**: `Duplicate memory exists`
+**Cause**: Memory already evolved
+**Fix**: Check metadata with `memclaw_manage op=read` before evolving
+
+### 11. bulk_delete FORBIDDEN
+**Symptom**: `FORBIDDEN` on bulk_delete
+**Cause**: Requires trust >= 3
+**Fix**: Use individual `memclaw_manage op=transition status=archived` instead
+
+### 12. Insights invalid focus
+**Symptom**: `Invalid focus 'gaps'`
+**Cause**: Wrong focus value
+**Fix**: Use one of: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`
