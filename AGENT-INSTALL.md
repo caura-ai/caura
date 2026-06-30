@@ -138,6 +138,10 @@ If you're an OpenClaw agent running on a gateway, install the plugin instead:
 MEMCLAW_URL=http://localhost:8000
 MEMCLAW_KEY=YOUR_KEY_HERE      # admin key (Path 2) or shared gate key (Path 3)
 MEMCLAW_FLEET=my-fleet
+MEMCLAW_AGENT_ID=my-agent      # optional but recommended: a stable, human-readable
+                              # identity for THIS install (e.g. webclaw, vm-01). If
+                              # unset, the plugin uses a stable per-install id
+                              # (main-<install_id>) so installs don't collide.
 
 # Run the install script (API key in header, not query param)
 curl -sf -H "X-API-Key: $MEMCLAW_KEY" "$MEMCLAW_URL/api/v1/install-plugin?fleet_id=$MEMCLAW_FLEET&api_url=$MEMCLAW_URL" | bash

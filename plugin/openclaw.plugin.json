@@ -10,7 +10,12 @@
   ],
   "configSchema": {
     "type": "object",
-    "properties": {},
+    "properties": {
+      "MEMCLAW_AGENT_ID": {
+        "type": "string",
+        "description": "Optional but recommended: a stable, human-readable identity for THIS install (e.g. \"webclaw\", \"vm-01\"); surfaces as the agent_id on writes. If unset, the plugin uses a stable per-install id (main-<install_id>) so installs don't collide."
+      }
+    },
     "required": []
   },
   "contracts": {

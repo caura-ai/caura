@@ -26,7 +26,7 @@ from pydantic import Field, ValidationError
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
-from core_api.agent_ids import DEFAULT_AGENT_ID
+from core_api.agent_ids import DEFAULT_AGENT_ID, effective_write_agent_id
 from core_api.auth import get_admin_key
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.constants import (
@@ -743,7 +743,12 @@ async def memclaw_write(
             t0,
         )
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    # WRITE identity: verified gateway id wins UNLESS it's a reserved
+    # placeholder (e.g. a misconfigured home_agent_id="main" cred), in which
+    # case the body-supplied id is honored so the install self-identifies
+    # rather than collapsing onto "main". Reads keep `_get_agent_id() or
+    # agent_id` (visibility scoping is unaffected).
+    agent_id = effective_write_agent_id(_get_agent_id(), agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
     # C3/C8 — reject reserved memory_types at the boundary before we
