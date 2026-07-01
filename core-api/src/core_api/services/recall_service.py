@@ -189,7 +189,14 @@ async def summarize_memories(
         tenant_config=config,
         service_label="recall",
         model_override=recall_model,
-        timeout=30.0,
+        # Recall is a latency-sensitive read path. Cap the per-attempt LLM timeout AND
+        # don't retry the same provider: with the default 2 attempts across primary +
+        # fallback, a slow provider stacks past the 45s request-timeout budget and
+        # surfaces as a Cloud Run "malformed response / connection error" 503. One
+        # primary attempt (15s), then one fallback attempt (15s), then _fake_recall
+        # keeps the worst case ~30s and fails fast instead of hanging.
+        timeout=15.0,
+        max_attempts=1,
     )
 
     recall_ms = int((time.perf_counter() - t0) * 1000)
