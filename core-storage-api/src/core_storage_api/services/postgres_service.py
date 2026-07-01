@@ -3422,11 +3422,21 @@ class PostgresService:
         agent_id: str | None = None,
         memory_type: str | None = None,
         status: str | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        exclude_memory_types: list[str] | None = None,
+        exclude_agent_ids: list[str] | None = None,
         include_deleted: bool = False,
         readable_tenant_ids: list[str] | None = None,
     ) -> dict:
         """Return ``{total, by_type, by_agent, by_status}`` (+ optional
         ``by_tenant`` / ``deleted`` / ``total_including_deleted``).
+
+        ``created_after`` / ``created_before`` bound the aggregation to a
+        half-open ``[after, before)`` window — used by the daily/weekly report
+        (GET /api/v1/reports) for "what each agent did in the period". Both
+        optional; omitting them aggregates all-time (the MCP ``memclaw_stats``
+        behaviour, unchanged).
 
         Ports core-api ``services.memory_stats.compute_memory_stats`` verbatim —
         same visibility scoping (``agent_id`` doubles as visibility identity AND
@@ -3463,6 +3473,20 @@ class PostgresService:
             scope_filters.append(Memory.memory_type == memory_type)
         if status:
             scope_filters.append(Memory.status == status)
+        # Report time-window: half-open [created_after, created_before). Added to
+        # ``scope_filters`` so it flows through BOTH the live and include_deleted
+        # query paths below (each derives from this list).
+        if created_after:
+            scope_filters.append(Memory.created_at >= created_after)
+        if created_before:
+            scope_filters.append(Memory.created_at < created_before)
+        # Report "durable, decision-bearing" filter: drop episodic activity-log
+        # types and the unattributed firehose agent ("main") so the report
+        # reflects real per-agent work rather than the raw activity stream.
+        if exclude_memory_types:
+            scope_filters.append(Memory.memory_type.notin_(exclude_memory_types))
+        if exclude_agent_ids:
+            scope_filters.append(Memory.agent_id.notin_(exclude_agent_ids))
 
         filters = [Memory.deleted_at.is_(None), *scope_filters]
 
@@ -3495,7 +3519,17 @@ class PostgresService:
         # Returns (where_fragment, params) to thread into the ``text()`` execute.
         def _predicate_sql(filter_list) -> tuple[str, dict]:
             compiled = (
-                select(Memory.id).where(*filter_list).compile(dialect=postgresql.dialect(paramstyle="named"))
+                select(Memory.id)
+                .where(*filter_list)
+                # ``render_postcompile`` expands IN/NOT IN bind lists (e.g. the
+                # exclude_memory_types / exclude_agent_ids filters) into individual
+                # named params at compile time. Without it the compiled string
+                # carries an unexpanded ``[POSTCOMPILE_x]`` placeholder that the
+                # raw ``text()`` re-execution below cannot bind ("column __ ...").
+                .compile(
+                    dialect=postgresql.dialect(paramstyle="named"),
+                    compile_kwargs={"render_postcompile": True},
+                )
             )
             rendered = str(compiled)
             idx = rendered.upper().find("WHERE ")
@@ -3589,6 +3623,44 @@ class PostgresService:
             result["deleted"] = deleted
             result["total_including_deleted"] = total + deleted
         return result
+
+    async def memory_daily_durable_counts(
+        self,
+        *,
+        tenant_id: str,
+        since: datetime,
+        fleet_id: str | None = None,
+        exclude_memory_types: list[str] | None = None,
+        exclude_agent_ids: list[str] | None = None,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> list[dict]:
+        """Per-day durable-write counts since ``since`` — the report's
+        activity-over-time trend. Same durable/firehose exclusions and
+        team/org visibility scope as ``memory_stats_breakdown`` (no agent_id ⇒
+        excludes ``scope_agent``). Runs as a plain ORM ``GROUP BY`` executed
+        directly (no compile→text round-trip, so ``NOT IN`` expands natively).
+        Read-only (reader replica).
+        """
+        conds = [
+            Memory.deleted_at.is_(None),
+            Memory.created_at >= since,
+            Memory.visibility != "scope_agent",
+        ]
+        if readable_tenant_ids:
+            conds.append(Memory.tenant_id.in_(readable_tenant_ids))
+        else:
+            conds.append(Memory.tenant_id == tenant_id)
+        if fleet_id:
+            conds.append(Memory.fleet_id == fleet_id)
+        if exclude_memory_types:
+            conds.append(Memory.memory_type.notin_(exclude_memory_types))
+        if exclude_agent_ids:
+            conds.append(Memory.agent_id.notin_(exclude_agent_ids))
+        day = func.date_trunc("day", Memory.created_at)
+        stmt = select(day.label("d"), func.count().label("c")).where(*conds).group_by(day).order_by(day)
+        async with get_read_session() as session:
+            rows = (await session.execute(stmt)).all()
+        return [{"day": r.d.date().isoformat(), "count": int(r.c)} for r in rows]
 
     # ══════════════════════════════════════════════════════════════════════
     #  ENTITIES

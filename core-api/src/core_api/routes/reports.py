@@ -1,0 +1,437 @@
+"""Report API — ``GET /api/v1/reports``.
+
+Daily/weekly governed activity report — "what each agent did" — backing the
+report → product-page → agent-self-report flow (an agent fetches its own report
+and surfaces it in its 1:1 with its owner, or in its group). MemClaw returns the
+governed data; the agent's runtime does the messaging.
+
+Two-check governed read (order matters):
+
+1. **Authorization (authoritative, server-verified).** ``resolve_caller_and_gate``
+   resolves the caller (gateway-verified ``X-Agent-ID`` > query > default) and
+   gates on trust (scope=agent → trust ≥ 1). The data is then scoped to the
+   caller's own tenant + own fleet (team/org-visible) + own agent rows — exactly
+   what the caller can already recall. Cross-fleet / tenant-wide reporting is
+   deliberately NOT exposed here (would need trust ≥ 2; future admin surface).
+
+2. **Destination down-filter (client-asserted, NARROW-ONLY).** The agent declares
+   the delivery *audience class* it will surface into. This can only ever
+   *narrow* the result from check 1 — never widen it. Absent/unknown destination
+   ⇒ fail closed to the most restrictive class.
+
+The corpus is restricted to **durable, decision-bearing** memories: episodic
+activity-log types and the unattributed ``main`` firehose agent are excluded so
+the report reflects durable per-agent work rather than the raw activity stream.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from core_api.auth import AuthContext, get_auth_context
+from core_api.clients.storage_client import get_storage_client
+from core_api.services.audit_service import log_action
+from core_api.services.caller_identity import resolve_caller_and_gate
+
+router = APIRouter(tags=["Reports"])
+
+# Episodic activity-log type(s) + the unattributed firehose agent excluded so the
+# report reflects durable, decision-bearing per-agent work.
+NON_DURABLE_TYPES = ("episode",)
+RESERVED_FIREHOSE_AGENTS = ("main",)
+
+# Delivery audience classes — an abstraction over messaging platforms
+# (WhatsApp / Teams / Slack / Claude-Code map to one of these at the edge).
+AUDIENCE_OWNER_1TO1 = "owner_1to1"
+AUDIENCE_GROUP = "internal_group"
+AUDIENCE_PRIVATE = "private_session"
+AUDIENCE_EXTERNAL = "external"
+_KNOWN_DESTINATIONS = {AUDIENCE_OWNER_1TO1, AUDIENCE_GROUP, AUDIENCE_PRIVATE, AUDIENCE_EXTERNAL}
+# Audiences that may see per-agent detail + learning titles. ``external`` (and any
+# unknown value, which we coerce to ``external``) is fail-closed to summary only.
+_DETAIL_AUDIENCES = {AUDIENCE_OWNER_1TO1, AUDIENCE_GROUP, AUDIENCE_PRIVATE}
+# "self" audiences scope to the caller's OWN contributions (narrowest).
+_SELF_AUDIENCES = {AUDIENCE_OWNER_1TO1, AUDIENCE_PRIVATE}
+
+_PERIOD_DAYS = {"day": 1, "week": 7}
+_LEARNING_LIMIT = 5
+_HIGHLIGHTS_LIMIT = 5
+_TOP_AGENTS_LIMIT = 25
+# Recent in-window durable rows fetched once to derive learning + highlights +
+# spotlight (top-by-recall is taken among these — avoids a recall_count sort dep).
+_DURABLE_FETCH_LIMIT = 60
+# Activity-over-time trend length (daily buckets), independent of the period toggle.
+_TREND_DAYS = 14
+# "What the org is working on" lanes — heuristic keyword match on title/content,
+# with a memory-type fallback so every durable memory lands in a lane.
+_LANE_KEYWORDS = {
+    "Governing": (
+        "rule",
+        "policy",
+        "keystone",
+        "governance",
+        "complian",
+        "trust",
+        "permission",
+        "access",
+        "audit",
+        "security",
+        "regulat",
+        "privacy",
+        "gdpr",
+        "pii",
+        "insider",
+    ),
+    "Building": (
+        "build",
+        "ship",
+        "feature",
+        "implement",
+        "deploy",
+        "product",
+        "integration",
+        "pipeline",
+        "engine",
+        "migration",
+        "release",
+        "launch",
+        "develop",
+        "signal",
+        "portfolio",
+    ),
+    "Operating": (
+        "monitor",
+        "incident",
+        "alert",
+        "outage",
+        "health",
+        "disk",
+        "dba",
+        "reliab",
+        "restart",
+        "latency",
+        "downtime",
+        "backup",
+        "on-call",
+        "stall",
+    ),
+}
+_TYPE_LANE = {
+    "rule": "Governing",
+    "decision": "Governing",
+    "preference": "Governing",
+    "commitment": "Governing",
+    "insight": "Governing",
+    "plan": "Building",
+    "task": "Building",
+    "action": "Building",
+    "intention": "Building",
+    "semantic": "Building",
+    "fact": "Building",
+    "outcome": "Operating",
+    "episode": "Operating",
+    "cancellation": "Operating",
+}
+
+
+@router.get("/reports")
+async def get_report(
+    tenant_id: str = Query(..., description="Tenant scope (validated against the calling credential)."),
+    period: str = Query("week", description="Reporting window: 'day' or 'week'."),
+    destination: str = Query(
+        AUDIENCE_EXTERNAL,
+        description=(
+            "Delivery audience class the agent will surface this into: "
+            "'owner_1to1', 'internal_group', 'private_session', or 'external'. "
+            "Narrows the result; never widens it. Unknown/absent ⇒ most restrictive."
+        ),
+    ),
+    agent_id: str | None = Query(
+        None, description="Caller agent id (gateway-verified X-Agent-ID wins when present)."
+    ),
+    scope: str = Query(
+        "own",
+        description=(
+            "Data breadth: 'own' (home tenant, default) or 'org' (aggregate across "
+            "every tenant the credential may read — requires a cross-tenant read key)."
+        ),
+    ),
+    readable_tenant_ids: str | None = Query(
+        None,
+        description=(
+            "CSV of tenant ids to aggregate under scope='org'. Honored ONLY for the "
+            "internal admin credential (the org-report proxy); every other caller is "
+            "pinned to its own credential's readable set and this value is ignored."
+        ),
+    ),
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict:
+    # Tenant scope is validated against the credential: agent creds can only
+    # report on their own tenant; admin keys may target any tenant.
+    auth.enforce_tenant(tenant_id)
+    if period not in _PERIOD_DAYS:
+        raise HTTPException(status_code=422, detail=f"Invalid period '{period}'. Use 'day' or 'week'.")
+    if scope not in ("own", "org"):
+        raise HTTPException(status_code=422, detail="Invalid scope. Use 'own' or 'org'.")
+
+    # ── Org breadth ("true org level" = a credential capability, not a
+    # memory scope). ``scope='org'`` aggregates across the caller's readable
+    # tenant set and REQUIRES a cross-tenant read credential — a home-only key
+    # cannot widen. Attribution still lives in each tenant's writes; the widened
+    # breakdown keeps Inv-Scope (no agent_id ⇒ excludes ``scope_agent``). ──
+    org_mode = scope == "org"
+    if org_mode and not (auth.is_admin or auth.is_cross_tenant_read):
+        raise HTTPException(
+            status_code=403,
+            detail="scope='org' requires a cross-tenant read credential.",
+        )
+    # The internal admin credential (the enterprise org-report proxy) may pass an
+    # explicit tenant set — the proxy has already org-admin-gated the caller and
+    # resolved the org's own tenants. Every other caller is pinned to its own
+    # credential's readable set; a client-supplied value is ignored so a
+    # cross-tenant agent cannot widen past its grant.
+    if org_mode and auth.is_admin and readable_tenant_ids:
+        readable: list[str] | None = [t.strip() for t in readable_tenant_ids.split(",") if t.strip()]
+    else:
+        readable = auth.readable_tenant_ids if org_mode else None
+
+    # ── Check 1: authorization. ──
+    # ``enforce_tenant`` (above) is the base authz: the caller is a member/admin
+    # of this tenant. An AGENT caller (gateway-verified ``X-Agent-ID`` or an
+    # explicit ``agent_id``) is additionally gated on trust ≥ 1 and resolved for
+    # the self view. A human/tenant dashboard caller has no agent identity — it
+    # gets the tenant GROUP view (never another agent's private rows; the
+    # breakdown's own visibility scoping excludes ``scope_agent`` when no agent
+    # is set). This avoids 403-ing a logged-in human on the unregistered default
+    # agent id.
+    asserted_agent = auth.agent_id or agent_id
+    caller_agent_id: str | None = None
+    if asserted_agent:
+        caller_agent_id = await resolve_caller_and_gate(
+            auth,
+            tenant_id=tenant_id,
+            body_agent_id=asserted_agent,
+            scope="agent",
+            action="reports",
+        )
+
+    # Caller's agent row → fleet (data scope) + belonging (audience target).
+    sc = get_storage_client()
+    caller = (await sc.get_agent(caller_agent_id, tenant_id) or {}) if caller_agent_id else {}
+    caller_fleet = caller.get("fleet_id")
+    belonging_type = caller.get("belonging_type") or "service"
+    owner_ref = caller.get("owner_ref")
+
+    # ── Check 2: destination → data scope (NARROW-ONLY; unknown ⇒ external). ──
+    dest = destination if destination in _KNOWN_DESTINATIONS else AUDIENCE_EXTERNAL
+    now = datetime.now(UTC)
+    window_start = now - timedelta(days=_PERIOD_DAYS[period])
+
+    breakdown_query: dict = {
+        "tenant_id": tenant_id,
+        "created_after": window_start.isoformat(),
+        "exclude_memory_types": list(NON_DURABLE_TYPES),
+        "exclude_agent_ids": list(RESERVED_FIREHOSE_AGENTS),
+    }
+    if org_mode:
+        # Org-wide: aggregate across every tenant the credential may read.
+        # Team/org-visible only (no agent_id ⇒ excludes scope_agent); the
+        # breakdown returns a per-tenant ``by_tenant`` when the set spans >1.
+        breakdown_query["readable_tenant_ids"] = readable
+        scope_label = "org"
+    elif dest in _SELF_AUDIENCES and caller_agent_id:
+        # Narrowest: only the caller's own contributions.
+        breakdown_query["agent_id"] = caller_agent_id
+        scope_label = "self"
+    else:
+        # internal_group / external: the caller's own fleet (team/org-visible).
+        # ``external`` shares the same query but its detail is stripped below.
+        if caller_fleet:
+            breakdown_query["fleet_id"] = caller_fleet
+        scope_label = "group"
+
+    breakdown = await sc.memory_stats_breakdown(breakdown_query)
+    by_agent = {
+        a: c for a, c in (breakdown.get("by_agent") or {}).items() if a not in RESERVED_FIREHOSE_AGENTS
+    }
+    by_type = breakdown.get("by_type") or {}
+    durable_total = int(breakdown.get("total", 0) or 0)
+    by_tenant = breakdown.get("by_tenant") or {}  # populated only in org scope (>1 tenant)
+
+    per_agent: list[dict] = []
+    learning: list[dict] = []
+    value_highlights: list[dict] = []
+    spotlight: dict | None = None
+    trend: list[dict] = []
+    working_on: dict = {}
+    if dest in _DETAIL_AUDIENCES or org_mode:
+        # Per-agent leaderboard, joined with belonging metadata (group view).
+        # Skip the belonging join in org scope — ``list_agents`` is per-tenant
+        # and can't cover the whole readable set (cross-tenant agents get null).
+        belong_by_id: dict[str, dict] = {}
+        if dest == AUDIENCE_GROUP and not org_mode:
+            for row in await sc.list_agents(tenant_id, caller_fleet) or []:
+                aid = row.get("agent_id")
+                if aid:
+                    belong_by_id[aid] = row
+        for aid, cnt in sorted(by_agent.items(), key=lambda kv: kv[1], reverse=True)[:_TOP_AGENTS_LIMIT]:
+            row = belong_by_id.get(aid, {})
+            per_agent.append(
+                {
+                    "agent_id": aid,
+                    "display_name": row.get("display_name"),
+                    "belonging_type": row.get("belonging_type"),
+                    "durable_writes": cnt,
+                }
+            )
+
+        # One fetch of recent in-window durable memories feeds learning,
+        # value_highlights, and the spotlight.
+        list_query: dict = {
+            "tenant_id": tenant_id,
+            "caller_agent_id": caller_agent_id,
+            "created_after": window_start.isoformat(),
+            "sort": "created_at",
+            "order": "desc",
+            "limit": _DURABLE_FETCH_LIMIT,
+        }
+        if org_mode:
+            list_query["readable_tenant_ids"] = readable
+        elif dest == AUDIENCE_GROUP and caller_fleet:
+            list_query["fleet_id"] = caller_fleet
+        rows = await sc.list_memories_by_filters(list_query) or []
+        durable = [
+            m
+            for m in rows
+            if m.get("memory_type") not in NON_DURABLE_TYPES
+            and m.get("agent_id") not in RESERVED_FIREHOSE_AGENTS
+        ]
+
+        def _title(m: dict) -> str:
+            return m.get("title") or (m.get("metadata") or {}).get("summary") or "(untitled)"
+
+        def _rank(m: dict) -> tuple:
+            return (m.get("recall_count") or 0, m.get("created_at") or "")
+
+        # Learning: most recent distilled insights in the window.
+        learning = [
+            {"title": _title(m), "created_at": m.get("created_at")}
+            for m in durable
+            if m.get("memory_type") == "insight"
+        ][:_LEARNING_LIMIT]
+
+        # Value highlights: the most-reused durable knowledge in the window.
+        value_highlights = [
+            {
+                "title": _title(m),
+                "type": m.get("memory_type"),
+                "recall_count": m.get("recall_count") or 0,
+                "agent_id": m.get("agent_id"),
+            }
+            for m in sorted(durable, key=_rank, reverse=True)[:_HIGHLIGHTS_LIMIT]
+        ]
+
+        # Spotlight: the top contributor + their headline durable memory.
+        if per_agent:
+            top = per_agent[0]
+            authored = sorted(
+                (m for m in durable if m.get("agent_id") == top["agent_id"]),
+                key=_rank,
+                reverse=True,
+            )
+            spotlight = {
+                "agent_id": top["agent_id"],
+                "durable_writes": top["durable_writes"],
+                "headline": (
+                    {"title": _title(authored[0]), "type": authored[0].get("memory_type")}
+                    if authored
+                    else None
+                ),
+            }
+
+        # Working-on lanes: heuristic categorization of the window's durable work
+        # (keyword match on title/content, else a memory-type fallback).
+        lanes: dict[str, dict] = {
+            name: {"count": 0, "items": []} for name in ("Governing", "Building", "Operating")
+        }
+        for m in durable:
+            text = (_title(m) + " " + (m.get("content") or "")).lower()
+            lane = next(
+                (name for name, kws in _LANE_KEYWORDS.items() if any(k in text for k in kws)),
+                None,
+            )
+            if lane is None:
+                lane = _TYPE_LANE.get(m.get("memory_type") or "", "Building")
+            lanes[lane]["count"] += 1
+            if len(lanes[lane]["items"]) < 3:
+                lanes[lane]["items"].append(_title(m))
+        working_on = lanes
+
+        # Activity-over-time trend (group/org view): daily durable counts, last _TREND_DAYS.
+        if dest == AUDIENCE_GROUP or org_mode:
+            trend_query: dict = {
+                "tenant_id": tenant_id,
+                "since": (now - timedelta(days=_TREND_DAYS)).isoformat(),
+                "exclude_memory_types": list(NON_DURABLE_TYPES),
+                "exclude_agent_ids": list(RESERVED_FIREHOSE_AGENTS),
+            }
+            if org_mode:
+                trend_query["readable_tenant_ids"] = readable
+            elif caller_fleet:
+                trend_query["fleet_id"] = caller_fleet
+            raw_counts = {
+                r["day"]: r["count"] for r in (await sc.memory_daily_durable_counts(trend_query) or [])
+            }
+            trend = [
+                {
+                    "day": (now.date() - timedelta(days=d)).isoformat(),
+                    "count": raw_counts.get((now.date() - timedelta(days=d)).isoformat(), 0),
+                }
+                for d in reversed(range(_TREND_DAYS))
+            ]
+
+    # ── Audit the read + the declared destination (provenance / no-leakage trail). ──
+    await log_action(
+        tenant_id=tenant_id,
+        action="report_read",
+        resource_type="report",
+        detail={
+            "period": period,
+            "destination": dest,
+            "scope": scope_label,
+            "agent_id": caller_agent_id,
+        },
+    )
+
+    return {
+        "meta": {
+            "period": period,
+            "window_start": window_start.isoformat(),
+            "window_end": now.isoformat(),
+            "tenant_id": tenant_id,
+            "fleet_id": None if org_mode else caller_fleet,
+            "tenants": len(readable) if org_mode and readable else 1,
+            "destination": dest,
+            "scope": scope_label,
+            "corpus": "durable, decision-bearing memories only (excl. episodic logs & 'main')",
+            "belonging": (
+                {"type": belonging_type, "owner_ref": owner_ref}
+                if dest in _SELF_AUDIENCES and not org_mode
+                else None
+            ),
+        },
+        "summary": {
+            "durable_memories_written": durable_total,
+            "active_agents": len(by_agent),
+            "by_type": by_type,
+            "by_tenant": by_tenant,
+        },
+        "per_agent": per_agent,
+        "value_highlights": value_highlights,
+        "spotlight": spotlight,
+        "trend": trend,
+        "working_on": working_on,
+        "learning": learning,
+    }

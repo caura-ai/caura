@@ -1003,6 +1003,13 @@ class CoreStorageClient:
             raise RuntimeError("core-storage-api /memories/stats-breakdown returned 404")
         return result  # type: ignore[return-value]
 
+    async def memory_daily_durable_counts(self, data: dict) -> list[dict]:
+        """Per-day durable-write counts (report activity-over-time trend)."""
+        result = await self._post("/memories/daily-durable-counts", data, read=True)
+        if result is None:
+            raise RuntimeError("core-storage-api /memories/daily-durable-counts returned 404")
+        return result  # type: ignore[return-value]
+
     async def soft_delete_by_run(
         self,
         tenant_id: str,

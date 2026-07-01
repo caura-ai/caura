@@ -118,6 +118,8 @@ AGENT_FIELDS: list[str] = [
     "install_id",
     "trust_level",
     "search_profile",
+    "belonging_type",
+    "owner_ref",
     "created_at",
     "updated_at",
 ]

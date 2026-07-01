@@ -59,6 +59,7 @@ from core_api.routes.memories import router as memories_router
 from core_api.routes.org_deletion import router as org_deletion_router
 from core_api.routes.plugin import plugin_bootstrap_router
 from core_api.routes.plugin import router as plugin_router
+from core_api.routes.reports import router as reports_router
 from core_api.routes.settings import router as settings_router
 from core_api.routes.skills_inbox import router as skills_inbox_router
 from core_api.routes.stats import router as stats_router
@@ -635,6 +636,7 @@ app.include_router(settings_router, prefix="/api/v1")
 app.include_router(agents_router, prefix="/api/v1")
 app.include_router(fleet_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")
+app.include_router(reports_router, prefix="/api/v1")
 # Skill Factory Phase 2 — HITL Skills Inbox. Routes flag-gated at
 # request time via ``org_settings.skills_factory.enabled``; non-opted-in
 # tenants receive 403 SKILLS_FACTORY_DISABLED, ensuring zero behavior
