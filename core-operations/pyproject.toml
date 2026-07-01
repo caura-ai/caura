@@ -19,6 +19,10 @@ dependencies = [
 
 [project.optional-dependencies]
 pubsub = ["google-cloud-pubsub>=2.23,<3"]
+# Datadog APM tracer (CAURA-0000). Opt-in: installed only in SaaS builds via
+# --build-arg DD_APM_ENABLED=true (--extra datadog); OSS/on-prem carry no
+# Datadog code. Auto-instruments FastAPI/httpx/pubsub.
+datadog = ["ddtrace>=4.10.6"]
 dev = [
     "core-operations[test,pubsub]",
     "mypy>=1.13,<3.0",

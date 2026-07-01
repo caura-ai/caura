@@ -40,6 +40,10 @@ dependencies = [
 pubsub = ["google-cloud-pubsub>=2.23,<3"]
 vertex = ["google-cloud-aiplatform>=1.80,<2"]
 local = ["sentence-transformers>=3.0,<4"]
+# Datadog APM tracer (CAURA-0000). Opt-in: installed only in SaaS builds via
+# --build-arg DD_APM_ENABLED=true (--extra datadog); OSS/on-prem carry no
+# Datadog code. Auto-instruments FastAPI/httpx/pubsub.
+datadog = ["ddtrace>=4.10.6"]
 dev = [
     "core-worker[test,pubsub]",
     "mypy>=1.13,<3.0",
