@@ -1263,6 +1263,12 @@
           "description": "Score multiplier applied to Phase 2 hits.",
           "title": "Cc Discount",
           "type": "number"
+        },
+        "reasoning_mode": {
+          "default": false,
+          "description": "Opt-in agentic multi-step graph-reasoning loop for relational/temporal queries. Slower than the default single-pass search.",
+          "title": "Reasoning Mode",
+          "type": "boolean"
         }
       },
       "required": [

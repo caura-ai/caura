@@ -1092,6 +1092,13 @@
         "name": "cc_discount",
         "required": false,
         "type": "float"
+      },
+      {
+        "default": false,
+        "description": "Opt-in agentic multi-step graph-reasoning loop for relational/temporal queries. Slower than the default single-pass search.",
+        "name": "reasoning_mode",
+        "required": false,
+        "type": "bool"
       }
     ],
     "plugin_exposed": true,
