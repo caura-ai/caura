@@ -176,7 +176,6 @@
       "payload": {
         "files": [
           "core-api/src/core_api/mcp_server.py",
-          "core-api/src/core_api/services/recall_service.py",
           "core-api/src/core_api/services/memory_service.py",
           "core-api/src/core_api/pipeline/compositions/search.py",
           "core-api/src/core_api/pipeline/steps/search/graph_reasoning_boost.py"
