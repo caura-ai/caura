@@ -20,7 +20,7 @@ agents. This guide onboards three clients — **Claude Code**, **Hermes**, and
 | Session | **Stateless** — no `Mcp-Session-Id` needed; POST `tools/call` directly |
 | Identity | carried by the `agent_id` **argument on every tool call** |
 | Health | `GET http://192.168.1.53:8000/api/v1/health` |
-| Tools | 15 (12 memory + 3 procedural-memory) |
+| Tools | 20 (16 memory + 4 procedural-memory) |
 
 **The one rule that matters for multi-agent use:** each client must carry its
 own stable identity, or every agent's memories pile into one namespace.
@@ -351,7 +351,7 @@ header — wire it once per client:
 
 ---
 
-## 3. Tool catalog (15 tools)
+## 3. Tool catalog (20 tools)
 
 Every tool accepts `agent_id` (defaults to the deployment's seeded
 `MEMCLAW_DEFAULT_AGENT_ID` — **always override** with your own id).
@@ -366,6 +366,8 @@ Every tool accepts `agent_id` (defaults to the deployment's seeded
 | `memclaw_list` | Non-semantic browse: filter/sort/paginate by type, author, status, weight, date. | `scope`, `memory_type`, `sort`, `cursor`, `limit` |
 | `memclaw_manage` | Per-memory lifecycle: `read` / `update` / `transition` / `delete` / `bulk_delete` / `lineage`. | `op*`, `memory_id`, `status`, `content` |
 | `memclaw_stats` | Aggregate counts (total + by type/agent/status). | `scope`, `memory_type`, `include_deleted` |
+| `memclaw_export` | Export memories paginated by scope/format — mirrors `memclaw_list`'s visibility scoping. | `scope*`, `format*`, `limit`, `cursor` |
+| `memclaw_env` | Stable-infra fact store (URLs, ports, config truths): upsert / get / list / verify. | `op*`, `name`, `value`, `confidence` |
 
 ### Outcome & reflection (closing the learning loop)
 
@@ -374,6 +376,7 @@ Every tool accepts `agent_id` (defaults to the deployment's seeded
 | `memclaw_evolve` | Report what happened after acting on memories; adjusts their weights. | `outcome*`, `outcome_type*` (success/failure/partial), `related_ids` |
 | `memclaw_insights` | Reflect over the store: `contradictions` / `failures` / `stale` / `divergence` / `patterns` / `discover`. Saves findings as insight memories. | `focus*`, `scope` |
 | `memclaw_tune` | Tune YOUR recall parameters (top_k, min_similarity, fts_weight, freshness, graph hops). No args → returns current profile. | (all optional) |
+| `memclaw_review` | Read-only curation surface: flag low-weight memories, sorted worst-first. | `threshold`, `limit`, `scope` |
 
 ### Structured documents & entities
 
@@ -396,6 +399,13 @@ Every tool accepts `agent_id` (defaults to the deployment's seeded
 | `memclaw_procedure_suggest` | Get reliability-ranked procedures for the current task. Returns `request_id` + ranked `{id, name, tools_sequence, score}`. Quarantined ones excluded. | `context_features*`, `task`, `limit` |
 | `memclaw_procedure_record` | Report outcome of following a procedure. Updates `reliability_score`; quarantines after ≥3 attempts with score < 0.3. | `procedure_id*`, `outcome_type*`, `request_id`, `latency_ms` |
 | `memclaw_procedure_write` | Capture a reusable procedure (name + ordered `tools_sequence` + `context_features`). Starts at reliability 0.5. | `name*`, `tools_sequence*`, `context_features*`, `risk_level` |
+| `memclaw_procedure_manage` | Manual procedure lifecycle: quarantine / unquarantine / invalidate / delete / stats. | `op*`, `procedure_id*`, `reason` |
+
+### Session bootstrap
+
+| Tool | Purpose | Key args |
+|------|---------|----------|
+| `memclaw_session_start` | Session initialization in one call: top-5 memories by weight, keystones, and reliable procedures (success_rate ≥ 0.6). | `agent_id`, `fleet_id` |
 
 ---
 
@@ -438,7 +448,39 @@ Discovered a new repeatable sequence? Capture it:
 memclaw_procedure_write {name, tools_sequence:[...], context_features:{...}}
 ```
 
-### 4d. Structured records (vs. memories)
+### 4d. Session-close protocol (MemClaw + MemPalace)
+
+MemPalace is a *separate* MCP server (diary/knowledge-graph, not covered elsewhere in this
+guide — see the global `~/.claude/rules/mempalace.md` rule for its wing map and AAAK diary
+format). When both are configured for an agent, close a session by running MemClaw's write/evolve
+step first, then MemPalace's status/search/diary step:
+
+```
+1. memclaw_write        {content:"<durable fact/decision from this session>",
+                          fleet_id:"<bound fleet>", visibility:"scope_team"}
+2. memclaw_evolve        {outcome:"<what happened>", outcome_type:"success|failure|partial",
+                          related_ids:[<UUIDs acted on>]}
+3. mempalace_status      {}                              → confirms palace is reachable
+4. mempalace_search      {query:"<session topic>", wing:"<project-or-topic-wing>"}
+                                                           → check for an existing entry before writing
+5. mempalace_diary_write {agent_name:"claude",
+                          entry:"SESSION:<date>|<what-done>|<result>|★★",
+                          topic:"<scope>"}
+```
+
+Two gotchas discovered running this live:
+
+- **Don't assume `fleet_id` = repo slug.** The heuristic in `brain.md` ("fleet = repo slug") is a
+  default, not a guarantee — a session can be bound to a different fleet (e.g. `Saas-code` instead
+  of `caura-memclaw`). `memclaw_write` fails closed with `FORBIDDEN: fleet-scope policy: fleet
+  '<x>' is not writable by principals of fleet '<y>'` if you guess wrong; the error names the
+  correct fleet, so retry with that value rather than debugging further.
+- **Don't assume a wing exists for your project.** `mempalace.md`'s project-wing table only
+  covers a few repos. If your project isn't listed, `mempalace_diary_write` still succeeds — it
+  falls back to a default wing (e.g. `wing_claude`) rather than erroring. Check the returned
+  `entry_id` if you need to know which wing it actually landed in.
+
+### 4e. Structured records (vs. memories)
 
 Use `memclaw_doc` for structured rows (customers, configs, run records); use
 `memclaw_write` for free-form knowledge. Make a doc searchable by putting 1–3
