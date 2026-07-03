@@ -589,6 +589,9 @@ async def memclaw_recall(
     cc_threshold: Annotated[float, Field(description="Min vec_sim for Phase 2 hits.")] = 0.15,
     cc_ratio: Annotated[float, Field(description="Max fraction of total results from Phase 2.")] = 0.3,
     cc_discount: Annotated[float, Field(description="Score multiplier applied to Phase 2 hits.")] = 0.85,
+    reasoning_mode: Annotated[
+        bool, Field(description="Opt-in agentic multi-step graph-reasoning loop for relational/temporal queries. Slower than the default single-pass search.")
+    ] = False,
 ) -> str:
     """Hybrid semantic+keyword recall, with optional LLM brief."""
     t0 = time.perf_counter()
@@ -621,8 +624,10 @@ async def memclaw_recall(
     capped_top_k = min(top_k, MAX_SEARCH_TOP_K)
 
     # Cache layer: skip when cross_context=True or filter_agent_id is set (both
-    # vary by caller state that changes frequently; caching would mask fresh data).
-    _use_cache = not cross_context and filter_agent_id is None
+    # vary by caller state that changes frequently; caching would mask fresh data),
+    # or when reasoning_mode=True (multi-turn LLM tool loop — result set isn't a
+    # pure function of the cache key and shouldn't be cached under it).
+    _use_cache = not cross_context and not reasoning_mode and filter_agent_id is None
     _cache_key: str | None = None
     if _use_cache:
         _h = hashlib.sha256(f"{query}{capped_top_k}".encode()).hexdigest()[:12]
@@ -695,6 +700,7 @@ async def memclaw_recall(
             cc_threshold=cc_threshold,
             cc_ratio=cc_ratio,
             cc_discount=cc_discount,
+            reasoning_mode=reasoning_mode,
         )
         # Cross-tenant read audit (F2): emit one event per source tenant when
         # the credential widened beyond home. Async queue — non-blocking.

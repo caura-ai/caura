@@ -3082,6 +3082,7 @@ async def search_memories(
     cc_threshold: float = 0.15,
     cc_ratio: float = 0.3,
     cc_discount: float = 0.85,
+    reasoning_mode: bool = False,
 ) -> list[MemoryOut]:
     # Diagnostic mode requires the pipeline path for score introspection
     if _USE_PIPELINE_SEARCH or diagnostic:
@@ -3108,6 +3109,7 @@ async def search_memories(
             cc_threshold=cc_threshold,
             cc_ratio=cc_ratio,
             cc_discount=cc_discount,
+            reasoning_mode=reasoning_mode,
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     return await _search_memories_legacy(
@@ -3150,6 +3152,7 @@ async def _search_memories_pipeline(
     cc_threshold: float = 0.15,
     cc_ratio: float = 0.3,
     cc_discount: float = 0.85,
+    reasoning_mode: bool = False,
 ) -> list[MemoryOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.search import build_search_pipeline
@@ -3178,6 +3181,7 @@ async def _search_memories_pipeline(
             "cc_threshold": cc_threshold,
             "cc_ratio": cc_ratio,
             "cc_discount": cc_discount,
+            "reasoning_mode": reasoning_mode,
         },
         tenant_config=tenant_config,
     )
@@ -3204,6 +3208,7 @@ async def _search_memories_pipeline(
             ctx.data["retrieval_plan"].strategy.value if ctx.data.get("retrieval_plan") else None
         )
         diagnostic_ctx["diagnostic_original_top_k"] = ctx.data.get("diagnostic_original_top_k")
+        diagnostic_ctx["reasoning_trace"] = ctx.data.get("reasoning_trace")
 
     return ctx.data["results"]
 

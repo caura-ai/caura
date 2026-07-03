@@ -4,6 +4,7 @@ from core_api.pipeline.steps.search.classify_query import ClassifyQuery
 from core_api.pipeline.steps.search.cross_context_enrich import CrossContextEnrich
 from core_api.pipeline.steps.search.execute_scored_search import ExecuteScoredSearch
 from core_api.pipeline.steps.search.extract_temporal_hint import ExtractTemporalHint
+from core_api.pipeline.steps.search.graph_reasoning_boost import GraphReasoningBoost
 from core_api.pipeline.steps.search.inject_stm_context import InjectSTMContext
 from core_api.pipeline.steps.search.load_and_serialize import LoadAndSerialize
 from core_api.pipeline.steps.search.log_recall_event import LogRecallEvent
@@ -23,6 +24,7 @@ __all__ = [
     "CrossContextEnrich",
     "ExecuteScoredSearch",
     "ExtractTemporalHint",
+    "GraphReasoningBoost",
     "InjectSTMContext",
     "LoadAndSerialize",
     "LogRecallEvent",
