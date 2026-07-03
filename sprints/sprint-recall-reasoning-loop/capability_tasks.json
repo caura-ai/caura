@@ -205,7 +205,7 @@
         "pytest tests/pipeline/test_recall_reasoning_loop_latency.py -q passes",
         "pytest tests/pipeline/test_pipeline_latency.py -q still passes unmodified (proves no regression to the existing documented benchmark)"
       ],
-      "state": "todo",
+      "state": "completed",
       "priority": 80,
       "dependencies": [
         "RL-03"
@@ -236,9 +236,30 @@
       },
       "resourceLocks": [],
       "version": 1,
-      "attempt": 0,
+      "attempt": 1,
       "parentId": null,
-      "artifacts": [],
+      "artifacts": [
+        {
+          "type": "patch",
+          "uri": "git:ae5d830",
+          "metadata": {
+            "filesChanged": 1,
+            "insertions": 180,
+            "deletions": 0
+          }
+        },
+        {
+          "type": "test-report",
+          "uri": "local:pytest-run-2026-07-03T05:41Z",
+          "metadata": {
+            "reasoning_mode_false_ratio": 0.962,
+            "reasoning_mode_false_median_ms": 7.59,
+            "no_param_baseline_median_ms": 7.89,
+            "reasoning_mode_true_median_ms": 7.23,
+            "test_pipeline_latency_unmodified": "passed"
+          }
+        }
+      ],
       "failure": null,
       "payload": {
         "new_file": "tests/pipeline/test_recall_reasoning_loop_latency.py",
