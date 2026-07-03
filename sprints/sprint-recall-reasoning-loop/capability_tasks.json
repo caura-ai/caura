@@ -1,0 +1,283 @@
+{
+  "planId": "SPRINT-RECALL-REASONING-LOOP-PLAN",
+  "sprintGoal": "Add an opt-in agentic graph-reasoning loop to memclaw_recall, inspired by MRAgent's typed multi-tool query-time reasoning (Ji-shuo/MRAgent): instead of always doing one fixed hybrid-scored retrieval + fixed <=2-hop graph boost, an explicit reasoning_mode=true param lets the LLM pick from typed graph-query tools (by keyword, by graph-context, by time range, by entity links) across up to 3 turns to better answer relational/temporal questions. Must be strictly additive: default reasoning_mode=false path is byte-identical to today's call sequence (no latency regression on the documented 23ms p50 benchmark), and reasoning_mode=true only adds boosted ids on top of the existing single-pass result, never replaces it.",
+  "correlationId": "SPRINT-RECALL-REASONING-LOOP",
+  "createdAt": "2026-07-03T00:00:00Z",
+  "createdBy": "claude-code",
+  "workItems": [
+    {
+      "id": "RL-01",
+      "kind": "software.implementation",
+      "objective": "Create graph_query_tools.py with typed async tool wrappers around four already-tested retrieval primitives, each returning (memory_ids, entity_ids, note) so the reasoning loop can call them uniformly.",
+      "acceptanceCriteria": [
+        "New file core-api/src/core_api/services/graph_query_tools.py defines query_by_keyword, query_by_graph_context, query_by_time_range, query_by_entity_links as async functions with a consistent (memory_ids: list[str], entity_ids: list[str], note: str) return shape",
+        "query_by_keyword wraps extract_entity_tokens() + storage_client.fts_search_entities() (storage_client.py:1218) — no new SQL, no new storage endpoint",
+        "query_by_graph_context wraps memory_service.expand_graph() (memory_service.py:2594), which itself calls storage_client.expand_graph() (storage_client.py:1221)",
+        "query_by_time_range wraps memory_service._extract_temporal_date_range() (memory_service.py:3007-3060) to parse the date window, then storage_client.list_memories_by_filters() (storage_client.py:1039) with created_after/created_before set",
+        "query_by_entity_links wraps storage_client.get_memory_ids_by_entity_ids() (storage_client.py:1301)",
+        "Each wrapper catches its own exceptions and returns ([], [], '<tool>: error - <msg>') rather than raising, so a single bad tool call cannot abort the loop",
+        "A TOOL_SPECS list/dict describing each tool's name, one-line description, and expected args (for building the LLM tool-selection prompt in RL-02) is exported from this module",
+        "ruff check passes on the new file"
+      ],
+      "state": "todo",
+      "priority": 100,
+      "dependencies": [],
+      "requiredCapabilities": ["filesystem.write"],
+      "executionPolicy": {
+        "maxAttempts": 2,
+        "timeoutSeconds": 900,
+        "requiresHumanApproval": false,
+        "allowedSideEffects": ["local_filesystem_write"],
+        "networkAccess": "none",
+        "retryPolicy": {"strategy": "exponential_backoff", "retryOn": ["transient_error"]}
+      },
+      "risk": {
+        "level": "low",
+        "reasons": [
+          "Pure wrapper module — no changes to any existing function",
+          "New file only, nothing imports it yet so it has zero effect on the running system"
+        ]
+      },
+      "resourceLocks": [],
+      "version": 1,
+      "attempt": 0,
+      "parentId": null,
+      "artifacts": [],
+      "failure": null,
+      "payload": {
+        "new_file": "core-api/src/core_api/services/graph_query_tools.py",
+        "reuse": {
+          "query_by_keyword": "storage_client.py:1218 fts_search_entities",
+          "query_by_graph_context": "memory_service.py:2594 expand_graph -> storage_client.py:1221 expand_graph",
+          "query_by_time_range": "memory_service.py:3007-3060 _extract_temporal_date_range -> storage_client.py:1039 list_memories_by_filters",
+          "query_by_entity_links": "storage_client.py:1301 get_memory_ids_by_entity_ids"
+        }
+      }
+    },
+    {
+      "id": "RL-02",
+      "kind": "software.implementation",
+      "objective": "Create graph_reasoning_loop.py implementing run_reasoning_loop(): a bounded, never-raising multi-turn loop that asks the LLM to pick a typed tool each turn (via complete_json), executes it, and accumulates boosted memory ids and a boost factor.",
+      "acceptanceCriteria": [
+        "New file core-api/src/core_api/services/graph_reasoning_loop.py defines async def run_reasoning_loop(query: str, tenant_id: str, config, seed_entity_ids: list[str]) -> tuple[set[str], float, list[dict]] returning (boosted_memory_ids, boost_factor, trace)",
+        "New constants GRAPH_REASONING_MAX_ITERATIONS = 3, GRAPH_REASONING_STEP_TIMEOUT_SECONDS, GRAPH_REASONING_TOTAL_TIMEOUT_SECONDS defined in this module (not per-org configurable in v1, per plan scope decision)",
+        "Each turn builds a prompt listing TOOL_SPECS from graph_query_tools.py plus a 'done' option, calls LLMProvider.complete_json(prompt, response_schema={'tool': str, 'args': dict}) via call_with_fallback (common/llm/retry.py), same pattern recall_service.summarize_memories() already uses",
+        "Loop stops when the model returns tool='done', when GRAPH_REASONING_MAX_ITERATIONS is reached, or when the total-timeout asyncio.wait_for fires",
+        "Any exception raised by the LLM call, JSON parsing, or a tool wrapper is caught inside the loop; the function returns whatever (boosted_memory_ids, boost_factor, trace) has been accumulated so far and never propagates the exception to the caller",
+        "trace is a list of {turn, tool, args, result_count} dicts usable for diagnostic mode",
+        "Unit-testable in isolation: run_reasoning_loop accepts an injected llm/provider argument (or resolves via the same seam call_with_fallback uses) so tests can supply a scripted provider"
+      ],
+      "state": "todo",
+      "priority": 95,
+      "dependencies": ["RL-01"],
+      "requiredCapabilities": ["filesystem.write"],
+      "executionPolicy": {
+        "maxAttempts": 2,
+        "timeoutSeconds": 900,
+        "requiresHumanApproval": false,
+        "allowedSideEffects": ["local_filesystem_write"],
+        "networkAccess": "none",
+        "retryPolicy": {"strategy": "exponential_backoff", "retryOn": ["transient_error"]}
+      },
+      "risk": {
+        "level": "medium",
+        "reasons": [
+          "Genuinely new orchestration pattern — no existing multi-turn tool-calling loop in-repo to copy",
+          "Must never raise or hang, since it will sit in the recall path once wired in RL-03 — bounded by both iteration count and asyncio.wait_for timeout",
+          "New file only in this task; still has zero effect on production until RL-03 wires it in"
+        ]
+      },
+      "resourceLocks": [],
+      "version": 1,
+      "attempt": 0,
+      "parentId": null,
+      "artifacts": [],
+      "failure": null,
+      "payload": {
+        "new_file": "core-api/src/core_api/services/graph_reasoning_loop.py",
+        "llm_mechanism": "common/llm/protocols.py LLMProvider.complete_json + common/llm/retry.py call_with_fallback",
+        "reference_pattern": "core-api/src/core_api/services/recall_service.py summarize_memories() _do_recall/_fake_recall + call_with_fallback usage",
+        "fallback_note": "_entity_boost_pipeline's existing fallback-on-failure pattern in memory_service.py is the model for 'never raise, return partial results'"
+      }
+    },
+    {
+      "id": "RL-03",
+      "kind": "software.implementation",
+      "objective": "Wire an opt-in reasoning_mode: bool = False parameter through mcp_server.memclaw_recall -> recall_service.recall() -> memory_service.search_memories(), additive-only: when true and graph_expand is true, run_reasoning_loop() runs after the existing _entity_boost_pipeline() call and its results are unioned in, never substituted.",
+      "acceptanceCriteria": [
+        "memclaw_recall MCP tool handler in mcp_server.py accepts reasoning_mode: bool = False and passes it through to recall_service.recall()",
+        "recall_service.recall() signature gains reasoning_mode: bool = False and forwards it to search_memories()",
+        "memory_service.search_memories() (and _search_memories_legacy() if it has a separate code path) gains reasoning_mode: bool = False; when reasoning_mode is False, the exact same sequence of calls as today executes with zero added branches evaluated at runtime",
+        "When reasoning_mode is True and graph_expand is True, after _entity_boost_pipeline() completes, run_reasoning_loop() is awaited and its boosted_memory_ids are unioned with the existing boosted set, and its boost_factor is combined via max() with the existing per-memory boost, not multiplied or replaced",
+        "When reasoning_mode is True but graph_expand is False, the reasoning loop is skipped (mirrors existing graph_expand gating for the fixed-hop boost)",
+        "diagnostic=True responses include the reasoning loop's trace (from RL-02) under a reasoning_trace key when reasoning_mode was used, absent otherwise",
+        "grep for '_entity_boost_pipeline' call sites confirms no other caller needs the new param (memclaw_recall is the only reasoning_mode-aware entrypoint in this sprint)",
+        "ruff check and mypy (if configured) pass on all three changed files"
+      ],
+      "state": "todo",
+      "priority": 90,
+      "dependencies": ["RL-02"],
+      "requiredCapabilities": ["filesystem.write"],
+      "executionPolicy": {
+        "maxAttempts": 2,
+        "timeoutSeconds": 900,
+        "requiresHumanApproval": false,
+        "allowedSideEffects": ["local_filesystem_write"],
+        "networkAccess": "none",
+        "retryPolicy": {"strategy": "exponential_backoff", "retryOn": ["transient_error"]}
+      },
+      "risk": {
+        "level": "medium",
+        "reasons": [
+          "Touches the live memclaw_recall path used by every recall call, though the new branch only executes when reasoning_mode=True (default False)",
+          "Must not change behavior or timing of the default path — this is the constraint the whole sprint exists to protect",
+          "Union/max() combination logic must be verified not to silently change existing single-pass boost semantics when reasoning_mode=False"
+        ]
+      },
+      "resourceLocks": [],
+      "version": 1,
+      "attempt": 0,
+      "parentId": null,
+      "artifacts": [],
+      "failure": null,
+      "payload": {
+        "files": [
+          "core-api/src/core_api/mcp_server.py",
+          "core-api/src/core_api/services/recall_service.py",
+          "core-api/src/core_api/services/memory_service.py"
+        ],
+        "call_chain": "mcp_server.memclaw_recall -> recall_service.recall() -> memory_service.search_memories() -> _entity_boost_pipeline() [existing] + graph_reasoning_loop.run_reasoning_loop() [new, additive, gated on reasoning_mode and graph_expand]"
+      }
+    },
+    {
+      "id": "RL-04",
+      "kind": "software.testing",
+      "objective": "Add a latency-regression guard test proving the default reasoning_mode=False path is unaffected, modeled on the existing pipeline latency test.",
+      "acceptanceCriteria": [
+        "New file tests/pipeline/test_recall_reasoning_loop_latency.py, structured like tests/pipeline/test_pipeline_latency.py (ITERATIONS=10, separate tenants, statistics/time stdlib for percentile comparison)",
+        "Test asserts reasoning_mode=False p50 latency stays within ~10% of a same-run baseline measurement taken without the reasoning_mode param at all (i.e. proves the new param doesn't add overhead even when unused)",
+        "Test separately measures and logs (does not gate on) reasoning_mode=True latency, since multi-turn LLM round-trips are inherently slower and not subject to the 23ms p50 benchmark",
+        "pytest tests/pipeline/test_recall_reasoning_loop_latency.py -q passes",
+        "pytest tests/pipeline/test_pipeline_latency.py -q still passes unmodified (proves no regression to the existing documented benchmark)"
+      ],
+      "state": "todo",
+      "priority": 80,
+      "dependencies": ["RL-03"],
+      "requiredCapabilities": ["filesystem.write"],
+      "executionPolicy": {
+        "maxAttempts": 2,
+        "timeoutSeconds": 900,
+        "requiresHumanApproval": false,
+        "allowedSideEffects": ["local_filesystem_write"],
+        "networkAccess": "none",
+        "retryPolicy": {"strategy": "exponential_backoff", "retryOn": ["transient_error"]}
+      },
+      "risk": {
+        "level": "low",
+        "reasons": ["Test-only changes, no production code affected"]
+      },
+      "resourceLocks": [],
+      "version": 1,
+      "attempt": 0,
+      "parentId": null,
+      "artifacts": [],
+      "failure": null,
+      "payload": {
+        "new_file": "tests/pipeline/test_recall_reasoning_loop_latency.py",
+        "template": "tests/pipeline/test_pipeline_latency.py"
+      }
+    },
+    {
+      "id": "RL-05",
+      "kind": "software.testing",
+      "objective": "Add behavior tests proving the reasoning loop picks the right typed tool for relational vs temporal queries, terminates correctly, and degrades safely on provider failure, using a scripted test-double LLMProvider since FakeLLMProvider always returns empty responses and cannot drive positive-path assertions.",
+      "acceptanceCriteria": [
+        "New file tests/services/test_graph_reasoning_loop.py defines a scripted test-double implementing common/llm/protocols.LLMProvider that returns a queued sequence of complete_json responses, injected via the same provider-monkeypatch seam used by existing tests (e.g. test_vertex_response_shape.py, test_entity_linking_wiring.py)",
+        "test_temporal_query_picks_time_range: a temporal-phrased query ('what happened with X three weeks ago') scripted to select query_by_time_range returns memories within the expected date window",
+        "test_relational_query_picks_graph_context: a relational-phrased query scripted to select query_by_graph_context returns the expected boosted entity/memory ids",
+        "test_loop_terminates_at_max_iterations: a script that never emits tool='done' still stops after GRAPH_REASONING_MAX_ITERATIONS turns",
+        "test_provider_error_returns_empty_no_raise: the scripted provider raises on complete_json; run_reasoning_loop returns an empty boosted set and does not propagate the exception",
+        "pytest tests/services/test_graph_reasoning_loop.py -q passes",
+        "No existing tests broken: pytest tests/ -q (excluding any pre-existing known failures)"
+      ],
+      "state": "todo",
+      "priority": 80,
+      "dependencies": ["RL-03"],
+      "requiredCapabilities": ["filesystem.write"],
+      "executionPolicy": {
+        "maxAttempts": 2,
+        "timeoutSeconds": 900,
+        "requiresHumanApproval": false,
+        "allowedSideEffects": ["local_filesystem_write"],
+        "networkAccess": "none",
+        "retryPolicy": {"strategy": "exponential_backoff", "retryOn": ["transient_error"]}
+      },
+      "risk": {
+        "level": "low",
+        "reasons": ["Test-only changes, no production code affected"]
+      },
+      "resourceLocks": [],
+      "version": 1,
+      "attempt": 0,
+      "parentId": null,
+      "artifacts": [],
+      "failure": null,
+      "payload": {
+        "new_file": "tests/services/test_graph_reasoning_loop.py",
+        "note": "FakeLLMProvider (common/llm/providers/fake.py) always returns {} from complete_json — cannot drive positive-path assertions. This task must define its own scripted provider double."
+      }
+    },
+    {
+      "id": "RL-Z01",
+      "kind": "content.generation",
+      "objective": "Write SPRINT-RECALL-REASONING-LOOP_SIGNOFF.md recording task outcomes, file changes, verification results, and explicit backlog items deferred from this sprint's scope.",
+      "acceptanceCriteria": [
+        "sprints/sprint-recall-reasoning-loop/SPRINT-RECALL-REASONING-LOOP_SIGNOFF.md exists",
+        "All RL-01..RL-05 outcomes recorded (state, commit, notes)",
+        "Verification section includes actual pytest output for RL-04 and RL-05, and the measured p50 latency delta for the default path",
+        "Backlog section explicitly lists the three scope decisions deferred from v1: (1) auto-trigger heuristic that classifies relational/temporal-looking queries without an explicit reasoning_mode flag, (2) a 'by tag' typed tool (no tag-search primitive exists in postgres_service.py today), (3) making GRAPH_REASONING_MAX_ITERATIONS and its timeouts a per-org configurable field the way graph_max_hops already is"
+      ],
+      "state": "todo",
+      "priority": 60,
+      "dependencies": ["RL-04", "RL-05"],
+      "requiredCapabilities": ["filesystem.write"],
+      "executionPolicy": {
+        "maxAttempts": 1,
+        "timeoutSeconds": 300,
+        "requiresHumanApproval": false,
+        "allowedSideEffects": ["local_filesystem_write"],
+        "networkAccess": "none",
+        "retryPolicy": {"strategy": "none", "retryOn": []}
+      },
+      "risk": {
+        "level": "low",
+        "reasons": ["Documentation only"]
+      },
+      "resourceLocks": [],
+      "version": 1,
+      "attempt": 0,
+      "parentId": null,
+      "artifacts": [],
+      "failure": null,
+      "payload": {
+        "file": "sprints/sprint-recall-reasoning-loop/SPRINT-RECALL-REASONING-LOOP_SIGNOFF.md"
+      }
+    }
+  ],
+  "validation": {
+    "status": "valid",
+    "errors": [],
+    "warnings": [
+      "RL-02's orchestration loop is genuinely new infrastructure with no in-repo precedent — budget extra review time relative to its 'medium' risk label",
+      "RL-03 touches the live memclaw_recall path; even though the new branch is gated behind reasoning_mode=False by default, review the union/max() boost-combination logic carefully before merge",
+      "No LoCoMo/LongMemEval harness exists in-repo — RL-05's accuracy verification relies on a small in-repo fixture set, not an external benchmark"
+    ]
+  },
+  "metrics": {
+    "totalWorkItems": 6,
+    "estimatedDurationDays": 3,
+    "criticalPathWorkItems": ["RL-01", "RL-02", "RL-03", "RL-04", "RL-05"],
+    "highRiskWorkItems": [],
+    "mediumRiskWorkItems": ["RL-02", "RL-03"]
+  }
+}
