@@ -11,7 +11,7 @@
       "objective": "Create graph_query_tools.py with typed async tool wrappers around four already-tested retrieval primitives, each returning (memory_ids, entity_ids, note) so the reasoning loop can call them uniformly.",
       "acceptanceCriteria": [
         "New file core-api/src/core_api/services/graph_query_tools.py defines query_by_keyword, query_by_graph_context, query_by_time_range, query_by_entity_links as async functions with a consistent (memory_ids: list[str], entity_ids: list[str], note: str) return shape",
-        "query_by_keyword wraps extract_entity_tokens() + storage_client.fts_search_entities() (storage_client.py:1218) — no new SQL, no new storage endpoint",
+        "query_by_keyword wraps extract_entity_tokens() + storage_client.fts_search_entities() (storage_client.py:1218) \u2014 no new SQL, no new storage endpoint",
         "query_by_graph_context wraps memory_service.expand_graph() (memory_service.py:2594), which itself calls storage_client.expand_graph() (storage_client.py:1221)",
         "query_by_time_range wraps memory_service._extract_temporal_date_range() (memory_service.py:3007-3060) to parse the date window, then storage_client.list_memories_by_filters() (storage_client.py:1039) with created_after/created_before set",
         "query_by_entity_links wraps storage_client.get_memory_ids_by_entity_ids() (storage_client.py:1301)",
@@ -19,22 +19,31 @@
         "A TOOL_SPECS list/dict describing each tool's name, one-line description, and expected args (for building the LLM tool-selection prompt in RL-02) is exported from this module",
         "ruff check passes on the new file"
       ],
-      "state": "todo",
+      "state": "completed",
       "priority": 100,
       "dependencies": [],
-      "requiredCapabilities": ["filesystem.write"],
+      "requiredCapabilities": [
+        "filesystem.write"
+      ],
       "executionPolicy": {
         "maxAttempts": 2,
         "timeoutSeconds": 900,
         "requiresHumanApproval": false,
-        "allowedSideEffects": ["local_filesystem_write"],
+        "allowedSideEffects": [
+          "local_filesystem_write"
+        ],
         "networkAccess": "none",
-        "retryPolicy": {"strategy": "exponential_backoff", "retryOn": ["transient_error"]}
+        "retryPolicy": {
+          "strategy": "exponential_backoff",
+          "retryOn": [
+            "transient_error"
+          ]
+        }
       },
       "risk": {
         "level": "low",
         "reasons": [
-          "Pure wrapper module — no changes to any existing function",
+          "Pure wrapper module \u2014 no changes to any existing function",
           "New file only, nothing imports it yet so it has zero effect on the running system"
         ]
       },
@@ -67,23 +76,34 @@
         "trace is a list of {turn, tool, args, result_count} dicts usable for diagnostic mode",
         "Unit-testable in isolation: run_reasoning_loop accepts an injected llm/provider argument (or resolves via the same seam call_with_fallback uses) so tests can supply a scripted provider"
       ],
-      "state": "todo",
+      "state": "completed",
       "priority": 95,
-      "dependencies": ["RL-01"],
-      "requiredCapabilities": ["filesystem.write"],
+      "dependencies": [
+        "RL-01"
+      ],
+      "requiredCapabilities": [
+        "filesystem.write"
+      ],
       "executionPolicy": {
         "maxAttempts": 2,
         "timeoutSeconds": 900,
         "requiresHumanApproval": false,
-        "allowedSideEffects": ["local_filesystem_write"],
+        "allowedSideEffects": [
+          "local_filesystem_write"
+        ],
         "networkAccess": "none",
-        "retryPolicy": {"strategy": "exponential_backoff", "retryOn": ["transient_error"]}
+        "retryPolicy": {
+          "strategy": "exponential_backoff",
+          "retryOn": [
+            "transient_error"
+          ]
+        }
       },
       "risk": {
         "level": "medium",
         "reasons": [
-          "Genuinely new orchestration pattern — no existing multi-turn tool-calling loop in-repo to copy",
-          "Must never raise or hang, since it will sit in the recall path once wired in RL-03 — bounded by both iteration count and asyncio.wait_for timeout",
+          "Genuinely new orchestration pattern \u2014 no existing multi-turn tool-calling loop in-repo to copy",
+          "Must never raise or hang, since it will sit in the recall path once wired in RL-03 \u2014 bounded by both iteration count and asyncio.wait_for timeout",
           "New file only in this task; still has zero effect on production until RL-03 wires it in"
         ]
       },
@@ -105,35 +125,46 @@
       "kind": "software.implementation",
       "objective": "Wire an opt-in reasoning_mode: bool = False parameter through mcp_server.memclaw_recall -> memory_service.search_memories() -> the live step-pipeline (build_search_pipeline()), additive-only: a new GraphReasoningBoost pipeline step runs after ParallelEmbedAndEntityBoost and unions its results into the existing boosted set, never substituting it.",
       "acceptanceCriteria": [
-        "GROUNDING CORRECTION (found during /sprint-run execution, pre-dating any RL-03 code): _USE_PIPELINE_SEARCH = True is hardcoded in memory_service.py (line 96), so search_memories() always dispatches to _search_memories_pipeline() and _search_memories_legacy() is dead/unreachable code. The plan's original premise that _entity_boost_pipeline() (memory_service.py) is the live entity-boost mechanism was wrong — the real live boost step is ParallelEmbedAndEntityBoost in core-api/src/core_api/pipeline/steps/search/parallel_embed_entity_boost.py, run as step 4 of 11 inside build_search_pipeline() (core-api/src/core_api/pipeline/compositions/search.py). It returns the identical shape the plan assumed: (boosted_memory_ids: set[UUID], memory_boost_factor: dict[UUID, float]), written to ctx.data['boosted_memory_ids'] / ctx.data['memory_boost_factor']. SECOND CORRECTION: the plan's call chain via recall_service.recall() is also wrong — recall_service.recall() (recall_service.py:225) has zero production callers anywhere in the repo (confirmed via grep across core-api/src). Both mcp_server.memclaw_recall (mcp_server.py:678) and the REST /recall endpoint (routes/memories.py:~1584-1613) call memory_service.search_memories() + recall_service.summarize_memories() directly, per an explicit prior audit fix (P3, see mcp_server.py:633-641 comment) that avoids holding a DB session across the LLM brief round-trip and avoids a duplicate search call. recall_service.recall() is dead code. This acceptance criteria set targets the corrected, real wiring point. _search_memories_legacy(), memory_service._entity_boost_pipeline(), and recall_service.recall() are NOT touched by this task (dead code — touching them would violate the orphan/surgical-changes rule).",
+        "GROUNDING CORRECTION (found during /sprint-run execution, pre-dating any RL-03 code): _USE_PIPELINE_SEARCH = True is hardcoded in memory_service.py (line 96), so search_memories() always dispatches to _search_memories_pipeline() and _search_memories_legacy() is dead/unreachable code. The plan's original premise that _entity_boost_pipeline() (memory_service.py) is the live entity-boost mechanism was wrong \u2014 the real live boost step is ParallelEmbedAndEntityBoost in core-api/src/core_api/pipeline/steps/search/parallel_embed_entity_boost.py, run as step 4 of 11 inside build_search_pipeline() (core-api/src/core_api/pipeline/compositions/search.py). It returns the identical shape the plan assumed: (boosted_memory_ids: set[UUID], memory_boost_factor: dict[UUID, float]), written to ctx.data['boosted_memory_ids'] / ctx.data['memory_boost_factor']. SECOND CORRECTION: the plan's call chain via recall_service.recall() is also wrong \u2014 recall_service.recall() (recall_service.py:225) has zero production callers anywhere in the repo (confirmed via grep across core-api/src). Both mcp_server.memclaw_recall (mcp_server.py:678) and the REST /recall endpoint (routes/memories.py:~1584-1613) call memory_service.search_memories() + recall_service.summarize_memories() directly, per an explicit prior audit fix (P3, see mcp_server.py:633-641 comment) that avoids holding a DB session across the LLM brief round-trip and avoids a duplicate search call. recall_service.recall() is dead code. This acceptance criteria set targets the corrected, real wiring point. _search_memories_legacy(), memory_service._entity_boost_pipeline(), and recall_service.recall() are NOT touched by this task (dead code \u2014 touching them would violate the orphan/surgical-changes rule).",
         "memclaw_recall MCP tool handler in mcp_server.py (async def memclaw_recall, mcp_server.py:574) accepts reasoning_mode: bool = False and passes it directly into its existing search_memories(...) call (mcp_server.py:678) as reasoning_mode=reasoning_mode",
-        "memory_service.search_memories() gains reasoning_mode: bool = False and forwards it into _search_memories_pipeline(), which adds 'reasoning_mode': reasoning_mode to the PipelineContext(data={...}) dict; when reasoning_mode is False, ctx.data['reasoning_mode'] is False/absent and the new pipeline step below is a single dict-lookup no-op — same call sequence and latency as today",
-        "New file core-api/src/core_api/pipeline/steps/search/graph_reasoning_boost.py defines class GraphReasoningBoost with name 'graph_reasoning_boost' and async execute(self, ctx): if not ctx.data.get('reasoning_mode') or not ctx.data.get('graph_expand', True): return None (or StepResult(outcome=StepOutcome.SKIPPED)) immediately — mirrors the graph_expand gating parallel_embed_entity_boost.py already uses",
+        "memory_service.search_memories() gains reasoning_mode: bool = False and forwards it into _search_memories_pipeline(), which adds 'reasoning_mode': reasoning_mode to the PipelineContext(data={...}) dict; when reasoning_mode is False, ctx.data['reasoning_mode'] is False/absent and the new pipeline step below is a single dict-lookup no-op \u2014 same call sequence and latency as today",
+        "New file core-api/src/core_api/pipeline/steps/search/graph_reasoning_boost.py defines class GraphReasoningBoost with name 'graph_reasoning_boost' and async execute(self, ctx): if not ctx.data.get('reasoning_mode') or not ctx.data.get('graph_expand', True): return None (or StepResult(outcome=StepOutcome.SKIPPED)) immediately \u2014 mirrors the graph_expand gating parallel_embed_entity_boost.py already uses",
         "When reasoning_mode and graph_expand are both true, GraphReasoningBoost awaits graph_reasoning_loop.run_reasoning_loop(...) and unions its boosted_memory_ids into ctx.data['boosted_memory_ids'], combining per-memory boost via max() against ctx.data['memory_boost_factor'] (never multiplied or replaced), and stores the trace at ctx.data['reasoning_trace']",
-        "compositions/search.py's build_search_pipeline() inserts GraphReasoningBoost() immediately after ParallelEmbedAndEntityBoost() in the step list — the other 10 steps and their order are unchanged",
+        "compositions/search.py's build_search_pipeline() inserts GraphReasoningBoost() immediately after ParallelEmbedAndEntityBoost() in the step list \u2014 the other 10 steps and their order are unchanged",
         "diagnostic=True responses include ctx.data.get('reasoning_trace') under a reasoning_trace key in diagnostic_ctx (populated in _search_memories_pipeline()'s existing diagnostic-extraction block) when reasoning_mode was used, absent otherwise",
         "grep for 'ParallelEmbedAndEntityBoost()' and 'GraphReasoningBoost()' in compositions/search.py confirms exactly one insertion point and no other composition (e.g. any STM-only pipeline) was accidentally changed",
         "ruff check and mypy (if configured) pass on all changed/new files"
       ],
       "state": "todo",
       "priority": 90,
-      "dependencies": ["RL-02"],
-      "requiredCapabilities": ["filesystem.write"],
+      "dependencies": [
+        "RL-02"
+      ],
+      "requiredCapabilities": [
+        "filesystem.write"
+      ],
       "executionPolicy": {
         "maxAttempts": 2,
         "timeoutSeconds": 900,
         "requiresHumanApproval": false,
-        "allowedSideEffects": ["local_filesystem_write"],
+        "allowedSideEffects": [
+          "local_filesystem_write"
+        ],
         "networkAccess": "none",
-        "retryPolicy": {"strategy": "exponential_backoff", "retryOn": ["transient_error"]}
+        "retryPolicy": {
+          "strategy": "exponential_backoff",
+          "retryOn": [
+            "transient_error"
+          ]
+        }
       },
       "risk": {
         "level": "medium",
         "reasons": [
           "Touches the live memclaw_recall step-pipeline used by every recall call, though the new step only does real work when reasoning_mode=True (default False)",
-          "Must not change behavior or timing of the default path — this is the constraint the whole sprint exists to protect",
+          "Must not change behavior or timing of the default path \u2014 this is the constraint the whole sprint exists to protect",
           "Union/max() combination logic must be verified not to silently change existing single-pass boost semantics when reasoning_mode=False",
-          "Wiring target was corrected mid-sprint from memory_service._entity_boost_pipeline()/_search_memories_legacy() (dead code) to the real pipeline/steps/search architecture — extra scrutiny warranted on this task specifically"
+          "Wiring target was corrected mid-sprint from memory_service._entity_boost_pipeline()/_search_memories_legacy() (dead code) to the real pipeline/steps/search architecture \u2014 extra scrutiny warranted on this task specifically"
         ]
       },
       "resourceLocks": [],
@@ -150,7 +181,7 @@
           "core-api/src/core_api/pipeline/compositions/search.py",
           "core-api/src/core_api/pipeline/steps/search/graph_reasoning_boost.py"
         ],
-        "call_chain": "mcp_server.memclaw_recall -> recall_service.recall() -> memory_service.search_memories() -> _search_memories_pipeline() -> PipelineContext(data={'reasoning_mode': ..., ...}) -> build_search_pipeline() step 4 ParallelEmbedAndEntityBoost() [existing, untouched] -> step 4b GraphReasoningBoost() [new, additive, O(1) skip when reasoning_mode is falsy] -> ... -> ctx.data['results']",
+        "call_chain": "mcp_server.memclaw_recall -> memory_service.search_memories() -> _search_memories_pipeline() -> PipelineContext(data={'reasoning_mode': ..., ...}) -> build_search_pipeline() step 4 ParallelEmbedAndEntityBoost() [existing, untouched] -> step 4b GraphReasoningBoost() [new, additive, O(1) skip when reasoning_mode is falsy] -> ... -> ctx.data['results']",
         "groundingCorrection": "Original payload cited memory_service.py's _entity_boost_pipeline() and _search_memories_legacy() as wiring targets. Verified during /sprint-run execution (before any RL-03 code was written) that _USE_PIPELINE_SEARCH=True is hardcoded, making _search_memories_legacy() unreachable in production. Corrected target: a new step in the always-live core_api/pipeline/steps/search/ architecture, inserted via compositions/search.py."
       }
     },
@@ -167,19 +198,32 @@
       ],
       "state": "todo",
       "priority": 80,
-      "dependencies": ["RL-03"],
-      "requiredCapabilities": ["filesystem.write"],
+      "dependencies": [
+        "RL-03"
+      ],
+      "requiredCapabilities": [
+        "filesystem.write"
+      ],
       "executionPolicy": {
         "maxAttempts": 2,
         "timeoutSeconds": 900,
         "requiresHumanApproval": false,
-        "allowedSideEffects": ["local_filesystem_write"],
+        "allowedSideEffects": [
+          "local_filesystem_write"
+        ],
         "networkAccess": "none",
-        "retryPolicy": {"strategy": "exponential_backoff", "retryOn": ["transient_error"]}
+        "retryPolicy": {
+          "strategy": "exponential_backoff",
+          "retryOn": [
+            "transient_error"
+          ]
+        }
       },
       "risk": {
         "level": "low",
-        "reasons": ["Test-only changes, no production code affected"]
+        "reasons": [
+          "Test-only changes, no production code affected"
+        ]
       },
       "resourceLocks": [],
       "version": 1,
@@ -207,19 +251,32 @@
       ],
       "state": "todo",
       "priority": 80,
-      "dependencies": ["RL-03"],
-      "requiredCapabilities": ["filesystem.write"],
+      "dependencies": [
+        "RL-03"
+      ],
+      "requiredCapabilities": [
+        "filesystem.write"
+      ],
       "executionPolicy": {
         "maxAttempts": 2,
         "timeoutSeconds": 900,
         "requiresHumanApproval": false,
-        "allowedSideEffects": ["local_filesystem_write"],
+        "allowedSideEffects": [
+          "local_filesystem_write"
+        ],
         "networkAccess": "none",
-        "retryPolicy": {"strategy": "exponential_backoff", "retryOn": ["transient_error"]}
+        "retryPolicy": {
+          "strategy": "exponential_backoff",
+          "retryOn": [
+            "transient_error"
+          ]
+        }
       },
       "risk": {
         "level": "low",
-        "reasons": ["Test-only changes, no production code affected"]
+        "reasons": [
+          "Test-only changes, no production code affected"
+        ]
       },
       "resourceLocks": [],
       "version": 1,
@@ -229,7 +286,7 @@
       "failure": null,
       "payload": {
         "new_file": "tests/services/test_graph_reasoning_loop.py",
-        "note": "FakeLLMProvider (common/llm/providers/fake.py) always returns {} from complete_json — cannot drive positive-path assertions. This task must define its own scripted provider double."
+        "note": "FakeLLMProvider (common/llm/providers/fake.py) always returns {} from complete_json \u2014 cannot drive positive-path assertions. This task must define its own scripted provider double."
       }
     },
     {
@@ -244,19 +301,31 @@
       ],
       "state": "todo",
       "priority": 60,
-      "dependencies": ["RL-04", "RL-05"],
-      "requiredCapabilities": ["filesystem.write"],
+      "dependencies": [
+        "RL-04",
+        "RL-05"
+      ],
+      "requiredCapabilities": [
+        "filesystem.write"
+      ],
       "executionPolicy": {
         "maxAttempts": 1,
         "timeoutSeconds": 300,
         "requiresHumanApproval": false,
-        "allowedSideEffects": ["local_filesystem_write"],
+        "allowedSideEffects": [
+          "local_filesystem_write"
+        ],
         "networkAccess": "none",
-        "retryPolicy": {"strategy": "none", "retryOn": []}
+        "retryPolicy": {
+          "strategy": "none",
+          "retryOn": []
+        }
       },
       "risk": {
         "level": "low",
-        "reasons": ["Documentation only"]
+        "reasons": [
+          "Documentation only"
+        ]
       },
       "resourceLocks": [],
       "version": 1,
@@ -273,16 +342,25 @@
     "status": "valid",
     "errors": [],
     "warnings": [
-      "RL-02's orchestration loop is genuinely new infrastructure with no in-repo precedent — budget extra review time relative to its 'medium' risk label",
+      "RL-02's orchestration loop is genuinely new infrastructure with no in-repo precedent \u2014 budget extra review time relative to its 'medium' risk label",
       "RL-03 touches the live memclaw_recall path; even though the new branch is gated behind reasoning_mode=False by default, review the union/max() boost-combination logic carefully before merge",
-      "No LoCoMo/LongMemEval harness exists in-repo — RL-05's accuracy verification relies on a small in-repo fixture set, not an external benchmark"
+      "No LoCoMo/LongMemEval harness exists in-repo \u2014 RL-05's accuracy verification relies on a small in-repo fixture set, not an external benchmark"
     ]
   },
   "metrics": {
     "totalWorkItems": 6,
     "estimatedDurationDays": 3,
-    "criticalPathWorkItems": ["RL-01", "RL-02", "RL-03", "RL-04", "RL-05"],
+    "criticalPathWorkItems": [
+      "RL-01",
+      "RL-02",
+      "RL-03",
+      "RL-04",
+      "RL-05"
+    ],
     "highRiskWorkItems": [],
-    "mediumRiskWorkItems": ["RL-02", "RL-03"]
+    "mediumRiskWorkItems": [
+      "RL-02",
+      "RL-03"
+    ]
   }
 }
