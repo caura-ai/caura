@@ -512,7 +512,14 @@ RECALL_DECAY_WINDOW_DAYS = 14  # only recalls within this window contribute to b
 
 # ── Recall summary ──
 MEMORY_RECALL_SUMMARY_TEMPERATURE = 0.3
-MEMORY_RECALL_SUMMARY_MAX_TOKENS = 1000
+# Hard cap on recall-summary generation. The recall LLM call is non-streaming and
+# output-bound, so the full generation time is exposed to the caller; this ceiling
+# bounds the worst-case p95+ tail (prod /recall was routinely 5-15s, traced to long
+# summary generations on the recall model). Halved from 1000 to 500: kept at 500
+# rather than lower because RECALL_PROMPT still emits step-by-step reasoning BEFORE
+# the answer, so too tight a cap would truncate the answer itself. If that
+# chain-of-thought is later trimmed from the prompt, this can drop toward ~400.
+MEMORY_RECALL_SUMMARY_MAX_TOKENS = 500
 
 # ── Insights ──
 INSIGHTS_MAX_MEMORIES = 50  # max memories per analysis pass (token budget ~10k)

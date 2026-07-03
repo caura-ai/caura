@@ -74,6 +74,31 @@ class FleetCreateIn(BaseModel):
         return v
 
 
+def _cap_or_drop(v: dict | None, limit: int, field: str) -> dict | None:
+    """Cap an OPTIONAL observability blob without failing the whole heartbeat.
+
+    ``recall_metrics`` / ``reconcile`` are best-effort observability. A
+    ``field_validator`` that *raises* on an oversized value fails the entire
+    request model → 422 → the node's registration AND command channel are
+    dropped over one bloated optional field (eToro 2026-06-28: a node with a
+    large skill catalog 422'd every heartbeat, going stale + uncommandable).
+    Degrade gracefully instead: replace the oversized blob with a small marker
+    so the load-bearing heartbeat still lands; only the detailed snapshot is
+    lost for that tick. Still bounds ``nodes.metadata`` growth.
+    """
+    if v is not None:
+        size = len(json.dumps(v))
+        if size > limit:
+            logger.warning(
+                "fleet.heartbeat: %s is %d bytes (> %d cap) — dropping field, keeping heartbeat",
+                field,
+                size,
+                limit,
+            )
+            return {"_truncated": True, "_original_bytes": size}
+    return v
+
+
 class HeartbeatIn(BaseModel):
     tenant_id: str
     node_name: str
@@ -131,24 +156,18 @@ class HeartbeatIn(BaseModel):
     @field_validator("recall_metrics")
     @classmethod
     def _cap_recall_metrics(cls, v: dict | None) -> dict | None:
-        # Cap incoming counter blob to keep a misbehaving / malicious
-        # plugin from ballooning `nodes.metadata` rows. The plugin's
-        # actual `getRecallMetrics()` payload is well under 1 KB even
-        # with every reason populated; 4 KB is a comfortable headroom.
-        if v is not None and len(json.dumps(v)) > 4096:
-            raise ValueError("recall_metrics exceeds 4 KB limit")
-        return v
+        # Anti-ballooning cap on an OPTIONAL observability blob. Drop (not
+        # reject) when oversized so a bloated counter blob can't 422 the whole
+        # heartbeat. getRecallMetrics() is well under 1 KB normally; 4 KB cap.
+        return _cap_or_drop(v, 4096, "recall_metrics")
 
     @field_validator("reconcile")
     @classmethod
     def _cap_reconcile(cls, v: dict | None) -> dict | None:
-        # Same anti-ballooning cap as recall_metrics. The summary is a
-        # handful of slug lists; even a fleet sharing ~150 skills stays
-        # well under 8 KB. Reject beyond that at the API boundary so a
-        # misbehaving plugin can't bloat the node row.
-        if v is not None and len(json.dumps(v)) > 8192:
-            raise ValueError("reconcile summary exceeds 8 KB limit")
-        return v
+        # Anti-ballooning cap on an OPTIONAL observability blob. Drop (not
+        # reject) when oversized — see _cap_or_drop. A summary is normally a
+        # handful of slug lists; 8 KB cap.
+        return _cap_or_drop(v, 8192, "reconcile")
 
 
 class CommandIn(BaseModel):

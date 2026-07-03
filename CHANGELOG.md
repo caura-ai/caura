@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.18.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.17.0...backend-v2.18.0) (2026-06-25)
+
+
+### Features
+
+* **skill:** curb trivial memory writes in agent guidance ([#494](https://github.com/caura-ai/caura-memclaw/issues/494)) ([d7bca1f](https://github.com/caura-ai/caura-memclaw/commit/d7bca1f9e7a9a38279d3d48f8e717505247bd474))
+
+
+### Bug Fixes
+
+* **core-api:** correct get_memory_ids_by_entity_ids return type to list[dict] ([#493](https://github.com/caura-ai/caura-memclaw/issues/493)) ([3d208e3](https://github.com/caura-ai/caura-memclaw/commit/3d208e36154c82071b0d1043107a5fda0a682a79))
+
+
+### Code Refactoring
+
+* **core-api:** delete direct DB pool, route all DB access via core-storage-api (Fix 2 final cleanup) ([#491](https://github.com/caura-ai/caura-memclaw/issues/491)) ([9e6d7f8](https://github.com/caura-ai/caura-memclaw/commit/9e6d7f8f97de20469df9305af76efef081ad3592))
+
 ## [2.17.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.16.0...backend-v2.17.0) (2026-06-24)
 
 

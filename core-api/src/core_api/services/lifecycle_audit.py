@@ -92,7 +92,7 @@ class _CoreApiLifecycleAdapter:
         # core-api startup just for the lifecycle adapter wiring.
         from core_api.services.crystallizer_service import run_crystallization
 
-        report_id = await run_crystallization(None, org_id, fleet_id, trigger="lifecycle")
+        report_id = await run_crystallization(tenant_id=org_id, fleet_id=fleet_id, trigger="lifecycle")
         return 1 if report_id is not None else 0
 
     async def insights(self, *, org_id: str, fleet_id: str | None) -> int:

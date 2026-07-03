@@ -328,9 +328,11 @@ async def test_heartbeat_reconcile_latest_snapshot_wins(client):
     assert node["metadata"]["reconcile"]["installed"] == ["alpha"]
 
 
-async def test_heartbeat_reconcile_oversized_rejected(client):
-    """A reconcile blob over the 8 KB cap is rejected at the API boundary
-    (anti-ballooning of nodes.metadata)."""
+async def test_heartbeat_reconcile_oversized_dropped_not_rejected(client):
+    """A reconcile blob over the 8 KB cap is DROPPED to a truncation marker,
+    NOT rejected. It's optional observability — an oversized value must never
+    422 the whole heartbeat (that would drop node registration + the command
+    channel). nodes.metadata growth is still bounded. See _cap_or_drop."""
     tenant_id, headers = get_test_auth()
     tag = _uid()
     oversized = {"installed": ["x" * 100 for _ in range(120)]}  # ~12 KB
@@ -344,4 +346,5 @@ async def test_heartbeat_reconcile_oversized_rejected(client):
         },
         headers=headers,
     )
-    assert resp.status_code == 422, resp.text
+    assert resp.status_code == 200, resp.text
+    assert resp.json().get("ok") is True

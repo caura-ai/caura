@@ -811,6 +811,11 @@ async def _write_memory_inner(
     from core_api.services.organization_settings import resolve_config
 
     write_config = await resolve_config(body.tenant_id)
+    # Phase 2 (dark, default off): bind to the verified credential identity,
+    # ignoring a client-supplied body override. Enable ONLY after reserved-
+    # `main` creds are re-identified, else it pins them back onto `main`.
+    if app_settings.bind_write_identity_to_auth and auth.agent_id:
+        body.agent_id = auth.agent_id
     agent = await get_or_create_agent(
         body.tenant_id,
         body.agent_id,
@@ -1008,6 +1013,10 @@ async def _write_memories_bulk_inner(
     idem: IdempotencyGuard | None,
     bulk_attempt_id: str,
 ):
+    # Phase 2 (dark, default off): bind to the verified credential identity
+    # (see _write_memory_inner). Enabled only post-re-identification.
+    if app_settings.bind_write_identity_to_auth and auth.agent_id:
+        body.agent_id = auth.agent_id
     agent = await get_or_create_agent(body.tenant_id, body.agent_id, body.fleet_id)
     if not body.fleet_id and agent.get("fleet_id"):
         body.fleet_id = agent["fleet_id"]

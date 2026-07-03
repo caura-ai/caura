@@ -2,7 +2,7 @@
   "id": "memclaw",
   "name": "MemClaw",
   "kind": "memory",
-  "version": "2.11.0",
+  "version": "2.12.0",
   "description": "Central persistent memory for OpenClaw agents — write, search, and entity lookup tools.",
   "entry": "dist/index.js",
   "skills": [
@@ -10,7 +10,12 @@
   ],
   "configSchema": {
     "type": "object",
-    "properties": {},
+    "properties": {
+      "MEMCLAW_AGENT_ID": {
+        "type": "string",
+        "description": "Optional but recommended: a stable, human-readable identity for THIS install (e.g. \"webclaw\", \"vm-01\"); surfaces as the agent_id on writes. If unset, the plugin uses a stable per-install id (main-<install_id>) so installs don't collide."
+      }
+    },
     "required": []
   },
   "contracts": {

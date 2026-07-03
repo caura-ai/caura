@@ -594,3 +594,70 @@ class TestFakeExtract:
 
         result = _fake_extract("John Smith manages the Auth Team")
         assert result.relations == []
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: call_with_fallback max_attempts (recall latency lever)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCallWithFallbackMaxAttempts:
+    """``call_with_fallback(max_attempts=...)`` bounds per-provider retries. Recall
+    passes ``max_attempts=1`` so a slow/hung primary fails fast to the fallback
+    provider instead of stacking retries past the request-timeout budget (which
+    surfaces as Cloud Run "malformed response / connection error" 503s)."""
+
+    @staticmethod
+    def _factory(name, tenant_config, **_kwargs):
+        # Non-fake provider so call_with_fallback actually invokes call_fn.
+        return SimpleNamespace(is_fake=False, name=name)
+
+    @pytest.mark.asyncio
+    async def test_max_attempts_1_does_not_retry_primary(self):
+        from common.llm.retry import call_with_fallback
+
+        calls = 0
+
+        async def call_fn(_provider):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("slow/hung")
+
+        with patch("common.llm.retry.asyncio.sleep", new_callable=AsyncMock):
+            result = await call_with_fallback(
+                primary_provider_name="openai",
+                call_fn=call_fn,
+                fake_fn=lambda: "fake",
+                tenant_config=None,  # no fallback configured → straight to fake_fn
+                service_label="recall",
+                max_attempts=1,
+                provider_factory=self._factory,
+            )
+
+        assert result == "fake"
+        assert calls == 1  # one primary attempt, no retry
+
+    @pytest.mark.asyncio
+    async def test_default_max_attempts_retries_primary(self):
+        from common.llm.retry import call_with_fallback
+
+        calls = 0
+
+        async def call_fn(_provider):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("transient")
+
+        with patch("common.llm.retry.asyncio.sleep", new_callable=AsyncMock):
+            result = await call_with_fallback(
+                primary_provider_name="openai",
+                call_fn=call_fn,
+                fake_fn=lambda: "fake",
+                tenant_config=None,
+                service_label="recall",
+                provider_factory=self._factory,
+            )
+
+        assert result == "fake"
+        assert calls == LLM_RETRY_ATTEMPTS  # default retries the primary provider

@@ -107,10 +107,26 @@ DEFAULT_SETTINGS: dict = {
     },
     "observability": {
         # Opt-in (default off). When on, each agent-chosen ``memclaw_recall``
-        # call is logged (query + scope + candidate scores) to ``recall_event``
-        # / ``recall_candidate`` for "why aren't good memories recalled?"
-        # analysis. The plugin's automatic ``/search`` is never logged.
+        # call is logged (query + scope + candidate scores + below-floor
+        # near-misses) to ``recall_event`` / ``recall_candidate`` for "why
+        # aren't good memories recalled?" analysis.
         "recall_logging_enabled": None,
+        # Opt-in (default off). When on, the plugin's automatic ``/search``
+        # path is ALSO logged — but in a lighter form: returned candidates
+        # only (id + scores), no below-floor near-misses, since ``/search``
+        # is high-volume. Independent of ``recall_logging_enabled`` so it can
+        # be enabled for a short diagnostic window on a couple of tenants and
+        # then turned back off.
+        "search_recall_logging_enabled": None,
+        # Fraction (0.0-1.0) of ``/search`` events for which below-floor
+        # near-misses ARE recorded (only relevant when
+        # ``search_recall_logging_enabled`` is on). Default 0.0 = never (pure
+        # returned-only light mode). Set e.g. 0.01 to keep near-misses on ~1%
+        # of search events — enough to estimate the "just-missed" distribution
+        # (was the good memory rank 7 at cosine 0.27?) without the full
+        # candidate-row volume on the bulk path. Capped at the same
+        # ``_NEAR_MISS_LIMIT`` per sampled event as ``mcp_recall``.
+        "search_recall_near_miss_sample_rate": None,
     },
     "chunking": {
         "auto_chunk_enabled": None,
@@ -467,6 +483,8 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "entity_linking.auto_entity_linking_enabled": bool,
     "insights.auto_insights_enabled": bool,
     "observability.recall_logging_enabled": bool,
+    "observability.search_recall_logging_enabled": bool,
+    "observability.search_recall_near_miss_sample_rate": (int, float),
     "chunking.auto_chunk_enabled": bool,
     "agents.require_agent_approval": bool,
     "entity_blocklist": list,
@@ -825,6 +843,24 @@ class ResolvedConfig:
     def recall_logging_enabled(self) -> bool:
         val = self._ts.get("observability", {}).get("recall_logging_enabled")
         return val if val is not None else False
+
+    # Search-path recall logging — opt-in (default False). When on, the
+    # automatic ``/search`` path is logged too (lighter: returned-only, no
+    # near-misses). Independent of ``recall_logging_enabled``.
+    @property
+    def search_recall_logging_enabled(self) -> bool:
+        val = self._ts.get("observability", {}).get("search_recall_logging_enabled")
+        return val if val is not None else False
+
+    # Fraction of ``/search`` events that keep below-floor near-misses
+    # (default 0.0). Clamped to [0.0, 1.0]. Only consulted when
+    # ``search_recall_logging_enabled`` is on.
+    @property
+    def search_recall_near_miss_sample_rate(self) -> float:
+        val = self._ts.get("observability", {}).get("search_recall_near_miss_sample_rate")
+        if val is None:
+            return 0.0
+        return max(0.0, min(1.0, float(val)))
 
     # Chunking
     @property

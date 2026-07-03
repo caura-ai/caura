@@ -485,24 +485,23 @@ def test_recall_metrics_under_cap_accepted():
     assert body.recall_metrics["calls_total"] == 142
 
 
-def test_recall_metrics_over_cap_rejected():
-    """A misbehaving plugin sending a huge counter blob is rejected at
-    the API boundary — protects nodes.metadata from unbounded growth.
+def test_recall_metrics_over_cap_dropped_not_rejected():
+    """A huge counter blob is DROPPED to a truncation marker, NOT rejected —
+    it must not 422 the whole heartbeat (which would drop the load-bearing
+    registration + command channel). nodes.metadata growth is still bounded.
     """
-    import pytest as _pt
-    from pydantic import ValidationError
-
     huge = {
         "calls_total": 1,
         "skipped_by_reason": {f"reason-{i}": i for i in range(500)},
     }
     # 500 keys × ~20 bytes ≈ 10 KB → well over the 4 KB cap.
-    with _pt.raises(ValidationError, match="exceeds 4 KB limit"):
-        fleet_mod.HeartbeatIn(
-            tenant_id="tenant-1",
-            node_name="node-a",
-            recall_metrics=huge,
-        )
+    hb = fleet_mod.HeartbeatIn(
+        tenant_id="tenant-1",
+        node_name="node-a",
+        recall_metrics=huge,
+    )
+    assert hb.recall_metrics is not None
+    assert hb.recall_metrics.get("_truncated") is True
 
 
 def test_recall_metrics_none_accepted():

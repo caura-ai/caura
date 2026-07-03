@@ -31,7 +31,12 @@ class ExtractTemporalHint:
 
         reference_dt = ctx.data.get("valid_at") or datetime.now(UTC)
         ctx.data["date_range_filter"] = _extract_temporal_date_range(query, reference_dt)
-        logger.info(
+        # DEBUG, not INFO: this fires once per search and echoes the raw query
+        # text — mild PII (customer query content), and it surfaces verbatim in
+        # prod logs whenever ops searches memclaw with an error-alert signature
+        # (the "temporal_hint: query='<error text>'" echo). The extracted
+        # window/date_range are carried on ctx.data for any downstream logging.
+        logger.debug(
             "temporal_hint: query=%r ref=%s window=%s date_range=%s",
             query[:80],
             reference_dt,

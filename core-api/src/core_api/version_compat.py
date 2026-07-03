@@ -6,7 +6,10 @@ We log a warning when a heartbeat reports a plugin older than the minimum
 recommended version; no hard rejection — operators decide when to upgrade.
 """
 
-MIN_RECOMMENDED_PLUGIN_VERSION = "2.9.0"
+# Auto-upgrade target / "outdated" floor. The fleet heartbeat queues a deploy
+# to this version for eligible nodes (>= MIN_AUTO_DEPLOY, auto-upgrade enabled).
+# Reconciled to the current shipped plugin release.
+MIN_RECOMMENDED_PLUGIN_VERSION = "2.12.0"
 
 # Server-side floor below which plugins must NOT auto-upgrade — the
 # heartbeat path in ``routes/fleet.py`` enforces this hard, and

@@ -29,6 +29,7 @@ import {
 } from "./env.js";
 import { assertSafePathSegment } from "./validation.js";
 import { getSpec } from "./tool-specs.js";
+import { getInstallId } from "./install-id.js";
 
 interface ToolResult {
   content: Array<{ type: string; text: string }>;
@@ -338,6 +339,12 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   memclaw_write: async (params, signal) => {
     const isBatch = Array.isArray(params.items);
     const body = await enrichBody(params);
+    // Write-scoped identity default: never send an empty agent_id, which on the
+    // gateway path collapses onto the reserved "main" default. enrichBody set it
+    // from MEMCLAW_AGENT_ID if present; otherwise fall back to a stable
+    // install-scoped id (mirrors resolve-agent.ts step 5). Scoped to writes so
+    // read visibility scoping is unchanged.
+    if (!body.agent_id) body.agent_id = `main-${getInstallId()}`;
     if (isBatch) {
       // POST /memories/bulk requires a per-attempt idempotency token via
       // the `X-Bulk-Attempt-Id` header (CAURA-602). The server derives each

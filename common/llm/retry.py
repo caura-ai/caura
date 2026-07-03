@@ -88,6 +88,7 @@ async def call_with_fallback(
     model_override: str | None = None,
     model_attr: str = "enrichment_model",
     timeout: float | None = None,
+    max_attempts: int = LLM_RETRY_ATTEMPTS,
     provider_factory: Callable[..., Any] | None = None,
 ) -> T:
     """3-tier fallback chain for LLM calls.
@@ -117,6 +118,11 @@ async def call_with_fallback(
         Attribute name forwarded to the provider factory for resolving the
         default Vertex model. Defaults to ``"enrichment_model"``; entity
         extraction should pass ``"entity_extraction_model"``.
+    max_attempts:
+        Per-provider attempt count, forwarded to ``call_with_retry`` for both the
+        primary and fallback provider. Defaults to ``LLM_RETRY_ATTEMPTS``. Pass
+        ``1`` on latency-sensitive read paths (e.g. recall) to fail fast to the
+        fallback provider instead of retrying a slow/hung primary.
     provider_factory:
         Callable ``(name, tenant_config) -> LLMProvider``. Defaults to
         ``common.llm.registry.get_llm_provider`` (imported lazily to avoid
@@ -150,6 +156,7 @@ async def call_with_fallback(
             return await call_with_retry(
                 lambda: call_fn(provider),
                 label=f"{label}-primary",
+                max_attempts=max_attempts,
                 timeout=timeout,
             )
         logger.warning(
@@ -192,6 +199,7 @@ async def call_with_fallback(
                     return await call_with_retry(
                         lambda: call_fn(fb_provider),
                         label=f"{label}-fallback-{fb_provider_name}",
+                        max_attempts=max_attempts,
                         timeout=timeout,
                     )
     except Exception:
