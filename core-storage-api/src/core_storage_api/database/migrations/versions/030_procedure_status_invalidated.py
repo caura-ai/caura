@@ -27,14 +27,8 @@ down_revision: str | None = "029"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-_OLD = (
-    "status IN ('active', 'candidate', 'staged', 'quarantined', "
-    "'stale', 'deprecated')"
-)
-_NEW = (
-    "status IN ('active', 'candidate', 'staged', 'quarantined', "
-    "'stale', 'deprecated', 'invalidated')"
-)
+_OLD = "status IN ('active', 'candidate', 'staged', 'quarantined', 'stale', 'deprecated')"
+_NEW = "status IN ('active', 'candidate', 'staged', 'quarantined', 'stale', 'deprecated', 'invalidated')"
 
 
 def upgrade() -> None:

@@ -26,20 +26,17 @@ GRAPH_QUERY_TOOL_NAMES = [
 
 TOOL_SPECS = {
     "query_by_keyword": (
-        "Entity full-text search by keyword — good first step for any query naming a "
-        "person, place, or thing."
+        "Entity full-text search by keyword — good first step for any query naming a person, place, or thing."
     ),
     "query_by_graph_context": (
         "Expand already-found entities across the knowledge graph (relationships, "
         "≤2 hops) — good for 'X's role with Y' style questions."
     ),
     "query_by_time_range": (
-        "List memories in a parsed date range — good for 'three weeks ago' / "
-        "'last month' style questions."
+        "List memories in a parsed date range — good for 'three weeks ago' / 'last month' style questions."
     ),
     "query_by_entity_links": (
-        "Fetch memories directly linked to already-found entities without further "
-        "graph expansion."
+        "Fetch memories directly linked to already-found entities without further graph expansion."
     ),
 }
 
@@ -150,4 +147,8 @@ async def query_by_entity_links(
 
     entity_id_set = set(entity_ids)
     memory_ids = await _memory_ids_for_entities(entity_id_set)
-    return memory_ids, entity_id_set, f"found {len(memory_ids)} memories linked to {len(entity_id_set)} entities"
+    return (
+        memory_ids,
+        entity_id_set,
+        f"found {len(memory_ids)} memories linked to {len(entity_id_set)} entities",
+    )

@@ -16,7 +16,8 @@ import logging
 import re
 import time
 import uuid
-from datetime import UTC, datetime as _dt
+from datetime import UTC
+from datetime import datetime as _dt
 from typing import Annotated, Any, cast
 from uuid import UUID, uuid4
 
@@ -583,14 +584,20 @@ async def memclaw_recall(
         int, Field(description="Max results, default 5. Values above 20 are capped to 20.")
     ] = DEFAULT_SEARCH_TOP_K,
     cross_context: Annotated[
-        bool, Field(description="Enable Phase 2 cross-context retrieval (shared scope_team/scope_org memories below Phase 1 threshold).")
+        bool,
+        Field(
+            description="Enable Phase 2 cross-context retrieval (shared scope_team/scope_org memories below Phase 1 threshold)."
+        ),
     ] = False,
     cc_top_m: Annotated[int, Field(description="Max Phase 2 cross-context candidates.")] = 3,
     cc_threshold: Annotated[float, Field(description="Min vec_sim for Phase 2 hits.")] = 0.15,
     cc_ratio: Annotated[float, Field(description="Max fraction of total results from Phase 2.")] = 0.3,
     cc_discount: Annotated[float, Field(description="Score multiplier applied to Phase 2 hits.")] = 0.85,
     reasoning_mode: Annotated[
-        bool, Field(description="Opt-in agentic multi-step graph-reasoning loop for relational/temporal queries. Slower than the default single-pass search.")
+        bool,
+        Field(
+            description="Opt-in agentic multi-step graph-reasoning loop for relational/temporal queries. Slower than the default single-pass search."
+        ),
     ] = False,
 ) -> str:
     """Hybrid semantic+keyword recall, with optional LLM brief."""
@@ -2102,9 +2109,7 @@ async def memclaw_env(
         str | None,
         Field(description="op=upsert: the infra fact value (string, URL, port, etc.)."),
     ] = None,
-    confidence: Annotated[
-        float, Field(description="op=upsert: certainty 0.0–1.0 (default 1.0).")
-    ] = 1.0,
+    confidence: Annotated[float, Field(description="op=upsert: certainty 0.0-1.0 (default 1.0).")] = 1.0,
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
 ) -> str:
     """Stable-infra fact store (env truths). Op-dispatched.
@@ -2148,10 +2153,23 @@ async def memclaw_env(
                     d["verification_count"] = d.get("verification_count", 0) + 1
                     d["verified_at"] = _dt.now(UTC).isoformat()
                     await sc.upsert_document_system(
-                        {"tenant_id": tenant_id, "collection": _ENV_TRUTHS_COLLECTION, "doc_id": name, "data": d}
+                        {
+                            "tenant_id": tenant_id,
+                            "collection": _ENV_TRUTHS_COLLECTION,
+                            "doc_id": name,
+                            "data": d,
+                        }
                     )
                 return _with_latency(
-                    json.dumps({"name": name, "value": d.get("value"), "confidence": d.get("confidence", 1.0), "verified_at": d.get("verified_at"), "verification_count": d.get("verification_count", 0)}),
+                    json.dumps(
+                        {
+                            "name": name,
+                            "value": d.get("value"),
+                            "confidence": d.get("confidence", 1.0),
+                            "verified_at": d.get("verified_at"),
+                            "verification_count": d.get("verification_count", 0),
+                        }
+                    ),
                     t0,
                 )
 
@@ -2160,7 +2178,15 @@ async def memclaw_env(
                 truths = []
                 for doc in docs:
                     d = doc.get("data") or {}
-                    truths.append({"name": doc.get("doc_id"), "value": d.get("value"), "confidence": d.get("confidence", 1.0), "verified_at": d.get("verified_at"), "verification_count": d.get("verification_count", 0)})
+                    truths.append(
+                        {
+                            "name": doc.get("doc_id"),
+                            "value": d.get("value"),
+                            "confidence": d.get("confidence", 1.0),
+                            "verified_at": d.get("verified_at"),
+                            "verification_count": d.get("verification_count", 0),
+                        }
+                    )
                 return _with_latency(json.dumps({"truths": truths, "count": len(truths)}), t0)
 
             # upsert
@@ -2170,7 +2196,14 @@ async def memclaw_env(
                 d = dict(existing.get("data") or {})
                 if d.get("value") != value:
                     # value changed — reset verification state
-                    d.update({"value": value, "confidence": confidence, "verified_at": now, "verification_count": 0})
+                    d.update(
+                        {
+                            "value": value,
+                            "confidence": confidence,
+                            "verified_at": now,
+                            "verification_count": 0,
+                        }
+                    )
                 else:
                     # same value — keep verification state, update confidence if changed
                     d["confidence"] = confidence
@@ -2413,8 +2446,12 @@ _EXPORT_MAX_LIMIT = 500
 
 
 async def memclaw_export(
-    scope: Annotated[str, Field(description="agent|team|org|all. Mirrors memclaw_list visibility scoping.")] = "agent",
-    format: Annotated[str, Field(description="json (envelope) or jsonl (newline-delimited records).")] = "json",
+    scope: Annotated[
+        str, Field(description="agent|team|org|all. Mirrors memclaw_list visibility scoping.")
+    ] = "agent",
+    format: Annotated[
+        str, Field(description="json (envelope) or jsonl (newline-delimited records).")
+    ] = "json",
     limit: Annotated[int, Field(description="Records per page, max 500 (default 200).")] = 200,
     cursor: Annotated[str | None, Field(description="Pagination cursor from previous response.")] = None,
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
@@ -2423,9 +2460,13 @@ async def memclaw_export(
     if err := _check_auth():
         return err
     if scope not in _EXPORT_SCOPES:
-        return _with_latency(_error_response("INVALID_ARGUMENTS", f"scope must be one of {sorted(_EXPORT_SCOPES)}."), t0)
+        return _with_latency(
+            _error_response("INVALID_ARGUMENTS", f"scope must be one of {sorted(_EXPORT_SCOPES)}."), t0
+        )
     if format not in _EXPORT_FORMATS:
-        return _with_latency(_error_response("INVALID_ARGUMENTS", f"format must be one of {sorted(_EXPORT_FORMATS)}."), t0)
+        return _with_latency(
+            _error_response("INVALID_ARGUMENTS", f"format must be one of {sorted(_EXPORT_FORMATS)}."), t0
+        )
     capped_limit = max(1, min(limit, _EXPORT_MAX_LIMIT))
     tenant_id = _get_tenant()
     sc = get_storage_client()
@@ -2506,9 +2547,13 @@ async def memclaw_export(
 
 # ── BP-05: Review low-rated ───────────────────────────────────────────────────
 
+
 async def memclaw_review(
-    threshold: Annotated[float, Field(description="Max weight to flag (0–1, default 0.4). Memories at or below this are returned.")] = 0.4,
-    limit: Annotated[int, Field(description="Max records to return (1–100, default 50).")] = 50,
+    threshold: Annotated[
+        float,
+        Field(description="Max weight to flag (0-1, default 0.4). Memories at or below this are returned."),
+    ] = 0.4,
+    limit: Annotated[int, Field(description="Max records to return (1-100, default 50).")] = 50,
     scope: Annotated[str, Field(description="agent (own only, default) | all (tenant-wide).")] = "agent",
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
 ) -> str:
@@ -3040,12 +3085,8 @@ async def memclaw_procedure_suggest(
     context_features: Annotated[
         dict, Field(description="Current task context (framework, region, library, …).")
     ],
-    task: Annotated[
-        str | None, Field(description="Short natural-language goal for the task.")
-    ] = None,
-    fleet_id: Annotated[
-        str | None, Field(description="Restrict to a fleet's procedures.")
-    ] = None,
+    task: Annotated[str | None, Field(description="Short natural-language goal for the task.")] = None,
+    fleet_id: Annotated[str | None, Field(description="Restrict to a fleet's procedures.")] = None,
     limit: Annotated[int, Field(description="Max suggestions (1-20).")] = 5,
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
 ) -> str:
@@ -3148,9 +3189,7 @@ async def memclaw_procedure_record(
         sc = get_storage_client()
         proc = await sc.get_procedure(procedure_id)
         if proc is None or proc.get("tenant_id") != tenant_id:
-            return _with_latency(
-                _error_response("NOT_FOUND", f"Procedure '{procedure_id}' not found."), t0
-            )
+            return _with_latency(_error_response("NOT_FOUND", f"Procedure '{procedure_id}' not found."), t0)
         stats = proc.get("stats") or {}
         success = int(stats.get("success_count", 0))
         failure = int(stats.get("failure_count", 0))
@@ -3186,8 +3225,7 @@ async def memclaw_procedure_record(
         # verified counters are additive telemetry this sprint. Letting
         # verified failures quarantine faster is deferred until there's data.
         quarantined = (
-            success + failure >= _PROC_QUARANTINE_MIN_ATTEMPTS
-            and reliability < _PROC_QUARANTINE_RELIABILITY
+            success + failure >= _PROC_QUARANTINE_MIN_ATTEMPTS and reliability < _PROC_QUARANTINE_RELIABILITY
         )
         patch.update(
             {
@@ -3266,9 +3304,7 @@ async def memclaw_procedure_write(
     pattern_signature: Annotated[
         str | None, Field(description="Stable signature for dedup; derived from name if omitted.")
     ] = None,
-    reasoning_guide: Annotated[
-        str | None, Field(description="Optional teacher strategy summary.")
-    ] = None,
+    reasoning_guide: Annotated[str | None, Field(description="Optional teacher strategy summary.")] = None,
     risk_level: Annotated[str, Field(description="low | medium | high.")] = "low",
     fleet_id: Annotated[str | None, Field(description="Fleet scope, optional.")] = None,
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
@@ -3288,9 +3324,7 @@ async def memclaw_procedure_write(
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
     if risk_level not in ("low", "medium", "high"):
-        return _with_latency(
-            _error_response("INVALID_ARGUMENTS", "risk_level must be low|medium|high."), t0
-        )
+        return _with_latency(_error_response("INVALID_ARGUMENTS", "risk_level must be low|medium|high."), t0)
     tenant_id = _get_tenant()
     try:
         from common.embedding import get_query_embedding
@@ -3325,15 +3359,11 @@ _PROC_MANAGE_OPS = ("quarantine", "unquarantine", "invalidate", "delete", "stats
 
 
 async def memclaw_procedure_manage(
-    op: Annotated[
-        str, Field(description="quarantine | unquarantine | invalidate | delete | stats.")
-    ],
+    op: Annotated[str, Field(description="quarantine | unquarantine | invalidate | delete | stats.")],
     procedure_id: Annotated[
         str, Field(description="Procedure UUID (from a memclaw_procedure_suggest result).")
     ],
-    reason: Annotated[
-        str | None, Field(description="op=invalidate: audit note for the retirement.")
-    ] = None,
+    reason: Annotated[str | None, Field(description="op=invalidate: audit note for the retirement.")] = None,
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
 ) -> str:
     """Manual procedure lifecycle: quarantine | unquarantine | invalidate | delete | stats.
@@ -3421,9 +3451,7 @@ async def memclaw_procedure_manage(
                 resource_type="procedure",
                 detail={"procedure_id": procedure_id, "reason": reason, "via": "mcp"},
             )
-            return _with_latency(
-                json.dumps({"procedure_id": procedure_id, "op": op, "ok": True}), t0
-            )
+            return _with_latency(json.dumps({"procedure_id": procedure_id, "op": op, "ok": True}), t0)
         except Exception as e:
             logger.exception("Unhandled error in memclaw_procedure_manage")
             return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
@@ -3895,12 +3923,11 @@ async def memclaw_session_start(
             sc.list_procedures(tenant_id=tenant_id, limit=200),
         )
         memories = [_memory_to_out(m).model_dump(mode="json") for m in mem_rows]
-        procedures = [
-            p for p in (proc_rows or [])
-            if (p.get("stats") or {}).get("success_rate", 0.0) >= 0.6
-        ]
+        procedures = [p for p in (proc_rows or []) if (p.get("stats") or {}).get("success_rate", 0.0) >= 0.6]
         return _with_latency(
-            json.dumps({"memories": memories, "keystones": ks_rows, "procedures": procedures}, indent=2, default=str),
+            json.dumps(
+                {"memories": memories, "keystones": ks_rows, "procedures": procedures}, indent=2, default=str
+            ),
             t0,
         )
     except HTTPException as e:

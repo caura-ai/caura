@@ -41,6 +41,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import load_only
+from sqlalchemy.sql.elements import ColumnElement
 
 from common.constants import (
     CONTRADICTION_CANDIDATE_MAX,
@@ -1264,6 +1265,7 @@ class PostgresService:
             currency_factor = literal_column("1.0").label("currency_factor")
 
         # ponytail: soft project bias — same agent_id rows rank higher in phase 2 cross-context
+        preferred_boost_expr: ColumnElement[Any]
         if preferred_agent_ids:
             preferred_boost_expr = case(
                 (Memory.agent_id.in_(preferred_agent_ids), preferred_agent_boost),
@@ -2340,9 +2342,7 @@ class PostgresService:
             async with get_read_session() as session:
                 return await session.get(Procedure, procedure_id)
 
-    async def procedure_get_stats(
-        self, procedure_id: UUID
-    ) -> ProcedureStats | None:
+    async def procedure_get_stats(self, procedure_id: UUID) -> ProcedureStats | None:
         with db_measure():
             async with get_read_session() as session:
                 return await session.get(ProcedureStats, procedure_id)
@@ -2388,9 +2388,7 @@ class PostgresService:
             result = await session.execute(stmt)
             return [(row[0], row[1]) for row in result.all()]
 
-    async def procedure_update_stats(
-        self, procedure_id: UUID, patch: dict
-    ) -> ProcedureStats | None:
+    async def procedure_update_stats(self, procedure_id: UUID, patch: dict) -> ProcedureStats | None:
         """Apply a stats patch (counters / reliability / quarantine).
 
         Reliability recomputation lives in core-api's procedure_service;
@@ -2411,9 +2409,7 @@ class PostgresService:
             await session.flush()
             return stats
 
-    async def procedure_set_status(
-        self, procedure_id: UUID, status: str
-    ) -> Procedure | None:
+    async def procedure_set_status(self, procedure_id: UUID, status: str) -> Procedure | None:
         """Set a procedure's lifecycle status (used by invalidate).
 
         Unlike quarantine (a reversible ``procedure_stats`` flag), status is

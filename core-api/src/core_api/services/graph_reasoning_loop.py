@@ -119,7 +119,9 @@ async def _run_loop(
         return set(), 0.0, [{"turn": 0, "tool": None, "args": {}, "result_count": 0}]
 
     for turn in range(GRAPH_REASONING_MAX_ITERATIONS):
-        tool_name, llm_args = await _choose_tool(query, provider, config, entity_ids, boosted_memory_ids, trace)
+        tool_name, llm_args = await _choose_tool(
+            query, provider, config, entity_ids, boosted_memory_ids, trace
+        )
 
         if tool_name == "done" or tool_name not in TOOL_SPECS:
             trace.append({"turn": turn, "tool": tool_name, "args": llm_args, "result_count": 0})

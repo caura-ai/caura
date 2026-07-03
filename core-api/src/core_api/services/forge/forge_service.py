@@ -350,8 +350,7 @@ async def run_forge_distill(
                 await procedure_emitter(proc_payload)
             except Exception:
                 logger.exception(
-                    "forge: procedure_emitter raised for slug=%s — skill mint "
-                    "unaffected, skipping procedure",
+                    "forge: procedure_emitter raised for slug=%s — skill mint unaffected, skipping procedure",
                     candidate_doc.get("data", {}).get("slug"),
                 )
 

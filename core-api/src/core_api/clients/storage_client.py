@@ -928,14 +928,10 @@ class CoreStorageClient:
             params["fleet_id"] = fleet_id
         return await self._get_list("/procedures", **params)
 
-    async def update_procedure_stats(
-        self, procedure_id: str, data: dict
-    ) -> dict | None:
+    async def update_procedure_stats(self, procedure_id: str, data: dict) -> dict | None:
         return await self._patch(f"/procedures/{procedure_id}/stats", data)
 
-    async def set_procedure_quarantine(
-        self, procedure_id: str, quarantined: bool
-    ) -> dict | None:
+    async def set_procedure_quarantine(self, procedure_id: str, quarantined: bool) -> dict | None:
         """Toggle the reversible quarantine flag — manual override of the
         auto-quarantine the record path applies."""
         return await self._patch(
@@ -943,16 +939,12 @@ class CoreStorageClient:
             {"is_quarantined": quarantined},
         )
 
-    async def invalidate_procedure(
-        self, procedure_id: str, reason: str | None = None
-    ) -> dict | None:
+    async def invalidate_procedure(self, procedure_id: str, reason: str | None = None) -> dict | None:
         """Permanently retire a procedure (status='invalidated').
 
         ``reason`` is accepted for the audit trail; the status transition is
         what storage persists (reason is logged at the gateway)."""
-        return await self._patch(
-            f"/procedures/{procedure_id}", {"status": "invalidated"}
-        )
+        return await self._patch(f"/procedures/{procedure_id}", {"status": "invalidated"})
 
     async def delete_procedure(self, procedure_id: str) -> bool:
         return await self._delete(f"/procedures/{procedure_id}")

@@ -127,9 +127,7 @@ async def rank_procedures(
         return []
 
     query = _construct_query(task or "", context_features)
-    q_emb = (
-        await get_query_embedding(query, tenant_config) if query.strip() else None
-    )
+    q_emb = await get_query_embedding(query, tenant_config) if query.strip() else None
 
     scored: list[dict[str, Any]] = []
     for proc in candidates:
@@ -138,11 +136,7 @@ async def rank_procedures(
         semantic = _cosine(q_emb, proc.get("embedding"))
         stats = proc.get("stats") or {}
         reliability = stats.get("reliability_score", 0.5)
-        score = (
-            W_SEMANTIC * semantic
-            + W_CONTEXT * overlap
-            + W_RELIABILITY * reliability
-        )
+        score = W_SEMANTIC * semantic + W_CONTEXT * overlap + W_RELIABILITY * reliability
         scored.append(
             {
                 "procedure": proc,
@@ -193,9 +187,7 @@ async def bump_skill_telemetry(
     (tolerated — a deleted skill simply has nowhere to count).
     """
     sc = get_storage_client()
-    doc = await sc.get_document(
-        tenant_id=tenant_id, collection="skills", doc_id=skill_doc_id
-    )
+    doc = await sc.get_document(tenant_id=tenant_id, collection="skills", doc_id=skill_doc_id)
     if doc is None:
         return None
     data = dict(doc.get("data") or {})

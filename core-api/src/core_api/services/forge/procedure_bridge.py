@@ -65,9 +65,7 @@ def build_procedure_from_cluster(
     data = candidate_doc.get("data", {})
     rep = _representative_trace(cluster_traces)
 
-    entity_ids = sorted(
-        {e for t in cluster_traces for e in (t.entity_ids or [])}
-    )
+    entity_ids = sorted({e for t in cluster_traces for e in (t.entity_ids or [])})
     context_features: dict[str, Any] = {"entities": entity_ids[:10]}
     goal = data.get("goal") or rep.goal_phrase
     if goal:

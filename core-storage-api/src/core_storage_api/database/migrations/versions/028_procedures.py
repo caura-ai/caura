@@ -118,23 +118,14 @@ def upgrade() -> None:
             name="ck_procedures_risk_level",
         ),
         sa.CheckConstraint(
-            "status IN ('active', 'candidate', 'staged', 'quarantined', "
-            "'stale', 'deprecated')",
+            "status IN ('active', 'candidate', 'staged', 'quarantined', 'stale', 'deprecated')",
             name="ck_procedures_status",
         ),
     )
-    op.execute(
-        "CREATE INDEX ix_procedures_tenant_agent ON procedures (tenant_id, agent_id)"
-    )
-    op.execute(
-        "CREATE INDEX ix_procedures_tenant_fleet ON procedures (tenant_id, fleet_id)"
-    )
-    op.execute(
-        "CREATE INDEX ix_procedures_tenant_status ON procedures (tenant_id, status)"
-    )
-    op.execute(
-        "CREATE INDEX ix_procedures_skill_doc ON procedures (skill_doc_id)"
-    )
+    op.execute("CREATE INDEX ix_procedures_tenant_agent ON procedures (tenant_id, agent_id)")
+    op.execute("CREATE INDEX ix_procedures_tenant_fleet ON procedures (tenant_id, fleet_id)")
+    op.execute("CREATE INDEX ix_procedures_tenant_status ON procedures (tenant_id, status)")
+    op.execute("CREATE INDEX ix_procedures_skill_doc ON procedures (skill_doc_id)")
 
     op.create_table(
         "procedure_stats",

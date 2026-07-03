@@ -28,7 +28,11 @@ _SPEC = ToolSpec(
     plugin_exposed=True,
     trust_required=0,
     ops=(
-        OpSpec(name="stats", description="Read a procedure's reliability stats.", required_params=("procedure_id",)),
+        OpSpec(
+            name="stats",
+            description="Read a procedure's reliability stats.",
+            required_params=("procedure_id",),
+        ),
         OpSpec(
             name="quarantine",
             description="Suspend a procedure from the ranker (reversible).",

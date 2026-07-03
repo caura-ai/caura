@@ -235,7 +235,7 @@
       },
       {
         "default": 1.0,
-        "description": "op=upsert: certainty 0.0\u20131.0 (default 1.0).",
+        "description": "op=upsert: certainty 0.0-1.0 (default 1.0).",
         "name": "confidence",
         "required": false,
         "type": "float"
@@ -1116,14 +1116,14 @@
     "params": [
       {
         "default": 0.4,
-        "description": "Max weight to flag (0\u20131, default 0.4). Memories at or below this are returned.",
+        "description": "Max weight to flag (0-1, default 0.4). Memories at or below this are returned.",
         "name": "threshold",
         "required": false,
         "type": "float"
       },
       {
         "default": 50,
-        "description": "Max records to return (1\u2013100, default 50).",
+        "description": "Max records to return (1-100, default 50).",
         "name": "limit",
         "required": false,
         "type": "int"

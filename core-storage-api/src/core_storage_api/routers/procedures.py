@@ -95,9 +95,7 @@ async def update_procedure_stats(procedure_id: UUID, request: Request) -> dict:
     _parse_datetimes(patch)
     stats = await _svc.procedure_update_stats(procedure_id, patch)
     if stats is None:
-        raise HTTPException(
-            status_code=404, detail="procedure or stats not found"
-        )
+        raise HTTPException(status_code=404, detail="procedure or stats not found")
     return orm_to_dict(stats, PROCEDURE_STATS_FIELDS)
 
 
