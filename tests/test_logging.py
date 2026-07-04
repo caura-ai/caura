@@ -253,6 +253,53 @@ def _json_log_buffer():
         _reset_for_testing()
 
 
+_DDTRACE_WRITER_LOGGERS = ("ddtrace.internal.writer.writer", "ddtrace.llmobs._writer")
+
+
+def test_ddtrace_writer_loggers_floored_at_critical_when_not_debug() -> None:
+    """The ddtrace trace + LLMObs writer loggers emit benign flush-failure
+    ERRORs ("failed to send, dropping N traces …"). configure_logging must
+    floor them at CRITICAL at both INFO and WARNING so that ERROR noise is
+    dropped from every sink (Datadog / GCP / the caura-ops error alerter) —
+    the ERROR clears root's WARNING filter otherwise and drives alert flap."""
+    for level in ("INFO", "WARNING"):
+        _reset_for_testing()
+        try:
+            configure_logging(environment="test", log_level=level, json_logs=True)
+            for name in _DDTRACE_WRITER_LOGGERS:
+                assert logging.getLogger(name).level == logging.CRITICAL, (
+                    f"{name} must be floored at CRITICAL when configured at {level}"
+                )
+        finally:
+            _reset_for_testing()
+
+
+def test_ddtrace_writer_loggers_not_floored_at_debug() -> None:
+    """At DEBUG (explicit opt-in to verbose output) the writer loggers must NOT
+    be floored, so ddtrace's own diagnostics stay visible."""
+    _reset_for_testing()
+    try:
+        configure_logging(environment="test", log_level="DEBUG", json_logs=True)
+        for name in _DDTRACE_WRITER_LOGGERS:
+            assert logging.getLogger(name).level != logging.CRITICAL, (
+                f"{name} must not be floored at CRITICAL when configured at DEBUG"
+            )
+    finally:
+        _reset_for_testing()
+
+
+def test_reset_clears_ddtrace_writer_floor() -> None:
+    """_reset_for_testing must clear the CRITICAL floor back to NOTSET so a
+    later DEBUG reconfigure isn't left with these stuck at CRITICAL."""
+    _reset_for_testing()
+    configure_logging(environment="test", log_level="INFO", json_logs=True)
+    _reset_for_testing()
+    for name in _DDTRACE_WRITER_LOGGERS:
+        assert logging.getLogger(name).level == logging.NOTSET, (
+            f"{name} must be reset to NOTSET after _reset_for_testing"
+        )
+
+
 def test_stdlib_logger_extras_reach_json_payload(_json_log_buffer) -> None:
     """``logger.info(msg, extra={...})`` from stdlib must surface its
     ``extra`` keys as top-level JSON fields, not be silently dropped.

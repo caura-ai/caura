@@ -494,6 +494,11 @@ def _reset_for_testing() -> None:
         # silent divergence from production behavior.
         for dep in ("httpx", "httpcore", "google.auth", "google.auth.transport"):
             logging.getLogger(dep).setLevel(logging.NOTSET)
+        # Clear the ddtrace-writer CRITICAL floor installed by
+        # _configure_logging_impl so a test reconfiguring at DEBUG doesn't see
+        # these stuck at CRITICAL — same rationale as the overrides above.
+        for dep in ("ddtrace.internal.writer.writer", "ddtrace.llmobs._writer"):
+            logging.getLogger(dep).setLevel(logging.NOTSET)
         # Restore third-party loggers to pre-config state from the snapshot
         # captured by ``_route_third_party_to_root``. Best-effort: any
         # FileHandler / SocketHandler that was closed during stripping won't
@@ -683,5 +688,19 @@ def _configure_logging_impl(
     if logging.DEBUG < min_level < logging.WARNING:
         for dep in ("httpx", "httpcore", "google.auth", "google.auth.transport"):
             logging.getLogger(dep).setLevel(logging.WARNING)
+
+    # ddtrace's trace + LLMObs writers emit a benign ERROR every time a flush to
+    # the local agent (localhost:8126) times out or the agent resets the
+    # connection ("failed to send, dropping N traces …" / "failed to send N
+    # LLMObs span events …"). These are telemetry-plumbing failures — dropped
+    # spans, send_to_telemetry:false — not app errors, but at ERROR they surface
+    # as errors in every sink (Datadog Logs, GCP, the caura-ops error alerter)
+    # and drive alert flapping. Floor them at CRITICAL so the ERROR/WARNING noise
+    # is dropped while a genuine writer CRITICAL still comes through. Unlike the
+    # httpx floor above (INFO-only), this must also apply at WARNING — the ERROR
+    # clears root's WARNING filter otherwise. Skip only at DEBUG (opt-in verbose).
+    if min_level > logging.DEBUG:
+        for dep in ("ddtrace.internal.writer.writer", "ddtrace.llmobs._writer"):
+            logging.getLogger(dep).setLevel(logging.CRITICAL)
 
     _route_third_party_to_root()
