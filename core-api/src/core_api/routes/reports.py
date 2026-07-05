@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -326,8 +328,9 @@ async def get_report(
         # consistent with the breakdown-derived counts (durable_total, per_agent).
         # NOTE: /memories/list filters authorship via ``written_by`` (``agent_id``
         # is not read on that path); ``caller_agent_id`` above is the visibility
-        # identity, not an author filter.
-        if dest in _SELF_AUDIENCES and caller_agent_id:
+        # identity, not an author filter. Skipped in org_mode: an org-scope report
+        # aggregates the whole readable set, so it must not narrow to one author.
+        if dest in _SELF_AUDIENCES and caller_agent_id and not org_mode:
             list_query["written_by"] = caller_agent_id
         if org_mode:
             list_query["readable_tenant_ids"] = readable
@@ -338,11 +341,21 @@ async def get_report(
         # Derived from list_query AFTER the written_by/fleet/readable conditionals.
         highlights_query = dict(list_query, sort="recall_count", limit=_HIGHLIGHTS_FETCH_LIMIT)
 
-        # Activity-over-time trend query (group/org only) — built before the gather.
+        # ── Phase 1: independent storage reads, concurrently. The agent
+        # leaderboard (group only) and the trend fetch (group/org only) are
+        # conditional. ──
         want_trend = dest == AUDIENCE_GROUP or org_mode
-        trend_query: dict | None = None
+        want_agents = dest == AUDIENCE_GROUP and not org_mode
+        phase1: dict[str, Awaitable[Any]] = {
+            "recent": sc.list_memories_by_filters(list_query),
+            "recall": sc.list_memories_by_filters(highlights_query),
+        }
+        if want_agents:
+            phase1["agents"] = sc.list_agents(tenant_id, caller_fleet)
         if want_trend:
-            trend_query = {
+            # Activity-over-time trend (group/org only). Built here — inside the
+            # guard — so trend_query is a concrete dict, not dict | None.
+            trend_query: dict = {
                 "tenant_id": tenant_id,
                 "since": (now - timedelta(days=_TREND_DAYS)).isoformat(),
                 "exclude_memory_types": list(NON_DURABLE_TYPES),
@@ -353,17 +366,6 @@ async def get_report(
                 trend_query["readable_tenant_ids"] = readable
             elif caller_fleet:
                 trend_query["fleet_id"] = caller_fleet
-
-        # ── Phase 1: independent storage reads, concurrently. The belong lookup
-        # (group only) and the trend fetch (group/org only) are conditional. ──
-        want_agents = dest == AUDIENCE_GROUP and not org_mode
-        phase1: dict[str, object] = {
-            "recent": sc.list_memories_by_filters(list_query),
-            "recall": sc.list_memories_by_filters(highlights_query),
-        }
-        if want_agents:
-            phase1["agents"] = sc.list_agents(tenant_id, caller_fleet)
-        if want_trend:
             phase1["trend"] = sc.memory_daily_durable_counts(trend_query)
         p1_keys = list(phase1)
         p1_vals = await asyncio.gather(*(phase1[k] for k in p1_keys))
