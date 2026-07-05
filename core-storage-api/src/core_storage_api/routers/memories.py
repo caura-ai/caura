@@ -73,9 +73,7 @@ def _validate_pg_regex(value: str | None, field: str) -> None:
     try:
         _re.compile(value)
     except _re.error as exc:
-        raise HTTPException(
-            status_code=422, detail=f"'{field}' is not a valid regex: {exc}"
-        )
+        raise HTTPException(status_code=422, detail=f"'{field}' is not a valid regex: {exc}")
 
 
 @router.post("")
