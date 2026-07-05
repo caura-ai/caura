@@ -3667,7 +3667,12 @@ class PostgresService:
             conds.append(Memory.agent_id.notin_(exclude_agent_ids))
         if exclude_title_regex:
             conds.append(~func.coalesce(Memory.title, "").op("~*")(exclude_title_regex))
-        day = func.date_trunc("day", Memory.created_at)
+        # Bucket by UTC day: the report caller builds its day-keys in UTC
+        # (datetime.now(UTC)), but bare date_trunc uses the PG session TimeZone —
+        # a non-UTC session TZ would shift the buckets so every raw_counts.get()
+        # misses and silently zeroes the whole trend. ``timezone('UTC', ...)``
+        # normalizes the timestamptz to UTC wall-clock before truncating.
+        day = func.date_trunc("day", func.timezone("UTC", Memory.created_at))
         stmt = select(day.label("d"), func.count().label("c")).where(*conds).group_by(day).order_by(day)
         async with get_read_session() as session:
             rows = (await session.execute(stmt)).all()

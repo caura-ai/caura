@@ -297,8 +297,15 @@ async def get_report(
         # Skip the belonging join in org scope — ``list_agents`` is per-tenant
         # and can't cover the whole readable set (cross-tenant agents get null).
         belong_by_id: dict[str, dict] = {}
-        if dest == AUDIENCE_GROUP and not org_mode:
-            for row in await sc.list_agents(tenant_id, caller_fleet) or []:
+        if (dest == AUDIENCE_GROUP or dest in _SELF_AUDIENCES) and not org_mode:
+            # Group view enriches the whole fleet; the self view only needs the
+            # caller's own row (already fetched above) so its single per_agent
+            # entry carries display_name / belonging_type instead of nulls.
+            if dest == AUDIENCE_GROUP:
+                agent_rows = await sc.list_agents(tenant_id, caller_fleet) or []
+            else:
+                agent_rows = [caller] if caller else []
+            for row in agent_rows:
                 aid = row.get("agent_id")
                 if aid:
                     belong_by_id[aid] = row
