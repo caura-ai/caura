@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.13.0](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.12.0...plugin-v2.13.0) (2026-07-05)
+
+
+### Features
+
+* **core-api,plugin:** self-identify MCP writes when the verified id is reserved "main" ([#507](https://github.com/caura-ai/caura-memclaw/issues/507)) ([1bc00c1](https://github.com/caura-ai/caura-memclaw/commit/1bc00c14e2de653f006ab5226e1c22626b5f829d))
+
 ## [2.12.0](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.11.0...plugin-v2.12.0) (2026-06-25)
 
 
