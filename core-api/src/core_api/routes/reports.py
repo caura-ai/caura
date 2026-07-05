@@ -26,6 +26,7 @@ the report reflects durable per-agent work rather than the raw activity stream.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -41,6 +42,23 @@ router = APIRouter(tags=["Reports"])
 # report reflects durable, decision-bearing per-agent work.
 NON_DURABLE_TYPES = ("episode",)
 RESERVED_FIREHOSE_AGENTS = ("main",)
+
+# "Cohesive" filter: heartbeat / health-check / status-poll noise leaks in as
+# NON-episode rows (e.g. action/outcome "heartbeat" or "Checked HEARTBEAT.md"
+# writes), so the type+firehose exclusion above is not enough — a per-agent
+# leaderboard built on it still counts monitoring pings as "what the agent did".
+# This case-insensitive title regex drops that noise across ALL types so the
+# report reflects real work; genuine rules/decisions/insights never match it, so
+# the value/quality surfaces are unaffected. Applied report-wide (breakdown,
+# durable rows, trend) for a single reconcilable corpus. Pure-monitor agents
+# fall off the leaderboard naturally once their pings are excluded.
+NON_COHESIVE_TITLE_REGEX = (
+    r"(heartbeat|health[- ]?check|healthz|healthy|watchdog|gpu.?health|no.?change|"
+    r"auth error|zero auth|0 auth|encrypted|unreadable|no readable|no actionable|"
+    r"no usable|no_reply|polled|quickcheck|app-fleet|discovery script|"
+    r"gateway (active|reachable)|cache refresh)"
+)
+_NON_COHESIVE_TITLE_RE = re.compile(NON_COHESIVE_TITLE_REGEX, re.IGNORECASE)
 
 # Delivery audience classes — an abstraction over messaging platforms
 # (WhatsApp / Teams / Slack / Claude-Code map to one of these at the edge).
@@ -59,9 +77,15 @@ _PERIOD_DAYS = {"day": 1, "week": 7}
 _LEARNING_LIMIT = 5
 _HIGHLIGHTS_LIMIT = 5
 _TOP_AGENTS_LIMIT = 25
-# Recent in-window durable rows fetched once to derive learning + highlights +
-# spotlight (top-by-recall is taken among these — avoids a recall_count sort dep).
-_DURABLE_FETCH_LIMIT = 60
+# Recent in-window durable rows (created_at desc) feeding LEARNING (recent
+# insights) and the working-on LANES (keyword categorization). Capped for a
+# representative window sample without an unbounded fetch.
+_DURABLE_FETCH_LIMIT = 200
+# Separate recall-sorted fetch backing VALUE HIGHLIGHTS + the spotlight headline,
+# so "most-reused" is the true top-by-recall in the window — not merely the
+# most-reused among the most-recent rows. Over-fetched so post-filtering
+# (episode/firehose/cohesive) still leaves enough to take _HIGHLIGHTS_LIMIT.
+_HIGHLIGHTS_FETCH_LIMIT = 40
 # Activity-over-time trend length (daily buckets), independent of the period toggle.
 _TREND_DAYS = 14
 # "What the org is working on" lanes — heuristic keyword match on title/content,
@@ -234,6 +258,7 @@ async def get_report(
         "created_after": window_start.isoformat(),
         "exclude_memory_types": list(NON_DURABLE_TYPES),
         "exclude_agent_ids": list(RESERVED_FIREHOSE_AGENTS),
+        "exclude_title_regex": NON_COHESIVE_TITLE_REGEX,
     }
     if org_mode:
         # Org-wide: aggregate across every tenant the credential may read.
@@ -287,8 +312,23 @@ async def get_report(
                 }
             )
 
-        # One fetch of recent in-window durable memories feeds learning,
-        # value_highlights, and the spotlight.
+        def _title(m: dict) -> str:
+            return m.get("title") or (m.get("metadata") or {}).get("summary") or "(untitled)"
+
+        def _rank(m: dict) -> tuple:
+            return (m.get("recall_count") or 0, m.get("created_at") or "")
+
+        def _cohesive(m: dict) -> bool:
+            # Mirror the server-side report corpus in Python for the row fetches:
+            # durable (non-episodic, non-firehose) AND not heartbeat/status noise.
+            # Title-only match mirrors the ``exclude_title_regex`` predicate.
+            return (
+                m.get("memory_type") not in NON_DURABLE_TYPES
+                and m.get("agent_id") not in RESERVED_FIREHOSE_AGENTS
+                and not _NON_COHESIVE_TITLE_RE.search(m.get("title") or "")
+            )
+
+        # Recent-ordered fetch → LEARNING (recent insights) + working-on LANES.
         list_query: dict = {
             "tenant_id": tenant_id,
             "caller_agent_id": caller_agent_id,
@@ -301,19 +341,13 @@ async def get_report(
             list_query["readable_tenant_ids"] = readable
         elif dest == AUDIENCE_GROUP and caller_fleet:
             list_query["fleet_id"] = caller_fleet
-        rows = await sc.list_memories_by_filters(list_query) or []
-        durable = [
-            m
-            for m in rows
-            if m.get("memory_type") not in NON_DURABLE_TYPES
-            and m.get("agent_id") not in RESERVED_FIREHOSE_AGENTS
-        ]
+        durable = [m for m in (await sc.list_memories_by_filters(list_query) or []) if _cohesive(m)]
 
-        def _title(m: dict) -> str:
-            return m.get("title") or (m.get("metadata") or {}).get("summary") or "(untitled)"
-
-        def _rank(m: dict) -> tuple:
-            return (m.get("recall_count") or 0, m.get("created_at") or "")
+        # Separate recall-sorted fetch → VALUE HIGHLIGHTS + spotlight headline, so
+        # "most-reused" is the true top-by-recall in the window, not just the
+        # most-reused among the most-recent rows. Over-fetch then post-filter.
+        highlights_query = dict(list_query, sort="recall_count", limit=_HIGHLIGHTS_FETCH_LIMIT)
+        top_durable = [m for m in (await sc.list_memories_by_filters(highlights_query) or []) if _cohesive(m)]
 
         # Learning: most recent distilled insights in the window.
         learning = [
@@ -322,7 +356,9 @@ async def get_report(
             if m.get("memory_type") == "insight"
         ][:_LEARNING_LIMIT]
 
-        # Value highlights: the most-reused durable knowledge in the window.
+        # Value highlights: the most-reused (all-time) durable knowledge authored
+        # in-window. NOTE: recall_count is a lifetime counter — MemClaw has no
+        # per-period recall log — so this is not "reused *this* period".
         value_highlights = [
             {
                 "title": _title(m),
@@ -330,14 +366,18 @@ async def get_report(
                 "recall_count": m.get("recall_count") or 0,
                 "agent_id": m.get("agent_id"),
             }
-            for m in sorted(durable, key=_rank, reverse=True)[:_HIGHLIGHTS_LIMIT]
+            for m in top_durable[:_HIGHLIGHTS_LIMIT]
         ]
 
-        # Spotlight: the top contributor + their headline durable memory.
+        # Spotlight: the top contributor + their headline (highest-recall) memory.
         if per_agent:
             top = per_agent[0]
+            # Search a deduped union of both fetches so the headline is the top
+            # agent's highest-recall in-window memory, whether it surfaced via the
+            # recall-sorted or the recent-ordered fetch.
+            pool = list({m.get("id"): m for m in (*top_durable, *durable)}.values())
             authored = sorted(
-                (m for m in durable if m.get("agent_id") == top["agent_id"]),
+                (m for m in pool if m.get("agent_id") == top["agent_id"]),
                 key=_rank,
                 reverse=True,
             )
@@ -376,6 +416,7 @@ async def get_report(
                 "since": (now - timedelta(days=_TREND_DAYS)).isoformat(),
                 "exclude_memory_types": list(NON_DURABLE_TYPES),
                 "exclude_agent_ids": list(RESERVED_FIREHOSE_AGENTS),
+                "exclude_title_regex": NON_COHESIVE_TITLE_REGEX,
             }
             if org_mode:
                 trend_query["readable_tenant_ids"] = readable
@@ -415,7 +456,10 @@ async def get_report(
             "tenants": len(readable) if org_mode and readable else 1,
             "destination": dest,
             "scope": scope_label,
-            "corpus": "durable, decision-bearing memories only (excl. episodic logs & 'main')",
+            "corpus": (
+                "durable, decision-bearing memories (excl. episodic logs, the "
+                "'main' firehose, and heartbeat/health/status noise)"
+            ),
             "belonging": (
                 {"type": belonging_type, "owner_ref": owner_ref}
                 if dest in _SELF_AUDIENCES and not org_mode

@@ -3426,6 +3426,7 @@ class PostgresService:
         created_before: datetime | None = None,
         exclude_memory_types: list[str] | None = None,
         exclude_agent_ids: list[str] | None = None,
+        exclude_title_regex: str | None = None,
         include_deleted: bool = False,
         readable_tenant_ids: list[str] | None = None,
     ) -> dict:
@@ -3487,6 +3488,15 @@ class PostgresService:
             scope_filters.append(Memory.memory_type.notin_(exclude_memory_types))
         if exclude_agent_ids:
             scope_filters.append(Memory.agent_id.notin_(exclude_agent_ids))
+        # Report "cohesive" filter: drop heartbeat / health-check / status-poll
+        # noise that isn't type=episode (e.g. action/outcome "heartbeat" rows) so
+        # the per-agent leaderboard reflects real work, not monitoring pings.
+        # ``coalesce(title,'')`` keeps null-title rows instead of dropping them on
+        # the NULL-propagating negation. Case-insensitive POSIX regex (``~*``).
+        if exclude_title_regex:
+            scope_filters.append(
+                ~func.coalesce(Memory.title, "").op("~*")(exclude_title_regex)
+            )
 
         filters = [Memory.deleted_at.is_(None), *scope_filters]
 
@@ -3632,6 +3642,7 @@ class PostgresService:
         fleet_id: str | None = None,
         exclude_memory_types: list[str] | None = None,
         exclude_agent_ids: list[str] | None = None,
+        exclude_title_regex: str | None = None,
         readable_tenant_ids: list[str] | None = None,
     ) -> list[dict]:
         """Per-day durable-write counts since ``since`` — the report's
@@ -3656,6 +3667,8 @@ class PostgresService:
             conds.append(Memory.memory_type.notin_(exclude_memory_types))
         if exclude_agent_ids:
             conds.append(Memory.agent_id.notin_(exclude_agent_ids))
+        if exclude_title_regex:
+            conds.append(~func.coalesce(Memory.title, "").op("~*")(exclude_title_regex))
         day = func.date_trunc("day", Memory.created_at)
         stmt = select(day.label("d"), func.count().label("c")).where(*conds).group_by(day).order_by(day)
         async with get_read_session() as session:

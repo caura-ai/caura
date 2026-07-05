@@ -265,6 +265,138 @@ async def test_report_org_scope_admin_readable_param(client):
     assert body["summary"]["by_tenant"] == {t1: 2, t2: 3}, body["summary"]["by_tenant"]
 
 
+async def _seed_titled(client, headers, tenant_id, fleet, agent, mtype, title):
+    """Create a durable memory then set an exact title via the storage client.
+
+    Enrichment runs inline in tests and would auto-title, so we PATCH the title
+    directly to make the cohesive-filter assertions enrichment-independent.
+    Returns the memory id.
+    """
+    r = await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant_id,
+            "agent_id": agent,
+            "fleet_id": fleet,
+            "memory_type": mtype,
+            "visibility": "scope_team",
+            "content": f"{title} {_uid()}",
+        },
+        headers=headers,
+    )
+    assert r.status_code == 201, r.text
+    mid = r.json()["id"]
+    await get_storage_client().update_memory(mid, tenant_id, {"title": title})
+    return mid
+
+
+async def test_report_excludes_noncohesive_titles(client):
+    """Non-episode heartbeat / health / status memories are excluded.
+
+    The durable filter (episode + ``main``) is not sufficient: monitoring pings
+    are written as NON-episode rows (a ``decision``/``outcome``/``action`` titled
+    "Heartbeat check…", "GPU health check…", "Gateway healthy…"). The cohesive
+    title filter drops them so the per-agent leaderboard and highlights reflect
+    real work, not pings.
+    """
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fleet, a1 = f"rep-fleet-{tag}", f"rep-a1-{tag}"
+    await _register(tenant_id, fleet, a1)
+
+    # Genuine durable work — kept. (Only decision/fact/semantic are writable
+    # directly; outcome/rule/insight are server-reserved. The noise the filter
+    # targets is in the TITLE, not the type, so non-episode types suffice.)
+    await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "decision",
+        "Chose Postgres over Mongo for the signal store",
+    )
+    await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "semantic",
+        "Verify a project URL via the proxy before sharing it",
+    )
+    # Non-episode monitoring noise — excluded by the cohesive title filter.
+    await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "decision",
+        "Heartbeat check for GoodDollar L2 builder status",
+    )
+    await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "fact",
+        "GPU health check recorded no_change",
+    )
+    await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "semantic",
+        "Gateway healthy: zero auth errors",
+    )
+
+    resp = await client.get(
+        "/api/v1/reports",
+        params={
+            "tenant_id": tenant_id,
+            "period": "week",
+            "destination": "internal_group",
+            "agent_id": a1,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Only the 2 genuine memories survive the cohesive filter.
+    assert body["summary"]["durable_memories_written"] == 2, body["summary"]
+    assert {p["agent_id"]: p["durable_writes"] for p in body["per_agent"]} == {a1: 2}
+    titles = " ".join(h["title"].lower() for h in body["value_highlights"])
+    assert "heartbeat" not in titles and "health check" not in titles, body["value_highlights"]
+    assert "gateway healthy" not in titles, body["value_highlights"]
+    assert len(body["value_highlights"]) == 2, body["value_highlights"]
+    # Trend counts share the cohesive corpus (noise excluded there too).
+    assert sum(pt["count"] for pt in body["trend"]) == 2, body["trend"]
+
+
+async def test_report_value_highlights_ranked_by_recall(client):
+    """value_highlights is the true top-by-recall in the window (dedicated
+    recall-sorted fetch), not merely the most-reused among the most-recent rows —
+    it surfaces an older-but-heavily-reused memory above newer, unreused ones.
+    """
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fleet, a1 = f"rep-fleet-{tag}", f"rep-a1-{tag}"
+    await _register(tenant_id, fleet, a1)
+    sc = get_storage_client()
+
+    older = await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "decision",
+        "Older but heavily-reused architecture decision",
+    )
+    # Newer, unreused writes created AFTER the high-recall one.
+    for i in range(3):
+        await _seed_titled(
+            client, headers, tenant_id, fleet, a1, "fact", f"Newer reference fact {i}"
+        )
+    # Bump the older memory's lifetime recall so it is the top by recall.
+    for _ in range(3):
+        assert await sc.increment_recall([older]) == 1
+
+    resp = await client.get(
+        "/api/v1/reports",
+        params={
+            "tenant_id": tenant_id,
+            "period": "week",
+            "destination": "internal_group",
+            "agent_id": a1,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["value_highlights"], body
+    top = body["value_highlights"][0]
+    assert top["title"] == "Older but heavily-reused architecture decision", body["value_highlights"]
+    assert top["recall_count"] == 3, top
+    # Spotlight headline is the top contributor's highest-recall memory.
+    assert body["spotlight"]["agent_id"] == a1
+    assert body["spotlight"]["headline"]["title"] == "Older but heavily-reused architecture decision", body["spotlight"]
+
+
 async def test_report_org_scope_requires_cross_tenant_key(client):
     """scope=org without a cross-tenant read credential → 403 (home-only key can't widen)."""
     tag = _uid()
