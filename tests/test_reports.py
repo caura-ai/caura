@@ -114,6 +114,14 @@ async def test_report_owner_1to1_is_self(client):
     body = resp.json()
     assert body["meta"]["scope"] == "self", body["meta"]
     assert body["summary"]["durable_memories_written"] == 2, body  # only a1's own
+    # List-derived sections are author-scoped to the caller too (self path),
+    # consistent with the breakdown counts — a2's team-visible fact must NOT leak.
+    assert all(h["agent_id"] == a1 for h in body["value_highlights"]), body[
+        "value_highlights"
+    ]
+    assert body["spotlight"] is None or body["spotlight"]["agent_id"] == a1, body[
+        "spotlight"
+    ]
 
 
 async def test_report_external_is_fail_closed(client):
@@ -308,24 +316,49 @@ async def test_report_excludes_noncohesive_titles(client):
     # directly; outcome/rule/insight are server-reserved. The noise the filter
     # targets is in the TITLE, not the type, so non-episode types suffice.)
     await _seed_titled(
-        client, headers, tenant_id, fleet, a1, "decision",
+        client,
+        headers,
+        tenant_id,
+        fleet,
+        a1,
+        "decision",
         "Chose Postgres over Mongo for the signal store",
     )
     await _seed_titled(
-        client, headers, tenant_id, fleet, a1, "semantic",
+        client,
+        headers,
+        tenant_id,
+        fleet,
+        a1,
+        "semantic",
         "Verify a project URL via the proxy before sharing it",
     )
     # Non-episode monitoring noise — excluded by the cohesive title filter.
     await _seed_titled(
-        client, headers, tenant_id, fleet, a1, "decision",
+        client,
+        headers,
+        tenant_id,
+        fleet,
+        a1,
+        "decision",
         "Heartbeat check for GoodDollar L2 builder status",
     )
     await _seed_titled(
-        client, headers, tenant_id, fleet, a1, "fact",
+        client,
+        headers,
+        tenant_id,
+        fleet,
+        a1,
+        "fact",
         "GPU health check recorded no_change",
     )
     await _seed_titled(
-        client, headers, tenant_id, fleet, a1, "semantic",
+        client,
+        headers,
+        tenant_id,
+        fleet,
+        a1,
+        "semantic",
         "Gateway healthy: zero auth errors",
     )
 
@@ -345,7 +378,9 @@ async def test_report_excludes_noncohesive_titles(client):
     assert body["summary"]["durable_memories_written"] == 2, body["summary"]
     assert {p["agent_id"]: p["durable_writes"] for p in body["per_agent"]} == {a1: 2}
     titles = " ".join(h["title"].lower() for h in body["value_highlights"])
-    assert "heartbeat" not in titles and "health check" not in titles, body["value_highlights"]
+    assert "heartbeat" not in titles and "health check" not in titles, body[
+        "value_highlights"
+    ]
     assert "gateway healthy" not in titles, body["value_highlights"]
     assert len(body["value_highlights"]) == 2, body["value_highlights"]
     # Trend counts share the cohesive corpus (noise excluded there too).
@@ -364,7 +399,12 @@ async def test_report_value_highlights_ranked_by_recall(client):
     sc = get_storage_client()
 
     older = await _seed_titled(
-        client, headers, tenant_id, fleet, a1, "decision",
+        client,
+        headers,
+        tenant_id,
+        fleet,
+        a1,
+        "decision",
         "Older but heavily-reused architecture decision",
     )
     # Newer, unreused writes created AFTER the high-recall one.
@@ -390,11 +430,16 @@ async def test_report_value_highlights_ranked_by_recall(client):
     body = resp.json()
     assert body["value_highlights"], body
     top = body["value_highlights"][0]
-    assert top["title"] == "Older but heavily-reused architecture decision", body["value_highlights"]
+    assert top["title"] == "Older but heavily-reused architecture decision", body[
+        "value_highlights"
+    ]
     assert top["recall_count"] == 3, top
     # Spotlight headline is the top contributor's highest-recall memory.
     assert body["spotlight"]["agent_id"] == a1
-    assert body["spotlight"]["headline"]["title"] == "Older but heavily-reused architecture decision", body["spotlight"]
+    assert (
+        body["spotlight"]["headline"]["title"]
+        == "Older but heavily-reused architecture decision"
+    ), body["spotlight"]
 
 
 async def test_report_quality_metrics(client):
@@ -410,9 +455,15 @@ async def test_report_quality_metrics(client):
     await _register(tenant_id, fleet, a1)
     sc = get_storage_client()
 
-    d1 = await _seed_titled(client, headers, tenant_id, fleet, a1, "decision", f"Decision one {tag}")
-    await _seed_titled(client, headers, tenant_id, fleet, a1, "decision", f"Decision two {tag}")
-    f1 = await _seed_titled(client, headers, tenant_id, fleet, a1, "fact", f"Fact one {tag}")
+    d1 = await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "decision", f"Decision one {tag}"
+    )
+    await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "decision", f"Decision two {tag}"
+    )
+    f1 = await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "fact", f"Fact one {tag}"
+    )
     await _seed_titled(client, headers, tenant_id, fleet, a1, "fact", f"Fact two {tag}")
     # One episode — counts toward the funnel's "written" but not the durable corpus.
     await _seed(client, headers, tenant_id, fleet, a1, "episode", 1)

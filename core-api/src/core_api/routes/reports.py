@@ -338,6 +338,15 @@ async def get_report(
             "order": "desc",
             "limit": _DURABLE_FETCH_LIMIT,
         }
+        # Self audiences scope to the caller's OWN authored rows, mirroring the
+        # ``agent_id`` filter applied to breakdown_query on this path — so the
+        # list-derived sections (learning, value_highlights, working_on) stay
+        # consistent with the breakdown-derived counts (durable_total, per_agent).
+        # NOTE: /memories/list filters authorship via ``written_by`` (``agent_id``
+        # is not read on that path); ``caller_agent_id`` above is the visibility
+        # identity, not an author filter.
+        if dest in _SELF_AUDIENCES and caller_agent_id:
+            list_query["written_by"] = caller_agent_id
         if org_mode:
             list_query["readable_tenant_ids"] = readable
         elif dest == AUDIENCE_GROUP and caller_fleet:
