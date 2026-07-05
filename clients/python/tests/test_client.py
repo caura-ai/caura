@@ -63,6 +63,36 @@ def test_search_returns_list():
     assert [m.id for m in results] == ["m1", "m2"]
 
 
+def test_search_raises_on_missing_items_key():
+    def handler(request):
+        return httpx.Response(200, json={"error": "quota exceeded"})
+
+    with pytest.raises(MemClawAPIError) as exc:
+        make_client(handler).search("q")
+    assert exc.value.status_code == 200
+    assert str(exc.value) == '[200] search response missing "items" list'
+
+
+def test_search_raises_on_items_not_a_list():
+    def handler(request):
+        return httpx.Response(200, json={"items": "not-a-list"})
+
+    with pytest.raises(MemClawAPIError) as exc:
+        make_client(handler).search("q")
+    assert exc.value.status_code == 200
+    assert str(exc.value) == '[200] search response "items" must be a list'
+
+
+def test_search_raises_on_non_dict_body():
+    def handler(request):
+        return httpx.Response(200, json=["not", "a", "dict"])
+
+    with pytest.raises(MemClawAPIError) as exc:
+        make_client(handler).search("q")
+    assert exc.value.status_code == 200
+    assert str(exc.value) == "[200] search response must be a JSON object"
+
+
 def test_recall_returns_summary():
     def handler(request):
         assert request.url.path == "/api/v1/recall"

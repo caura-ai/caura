@@ -94,7 +94,13 @@ class MemClaw:
             body["filter_agent_id"] = filter_agent_id
         body.update(extra)
         data = self._post("/api/v1/search", body)
-        items = data.get("items", []) if isinstance(data, dict) else []
+        if not isinstance(data, dict):
+            raise MemClawAPIError(200, "search response must be a JSON object")
+        if "items" not in data:
+            raise MemClawAPIError(200, 'search response missing "items" list')
+        items = data["items"]
+        if not isinstance(items, list):
+            raise MemClawAPIError(200, 'search response "items" must be a list')
         return [Memory.from_dict(m) for m in items]
 
     def recall(self, query: str, *, top_k: int = 5, **extra: Any) -> RecallResult:

@@ -128,8 +128,17 @@ export class MemClaw {
     if (filterAgentId) body.filter_agent_id = filterAgentId;
     Object.assign(body, extra);
     const data = await this.request("POST", "/api/v1/search", body);
-    const items: unknown = data?.items;
-    return Array.isArray(items) ? items.map((m) => toMemory(m as Record<string, any>)) : [];
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new MemClawApiError(200, "search response must be a JSON object");
+    }
+    if (!("items" in data)) {
+      throw new MemClawApiError(200, 'search response missing "items" list');
+    }
+    const items = (data as Record<string, unknown>).items;
+    if (!Array.isArray(items)) {
+      throw new MemClawApiError(200, 'search response "items" must be a list');
+    }
+    return items.map((m) => toMemory(m as Record<string, any>));
   }
 
   /** Search + LLM-synthesized context brief. POST /api/v1/recall */

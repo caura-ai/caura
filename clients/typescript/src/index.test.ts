@@ -59,6 +59,26 @@ test("search posts to /search and returns a list", async () => {
   assert.deepEqual(results.map((m) => m.id), ["m1", "m2"]);
 });
 
+test("search throws when 200 body lacks items", async () => {
+  const client = makeClient(() => jsonResponse(200, { error: "quota exceeded" }));
+  await assert.rejects(client.search("q"), (err: unknown) => {
+    assert.ok(err instanceof MemClawApiError);
+    assert.equal((err as MemClawApiError).statusCode, 200);
+    assert.equal((err as MemClawApiError).message, '[200] search response missing "items" list');
+    return true;
+  });
+});
+
+test("search throws when 200 items is not a list", async () => {
+  const client = makeClient(() => jsonResponse(200, { items: "not-a-list" }));
+  await assert.rejects(client.search("q"), (err: unknown) => {
+    assert.ok(err instanceof MemClawApiError);
+    assert.equal((err as MemClawApiError).statusCode, 200);
+    assert.equal((err as MemClawApiError).message, '[200] search response "items" must be a list');
+    return true;
+  });
+});
+
 test("recall returns the summary and supporting memories", async () => {
   const client = makeClient((url) => {
     assert.equal(new URL(url).pathname, "/api/v1/recall");
