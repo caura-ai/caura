@@ -80,15 +80,21 @@ _PERIOD_DAYS = {"day": 1, "week": 7}
 _LEARNING_LIMIT = 5
 _HIGHLIGHTS_LIMIT = 5
 _TOP_AGENTS_LIMIT = 25
+# PRE-FILTER fetch sizes, NOT final result sizes. The list API (see the warning
+# at _cohesive() below) cannot push exclude_memory_types/exclude_agent_ids/
+# exclude_title_regex server-side, so these rows are fetched raw and the noise
+# (episode/firehose/heartbeat) is dropped client-side by _cohesive(). Both must
+# stay large enough that the POST-_cohesive() pool still exceeds the downstream
+# limits (_LEARNING_LIMIT=5, _HIGHLIGHTS_LIMIT=5) even in noisy corpora — a
+# ~3-5x margin over the known exclusion rate.
+#
 # Recent in-window durable rows (created_at desc) feeding LEARNING (recent
-# insights) and the working-on LANES (keyword categorization). Capped for a
-# representative window sample without an unbounded fetch.
-_DURABLE_FETCH_LIMIT = 200
+# insights) and the working-on LANES (keyword categorization).
+_DURABLE_FETCH_LIMIT = 600  # was 200
 # Separate recall-sorted fetch backing VALUE HIGHLIGHTS + the spotlight headline,
 # so "most-reused" is the true top-by-recall in the window — not merely the
-# most-reused among the most-recent rows. Over-fetched so post-filtering
-# (episode/firehose/cohesive) still leaves enough to take _HIGHLIGHTS_LIMIT.
-_HIGHLIGHTS_FETCH_LIMIT = 40
+# most-reused among the most-recent rows.
+_HIGHLIGHTS_FETCH_LIMIT = 150  # was 40
 # Activity-over-time trend length (daily buckets), independent of the period toggle.
 _TREND_DAYS = 14
 # "What the org is working on" lanes — heuristic keyword match on title/content,
@@ -304,6 +310,14 @@ async def get_report(
             return (m.get("recall_count") or 0, m.get("created_at") or "")
 
         def _cohesive(m: dict) -> bool:
+            # WARNING: the /memories/list API cannot push exclude_memory_types /
+            # exclude_agent_ids / exclude_title_regex server-side, so the row
+            # fetches (list_query, highlights_query) come back raw and this
+            # predicate drops the noise client-side — AFTER the fetch limit has
+            # already been consumed. That is why _DURABLE_FETCH_LIMIT /
+            # _HIGHLIGHTS_FETCH_LIMIT over-fetch: the surviving pool must still
+            # exceed the downstream _LEARNING_LIMIT / _HIGHLIGHTS_LIMIT slices.
+            #
             # Mirror the server-side report corpus in Python for the row fetches:
             # durable (non-episodic, non-firehose) AND not heartbeat/status noise.
             # Title-only match mirrors the ``exclude_title_regex`` predicate.
