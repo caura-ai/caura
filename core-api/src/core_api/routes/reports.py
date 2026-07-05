@@ -26,6 +26,7 @@ the report reflects durable per-agent work rather than the raw activity stream.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import UTC, datetime, timedelta
 
@@ -293,32 +294,6 @@ async def get_report(
     working_on: dict = {}
     quality: dict = {}
     if dest in _DETAIL_AUDIENCES or org_mode:
-        # Per-agent leaderboard, joined with belonging metadata (group view).
-        # Skip the belonging join in org scope — ``list_agents`` is per-tenant
-        # and can't cover the whole readable set (cross-tenant agents get null).
-        belong_by_id: dict[str, dict] = {}
-        if (dest == AUDIENCE_GROUP or dest in _SELF_AUDIENCES) and not org_mode:
-            # Group view enriches the whole fleet; the self view only needs the
-            # caller's own row (already fetched above) so its single per_agent
-            # entry carries display_name / belonging_type instead of nulls.
-            if dest == AUDIENCE_GROUP:
-                agent_rows = await sc.list_agents(tenant_id, caller_fleet) or []
-            else:
-                agent_rows = [caller] if caller else []
-            for row in agent_rows:
-                aid = row.get("agent_id")
-                if aid:
-                    belong_by_id[aid] = row
-        for aid, cnt in sorted(by_agent.items(), key=lambda kv: kv[1], reverse=True)[:_TOP_AGENTS_LIMIT]:
-            row = belong_by_id.get(aid, {})
-            per_agent.append(
-                {
-                    "agent_id": aid,
-                    "display_name": row.get("display_name"),
-                    "belonging_type": row.get("belonging_type"),
-                    "durable_writes": cnt,
-                }
-            )
 
         def _title(m: dict) -> str:
             return m.get("title") or (m.get("metadata") or {}).get("summary") or "(untitled)"
@@ -358,13 +333,71 @@ async def get_report(
             list_query["readable_tenant_ids"] = readable
         elif dest == AUDIENCE_GROUP and caller_fleet:
             list_query["fleet_id"] = caller_fleet
-        durable = [m for m in (await sc.list_memories_by_filters(list_query) or []) if _cohesive(m)]
-
-        # Separate recall-sorted fetch → VALUE HIGHLIGHTS + spotlight headline, so
-        # "most-reused" is the true top-by-recall in the window, not just the
-        # most-reused among the most-recent rows. Over-fetch then post-filter.
+        # Recall-sorted fetch → VALUE HIGHLIGHTS + spotlight headline (true
+        # top-by-recall, not merely the most-reused among the most-recent rows).
+        # Derived from list_query AFTER the written_by/fleet/readable conditionals.
         highlights_query = dict(list_query, sort="recall_count", limit=_HIGHLIGHTS_FETCH_LIMIT)
-        top_durable = [m for m in (await sc.list_memories_by_filters(highlights_query) or []) if _cohesive(m)]
+
+        # Activity-over-time trend query (group/org only) — built before the gather.
+        want_trend = dest == AUDIENCE_GROUP or org_mode
+        trend_query: dict | None = None
+        if want_trend:
+            trend_query = {
+                "tenant_id": tenant_id,
+                "since": (now - timedelta(days=_TREND_DAYS)).isoformat(),
+                "exclude_memory_types": list(NON_DURABLE_TYPES),
+                "exclude_agent_ids": list(RESERVED_FIREHOSE_AGENTS),
+                "exclude_title_regex": NON_COHESIVE_TITLE_REGEX,
+            }
+            if org_mode:
+                trend_query["readable_tenant_ids"] = readable
+            elif caller_fleet:
+                trend_query["fleet_id"] = caller_fleet
+
+        # ── Phase 1: independent storage reads, concurrently. The belong lookup
+        # (group only) and the trend fetch (group/org only) are conditional. ──
+        want_agents = dest == AUDIENCE_GROUP and not org_mode
+        phase1: dict[str, object] = {
+            "recent": sc.list_memories_by_filters(list_query),
+            "recall": sc.list_memories_by_filters(highlights_query),
+        }
+        if want_agents:
+            phase1["agents"] = sc.list_agents(tenant_id, caller_fleet)
+        if want_trend:
+            phase1["trend"] = sc.memory_daily_durable_counts(trend_query)
+        p1_keys = list(phase1)
+        p1_vals = await asyncio.gather(*(phase1[k] for k in p1_keys))
+        p1 = dict(zip(p1_keys, p1_vals))
+
+        durable = [m for m in (p1["recent"] or []) if _cohesive(m)]
+        top_durable = [m for m in (p1["recall"] or []) if _cohesive(m)]
+
+        # Per-agent leaderboard, joined with belonging metadata. Group = the whole
+        # fleet (list_agents); self = just the caller's own row (already fetched);
+        # org scope skips the join (list_agents is per-tenant, can't cover the
+        # readable set — cross-tenant agents get null).
+        belong_by_id: dict[str, dict] = {}
+        if not org_mode:
+            if dest == AUDIENCE_GROUP:
+                agent_rows = p1.get("agents") or []
+            elif dest in _SELF_AUDIENCES:
+                agent_rows = [caller] if caller else []
+            else:
+                agent_rows = []
+            for row in agent_rows:
+                aid = row.get("agent_id")
+                if aid:
+                    belong_by_id[aid] = row
+        for aid, cnt in sorted(by_agent.items(), key=lambda kv: kv[1], reverse=True)[:_TOP_AGENTS_LIMIT]:
+            row = belong_by_id.get(aid, {})
+            per_agent.append(
+                {
+                    "agent_id": aid,
+                    "display_name": row.get("display_name"),
+                    "belonging_type": row.get("belonging_type"),
+                    "durable_writes": cnt,
+                }
+            )
 
         # Learning: most recent distilled insights in the window.
         learning = [
@@ -426,22 +459,10 @@ async def get_report(
                 lanes[lane]["items"].append(_title(m))
         working_on = lanes
 
-        # Activity-over-time trend (group/org view): daily durable counts, last _TREND_DAYS.
-        if dest == AUDIENCE_GROUP or org_mode:
-            trend_query: dict = {
-                "tenant_id": tenant_id,
-                "since": (now - timedelta(days=_TREND_DAYS)).isoformat(),
-                "exclude_memory_types": list(NON_DURABLE_TYPES),
-                "exclude_agent_ids": list(RESERVED_FIREHOSE_AGENTS),
-                "exclude_title_regex": NON_COHESIVE_TITLE_REGEX,
-            }
-            if org_mode:
-                trend_query["readable_tenant_ids"] = readable
-            elif caller_fleet:
-                trend_query["fleet_id"] = caller_fleet
-            raw_counts = {
-                r["day"]: r["count"] for r in (await sc.memory_daily_durable_counts(trend_query) or [])
-            }
+        # Activity-over-time trend (group/org view): assembled from the Phase-1
+        # daily-durable-counts fetch, bucketed into the last _TREND_DAYS days.
+        if want_trend:
+            raw_counts = {r["day"]: r["count"] for r in (p1.get("trend") or [])}
             trend = [
                 {
                     "day": (now.date() - timedelta(days=d)).isoformat(),
@@ -453,7 +474,23 @@ async def get_report(
         # ── Quality: how good is the durable corpus (not just how much). ──
         # reuse-rate by type, never-recalled %, recall concentration (top-6
         # share), insight freshness, and the write→durable→reused funnel.
-        qm = await sc.memory_quality_metrics(breakdown_query)
+        # Scope keys shared by the three (independent) quality calls below.
+        scope_keys = {
+            k: breakdown_query[k]
+            for k in ("tenant_id", "agent_id", "fleet_id", "readable_tenant_ids")
+            if k in breakdown_query
+        }
+        # ── Phase 2: quality metrics + the two supporting breakdown calls run
+        # concurrently — all independent, and derived only from breakdown_query
+        # (already resolved), not from the main breakdown's results.
+        #   - memory_quality_metrics: reuse-rate/never/concentration over the corpus
+        #   - insight breakdown: lifetime insight corpus by status (freshness)
+        #   - funnel breakdown: full-corpus writes in the window (no excludes)
+        qm, ins, full = await asyncio.gather(
+            sc.memory_quality_metrics(breakdown_query),
+            sc.memory_stats_breakdown({**scope_keys, "memory_type": "insight"}),
+            sc.memory_stats_breakdown({**scope_keys, "created_after": window_start.isoformat()}),
+        )
         q_total = int(qm.get("total", 0) or 0)
         q_reused = int(qm.get("reused", 0) or 0)
         q_recalls = int(qm.get("total_recalls", 0) or 0)
@@ -471,21 +508,10 @@ async def get_report(
             key=lambda r: r["reuse_pct"],
             reverse=True,
         )
-        # Scope keys shared with the two supporting breakdown calls below.
-        scope_keys = {
-            k: breakdown_query[k]
-            for k in ("tenant_id", "agent_id", "fleet_id", "readable_tenant_ids")
-            if k in breakdown_query
-        }
-        # Insight freshness — the lifetime insight corpus (same scope; no window
-        # or excludes) by status. "outdated"/"archived" = gone stale.
-        ins = await sc.memory_stats_breakdown({**scope_keys, "memory_type": "insight"})
+        # Insight freshness — "outdated"/"archived" = gone stale.
         ins_status = ins.get("by_status") or {}
         ins_total = int(ins.get("total", 0) or 0)
         ins_stale = int(ins_status.get("outdated", 0) or 0) + int(ins_status.get("archived", 0) or 0)
-        # Funnel: full-corpus writes in the window (NO durable/cohesive excludes)
-        # → the durable corpus → ever-reused.
-        full = await sc.memory_stats_breakdown({**scope_keys, "created_after": window_start.isoformat()})
         written = int(full.get("total", 0) or 0)
         quality = {
             "never_recalled_pct": round(100.0 * (q_total - q_reused) / q_total, 1) if q_total else 0.0,

@@ -1085,14 +1085,22 @@ async def stats_breakdown(request: Request) -> dict:
     # as the admin stats route above.
     ca = body.get("created_after")
     cb = body.get("created_before")
+    try:
+        created_after = datetime.fromisoformat(ca) if isinstance(ca, str) else ca
+        created_before = datetime.fromisoformat(cb) if isinstance(cb, str) else cb
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="'created_after'/'created_before' must be a valid ISO datetime string",
+        )
     return await _svc.memory_stats_breakdown(
         tenant_id=tenant_id,
         fleet_id=body.get("fleet_id"),
         agent_id=body.get("agent_id"),
         memory_type=body.get("memory_type"),
         status=body.get("status"),
-        created_after=datetime.fromisoformat(ca) if isinstance(ca, str) else ca,
-        created_before=datetime.fromisoformat(cb) if isinstance(cb, str) else cb,
+        created_after=created_after,
+        created_before=created_before,
         exclude_memory_types=body.get("exclude_memory_types"),
         exclude_agent_ids=body.get("exclude_agent_ids"),
         exclude_title_regex=body.get("exclude_title_regex"),
@@ -1114,7 +1122,10 @@ async def daily_durable_counts(request: Request) -> list[dict]:
     if not tenant_id:
         raise HTTPException(status_code=422, detail="tenant_id is required")
     since_raw = body.get("since")
-    since = datetime.fromisoformat(since_raw) if isinstance(since_raw, str) else since_raw
+    try:
+        since = datetime.fromisoformat(since_raw) if isinstance(since_raw, str) else since_raw
+    except ValueError:
+        raise HTTPException(status_code=422, detail="'since' must be a valid ISO datetime string")
     if since is None:
         raise HTTPException(status_code=422, detail="since is required")
     return await _svc.memory_daily_durable_counts(
@@ -1143,11 +1154,15 @@ async def quality_metrics(request: Request) -> dict:
     if not tenant_id and not body.get("readable_tenant_ids"):
         raise HTTPException(status_code=422, detail="tenant_id is required")
     ca = body.get("created_after")
+    try:
+        created_after = datetime.fromisoformat(ca) if isinstance(ca, str) else ca
+    except ValueError:
+        raise HTTPException(status_code=422, detail="'created_after' must be a valid ISO datetime string")
     return await _svc.memory_quality_metrics(
         tenant_id=tenant_id,
         fleet_id=body.get("fleet_id"),
         agent_id=body.get("agent_id"),
-        created_after=datetime.fromisoformat(ca) if isinstance(ca, str) else ca,
+        created_after=created_after,
         exclude_memory_types=body.get("exclude_memory_types"),
         exclude_agent_ids=body.get("exclude_agent_ids"),
         exclude_title_regex=body.get("exclude_title_regex"),
