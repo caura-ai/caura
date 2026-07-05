@@ -246,4 +246,7 @@ If you see search latency materially above ~50 ms p50 after warm-up, the pgvecto
 
 ## Full Reference
 
-For complete tool documentation with parameters, examples, memory types, status lifecycle, and best practices, see the [README](README.md) and [ARCHITECTURE_REVIEW.md](ARCHITECTURE_REVIEW.md). For benchmark methodology and competitive context, see [`docs/performance.md`](docs/performance.md).
+For complete tool documentation with parameters, examples, memory types, status lifecycle, best practices, and
+project structure, see the [README API reference](README.md#api-reference) and
+[README project structure](README.md#project-structure). For benchmark methodology and competitive context, see
+[`docs/performance.md`](docs/performance.md).

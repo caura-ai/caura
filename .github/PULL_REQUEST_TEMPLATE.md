@@ -28,7 +28,7 @@
 - [ ] `ruff check` and `ruff format --check` pass
 - [ ] `mypy` passes
 - [ ] `pytest` passes locally
-- [ ] I have updated relevant documentation (README, ARCHITECTURE_REVIEW, etc.)
+- [ ] I have updated relevant documentation (README, docs, etc.)
 - [ ] I have updated `CHANGELOG.md` under the `Unreleased` section (if user-facing)
 
 ## Additional Notes

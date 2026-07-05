@@ -931,6 +931,7 @@ All configuration is via environment variables or `.env`. See `.env.example` for
 
 </details>
 
+<a id="project-structure"></a>
 <details>
 <summary>Project structure</summary>
 
