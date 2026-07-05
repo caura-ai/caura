@@ -291,6 +291,7 @@ async def get_report(
     spotlight: dict | None = None
     trend: list[dict] = []
     working_on: dict = {}
+    quality: dict = {}
     if dest in _DETAIL_AUDIENCES or org_mode:
         # Per-agent leaderboard, joined with belonging metadata (group view).
         # Skip the belonging join in org scope — ``list_agents`` is per-tenant
@@ -433,6 +434,58 @@ async def get_report(
                 for d in reversed(range(_TREND_DAYS))
             ]
 
+        # ── Quality: how good is the durable corpus (not just how much). ──
+        # reuse-rate by type, never-recalled %, recall concentration (top-6
+        # share), insight freshness, and the write→durable→reused funnel.
+        qm = await sc.memory_quality_metrics(breakdown_query)
+        q_total = int(qm.get("total", 0) or 0)
+        q_reused = int(qm.get("reused", 0) or 0)
+        q_recalls = int(qm.get("total_recalls", 0) or 0)
+        top6 = sum(qm.get("top_recalls") or [])
+        reuse_by_type = sorted(
+            (
+                {
+                    "type": t,
+                    "total": int(v.get("total", 0) or 0),
+                    "reused": int(v.get("reused", 0) or 0),
+                    "reuse_pct": round(100.0 * v["reused"] / v["total"], 1) if v.get("total") else 0.0,
+                }
+                for t, v in (qm.get("by_type") or {}).items()
+            ),
+            key=lambda r: r["reuse_pct"],
+            reverse=True,
+        )
+        # Scope keys shared with the two supporting breakdown calls below.
+        scope_keys = {
+            k: breakdown_query[k]
+            for k in ("tenant_id", "agent_id", "fleet_id", "readable_tenant_ids")
+            if k in breakdown_query
+        }
+        # Insight freshness — the lifetime insight corpus (same scope; no window
+        # or excludes) by status. "outdated"/"archived" = gone stale.
+        ins = await sc.memory_stats_breakdown({**scope_keys, "memory_type": "insight"})
+        ins_status = ins.get("by_status") or {}
+        ins_total = int(ins.get("total", 0) or 0)
+        ins_stale = int(ins_status.get("outdated", 0) or 0) + int(ins_status.get("archived", 0) or 0)
+        # Funnel: full-corpus writes in the window (NO durable/cohesive excludes)
+        # → the durable corpus → ever-reused.
+        full = await sc.memory_stats_breakdown({**scope_keys, "created_after": window_start.isoformat()})
+        written = int(full.get("total", 0) or 0)
+        quality = {
+            "never_recalled_pct": round(100.0 * (q_total - q_reused) / q_total, 1) if q_total else 0.0,
+            "recall_concentration_pct": round(100.0 * top6 / q_recalls, 1) if q_recalls else 0.0,
+            "recall_concentration_top6": top6,
+            "total_recalls": q_recalls,
+            "reuse_by_type": reuse_by_type,
+            "insight_freshness": {
+                "total": ins_total,
+                "stale": ins_stale,
+                "stale_pct": round(100.0 * ins_stale / ins_total, 1) if ins_total else 0.0,
+                "by_status": ins_status,
+            },
+            "funnel": {"written": written, "durable": q_total, "reused": q_reused},
+        }
+
     # ── Audit the read + the declared destination (provenance / no-leakage trail). ──
     await log_action(
         tenant_id=tenant_id,
@@ -478,4 +531,5 @@ async def get_report(
         "trend": trend,
         "working_on": working_on,
         "learning": learning,
+        "quality": quality,
     }

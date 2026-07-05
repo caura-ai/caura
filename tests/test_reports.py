@@ -397,6 +397,57 @@ async def test_report_value_highlights_ranked_by_recall(client):
     assert body["spotlight"]["headline"]["title"] == "Older but heavily-reused architecture decision", body["spotlight"]
 
 
+async def test_report_quality_metrics(client):
+    """Quality block: reuse-rate by type, never-recalled %, recall concentration,
+    the write→durable→reused funnel, and insight-freshness structure.
+
+    Seeds 4 durable memories (2 decisions, 2 facts) with one of each reused, plus
+    one episode (full-corpus only), so every quality figure is deterministic.
+    """
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fleet, a1 = f"rep-fleet-{tag}", f"rep-a1-{tag}"
+    await _register(tenant_id, fleet, a1)
+    sc = get_storage_client()
+
+    d1 = await _seed_titled(client, headers, tenant_id, fleet, a1, "decision", f"Decision one {tag}")
+    await _seed_titled(client, headers, tenant_id, fleet, a1, "decision", f"Decision two {tag}")
+    f1 = await _seed_titled(client, headers, tenant_id, fleet, a1, "fact", f"Fact one {tag}")
+    await _seed_titled(client, headers, tenant_id, fleet, a1, "fact", f"Fact two {tag}")
+    # One episode — counts toward the funnel's "written" but not the durable corpus.
+    await _seed(client, headers, tenant_id, fleet, a1, "episode", 1)
+    # Reuse: d1 twice, f1 once → 2 of 4 durable memories ever reused; 3 total recalls.
+    for _ in range(2):
+        assert await sc.increment_recall([d1]) == 1
+    assert await sc.increment_recall([f1]) == 1
+
+    resp = await client.get(
+        "/api/v1/reports",
+        params={
+            "tenant_id": tenant_id,
+            "period": "week",
+            "destination": "internal_group",
+            "agent_id": a1,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    q = resp.json()["quality"]
+    # Funnel: 5 written (4 durable + 1 episode), 4 durable, 2 ever-reused.
+    assert q["funnel"] == {"written": 5, "durable": 4, "reused": 2}, q["funnel"]
+    # Never-recalled: 2 of 4 durable → 50%.
+    assert q["never_recalled_pct"] == 50.0, q
+    # Reuse rate by type: decision 1/2, fact 1/2 → 50% each.
+    rbt = {r["type"]: r["reuse_pct"] for r in q["reuse_by_type"]}
+    assert rbt.get("decision") == 50.0 and rbt.get("fact") == 50.0, q["reuse_by_type"]
+    # Concentration: total recalls 3 (=2+1); top-6 captures all → 100%.
+    assert q["total_recalls"] == 3, q
+    assert q["recall_concentration_pct"] == 100.0, q
+    # Insight freshness present and well-formed (no insights seeded here).
+    assert q["insight_freshness"]["total"] == 0, q["insight_freshness"]
+    assert q["insight_freshness"]["stale_pct"] == 0.0, q["insight_freshness"]
+
+
 async def test_report_org_scope_requires_cross_tenant_key(client):
     """scope=org without a cross-tenant read credential → 403 (home-only key can't widen)."""
     tag = _uid()

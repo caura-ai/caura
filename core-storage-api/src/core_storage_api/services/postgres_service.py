@@ -3494,9 +3494,7 @@ class PostgresService:
         # ``coalesce(title,'')`` keeps null-title rows instead of dropping them on
         # the NULL-propagating negation. Case-insensitive POSIX regex (``~*``).
         if exclude_title_regex:
-            scope_filters.append(
-                ~func.coalesce(Memory.title, "").op("~*")(exclude_title_regex)
-            )
+            scope_filters.append(~func.coalesce(Memory.title, "").op("~*")(exclude_title_regex))
 
         filters = [Memory.deleted_at.is_(None), *scope_filters]
 
@@ -3674,6 +3672,88 @@ class PostgresService:
         async with get_read_session() as session:
             rows = (await session.execute(stmt)).all()
         return [{"day": r.d.date().isoformat(), "count": int(r.c)} for r in rows]
+
+    async def memory_quality_metrics(
+        self,
+        *,
+        tenant_id: str | None,
+        fleet_id: str | None = None,
+        agent_id: str | None = None,
+        created_after: datetime | None = None,
+        exclude_memory_types: list[str] | None = None,
+        exclude_agent_ids: list[str] | None = None,
+        exclude_title_regex: str | None = None,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> dict:
+        """Reuse / recall quality aggregates over the SAME scoped corpus as
+        ``memory_stats_breakdown`` (durable+cohesive when the exclude_* filters are
+        passed). Backs the report Quality section:
+
+        - ``by_type`` = ``{type: {total, reused}}`` → reuse RATE per type,
+        - ``total`` / ``reused`` → never-recalled %,
+        - ``total_recalls`` + ``top_recalls`` (top 6 values) → recall concentration.
+
+        Kept separate from the GROUPING SETS breakdown so that shared (MCP stats)
+        path stays untouched. The scope/visibility block below MUST mirror
+        ``memory_stats_breakdown`` so the two report surfaces reconcile. Read-only
+        (reader replica).
+        """
+        # ── Scope/visibility — MUST mirror memory_stats_breakdown. ──
+        scope_filters = []
+        if readable_tenant_ids:
+            scope_filters.append(Memory.tenant_id.in_(readable_tenant_ids))
+        else:
+            scope_filters.append(Memory.tenant_id == tenant_id)
+        if fleet_id:
+            scope_filters.append(Memory.fleet_id == fleet_id)
+        if agent_id:
+            scope_filters.append(Memory.agent_id == agent_id)
+            scope_filters.append(
+                or_(
+                    Memory.visibility == "scope_org",
+                    Memory.visibility == "scope_team",
+                    and_(Memory.visibility == "scope_agent", Memory.agent_id == agent_id),
+                )
+            )
+        else:
+            scope_filters.append(Memory.visibility != "scope_agent")
+        if created_after:
+            scope_filters.append(Memory.created_at >= created_after)
+        if exclude_memory_types:
+            scope_filters.append(Memory.memory_type.notin_(exclude_memory_types))
+        if exclude_agent_ids:
+            scope_filters.append(Memory.agent_id.notin_(exclude_agent_ids))
+        if exclude_title_regex:
+            scope_filters.append(~func.coalesce(Memory.title, "").op("~*")(exclude_title_regex))
+        filters = [Memory.deleted_at.is_(None), *scope_filters]
+
+        reused = case((Memory.recall_count > 0, 1), else_=0)
+        per_type_stmt = (
+            select(
+                Memory.memory_type,
+                func.count().label("n"),
+                func.coalesce(func.sum(reused), 0).label("r"),
+            )
+            .where(*filters)
+            .group_by(Memory.memory_type)
+        )
+        overall_stmt = select(
+            func.count(),
+            func.coalesce(func.sum(reused), 0),
+            func.coalesce(func.sum(Memory.recall_count), 0),
+        ).where(*filters)
+        top_stmt = select(Memory.recall_count).where(*filters).order_by(Memory.recall_count.desc()).limit(6)
+        async with get_read_session() as session:
+            per_type = (await session.execute(per_type_stmt)).all()
+            total, total_reused, total_recalls = (await session.execute(overall_stmt)).one()
+            top_recalls = [int(x[0] or 0) for x in (await session.execute(top_stmt)).all()]
+        return {
+            "total": int(total or 0),
+            "reused": int(total_reused or 0),
+            "total_recalls": int(total_recalls or 0),
+            "top_recalls": top_recalls,
+            "by_type": {r.memory_type: {"total": int(r.n), "reused": int(r.r or 0)} for r in per_type},
+        }
 
     # ══════════════════════════════════════════════════════════════════════
     #  ENTITIES

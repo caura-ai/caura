@@ -1128,6 +1128,33 @@ async def daily_durable_counts(request: Request) -> list[dict]:
     )
 
 
+@router.post("/quality-metrics")
+async def quality_metrics(request: Request) -> dict:
+    """Reuse / recall quality aggregates over a scoped corpus (report Quality section).
+
+    Body: ``{tenant_id, fleet_id?, agent_id?, created_after? (ISO),
+    exclude_memory_types?, exclude_agent_ids?, exclude_title_regex?,
+    readable_tenant_ids?}``. Returns ``{total, reused, total_recalls,
+    top_recalls, by_type:{type:{total,reused}}}``. Same scope/visibility as
+    ``/stats-breakdown``; read-only.
+    """
+    body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    if not tenant_id and not body.get("readable_tenant_ids"):
+        raise HTTPException(status_code=422, detail="tenant_id is required")
+    ca = body.get("created_after")
+    return await _svc.memory_quality_metrics(
+        tenant_id=tenant_id,
+        fleet_id=body.get("fleet_id"),
+        agent_id=body.get("agent_id"),
+        created_after=datetime.fromisoformat(ca) if isinstance(ca, str) else ca,
+        exclude_memory_types=body.get("exclude_memory_types"),
+        exclude_agent_ids=body.get("exclude_agent_ids"),
+        exclude_title_regex=body.get("exclude_title_regex"),
+        readable_tenant_ids=body.get("readable_tenant_ids"),
+    )
+
+
 @router.post("/soft-delete-by-filter")
 async def soft_delete_by_filter(request: Request) -> dict:
     """Soft-delete every matching live memory for a tenant.

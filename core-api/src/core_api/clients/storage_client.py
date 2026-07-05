@@ -1010,6 +1010,13 @@ class CoreStorageClient:
             raise RuntimeError("core-storage-api /memories/daily-durable-counts returned 404")
         return result  # type: ignore[return-value]
 
+    async def memory_quality_metrics(self, data: dict) -> dict:
+        """Reuse / recall quality aggregates over a scoped corpus (report Quality section)."""
+        result = await self._post("/memories/quality-metrics", data, read=True)
+        if result is None:
+            raise RuntimeError("core-storage-api /memories/quality-metrics returned 404")
+        return result  # type: ignore[return-value]
+
     async def soft_delete_by_run(
         self,
         tenant_id: str,
