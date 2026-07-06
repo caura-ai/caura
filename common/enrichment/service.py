@@ -25,6 +25,7 @@ from dateutil.parser import ParserError
 
 from common.enrichment._prompts import ENRICHMENT_PROMPT
 from common.enrichment.constants import (
+    CLASSIFIER_DEPRECATED_MEMORY_TYPES,
     DEFAULT_MEMORY_TYPE,
     MEMORY_STATUSES,
     MEMORY_TYPES,
@@ -79,8 +80,17 @@ def _validate_enrichment(raw: dict, llm_ms: int) -> EnrichmentResult:
     # invalid type and fall to the default. Reserved types are authored only
     # by internal flows that set ``memory_type`` explicitly and bypass this
     # classifier path entirely.
+    #
+    # CAURA-701: same treatment for classifier-deprecated types (currently
+    # ``semantic``). The prompt hides them, but if the LLM emits one anyway
+    # from residual training, demote to the default (``fact``) so the merger
+    # is enforced at the storage boundary.
     mt = raw.get("memory_type")
-    if mt not in MEMORY_TYPES or mt in SERVER_RESERVED_MEMORY_TYPES:
+    if (
+        mt not in MEMORY_TYPES
+        or mt in SERVER_RESERVED_MEMORY_TYPES
+        or mt in CLASSIFIER_DEPRECATED_MEMORY_TYPES
+    ):
         raw["memory_type"] = DEFAULT_MEMORY_TYPE
     if raw.get("status") not in MEMORY_STATUSES:
         raw["status"] = "active"
@@ -148,6 +158,7 @@ def _validate_enrichment(raw: dict, llm_ms: int) -> EnrichmentResult:
                 not isinstance(st, str)
                 or st not in MEMORY_TYPES
                 or st in SERVER_RESERVED_MEMORY_TYPES
+                or st in CLASSIFIER_DEPRECATED_MEMORY_TYPES
             ):
                 st = DEFAULT_MEMORY_TYPE
             fh = f.get("retrieval_hint")

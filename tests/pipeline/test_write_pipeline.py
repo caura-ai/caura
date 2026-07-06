@@ -46,13 +46,12 @@ def _make_input(
 @pytest.mark.asyncio
 async def test_validate_step_rejects_short_content():
     """CheckContentLength raises 422 for content below minimum length."""
-    from unittest.mock import AsyncMock
     from fastapi import HTTPException
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.write.check_content_length import CheckContentLength
 
     ctx = PipelineContext(
-                data={"input": _make_input(content="hi")},
+        data={"input": _make_input(content="hi")},
     )
     step = CheckContentLength()
 
@@ -72,7 +71,7 @@ async def test_compute_content_hash_skips_cache_lookup_when_embedding_deferred(
     deferred to ``core-worker``, the lookup is wasted work AND under
     storm load (noisy-neighbor scenario) it observed p95 of ~17.8 s on
     staging — the single step that dominated the write degradation."""
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import patch
     from core_api.config import settings
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.write.compute_content_hash import ComputeContentHash
@@ -102,7 +101,7 @@ async def test_compute_content_hash_still_looks_up_when_embedding_inline(
     — the cache lookup still runs so a duplicate-content write skips the
     inline ``get_embedding`` call. Regression guard for the path the
     deferred-mode fix MUST NOT break."""
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import patch
     from core_api.config import settings
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.write.compute_content_hash import ComputeContentHash
@@ -129,12 +128,12 @@ async def test_check_exact_duplicate_records_dedup_lookup_ms():
     emit can separate the dedup lookup (GET /by-content-hash) from the
     insert (``storage_ms``) and from core-api-side overhead — the split
     that attributes the single_write p99 tail."""
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import patch
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.write.check_exact_duplicate import CheckExactDuplicate
 
     ctx = PipelineContext(
-                data={"input": _make_input(), "content_hash": "deadbeef"},
+        data={"input": _make_input(), "content_hash": "deadbeef"},
     )
     mock_sc = AsyncMock()
     mock_sc.find_by_content_hash.return_value = None  # no duplicate
@@ -153,14 +152,13 @@ async def test_check_exact_duplicate_records_dedup_lookup_ms():
 @pytest.mark.asyncio
 async def test_apply_enrichment_step_defaults():
     """MergeEnrichmentFields applies correct defaults when no enrichment."""
-    from unittest.mock import AsyncMock
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.write.merge_enrichment_fields import (
         MergeEnrichmentFields,
     )
 
     ctx = PipelineContext(
-                data={
+        data={
             "input": _make_input(),
             "enrichment": None,
         },
@@ -173,6 +171,52 @@ async def test_apply_enrichment_step_defaults():
     assert fields["weight"] == 0.5  # DEFAULT_MEMORY_WEIGHT
     assert fields["status"] == "active"
     assert fields["title"] is None
+
+
+@pytest.mark.asyncio
+async def test_merge_enrichment_demotes_caller_supplied_semantic():
+    """CAURA-701: a caller that pins ``memory_type='semantic'`` is silently
+    coerced to the default (``fact``). Without this guard the caller path
+    bypasses the enrichment-LLM demotion in ``_validate_enrichment`` because
+    ``MergeEnrichmentFields`` only falls through to the enrichment result when
+    the caller supplied ``None``. The write-time merger has to hold on every
+    entry point, not just the classifier's own output."""
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.write.merge_enrichment_fields import (
+        MergeEnrichmentFields,
+    )
+
+    ctx = PipelineContext(
+        data={
+            "input": _make_input(memory_type="semantic"),
+            "enrichment": None,
+        },
+    )
+    step = MergeEnrichmentFields()
+    await step.execute(ctx)
+
+    assert ctx.data["memory_fields"]["memory_type"] == "fact"
+
+
+@pytest.mark.asyncio
+async def test_merge_enrichment_leaves_non_deprecated_caller_type_intact():
+    """Guard against over-eager demotion — CAURA-701 must only coerce
+    deprecated types, never anything else."""
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.write.merge_enrichment_fields import (
+        MergeEnrichmentFields,
+    )
+
+    ctx = PipelineContext(
+        data={
+            "input": _make_input(memory_type="episode"),
+            "enrichment": None,
+        },
+    )
+    step = MergeEnrichmentFields()
+    await step.execute(ctx)
+
+    assert ctx.data["memory_fields"]["memory_type"] == "episode"
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +567,7 @@ async def test_merge_enrichment_sets_pending_in_fast_mode():
     )
 
     ctx = PipelineContext(
-                data={
+        data={
             "input": _make_input(),
             "enrichment": None,
             "resolved_write_mode": "fast",
@@ -546,7 +590,7 @@ async def test_merge_enrichment_no_pending_in_strong_mode():
     )
 
     ctx = PipelineContext(
-                data={
+        data={
             "input": _make_input(),
             "enrichment": None,
             "resolved_write_mode": "strong",
@@ -586,7 +630,7 @@ async def test_schedule_background_tasks_fast_mode_fires_full_fan_out():
     )()
 
     ctx = PipelineContext(
-                data={
+        data={
             "input": _make_input(),
             "memory": mock_memory,
             "embedding": [0.1] * VECTOR_DIM,
@@ -626,7 +670,7 @@ async def test_schedule_background_tasks_strong_mode_fires_entity_and_contradict
     )()
 
     ctx = PipelineContext(
-                data={
+        data={
             "input": _make_input(),
             "memory": mock_memory,
             "embedding": [0.1] * VECTOR_DIM,

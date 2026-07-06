@@ -120,11 +120,13 @@ def test_prompt_examples_are_realistic_business_content():
 
 def test_prompt_word_count_still_bounded():
     """A9 adds few-shot pairs (raises ceiling from 1100 → 1200 to
-    cover A8's tag guidance + A9's action/episode pairs). Keeps cost
-    bounded while permitting the new high-signal content."""
+    cover A8's tag guidance + A9's action/episode pairs). CAURA-701's
+    V2.1 taxonomy raised this to 1500 for the 3-way action/episode/fact
+    contrastive block. Keeps cost bounded while permitting the new
+    high-signal content."""
     prompt = _get_prompt()
     word_count = len(prompt.split())
-    assert word_count < 1200, f"prompt is {word_count} words — too long"
+    assert word_count < 1500, f"prompt is {word_count} words — too long"
 
 
 # ---------------------------------------------------------------------------

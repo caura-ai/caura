@@ -364,8 +364,7 @@ def _refuse_reserved_memory_type(memory_type: str | None, *, index: int | None =
         f"memory_type='{slug}' is server-reserved and cannot be "
         "supplied on writes. Use memclaw_evolve for outcome/rule or "
         "memclaw_insights for insight; for agent-authored reflections, "
-        "use memory_type='semantic' or 'fact' (or omit memory_type to "
-        "auto-classify)."
+        "use memory_type='fact' (or omit memory_type to auto-classify)."
     )
     if index is not None:
         detail = f"items[{index}]: {detail}"

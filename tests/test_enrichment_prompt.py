@@ -47,11 +47,14 @@ class TestEnrichmentPromptSignalPhrases:
 
         Baseline grew with retrieval_hint, atomic_facts, the temporal
         ts_valid_end guidance, A8's tag-format guidance, and A9's
-        action/episode disambiguation pairs. Raised to 1200 (2026-05-24).
+        action/episode disambiguation pairs (1200 as of 2026-05-24).
+        Raised to 1500 (2026-07-06) for CAURA-701's V2.1 taxonomy —
+        expanded fact/episode/action descriptions and the 3-way
+        action-vs-episode-vs-fact contrastive block.
         """
         prompt = self._get_prompt()
         word_count = len(prompt.split())
-        assert word_count < 1200, (
+        assert word_count < 1500, (
             f"Prompt is {word_count} words — too long, will increase cost"
         )
 
@@ -88,13 +91,17 @@ class TestEnrichmentPromptVocabularySync:
 
     def test_every_classifiable_type_appears_quoted_in_inline_list(self):
         from common.enrichment.constants import (
+            CLASSIFIER_DEPRECATED_MEMORY_TYPES,
             MEMORY_TYPES,
             SERVER_RESERVED_MEMORY_TYPES,
         )
 
         prompt = self._get_prompt()
         for t in MEMORY_TYPES:
-            if t in SERVER_RESERVED_MEMORY_TYPES:
+            if (
+                t in SERVER_RESERVED_MEMORY_TYPES
+                or t in CLASSIFIER_DEPRECATED_MEMORY_TYPES
+            ):
                 continue
             assert f'"{t}"' in prompt, (
                 f"memory_type {t!r} missing from inline list — prompt vocabulary "
@@ -114,15 +121,35 @@ class TestEnrichmentPromptVocabularySync:
                 f"reserved memory_type {t!r} must not have a prompt bullet"
             )
 
+    def test_deprecated_types_excluded_from_vocabulary(self):
+        """CAURA-701: deprecated types (currently ``semantic``) must not be
+        offered to the classifier, so the LLM cannot mint them. Historical
+        rows keep their labels at the storage layer — only the classifier
+        surface hides them."""
+        from common.enrichment.constants import CLASSIFIER_DEPRECATED_MEMORY_TYPES
+
+        prompt = self._get_prompt()
+        for t in sorted(CLASSIFIER_DEPRECATED_MEMORY_TYPES):
+            assert f'"{t}"' not in prompt, (
+                f"deprecated memory_type {t!r} must not appear in the inline list"
+            )
+            assert f"   - {t}: " not in prompt, (
+                f"deprecated memory_type {t!r} must not have a prompt bullet"
+            )
+
     def test_every_classifiable_type_has_a_bullet(self):
         from common.enrichment.constants import (
+            CLASSIFIER_DEPRECATED_MEMORY_TYPES,
             MEMORY_TYPE_DESCRIPTIONS,
             SERVER_RESERVED_MEMORY_TYPES,
         )
 
         prompt = self._get_prompt()
         for name, desc in MEMORY_TYPE_DESCRIPTIONS.items():
-            if name in SERVER_RESERVED_MEMORY_TYPES:
+            if (
+                name in SERVER_RESERVED_MEMORY_TYPES
+                or name in CLASSIFIER_DEPRECATED_MEMORY_TYPES
+            ):
                 continue
             assert f"   - {name}: " in prompt, f"{name!r} bullet missing from prompt"
             # First clause of the description should also land verbatim

@@ -13,18 +13,25 @@ import time, so adding a type there propagates here automatically.
 from __future__ import annotations
 
 from common.enrichment.constants import (
+    CLASSIFIER_DEPRECATED_MEMORY_TYPES,
     MEMORY_TYPE_DESCRIPTIONS,
     MEMORY_TYPES,
     SERVER_RESERVED_MEMORY_TYPES,
 )
 
-# The auto-classifier is only ever offered the agent-writable types. The
-# server-reserved types (insight/outcome/rule) are authored exclusively by
-# internal flows (insights_service / evolve_service) with the type set
-# explicitly, so they never travel through this prompt. Offering them here
-# is what let agent writes leak into the insight space (CAURA-699).
+# The auto-classifier is only ever offered the agent-writable, non-deprecated
+# types. The server-reserved types (insight/outcome/rule) are authored
+# exclusively by internal flows (insights_service / evolve_service) with the
+# type set explicitly, so they never travel through this prompt — offering
+# them here is what let agent writes leak into the insight space (CAURA-699).
+# The deprecated types (currently ``semantic``, CAURA-701) remain in the
+# enum for read-compat with historical rows but are hidden from the LLM so
+# it merges their content into the successor type (``fact``).
 _CLASSIFIABLE_TYPES = tuple(
-    t for t in MEMORY_TYPES if t not in SERVER_RESERVED_MEMORY_TYPES
+    t
+    for t in MEMORY_TYPES
+    if t not in SERVER_RESERVED_MEMORY_TYPES
+    and t not in CLASSIFIER_DEPRECATED_MEMORY_TYPES
 )
 _TYPES_INLINE = ", ".join(f'"{name}"' for name in _CLASSIFIABLE_TYPES)
 _TYPE_BULLETS = "\n".join(
@@ -43,15 +50,30 @@ Analyze the following memory content and return a JSON object with these fields:
     + _TYPE_BULLETS
     + """
 
-   Action vs episode (common confusion):
-   - action — actor's own deed, first-person past tense (subject=agent).
-   - episode — observed event tied to time/place (subject=event,
-     often third-person).
-   Pairs:
-     "I deployed v2.3 to production"                 -> action
-     "The v2.3 deployment succeeded at 14:00"        -> episode
-     "Merged the auth refactor PR"                   -> action
-     "Production outage between 14:00 and 14:30"     -> episode
+   Action vs episode vs fact — resolving the common confusion:
+   - action = the ACTOR did a DEED. Verbs of doing (deployed, merged,
+     sent, completed, created, filed, staged) + first-person or agentic
+     subject.
+   - episode = an EVENT happened (observed, third-person framing). Not
+     tied to the actor as the doer.
+   - fact = a stable STATE or knowledge — durable statements of what IS,
+     including documentation of a system, API, or process.
+
+   The type is determined by what the statement DOES (deed / event /
+   state / choice / pending), not by who authored the content or by
+   surface prefixes.
+
+   Contrastive examples:
+     "Deployed v2.3 to production"                 -> action    (deed completed)
+     "The v2.3 deployment succeeded at 14:00"      -> episode   (third-person observed event)
+     "Merged the auth refactor PR"                 -> action    (deed completed)
+     "Production outage between 14:00 and 14:30"   -> episode   (event tied to time)
+     "Completed full data pipeline validation"     -> action    (deed completed)
+     "System uses OAuth 2.0 with refresh tokens"   -> fact      (durable state)
+     "API endpoints: /users, /posts, /admin"       -> fact      (documentation)
+     "Chose Postgres over MongoDB for scale"       -> decision  (choice + reasoning)
+     "Fix the login bug"                           -> task      (pending work)
+     "Will migrate the DB next month"              -> intention (not yet acted on)
 
 2. "weight": float 0.0-1.0 indicating importance
    - 0.9-1.0: critical decisions, key facts with evidence, high-impact events

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from common.enrichment.constants import CLASSIFIER_DEPRECATED_MEMORY_TYPES
 from core_api.constants import DEFAULT_MEMORY_TYPE, DEFAULT_MEMORY_WEIGHT
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
@@ -24,6 +25,15 @@ class MergeEnrichmentFields:
         metadata = data.metadata or {}
         ts_valid_start = data.ts_valid_start
         ts_valid_end = data.ts_valid_end
+
+        # CAURA-701: caller-supplied deprecated types (currently ``semantic``)
+        # bypass the enrichment-LLM demotion in ``_validate_enrichment`` because
+        # a non-``None`` ``data.memory_type`` short-circuits the fill-gaps branch
+        # below. Demote here so the merger is enforced regardless of who chose
+        # the type. Historical rows in the DB are untouched — only new writes
+        # are coerced.
+        if memory_type in CLASSIFIER_DEPRECATED_MEMORY_TYPES:
+            memory_type = DEFAULT_MEMORY_TYPE
 
         if enrichment:
             # LLM fills gaps; agent-provided values always win

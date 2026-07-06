@@ -9,6 +9,10 @@ from uuid import UUID
 import httpx
 from sqlalchemy.exc import SQLAlchemyError
 
+from common.enrichment.constants import (
+    CLASSIFIER_DEPRECATED_MEMORY_TYPES,
+    DEFAULT_MEMORY_TYPE,
+)
 from core_api.clients.storage_client import get_storage_client
 
 try:
@@ -58,7 +62,7 @@ Rules:
 - Preserve important details: names, numbers, dates, decisions
 - Discard trivial or meaningless content
 - Each fact should be 1-2 sentences maximum
-- Assign a memory_type to each fact: one of "fact", "episode", "decision", "preference", "task", "semantic", "intention", "plan", "commitment", "action", "outcome", "cancellation", "rule"
+- Assign a memory_type to each fact: one of "fact", "episode", "decision", "preference", "task", "intention", "plan", "commitment", "action", "outcome", "cancellation", "rule"
 - Assign a weight (0.0-1.0) based on importance
 
 Input memories:
@@ -338,6 +342,15 @@ async def _run_crystallization(
 
         new_ids = []
         for fact in extracted:
+            # CAURA-701: crystallizer bypasses the write pipeline (calls
+            # create_memory directly, no MergeEnrichmentFields step), so its
+            # LLM output cannot rely on the pipeline-level demotion of
+            # deprecated types. Guard here instead — if residual training makes
+            # the crystallizer LLM emit e.g. "semantic", coerce to the default
+            # so the merger is enforced on this path too.
+            mt = fact.get("memory_type", "fact")
+            if mt in CLASSIFIER_DEPRECATED_MEMORY_TYPES:
+                mt = DEFAULT_MEMORY_TYPE
             try:
                 mem_out = await create_memory(
                     MemoryCreate(
@@ -345,7 +358,7 @@ async def _run_crystallization(
                         fleet_id=fleet_id,
                         agent_id="crystallizer",
                         content=fact["content"],
-                        memory_type=fact.get("memory_type", "fact"),
+                        memory_type=mt,
                         weight=fact.get("weight", 0.7),
                         status="confirmed",
                         metadata={"crystallized_from": [str(m.get("id")) for m in cluster_memories]},
