@@ -674,8 +674,17 @@ async def get_agent_activity_digest(
     # config), so the scalar window_start/window_end/model are "from the freshest
     # run" only — ``windows`` lists every distinct window actually present, so a
     # caller can tell when the result set is not a single coherent window.
-    latest = max(digests, key=lambda d: d["generated_at"]) if digests else None
-    windows = sorted({(d["window_start"], d["window_end"]) for d in digests}, reverse=True)
+    # Order on parsed datetimes, not raw ISO strings: lexical comparison is wrong
+    # when offsets are formatted differently across rows ("Z" vs "+00:00").
+    def _parse_dt(s: str) -> datetime:
+        return datetime.fromisoformat(s)
+
+    latest = max(digests, key=lambda d: _parse_dt(d["generated_at"])) if digests else None
+    windows = sorted(
+        {(d["window_start"], d["window_end"]) for d in digests},
+        key=lambda t: _parse_dt(t[0]),
+        reverse=True,
+    )
     meta = {
         "period": period,
         "scope": scope,
