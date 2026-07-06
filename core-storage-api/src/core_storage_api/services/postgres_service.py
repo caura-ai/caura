@@ -8287,8 +8287,11 @@ class PostgresService:
             if latest_run_id is None:
                 return []
 
+            # Scope to tenant_id as well: a fleet-wide pass shares one run_id
+            # across tenants, so run_id alone would return other tenants' rows.
             rows_stmt = select(AgentActivityDigest).where(
                 AgentActivityDigest.run_id == latest_run_id,
+                AgentActivityDigest.tenant_id == tenant_id,
             )
             if agent_id is not None:
                 rows_stmt = rows_stmt.where(AgentActivityDigest.agent_id == agent_id)

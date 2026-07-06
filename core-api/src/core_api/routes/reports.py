@@ -668,16 +668,24 @@ async def get_agent_activity_digest(
     )
     digests: list[dict] = [row for rows in per_tenant for row in (rows or [])]
 
-    # Meta reflects the freshest run represented in the result set.
+    # Meta reflects the freshest run represented in the result set. Under
+    # scope='org' the digests can span tenants whose scheduled passes ran over
+    # different windows / with different models (per-tenant cadence + model
+    # config), so the scalar window_start/window_end/model are "from the freshest
+    # run" only — ``windows`` lists every distinct window actually present, so a
+    # caller can tell when the result set is not a single coherent window.
     latest = max(digests, key=lambda d: d["generated_at"]) if digests else None
+    windows = sorted({(d["window_start"], d["window_end"]) for d in digests}, reverse=True)
     meta = {
         "period": period,
         "scope": scope,
         "tenants": len(tenants),
         "agents": len({d["agent_id"] for d in digests}),
         "generated_at": latest["generated_at"] if latest else None,
+        # From the freshest run; see ``windows`` for the full set under scope='org'.
         "window_start": latest["window_start"] if latest else None,
         "window_end": latest["window_end"] if latest else None,
         "model": latest["model"] if latest else None,
+        "windows": [{"window_start": s, "window_end": e} for s, e in windows],
     }
     return {"meta": meta, "digests": digests}
