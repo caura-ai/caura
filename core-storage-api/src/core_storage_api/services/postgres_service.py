@@ -8269,22 +8269,26 @@ class PostgresService:
         exists yet — the caller renders "not generated yet", never an error.
         """
         async with get_session() as session:
-            # Resolve the latest run's window_start for this tenant/period.
-            window_stmt = select(AgentActivityDigest.window_start).where(
+            # Resolve the latest run_id for this tenant/period. Keying the row
+            # fetch on run_id (not window_start) keeps the result to a single
+            # coherent run: a same-window re-run mints a new run_id, and the
+            # generated_at tie-break makes the newest such run win.
+            run_stmt = select(AgentActivityDigest.run_id).where(
                 AgentActivityDigest.tenant_id == tenant_id,
                 AgentActivityDigest.period == period,
             )
             if as_of is not None:
-                window_stmt = window_stmt.where(AgentActivityDigest.window_start <= as_of)
-            window_stmt = window_stmt.order_by(AgentActivityDigest.window_start.desc()).limit(1)
-            latest_window = (await session.execute(window_stmt)).scalar_one_or_none()
-            if latest_window is None:
+                run_stmt = run_stmt.where(AgentActivityDigest.window_start <= as_of)
+            run_stmt = run_stmt.order_by(
+                AgentActivityDigest.window_start.desc(),
+                AgentActivityDigest.generated_at.desc(),
+            ).limit(1)
+            latest_run_id = (await session.execute(run_stmt)).scalar_one_or_none()
+            if latest_run_id is None:
                 return []
 
             rows_stmt = select(AgentActivityDigest).where(
-                AgentActivityDigest.tenant_id == tenant_id,
-                AgentActivityDigest.period == period,
-                AgentActivityDigest.window_start == latest_window,
+                AgentActivityDigest.run_id == latest_run_id,
             )
             if agent_id is not None:
                 rows_stmt = rows_stmt.where(AgentActivityDigest.agent_id == agent_id)

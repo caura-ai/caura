@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
@@ -76,6 +76,10 @@ async def get_agent_activity_digest(
             as_of_dt = datetime.fromisoformat(as_of)
         except ValueError:
             raise HTTPException(status_code=422, detail="'as_of' must be a valid ISO date/datetime")
+        # A date-only / tz-less ISO string parses naive; window_start is
+        # timestamptz, so assume UTC to avoid a naive-vs-aware asyncpg error.
+        if as_of_dt.tzinfo is None:
+            as_of_dt = as_of_dt.replace(tzinfo=UTC)
     rows = await _svc.agent_activity_digest_get_latest(tenant_id, period, agent_id=agent_id, as_of=as_of_dt)
     return [orm_to_dict(r, AGENT_DIGEST_FIELDS) for r in rows]
 
