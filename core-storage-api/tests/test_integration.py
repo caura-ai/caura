@@ -726,6 +726,70 @@ class TestMemories:
             f"(old-blend ratio would be 0.7/0.3 ≈ 2.33)"
         )
 
+    async def test_scored_search_future_valid_start_does_not_inflate_freshness(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """A43: a FUTURE ``ts_valid_start`` (with ``ts_valid_end`` NULL) must not
+        push freshness above 1.0. The freshness anchor is
+        ``greatest(created_at, ts_valid_start)``; a future anchor drives
+        ``age_days`` negative, and without the ``greatest(0.0, age_days)`` clamp
+        ``freshness = 1 - (age/decay)*(1-floor)`` reaches several x — letting a
+        future-dated memory outrank an otherwise-identical present-dated one.
+        This asserts the clamp: with the same embedding/weight/type, the
+        future-dated row does NOT outscore the present-dated row.
+        """
+        seed = f"a43_{_uid()}"
+        emb = fake_embedding(seed)
+
+        # A: present-dated (age ~0 -> freshness 1.0).
+        pa = _memory_payload(tenant_id, fleet_id, content=f"present {seed}")
+        pa["embedding"] = emb
+        pa["memory_type"] = "episode"
+        ra = await client.post(f"{PREFIX}/memories", json=pa)
+        assert ra.status_code == 200, ra.text
+        a_id = ra.json()["id"]
+
+        # B: identical embedding/weight/type but ts_valid_start 2y in the
+        # future, ts_valid_end NULL -> hits the uncapped age branch.
+        pb = _memory_payload(tenant_id, fleet_id, content=f"future {seed}")
+        pb["embedding"] = emb
+        pb["memory_type"] = "episode"
+        pb["ts_valid_start"] = "2028-07-01T00:00:00+00:00"
+        rb = await client.post(f"{PREFIX}/memories", json=pb)
+        assert rb.status_code == 200, rb.text
+        b_id = rb.json()["id"]
+
+        search_body = {
+            "tenant_id": tenant_id,
+            "embedding": emb,
+            "query": seed,
+            "fleet_ids": [fleet_id],
+            "top_k": 10,
+            "search_params": {
+                "fts_weight": 0.3,
+                "freshness_floor": 0.7,
+                "freshness_decay_days": 90.0,
+                "recall_boost_cap": 1.1,
+                "recall_decay_window_days": 14.0,
+                "similarity_blend": 0.85,
+            },
+        }
+        resp = await client.post(f"{PREFIX}/memories/scored-search", json=search_body)
+        assert resp.status_code == 200, resp.text
+        rows = {r["id"]: r for r in resp.json()}
+        assert a_id in rows and b_id in rows, f"both memories should be returned; got {rows.keys()!r}"
+        a_score = rows[a_id]["score"]
+        b_score = rows[b_id]["score"]
+        # Freshness capped at 1.0 -> identical base -> future row cannot exceed
+        # the present row. Pre-fix, b_score was ~2.8x a_score.
+        assert b_score <= a_score * 1.02, (
+            "future ts_valid_start inflated freshness above the cap: "
+            f"b_score={b_score} must not exceed a_score={a_score}"
+        )
+
     async def test_public_counters_exclude_soft_deleted(
         self,
         client: AsyncClient,

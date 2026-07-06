@@ -1147,7 +1147,13 @@ class PostgresService:
             (Memory.ts_valid_end.is_not(None), 1.0),
             (
                 age_days < type_decay,
-                1.0 - (age_days / type_decay) * (1.0 - _freshness_floor),
+                # Clamp age to >= 0 so a FUTURE anchor (e.g. an enrichment-set
+                # ts_valid_start dated in the future, with ts_valid_end NULL)
+                # cannot drive age_days negative and inflate freshness above
+                # 1.0. Without this, freshness = 1 - (neg/decay)*(1-floor) can
+                # reach several x, letting a low-similarity memory dominate the
+                # ranking for any query (A43). A memory is never "fresher than now".
+                1.0 - (func.greatest(0.0, age_days) / type_decay) * (1.0 - _freshness_floor),
             ),
             else_=_freshness_floor,
         ).label("freshness")
