@@ -1123,6 +1123,7 @@ async def stats_breakdown(request: Request) -> dict:
         exclude_agent_ids=body.get("exclude_agent_ids"),
         exclude_title_regex=body.get("exclude_title_regex"),
         include_deleted=bool(body.get("include_deleted", False)),
+        include_scope_agent=bool(body.get("include_scope_agent", False)),
         readable_tenant_ids=body.get("readable_tenant_ids"),
     )
 
@@ -1132,8 +1133,10 @@ async def daily_durable_counts(request: Request) -> list[dict]:
     """Per-day durable-write counts since ``since`` (report activity trend).
 
     Body: ``{tenant_id, since (ISO), fleet_id?, exclude_memory_types?,
-    exclude_agent_ids?, exclude_title_regex?, readable_tenant_ids?}``. Team/org-scoped
-    (excludes ``scope_agent``); mirrors the durable/firehose exclusions of ``/stats-breakdown``.
+    exclude_agent_ids?, exclude_title_regex?, include_scope_agent?,
+    readable_tenant_ids?}``. Team/org-scoped; excludes ``scope_agent`` unless
+    ``include_scope_agent`` is set. Mirrors the durable/firehose exclusions of
+    ``/stats-breakdown``.
     """
     body: dict = await request.json()
     tenant_id = body.get("tenant_id")
@@ -1154,6 +1157,7 @@ async def daily_durable_counts(request: Request) -> list[dict]:
         exclude_memory_types=body.get("exclude_memory_types"),
         exclude_agent_ids=body.get("exclude_agent_ids"),
         exclude_title_regex=body.get("exclude_title_regex"),
+        include_scope_agent=bool(body.get("include_scope_agent", False)),
         readable_tenant_ids=body.get("readable_tenant_ids"),
     )
 
@@ -1186,6 +1190,7 @@ async def quality_metrics(request: Request) -> dict:
         exclude_memory_types=body.get("exclude_memory_types"),
         exclude_agent_ids=body.get("exclude_agent_ids"),
         exclude_title_regex=body.get("exclude_title_regex"),
+        include_scope_agent=bool(body.get("include_scope_agent", False)),
         readable_tenant_ids=body.get("readable_tenant_ids"),
     )
 

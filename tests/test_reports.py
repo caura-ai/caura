@@ -206,6 +206,57 @@ async def test_report_no_agent_caller_is_group_view(client):
     assert body["summary"]["durable_memories_written"] == 3, body
 
 
+async def test_report_group_counts_private_writes_but_hides_content(client):
+    """Agent-private (``scope_agent``) durable writes are COUNTED in the group
+    aggregates — durable_memories_written / by_type / per_agent / trend — but
+    their CONTENT is never surfaced (value_highlights). Visibility is an audience
+    attribute, not a measure of whether a memory is knowledge produced."""
+    tag = _uid()
+    tenant_id, headers = get_test_auth(f"rep-tenant-{tag}")
+    fleet, a1 = f"rep-fleet-{tag}", f"rep-a1-{tag}"
+    await _register(tenant_id, fleet, a1)
+    # 2 team-visible durable + 1 agent-private durable, all authored by a1.
+    await _seed(client, headers, tenant_id, fleet, a1, "decision", 2)
+    r = await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant_id,
+            "agent_id": a1,
+            "fleet_id": fleet,
+            "memory_type": "fact",
+            "visibility": "scope_agent",
+            "content": f"private fact by {a1} {_uid()}",
+        },
+        headers=headers,
+    )
+    assert r.status_code == 201, r.text
+
+    resp = await client.get(
+        "/api/v1/reports",
+        params={
+            "tenant_id": tenant_id,
+            "period": "week",
+            "destination": "internal_group",  # group view: no agent_id
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # COUNTS include the private durable write: 2 team decisions + 1 private fact.
+    assert body["summary"]["durable_memories_written"] == 3, body
+    assert body["summary"]["by_type"].get("fact") == 1, body["summary"]["by_type"]
+    agents = {p["agent_id"]: p["durable_writes"] for p in body["per_agent"]}
+    assert agents.get(a1) == 3, agents
+    # Trend line reconciles with the total (counts private too).
+    assert sum(pt["count"] for pt in body["trend"]) == 3, body["trend"]
+    # CONTENT stays audience-scoped: only the 2 team decisions surface; the
+    # private fact is counted above but never appears in value_highlights.
+    assert len(body["value_highlights"]) == 2, body["value_highlights"]
+    assert all(h["type"] == "decision" for h in body["value_highlights"]), body[
+        "value_highlights"
+    ]
+
+
 async def test_report_org_scope_aggregates_across_tenants(client):
     """scope=org with a cross-tenant read credential aggregates across the
     readable tenant set and returns a per-tenant breakdown."""

@@ -3434,6 +3434,7 @@ class PostgresService:
         exclude_agent_ids: list[str] | None = None,
         exclude_title_regex: str | None = None,
         include_deleted: bool = False,
+        include_scope_agent: bool = False,
         readable_tenant_ids: list[str] | None = None,
     ) -> dict:
         """Return ``{total, by_type, by_agent, by_status}`` (+ optional
@@ -3451,6 +3452,15 @@ class PostgresService:
         match what a non-semantic list would return), same single-pass GROUPING
         SETS aggregation, same cross-tenant widening + ``by_tenant`` breakdown,
         and same ``include_deleted`` CTE. Read-only (reader replica).
+
+        ``include_scope_agent`` (default False keeps the historical MCP
+        ``memclaw_stats`` behaviour) opts into counting agent-private
+        (``scope_agent``) rows in the no-``agent_id`` team/org aggregate. This is
+        a pure COUNT — no memory content is returned — so private rows can be
+        tallied without leaking their contents; the report uses it so
+        ``durable_memories_written`` reflects everything an agent wrote, not just
+        what it shared. Ignored when ``agent_id`` is set (that path already
+        scopes visibility to the named agent).
         """
         scope_filters = []
         if readable_tenant_ids:
@@ -3474,7 +3484,7 @@ class PostgresService:
                     ),
                 )
             )
-        else:
+        elif not include_scope_agent:
             scope_filters.append(Memory.visibility != "scope_agent")
         if memory_type:
             scope_filters.append(Memory.memory_type == memory_type)
@@ -3647,20 +3657,25 @@ class PostgresService:
         exclude_memory_types: list[str] | None = None,
         exclude_agent_ids: list[str] | None = None,
         exclude_title_regex: str | None = None,
+        include_scope_agent: bool = False,
         readable_tenant_ids: list[str] | None = None,
     ) -> list[dict]:
         """Per-day durable-write counts since ``since`` — the report's
         activity-over-time trend. Same durable/firehose exclusions and
-        team/org visibility scope as ``memory_stats_breakdown`` (no agent_id ⇒
-        excludes ``scope_agent``). Runs as a plain ORM ``GROUP BY`` executed
-        directly (no compile→text round-trip, so ``NOT IN`` expands natively).
-        Read-only (reader replica).
+        team/org visibility scope as ``memory_stats_breakdown``. Runs as a plain
+        ORM ``GROUP BY`` executed directly (no compile→text round-trip, so
+        ``NOT IN`` expands natively). Read-only (reader replica).
+
+        ``include_scope_agent`` (default False) mirrors ``memory_stats_breakdown``:
+        opt in to counting agent-private rows so the trend line matches the
+        report's ``durable_memories_written`` total. Pure count, no content.
         """
         conds = [
             Memory.deleted_at.is_(None),
             Memory.created_at >= since,
-            Memory.visibility != "scope_agent",
         ]
+        if not include_scope_agent:
+            conds.append(Memory.visibility != "scope_agent")
         if readable_tenant_ids:
             conds.append(Memory.tenant_id.in_(readable_tenant_ids))
         else:
@@ -3694,6 +3709,7 @@ class PostgresService:
         exclude_memory_types: list[str] | None = None,
         exclude_agent_ids: list[str] | None = None,
         exclude_title_regex: str | None = None,
+        include_scope_agent: bool = False,
         readable_tenant_ids: list[str] | None = None,
     ) -> dict:
         """Reuse / recall quality aggregates over the SAME scoped corpus as
@@ -3726,7 +3742,7 @@ class PostgresService:
                     and_(Memory.visibility == "scope_agent", Memory.agent_id == agent_id),
                 )
             )
-        else:
+        elif not include_scope_agent:
             scope_filters.append(Memory.visibility != "scope_agent")
         if created_after:
             scope_filters.append(Memory.created_at >= created_after)

@@ -268,6 +268,16 @@ async def get_report(
         "exclude_memory_types": list(NON_DURABLE_TYPES),
         "exclude_agent_ids": list(RESERVED_FIREHOSE_AGENTS),
         "exclude_title_regex": NON_COHESIVE_TITLE_REGEX,
+        # Count agent-private (scope_agent) durable writes in the AGGREGATES
+        # (totals/by_type/by_agent/quality/trend). These are real, decision-
+        # bearing memories an agent kept private — excluding them made
+        # durable_memories_written measure "team-visible" rather than "written",
+        # and disproportionately undercounted privacy-heavy tenants. This is a
+        # pure count; the content sections (value_highlights/learning/spotlight/
+        # working_on) still exclude scope_agent — see list_query below — so no
+        # private content is surfaced to the group. Ignored on the self path
+        # (agent_id set), which already scopes visibility to the caller.
+        "include_scope_agent": True,
     }
     if org_mode:
         # Org-wide: aggregate across every tenant the credential may read.
@@ -375,6 +385,9 @@ async def get_report(
                 "exclude_memory_types": list(NON_DURABLE_TYPES),
                 "exclude_agent_ids": list(RESERVED_FIREHOSE_AGENTS),
                 "exclude_title_regex": NON_COHESIVE_TITLE_REGEX,
+                # Match the breakdown: the trend must count private durable rows
+                # too, or the daily line won't sum to durable_memories_written.
+                "include_scope_agent": True,
             }
             if org_mode:
                 trend_query["readable_tenant_ids"] = readable
@@ -491,9 +504,13 @@ async def get_report(
         # reuse-rate by type, never-recalled %, recall concentration (top-6
         # share), insight freshness, and the write→durable→reused funnel.
         # Scope keys shared by the three (independent) quality calls below.
+        # ``include_scope_agent`` rides along so the funnel's "written" (full) and
+        # the insight-freshness corpus (ins) count private rows too — otherwise
+        # ``durable`` (which now includes them) could exceed ``written`` and break
+        # the write→durable→reused funnel invariant.
         scope_keys = {
             k: breakdown_query[k]
-            for k in ("tenant_id", "agent_id", "fleet_id", "readable_tenant_ids")
+            for k in ("tenant_id", "agent_id", "fleet_id", "readable_tenant_ids", "include_scope_agent")
             if k in breakdown_query
         }
         # ── Phase 2: quality metrics + the two supporting breakdown calls run
