@@ -664,7 +664,7 @@ class TestMigrationChain:
     def test_single_head(self):
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"028"}, f"Expected single head '028', got {sorted(heads)}"
+        assert heads == {"029"}, f"Expected single head '029', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -682,6 +682,8 @@ class TestMigrationChain:
         assert chain.get("027") == "026", "027 must follow 026"
         # 028: agent belonging model (belonging_type + owner_ref)
         assert chain.get("028") == "027", "028 must follow 027"
+        # 029: agent activity digest (cached per-agent summaries, CAURA-222)
+        assert chain.get("029") == "028", "029 must follow 028"
 
     def test_no_plain_create_index_on_large_tables(self):
         """Indexes on large, pre-existing tables MUST be built ``CONCURRENTLY``
