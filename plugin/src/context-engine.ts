@@ -27,6 +27,9 @@ import {
   RECALL_MIN_PROMPT_CHARS,
   RECALL_TRIGGER_KEYWORDS,
   RECALL_DENY_SESSIONS,
+  RECALL_MACHINE_PATTERNS,
+  RECALL_GATE_MODE,
+  RECALL_CROSS_AGENT,
   type RecallPolicy,
 } from "./env.js";
 import { memclawPromptSectionText } from "./prompt-section.js";
@@ -186,7 +189,22 @@ export type ShouldRecallReason =
   | "trivial-ping"
   | "slash-command"
   | "session-denied"
+  | "agent-name-self"
+  | "mention-only"
+  | "subagent-context"
+  | "machine-pattern"
+  | "instruction-3rd-party"
   | "default-substantive";
+
+// Reasons introduced by the noise-skip gate. In shadow mode these are logged
+// as "would-skip" but do NOT suppress recall (see RECALL_GATE_SHADOW).
+export const NOISE_SKIP_REASONS: ReadonlySet<ShouldRecallReason> = new Set([
+  "agent-name-self",
+  "mention-only",
+  "subagent-context",
+  "machine-pattern",
+  "instruction-3rd-party",
+]);
 
 export interface ShouldRecallInput {
   policy: RecallPolicy;
@@ -196,7 +214,15 @@ export interface ShouldRecallInput {
   triggerKeywords: readonly string[];
   sessionKey?: string;
   denySessions: readonly string[];
+  agentId?: string;
+  machinePatterns?: readonly RegExp[];
+  // When false/undefined the noise-skip rules are not applied (gate "off").
+  applyNoiseRules?: boolean;
 }
+
+const _MENTION_ONLY_RE = /^\s*@?\+?[\d\s@]+$/;
+const _INSTR_3RD_RE =
+  /^\s*(tell|ask|have|get)\s+(codex|claude|cursor|\w*claw|him|her|them)\b/i;
 
 export interface ShouldRecallResult {
   recall: boolean;
@@ -331,6 +357,29 @@ export function shouldRecall(input: ShouldRecallInput): ShouldRecallResult {
       // "/help" should report `slash-command`, not `below-threshold`).
       if (_isTrivialPing(eff)) {
         return { recall: false, reason: "trivial-ping" };
+      }
+      // Noise-skip gate (opt-in via RECALL_GATE_MODE): automation / non-question
+      // turns that should not trigger recall. Ordered before slash/length so
+      // metrics show the precise reason. (Explicit keywords above still win.)
+      // Caller passes applyNoiseRules=false when the gate is "off", so this is
+      // behavior-neutral by default.
+      if (input.applyNoiseRules) {
+        const _lc = eff.trim().toLowerCase();
+        if (input.agentId && _lc === input.agentId.trim().toLowerCase()) {
+          return { recall: false, reason: "agent-name-self" };
+        }
+        if (_MENTION_ONLY_RE.test(eff)) {
+          return { recall: false, reason: "mention-only" };
+        }
+        if (_lc.startsWith("[subagent context]")) {
+          return { recall: false, reason: "subagent-context" };
+        }
+        if (input.machinePatterns && input.machinePatterns.some((re) => re.test(eff))) {
+          return { recall: false, reason: "machine-pattern" };
+        }
+        if (_INSTR_3RD_RE.test(eff)) {
+          return { recall: false, reason: "instruction-3rd-party" };
+        }
       }
       if (eff.startsWith("/") && eff.length < 60) {
         return { recall: false, reason: "slash-command" };
@@ -800,7 +849,7 @@ export class MemClawContextEngine {
     const sessionHash = createHashShort(sessionKey);
 
     // --- Recall gate ---
-    const decision = shouldRecall({
+    const rawDecision = shouldRecall({
       policy: RECALL_POLICY,
       prompt,
       messages: incomingMessages,
@@ -808,8 +857,19 @@ export class MemClawContextEngine {
       triggerKeywords: RECALL_TRIGGER_KEYWORDS,
       sessionKey,
       denySessions: RECALL_DENY_SESSIONS,
+      agentId,
+      machinePatterns: RECALL_MACHINE_PATTERNS,
+      applyNoiseRules: RECALL_GATE_MODE !== "off",
     });
-    _recordDecision(decision, sessionHash);
+    // Record the TRUE gate outcome for metrics (so shadow-mode would-skips are
+    // counted). In shadow mode, a noise-skip is logged but not enforced.
+    _recordDecision(rawDecision, sessionHash);
+    const decision: ShouldRecallResult =
+      RECALL_GATE_MODE === "shadow" &&
+      !rawDecision.recall &&
+      NOISE_SKIP_REASONS.has(rawDecision.reason)
+        ? { recall: true, reason: rawDecision.reason }
+        : rawDecision;
 
     // Block on keystones now that the gate decision is in. In the skip
     // path below we return immediately; in the recall path further down
@@ -879,10 +939,16 @@ export class MemClawContextEngine {
         const tid = await ensureTenantId();
         const searchBody: Record<string, unknown> = {
           tenant_id: tid,
-          filter_agent_id: agentId,
           query: searchQuery,
           top_k: 5,
         };
+        // Self-filter (agent silo) unless cross-agent recall is enabled. When
+        // enabled, omit filter_agent_id so the agent can retrieve sibling
+        // agents' knowledge — still bounded by the server-side fleet/trust
+        // scope. Opt-in (RECALL_CROSS_AGENT); pairs with the A43 freshness cap.
+        if (!RECALL_CROSS_AGENT) {
+          searchBody.filter_agent_id = agentId;
+        }
         const sr = (await apiCall(
           "POST",
           "/search",
