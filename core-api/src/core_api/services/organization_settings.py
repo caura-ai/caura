@@ -73,6 +73,13 @@ DEFAULT_SETTINGS: dict = {
     "search": {
         "recall_boost": None,
         "graph_retrieval": None,
+        # Tenant-wide default search profile (A47). Any search_profile knob set
+        # here (min_similarity, top_k, freshness_floor, ...) becomes the fallback
+        # for EVERY agent in the tenant, filling the gap between a per-agent tuned
+        # profile and the global constants. Empty by default → global constants
+        # apply, unchanged. Validated by ``_validate_default_search_profile`` on
+        # write (strict, raises) and ``validate_search_profile`` on read (clamps).
+        "default_profile": {},
     },
     "crystallizer": {
         "auto_crystallize": None,
@@ -445,6 +452,39 @@ def _validate_governance_enums(payload: dict) -> None:
         )
 
 
+def _validate_default_search_profile(payload: dict) -> None:
+    """Strictly validate the tenant-wide ``search.default_profile`` on write.
+
+    Unlike ``validate_search_profile`` (which silently clamps/drops for the
+    agent-tune path), an org-wide setting write should fail loudly so an
+    operator gets a 422 rather than a value that was quietly clamped. Unknown
+    keys, wrong types, and out-of-range values all raise. Keys and ranges are
+    the same source of truth as agent profiles (``_SEARCH_PROFILE_RULES``).
+    """
+    dp = payload.get("search", {}).get("default_profile")
+    if dp is None:
+        return
+    if not isinstance(dp, dict):
+        raise ValueError("search.default_profile must be an object")
+    for key, value in dp.items():
+        if key not in _SEARCH_PROFILE_RULES:
+            raise ValueError(
+                f"search.default_profile: unknown key {key!r} (allowed: {sorted(_SEARCH_PROFILE_RULES)})"
+            )
+        expected_type, (lo, hi), _ = _SEARCH_PROFILE_RULES[key]
+        # Accept an int where a float is expected (e.g. min_similarity=0 → 0.0),
+        # but never a bool (bool is an int subclass and would slip through).
+        if expected_type is float and isinstance(value, int) and not isinstance(value, bool):
+            value = float(value)
+        wrong_bool = isinstance(value, bool) and expected_type is not bool
+        if wrong_bool or not isinstance(value, expected_type):
+            raise ValueError(
+                f"search.default_profile.{key} must be {expected_type.__name__}, got {type(value).__name__}"
+            )
+        if value < lo or value > hi:
+            raise ValueError(f"search.default_profile.{key} must be in [{lo}, {hi}], got {value}")
+
+
 def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
     """Raise ``ValueError`` for any key in *payload* not present in *schema*.
 
@@ -793,6 +833,17 @@ class ResolvedConfig:
         val = self._ts.get("search", {}).get("graph_retrieval")
         return val if val is not None else True
 
+    @property
+    def default_search_profile(self) -> dict:
+        """Tenant-wide default search profile (A47).
+
+        Sits below a per-agent tuned profile and above the global constants in
+        ``resolve_search_profile``. Sanitised via ``validate_search_profile`` on
+        read so a malformed stored value can never crash the search pipeline —
+        unknown/out-of-range knobs are clamped or dropped. Empty ⇒ constants.
+        """
+        return validate_search_profile(self._ts.get("search", {}).get("default_profile", {}) or {})
+
     # Crystallizer
     @property
     def auto_crystallize_enabled(self) -> bool:
@@ -1087,6 +1138,7 @@ async def update_settings(
     _check_keys(new_settings, DEFAULT_SETTINGS)
     _validate_leaf_types(new_settings)
     _validate_governance_enums(new_settings)
+    _validate_default_search_profile(new_settings)
     cron_override = new_settings.get("security_audit", {}).get("schedule_cron")
     if cron_override is not None:
         _validate_cron(cron_override)
