@@ -608,3 +608,76 @@ async def get_report(
         "learning": learning,
         "quality": quality,
     }
+
+
+@router.get("/reports/agent-activity")
+async def get_agent_activity_digest(
+    tenant_id: str = Query(..., description="Home tenant scope."),
+    period: str = Query("day", description="Digest window: 'day' or 'week'."),
+    scope: str = Query(
+        "own",
+        description=(
+            "Breadth: 'own' (just ``tenant_id``) or 'org' (every tenant the "
+            "credential may read). Both require a cross-tenant read credential."
+        ),
+    ),
+    agent_id: str | None = Query(None, description="Filter the digest to a single agent."),
+    as_of: str | None = Query(
+        None, description="ISO date/datetime to view a past snapshot; absent ⇒ latest."
+    ),
+    readable_tenant_ids: str | None = Query(
+        None,
+        description=(
+            "CSV of tenant ids for scope='org'. Honored ONLY for the internal "
+            "admin credential (the org-report proxy); ignored otherwise."
+        ),
+    ),
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict:
+    """Cached, LLM-generated per-agent activity digest (read-only).
+
+    Precomputed on a schedule (default nightly; see core-operations) and served
+    from storage — never computed live. Gated on **cross-tenant read
+    privileges** (``enforce_cross_tenant_read``): single-tenant callers reach it
+    through the enterprise org-report proxy instead. Returns ``digests: []`` with
+    ``meta.generated_at: null`` when no run exists yet, not a 404.
+    """
+    auth.enforce_cross_tenant_read()
+    if period not in _PERIOD_DAYS:
+        raise HTTPException(status_code=422, detail=f"Invalid period '{period}'. Use 'day' or 'week'.")
+    if scope not in ("own", "org"):
+        raise HTTPException(status_code=422, detail="Invalid scope. Use 'own' or 'org'.")
+
+    # Resolve the target tenant set. The internal admin proxy may pass an
+    # explicit set; every other caller is pinned to its own readable set so a
+    # cross-tenant agent cannot widen past its grant.
+    if scope == "org":
+        if auth.is_admin and readable_tenant_ids:
+            tenants = [t.strip() for t in readable_tenant_ids.split(",") if t.strip()]
+        else:
+            tenants = list(auth.readable_tenant_ids)
+    else:
+        tenants = [tenant_id]
+    # Bound which tenants: every target must be in the credential's readable set.
+    for t in tenants:
+        auth.enforce_readable_tenant(t)
+
+    sc = get_storage_client()
+    per_tenant = await asyncio.gather(
+        *(sc.get_agent_activity_digest(t, period, agent_id=agent_id, as_of=as_of) for t in tenants)
+    )
+    digests: list[dict] = [row for rows in per_tenant for row in (rows or [])]
+
+    # Meta reflects the freshest run represented in the result set.
+    latest = max(digests, key=lambda d: d["generated_at"]) if digests else None
+    meta = {
+        "period": period,
+        "scope": scope,
+        "tenants": len(tenants),
+        "agents": len({d["agent_id"] for d in digests}),
+        "generated_at": latest["generated_at"] if latest else None,
+        "window_start": latest["window_start"] if latest else None,
+        "window_end": latest["window_end"] if latest else None,
+        "model": latest["model"] if latest else None,
+    }
+    return {"meta": meta, "digests": digests}

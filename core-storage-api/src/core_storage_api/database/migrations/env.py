@@ -21,6 +21,7 @@ from common.models.memory import Memory  # noqa: F401
 from common.models.entity import Entity, MemoryEntityLink, Relation  # noqa: F401
 from common.models.audit import AuditLog  # noqa: F401
 from common.models.agent import Agent  # noqa: F401
+from common.models.agent_activity_digest import AgentActivityDigest  # noqa: F401
 from common.models.analysis_report import CrystallizationReport  # noqa: F401
 from common.models.fleet import FleetNode, FleetCommand  # noqa: F401
 from common.models.document import Document  # noqa: F401
@@ -56,8 +57,7 @@ async def run_migrations_cli():
 
 if context.is_offline_mode():
     raise RuntimeError(
-        "Offline mode (alembic --sql) is not supported. "
-        "Run 'alembic upgrade head' without --sql."
+        "Offline mode (alembic --sql) is not supported. Run 'alembic upgrade head' without --sql."
     )
 else:
     connection = context.config.attributes.get("connection")

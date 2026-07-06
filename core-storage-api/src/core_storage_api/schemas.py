@@ -225,6 +225,25 @@ BACKGROUND_TASK_FIELDS: list[str] = [
     "created_at",
 ]
 
+AGENT_DIGEST_FIELDS: list[str] = [
+    "id",
+    "run_id",
+    "tenant_id",
+    "fleet_id",
+    "agent_id",
+    "period",
+    "window_start",
+    "window_end",
+    "narrative",
+    "sections",
+    "source_count",
+    "recall_count",
+    "model",
+    "status",
+    "error_detail",
+    "generated_at",
+]
+
 
 # ---------------------------------------------------------------------------
 # Pydantic request schemas for complex query endpoints

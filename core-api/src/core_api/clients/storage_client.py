@@ -2450,6 +2450,22 @@ class CoreStorageClient:
     async def list_reports(self, tenant_id: str) -> list[dict]:
         return await self._get_list("/reports", tenant_id=tenant_id)
 
+    async def get_agent_activity_digest(
+        self,
+        tenant_id: str,
+        period: str,
+        *,
+        agent_id: str | None = None,
+        as_of: str | None = None,
+    ) -> list[dict]:
+        """Latest run's per-agent digest rows for a tenant/period ([] if none)."""
+        params: dict[str, Any] = {"tenant_id": tenant_id, "period": period}
+        if agent_id is not None:
+            params["agent_id"] = agent_id
+        if as_of is not None:
+            params["as_of"] = as_of
+        return await self._get_list("/reports/agent-activity", **params)
+
     # =====================================================================
     # Tasks
     # =====================================================================

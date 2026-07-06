@@ -240,6 +240,27 @@ class AuthContext:
                 detail=f"API key is not authorized to read tenant '{requested_tenant}'",
             )
 
+    def enforce_cross_tenant_read(self) -> None:
+        """Raise 403 unless this credential may read beyond its home tenant.
+
+        The gate for admin-plane, cross-tenant read artifacts (e.g. the cached
+        agent-activity digest at GET /api/v1/reports/agent-activity). Strict by
+        design: a single-tenant key never qualifies — those callers reach the
+        report through the enterprise org-report proxy, which is org-admin-gated
+        and itself holds a cross-tenant read credential. ``is_admin`` (the
+        internal super-admin key) always passes.
+
+        Bounding *which* tenants remains ``enforce_readable_tenant`` per target;
+        this only asserts the credential has cross-tenant read at all.
+        """
+        if self.is_admin:
+            return
+        if not self.is_cross_tenant_read:
+            raise HTTPException(
+                status_code=403,
+                detail="Cross-tenant read privileges are required for this report.",
+            )
+
     def enforce_write_scope(self) -> None:
         """Raise 403 if this credential's capabilities exclude ``write``.
 

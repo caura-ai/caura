@@ -564,3 +564,78 @@ async def test_report_org_scope_requires_cross_tenant_key(client):
         assert resp.status_code == 403, resp.text
     finally:
         app.dependency_overrides.pop(get_auth_context, None)
+
+
+# ── Agent-activity digest (CAURA-222): cached per-agent summaries ──
+# Phase 1 is the inert read slice — the generation worker lands in Phase 2, so
+# these cover the gate + the "no run yet" contract. Non-empty read coverage
+# arrives with the writer.
+
+
+async def test_agent_activity_requires_cross_tenant_read(client):
+    """A single-tenant (non-admin) credential is refused: the digest is a
+    cross-tenant admin-plane artifact (``enforce_cross_tenant_read``)."""
+    tag = _uid()
+    t1 = f"rep-dig-solo-{tag}"
+    ctx = AuthContext(tenant_id=t1)  # single-tenant, non-admin
+    app.dependency_overrides[get_auth_context] = lambda: ctx
+    try:
+        resp = await client.get(
+            "/api/v1/reports/agent-activity",
+            params={"tenant_id": t1, "period": "day"},
+        )
+        assert resp.status_code == 403, resp.text
+    finally:
+        app.dependency_overrides.pop(get_auth_context, None)
+
+
+async def test_agent_activity_cross_tenant_empty_until_generated(client):
+    """A cross-tenant reader is allowed; with no run yet the endpoint returns an
+    empty digest list + null ``generated_at`` (never a 404)."""
+    tag = _uid()
+    t1, t2 = f"rep-dig1-{tag}", f"rep-dig2-{tag}"
+    ctx = AuthContext(tenant_id=t1, readable_tenant_ids=[t1, t2])
+    app.dependency_overrides[get_auth_context] = lambda: ctx
+    try:
+        resp = await client.get(
+            "/api/v1/reports/agent-activity",
+            params={"tenant_id": t1, "period": "day", "scope": "org"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["digests"] == [], body
+        assert body["meta"]["generated_at"] is None, body["meta"]
+        assert body["meta"]["scope"] == "org"
+        assert body["meta"]["tenants"] == 2, body["meta"]
+    finally:
+        app.dependency_overrides.pop(get_auth_context, None)
+
+
+async def test_agent_activity_admin_allowed(client):
+    """The internal admin key bypasses the cross-tenant gate."""
+    tag = _uid()
+    t1 = f"rep-dig-adm-{tag}"
+    _, headers = get_test_auth(t1)  # admin key (is_admin=True)
+    resp = await client.get(
+        "/api/v1/reports/agent-activity",
+        params={"tenant_id": t1, "period": "day"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["digests"] == []
+
+
+async def test_agent_activity_invalid_period(client):
+    """Period is validated to 'day'|'week' → 422 otherwise."""
+    tag = _uid()
+    t1, t2 = f"rep-dig-per1-{tag}", f"rep-dig-per2-{tag}"
+    ctx = AuthContext(tenant_id=t1, readable_tenant_ids=[t1, t2])
+    app.dependency_overrides[get_auth_context] = lambda: ctx
+    try:
+        resp = await client.get(
+            "/api/v1/reports/agent-activity",
+            params={"tenant_id": t1, "period": "month"},
+        )
+        assert resp.status_code == 422, resp.text
+    finally:
+        app.dependency_overrides.pop(get_auth_context, None)
