@@ -1,0 +1,27 @@
+{
+  "planId": "SPRINT-RECALL-EFFICIENCY-PLAN",
+  "startedAt": "2026-07-07T00:00:00Z",
+  "workItems": {
+    "RE-01": {
+      "state": "completed",
+      "attempt": 1,
+      "startedAt": "2026-07-07T09:00:00Z",
+      "completedAt": "2026-07-07T09:40:20Z",
+      "duration": "40m",
+      "modelUsed": "sonnet",
+      "artifacts": [
+        "docker-compose.yml (core-worker service block + explicit DEPLOYMENT_MODE=inline)",
+        "docker-compose.dev.yml (core-worker service block + explicit DEPLOYMENT_MODE=inline)",
+        "wet-test memory cf0d610f-0738-4bb4-933b-976166008ebd: enrichment_pending cleared, title populated via fake_enrich heuristic (USE_LLM_FOR_MEMORY_CREATION=true scoped to test run only)"
+      ]
+    },
+    "RE-02": { "state": "ready", "attempt": 0, "artifacts": [] },
+    "RE-03": { "state": "ready", "attempt": 0, "artifacts": [] },
+    "RE-04": { "state": "blocked", "attempt": 0, "artifacts": [] },
+    "RE-05": { "state": "ready", "attempt": 0, "artifacts": [] },
+    "RE-06": { "state": "blocked", "attempt": 0, "artifacts": [] },
+    "RE-07": { "state": "blocked", "attempt": 0, "artifacts": [] },
+    "RE-Z01": { "state": "blocked", "attempt": 0, "artifacts": [] }
+  },
+  "quality_review": null
+}
