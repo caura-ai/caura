@@ -15,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot, per_tenant_storage_slot
+from core_api.pipeline.context import PipelineContext
 from core_api.services.agent_identity import ReservedAgentIdError, enforce_reserved_write_id
 from core_api.tasks import track_task
 
@@ -22,16 +23,20 @@ try:
     from openai import OpenAIError
 except ImportError:
 
-    class OpenAIError(Exception):
-        pass  # type: ignore[misc]
+    class _OpenAIError(Exception):
+        pass
+
+    OpenAIError = _OpenAIError  # type: ignore[misc,assignment]
 
 
 try:
-    from google.api_core.exceptions import GoogleAPIError
+    from google.api_core.exceptions import GoogleAPIError  # type: ignore[import-untyped]
 except ImportError:
 
-    class GoogleAPIError(Exception):
-        pass  # type: ignore[misc]
+    class _GoogleAPIError(Exception):
+        pass
+
+    GoogleAPIError = _GoogleAPIError  # type: ignore[misc,assignment]
 
 
 from common.constants import VECTOR_DIM
@@ -62,6 +67,7 @@ from core_api.constants import (
     RECALL_DECAY_WINDOW_DAYS,
     SEARCH_OVERFETCH_FACTOR,
     SIMILARITY_BLEND,
+    MemoryType,
 )
 from core_api.schemas import (
     BulkItemResult,
@@ -157,18 +163,22 @@ def _dict_to_memory_out(
     raw_meta = mem.get("metadata_")
     metadata = raw_meta if raw_meta is not None else mem.get("metadata")
     return MemoryOut(
-        id=mem.get("id"),
-        tenant_id=mem.get("tenant_id"),
+        # Required MemoryOut fields: index directly rather than ``.get()`` —
+        # these are guaranteed present on a persisted memory row, and a
+        # missing key here is a real storage-layer bug that should raise
+        # KeyError, not silently coerce to None and fail inside pydantic.
+        id=mem["id"],
+        tenant_id=mem["tenant_id"],
         fleet_id=mem.get("fleet_id"),
-        agent_id=mem.get("agent_id"),
-        memory_type=mem.get("memory_type"),
+        agent_id=mem["agent_id"],
+        memory_type=mem["memory_type"],
         title=mem.get("title"),
-        content=mem.get("content"),
-        weight=mem.get("weight"),
+        content=mem["content"],
+        weight=mem["weight"],
         source_uri=mem.get("source_uri"),
         run_id=mem.get("run_id"),
         metadata=metadata,
-        created_at=mem.get("created_at"),
+        created_at=mem["created_at"],
         expires_at=mem.get("expires_at"),
         entity_links=entity_links or [],
         similarity=similarity,
@@ -177,9 +187,9 @@ def _dict_to_memory_out(
         object_value=mem.get("object_value"),
         ts_valid_start=mem.get("ts_valid_start"),
         ts_valid_end=mem.get("ts_valid_end"),
-        status=mem.get("status"),
-        visibility=mem.get("visibility"),
-        recall_count=mem.get("recall_count"),
+        status=mem["status"],
+        visibility=mem["visibility"],
+        recall_count=mem["recall_count"],
         last_recalled_at=mem.get("last_recalled_at"),
         supersedes_id=mem.get("supersedes_id"),
         superseded_by=contradictions if contradictions else None,
@@ -253,6 +263,8 @@ async def create_memory(data: MemoryCreate) -> MemoryOut:
 
 async def _create_memory_pipeline(data: MemoryCreate) -> MemoryOut:
     """Pipeline-based create_memory — same logic, decomposed into timed steps."""
+    if not data.agent_id:
+        raise ValueError("agent_id must be resolved before calling _create_memory_pipeline")
     from core_api.pipeline.compositions.write import (
         build_enrichment_pipeline,
         build_fast_write_pipeline,
@@ -435,8 +447,10 @@ async def _create_memory_pipeline(data: MemoryCreate) -> MemoryOut:
         )
 
 
-async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> MemoryOut:
+async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: PipelineContext) -> MemoryOut:
     """Auto-chunking branch using pipeline context enrichment results."""
+    if not data.agent_id:
+        raise ValueError("agent_id must be resolved before calling _handle_auto_chunk_from_ctx")
     from core_api.services.ingest_service import _chunk_content
 
     sc = get_storage_client()
@@ -501,7 +515,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                 }
             )
 
-        parent_id = parent.get("id")
+        parent_id = parent["id"]
 
         _hooks = get_hooks()
         if _hooks.audit_log:
@@ -567,7 +581,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                         data.fleet_id,
                         data.agent_id,
                         data.content,
-                        data.memory_type,
+                        fields["memory_type"],
                     ),
                     "entity_extraction",
                     parent_id,
@@ -593,6 +607,8 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
 
 
 async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
+    if not data.agent_id:
+        raise ValueError("agent_id must be resolved before calling _create_memory_legacy")
     # -- Content quality gate -- reject before any LLM work --
     if len(data.content.strip()) < CRYSTALLIZER_SHORT_CONTENT_CHARS:
         raise HTTPException(
@@ -621,6 +637,7 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
     # -- Enrichment + embedding (needed for both persist and extract-only) --
     enrichment = None
     if cached_embedding is not None:
+        assert ch is not None  # cached_embedding is only ever set inside `if ch:` above
         logger.info("Reusing existing embedding for content_hash=%s", ch[:12])
 
         async def _return_cached():
@@ -681,7 +698,7 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
 
     # Apply defaults if still unset (LLM disabled or failed)
     if memory_type is None:
-        memory_type = "fact"
+        memory_type = MemoryType.FACT
     if weight is None:
         weight = DEFAULT_MEMORY_WEIGHT
 
@@ -770,7 +787,7 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
                     }
                 )
 
-            parent_id = parent.get("id")
+            parent_id = parent["id"]
 
             _hooks = get_hooks()
             if _hooks.audit_log:
@@ -836,7 +853,7 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
                             data.fleet_id,
                             data.agent_id,
                             data.content,
-                            data.memory_type,
+                            memory_type,
                         ),
                         "entity_extraction",
                         parent_id,
@@ -850,6 +867,7 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
     # Dedup: check for exact content match within tenant+fleet, scoped to
     # the writing agent. Cross-agent writes of identical content should
     # succeed as distinct observations — friction §2.8 / Stage 5.
+    assert ch is not None  # data.persist is True here (guarded by the extract-only return above)
     dup = await sc.find_by_content_hash(
         data.tenant_id,
         ch,
@@ -953,7 +971,7 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
         },
     )
 
-    memory_id = created.get("id")
+    memory_id = created["id"]
 
     detail = {
         "memory_type": memory_type,
@@ -986,7 +1004,7 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
                     data.fleet_id,
                     data.agent_id,
                     data.content,
-                    data.memory_type,
+                    memory_type,
                 ),
                 "entity_extraction",
                 memory_id,
@@ -1332,7 +1350,7 @@ async def create_memories_bulk(
             metadata["business_relevance"] = enrichment.business_relevance
 
         if memory_type is None:
-            memory_type = "fact"
+            memory_type = MemoryType.FACT
         if weight is None:
             weight = DEFAULT_MEMORY_WEIGHT
 

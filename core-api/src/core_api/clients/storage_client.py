@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import datetime
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict, cast
 from uuid import UUID
 
 import httpx
@@ -187,7 +187,7 @@ class CoreStorageClient:
 
     # -- pool resilience (incident 2026-06-16) ---------------------------
 
-    async def _cancel_safe(self, coro: Awaitable[httpx.Response]) -> httpx.Response:
+    async def _cancel_safe(self, coro: Coroutine[Any, Any, httpx.Response]) -> httpx.Response:
         """Run an in-flight storage request so cancellation cannot strand its
         pooled connection.
 
@@ -252,7 +252,7 @@ class CoreStorageClient:
 
     async def _execute(
         self,
-        do_request: Callable[[], Awaitable[httpx.Response]],
+        do_request: Callable[[], Coroutine[Any, Any, httpx.Response]],
         *,
         retry: Callable[..., Awaitable[httpx.Response]],
         label: str,
@@ -263,7 +263,7 @@ class CoreStorageClient:
         If ``PoolTimeout`` survives the retry policy the pool is exhausted —
         recycle it once and retry on the fresh pool."""
 
-        def _shielded() -> Awaitable[httpx.Response]:
+        def _shielded() -> Coroutine[Any, Any, httpx.Response]:
             return self._cancel_safe(do_request())
 
         observed_gen = self._pool_generation
@@ -309,7 +309,7 @@ class CoreStorageClient:
         prefix = self._read_prefix if read else self._prefix
         headers = await self._auth_headers(read=read)
 
-        def _do() -> Awaitable[httpx.Response]:
+        def _do() -> Coroutine[Any, Any, httpx.Response]:
             # Read the pool lazily so a mid-call recycle is picked up on retry.
             http = self._read_http if read else self._http
             return http.get(f"{prefix}{path}", params=params, headers=headers)
@@ -326,7 +326,7 @@ class CoreStorageClient:
         # sit on the write path, so no per-call opt-out is needed yet.
         headers = await self._auth_headers(read=True)
 
-        def _do() -> Awaitable[httpx.Response]:
+        def _do() -> Coroutine[Any, Any, httpx.Response]:
             return self._read_http.get(f"{self._read_prefix}{path}", params=params, headers=headers)
 
         resp = await self._execute(_do, retry=_read_retry, label=f"GET-list {path}")
@@ -340,7 +340,7 @@ class CoreStorageClient:
         prefix = self._read_prefix if read else self._prefix
         headers = await self._auth_headers(read=read)
 
-        def _do() -> Awaitable[httpx.Response]:
+        def _do() -> Coroutine[Any, Any, httpx.Response]:
             http = self._read_http if read else self._http
             return http.post(
                 f"{prefix}{path}",
@@ -361,7 +361,7 @@ class CoreStorageClient:
     async def _patch(self, path: str, data: dict) -> dict | None:
         headers = await self._auth_headers(read=False)
 
-        def _do() -> Awaitable[httpx.Response]:
+        def _do() -> Coroutine[Any, Any, httpx.Response]:
             return self._http.patch(f"{self._prefix}{path}", json=data, headers=headers)
 
         resp = await self._execute(_do, retry=with_retry, label=f"PATCH {path}")
@@ -374,7 +374,7 @@ class CoreStorageClient:
     async def _delete(self, path: str, **params: Any) -> bool:
         headers = await self._auth_headers(read=False)
 
-        def _do() -> Awaitable[httpx.Response]:
+        def _do() -> Coroutine[Any, Any, httpx.Response]:
             return self._http.delete(f"{self._prefix}{path}", params=params, headers=headers)
 
         resp = await self._execute(_do, retry=with_retry, label=f"DELETE {path}")
@@ -388,7 +388,7 @@ class CoreStorageClient:
         prefix = self._read_prefix if read else self._prefix
         headers = await self._auth_headers(read=read)
 
-        def _do() -> Awaitable[httpx.Response]:
+        def _do() -> Coroutine[Any, Any, httpx.Response]:
             http = self._read_http if read else self._http
             return http.post(
                 f"{prefix}{path}",
@@ -408,7 +408,7 @@ class CoreStorageClient:
     # =====================================================================
 
     async def create_memory(self, data: dict) -> dict:
-        return await self._post("/memories", data)
+        return cast("dict", await self._post("/memories", data))
 
     async def create_memories(self, data: list[dict]) -> list[dict]:
         """Bulk-insert memories with per-attempt idempotency (CAURA-602).
@@ -428,7 +428,7 @@ class CoreStorageClient:
         (concurrent soft-delete or a torn write); the upstream caller
         treats it as a per-item error.
         """
-        return await self._post("/memories/bulk", data)
+        return cast("list[dict]", await self._post("/memories/bulk", data))
 
     async def get_memory(self, memory_id: str) -> dict | None:
         return await self._get(f"/memories/{memory_id}")
@@ -530,11 +530,14 @@ class CoreStorageClient:
         # Write-path embedding-cache lookup: skips re-embedding identical
         # content. Stale replica would cause a miss and trigger an
         # unnecessary (and expensive) re-embed.
-        return await self._get(
-            "/memories/embedding-by-content-hash",
-            read=False,
-            tenant_id=tenant_id,
-            content_hash=content_hash,
+        return cast(
+            "list[float] | None",
+            await self._get(
+                "/memories/embedding-by-content-hash",
+                read=False,
+                tenant_id=tenant_id,
+                content_hash=content_hash,
+            ),
         )
 
     async def find_duplicate_hash(
@@ -1114,8 +1117,10 @@ class CoreStorageClient:
         UUIDs (e.g. ``candidate["memory_id"]``) and ISO-format any datetimes
         BEFORE calling. Returns the new ``recall_event.id`` as a string.
         """
-        result = await self._post("/memories/recall-log", {"event": event, "candidates": candidates})
-        return result["recall_event_id"]  # type: ignore[index,return-value]
+        result = cast(
+            "dict", await self._post("/memories/recall-log", {"event": event, "candidates": candidates})
+        )
+        return result["recall_event_id"]
 
     async def flush_capability_usage(self, rows: list[dict]) -> int:
         """Bulk-append adoption-counter rows to ``capability_usage``.
@@ -1398,16 +1403,19 @@ class CoreStorageClient:
     ) -> list[dict]:
         """Entities needing a name embedding (read half of backfill). Returns a
         list of ``{id, canonical_name}`` dicts for the core-api LLM embed loop."""
-        resp = await self._post(
-            "/entities/list-null-embeddings",
-            {
-                "tenant_id": tenant_id,
-                "fleet_id": fleet_id,
-                "batch_size": batch_size,
-            },
-            read=True,
+        resp = cast(
+            "dict",
+            await self._post(
+                "/entities/list-null-embeddings",
+                {
+                    "tenant_id": tenant_id,
+                    "fleet_id": fleet_id,
+                    "batch_size": batch_size,
+                },
+                read=True,
+            ),
         )
-        return resp["rows"]  # type: ignore[index,return-value]
+        return resp["rows"]
 
     async def set_entity_embeddings(
         self,
@@ -1418,12 +1426,15 @@ class CoreStorageClient:
         """Write back computed name embeddings (write half of backfill, ONE
         atomic txn). ``updates`` is ``[{id, embedding:[float,...]}, ...]``.
         Returns the count written."""
-        resp = await self._post(
-            "/entities/set-embeddings",
-            {"tenant_id": tenant_id, "updates": updates},
-            read=False,
+        resp = cast(
+            "dict",
+            await self._post(
+                "/entities/set-embeddings",
+                {"tenant_id": tenant_id, "updates": updates},
+                read=False,
+            ),
         )
-        return resp["backfill_count"]  # type: ignore[index,return-value]
+        return resp["backfill_count"]
 
     # =====================================================================
     # Agents
@@ -1989,18 +2000,21 @@ class CoreStorageClient:
         ids: list[str],
     ) -> list[str]:
         """Return the subset of ``ids`` the caller can touch under ``scope``."""
-        resp = await self._post(
-            "/evolve/filter-by-scope",
-            {
-                "tenant_id": tenant_id,
-                "caller_agent_id": caller_agent_id,
-                "fleet_id": fleet_id,
-                "scope": scope,
-                "ids": ids,
-            },
-            read=True,
+        resp = cast(
+            "dict",
+            await self._post(
+                "/evolve/filter-by-scope",
+                {
+                    "tenant_id": tenant_id,
+                    "caller_agent_id": caller_agent_id,
+                    "fleet_id": fleet_id,
+                    "scope": scope,
+                    "ids": ids,
+                },
+                read=True,
+            ),
         )
-        return resp["allowed_ids"]  # type: ignore[index,return-value]
+        return resp["allowed_ids"]
 
     async def evolve_apply_weights(
         self,
@@ -2052,7 +2066,7 @@ class CoreStorageClient:
             params["agent_id"] = agent_id
         headers = await self._auth_headers(read=True)
 
-        def _do() -> Awaitable[httpx.Response]:
+        def _do() -> Coroutine[Any, Any, httpx.Response]:
             return self._read_http.get(
                 f"{self._read_prefix}/keystones",
                 params=params,
@@ -2219,7 +2233,7 @@ class CoreStorageClient:
         """
         headers = await self._auth_headers(read=False)
 
-        def _do() -> Awaitable[httpx.Response]:
+        def _do() -> Coroutine[Any, Any, httpx.Response]:
             return self._http.post(
                 f"{self._prefix}/idempotency/claim",
                 json={
@@ -2345,11 +2359,14 @@ class CoreStorageClient:
         The fanout endpoint calls this immediately before each per-org
         publish so the consumer has a stable id to finalise.
         """
-        result = await self._post(
-            "/lifecycle-audit",
-            {"org_id": org_id, "action": action, "triggered_by": triggered_by},
+        result = cast(
+            "dict",
+            await self._post(
+                "/lifecycle-audit",
+                {"org_id": org_id, "action": action, "triggered_by": triggered_by},
+            ),
         )
-        return result["audit_id"]  # type: ignore[index]
+        return result["audit_id"]
 
     async def update_lifecycle_audit_row(
         self,
