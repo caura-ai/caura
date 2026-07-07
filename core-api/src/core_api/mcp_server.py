@@ -13,6 +13,7 @@ import hashlib
 import hmac as _hmac
 import json
 import logging
+import math
 import re
 import time
 import uuid
@@ -583,6 +584,45 @@ def _project_compact(memory: dict, *, include_similarity: bool = False) -> dict:
     """
     fields = (*_COMPACT_FIELDS, "similarity") if include_similarity else _COMPACT_FIELDS
     return {k: memory.get(k) for k in fields}
+
+
+# ── memclaw_session_start re-ranking (RE-06) ──
+# session_start's payload is injected into every session by the preflight hook,
+# so its top-5 must be the highest-signal memories, not merely the highest raw
+# weight. We fetch a wider weight-sorted window and re-rank in Python (no new
+# SQL): recency decay keeps stale-but-heavy rows from dominating, and a log1p
+# recall term rewards frequently-used memories WITHOUT zeroing out the never-
+# recalled (a bare recall_count multiplier would).
+_SESSION_START_WINDOW = 25  # widen the storage fetch, re-rank down to top-5
+_SESSION_START_TOP_K = 5
+# ASSUMPTION (RE-06): 30-day recency half-life is an implementation choice, not
+# user-specified — flip on request.
+_SESSION_RECENCY_HALF_LIFE_DAYS = 30.0
+# session_start memories are injected every session; cap content so one long
+# memory can't blow the prefill budget. Only applied on the compact projection.
+_SESSION_CONTENT_CAP = 300
+
+
+def _session_rank_score(mem, now: _dt) -> float:
+    """RE-06 recency/usage-blended rank: weight * recency_decay * (1 + log1p(recall_count))."""
+    created = mem.created_at
+    if created is not None and created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    age_days = max(0.0, (now - created).total_seconds() / 86400.0) if created else 0.0
+    recency = 0.5 ** (age_days / _SESSION_RECENCY_HALF_LIFE_DAYS)
+    return float(mem.weight or 0.0) * recency * (1.0 + math.log1p(mem.recall_count or 0))
+
+
+def _project_compact_session(memory: dict) -> dict:
+    """Compact projection for session_start: ``_project_compact`` plus a fixed
+    content cap (this payload is injected into every session), flagging
+    ``content_truncated`` when it cuts."""
+    projected = _project_compact(memory)
+    content = projected.get("content")
+    if isinstance(content, str) and len(content) > _SESSION_CONTENT_CAP:
+        projected["content"] = content[:_SESSION_CONTENT_CAP]
+        projected["content_truncated"] = True
+    return projected
 
 
 # ── Tools ──
@@ -3972,7 +4012,8 @@ async def memclaw_session_start(
 ) -> str | CallToolResult:
     """Call once at session start. Paste result into system prompt for zero-latency context.
 
-    Returns top-5 memories by weight, active keystone rules, and procedures with reliability >= 0.6.
+    Returns the top-5 memories (recency/usage-blended re-rank, rule-typed rows
+    excluded), active keystone rules, and procedures with reliability >= 0.6.
     Keys: memories (list), keystones (list), procedures (list).
     """
     t0 = time.perf_counter()
@@ -4003,16 +4044,29 @@ async def memclaw_session_start(
             "status": "active",
             "sort": "weight",
             "order": "desc",
-            "limit": 5,
+            # RE-06: fetch a wider weight-sorted window (still one call, no new
+            # SQL) and re-rank in Python down to the top-5.
+            "limit": _SESSION_START_WINDOW,
         }
         mem_rows, (ks_rows, _), proc_rows = await asyncio.gather(
             sc.list_memories_by_filters(mem_payload),
             sc.list_keystones(tenant_id=tenant_id, fleet_id=fleet_id, agent_id=agent_id_effective),
             sc.list_procedures(tenant_id=tenant_id, limit=200),
         )
-        _dumped_memories = [_memory_to_out(m).model_dump(mode="json") for m in mem_rows]
+        # RE-06: exclude rule-typed rows from the memories section — keystones are
+        # already returned separately, and a rule-typed memory here is exactly the
+        # "fake rule generated for testing" artifact class the plan measured.
+        # (Blanket exclusion; the plan doc's finer "not backed by keystones"
+        # condition is simplified for surgical clarity.)
+        _outs = [o for o in (_memory_to_out(m) for m in mem_rows) if o.memory_type != "rule"]
+        # RE-06: recency/usage-blended re-rank to the top-5 (see _session_rank_score).
+        _now = _dt.now(UTC)
+        _top = sorted(_outs, key=lambda o: _session_rank_score(o, _now), reverse=True)[:_SESSION_START_TOP_K]
+        _dumped_memories = [o.model_dump(mode="json") for o in _top]
         memories = (
-            [_project_compact(m) for m in _dumped_memories] if verbosity == "compact" else _dumped_memories
+            [_project_compact_session(m) for m in _dumped_memories]
+            if verbosity == "compact"
+            else _dumped_memories
         )
         procedures = [p for p in (proc_rows or []) if (p.get("stats") or {}).get("success_rate", 0.0) >= 0.6]
         return _with_latency(

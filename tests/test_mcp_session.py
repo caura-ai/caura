@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from unittest.mock import AsyncMock
@@ -38,12 +39,34 @@ def _stub_session_deps(monkeypatch, memories=None, keystones=None, procedures=No
 
 
 class _MemoryOut:
-    """Minimal stand-in for the model_dump result."""
+    """Stand-in for the ``_memory_to_out`` result. ``model_dump`` returns the row;
+    the RE-06 session re-rank reads memory_type/weight/created_at/recall_count as
+    attributes, so expose them off the row (created_at coerced to datetime)."""
+
     def __init__(self, row):
         self._row = row
 
     def model_dump(self, mode="python"):  # noqa: ARG002
         return self._row
+
+    @property
+    def memory_type(self):
+        return self._row.get("memory_type")
+
+    @property
+    def weight(self):
+        return self._row.get("weight", 0.0)
+
+    @property
+    def recall_count(self):
+        return self._row.get("recall_count", 0)
+
+    @property
+    def created_at(self):
+        ca = self._row.get("created_at")
+        if isinstance(ca, str):
+            return datetime.fromisoformat(ca)
+        return ca
 
 
 async def test_session_start_tool_exists():
@@ -135,3 +158,91 @@ async def test_session_start_verbosity_invalid_returns_422(mcp_env):
     out = await mcp_server.memclaw_session_start(verbosity="tiny")
     assert "INVALID_ARGUMENTS" in as_text(out)
     assert "Invalid verbosity 'tiny'" in as_text(out)
+
+
+# ---------------------------------------------------------------------------
+# RE-06: recency/usage re-rank + rule exclusion + content cap
+# ---------------------------------------------------------------------------
+
+
+def _rrow(mid, *, weight=0.5, memory_type="decision", age_days=0, recall_count=0, content="c"):
+    created = (datetime.now(timezone.utc) - timedelta(days=age_days)).isoformat()
+    return {
+        "id": mid,
+        "content": content,
+        "weight": weight,
+        "status": "active",
+        "created_at": created,
+        "memory_type": memory_type,
+        "recall_count": recall_count,
+        "agent_id": "test-agent",
+        "tenant_id": "test-tenant",
+    }
+
+
+async def test_session_start_fetches_wider_window(mcp_env, monkeypatch):
+    """RE-06 AC1: the storage fetch is widened to 25 (re-ranked to top-5 in Python)."""
+    sc = _stub_session_deps(monkeypatch)
+    await mcp_server.memclaw_session_start()
+    payload = sc.list_memories_by_filters.await_args.args[0]
+    assert payload["limit"] == 25
+    assert payload["sort"] == "weight" and payload["order"] == "desc"
+
+
+async def test_session_start_equal_weight_ranks_by_recency(mcp_env, monkeypatch):
+    """Equal-weight memories: the more recent one ranks first."""
+    rows = [
+        _rrow("old", weight=0.5, age_days=90),
+        _rrow("new", weight=0.5, age_days=0),
+    ]
+    _stub_session_deps(monkeypatch, memories=rows)
+    out = await mcp_server.memclaw_session_start()
+    ids = [m["id"] for m in parse_envelope(out)["memories"]]
+    assert ids.index("new") < ids.index("old")
+
+
+async def test_session_start_recalled_older_outranks_fresh_unused(mcp_env, monkeypatch):
+    """A frequently-recalled older memory can outrank a never-recalled newer one
+    (the log1p recall term is load-bearing; it must not zero out unused rows)."""
+    rows = [
+        _rrow("older_used", weight=0.5, age_days=40, recall_count=50),
+        _rrow("newer_unused", weight=0.5, age_days=1, recall_count=0),
+    ]
+    _stub_session_deps(monkeypatch, memories=rows)
+    out = await mcp_server.memclaw_session_start()
+    ids = [m["id"] for m in parse_envelope(out)["memories"]]
+    assert ids.index("older_used") < ids.index("newer_unused")
+
+
+async def test_session_start_excludes_rule_typed_rows(mcp_env, monkeypatch):
+    """RE-06 AC2: memory_type='rule' rows are absent from the memories section."""
+    rows = [
+        _rrow("a_rule", memory_type="rule", weight=0.9),
+        _rrow("a_decision", memory_type="decision", weight=0.5),
+    ]
+    _stub_session_deps(monkeypatch, memories=rows)
+    out = await mcp_server.memclaw_session_start()
+    ids = [m["id"] for m in parse_envelope(out)["memories"]]
+    assert "a_rule" not in ids
+    assert "a_decision" in ids
+
+
+async def test_session_start_compact_caps_content_at_300(mcp_env, monkeypatch):
+    """RE-06 AC3: in compact mode, content > 300 chars is capped with a marker."""
+    long_content = "x" * 500
+    _stub_session_deps(monkeypatch, memories=[_rrow("big", content=long_content)])
+    out = await mcp_server.memclaw_session_start(verbosity="compact")
+    mem = parse_envelope(out)["memories"][0]
+    assert len(mem["content"]) == 300
+    assert mem["content_truncated"] is True
+
+
+async def test_session_start_full_mode_does_not_cap_content(mcp_env, monkeypatch):
+    """Default (full) mode leaves content uncapped and adds no truncation marker
+    (the cap is part of the compact projection only — additive default)."""
+    long_content = "x" * 500
+    _stub_session_deps(monkeypatch, memories=[_rrow("big", content=long_content)])
+    out = await mcp_server.memclaw_session_start()  # default full
+    mem = parse_envelope(out)["memories"][0]
+    assert len(mem["content"]) == 500
+    assert "content_truncated" not in mem

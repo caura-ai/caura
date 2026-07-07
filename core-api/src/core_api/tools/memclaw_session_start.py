@@ -8,9 +8,9 @@ from ._types import ToolSpec
 
 _DESCRIPTION = (
     "Call once at session start. Paste result into system prompt for zero-latency context. "
-    "Returns top-5 memories by weight, active keystone rules, and procedures with reliability >= 0.6. "
-    "Keys: memories (list), keystones (list), procedures (list). "
-    "Mirrors Brain's session-start prefill pattern without requiring a separate recall query."
+    "Returns the top-5 memories (recency/usage-blended re-rank, rule-typed rows excluded), "
+    "active keystone rules, and procedures with reliability >= 0.6. "
+    "Keys: memories (list), keystones (list), procedures (list)."
 )
 
 _SPEC = ToolSpec(
