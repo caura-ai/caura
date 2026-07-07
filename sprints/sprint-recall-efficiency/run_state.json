@@ -51,7 +51,21 @@
       ]
     },
     "RE-04": { "state": "blocked", "attempt": 0, "artifacts": [] },
-    "RE-05": { "state": "ready", "attempt": 0, "artifacts": [] },
+    "RE-05": {
+      "state": "completed",
+      "attempt": 1,
+      "startedAt": "2026-07-07T15:04:31Z",
+      "completedAt": "2026-07-07T15:16:13Z",
+      "duration": "12m",
+      "modelUsed": "opus",
+      "artifacts": [
+        "core-storage-api/src/core_storage_api/services/postgres_service.py (status_penalty CASE: added Memory.status=='archived' -> 0.5 arm in memory_scored_search; arms 1-2 byte-identical; load-bearing arm-order documented)",
+        "tests/test_integration_search.py (TestArchivedDemotion: archived twin with higher weight ranks below active twin — fails if arm removed; archived retrievable via explicit status filter)",
+        "SCOPE CHANGE (Leon-approved 2026-07-07): plan's superseded_by arm DROPPED — no such column (model has supersedes_id, inverse direction); superseded/older rows already status='outdated' -> demoted by arm 1. Ship archived only.",
+        "verification: archived ranking test proven to fail without the arm then pass with it; #357 carve-out tests (TestConflictedExactMatchSurfaces) pass unmodified; test_integration_search.py 13/13; root search/scoring/status regression sweep 551 passed 2 skipped; core-storage-api ruff/format/mypy hook-exact green; feature commit ef85cd9",
+        "NOTE for signoff: RE-05 superseded_by acceptance criterion rests on a false schema assumption — flag as a plan-defect finding + the archived-only decision in SPRINT signoff"
+      ]
+    },
     "RE-06": { "state": "blocked", "attempt": 0, "artifacts": [] },
     "RE-07": { "state": "blocked", "attempt": 0, "artifacts": [] },
     "RE-Z01": { "state": "blocked", "attempt": 0, "artifacts": [] }
