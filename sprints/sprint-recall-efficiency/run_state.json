@@ -15,7 +15,23 @@
         "wet-test memory cf0d610f-0738-4bb4-933b-976166008ebd: enrichment_pending cleared, title populated via fake_enrich heuristic (USE_LLM_FOR_MEMORY_CREATION=true scoped to test run only)"
       ]
     },
-    "RE-02": { "state": "ready", "attempt": 0, "artifacts": [] },
+    "RE-02": {
+      "state": "completed",
+      "attempt": 1,
+      "startedAt": "2026-07-07T09:40:20Z",
+      "completedAt": "2026-07-07T14:35:20Z",
+      "duration": "4h55m",
+      "modelUsed": "sonnet",
+      "artifacts": [
+        "core-storage-api/src/core_storage_api/routers/memories.py (GET /memories/enrichment-pending-ids)",
+        "core-storage-api/src/core_storage_api/services/postgres_service.py (memory_list_enrichment_pending_rows)",
+        "core-worker/src/core_worker/clients/storage_client.py (EnrichmentPendingRow, iter_memories_with_enrichment_pending)",
+        "core-worker/src/core_worker/backfill.py (run_enrichment_backfill)",
+        "core-worker/src/core_worker/cli.py (backfill-enrichment subcommand)",
+        "tests/test_enrichment_backfill.py (7 unit tests, mirrors tests/test_embedding_backfill.py 1:1)",
+        "verification: full call chain traced end-to-end (cli -> backfill -> storage_client -> router -> postgres_service); core-storage-api ruff/format/mypy green; pytest test_enrichment_backfill.py (7/7), tests/ -k enrich (128 passed 1 skipped), tests/ -k memor (303 passed), core-worker/tests/ (66/67, 1 pre-existing unrelated failure) all green"
+      ]
+    },
     "RE-03": { "state": "ready", "attempt": 0, "artifacts": [] },
     "RE-04": { "state": "blocked", "attempt": 0, "artifacts": [] },
     "RE-05": { "state": "ready", "attempt": 0, "artifacts": [] },
