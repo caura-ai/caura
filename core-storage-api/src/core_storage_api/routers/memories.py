@@ -851,6 +851,56 @@ async def list_null_embedding_ids(
     }
 
 
+@router.get("/enrichment-pending-ids")
+async def list_enrichment_pending_ids(
+    tenant_id: str,
+    limit: int = 500,
+    after: str | None = None,
+) -> dict:
+    """Page through memories with ``metadata->>'enrichment_pending' = 'true'``.
+
+    Drives the event-driven enrichment backfill task in core-worker
+    (``core_worker.backfill``) — mirrors ``list_null_embedding_ids`` above.
+    The worker fetches a page of ids here, calls
+    ``GET /memories/{id}?tenant_id=...`` per row to retrieve the content,
+    then publishes one ``ENRICH_REQUESTED`` event per row.
+
+    Same ids-only shape and defence-in-depth rationale as
+    ``list_null_embedding_ids``: the OSS storage API has no auth
+    middleware, so this endpoint never inlines ``content``.
+
+    Idempotent under restart: the consumer clears ``enrichment_pending``
+    on completion (including heuristic-fallback paths), so a re-run picks
+    up only rows still flagged.
+
+    ``tenant_id`` is required for the same defence-in-depth reason — no
+    un-scoped scans across all tenants.
+    """
+    if limit < 1 or limit > 5000:
+        raise HTTPException(
+            status_code=422,
+            detail="limit must be in [1, 5000]",
+        )
+    after_uuid: UUID | None = None
+    if after is not None:
+        try:
+            after_uuid = UUID(after)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"after must be a UUID, got {after!r}",
+            )
+
+    rows, total_remaining = await _svc.memory_list_enrichment_pending_rows(
+        limit=limit, after=after_uuid, tenant_id=tenant_id
+    )
+    return {
+        "rows": [{"id": str(row_id), "tenant_id": row_tenant} for row_id, row_tenant in rows],
+        "next_after": str(rows[-1][0]) if rows else None,
+        "total_remaining": total_remaining,
+    }
+
+
 @router.get("/distinct-agents")
 async def count_distinct_agents() -> dict:
     """Global count of distinct agent identities across all memories.

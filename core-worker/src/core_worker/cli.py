@@ -5,10 +5,21 @@ Usage::
     python -m core_worker.cli backfill-embeddings \
         [--tenant-id ID] [--batch-size N] [--max-inflight N] [--dry-run]
 
-The backfill subcommand drives the existing ``handle_embed_request``
-consumer: it scans memories whose ``embedding IS NULL`` (after migration
-``012_vector_dim_1024``) and publishes one ``EMBED_REQUESTED`` event per
-row. See ``core_worker.backfill`` for the design notes.
+    python -m core_worker.cli backfill-enrichment \
+        [--tenant-id ID] [--batch-size N] [--max-inflight N] [--dry-run]
+
+The backfill-embeddings subcommand drives the existing
+``handle_embed_request`` consumer: it scans memories whose ``embedding
+IS NULL`` (after migration ``012_vector_dim_1024``) and publishes one
+``EMBED_REQUESTED`` event per row.
+
+The backfill-enrichment subcommand drives the existing
+``handle_enrich_request`` consumer: it scans memories flagged
+``metadata->>'enrichment_pending' = 'true'`` and publishes one
+``ENRICH_REQUESTED`` event per row (one-shot re-enqueue for rows whose
+inline enrichment was deferred or failed).
+
+See ``core_worker.backfill`` for the design notes.
 """
 
 from __future__ import annotations
@@ -19,7 +30,7 @@ import logging
 import sys
 
 from common.events.factory import get_event_bus
-from core_worker.backfill import run_embedding_backfill
+from core_worker.backfill import run_embedding_backfill, run_enrichment_backfill
 from core_worker.clients.storage_client import close_storage_client
 
 
@@ -45,6 +56,30 @@ def _build_parser() -> argparse.ArgumentParser:
     bf.add_argument("--max-inflight", type=int, default=100)
     bf.add_argument("--dry-run", action="store_true")
     bf.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+    )
+
+    ebf = sub.add_parser(
+        "backfill-enrichment",
+        help="Re-enqueue memories with enrichment_pending=true (one-shot re-enqueue backfill).",
+    )
+    ebf.add_argument(
+        "--tenant-id",
+        required=True,
+        help=(
+            "Required. Scope the backfill to a single tenant. The "
+            "storage-API endpoint refuses un-scoped calls since the OSS "
+            "API has no auth middleware. For whole-deployment cutovers, "
+            "iterate the tenant list externally and invoke this command "
+            "once per tenant — also the documented prod-cutover pattern."
+        ),
+    )
+    ebf.add_argument("--batch-size", type=int, default=500)
+    ebf.add_argument("--max-inflight", type=int, default=100)
+    ebf.add_argument("--dry-run", action="store_true")
+    ebf.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -87,6 +122,29 @@ async def _amain(argv: list[str]) -> int:
                 logging.getLogger(__name__).exception("event bus stop failed; continuing teardown")
             # Close the singleton httpx client so the event-loop exits
             # cleanly. Mirrors the FastAPI lifespan shutdown.
+            await close_storage_client()
+        print(
+            f"backfill {'dry-run ' if args.dry_run else ''}done: "
+            f"scanned={report.scanned} published={report.published} "
+            f"elapsed={report.elapsed_s:.1f}s"
+        )
+        return 0
+    if args.cmd == "backfill-enrichment":
+        try:
+            report = await run_enrichment_backfill(
+                tenant_id=args.tenant_id,
+                batch_size=args.batch_size,
+                max_inflight=args.max_inflight,
+                dry_run=args.dry_run,
+            )
+        finally:
+            # Same event-bus-drain-before-exit rationale as
+            # backfill-embeddings above — see that finally block's
+            # comment for the full incident context.
+            try:
+                await get_event_bus().stop()
+            except Exception:
+                logging.getLogger(__name__).exception("event bus stop failed; continuing teardown")
             await close_storage_client()
         print(
             f"backfill {'dry-run ' if args.dry_run else ''}done: "

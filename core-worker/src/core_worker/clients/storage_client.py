@@ -303,6 +303,55 @@ async def iter_memories_with_null_embedding(
         after = page["next_after"]
 
 
+@dataclass(frozen=True)
+class EnrichmentPendingRow:
+    """Identifiers for one memory row flagged ``enrichment_pending``.
+
+    Mirrors ``NullEmbeddingRow`` exactly — ids-only, content fetched
+    per row via ``get_memory`` before publishing.
+    """
+
+    memory_id: UUID
+    tenant_id: str
+
+
+async def iter_memories_with_enrichment_pending(
+    client: httpx.AsyncClient,
+    *,
+    tenant_id: str,
+    batch_size: int = 500,
+) -> AsyncIterator[list[EnrichmentPendingRow]]:
+    """Paginate memories flagged ``metadata->>'enrichment_pending' = 'true'``.
+
+    Mirrors ``iter_memories_with_null_embedding`` exactly — see that
+    function's docstring for the pagination/idempotency/scoping
+    rationale, all of which applies unchanged here.
+    """
+    after: str | None = None
+    while True:
+        params: dict[str, Any] = {"limit": batch_size, "tenant_id": tenant_id}
+        if after is not None:
+            params["after"] = after
+        resp = await _signed_call(
+            client.get,
+            f"{_PREFIX}/memories/enrichment-pending-ids",
+            params=params,
+        )
+        resp.raise_for_status()
+        page = resp.json()
+        rows_payload = page.get("rows") or []
+        if not rows_payload:
+            return
+        yield [
+            EnrichmentPendingRow(
+                memory_id=UUID(r["id"]),
+                tenant_id=r["tenant_id"],
+            )
+            for r in rows_payload
+        ]
+        after = page["next_after"]
+
+
 async def get_memory(
     client: httpx.AsyncClient,
     *,

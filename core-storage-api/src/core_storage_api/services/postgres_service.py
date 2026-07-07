@@ -2513,6 +2513,58 @@ class PostgresService:
                 int(total_remaining),
             )
 
+    async def memory_list_enrichment_pending_rows(
+        self,
+        *,
+        limit: int,
+        after: UUID | None = None,
+        tenant_id: str | None = None,
+    ) -> tuple[list[tuple[UUID, str]], int]:
+        """Page through memories flagged ``metadata->>'enrichment_pending' = 'true'``.
+
+        Mirrors ``memory_list_null_embedding_rows`` exactly — same ids-only
+        shape, same cursor-on-id pagination, same ``total_remaining`` computed
+        from ``base_filters`` only (see that method's docstring for the full
+        rationale). Drives the event-driven enrichment backfill task in
+        core-worker (``core_worker.backfill.run_enrichment_backfill``).
+
+        ``enrichment_pending`` lives in the ``Memory.metadata_`` JSONB column
+        (mapped attr ``metadata_``, DB column ``metadata``); filtered via the
+        same ``.astext`` idiom used elsewhere in this file (e.g. the
+        ``doc_hash``/``source`` filters above).
+        """
+        async with get_session() as session:
+            base_filters: list[ColumnElement[bool]] = [
+                Memory.metadata_["enrichment_pending"].astext == "true",
+                Memory.deleted_at.is_(None),
+            ]
+            if tenant_id is not None:
+                base_filters.append(Memory.tenant_id == tenant_id)
+
+            page_filters = list(base_filters)
+            if after is not None:
+                page_filters.append(Memory.id > after)
+
+            stmt = (
+                select(
+                    Memory.id,
+                    Memory.tenant_id,
+                )
+                .where(*page_filters)
+                .order_by(Memory.id)
+                .limit(limit)
+            )
+            rows = (await session.execute(stmt)).all()
+
+            total_remaining = (
+                await session.execute(select(func.count()).select_from(Memory).where(*base_filters))
+            ).scalar_one()
+
+            return (
+                [(r[0], r[1]) for r in rows],
+                int(total_remaining),
+            )
+
     async def memory_find_missing_embeddings(
         self,
         tenant_id: str,

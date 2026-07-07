@@ -37,10 +37,13 @@ import time
 from dataclasses import dataclass
 
 from common.events.memory_embed_publisher import publish_memory_embed_request
+from common.events.memory_enrich_publisher import publish_memory_enrich_request
 from core_worker.clients.storage_client import (
+    EnrichmentPendingRow,
     NullEmbeddingRow,
     get_memory,
     get_storage_client,
+    iter_memories_with_enrichment_pending,
     iter_memories_with_null_embedding,
 )
 
@@ -141,6 +144,90 @@ async def run_embedding_backfill(
     elapsed = time.monotonic() - started
     logger.info(
         "embedding_backfill done: scanned=%d published=%d skipped=%d elapsed=%.1fs",
+        scanned,
+        published,
+        skipped_missing,
+        elapsed,
+    )
+    return BackfillReport(
+        scanned=scanned,
+        published=published,
+        skipped_missing=skipped_missing,
+        elapsed_s=elapsed,
+    )
+
+
+async def run_enrichment_backfill(
+    *,
+    tenant_id: str,
+    batch_size: int = 500,
+    max_inflight: int = 100,
+    dry_run: bool = False,
+) -> BackfillReport:
+    """Scan ``enrichment_pending`` memories for one tenant, publish ``ENRICH_REQUESTED``.
+
+    Mirrors ``run_embedding_backfill`` exactly — same ids-only listing
+    endpoint, per-row content fetch, ``max_inflight`` backpressure, and
+    ``dry_run`` support. See that function's docstring for the full
+    per-tenant-scoping rationale.
+
+    Idempotent under restart: the ``handle_enrich_request`` consumer
+    clears ``enrichment_pending`` on completion (including
+    heuristic-fallback paths), so a re-run only picks up rows still
+    flagged. ``tenant_config``, ``reference_datetime``, and
+    ``agent_provided_fields`` are passed as ``None`` — the backfill has
+    no per-row context beyond id/tenant/content, so the consumer falls
+    back to its default enrichment behaviour for each republished row.
+    """
+    import httpx
+
+    sem = asyncio.Semaphore(max_inflight)
+    scanned = 0
+    published = 0
+    skipped_missing = 0
+    started = time.monotonic()
+
+    async def _publish_one(row: EnrichmentPendingRow) -> None:
+        nonlocal published, skipped_missing
+        async with sem:
+            try:
+                memory = await get_memory(storage, memory_id=row.memory_id, tenant_id=row.tenant_id)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    skipped_missing += 1
+                    return
+                raise
+            content = memory.get("content")
+            if not content:
+                skipped_missing += 1
+                return
+            if not dry_run:
+                await publish_memory_enrich_request(
+                    memory_id=row.memory_id,
+                    content=content,
+                    tenant_id=row.tenant_id,
+                    tenant_config=None,
+                    reference_datetime=None,
+                    agent_provided_fields=None,
+                )
+            published += 1
+
+    storage = get_storage_client()
+    async for batch in iter_memories_with_enrichment_pending(
+        storage, tenant_id=tenant_id, batch_size=batch_size
+    ):
+        scanned += len(batch)
+        await asyncio.gather(*(_publish_one(row) for row in batch))
+        logger.info(
+            "enrichment_backfill progress: scanned=%d published=%d skipped=%d",
+            scanned,
+            published,
+            skipped_missing,
+        )
+
+    elapsed = time.monotonic() - started
+    logger.info(
+        "enrichment_backfill done: scanned=%d published=%d skipped=%d elapsed=%.1fs",
         scanned,
         published,
         skipped_missing,
