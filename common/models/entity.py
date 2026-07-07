@@ -1,6 +1,6 @@
 import uuid
 
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import Vector  # type: ignore[import-not-found]
 from sqlalchemy import DDL, Float, ForeignKey, Index, Text, UniqueConstraint, event, text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column

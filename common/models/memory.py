@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import Vector  # type: ignore[import-not-found]
 from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column

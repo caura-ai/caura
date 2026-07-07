@@ -108,7 +108,8 @@ def _validate_enrichment(raw: dict, llm_ms: int) -> EnrichmentResult:
             parsed_ts[ts_field] = _parse_temporal(val)
         else:
             parsed_ts[ts_field] = None
-        raw[ts_field] = parsed_ts[ts_field].isoformat() if parsed_ts[ts_field] else None
+        ts_value = parsed_ts[ts_field]
+        raw[ts_field] = ts_value.isoformat() if ts_value else None
     # Ensure end > start; drop invalid end
     start, end = parsed_ts["ts_valid_start"], parsed_ts["ts_valid_end"]
     if start and end and end <= start:
@@ -249,7 +250,7 @@ def fake_enrich(content: str) -> EnrichmentResult:
     title = " ".join(words[:10]) + ("..." if len(words) > 10 else "")
 
     return EnrichmentResult(
-        memory_type=mt,
+        memory_type=MemoryType(mt),
         weight=w,
         title=title,
         summary=content[:200],

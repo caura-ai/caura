@@ -74,8 +74,11 @@ class VertexLLMProvider:
         temperature: float = 0.0,
     ) -> dict:
         """Synchronous JSON completion via Vertex AI GenerativeModel."""
-        from google.cloud import aiplatform
-        from vertexai.generative_models import GenerationConfig, GenerativeModel
+        from google.cloud import aiplatform  # type: ignore[attr-defined]
+        from vertexai.generative_models import (  # type: ignore[import-not-found]
+            GenerationConfig,
+            GenerativeModel,
+        )
 
         aiplatform.init(project=self._project_id, location=self._location)
         model = GenerativeModel(self._model)
@@ -117,8 +120,11 @@ class VertexLLMProvider:
         max_tokens: int = 1000,
     ) -> str:
         """Synchronous text completion via Vertex AI GenerativeModel."""
-        from google.cloud import aiplatform
-        from vertexai.generative_models import GenerationConfig, GenerativeModel
+        from google.cloud import aiplatform  # type: ignore[attr-defined]
+        from vertexai.generative_models import (  # type: ignore[import-not-found]
+            GenerationConfig,
+            GenerativeModel,
+        )
 
         aiplatform.init(project=self._project_id, location=self._location)
         model = GenerativeModel(self._model)

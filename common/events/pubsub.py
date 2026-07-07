@@ -209,7 +209,7 @@ class PubSubEventBus(EventBus):
     @staticmethod
     def _ensure_pubsub_sdk() -> Any:
         try:
-            from google.cloud import pubsub_v1  # type: ignore[import-untyped]
+            from google.cloud import pubsub_v1  # type: ignore[attr-defined]
 
             return pubsub_v1
         except ImportError as exc:
@@ -587,7 +587,7 @@ class PubSubEventBus(EventBus):
         subscription orphaned by an unclean shutdown self-deletes after
         ``BROADCAST_SUBSCRIPTION_TTL_SECONDS``.
         """
-        from google.api_core import exceptions as gexc
+        from google.api_core import exceptions as gexc  # type: ignore[import-untyped]
 
         loop = asyncio.get_running_loop()
         sub_path = self._subscriber.subscription_path(self._project_id, sub_name)

@@ -139,12 +139,12 @@ def get_llm_provider(
         # silently shadow a ``.env``-configured value. The fallback
         # constant matches what the constants module would have
         # produced for the all-defaults case.
+        raw_timeout = os.environ.get("OPENAI_REQUEST_TIMEOUT_SECONDS")
         try:
-            request_timeout = float(
-                os.environ.get(
-                    "OPENAI_REQUEST_TIMEOUT_SECONDS",
-                    _DEFAULT_OPENAI_TIMEOUT,
-                )
+            request_timeout = (
+                float(raw_timeout)
+                if raw_timeout is not None
+                else _DEFAULT_OPENAI_TIMEOUT
             )
         except (TypeError, ValueError):
             request_timeout = _DEFAULT_OPENAI_TIMEOUT

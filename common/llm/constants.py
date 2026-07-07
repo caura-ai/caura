@@ -7,6 +7,7 @@ keeps re-exports for back-compat; new code should import from here.
 from __future__ import annotations
 
 import os
+from typing import overload
 
 # ── Provider model defaults ──────────────────────────────────────────
 
@@ -53,6 +54,10 @@ LLM_FALLBACK_MODEL_OPENAI = os.environ.get("LLM_FALLBACK_MODEL_OPENAI", "gpt-5.4
 # enough that a single hung upstream call eats the whole enrichment
 # budget silently. 25s gives the provider room to respond while still
 # leaving budget for one retry under the inline ceiling.
+@overload
+def _read_float_env(name: str, default: float) -> float: ...
+@overload
+def _read_float_env(name: str, default: None) -> float | None: ...
 def _read_float_env(name: str, default: float | None) -> float | None:
     """Parse a float env var defensively.
 

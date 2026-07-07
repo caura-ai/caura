@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from common.constants import VECTOR_DIM
 
@@ -20,7 +21,7 @@ class LocalEmbedding:
 
     def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5") -> None:
         self._model_name = model_name
-        self._model = None
+        self._model: Any | None = None
         self._load_lock = asyncio.Lock()
 
     @property
@@ -42,7 +43,7 @@ class LocalEmbedding:
             if self._model is not None:
                 return
             try:
-                from sentence_transformers import SentenceTransformer
+                from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found]
             except ImportError:
                 raise ImportError(
                     "sentence-transformers is required for local embeddings. "
@@ -70,20 +71,24 @@ class LocalEmbedding:
     async def embed(self, text: str) -> list[float]:
         """Embed a single text string."""
         await self._ensure_model()
+        assert self._model is not None
+        model = self._model
         loop = asyncio.get_running_loop()
         vec = await loop.run_in_executor(
             None,
-            lambda: self._model.encode(text, normalize_embeddings=True),
+            lambda: model.encode(text, normalize_embeddings=True),
         )
         return vec.tolist()
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts."""
         await self._ensure_model()
+        assert self._model is not None
+        model = self._model
         loop = asyncio.get_running_loop()
         vecs = await loop.run_in_executor(
             None,
-            lambda: self._model.encode(texts, normalize_embeddings=True, batch_size=32),
+            lambda: model.encode(texts, normalize_embeddings=True, batch_size=32),
         )
         return vecs.tolist()
 

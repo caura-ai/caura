@@ -68,7 +68,7 @@ class GeminiLLMProvider:
         temperature: float = 0.0,
     ) -> dict:
         """Synchronous JSON completion via google-genai."""
-        from google.genai import types
+        from google.genai import types  # type: ignore[import-untyped]
 
         t0 = time.perf_counter()
         response = self._client.models.generate_content(
@@ -102,7 +102,7 @@ class GeminiLLMProvider:
         max_tokens: int = 1000,
     ) -> str:
         """Synchronous text completion via google-genai."""
-        from google.genai import types
+        from google.genai import types  # type: ignore[import-untyped]
 
         t0 = time.perf_counter()
         response = self._client.models.generate_content(

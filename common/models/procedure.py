@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import Vector  # type: ignore[import-not-found]
 from sqlalchemy import (
     Boolean,
     DateTime,
