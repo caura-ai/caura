@@ -94,8 +94,29 @@
         "verification: session suite 14/14; broad mcp/session/recall/verbosity sweep 511 passed 1 skipped; all six core-api gates green (mypy hook-exact); feature commit 6dd2015"
       ]
     },
-    "RE-07": { "state": "blocked", "attempt": 0, "artifacts": [] },
-    "RE-Z01": { "state": "blocked", "attempt": 0, "artifacts": [] }
+    "RE-07": {
+      "state": "partial",
+      "attempt": 1,
+      "startedAt": "2026-07-07T16:30:00Z",
+      "completedAt": "2026-07-07T17:10:00Z",
+      "modelUsed": "opus",
+      "artifacts": [
+        "Deployed 4889251 to utility-53 (host dns/192.168.1.53) after Leon step-by-step approval; prod DB backup memclaw_predeploy_20260707_233859.sql.gz (4.8M)",
+        "Migration reconciliation (rehearsed on scratch first): prod alembic 030->032 via stamp 027 -> upgrade 029 -> stamp 032; added agents.belonging_type/owner_ref + agent_activity_digests, procedures intact",
+        "Root-cause fix (AC2): USE_LLM_FOR_MEMORY_CREATION false->true in env.dev:8 + core-api restart; fresh write clears enrichment_pending ('Background enrichment succeeded')",
+        "Deploy verified via raw curl JSON-RPC (AC3): /api/v1/health ok, tools/list=20 with verbosity, verbosity=compact tools/call isError:false; compact recall 2605 vs full 4338 chars (~40% smaller) (AC7)",
+        "PARTIAL / carry-forward: backlog of 91 enrichment_pending memories NOT cleared (AC6) and core-worker NOT running (AC4) — infeasible on standalone (core-worker absent from prod compose, no cross-process event-bus consumer). Enrichment quality is heuristic content-echo, not LLM (provider/mode question; OPENAI_API_KEY never touched)."
+      ]
+    },
+    "RE-Z01": {
+      "state": "completed",
+      "attempt": 1,
+      "completedAt": "2026-07-07T17:15:00Z",
+      "modelUsed": "opus",
+      "artifacts": [
+        "sprints/sprint-recall-efficiency/SPRINT-RECALL-EFFICIENCY_SIGNOFF.md (RE-01..RE-07 outcomes + commit hashes, verified deploy evidence, rerere/migration failure analysis, 7-item deferred backlog)"
+      ]
+    }
   },
   "quality_review": null
 }
