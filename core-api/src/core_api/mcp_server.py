@@ -18,7 +18,7 @@ import time
 import uuid
 from datetime import UTC
 from datetime import datetime as _dt
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID, uuid4
 
 import httpx
@@ -29,7 +29,7 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import Field, ValidationError
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
+from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES, MemoryType
 from core_api.agent_ids import DEFAULT_AGENT_ID, effective_write_agent_id
 from core_api.auth import get_admin_key
 from core_api.cache import cache_get, cache_set
@@ -49,7 +49,9 @@ from core_api.pagination import decode_cursor, encode_cursor
 from core_api.schemas import (
     BulkMemoryCreate,
     BulkMemoryItem,
+    BulkMemoryResponse,
     MemoryCreate,
+    MemoryOut,
     MemoryUpdate,
     SearchProfileUpdate,
 )
@@ -599,7 +601,7 @@ async def memclaw_recall(
             description="Opt-in agentic multi-step graph-reasoning loop for relational/temporal queries. Slower than the default single-pass search."
         ),
     ] = False,
-) -> str:
+) -> str | CallToolResult:
     """Hybrid semantic+keyword recall, with optional LLM brief."""
     t0 = time.perf_counter()
     if err := _check_auth():
@@ -760,7 +762,7 @@ async def memclaw_write(
     metadata: Annotated[dict | None, Field(description="Metadata (single only).")] = None,
     status: Annotated[str | None, Field(description="Status (single only).")] = None,
     write_mode: Annotated[str | None, Field(description="fast|strong|auto (single only).")] = None,
-) -> str:
+) -> str | CallToolResult:
     """Single OR batch write. Exactly one of {content, items} is required."""
     t0 = time.perf_counter()
     if err := _check_auth():
@@ -790,7 +792,7 @@ async def memclaw_write(
     # case the body-supplied id is honored so the install self-identifies
     # rather than collapsing onto "main". Reads keep `_get_agent_id() or
     # agent_id` (visibility scoping is unaffected).
-    agent_id = effective_write_agent_id(_get_agent_id(), agent_id)
+    agent_id = effective_write_agent_id(_get_agent_id(), agent_id) or agent_id
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
     # C3/C8 — reject reserved memory_types at the boundary before we
@@ -829,12 +831,15 @@ async def memclaw_write(
                 fleet_id = agent["fleet_id"]
             if content is not None:
                 await check_and_increment(tenant_id, "write")
-                result = await create_memory(
+                valid_write_modes = ("fast", "strong", "auto", "stm")
+                if write_mode is not None and write_mode not in valid_write_modes:
+                    raise ValueError(f"Invalid write_mode: {write_mode!r}")
+                result: MemoryOut | BulkMemoryResponse = await create_memory(
                     MemoryCreate(
                         tenant_id=tenant_id,
                         fleet_id=fleet_id,
                         agent_id=agent_id,
-                        memory_type=memory_type,
+                        memory_type=MemoryType(memory_type) if memory_type is not None else None,
                         content=content,
                         weight=weight,
                         source_uri=source_uri,
@@ -842,11 +847,12 @@ async def memclaw_write(
                         metadata=metadata,
                         status=status,
                         visibility=visibility,
-                        write_mode=write_mode,
+                        write_mode=cast("Literal['fast', 'strong', 'auto', 'stm'] | None", write_mode),
                     ),
                 )
                 return _with_latency(_serialize(result), t0)
             # Batch path
+            assert items is not None  # XOR invariant enforced above
             if len(items) > 100:
                 return _with_latency(
                     json.dumps(
@@ -937,7 +943,7 @@ async def memclaw_manage(
     metadata: Annotated[dict | None, Field(description="op=update.")] = None,
     source_uri: Annotated[str | None, Field(description="op=update.")] = None,
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
-) -> str:
+) -> str | CallToolResult:
     """Per-memory lifecycle: read | update | transition | delete | bulk_delete | lineage.
 
     op=lineage walks the supersession chain for `memory_id` and returns
@@ -1245,7 +1251,7 @@ async def memclaw_manage(
 
 async def memclaw_entity_get(
     entity_id: Annotated[str, Field(description="The UUID of the entity to look up.")],
-) -> str:
+) -> str | CallToolResult:
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
@@ -1286,7 +1292,7 @@ async def memclaw_tune(
     recall_decay_window_days: Annotated[int | None, Field(description="7-365.")] = None,
     graph_max_hops: Annotated[int | None, Field(description="0-3.")] = None,
     similarity_blend: Annotated[float | None, Field(description="0-1.")] = None,
-) -> str:
+) -> str | CallToolResult:
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
@@ -1484,7 +1490,7 @@ async def memclaw_doc(
     ] = None,
     query: Annotated[str | None, Field(description="op=search: natural-language query.")] = None,
     top_k: Annotated[int, Field(description="op=search: max results (1-50).")] = 5,
-) -> str:
+) -> str | CallToolResult:
     """Structured-document CRUD. Op-dispatched. Replaces the 4 prior
     `memclaw_doc_*` tools."""
     t0 = time.perf_counter()
@@ -1577,6 +1583,9 @@ async def memclaw_doc(
                     t0,
                 )
             if op == "write":
+                assert (
+                    collection is not None
+                )  # non-empty for every op but list_collections/search (checked above)
                 if not doc_id:
                     return _with_latency(
                         _error_response("INVALID_ARGUMENTS", "op=write requires 'doc_id'."), t0
@@ -1796,6 +1805,9 @@ async def memclaw_doc(
                     t0,
                 )
             if op == "read":
+                assert (
+                    collection is not None
+                )  # non-empty for every op but list_collections/search (checked above)
                 if not doc_id:
                     return _with_latency(
                         _error_response("INVALID_ARGUMENTS", "op=read requires 'doc_id'."), t0
@@ -2037,6 +2049,9 @@ async def memclaw_doc(
                     t0,
                 )
             # op == "delete"
+            assert (
+                collection is not None
+            )  # non-empty for every op but list_collections/search (checked above)
             if not doc_id:
                 return _with_latency(_error_response("INVALID_ARGUMENTS", "op=delete requires 'doc_id'."), t0)
             # Admin-trust (>= 3) gate for agent credentials, parity with memory
@@ -2111,7 +2126,7 @@ async def memclaw_env(
     ] = None,
     confidence: Annotated[float, Field(description="op=upsert: certainty 0.0-1.0 (default 1.0).")] = 1.0,
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
-) -> str:
+) -> str | CallToolResult:
     """Stable-infra fact store (env truths). Op-dispatched.
 
     upsert: write or update a named fact; resets verification_count when value changes.
@@ -2144,6 +2159,7 @@ async def memclaw_env(
     async with _no_db():
         try:
             if op in {"get", "verify"}:
+                assert name is not None  # required for get|verify (checked above)
                 existing = await sc.get_document(tenant_id, _ENV_TRUTHS_COLLECTION, name, read=True)
                 if existing is None:
                     return _with_latency(_error_response("NOT_FOUND", f"Env truth '{name}' not found."), t0)
@@ -2190,6 +2206,7 @@ async def memclaw_env(
                 return _with_latency(json.dumps({"truths": truths, "count": len(truths)}), t0)
 
             # upsert
+            assert name is not None  # required for upsert (checked above)
             now = _dt.now(UTC).isoformat()
             existing = await sc.get_document(tenant_id, _ENV_TRUTHS_COLLECTION, name, read=False)
             if existing is not None:
@@ -2258,7 +2275,7 @@ async def memclaw_list(
     limit: Annotated[int, Field(description="1-50.")] = 25,
     cursor: Annotated[str | None, Field(description="Pagination cursor.")] = None,
     include_deleted: Annotated[bool, Field(description="Trust-3 only.")] = False,
-) -> str:
+) -> str | CallToolResult:
     """Non-semantic memory enumeration: filter, sort, paginate by metadata.
     scope='agent' (default) requires trust ≥ 1; scope='fleet'/'all' requires
     trust ≥ 2. Trust 3 unlocks ``include_deleted``."""
@@ -2455,7 +2472,7 @@ async def memclaw_export(
     limit: Annotated[int, Field(description="Records per page, max 500 (default 200).")] = 200,
     cursor: Annotated[str | None, Field(description="Pagination cursor from previous response.")] = None,
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
-) -> str:
+) -> str | CallToolResult:
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
@@ -2556,7 +2573,7 @@ async def memclaw_review(
     limit: Annotated[int, Field(description="Max records to return (1-100, default 50).")] = 50,
     scope: Annotated[str, Field(description="agent (own only, default) | all (tenant-wide).")] = "agent",
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
-) -> str:
+) -> str | CallToolResult:
     """Read-only curation surface: return memories flagged by low weight,
     sorted ascending (worst first). Mirrors Brain review_low_rated.
     scope='agent' restricts to caller's own memories; 'all' covers the full
@@ -2636,7 +2653,7 @@ async def memclaw_stats(
             description="When true, also return 'deleted' (soft-deleted count) and 'total_including_deleted'. 'total' and breakdowns stay non-deleted regardless."
         ),
     ] = False,
-) -> str:
+) -> str | CallToolResult:
     """Aggregate counts: total plus breakdowns by type, agent, status.
     scope='agent' (default) requires trust ≥ 1; scope='fleet'/'all' requires
     trust ≥ 2. scope='agent' counts only memories visible to the caller (mirrors
@@ -2741,7 +2758,7 @@ async def memclaw_insights(
     scope: Annotated[str, Field(description="agent|fleet|all.")] = "agent",
     fleet_id: Annotated[str | None, Field(description="Required when scope='fleet'.")] = None,
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
-) -> str:
+) -> str | CallToolResult:
     """Analyze the memory store for patterns, contradictions, stale knowledge,
     or unexpected clusters; persist findings as ``insight`` memories.
     Consolidates onto the Karpathy Loop reflection step.
@@ -2830,6 +2847,9 @@ async def memclaw_insights(
                 memories_or_clusters = memories_or_clusters.data
             else:
                 is_clustered = False
+                assert isinstance(
+                    memories_or_clusters, list
+                )  # every non-discover dispatch fn returns list[dict]
             # Short-circuit when the query found no candidate memories —
             # no LLM work, no second session, just a stable empty result.
             if not memories_or_clusters:
@@ -2896,7 +2916,7 @@ async def memclaw_evolve(
     scope: Annotated[str, Field(description="agent|fleet|all.")] = "agent",
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
     fleet_id: Annotated[str | None, Field(description="Required when scope='fleet'.")] = None,
-) -> str:
+) -> str | CallToolResult:
     """Record a real-world outcome against the memories that influenced the
     action: adjust weights, generate preventive rules on failure. Closes the
     Karpathy Loop feedback edge.
@@ -3089,7 +3109,7 @@ async def memclaw_procedure_suggest(
     fleet_id: Annotated[str | None, Field(description="Restrict to a fleet's procedures.")] = None,
     limit: Annotated[int, Field(description="Max suggestions (1-20).")] = 5,
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
-) -> str:
+) -> str | CallToolResult:
     """Suggest reliability-ranked tool-call procedures for the current context.
 
     Returns a ``request_id`` plus ranked procedures (each with ``id``,
@@ -3156,7 +3176,7 @@ async def memclaw_procedure_record(
         ),
     ] = None,
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
-) -> str:
+) -> str | CallToolResult:
     """Record an outcome against a procedure: move reliability + quarantine.
 
     Increments the success/failure counter, recomputes ``reliability_score``
@@ -3308,7 +3328,7 @@ async def memclaw_procedure_write(
     risk_level: Annotated[str, Field(description="low | medium | high.")] = "low",
     fleet_id: Annotated[str | None, Field(description="Fleet scope, optional.")] = None,
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
-) -> str:
+) -> str | CallToolResult:
     """Explicitly capture a procedure (tool-call sequence + context).
 
     Embeds the procedure's descriptive text with MemClaw's embedder so it is
@@ -3365,7 +3385,7 @@ async def memclaw_procedure_manage(
     ],
     reason: Annotated[str | None, Field(description="op=invalidate: audit note for the retirement.")] = None,
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
-) -> str:
+) -> str | CallToolResult:
     """Manual procedure lifecycle: quarantine | unquarantine | invalidate | delete | stats.
 
     The runtime loop (``memclaw_procedure_record``) auto-quarantines unreliable
@@ -3488,7 +3508,7 @@ async def memclaw_keystones(
         str | None,
         Field(description="Scope filter; supply to include fleet- and agent-scoped rules."),
     ] = None,
-) -> str:
+) -> str | CallToolResult:
     """Retrieve the scope-merged set of keystone rules for the caller.
 
     Returns ``{"count": N, "truncated": bool, "rules": [...]}`` — the
@@ -3566,7 +3586,7 @@ async def memclaw_keystones_set(
     author_user_id: Annotated[
         str | None, Field(description="op=set: optional author identity for audit.")
     ] = None,
-) -> str:
+) -> str | CallToolResult:
     """Author or remove a keystone rule.
 
     ``agent_id`` is the TARGET agent the rule binds to — not the
@@ -3761,11 +3781,14 @@ async def memclaw_keystones_set(
                 # rejects e.g. ``"fleet_id": null`` for ``scope=tenant``
                 # ("scope=tenant must not include fleet_id") — mirrors
                 # the REST path's ``exclude_none=True`` behaviour.
+                # ``title``/``content`` are guaranteed non-None by the
+                # required-fields check above; ``cast`` makes that visible
+                # to mypy the same way ``new_scope_str`` does for ``scope``.
                 payload: KeystoneUpsertPayload = {
                     "tenant_id": tenant_id,
                     "doc_id": doc_id,
-                    "title": title,
-                    "content": content,
+                    "title": cast("str", title),
+                    "content": cast("str", content),
                     "scope": scope,  # type: ignore[typeddict-item]
                     "weight": weight,  # type: ignore[typeddict-item]
                 }
@@ -3891,7 +3914,7 @@ async def memclaw_keystones_set(
 async def memclaw_session_start(
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
     fleet_id: Annotated[str | None, Field(description="Fleet scope.")] = None,
-) -> str:
+) -> str | CallToolResult:
     """Call once at session start. Paste result into system prompt for zero-latency context.
 
     Returns top-5 memories by weight, active keystone rules, and procedures with reliability >= 0.6.
