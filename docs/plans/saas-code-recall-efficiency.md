@@ -87,3 +87,28 @@ modified beyond adding this file.
 No code changes in this repo until Leon reviews this plan. The Saas-code side
 will adopt `verbosity="compact"` in `~/.claude/brain-preflight.py` and
 `.agent/rules/BRAIN_USAGE.md` once P2 lands.
+
+## Decision log — 2026-07-07 (sprint review, plan author sign-off)
+
+1. **`verbosity` defaults to `"full"` — ACCEPTED, do not flip.** This is the
+   fallback this plan pre-authorized: a default response-shape change on a hot
+   path is a breaking Public API change (repo convention 4). The token win is
+   captured client-side regardless — Saas-code opts in explicitly the moment
+   the param ships; flipping the default later is a one-liner if telemetry
+   shows every client opting in.
+2. **`content_max_chars` deferred; fixed 300-char cap in `session_start`
+   (RE-06) — ACCEPTED.** session_start is the only payload injected
+   unconditionally every session, so the fixed cap captures most of the win;
+   per-call truncation on recall was optional (full content is the useful part
+   of a compact recall result).
+3. **Host identity for RE-07 — CONFIRMED:** SSH alias `dns` resolves to
+   hostname `utility-53`, IP 192.168.1.53 — same machine. It runs the MemClaw
+   production stack (checkout `/home/ubuntu/dev/caura-memclaw`). Note: core-api
+   runs from `ghcr.io/caura-ai/caura-memclaw-core-api:latest`, so the worker
+   deploy should follow the same registry-image pattern, not a local build.
+4. **RE-07 deploy approval — remains Leon's, not granted here.** Production
+   deployment stays behind his explicit go, per the original stop instruction.
+   Live evidence the fix matters: the session-close memclaw_write from the
+   originating Saas-code session itself came back `enrichment_pending: true`
+   — the backlog is still growing, so the P1 backfill/drain step is required,
+   not just the consumer.
