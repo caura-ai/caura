@@ -1,6 +1,6 @@
 {
   "planId": "SPRINT-RECALL-EFFICIENCY-PLAN",
-  "sprintGoal": "Execute docs/plans/saas-code-recall-efficiency.md (P1-P4): deploy core-worker so fast-write enrichment actually happens and drain the enrichment_pending backlog; add an opt-in verbosity='compact' projection to memclaw_recall / memclaw_list / memclaw_session_start for a ~60-70% token cut; extend the existing status_penalty rank-hygiene CASE to archived and superseded rows; replace session_start's raw-weight top-5 with a recency/usage blend. All recall-path changes are additive-only per repo convention 4: verbosity defaults to 'full' (byte-identical responses when the param is omitted) — flipping the default to 'compact' is a breaking Public API change that requires Leon's explicit sign-off and is deliberately NOT in this sprint.",
+  "sprintGoal": "Execute docs/plans/saas-code-recall-efficiency.md (P1-P4): deploy core-worker so fast-write enrichment actually happens and drain the enrichment_pending backlog; add an opt-in verbosity='compact' projection to memclaw_recall / memclaw_list / memclaw_session_start for a ~60-70% token cut; extend the existing status_penalty rank-hygiene CASE to archived and superseded rows; replace session_start's raw-weight top-5 with a recency/usage blend. All recall-path changes are additive-only per repo convention 4: verbosity defaults to 'full' (byte-identical responses when the param is omitted) \u2014 flipping the default to 'compact' is a breaking Public API change that requires Leon's explicit sign-off and is deliberately NOT in this sprint.",
   "correlationId": "SPRINT-RECALL-EFFICIENCY",
   "createdAt": "2026-07-07T00:00:00Z",
   "createdBy": "claude-code",
@@ -8,11 +8,12 @@
     {
       "id": "RE-01",
       "kind": "software.implementation",
-      "objective": "Add a core-worker service block to docker-compose.yml (production) and docker-compose.dev.yml so ENRICH_REQUESTED / EMBED_REQUESTED consumers run, and make the event-publish path explicit: set DEPLOYMENT_MODE in the compose environment after tracing which mode the fast-write path needs for events to reach the worker.",
+      "objective": "Add a core-worker service block to docker-compose.yml (production) and docker-compose.dev.yml so ENRICH_REQUESTED / EMBED_REQUESTED consumers can run in a future deferred-mode sprint, and make the event-publish path explicit by setting DEPLOYMENT_MODE=inline (not deferred) in the compose environment. CORRECTED SCOPE: this WorkItem does NOT drain today's enrichment backlog \u2014 grounding traced the real root cause to production's live (out-of-repo) .env setting USE_LLM_FOR_MEMORY_CREATION=false, which organization_settings.py:690-694 falls back to when no tenant-level enrichment.enabled override exists, making _enrich_memory_background silently no-op on every write. That fix is a live-host .env change, out of scope for a repo-only WorkItem \u2014 it is RE-07's job.",
       "acceptanceCriteria": [
-        "docker-compose.yml gains a core-worker service mirroring the core-api block's pattern (docker-compose.yml:94-140): ghcr image ghcr.io/caura-ai/caura-memclaw-core-worker:${MEMCLAW_VERSION:-latest} + pull_policy: missing + build context core-worker/Dockerfile, env_file env.dev + optional .env, environment overrides CORE_STORAGE_API_URL=http://core-storage-api:8002 and REDIS_URL=redis://redis:6379/0 (worker config default is http://oss-core-storage-api:8002 per core-worker/src/core_worker/config.py:23 — the override is required), depends_on core-storage-api + redis healthy, restart unless-stopped",
+        "docker-compose.yml gains a core-worker service mirroring the core-api block's pattern (docker-compose.yml:94-140): ghcr image ghcr.io/caura-ai/caura-memclaw-core-worker:${MEMCLAW_VERSION:-latest} + pull_policy: missing + build context core-worker/Dockerfile, env_file env.dev + optional .env, environment overrides CORE_STORAGE_API_URL=http://core-storage-api:8002 and REDIS_URL=redis://redis:6379/0 (worker config default is http://oss-core-storage-api:8002 per core-worker/src/core_worker/config.py:23 \u2014 the override is required), depends_on core-storage-api + redis healthy, restart unless-stopped",
         "docker-compose.dev.yml gains an equivalent core-worker block following that file's existing build-based style",
-        "GROUNDING CHECK REQUIRED BEFORE WIRING (convention 4.12 'verify the wiring'): deployment_mode defaults to 'inline' (core-api/src/core_api/config.py:51) and neither compose file nor env.dev sets DEPLOYMENT_MODE today. Trace one real fast write (write_mode='fast') through core-api/src/core_api/pipeline/steps/write/schedule_background_tasks.py:146 and memory_service.py:1547-1580 and record in the commit body which mode publishes ENRICH_REQUESTED for fast writes. Then set DEPLOYMENT_MODE explicitly on the core-api service in both compose files to the value that makes worker consumption real — do not leave it implicit",
+        "GROUNDING CHECK \u2014 RESOLVED (convention 4.12 'verify the wiring'): deployment_mode defaults to 'inline' (core-api/src/core_api/config.py:51), and it is NOT set in env.dev, .env.example, docker-compose.yml, or docker-compose.dev.yml (confirmed by grep \u2014 the repo never overrides the code default). Traced fast writes through schedule_background_tasks.py:146 and memory_service.py:1743-1795 (_schedule_enrich_or_inline): inline mode calls _enrich_memory_background(...) synchronously in-process today \u2014 ENRICH_REQUESTED is NEVER published in inline mode, so a deployed-but-idle core-worker would consume nothing. Flipping DEPLOYMENT_MODE to 'deferred' would NOT make worker consumption real either: the default event bus (EVENT_BUS_BACKEND=inprocess, common/events/factory.py) cannot deliver events across the core-api/core-worker container boundary \u2014 cross-process delivery requires GCP Pub/Sub config that exists nowhere in this repo or its env files. Wiring that is out of this sprint's scope. Decision: set DEPLOYMENT_MODE=inline explicitly on both compose files (matches real current behavior, satisfies 'do not leave it implicit'), and record the event-bus gap as a deferred-scope item in the signoff \u2014 do not set 'deferred' without the Pub/Sub wiring, since that would leave writes neither enriched inline nor delivered to the worker.",
+        "Commit body must state the corrected root-cause finding verbatim (enrichment_enabled resolving False via production's local USE_LLM_FOR_MEMORY_CREATION=false override, per organization_settings.py:690-694), and must NOT include the plaintext OPENAI_API_KEY value observed during production reconnaissance.",
         "docker compose -f docker-compose.yml config -q and docker compose -f docker-compose.dev.yml config -q both exit 0",
         "Local wet verification against the dev stack: docker compose -f docker-compose.dev.yml up -d, write one memory with write_mode='fast' via the local MCP endpoint, and observe title != null and metadata.enrichment_pending cleared within 60s (evidence: the before/after memclaw_manage op=read output pasted into the commit or signoff notes)",
         "No changes to any Python source in this WorkItem"
@@ -43,12 +44,12 @@
       "risk": {
         "level": "medium",
         "reasons": [
-          "Compose-only change, but setting DEPLOYMENT_MODE flips core-api's write path between inline and deferred enrichment — the grounding check exists precisely because the correct value is not yet proven",
-          "Production compose is deployed on a live host; this WorkItem only edits the repo copy — the live rollout is RE-07 (human-approved)"
+          "Compose-only change; DEPLOYMENT_MODE is being set to 'inline' (matching current real behavior) rather than 'deferred', because deferred mode is not viable until a cross-process event bus (GCP Pub/Sub) is configured \u2014 out of this sprint's scope",
+          "Production compose is deployed on a live host; this WorkItem only edits the repo copy \u2014 the live rollout is RE-07 (human-approved)"
         ]
       },
       "resourceLocks": [],
-      "version": 1,
+      "version": 2,
       "attempt": 0,
       "parentId": null,
       "artifacts": [],
@@ -71,9 +72,9 @@
       "kind": "software.implementation",
       "objective": "Build the enrichment-backlog backfill as a one-shot re-enqueue: iterate memories where metadata->>'enrichment_pending'='true' and publish one ENRICH_REQUESTED event per row, mirroring the existing embeddings backfill end to end (storage endpoint -> worker storage-client iterator -> backfill task -> CLI subcommand).",
       "acceptanceCriteria": [
-        "core-storage-api gains a new endpoint (new route in core-storage-api/src/core_storage_api/routers/memories.py + postgres_service query) that pages memory rows with metadata->>'enrichment_pending'='true' for a tenant, modeled on the existing NULL-embedding iterator endpoint that backs core-worker/src/core_worker/clients/storage_client.py:251 iter_memories_with_null_embedding — SQL lives only in core-storage-api (repo rule: no SQL in core-api or core-worker)",
+        "core-storage-api gains a new endpoint (new route in core-storage-api/src/core_storage_api/routers/memories.py + postgres_service query) that pages memory rows with metadata->>'enrichment_pending'='true' for a tenant, modeled on the existing NULL-embedding iterator endpoint that backs core-worker/src/core_worker/clients/storage_client.py:251 iter_memories_with_null_embedding \u2014 SQL lives only in core-storage-api (repo rule: no SQL in core-api or core-worker)",
         "core-worker/src/core_worker/clients/storage_client.py gains iter_memories_with_enrichment_pending, same paging/shape pattern as iter_memories_with_null_embedding (storage_client.py:251)",
-        "core-worker/src/core_worker/backfill.py (or a sibling module) gains run_enrichment_backfill mirroring run_embedding_backfill: idempotent (re-run picks up only still-pending rows), max_inflight backpressure, publishes via common/events/memory_enrich_publisher.py publish_memory_enrich_request, returns a BackfillReport-style dataclass; no retry/DLQ logic here — that stays in the consumer (handle_enrich_request), per the design notes at the top of backfill.py",
+        "core-worker/src/core_worker/backfill.py (or a sibling module) gains run_enrichment_backfill mirroring run_embedding_backfill: idempotent (re-run picks up only still-pending rows), max_inflight backpressure, publishes via common/events/memory_enrich_publisher.py publish_memory_enrich_request, returns a BackfillReport-style dataclass; no retry/DLQ logic here \u2014 that stays in the consumer (handle_enrich_request), per the design notes at the top of backfill.py",
         "core-worker/src/core_worker/cli.py gains a backfill-enrichment subcommand mirroring backfill-embeddings (cli.py:26-40), including the required --tenant-id scoping argument",
         "Tests mirror the existing embeddings-backfill tests (locate them under core-worker/tests/ first; copy their structure): pending rows are enqueued, already-enriched rows are skipped, re-run after partial completion enqueues only the remainder",
         "pytest core-worker/tests/ -q passes; the touched root-suite subset passes per the /run-tests skill recipe",
@@ -103,7 +104,7 @@
       "risk": {
         "level": "low",
         "reasons": [
-          "Every layer has a directly analogous, already-tested twin in the embeddings backfill (CAURA-594) — this is grounded reuse, not new architecture",
+          "Every layer has a directly analogous, already-tested twin in the embeddings backfill (CAURA-594) \u2014 this is grounded reuse, not new architecture",
           "One-shot tool; nothing on the request hot path"
         ]
       },
@@ -133,15 +134,15 @@
     {
       "id": "RE-03",
       "kind": "software.implementation",
-      "objective": "Add an opt-in verbosity: 'compact' | 'full' parameter (default 'full' — additive-only, existing responses byte-identical) to memclaw_recall, memclaw_list, and memclaw_session_start, projecting each memory down to {id, title, content, memory_type, status, weight, similarity (when present), created_at} in compact mode, and key the recall cache on verbosity so compact and full responses never cross-contaminate.",
+      "objective": "Add an opt-in verbosity: 'compact' | 'full' parameter (default 'full' \u2014 additive-only, existing responses byte-identical) to memclaw_recall, memclaw_list, and memclaw_session_start, projecting each memory down to {id, title, content, memory_type, status, weight, similarity (when present), created_at} in compact mode, and key the recall cache on verbosity so compact and full responses never cross-contaminate.",
       "acceptanceCriteria": [
-        "A single projection helper (e.g. _project_compact(memory_dict) in mcp_server.py next to the existing serializers) maps a full MemoryOut dump (core-api/src/core_api/schemas.py:227) to exactly the fields id, title, content, memory_type, status, weight, similarity, created_at — similarity included only when the source dict has it (recall results have it; list/session_start rows do not)",
-        "memclaw_recall applies it at the payload assembly site mcp_server.py:726 ('results': [r.model_dump(mode='json') for r in results]); memclaw_list at mcp_server.py:2405; memclaw_session_start at mcp_server.py:3925 — all three gated on verbosity == 'compact', with verbosity == 'full' leaving today's serialization call sequence untouched",
-        "Invalid verbosity values return the structured INVALID_ARGUMENTS error shape used by the existing status/memory_type validation in memclaw_recall (mcp_server.py:611-627) — never a raw error string (CI grep gate)",
-        "CACHE CORRECTNESS: the recall cache key currently hashes only query+top_k (mcp_server.py:640-641 — _h = sha256(f'{query}{capped_top_k}')). verbosity must be added to the hashed material so a compact response is never served to a full caller or vice versa; a comment at the key-build site names this invariant",
-        "Tool-surface checklist (/tool-surface skill, in full — this changes three tool schemas): plugin/tools.json regenerated via scripts/export_tool_specs.py (never hand-edited); the three tests/fixtures/*_baseline_v1.json regenerated by script; tests/test_tool_descriptions_regression.py, tests/test_mcp_token_budget.py, tests/test_tools_export_in_sync.py all green; EXPECTED_TOOL_COUNT stays 20 (param addition, no new tool — verify by command, not assertion); docs/MEMCLAW_CLIENT_GUIDE.md catalog entries for the three tools updated",
-        "Charter check: this is a parameter extension on three existing tools, not a new tool or surface mirror — record the docs/api-surfaces.md justification in the commit body",
-        "content_max_chars is explicitly OUT of scope for this WorkItem (plan doc marks it optional; simplicity rule) — recorded as a deferred backlog item for the signoff; session_start's fixed content cap is RE-06's job",
+        "A single projection helper (e.g. _project_compact(memory_dict) in mcp_server.py next to the existing serializers) maps a full MemoryOut dump (core-api/src/core_api/schemas.py:227) to exactly the fields id, title, content, memory_type, status, weight, similarity, created_at \u2014 similarity included only when the source dict has it (recall results have it; list/session_start rows do not)",
+        "memclaw_recall applies it at the payload assembly site mcp_server.py:726 ('results': [r.model_dump(mode='json') for r in results]); memclaw_list at mcp_server.py:2405; memclaw_session_start at mcp_server.py:3925 \u2014 all three gated on verbosity == 'compact', with verbosity == 'full' leaving today's serialization call sequence untouched",
+        "Invalid verbosity values return the structured INVALID_ARGUMENTS error shape used by the existing status/memory_type validation in memclaw_recall (mcp_server.py:611-627) \u2014 never a raw error string (CI grep gate)",
+        "CACHE CORRECTNESS: the recall cache key currently hashes only query+top_k (mcp_server.py:640-641 \u2014 _h = sha256(f'{query}{capped_top_k}')). verbosity must be added to the hashed material so a compact response is never served to a full caller or vice versa; a comment at the key-build site names this invariant",
+        "Tool-surface checklist (/tool-surface skill, in full \u2014 this changes three tool schemas): plugin/tools.json regenerated via scripts/export_tool_specs.py (never hand-edited); the three tests/fixtures/*_baseline_v1.json regenerated by script; tests/test_tool_descriptions_regression.py, tests/test_mcp_token_budget.py, tests/test_tools_export_in_sync.py all green; EXPECTED_TOOL_COUNT stays 20 (param addition, no new tool \u2014 verify by command, not assertion); docs/MEMCLAW_CLIENT_GUIDE.md catalog entries for the three tools updated",
+        "Charter check: this is a parameter extension on three existing tools, not a new tool or surface mirror \u2014 record the docs/api-surfaces.md justification in the commit body",
+        "content_max_chars is explicitly OUT of scope for this WorkItem (plan doc marks it optional; simplicity rule) \u2014 recorded as a deferred backlog item for the signoff; session_start's fixed content cap is RE-06's job",
         "uv run --project core-api ruff check / ruff format --check / mypy pass"
       ],
       "state": "todo",
@@ -168,9 +169,9 @@
       "risk": {
         "level": "medium",
         "reasons": [
-          "Touches the serialization of the three highest-traffic MCP tools; the default='full' gate is the only thing keeping existing clients byte-identical — review that gate first",
+          "Touches the serialization of the three highest-traffic MCP tools; the default='full' gate is the only thing keeping existing clients byte-identical \u2014 review that gate first",
           "The under-keyed recall cache is a live correctness trap: missing the cache-key criterion would ship stale-shape responses that no unit test of the handler alone would catch",
-          "Baseline Blindness (named failure mode 4.5): three schema changes guarantee baseline churn — regeneration must follow the intended change, never precede diagnosis"
+          "Baseline Blindness (named failure mode 4.5): three schema changes guarantee baseline churn \u2014 regeneration must follow the intended change, never precede diagnosis"
         ]
       },
       "resourceLocks": [],
@@ -205,9 +206,9 @@
       "acceptanceCriteria": [
         "New test file (e.g. tests/test_mcp_verbosity_projection.py) asserting through the public MCP tool surface (pattern: existing tests using tests/_mcp_test_helpers.py), with unique per-run data via conftest's uid()",
         "test_compact_shape_exact: a compact recall result contains exactly {id, title, content, memory_type, status, weight, similarity, created_at} and none of tenant_id/entity_links/run_id/usage/ts_valid_*/subject-predicate-object/recall bookkeeping",
-        "test_full_default_unchanged: calling memclaw_recall without verbosity yields a result whose per-memory key set equals the full MemoryOut field set (schemas.py:227) — proving the param's existence did not alter the default response",
+        "test_full_default_unchanged: calling memclaw_recall without verbosity yields a result whose per-memory key set equals the full MemoryOut field set (schemas.py:227) \u2014 proving the param's existence did not alter the default response",
         "test_list_and_session_start_compact: same projection assertions for memclaw_list and memclaw_session_start (session_start rows have no similarity key)",
-        "test_cache_no_cross_contamination: same query issued with verbosity='compact' then verbosity='full' (and reverse) returns the correct shape both times — fails on the pre-RE-03 cache key by construction (run once against the unfixed key to prove it catches the bug, per CLAUDE.md section 5 regression-test rule)",
+        "test_cache_no_cross_contamination: same query issued with verbosity='compact' then verbosity='full' (and reverse) returns the correct shape both times \u2014 fails on the pre-RE-03 cache key by construction (run once against the unfixed key to prove it catches the bug, per CLAUDE.md section 5 regression-test rule)",
         "Latency guard per convention 4: ratio-based test modeled on tests/pipeline/test_recall_reasoning_loop_latency.py (same-run baseline, percentage ceiling ~10%, never absolute ms) showing the no-param default path is unaffected by the new parameter",
         "Token-cut evidence (informational, logged not gated): serialized compact payload for a 5-result recall measured at <= 50% of the full payload's character count, printed in test output for the signoff",
         "pytest <new files> -q passes standalone and inside the full suite (/run-tests recipe: venv active, TEST_DATABASE_URL with the real mapped port from docker ps)"
@@ -256,13 +257,13 @@
     {
       "id": "RE-05",
       "kind": "software.implementation",
-      "objective": "Extend the existing status_penalty CASE in the scored search so archived rows and rows with superseded_by IS NOT NULL are demoted by default (penalty, not exclusion — rows stay reachable via explicit status= filters), preserving the conflicted exact-lexical-match carve-out from #357.",
+      "objective": "Extend the existing status_penalty CASE in the scored search so archived rows and rows with superseded_by IS NOT NULL are demoted by default (penalty, not exclusion \u2014 rows stay reachable via explicit status= filters), preserving the conflicted exact-lexical-match carve-out from #357.",
       "acceptanceCriteria": [
-        "core-storage-api/src/core_storage_api/services/postgres_service.py:1241-1245 status_penalty CASE gains: Memory.status == 'archived' -> 0.5, and Memory.superseded_by.is_not(None) -> 0.5 (stacking behavior with the status arms decided and documented in a code comment — CASE takes the first match, so arm order is load-bearing)",
+        "core-storage-api/src/core_storage_api/services/postgres_service.py:1241-1245 status_penalty CASE gains: Memory.status == 'archived' -> 0.5, and Memory.superseded_by.is_not(None) -> 0.5 (stacking behavior with the status arms decided and documented in a code comment \u2014 CASE takes the first match, so arm order is load-bearing)",
         "The existing conflicted arm's exact-lexical-match escape (postgres_service.py:1230-1245, shipped by c00a3f7 / #357) is byte-identical after the change; its covering test (locate under core-storage-api/tests/ or tests/ before editing) still passes unmodified",
-        "Explicit-filter behavior unchanged: a caller passing status='archived' still gets archived rows (penalty scales all candidates in that filtered set equally, so relative order within the filter is preserved) — asserted by test",
+        "Explicit-filter behavior unchanged: a caller passing status='archived' still gets archived rows (penalty scales all candidates in that filtered set equally, so relative order within the filter is preserved) \u2014 asserted by test",
         "New scored-search tests, written via the public storage endpoint or search service (not raw SQL assertions): an archived twin of an active memory ranks below it for the same query; a superseded row ranks below its superseder; both remain retrievable with the explicit filter",
-        "This deliberately changes default ranking (the plan's P3 intent) — the commit body states so and cites docs/plans/saas-code-recall-efficiency.md P3 as the authorization, per the convention-4 exception process",
+        "This deliberately changes default ranking (the plan's P3 intent) \u2014 the commit body states so and cites docs/plans/saas-code-recall-efficiency.md P3 as the authorization, per the convention-4 exception process",
         "uv run --project core-storage-api ruff check / ruff format --check / mypy pass; full suite green per /run-tests"
       ],
       "state": "todo",
@@ -289,7 +290,7 @@
       "risk": {
         "level": "medium",
         "reasons": [
-          "Intentional default-ranking change on the hottest query in the system — small diff, wide blast radius; the #357 carve-out regression test is the tripwire",
+          "Intentional default-ranking change on the hottest query in the system \u2014 small diff, wide blast radius; the #357 carve-out regression test is the tripwire",
           "SQLAlchemy CASE arm ordering is easy to get subtly wrong (first-match-wins); the superseded_by arm interacts with all three status arms"
         ]
       },
@@ -311,12 +312,12 @@
     {
       "id": "RE-06",
       "kind": "software.implementation",
-      "objective": "Replace memclaw_session_start's raw-weight top-5 with a recency/usage-blended re-rank done in core-api (fetch a wider weight-sorted window from storage, re-rank in Python — no new SQL), exclude memory_type='rule' rows from the memories section, and apply the RE-03 compact projection plus a fixed ~300-char content cap to the session_start payload.",
+      "objective": "Replace memclaw_session_start's raw-weight top-5 with a recency/usage-blended re-rank done in core-api (fetch a wider weight-sorted window from storage, re-rank in Python \u2014 no new SQL), exclude memory_type='rule' rows from the memories section, and apply the RE-03 compact projection plus a fixed ~300-char content cap to the session_start payload.",
       "acceptanceCriteria": [
-        "memclaw_session_start (mcp_server.py:3891-3939) raises its storage fetch from limit 5 to limit 25 (same single list_memories_by_filters call at :3920-3921, sort=weight desc unchanged — no new storage endpoint, no SQL in core-api) and re-ranks in Python: score = weight * recency_decay(created_at) * (1 + log1p(recall_count)), taking the top 5. The (1 + ...) term is load-bearing: never-recalled memories must not be zeroed out. ASSUMPTION to flag in the commit body: exact decay half-life (propose ~30 days) is an implementation choice, not user-specified — flip on Leon's word",
-        "Rows with memory_type='rule' are excluded from the memories section (keystones are already returned separately in the same payload — mcp_server.py:3922; a rule-typed memory in the memories list is exactly the 'Fake rule generated for testing' artifact class the plan doc measured). Plan doc's finer condition ('not backed by keystones') simplified to a blanket exclusion — stated as an assumption in the commit body",
-        "The session_start memories section always uses the RE-03 compact projection with content additionally capped at 300 chars and a content_truncated: true marker when capped (this payload is injected into every session via the brain-preflight hook — plan doc P4); the tool's verbosity param still controls recall/list semantics per RE-03, but session_start's memories default to compact — GATE: this changes session_start's default response shape; confirm with Leon at execution time OR keep default 'full' here too and let the preflight hook pass verbosity='compact' explicitly (the strictly-additive fallback; executor picks this unless Leon says otherwise)",
-        "Behavior tests: equal-weight memories rank by recency; a frequently-recalled older memory can outrank a never-recalled newer one; rule-typed rows absent; content capped at 300 chars with the truncation marker; a docstring/description update for the tool (top-5 'by weight' wording at mcp_server.py:3897 becomes accurate) — which re-triggers the RE-03 tool-surface checklist (baselines, tools.json, token budget)",
+        "memclaw_session_start (mcp_server.py:3891-3939) raises its storage fetch from limit 5 to limit 25 (same single list_memories_by_filters call at :3920-3921, sort=weight desc unchanged \u2014 no new storage endpoint, no SQL in core-api) and re-ranks in Python: score = weight * recency_decay(created_at) * (1 + log1p(recall_count)), taking the top 5. The (1 + ...) term is load-bearing: never-recalled memories must not be zeroed out. ASSUMPTION to flag in the commit body: exact decay half-life (propose ~30 days) is an implementation choice, not user-specified \u2014 flip on Leon's word",
+        "Rows with memory_type='rule' are excluded from the memories section (keystones are already returned separately in the same payload \u2014 mcp_server.py:3922; a rule-typed memory in the memories list is exactly the 'Fake rule generated for testing' artifact class the plan doc measured). Plan doc's finer condition ('not backed by keystones') simplified to a blanket exclusion \u2014 stated as an assumption in the commit body",
+        "The session_start memories section always uses the RE-03 compact projection with content additionally capped at 300 chars and a content_truncated: true marker when capped (this payload is injected into every session via the brain-preflight hook \u2014 plan doc P4); the tool's verbosity param still controls recall/list semantics per RE-03, but session_start's memories default to compact \u2014 GATE: this changes session_start's default response shape; confirm with Leon at execution time OR keep default 'full' here too and let the preflight hook pass verbosity='compact' explicitly (the strictly-additive fallback; executor picks this unless Leon says otherwise)",
+        "Behavior tests: equal-weight memories rank by recency; a frequently-recalled older memory can outrank a never-recalled newer one; rule-typed rows absent; content capped at 300 chars with the truncation marker; a docstring/description update for the tool (top-5 'by weight' wording at mcp_server.py:3897 becomes accurate) \u2014 which re-triggers the RE-03 tool-surface checklist (baselines, tools.json, token budget)",
         "uv run --project core-api gates pass; full suite green per /run-tests"
       ],
       "state": "todo",
@@ -366,15 +367,16 @@
     {
       "id": "RE-07",
       "kind": "software.deployment",
-      "objective": "Deploy the sprint branch to the production standalone instance (host 'dns', /home/ubuntu/dev/caura-memclaw — the instance serving fleet Saas-code), bring up core-worker, run the one-shot enrichment backfill, and verify all four plan-doc 'Verify' bullets with pasted evidence.",
+      "objective": "Deploy the sprint branch to the production standalone instance (host 'dns', /home/ubuntu/dev/caura-memclaw \u2014 the instance serving fleet Saas-code), FIX the root cause of the enrichment backlog on that host (USE_LLM_FOR_MEMORY_CREATION=false in production's live .env), bring up core-worker, run the one-shot enrichment backfill, and verify all four plan-doc 'Verify' bullets with pasted evidence.",
       "acceptanceCriteria": [
-        "HUMAN APPROVAL GATE: Leon explicitly approves this deployment before any remote command runs (CLAUDE.md section 6: deploying to any live host always requires confirmation, even mid-task). Also confirm with Leon whether host 'dns' and utility-53/192.168.1.53 are the same machine — the /deploy-53 skill's procedure (narrow fetch refspec, stale-MCP-schema trap) is the model either way, but the target hostname is infra knowledge only Leon has",
+        "HUMAN APPROVAL GATE: Leon explicitly approves this deployment before any remote command runs (CLAUDE.md section 6: deploying to any live host always requires confirmation, even mid-task). Also confirm with Leon whether host 'dns' and utility-53/192.168.1.53 are the same machine \u2014 the /deploy-53 skill's procedure (narrow fetch refspec, stale-MCP-schema trap) is the model either way, but the target hostname is infra knowledge only Leon has",
+        "ROOT-CAUSE FIX (must run before the backfill step, or the backfill will re-PATCH into the same silent no-op): on host 'dns', edit the live .env to remove/flip USE_LLM_FOR_MEMORY_CREATION back to true (repo's own code default \u2014 core-api/src/core_api/config.py:85 \u2014 production's false value is a host-local override not present anywhere in this repo), restart core-api, and confirm via a fresh fast write that organization_settings.enrichment_enabled now resolves True for tenant Saas-code (title populates, enrichment_pending clears) before running the backfill for the pre-existing backlog. Do not write the plaintext OPENAI_API_KEY value observed on this host into any commit, artifact, or output.",
         "Deploy per the /deploy-53 skill procedure adapted to the target host; verify the new code actually shipped via raw curl JSON-RPC tools/call against /mcp, never via this session's cached MCP tool schema (named failure mode 4.14)",
         "docker ps on the host shows core-worker running alongside core-api, core-storage-api, db, redis",
-        "Evidence bullet 1 (P1 new writes): one write_mode='fast' memory written post-deploy shows enriched title and cleared enrichment_pending within ~1 min — before/after tool output pasted",
+        "Evidence bullet 1 (P1 new writes): one write_mode='fast' memory written post-deploy shows enriched title and cleared enrichment_pending within ~1 min \u2014 before/after tool output pasted",
         "Evidence bullet 2 (P1 backlog): python -m core_worker.cli backfill-enrichment --tenant-id <Saas-code tenant> run to completion; backlog count (memories with metadata->>'enrichment_pending'='true' for fleet Saas-code) reported as 0 by a computed query, not asserted from memory (convention: counts are computed)",
-        "Evidence bullet 3 (P2): memclaw_recall(query='tenant isolation', fleet_ids=['Saas-code'], top_k=5, verbosity='compact') response measured < 1.5K tokens (was ~3K+ full) — measurement command and output pasted",
-        "Evidence bullet 4 (P3+P4): memclaw_session_start top-5 for the Saas-code fleet contains no test artifacts and no null-title records; a default recall no longer surfaces archived/superseded rows above active ones — outputs pasted",
+        "Evidence bullet 3 (P2): memclaw_recall(query='tenant isolation', fleet_ids=['Saas-code'], top_k=5, verbosity='compact') response measured < 1.5K tokens (was ~3K+ full) \u2014 measurement command and output pasted",
+        "Evidence bullet 4 (P3+P4): memclaw_session_start top-5 for the Saas-code fleet contains no test artifacts and no null-title records; a default recall no longer surfaces archived/superseded rows above active ones \u2014 outputs pasted",
         "Any FORBIDDEN fleet-policy error during verification is handled per named failure mode 4.13: use the fleet the error names, don't debug"
       ],
       "state": "todo",
@@ -407,15 +409,16 @@
       "risk": {
         "level": "high",
         "reasons": [
+          "The actual backlog fix is a live .env edit (USE_LLM_FOR_MEMORY_CREATION), not just a core-worker deploy \u2014 confirmed via organization_settings.py:690-694; sequencing matters: fix the flag, restart core-api, THEN backfill, or the backfill re-enqueues into the same no-op",
           "Live production host serving the Saas-code fleet; the backfill writes enrichment PATCHes to real memories at volume (hundreds of rows)",
-          "First-ever core-worker rollout on this host — no prior operational baseline; watch provider-key env wiring (worker needs the same LLM keys core-api has)",
-          "Target-host identity (dns vs utility-53) is unconfirmed infra knowledge — resolving it is the first acceptance criterion, not an assumption"
+          "First-ever core-worker rollout on this host \u2014 no prior operational baseline; watch provider-key env wiring (worker needs the same LLM keys core-api has)",
+          "Target-host identity (dns vs utility-53) is unconfirmed infra knowledge \u2014 resolving it is the first acceptance criterion, not an assumption"
         ]
       },
       "resourceLocks": [
         "production-dns-host"
       ],
-      "version": 1,
+      "version": 2,
       "attempt": 0,
       "parentId": null,
       "artifacts": [],
@@ -434,7 +437,7 @@
         "sprints/sprint-recall-efficiency/SPRINT-RECALL-EFFICIENCY_SIGNOFF.md exists, modeled on sprints/sprint-recall-reasoning-loop/SPRINT-RECALL-REASONING-LOOP_SIGNOFF.md",
         "All RE-01..RE-07 outcomes recorded (state, commit hash, notes); every count/latency/token number computed by a command in the signoff session, never restated (convention 10)",
         "Verification section includes actual pytest output for RE-04's suite, the latency-guard ratio, the compact-vs-full character-count ratio, and RE-07's pasted production evidence",
-        "Deferred-scope backlog explicitly lists: (1) flipping verbosity default to 'compact' (breaking; needs Leon's sign-off; Saas-code side adopts compact client-side meanwhile per the plan doc's stop-rule note), (2) content_max_chars param on recall/list (plan doc marked optional; deferred for simplicity), (3) recall cache key under-keying beyond verbosity — fleet_ids/status/memory_type are also absent from the hash (pre-existing issue observed at mcp_server.py:640, out of scope here, deserves its own fix), (4) session_start default-shape decision if RE-06 shipped the strictly-additive fallback",
+        "Deferred-scope backlog explicitly lists: (1) flipping verbosity default to 'compact' (breaking; needs Leon's sign-off; Saas-code side adopts compact client-side meanwhile per the plan doc's stop-rule note), (2) content_max_chars param on recall/list (plan doc marked optional; deferred for simplicity), (3) recall cache key under-keying beyond verbosity \u2014 fleet_ids/status/memory_type are also absent from the hash (pre-existing issue observed at mcp_server.py:640, out of scope here, deserves its own fix), (4) session_start default-shape decision if RE-06 shipped the strictly-additive fallback, (5) cross-process event-bus wiring (GCP Pub/Sub config for EVENT_BUS_BACKEND) required before DEPLOYMENT_MODE=deferred is viable on core-worker \u2014 discovered during RE-01 grounding, not configured anywhere in this repo, needed for core-worker to ever consume a live queue",
         "MemClaw session-close protocol executed per docs/MEMCLAW_CLIENT_GUIDE.md section 4d (write outcome memory + evolve against recalled memories)",
         "Committed with a sprint(recall-efficiency): RE-Z01 conventional commit, DCO signed"
       ],
@@ -466,7 +469,7 @@
         ]
       },
       "resourceLocks": [],
-      "version": 1,
+      "version": 2,
       "attempt": 0,
       "parentId": null,
       "artifacts": [],
@@ -481,11 +484,12 @@
     "status": "valid",
     "errors": [],
     "warnings": [
-      "RE-01 carries an unresolved grounding question (which deployment_mode publishes ENRICH_REQUESTED for fast writes) that must be answered by tracing code before the compose env is set — do not guess it",
-      "RE-03's default='full' means Saas-code sees zero token savings until its client passes verbosity='compact' (it has committed to doing so) or Leon approves flipping the default — the sprint's headline token cut is opt-in by design",
-      "RE-05 intentionally changes default ranking on the hottest query path; the #357 carve-out test is the only guard for the prior fix — locate and run it before touching the CASE",
+      "RE-01's grounding question is RESOLVED: fast writes use inline mode today (never publishes ENRICH_REQUESTED), and deferred mode is not viable without GCP Pub/Sub wiring (not present in this repo) \u2014 DEPLOYMENT_MODE is set to 'inline' explicitly, not 'deferred'. The ACTUAL enrichment-backlog root cause is production's live .env (USE_LLM_FOR_MEMORY_CREATION=false, confirmed via organization_settings.py:690-694) \u2014 that fix is now an explicit RE-07 acceptance criterion, sequenced before the backfill step.",
+      "RE-03's default='full' means Saas-code sees zero token savings until its client passes verbosity='compact' (it has committed to doing so) or Leon approves flipping the default \u2014 the sprint's headline token cut is opt-in by design",
+      "RE-05 intentionally changes default ranking on the hottest query path; the #357 carve-out test is the only guard for the prior fix \u2014 locate and run it before touching the CASE",
       "RE-06 contains an execution-time decision gate (session_start default shape) with a stated safe fallback; the executor must not resolve it silently in the breaking direction",
-      "RE-07 cannot start without Leon: human approval for the live deploy AND confirmation of the target host identity (dns vs utility-53)"
+      "RE-07 cannot start without Leon: human approval for the live deploy AND confirmation of the target host identity (dns vs utility-53)",
+      "Leon confirmed via AskUserQuestion (2026-07-07): rescope to 'flip global env flag' on production \u2014 this is now RE-07's root-cause-fix acceptance criterion. RE-07's own HUMAN APPROVAL GATE still requires a fresh confirmation immediately before any remote command runs, per CLAUDE.md 'always stop and confirm, even mid-task, even if previously approved.'"
     ]
   },
   "metrics": {
