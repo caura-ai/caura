@@ -50,7 +50,19 @@
         "verification: cache-key regression test proven to fail on pre-fix hash then pass; 58 guard+tool tests green; MCP-wide sweep 607 passed 1 skipped; token budget 7488/7500; EXPECTED_TOOL_COUNT stays 20 (len(REGISTRY)==20 by command); ruff/format/mypy hook-exact green both services; feature commit 869c32b"
       ]
     },
-    "RE-04": { "state": "blocked", "attempt": 0, "artifacts": [] },
+    "RE-04": {
+      "state": "completed",
+      "attempt": 1,
+      "startedAt": "2026-07-07T15:16:13Z",
+      "completedAt": "2026-07-07T15:28:58Z",
+      "duration": "13m",
+      "modelUsed": "opus",
+      "artifacts": [
+        "tests/test_mcp_verbosity_projection.py (7 tests: compact-shape-exact + negative drop assertions, full-default==MemoryOut field set, list/session_start compact, cache no-cross-contamination via dict-backed round-trip, ratio-based default-path latency guard, compact-vs-full payload evidence)",
+        "verification: cache test proven to FAIL on pre-RE-03 single-keyed cache then pass; latency ratio 0.971x (ceiling 1.25x); compact payload 36.1% of full (<=50%) for 5-result recall; 7/7 standalone, 65 passed in full verbosity+guard suite; ruff check/format clean; feature commit 237e8d9",
+        "NOTE: AC6 latency ceiling is 1.25x (not the integration model's 1.10x) because AC1 scopes the file to the stubbed MCP tool surface where medians are microsecond-scale — documented in the file docstring + commit body"
+      ]
+    },
     "RE-05": {
       "state": "completed",
       "attempt": 1,
