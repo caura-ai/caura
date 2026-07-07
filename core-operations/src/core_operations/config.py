@@ -62,12 +62,20 @@ class Settings(BaseSettings):
     # gate further no-ops ticks where no non-insight memories landed since
     # the last run, so a once-a-day fire is plenty.
     lifecycle_insights_run_at_hour: int = 2
+    # Per-agent activity digest generation (CAURA-222 Phase 2). Opt-in per-org
+    # (``agent_digest.enabled``, default off); a tenant that hasn't opted in
+    # costs nothing, so a daily fire is safe.
+    agent_digest_run_at_hour: int = 2
+    # Generation runs INLINE in core-api (LLM per agent across opted-in orgs), so
+    # its trigger POST can take minutes — a generous timeout, not the 30s default.
+    agent_digest_http_timeout_s: float = 600.0
 
     @field_validator(
         "lifecycle_archive_run_at_hour",
         "lifecycle_purge_run_at_hour",
         "lifecycle_pipeline_run_at_hour",
         "lifecycle_insights_run_at_hour",
+        "agent_digest_run_at_hour",
     )
     @classmethod
     def _validate_run_at_hour(cls, v: int, info: ValidationInfo) -> int:

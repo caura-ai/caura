@@ -111,3 +111,44 @@ async def run_insights_tick() -> None:
     quiet tenants.
     """
     await _fire_fanout("insights")
+
+
+async def _fire_agent_digest(period: str) -> None:
+    """POST ``/admin/reports/agent-digest/run?period=<period>``. Unlike the
+    lifecycle fanout, digest generation runs INLINE in core-api (no Pub/Sub), so
+    this trigger has its own endpoint. Non-2xx logs and returns — the scheduler
+    retries next tick.
+    """
+    url = f"{settings.core_api_url.rstrip('/')}/api/v1/admin/reports/agent-digest/run?period={period}"
+    headers: dict[str, str] = {}
+    if settings.core_api_admin_api_key:
+        headers["X-API-Key"] = settings.core_api_admin_api_key
+    else:
+        logger.warning(
+            "core-operations: CORE_API_ADMIN_API_KEY unset; agent-digest run will be unauthorised",
+            extra={"period": period},
+        )
+
+    # Generation is a long inline job (LLM per agent across opted-in orgs), so
+    # give it a generous timeout rather than the short storage default.
+    timeout = httpx.Timeout(settings.agent_digest_http_timeout_s)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            resp = await client.post(url, headers=headers)
+        except httpx.HTTPError:
+            logger.exception("agent-digest POST failed", extra={"period": period, "url": url})
+            return
+    if resp.status_code >= 400:
+        logger.error(
+            "agent-digest run returned non-2xx; will retry next tick",
+            extra={"period": period, "status_code": resp.status_code, "body": resp.text[:500]},
+        )
+        return
+    logger.info("agent-digest run fired", extra={"period": period, "summary": resp.json()})
+
+
+async def run_agent_digest_tick() -> None:
+    """Nightly per-agent activity digest generation (daily window). core-api
+    enumerates opted-in orgs and generates inline; a tenant that hasn't opted in
+    pays zero cost. Safe to fire daily."""
+    await _fire_agent_digest("day")

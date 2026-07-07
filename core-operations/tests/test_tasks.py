@@ -87,6 +87,21 @@ async def test_archive_expired_tick_posts_to_fanout(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
+async def test_agent_digest_tick_posts_to_run_endpoint(monkeypatch: pytest.MonkeyPatch):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    response = _StubResponse(200, {"period": "day", "orgs": 2, "completed": 2, "digests": 5})
+    async with _patch_client(monkeypatch, response=response) as stub:
+        await tasks.run_agent_digest_tick()
+
+    assert len(stub.calls) == 1
+    url, headers = stub.calls[0]
+    assert url == "http://core-api/api/v1/admin/reports/agent-digest/run?period=day"
+    assert headers == {"X-API-Key": "admin-key-xyz"}
+
+
+@pytest.mark.asyncio
 async def test_archive_stale_tick_hits_correct_path(monkeypatch: pytest.MonkeyPatch):
     settings.core_api_url = "http://core-api"
     settings.core_api_admin_api_key = "admin-key-xyz"

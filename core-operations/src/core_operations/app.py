@@ -51,6 +51,7 @@ configure_logging(
 
 from core_operations.scheduler import scheduler, seconds_until_next_utc_hour
 from core_operations.tasks import (
+    run_agent_digest_tick,
     run_archive_expired_tick,
     run_archive_stale_tick,
     run_crystallize_tick,
@@ -111,6 +112,12 @@ def _register_scheduled_tasks() -> None:
         24 * 3600,
         run_insights_tick,
         delay_provider=_daily_at("lifecycle_insights_run_at_hour"),
+    )
+    scheduler.register(
+        "agent-digest",
+        24 * 3600,
+        run_agent_digest_tick,
+        delay_provider=_daily_at("agent_digest_run_at_hour"),
     )
 
 
