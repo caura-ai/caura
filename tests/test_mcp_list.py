@@ -250,3 +250,61 @@ async def test_list_limit_clamped_to_1_50(mcp_env, monkeypatch):
 
     await mcp_server.memclaw_list(limit=0)
     assert sc.list_memories_by_filters.await_args.args[0]["limit"] == 1
+
+
+# ---------------------------------------------------------------------------
+# verbosity=compact projection (RE-03)
+# ---------------------------------------------------------------------------
+
+
+def _rich_out_stub(mid: str):
+    """A ``_memory_to_out`` result whose model_dump carries the full field set,
+    so the compact projection has enrichment/metadata to drop."""
+
+    class _Out:
+        def model_dump(self, mode="python"):  # noqa: ARG002
+            return {
+                "id": mid,
+                "title": "T",
+                "content": "C",
+                "memory_type": "decision",
+                "status": "active",
+                "weight": 0.5,
+                "created_at": "2026-07-07T00:00:00Z",
+                "tags": ["x"],
+                "summary": "s",
+                "enrichment_pending": False,
+            }
+
+    return _Out()
+
+
+_LIST_COMPACT_KEYS = {"id", "title", "content", "memory_type", "status", "weight", "created_at"}
+
+
+async def test_list_verbosity_compact_projects_field_set(mcp_env, monkeypatch):
+    """verbosity='compact' returns exactly the compact field set (no similarity on list)."""
+    rows = [{"id": str(uuid4()), "created_at": datetime.now(timezone.utc).isoformat()}]
+    stub_storage_client(monkeypatch, list_memories_by_filters=rows)
+    monkeypatch.setattr(mcp_server, "_memory_to_out", lambda m: _rich_out_stub(m["id"]))
+    out = await mcp_server.memclaw_list(verbosity="compact")
+    payload = parse_envelope(out)
+    assert len(payload["results"]) == 1
+    assert set(payload["results"][0].keys()) == _LIST_COMPACT_KEYS
+
+
+async def test_list_verbosity_full_is_default_and_unprojected(mcp_env, monkeypatch):
+    """Default (verbosity omitted) keeps the extra fields compact would drop."""
+    rows = [{"id": str(uuid4()), "created_at": datetime.now(timezone.utc).isoformat()}]
+    stub_storage_client(monkeypatch, list_memories_by_filters=rows)
+    monkeypatch.setattr(mcp_server, "_memory_to_out", lambda m: _rich_out_stub(m["id"]))
+    out = await mcp_server.memclaw_list()  # default == full
+    r0 = parse_envelope(out)["results"][0]
+    assert {"tags", "summary", "enrichment_pending"} <= set(r0.keys())
+
+
+async def test_list_verbosity_invalid_returns_422(mcp_env):
+    """An unknown verbosity value is rejected with the structured envelope."""
+    out = await mcp_server.memclaw_list(verbosity="tiny")
+    assert "INVALID_ARGUMENTS" in as_text(out)
+    assert "Invalid verbosity 'tiny'" in as_text(out)

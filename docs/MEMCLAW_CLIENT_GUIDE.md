@@ -362,12 +362,14 @@ Every tool accepts `agent_id` (defaults to the deployment's seeded
 | Tool | Purpose | Key args |
 |------|---------|----------|
 | `memclaw_write` | Store NEW memories; auto-classifies type/title/tags/dates. One of `content` **or** `items` (batch ≤100). | `content`, `items`, `visibility`, `weight`, `memory_type` |
-| `memclaw_recall` | Semantic + keyword search ("find by meaning"). | `query*`, `top_k`, `memory_type`, `include_brief` |
-| `memclaw_list` | Non-semantic browse: filter/sort/paginate by type, author, status, weight, date. | `scope`, `memory_type`, `sort`, `cursor`, `limit` |
+| `memclaw_recall` | Semantic + keyword search ("find by meaning"). | `query*`, `top_k`, `memory_type`, `include_brief`, `verbosity` |
+| `memclaw_list` | Non-semantic browse: filter/sort/paginate by type, author, status, weight, date. | `scope`, `memory_type`, `sort`, `cursor`, `limit`, `verbosity` |
 | `memclaw_manage` | Per-memory lifecycle: `read` / `update` / `transition` / `delete` / `bulk_delete` / `lineage`. | `op*`, `memory_id`, `status`, `content` |
 | `memclaw_stats` | Aggregate counts (total + by type/agent/status). | `scope`, `memory_type`, `include_deleted` |
 | `memclaw_export` | Export memories paginated by scope/format — mirrors `memclaw_list`'s visibility scoping. | `scope*`, `format*`, `limit`, `cursor` |
 | `memclaw_env` | Stable-infra fact store (URLs, ports, config truths): upsert / get / list / verify. | `op*`, `name`, `value`, `confidence` |
+
+> **`verbosity` (recall / list / session_start):** defaults to `"full"` — every field, byte-identical to prior behavior. Pass `"compact"` to shrink each returned memory to the core set `id, title, content, memory_type, status, weight, created_at` (`memclaw_recall` also keeps `similarity`), dropping enrichment/metadata to cut response tokens on large result sets. Any other value is rejected with `INVALID_ARGUMENTS`.
 
 ### Outcome & reflection (closing the learning loop)
 
@@ -405,7 +407,7 @@ Every tool accepts `agent_id` (defaults to the deployment's seeded
 
 | Tool | Purpose | Key args |
 |------|---------|----------|
-| `memclaw_session_start` | Session initialization in one call: top-5 memories by weight, keystones, and reliable procedures (success_rate ≥ 0.6). | `agent_id`, `fleet_id` |
+| `memclaw_session_start` | Session initialization in one call: top-5 memories by weight, keystones, and reliable procedures (success_rate ≥ 0.6). | `agent_id`, `fleet_id`, `verbosity` |
 
 ---
 

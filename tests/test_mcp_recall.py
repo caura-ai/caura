@@ -255,6 +255,98 @@ async def test_recall_cache_bypass_on_filter_agent_id(mcp_env, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# verbosity=compact projection + cache-key fix (RE-03)
+# ---------------------------------------------------------------------------
+
+
+class _RichMemoryStub:
+    """Search result whose ``model_dump`` carries the full field set — so the
+    compact projection has real fields to drop (enrichment/metadata)."""
+
+    def __init__(self, mid: str):
+        self._d = {
+            "id": mid,
+            "title": "T",
+            "content": "C",
+            "memory_type": "decision",
+            "status": "active",
+            "weight": 0.5,
+            "created_at": "2026-07-07T00:00:00Z",
+            "similarity": 0.88,
+            # extras the compact projection must drop:
+            "tags": ["x"],
+            "summary": "s",
+            "enrichment_pending": False,
+            "agent_id": "a",
+        }
+
+    def model_dump(self, mode: str = "python"):  # noqa: ARG002
+        return dict(self._d)
+
+
+_RECALL_COMPACT_KEYS = {
+    "id",
+    "title",
+    "content",
+    "memory_type",
+    "status",
+    "weight",
+    "created_at",
+    "similarity",
+}
+
+
+async def test_recall_verbosity_compact_projects_field_set(mcp_env, monkeypatch):
+    """verbosity='compact' returns exactly the compact field set (incl. similarity)."""
+    monkeypatch.setattr(mcp_server, "cache_get", _fake_async_return(None))
+    monkeypatch.setattr(mcp_server, "cache_set", AsyncMock(return_value=True))
+    mcp_env["service"]("search_memories").return_value = [_RichMemoryStub("m-1")]
+    _wire_recall_deps(monkeypatch)
+
+    out = await mcp_server.memclaw_recall(query="q", verbosity="compact")
+    payload = parse_envelope(out)
+    assert len(payload["results"]) == 1
+    assert set(payload["results"][0].keys()) == _RECALL_COMPACT_KEYS
+
+
+async def test_recall_verbosity_full_is_default_and_unprojected(mcp_env, monkeypatch):
+    """Default (verbosity omitted) keeps the extra fields compact would drop."""
+    monkeypatch.setattr(mcp_server, "cache_get", _fake_async_return(None))
+    monkeypatch.setattr(mcp_server, "cache_set", AsyncMock(return_value=True))
+    mcp_env["service"]("search_memories").return_value = [_RichMemoryStub("m-1")]
+    _wire_recall_deps(monkeypatch)
+
+    out = await mcp_server.memclaw_recall(query="q")  # default == full
+    r0 = parse_envelope(out)["results"][0]
+    assert {"tags", "summary", "enrichment_pending"} <= set(r0.keys())
+
+
+async def test_recall_verbosity_invalid_returns_422(mcp_env):
+    """An unknown verbosity value is rejected with the structured envelope."""
+    out = await mcp_server.memclaw_recall(query="q", verbosity="tiny")
+    assert "INVALID_ARGUMENTS" in as_text(out)
+    assert "Invalid verbosity 'tiny'" in as_text(out)
+
+
+async def test_recall_cache_key_differs_by_verbosity(mcp_env, monkeypatch):
+    """RE-03 cache-key fix: compact and full recalls must not collide on one
+    cache entry — verbosity is part of the key, so a full-mode payload is never
+    served to a compact request (and vice versa)."""
+    monkeypatch.setattr(mcp_server, "cache_get", _fake_async_return(None))
+    cache_set_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(mcp_server, "cache_set", cache_set_mock)
+    mcp_env["service"]("search_memories").return_value = [_RichMemoryStub("m-1")]
+    _wire_recall_deps(monkeypatch)
+
+    await mcp_server.memclaw_recall(query="same query", verbosity="full")
+    await mcp_server.memclaw_recall(query="same query", verbosity="compact")
+
+    keys = [c.args[0] for c in cache_set_mock.await_args_list]
+    assert len(keys) == 2
+    assert keys[0] != keys[1], "compact and full recalls collided on the same cache key"
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

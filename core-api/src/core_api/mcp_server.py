@@ -571,6 +571,20 @@ def _storage_error_envelope(e: httpx.HTTPStatusError, t0: float) -> str | CallTo
     return _with_latency(_error_response(code_for_status(e.response.status_code), str(detail)), t0)
 
 
+_VALID_VERBOSITY = ("compact", "full")
+_COMPACT_FIELDS = ("id", "title", "content", "memory_type", "status", "weight", "created_at")
+
+
+def _project_compact(memory: dict, *, include_similarity: bool = False) -> dict:
+    """Project a serialized memory dict down to the ``verbosity='compact'`` field set.
+
+    Shared by ``memclaw_recall``, ``memclaw_list``, and ``memclaw_session_start``.
+    ``similarity`` is only meaningful on the recall path, so it's included there only.
+    """
+    fields = (*_COMPACT_FIELDS, "similarity") if include_similarity else _COMPACT_FIELDS
+    return {k: memory.get(k) for k in fields}
+
+
 # ── Tools ──
 
 
@@ -601,11 +615,25 @@ async def memclaw_recall(
             description="Opt-in agentic multi-step graph-reasoning loop for relational/temporal queries. Slower than the default single-pass search."
         ),
     ] = False,
+    verbosity: Annotated[
+        str,
+        Field(description="'compact': reduced field set. 'full' (default): unchanged."),
+    ] = "full",
 ) -> str | CallToolResult:
     """Hybrid semantic+keyword recall, with optional LLM brief."""
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
+    if verbosity not in _VALID_VERBOSITY:
+        return _with_latency(
+            _error_response(
+                "INVALID_ARGUMENTS",
+                f"Invalid verbosity '{verbosity}'. Must be one of: {', '.join(_VALID_VERBOSITY)}",
+                field="verbosity",
+                value=verbosity,
+            ),
+            t0,
+        )
     if memory_type and memory_type not in MEMORY_TYPES:
         return _with_latency(
             _error_response(
@@ -639,7 +667,10 @@ async def memclaw_recall(
     _use_cache = not cross_context and not reasoning_mode and filter_agent_id is None
     _cache_key: str | None = None
     if _use_cache:
-        _h = hashlib.sha256(f"{query}{capped_top_k}".encode()).hexdigest()[:12]
+        # Invariant: verbosity is part of the cache key so a compact response is
+        # never served to a full caller (or vice versa) — the two shapes differ
+        # and share every other key input, so omitting it cross-contaminates.
+        _h = hashlib.sha256(f"{query}{capped_top_k}{verbosity}".encode()).hexdigest()[:12]
         _cache_key = f"recall:{agent_id}:{_h}"
         if cached := await cache_get(_cache_key):
             return _with_latency(cached, t0)
@@ -724,8 +755,13 @@ async def memclaw_recall(
                 query_summary=(query or "")[:200],
             )
         # The LLM brief (when requested) runs without any DB connection held.
+        _dumped = [r.model_dump(mode="json") for r in results] if results else []
         payload: dict = {
-            "results": [r.model_dump(mode="json") for r in results] if results else [],
+            "results": (
+                [_project_compact(r, include_similarity=True) for r in _dumped]
+                if verbosity == "compact"
+                else _dumped
+            ),
         }
         if include_brief:
             payload["brief"] = await summarize_memories(
@@ -2275,6 +2311,10 @@ async def memclaw_list(
     limit: Annotated[int, Field(description="1-50.")] = 25,
     cursor: Annotated[str | None, Field(description="Pagination cursor.")] = None,
     include_deleted: Annotated[bool, Field(description="Trust-3 only.")] = False,
+    verbosity: Annotated[
+        str,
+        Field(description="'compact': reduced field set. 'full' (default): unchanged."),
+    ] = "full",
 ) -> str | CallToolResult:
     """Non-semantic memory enumeration: filter, sort, paginate by metadata.
     scope='agent' (default) requires trust ≥ 1; scope='fleet'/'all' requires
@@ -2282,6 +2322,16 @@ async def memclaw_list(
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
+    if verbosity not in _VALID_VERBOSITY:
+        return _with_latency(
+            _error_response(
+                "INVALID_ARGUMENTS",
+                f"Invalid verbosity '{verbosity}'. Must be one of: {', '.join(_VALID_VERBOSITY)}",
+                field="verbosity",
+                value=verbosity,
+            ),
+            t0,
+        )
     if scope not in VALID_SCOPES:
         return _with_latency(
             _error_response("INVALID_ARGUMENTS", f"Invalid scope '{scope}'. Must be: agent, fleet, all."),
@@ -2419,7 +2469,8 @@ async def memclaw_list(
             rows = await get_storage_client().list_memories_by_filters(list_payload)
             has_more = len(rows) > capped_limit
             # ``_memory_to_out`` accepts either an ORM row or a storage dict.
-            items = [_memory_to_out(m).model_dump(mode="json") for m in rows[:capped_limit]]
+            _dumped = [_memory_to_out(m).model_dump(mode="json") for m in rows[:capped_limit]]
+            items = [_project_compact(m) for m in _dumped] if verbosity == "compact" else _dumped
             next_cursor = None
             if has_more and rows:
                 last = rows[capped_limit - 1]
@@ -3914,6 +3965,10 @@ async def memclaw_keystones_set(
 async def memclaw_session_start(
     agent_id: Annotated[str, Field(description="Caller agent.")] = _DEFAULT_AGENT_ID,
     fleet_id: Annotated[str | None, Field(description="Fleet scope.")] = None,
+    verbosity: Annotated[
+        str,
+        Field(description="'compact': reduced field set. 'full' (default): unchanged."),
+    ] = "full",
 ) -> str | CallToolResult:
     """Call once at session start. Paste result into system prompt for zero-latency context.
 
@@ -3923,6 +3978,16 @@ async def memclaw_session_start(
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
+    if verbosity not in _VALID_VERBOSITY:
+        return _with_latency(
+            _error_response(
+                "INVALID_ARGUMENTS",
+                f"Invalid verbosity '{verbosity}'. Must be one of: {', '.join(_VALID_VERBOSITY)}",
+                field="verbosity",
+                value=verbosity,
+            ),
+            t0,
+        )
     tenant_id = _get_tenant()
     agent_id_effective = _get_agent_id() or agent_id
     if refuse := _refuse_default_agent_on_gateway(agent_id_effective):
@@ -3945,7 +4010,10 @@ async def memclaw_session_start(
             sc.list_keystones(tenant_id=tenant_id, fleet_id=fleet_id, agent_id=agent_id_effective),
             sc.list_procedures(tenant_id=tenant_id, limit=200),
         )
-        memories = [_memory_to_out(m).model_dump(mode="json") for m in mem_rows]
+        _dumped_memories = [_memory_to_out(m).model_dump(mode="json") for m in mem_rows]
+        memories = (
+            [_project_compact(m) for m in _dumped_memories] if verbosity == "compact" else _dumped_memories
+        )
         procedures = [p for p in (proc_rows or []) if (p.get("stats") or {}).get("success_rate", 0.0) >= 0.6]
         return _with_latency(
             json.dumps(

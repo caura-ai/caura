@@ -8,7 +8,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 from core_api import mcp_server
-from tests._mcp_test_helpers import parse_envelope, stub_storage_client
+from tests._mcp_test_helpers import as_text, parse_envelope, stub_storage_client
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -104,3 +104,34 @@ async def test_session_start_auth_failure_shortcircuits(monkeypatch):
     monkeypatch.setattr(mcp_server, "_check_auth", lambda: mcp_server._AUTH_ERROR)
     out = await mcp_server.memclaw_session_start()
     assert out == mcp_server._AUTH_ERROR
+
+
+# ---------------------------------------------------------------------------
+# verbosity=compact projection (RE-03)
+# ---------------------------------------------------------------------------
+
+_SESSION_COMPACT_KEYS = {"id", "title", "content", "memory_type", "status", "weight", "created_at"}
+
+
+async def test_session_start_verbosity_compact_projects_field_set(mcp_env, monkeypatch):
+    """verbosity='compact' shrinks each memory to the compact field set."""
+    _stub_session_deps(monkeypatch, memories=[_make_memory_row("m1")])
+    out = await mcp_server.memclaw_session_start(verbosity="compact")
+    payload = parse_envelope(out)
+    assert len(payload["memories"]) == 1
+    assert set(payload["memories"][0].keys()) == _SESSION_COMPACT_KEYS
+
+
+async def test_session_start_verbosity_full_is_default_and_unprojected(mcp_env, monkeypatch):
+    """Default (verbosity omitted) keeps the extra fields compact would drop."""
+    _stub_session_deps(monkeypatch, memories=[_make_memory_row("m1")])
+    out = await mcp_server.memclaw_session_start()  # default == full
+    m0 = parse_envelope(out)["memories"][0]
+    assert {"agent_id", "tenant_id"} <= set(m0.keys())
+
+
+async def test_session_start_verbosity_invalid_returns_422(mcp_env):
+    """An unknown verbosity value is rejected with the structured envelope."""
+    out = await mcp_server.memclaw_session_start(verbosity="tiny")
+    assert "INVALID_ARGUMENTS" in as_text(out)
+    assert "Invalid verbosity 'tiny'" in as_text(out)

@@ -719,6 +719,12 @@
           "description": "Trust-3 only.",
           "title": "Include Deleted",
           "type": "boolean"
+        },
+        "verbosity": {
+          "default": "full",
+          "description": "'compact': reduced field set. 'full' (default): unchanged.",
+          "title": "Verbosity",
+          "type": "string"
         }
       },
       "title": "memclaw_listArguments",
@@ -1269,6 +1275,12 @@
           "description": "Opt-in agentic multi-step graph-reasoning loop for relational/temporal queries. Slower than the default single-pass search.",
           "title": "Reasoning Mode",
           "type": "boolean"
+        },
+        "verbosity": {
+          "default": "full",
+          "description": "'compact': reduced field set. 'full' (default): unchanged.",
+          "title": "Verbosity",
+          "type": "string"
         }
       },
       "required": [
@@ -1347,6 +1359,12 @@
           "default": null,
           "description": "Fleet scope.",
           "title": "Fleet Id"
+        },
+        "verbosity": {
+          "default": "full",
+          "description": "'compact': reduced field set. 'full' (default): unchanged.",
+          "title": "Verbosity",
+          "type": "string"
         }
       },
       "title": "memclaw_session_startArguments",

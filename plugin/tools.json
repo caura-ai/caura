@@ -626,6 +626,13 @@
         "name": "include_deleted",
         "required": false,
         "type": "bool"
+      },
+      {
+        "default": "full",
+        "description": "'compact': reduced field set. 'full' (default): unchanged.",
+        "name": "verbosity",
+        "required": false,
+        "type": "str"
       }
     ],
     "plugin_exposed": true,
@@ -1099,6 +1106,13 @@
         "name": "reasoning_mode",
         "required": false,
         "type": "bool"
+      },
+      {
+        "default": "full",
+        "description": "'compact': reduced field set. 'full' (default): unchanged.",
+        "name": "verbosity",
+        "required": false,
+        "type": "str"
       }
     ],
     "plugin_exposed": true,
@@ -1168,6 +1182,13 @@
         "name": "fleet_id",
         "required": false,
         "type": "str | None"
+      },
+      {
+        "default": "full",
+        "description": "'compact': reduced field set. 'full' (default): unchanged.",
+        "name": "verbosity",
+        "required": false,
+        "type": "str"
       }
     ],
     "plugin_exposed": true,
