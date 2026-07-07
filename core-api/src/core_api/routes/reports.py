@@ -647,6 +647,13 @@ async def get_agent_activity_digest(
         raise HTTPException(status_code=422, detail=f"Invalid period '{period}'. Use 'day' or 'week'.")
     if scope not in ("own", "org"):
         raise HTTPException(status_code=422, detail="Invalid scope. Use 'own' or 'org'.")
+    if as_of is not None:
+        # Fail fast with a clean 422 before any storage round-trip (N calls under
+        # scope='org'); the storage router validates too, as a backstop.
+        try:
+            datetime.fromisoformat(as_of)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="'as_of' must be a valid ISO date/datetime.")
 
     # Resolve the target tenant set. The internal admin proxy may pass an
     # explicit set; every other caller is pinned to its own readable set so a

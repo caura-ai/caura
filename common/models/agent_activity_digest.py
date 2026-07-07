@@ -80,6 +80,6 @@ class AgentActivityDigest(Base):
             "ix_agent_digest_latest",
             "tenant_id",
             "period",
-            window_start.desc(),
+            text("window_start DESC"),
         ),
     )
