@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -12,11 +13,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from core_api.clients.storage_client import get_storage_client
 
 try:
-    from google.api_core.exceptions import GoogleAPIError
+    from google.api_core.exceptions import GoogleAPIError  # type: ignore[import-untyped]
 except ImportError:
 
-    class GoogleAPIError(Exception):
-        pass  # type: ignore[misc]
+    class _GoogleAPIError(Exception):
+        pass
+
+    GoogleAPIError = _GoogleAPIError  # type: ignore[misc,assignment]
 
 
 from core_api.constants import (
@@ -275,7 +278,7 @@ async def _run_crystallization(
 
     sc = get_storage_client()
 
-    result = {
+    result: dict[str, Any] = {
         "enabled": True,
         "clusters_found": 0,
         "memories_crystallized": 0,

@@ -138,6 +138,7 @@ async def process_entity_extraction(
         # ent.role`` in the old serial path also picked first-wins).
         filtered: list[tuple[str, str, str]] = []  # (canonical_name, entity_type, role)
         seen_names: set[str] = set()
+        name_to_id: dict[str, UUID]
         for ent in graph.entities:
             if not _is_valid_entity(ent.canonical_name, blocklist):
                 logger.debug("Skipping invalid entity name '%s'", ent.canonical_name)
@@ -151,7 +152,7 @@ async def process_entity_extraction(
             # Nothing to persist; skip the bulk flow but keep the
             # downstream audit-log + contradiction-trigger paths so a
             # zero-entity memory still records the run.
-            name_to_id: dict[str, UUID] = {}
+            name_to_id = {}
         else:
             # ---- Step 1: parallel embeddings (audit P1) ----
             #
@@ -338,7 +339,7 @@ async def process_entity_extraction(
             # as a WARN log instead of an IndexError → 500. Mirrors the
             # length-mismatch warning above on ``bulk_resolve_entities``
             # — same "treat malformed responses defensively" pattern.
-            name_to_id: dict[str, UUID] = {}
+            name_to_id = {}
             for r in upserted:
                 if not r.get("entity_id"):
                     continue

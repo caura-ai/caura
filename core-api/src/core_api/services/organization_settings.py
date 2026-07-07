@@ -581,7 +581,7 @@ def _validate_leaf_types(payload: dict, prefix: str = "") -> None:
                     else " or ".join(t.__name__ for t in expected)
                 )
                 raise ValueError(f"Settings key {path!r} must be {type_name}, got {type(v).__name__}")
-            if path in _LEAF_RANGES:
+            if path in _LEAF_RANGES and isinstance(v, (int, float)):
                 lo, hi = _LEAF_RANGES[path]
                 if not (lo <= v <= hi):
                     raise ValueError(f"Settings key {path!r} must be in [{lo}, {hi}], got {v!r}")
