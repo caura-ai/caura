@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -37,33 +36,24 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.services.agent_digest import run_agent_digest
 from core_api.services.audit_service import log_action
 from core_api.services.caller_identity import resolve_caller_and_gate
+from core_api.services.report_corpus import (
+    NON_COHESIVE_TITLE_REGEX,
+    NON_DURABLE_TYPES,
+    RESERVED_FIREHOSE_AGENTS,
+)
+from core_api.services.report_corpus import (
+    is_cohesive as _cohesive,
+)
 
 router = APIRouter(tags=["Reports"])
 logger = logging.getLogger(__name__)
 
-# Episodic activity-log type(s) + the unattributed firehose agent excluded so the
-# report reflects durable, decision-bearing per-agent work.
-NON_DURABLE_TYPES = ("episode",)
-RESERVED_FIREHOSE_AGENTS = ("main",)
-
-# "Cohesive" filter: heartbeat / health-check / status-poll noise leaks in as
-# NON-episode rows (e.g. action/outcome "heartbeat" or "Checked HEARTBEAT.md"
-# writes), so the type+firehose exclusion above is not enough — a per-agent
-# leaderboard built on it still counts monitoring pings as "what the agent did".
-# This case-insensitive title regex drops that noise across ALL types so the
-# report reflects real work; genuine rules/decisions/insights never match it, so
-# the value/quality surfaces are unaffected. Applied report-wide (breakdown,
-# durable rows, trend) for a single reconcilable corpus. Pure-monitor agents
-# fall off the leaderboard naturally once their pings are excluded.
-NON_COHESIVE_TITLE_REGEX = (
-    r"(heartbeat|health[- ]?check|healthz|healthy|watchdog|gpu.?health|no.?change|"
-    r"auth error|zero auth|0 auth|encrypted|unreadable|no readable|no actionable|"
-    r"no usable|no_reply|polled|quickcheck|app-fleet|discovery script|"
-    r"gateway (active|reachable)|cache refresh)"
-)
-_NON_COHESIVE_TITLE_RE = re.compile(NON_COHESIVE_TITLE_REGEX, re.IGNORECASE)
+# Corpus rules (NON_DURABLE_TYPES / RESERVED_FIREHOSE_AGENTS /
+# NON_COHESIVE_TITLE_REGEX / _cohesive) are shared with the digest generator —
+# see core_api.services.report_corpus.
 
 # Delivery audience classes — an abstraction over messaging platforms
 # (WhatsApp / Teams / Slack / Claude-Code map to one of these at the edge).
@@ -321,23 +311,11 @@ async def get_report(
         def _rank(m: dict) -> tuple:
             return (m.get("recall_count") or 0, m.get("created_at") or "")
 
-        def _cohesive(m: dict) -> bool:
-            # WARNING: the /memories/list API cannot push exclude_memory_types /
-            # exclude_agent_ids / exclude_title_regex server-side, so the row
-            # fetches (list_query, highlights_query) come back raw and this
-            # predicate drops the noise client-side — AFTER the fetch limit has
-            # already been consumed. That is why _DURABLE_FETCH_LIMIT /
-            # _HIGHLIGHTS_FETCH_LIMIT over-fetch: the surviving pool must still
-            # exceed the downstream _LEARNING_LIMIT / _HIGHLIGHTS_LIMIT slices.
-            #
-            # Mirror the server-side report corpus in Python for the row fetches:
-            # durable (non-episodic, non-firehose) AND not heartbeat/status noise.
-            # Title-only match mirrors the ``exclude_title_regex`` predicate.
-            return (
-                m.get("memory_type") not in NON_DURABLE_TYPES
-                and m.get("agent_id") not in RESERVED_FIREHOSE_AGENTS
-                and not _NON_COHESIVE_TITLE_RE.search(m.get("title") or "")
-            )
+        # ``_cohesive`` (imported from report_corpus) drops the noise the
+        # /memories/list API can't exclude server-side — AFTER the fetch limit is
+        # consumed, which is why _DURABLE_FETCH_LIMIT / _HIGHLIGHTS_FETCH_LIMIT
+        # over-fetch: the surviving pool must still exceed the downstream
+        # _LEARNING_LIMIT / _HIGHLIGHTS_LIMIT slices.
 
         # Recent-ordered fetch → LEARNING (recent insights) + working-on LANES.
         list_query: dict = {
@@ -720,3 +698,22 @@ async def get_agent_activity_digest(
         "windows": [{"window_start": s, "window_end": e} for s, e in windows],
     }
     return {"meta": meta, "digests": digests}
+
+
+@router.post("/admin/reports/agent-digest/run")
+async def run_agent_digest_endpoint(
+    period: str = Query("day", description="Digest window to generate: 'day' or 'week'."),
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict:
+    """Generate agent-activity digests for all opted-in orgs (admin/cron only).
+
+    The core-operations nightly cron POSTs this. Enumerates orgs with
+    ``agent_digest.enabled`` and generates inline with bounded concurrency
+    (see ``services.agent_digest``); returns a bounded counts summary. This is
+    the WRITE/generation path — the read path (GET /reports/agent-activity)
+    never computes.
+    """
+    auth.enforce_admin()
+    if period not in _PERIOD_DAYS:
+        raise HTTPException(status_code=422, detail=f"Invalid period '{period}'. Use 'day' or 'week'.")
+    return await run_agent_digest(period)

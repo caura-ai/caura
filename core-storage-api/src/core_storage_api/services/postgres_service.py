@@ -8150,6 +8150,18 @@ class PostgresService:
             )
             return sorted(row[0] for row in result.all())
 
+    async def tenants_list_agent_digest_enabled(self) -> list[str]:
+        """``org_id`` values whose ``agent_digest.enabled`` JSONB flag is True,
+        sorted. The nightly digest fanout uses this so a tenant that hasn't opted
+        in pays zero cost. Orgs with no settings row are excluded (default off)."""
+        async with get_read_session() as session:
+            result = await session.execute(
+                select(OrganizationSettings.org_id).where(
+                    OrganizationSettings.settings["agent_digest"]["enabled"].as_boolean().is_(True)
+                )
+            )
+            return sorted(row[0] for row in result.all())
+
     # ══════════════════════════════════════════════════════════════════════
     #  REPORTS (CrystallizationReport)
     # ══════════════════════════════════════════════════════════════════════

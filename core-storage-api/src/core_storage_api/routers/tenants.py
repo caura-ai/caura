@@ -49,3 +49,10 @@ async def list_skills_factory_enabled_orgs() -> OrgIdsResponse:
     """Orgs whose ``skills_factory.enabled`` setting is True (forge-distill
     fanout target)."""
     return OrgIdsResponse(org_ids=await _svc.tenants_list_skills_factory_enabled())
+
+
+@router.get("/agent-digest-enabled")
+async def list_agent_digest_enabled_orgs() -> OrgIdsResponse:
+    """Orgs whose ``agent_digest.enabled`` setting is True (nightly digest
+    fanout target)."""
+    return OrgIdsResponse(org_ids=await _svc.tenants_list_agent_digest_enabled())

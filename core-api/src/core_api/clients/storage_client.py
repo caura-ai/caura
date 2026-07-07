@@ -2408,6 +2408,13 @@ class CoreStorageClient:
             raise RuntimeError("core-storage-api /tenants/skills-factory-enabled returned 404")
         return result.get("org_ids", [])
 
+    async def list_agent_digest_enabled_orgs(self) -> list[str]:
+        """Orgs whose ``agent_digest.enabled`` setting is True."""
+        result = await self._get("/tenants/agent-digest-enabled")
+        if result is None:
+            raise RuntimeError("core-storage-api /tenants/agent-digest-enabled returned 404")
+        return result.get("org_ids", [])
+
     # =====================================================================
     # Reports
     # =====================================================================

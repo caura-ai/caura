@@ -70,6 +70,20 @@ DEFAULT_SETTINGS: dict = {
         "provider": None,
         "model": None,
     },
+    # Cached per-agent activity digest (nightly generation; served read-only by
+    # GET /api/v1/reports/agent-activity). Opt-in — disabled by default because
+    # generation spends LLM tokens. See core_api.services.agent_digest.
+    "agent_digest": {
+        "enabled": False,
+        "cadence": "daily",  # daily | weekly | both
+        "provider": "openai",
+        "model": "gpt-5.4-mini",
+        "top_n": 25,
+        "max_memories_per_agent": 60,
+        "min_activity_threshold": 3,
+        "max_cost_per_run_usd": 2.0,
+        "retention_days": 90,
+    },
     "search": {
         "recall_boost": None,
         "graph_retrieval": None,
