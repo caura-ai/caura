@@ -2466,6 +2466,10 @@ class CoreStorageClient:
             params["as_of"] = as_of
         return await self._get_list("/reports/agent-activity", **params)
 
+    async def upsert_agent_activity_digest(self, data: dict) -> dict:
+        """Insert/replace one agent-activity digest row (digest generator writes)."""
+        return await self._post("/reports/agent-activity", data)  # type: ignore[return-value]
+
     # =====================================================================
     # Tasks
     # =====================================================================

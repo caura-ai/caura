@@ -8299,6 +8299,60 @@ class PostgresService:
             result = await session.execute(rows_stmt)
             return list(result.scalars().all())
 
+    async def agent_activity_digest_upsert(self, data: dict) -> AgentActivityDigest:
+        """Insert or replace one digest row; idempotent on the run window.
+
+        Re-running the same (tenant_id, [fleet_id], agent_id, period,
+        window_start) overwrites the prior content — a re-run mints a fresh
+        ``run_id`` and refreshes ``generated_at``. Uniqueness is enforced by two
+        PARTIAL unique indexes (fleet / no-fleet), and ``ON CONFLICT`` can infer
+        only one, so we target the index matching this row's fleet_id NULL-ness.
+        """
+        async with get_session() as session:
+            insert_stmt = pg_insert(AgentActivityDigest).values(**data)
+            set_ = {
+                "run_id": insert_stmt.excluded.run_id,
+                "window_end": insert_stmt.excluded.window_end,
+                "narrative": insert_stmt.excluded.narrative,
+                "sections": insert_stmt.excluded.sections,
+                "source_count": insert_stmt.excluded.source_count,
+                "recall_count": insert_stmt.excluded.recall_count,
+                "model": insert_stmt.excluded.model,
+                "status": insert_stmt.excluded.status,
+                "error_detail": insert_stmt.excluded.error_detail,
+                # A re-run's row is freshly generated — stamp update time.
+                "generated_at": func.now(),
+            }
+            if data.get("fleet_id") is None:
+                upsert_stmt = insert_stmt.on_conflict_do_update(
+                    index_elements=["tenant_id", "agent_id", "period", "window_start"],
+                    index_where=text("fleet_id IS NULL"),
+                    set_=set_,
+                )
+            else:
+                upsert_stmt = insert_stmt.on_conflict_do_update(
+                    index_elements=["tenant_id", "fleet_id", "agent_id", "period", "window_start"],
+                    index_where=text("fleet_id IS NOT NULL"),
+                    set_=set_,
+                )
+            await session.execute(upsert_stmt)
+
+            # Re-fetch for a tracked ORM instance: RETURNING on a
+            # pg_insert+on_conflict yields a Row, not the ORM object orm_to_dict
+            # expects (mirrors relation_upsert). The natural key + fleet_id
+            # NULL-ness pins exactly one row.
+            select_stmt = select(AgentActivityDigest).where(
+                AgentActivityDigest.tenant_id == data["tenant_id"],
+                AgentActivityDigest.agent_id == data["agent_id"],
+                AgentActivityDigest.period == data["period"],
+                AgentActivityDigest.window_start == data["window_start"],
+            )
+            if data.get("fleet_id") is None:
+                select_stmt = select_stmt.where(AgentActivityDigest.fleet_id.is_(None))
+            else:
+                select_stmt = select_stmt.where(AgentActivityDigest.fleet_id == data["fleet_id"])
+            return (await session.execute(select_stmt)).scalar_one()
+
     # ══════════════════════════════════════════════════════════════════════
     #  TASKS (BackgroundTaskLog)
     # ══════════════════════════════════════════════════════════════════════

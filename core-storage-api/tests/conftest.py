@@ -50,6 +50,7 @@ async def _ensure_schema():
     import common.models.document  # noqa: F401
     import common.models.background_task  # noqa: F401
     import common.models.analysis_report  # noqa: F401
+    import common.models.agent_activity_digest  # noqa: F401
     from common.models.base import Base
 
     async with engine.begin() as conn:
