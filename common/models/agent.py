@@ -31,6 +31,21 @@ class Agent(Base):
     install_id: Mapped[str | None] = mapped_column(String(32), index=True)
     trust_level: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("1"))
     search_profile: Mapped[dict | None] = mapped_column(JSONB)
+    # ``belonging_type`` / ``owner_ref``: the typed agent→owner relationship the
+    # report API (GET /api/v1/reports) uses to resolve where an agent's report
+    # goes. Two kinds:
+    #   ``personal`` — belongs to a human user (``owner_ref`` = that user id);
+    #                  the agent reports 1:1 to its owner.
+    #   ``service``  — belongs to a group/fleet (the group IS ``fleet_id``;
+    #                  ``owner_ref`` is NULL); the agent reports into the group.
+    # Validated at the app layer (no DB enum, mirroring ``visibility``/``trust``).
+    # Existing rows backfill to ``service`` so today's fleet agents keep working;
+    # ``personal`` agents are set explicitly (interim ``owner_ref`` default =
+    # the agent credential's ``created_by``). Extensible to more types later.
+    belonging_type: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'service'")
+    )
+    owner_ref: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

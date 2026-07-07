@@ -664,7 +664,7 @@ class TestMigrationChain:
     def test_single_head(self):
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"030"}, f"Expected single head '030', got {sorted(heads)}"
+        assert heads == {"032"}, f"Expected single head '032', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -680,10 +680,17 @@ class TestMigrationChain:
         assert chain.get("026") == "025", "026 must follow 025"
         # 027: opt-in recall logging (recall_event + recall_candidate)
         assert chain.get("027") == "026", "027 must follow 026"
-        # 028: procedures + procedure_stats (procedural-memory sprint)
+        # 028: agent belonging model (belonging_type + owner_ref)
         assert chain.get("028") == "027", "028 must follow 027"
-        # 029: verified outcome counters on procedure_stats (Loop Engineering LE-01)
+        # 029: agent activity digest (cached per-agent summaries, CAURA-222)
         assert chain.get("029") == "028", "029 must follow 028"
+        # 030: procedures + procedure_stats (procedural-memory sprint; renumbered
+        # from 028 onto origin's head during recall-efficiency integration)
+        assert chain.get("030") == "029", "030 must follow 029"
+        # 031: verified outcome counters on procedure_stats (Loop Engineering LE-01)
+        assert chain.get("031") == "030", "031 must follow 030"
+        # 032: procedure status invalidated (procedural-memory)
+        assert chain.get("032") == "031", "032 must follow 031"
 
     def test_no_plain_create_index_on_large_tables(self):
         """Indexes on large, pre-existing tables MUST be built ``CONCURRENTLY``

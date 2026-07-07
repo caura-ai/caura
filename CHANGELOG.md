@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.19.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.18.0...backend-v2.19.0) (2026-07-05)
+
+
+### Features
+
+* **core-api,plugin:** self-identify MCP writes when the verified id is reserved "main" ([#507](https://github.com/caura-ai/caura-memclaw/issues/507)) ([1bc00c1](https://github.com/caura-ai/caura-memclaw/commit/1bc00c14e2de653f006ab5226e1c22626b5f829d))
+* **core-api:** governed daily/weekly agent activity report (GET /api/v1/reports) ([#514](https://github.com/caura-ai/caura-memclaw/issues/514)) ([d6c569d](https://github.com/caura-ai/caura-memclaw/commit/d6c569d72eaba687e3538743b9293b30760f9ca7))
+* **core-api:** reserve agent_id "main" on the write path (Phase 1) ([#505](https://github.com/caura-ai/caura-memclaw/issues/505)) ([1d313f9](https://github.com/caura-ai/caura-memclaw/commit/1d313f94d3df953d83f37f37e068cdd2e3c6514b))
+* **observability:** log auto /search recalls behind a separate flag ([#503](https://github.com/caura-ai/caura-memclaw/issues/503)) ([f411db2](https://github.com/caura-ai/caura-memclaw/commit/f411db29ee3f5821303128fb52936b8b6a889d3c))
+* **observability:** sample below-floor near-misses on the /search recall log ([#506](https://github.com/caura-ai/caura-memclaw/issues/506)) ([9b18bd9](https://github.com/caura-ai/caura-memclaw/commit/9b18bd91a6a816b6fab907c644a2e86eb3a9fa77))
+
+
+### Bug Fixes
+
+* **core-api:** don't 422 the whole heartbeat on an oversized observability blob ([#497](https://github.com/caura-ai/caura-memclaw/issues/497)) ([77bfcbe](https://github.com/caura-ai/caura-memclaw/commit/77bfcbe266f804a808b75e895f56c00895a71fd8))
+* **core-api:** stop passing removed positional db to log_action on write path ([#495](https://github.com/caura-ai/caura-memclaw/issues/495)) ([3f89218](https://github.com/caura-ai/caura-memclaw/commit/3f892189cf6caa98cab1a838ae5b3dfaa18293a3))
+* **core-operations:** configure logging at import so uvicorn startup lines aren't tagged ERROR ([#523](https://github.com/caura-ai/caura-memclaw/issues/523)) ([ff88064](https://github.com/caura-ai/caura-memclaw/commit/ff88064e3d7eae1aa15ab7302e6c5e405a43b5c0))
+* **logging:** floor ddtrace trace/LLMObs writer loggers at CRITICAL ([#522](https://github.com/caura-ai/caura-memclaw/issues/522)) ([a878d84](https://github.com/caura-ai/caura-memclaw/commit/a878d84d17235d884cfe5da07502660bcf02bb78))
+
+
+### Performance
+
+* **recall:** cap summary max_tokens and fail fast on slow provider ([#515](https://github.com/caura-ai/caura-memclaw/issues/515)) ([5fd98b1](https://github.com/caura-ai/caura-memclaw/commit/5fd98b1e991dcd48fa3203317f8daa2397bc480a))
+
+
+### Documentation
+
+* **readme:** add Skill Factory overview [slice 1] ([#504](https://github.com/caura-ai/caura-memclaw/issues/504)) ([cf8bfe9](https://github.com/caura-ai/caura-memclaw/commit/cf8bfe9115fef1d04c3c1868caaf3fd86e4657a2))
+
 ## [2.18.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.17.0...backend-v2.18.0) (2026-06-25)
 
 

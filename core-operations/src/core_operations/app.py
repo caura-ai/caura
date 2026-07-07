@@ -4,8 +4,12 @@ Hosts cron/scheduled background jobs that operate on OSS data
 (memories, organizations, tenants). No business HTTP surface — only
 ``/healthz`` for Cloud Run probes.
 
+Logging is configured at MODULE IMPORT (see below) so uvicorn's own startup
+lines route through the JSON/GCP handler; the lifespan only re-routes
+third-party loggers once they're all imported.
+
 Lifespan ordering:
-1. ``configure_logging`` reads env BEFORE any module that emits log records.
+1. Re-route third-party loggers (uvicorn / scheduler) onto the JSON handler.
 2. If ``settings.standalone``: skip scheduler entirely. The service runs
    as a no-op; OSS standalone deployments should not deploy this image
    at all, but the flag is a defensive short-circuit.
@@ -24,8 +28,27 @@ from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException
 
-from common.structlog_config import configure_logging
+from common.structlog_config import configure_logging, reroute_third_party_loggers
 from core_operations.config import settings
+
+# Configure logging at import — before the scheduler/tasks imports below AND
+# before uvicorn emits its startup lines. uvicorn imports this module during
+# config load, so an import-time configure_logging() reroutes uvicorn's own
+# loggers onto the JSON/GCP handler before "Started server process" / "Waiting
+# for application startup" are logged. Configuring in the lifespan instead left
+# those two lines to fall through uvicorn's default stderr handler, where Cloud
+# Logging tagged them ERROR (false errors). E402 on the imports below is ignored
+# for app.py — the config call must precede any module that emits log records.
+# Test-safe: pytest caplog captures via stdlib root propagation, so the scheduler
+# /task caplog assertions still work (verified: full suite green) — this mirrors
+# core-api, which also configures at import with no special reset fixture.
+configure_logging(
+    settings.environment,
+    settings.log_level,
+    json_logs=settings.log_format_json,
+    log_file=settings.log_file or None,
+)
+
 from core_operations.scheduler import scheduler, seconds_until_next_utc_hour
 from core_operations.tasks import (
     run_archive_expired_tick,
@@ -93,15 +116,11 @@ def _register_scheduled_tasks() -> None:
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # Logging is configured here rather than at module import so test
-    # runners that import this module (for `app` collection) don't
-    # reconfigure structlog before pytest's caplog activates.
-    configure_logging(
-        settings.environment,
-        settings.log_level,
-        json_logs=settings.log_format_json,
-        log_file=settings.log_file or None,
-    )
+    # Re-route third-party loggers (uvicorn / scheduler libs) onto the root JSON
+    # handler now that they're all imported — the import-time configure_logging()
+    # pass above no-ops for libraries imported after it (uvicorn is loaded by the
+    # server). Idempotent; mirrors core-api's lifespan.
+    reroute_third_party_loggers()
 
     logger.info(
         "Starting core-operations",

@@ -1060,6 +1060,20 @@ class CoreStorageClient:
             raise RuntimeError("core-storage-api /memories/stats-breakdown returned 404")
         return result  # type: ignore[return-value]
 
+    async def memory_daily_durable_counts(self, data: dict) -> list[dict]:
+        """Per-day durable-write counts (report activity-over-time trend)."""
+        result = await self._post("/memories/daily-durable-counts", data, read=True)
+        if result is None:
+            raise RuntimeError("core-storage-api /memories/daily-durable-counts returned 404")
+        return result  # type: ignore[return-value]
+
+    async def memory_quality_metrics(self, data: dict) -> dict:
+        """Reuse / recall quality aggregates over a scoped corpus (report Quality section)."""
+        result = await self._post("/memories/quality-metrics", data, read=True)
+        if result is None:
+            raise RuntimeError("core-storage-api /memories/quality-metrics returned 404")
+        return result  # type: ignore[return-value]
+
     async def soft_delete_by_run(
         self,
         tenant_id: str,
@@ -2513,6 +2527,22 @@ class CoreStorageClient:
 
     async def list_reports(self, tenant_id: str) -> list[dict]:
         return await self._get_list("/reports", tenant_id=tenant_id)
+
+    async def get_agent_activity_digest(
+        self,
+        tenant_id: str,
+        period: str,
+        *,
+        agent_id: str | None = None,
+        as_of: str | None = None,
+    ) -> list[dict]:
+        """Latest run's per-agent digest rows for a tenant/period ([] if none)."""
+        params: dict[str, Any] = {"tenant_id": tenant_id, "period": period}
+        if agent_id is not None:
+            params["agent_id"] = agent_id
+        if as_of is not None:
+            params["as_of"] = as_of
+        return await self._get_list("/reports/agent-activity", **params)
 
     # =====================================================================
     # Tasks

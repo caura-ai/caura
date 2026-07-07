@@ -115,6 +115,7 @@ def _import_all_models():
     import common.models.memory  # noqa: F401
     import common.models.entity  # noqa: F401
     import common.models.agent  # noqa: F401
+    import common.models.agent_activity_digest  # noqa: F401
     import common.models.audit  # noqa: F401
     import common.models.analysis_report  # noqa: F401
     import common.models.fleet  # noqa: F401
@@ -152,6 +153,7 @@ async def _setup_schema(_engine):
             "entities",
             "memories",
             "audit_log",
+            "agent_activity_digests",
         ):
             try:
                 await conn.execute(

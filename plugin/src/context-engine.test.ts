@@ -45,6 +45,7 @@ function input(overrides: Partial<ShouldRecallInput> = {}): ShouldRecallInput {
     triggerKeywords: DEFAULT_KEYWORDS,
     sessionKey: "tenant:agent:default",
     denySessions: [],
+    applyNoiseRules: true,
     ...overrides,
   };
 }
@@ -356,5 +357,65 @@ describe("isDuplicateMemoryError — afterTurn 409 swallow gate", () => {
     // prefix is always present at the start.
     const e = new Error('MemClaw API 409: ...truncated...');
     assert.equal(isDuplicateMemoryError(e), true);
+  });
+});
+
+describe("shouldRecall — noise-skip gate (auto)", () => {
+  const MP = [/heartbeat/i, /health ?check/i, /\bcron\b/i];
+  test("skips a bare agent-name self-match", () => {
+    const r = shouldRecall(input({ prompt: "brandclaw", agentId: "brandclaw" }));
+    assert.equal(r.recall, false);
+    assert.equal(r.reason, "agent-name-self");
+  });
+  test("skips @mention / number-only turns", () => {
+    const r = shouldRecall(input({ prompt: "@50934788919473" }));
+    assert.equal(r.recall, false);
+    assert.equal(r.reason, "mention-only");
+  });
+  test("skips [Subagent Context] blobs", () => {
+    const r = shouldRecall(
+      input({ prompt: "[Subagent Context] you are running as a subagent (depth 1/1)" }),
+    );
+    assert.equal(r.recall, false);
+    assert.equal(r.reason, "subagent-context");
+  });
+  test("skips machine/automation turns via patterns", () => {
+    for (const p of [
+      "heartbeat check: all services healthy",
+      "cron run 08:00 UTC sync completed",
+      "AgentX health check exited 1",
+    ]) {
+      const r = shouldRecall(input({ prompt: p, machinePatterns: MP }));
+      assert.equal(r.recall, false, p);
+      assert.equal(r.reason, "machine-pattern", p);
+    }
+  });
+  test("skips instruction-to-third-party", () => {
+    const r = shouldRecall(input({ prompt: "tell Codex to add this MCP server for me" }));
+    assert.equal(r.recall, false);
+    assert.equal(r.reason, "instruction-3rd-party");
+  });
+  test("still recalls a genuine question", () => {
+    const r = shouldRecall(
+      input({
+        prompt: "what are the compliance rules for prediction markets?",
+        agentId: "complianceclaw",
+        machinePatterns: MP,
+      }),
+    );
+    assert.equal(r.recall, true);
+    assert.equal(r.reason, "default-substantive");
+  });
+  test("explicit recall keyword still wins over noise rules", () => {
+    const r = shouldRecall(
+      input({ prompt: "remember the deadline (heartbeat)", machinePatterns: MP }),
+    );
+    assert.equal(r.recall, true);
+    assert.equal(r.reason, "explicit-recall-trigger");
+  });
+  test("no machinePatterns supplied → machine rule inert", () => {
+    const r = shouldRecall(input({ prompt: "heartbeat check all healthy and nothing else here" }));
+    // falls through to default-substantive (length >= 14, not a ping)
+    assert.equal(r.reason, "default-substantive");
   });
 });

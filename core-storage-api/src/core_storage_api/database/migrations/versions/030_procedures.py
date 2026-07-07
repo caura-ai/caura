@@ -26,8 +26,8 @@ Two tables, 1:1:
 defence-in-depth, mirroring ``021_session_traces`` (outcome_label CHECK)
 and ``013_memory_type_check_constraint``.
 
-Revision ID: 028
-Revises: 027
+Revision ID: 030
+Revises: 029
 Create Date: 2026-06-10
 """
 
@@ -41,8 +41,8 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 from common.constants import VECTOR_DIM
 
-revision: str = "028"
-down_revision: str | None = "027"
+revision: str = "030"
+down_revision: str | None = "029"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

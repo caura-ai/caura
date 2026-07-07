@@ -66,6 +66,26 @@ async def _seed_memory(
     if embedding is not None:
         emb_literal = "[" + ",".join(str(float(x)) for x in embedding) + "]"
     async with get_session() as session:
+        if subject_entity_id is not None:
+            # memories.subject_entity_id carries a FK to entities.id (ON DELETE
+            # SET NULL), so the referenced entity must exist. Auto-seed a minimal
+            # one in the same transaction; ON CONFLICT keeps it idempotent when
+            # several memories share one entity. (Without this, these seeds only
+            # pass on a stale test DB whose memories table predates the FK.)
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO entities (id, tenant_id, entity_type, canonical_name)
+                    VALUES (CAST(:eid AS uuid), :tenant_id, 'concept', :name)
+                    ON CONFLICT (id) DO NOTHING
+                    """
+                ),
+                {
+                    "eid": subject_entity_id,
+                    "tenant_id": tenant_id,
+                    "name": f"ent-{subject_entity_id[:8]}",
+                },
+            )
         await session.execute(
             text(
                 """

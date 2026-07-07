@@ -27,6 +27,18 @@ class ResolveSearchProfile:
         search_profile = ctx.data.get("search_profile")
         sp = validate_search_profile(search_profile) if search_profile else {}
 
+        # Tenant-wide default profile (A47) sits BELOW the agent profile and
+        # ABOVE the global constants: a per-agent tuned knob wins, the tenant
+        # default fills the gaps, and the constant is the final fallback.
+        # ``tenant_config`` is a ResolvedConfig on the primary search/recall
+        # paths (routes resolve it before calling); guard for callers that
+        # don't pass one so behaviour is unchanged when it's absent.
+        tenant_config = ctx.tenant_config
+        if tenant_config is not None:
+            tenant_default = getattr(tenant_config, "default_search_profile", {}) or {}
+            if tenant_default:
+                sp = {**tenant_default, **sp}
+
         query = ctx.data["query"]
         top_k = ctx.data["top_k"]
 

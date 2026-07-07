@@ -392,7 +392,70 @@ function _readDenySessions(): readonly string[] {
     .filter((s) => s.length > 0);
 }
 
+// Automation / machine-turn patterns. When a turn matches one of these it is
+// an agent's own heartbeat/cron/health-check/status line, not an
+// information-seeking question — recalling on it just injects noise. The set
+// is DEPLOYMENT-TUNABLE (a term that's noise here may be real business content
+// elsewhere, e.g. "health check" for an ops product), so operators can
+// override the whole list via MEMCLAW_RECALL_MACHINE_PATTERNS (comma-separated
+// regex sources). Defaults are seeded from observed eToro automation traffic.
+const DEFAULT_MACHINE_PATTERNS = [
+  "heartbeat",
+  "\\bcron\\b",
+  "health ?check",
+  "checkpoint",
+  "\\bpm2\\b",
+  "disk \\d",
+  "rpc ok",
+  "watchdog",
+  "status\\.md",
+  "no commits",
+  "quiet.?hours",
+  "no active",
+  "sync block",
+  "cache refresh",
+] as const;
+
+function _readMachinePatterns(): readonly RegExp[] {
+  const raw = process.env.MEMCLAW_RECALL_MACHINE_PATTERNS;
+  const sources = raw
+    ? raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0)
+    : [...DEFAULT_MACHINE_PATTERNS];
+  const out: RegExp[] = [];
+  for (const s of sources) {
+    try {
+      out.push(new RegExp(s, "i"));
+    } catch {
+      // Skip an invalid operator-supplied pattern rather than crash the plugin.
+    }
+  }
+  return out;
+}
+
 export const RECALL_POLICY: RecallPolicy = _readPolicy();
 export const RECALL_MIN_PROMPT_CHARS: number = _readMinPromptChars();
 export const RECALL_TRIGGER_KEYWORDS: readonly string[] = _readTriggerKeywords();
 export const RECALL_DENY_SESSIONS: readonly string[] = _readDenySessions();
+export const RECALL_MACHINE_PATTERNS: readonly RegExp[] = _readMachinePatterns();
+
+// Noise-skip gate rollout mode (MEMCLAW_RECALL_GATE):
+//   "off"    (default) — new noise-skip rules (machine / agent-name /
+//              mention-only / subagent-context / 3rd-party-instruction) are
+//              NOT applied. Merge is behavior-neutral; opt-in required.
+//   "shadow" — rules are evaluated and LOGGED as "would-skip" but do NOT
+//              suppress recall. Lets operators measure impact first.
+//   "on"     — rules are enforced (recall suppressed on a match).
+// Default "off" so shipping this change does not alter recall behavior for any
+// deployment until an operator opts in (cross-customer safety not yet validated).
+export type RecallGateMode = "off" | "shadow" | "on";
+function _readGateMode(): RecallGateMode {
+  const raw = (process.env.MEMCLAW_RECALL_GATE || "off").toLowerCase();
+  return raw === "shadow" || raw === "on" ? raw : "off";
+}
+export const RECALL_GATE_MODE: RecallGateMode = _readGateMode();
+// Cross-agent recall: when true, auto-recall omits filter_agent_id so the
+// agent can retrieve knowledge authored by SIBLING agents (still bounded by
+// the server-side fleet/trust scope). Default false — this changes read
+// isolation and must ship alongside the freshness cap (A43), else a
+// future-dated hub memory dominates cross-agent results. Opt-in.
+export const RECALL_CROSS_AGENT: boolean = _readBoolEnv("MEMCLAW_RECALL_CROSS_AGENT", false);

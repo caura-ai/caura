@@ -16,8 +16,8 @@ a VERIFIED-reliable procedure from a merely SELF-REPORTED one
 Purely additive + reversible: two integer columns, default 0. No backfill
 (pre-existing rows correctly start with zero verified outcomes).
 
-Revision ID: 029
-Revises: 028
+Revision ID: 031
+Revises: 030
 Create Date: 2026-06-26
 """
 
@@ -26,8 +26,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "029"
-down_revision: str | None = "028"
+revision: str = "031"
+down_revision: str | None = "030"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

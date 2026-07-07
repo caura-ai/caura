@@ -13,8 +13,8 @@ Reversible: downgrade restores the original allowed set. Downgrade will
 fail if any row already carries ``status='invalidated'`` (correct — the
 constraint can't be re-narrowed while a violating row exists).
 
-Revision ID: 030
-Revises: 029
+Revision ID: 032
+Revises: 031
 Create Date: 2026-06-27
 """
 
@@ -22,8 +22,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "030"
-down_revision: str | None = "029"
+revision: str = "032"
+down_revision: str | None = "031"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

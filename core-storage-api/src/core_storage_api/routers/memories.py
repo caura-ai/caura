@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re as _re
 import time
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -57,6 +58,22 @@ def _parse_datetimes(body: dict) -> dict:
                     detail=f"Invalid ISO datetime for field {key!r}: {val!r}",
                 )
     return body
+
+
+def _validate_pg_regex(value: str | None, field: str) -> None:
+    """Reject a malformed regex at the edge with 422, not a 500 from Postgres.
+
+    ``exclude_title_regex`` flows into a Postgres ``~*`` operator; an invalid
+    pattern would otherwise surface as a DataError deep in the query. Python's
+    ``re`` grammar is close enough to POSIX that compiling it here catches the
+    common client mistakes (unbalanced brackets/parens, dangling quantifiers).
+    """
+    if value is None:
+        return
+    try:
+        _re.compile(value)
+    except _re.error as exc:
+        raise HTTPException(status_code=422, detail=f"'{field}' is not a valid regex: {exc}")
 
 
 @router.post("")
@@ -1143,13 +1160,99 @@ async def stats_breakdown(request: Request) -> dict:
         # Mirror /list: a binding/home tenant is mandatory. Without it (and with no
         # readable set) the aggregation would run unscoped across all tenants.
         raise HTTPException(status_code=422, detail="tenant_id is required")
+    # Optional report time-window (ISO strings or datetimes) — same parse idiom
+    # as the admin stats route above.
+    ca = body.get("created_after")
+    cb = body.get("created_before")
+    try:
+        created_after = datetime.fromisoformat(ca) if isinstance(ca, str) else ca
+        created_before = datetime.fromisoformat(cb) if isinstance(cb, str) else cb
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="'created_after'/'created_before' must be a valid ISO datetime string",
+        )
+    _validate_pg_regex(body.get("exclude_title_regex"), "exclude_title_regex")
     return await _svc.memory_stats_breakdown(
         tenant_id=tenant_id,
         fleet_id=body.get("fleet_id"),
         agent_id=body.get("agent_id"),
         memory_type=body.get("memory_type"),
         status=body.get("status"),
+        created_after=created_after,
+        created_before=created_before,
+        exclude_memory_types=body.get("exclude_memory_types"),
+        exclude_agent_ids=body.get("exclude_agent_ids"),
+        exclude_title_regex=body.get("exclude_title_regex"),
         include_deleted=bool(body.get("include_deleted", False)),
+        include_scope_agent=bool(body.get("include_scope_agent", False)),
+        readable_tenant_ids=body.get("readable_tenant_ids"),
+    )
+
+
+@router.post("/daily-durable-counts")
+async def daily_durable_counts(request: Request) -> list[dict]:
+    """Per-day durable-write counts since ``since`` (report activity trend).
+
+    Body: ``{tenant_id, since (ISO), fleet_id?, exclude_memory_types?,
+    exclude_agent_ids?, exclude_title_regex?, include_scope_agent?,
+    readable_tenant_ids?}``. Team/org-scoped; excludes ``scope_agent`` unless
+    ``include_scope_agent`` is set. Mirrors the durable/firehose exclusions of
+    ``/stats-breakdown``.
+    """
+    body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=422, detail="tenant_id is required")
+    since_raw = body.get("since")
+    try:
+        since = datetime.fromisoformat(since_raw) if isinstance(since_raw, str) else since_raw
+    except ValueError:
+        raise HTTPException(status_code=422, detail="'since' must be a valid ISO datetime string")
+    if since is None:
+        raise HTTPException(status_code=422, detail="since is required")
+    _validate_pg_regex(body.get("exclude_title_regex"), "exclude_title_regex")
+    return await _svc.memory_daily_durable_counts(
+        tenant_id=tenant_id,
+        since=since,
+        fleet_id=body.get("fleet_id"),
+        exclude_memory_types=body.get("exclude_memory_types"),
+        exclude_agent_ids=body.get("exclude_agent_ids"),
+        exclude_title_regex=body.get("exclude_title_regex"),
+        include_scope_agent=bool(body.get("include_scope_agent", False)),
+        readable_tenant_ids=body.get("readable_tenant_ids"),
+    )
+
+
+@router.post("/quality-metrics")
+async def quality_metrics(request: Request) -> dict:
+    """Reuse / recall quality aggregates over a scoped corpus (report Quality section).
+
+    Body: ``{tenant_id, fleet_id?, agent_id?, created_after? (ISO),
+    exclude_memory_types?, exclude_agent_ids?, exclude_title_regex?,
+    readable_tenant_ids?}``. Returns ``{total, reused, total_recalls,
+    top_recalls, by_type:{type:{total,reused}}}``. Same scope/visibility as
+    ``/stats-breakdown``; read-only.
+    """
+    body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    if not tenant_id and not body.get("readable_tenant_ids"):
+        raise HTTPException(status_code=422, detail="tenant_id is required")
+    ca = body.get("created_after")
+    try:
+        created_after = datetime.fromisoformat(ca) if isinstance(ca, str) else ca
+    except ValueError:
+        raise HTTPException(status_code=422, detail="'created_after' must be a valid ISO datetime string")
+    _validate_pg_regex(body.get("exclude_title_regex"), "exclude_title_regex")
+    return await _svc.memory_quality_metrics(
+        tenant_id=tenant_id,
+        fleet_id=body.get("fleet_id"),
+        agent_id=body.get("agent_id"),
+        created_after=created_after,
+        exclude_memory_types=body.get("exclude_memory_types"),
+        exclude_agent_ids=body.get("exclude_agent_ids"),
+        exclude_title_regex=body.get("exclude_title_regex"),
+        include_scope_agent=bool(body.get("include_scope_agent", False)),
         readable_tenant_ids=body.get("readable_tenant_ids"),
     )
 
