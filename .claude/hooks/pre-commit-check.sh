@@ -21,7 +21,7 @@ for svc in "${SERVICES[@]}"; do
   uv run --project "$svc" ruff format --check "$svc/" || { echo "BLOCKED: ruff format failed in $svc"; exit 2; }
 
   echo "Pre-commit: mypy ($svc)..."
-  uv run --project "$svc" mypy "$svc/src/" || { echo "BLOCKED: mypy failed in $svc"; exit 2; }
+  uv run --project "$svc" mypy --config-file "$svc/pyproject.toml" "$svc/src/" || { echo "BLOCKED: mypy failed in $svc"; exit 2; }
 done
 
 echo "Pre-commit: all checks passed."
