@@ -10,9 +10,10 @@ storage.
 
 Policy under test (see ``common/http_retry.py``): every request
 through ``_signed_call`` retries ConnectTimeout / ConnectError /
-PoolTimeout up to 3 attempts. ReadTimeout and 5xx are NOT retried
-in-process — the worker's designed retry path for sent-but-failed
-requests is raise → nack → Pub/Sub redelivery.
+PoolTimeout up to ``CONNECT_PHASE_MAX_ATTEMPTS`` (5) attempts —
+widened from 3 by #406 to ride out storage cold starts. ReadTimeout
+and 5xx are NOT retried in-process — the worker's designed retry path
+for sent-but-failed requests is raise → nack → Pub/Sub redelivery.
 
 Mirrors ``tests/test_storage_client_retry.py`` (core-api) and the
 harness conventions of ``test_storage_client_auth.py`` — retry is
@@ -91,7 +92,9 @@ async def test_post_gives_up_after_max_attempts_on_connect_timeout() -> None:
     with pytest.raises(httpx.ConnectTimeout):
         await storage_client.archive_stale(client, tenant_id="t1", fleet_id=None)
 
-    assert client.post.await_count == 3
+    # ConnectTimeout is a connect-phase exception → CONNECT_PHASE_MAX_ATTEMPTS (5),
+    # not the idempotent-default RETRY_MAX_ATTEMPTS (3). #406 widened this from 3.
+    assert client.post.await_count == 5
 
 
 async def test_post_does_not_retry_on_read_timeout() -> None:
