@@ -27,6 +27,7 @@ the report reflects durable per-agent work rather than the raw activity stream.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
@@ -40,6 +41,7 @@ from core_api.services.audit_service import log_action
 from core_api.services.caller_identity import resolve_caller_and_gate
 
 router = APIRouter(tags=["Reports"])
+logger = logging.getLogger(__name__)
 
 # Episodic activity-log type(s) + the unattributed firehose agent excluded so the
 # report reflects durable, decision-bearing per-agent work.
@@ -681,9 +683,12 @@ async def get_agent_activity_digest(
         *(sc.get_agent_activity_digest(t, period, agent_id=agent_id, as_of=as_of) for t in tenants),
         return_exceptions=True,
     )
-    digests: list[dict] = [
-        row for rows in per_tenant if not isinstance(rows, BaseException) for row in (rows or [])
-    ]
+    digests: list[dict] = []
+    for t, rows in zip(tenants, per_tenant):
+        if isinstance(rows, BaseException):
+            logger.warning("agent_activity_digest: storage call failed for tenant %s: %r", t, rows)
+        else:
+            digests.extend(rows or [])
 
     # Meta reflects the freshest run represented in the result set. Under
     # scope='org' the digests can span tenants whose scheduled passes ran over
