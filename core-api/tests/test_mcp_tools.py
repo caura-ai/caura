@@ -4,6 +4,7 @@ MemClaw MCP tool test suite.
 Tests all 12 tools listed in AGENT-INSTALL.md via the MCP Streamable HTTP endpoint.
 Run: python3 test_tools.py
 """
+
 import json
 import sys
 import time
@@ -30,6 +31,7 @@ _created_doc_key: str | None = None
 _keystone_id: str | None = None
 
 # ─── MCP call helper ───────────────────────────────────────────────────────────
+
 
 def call(tool: str, args: dict, *, req_id: int = 1) -> dict:
     payload = {
@@ -83,7 +85,8 @@ def tool_result(rpc: dict) -> tuple[bool, any]:
 
 # ─── Logger ────────────────────────────────────────────────────────────────────
 
-def log(tool: str, sub: str, passed: bool, detail: str = "", data: any = None):
+
+def log(tool: str, sub: str, passed: bool, detail: str = "", data: object | None = None):
     entry = {
         "tool": tool,
         "sub_test": sub,
@@ -101,16 +104,20 @@ def log(tool: str, sub: str, passed: bool, detail: str = "", data: any = None):
 
 # ─── Tests ────────────────────────────────────────────────────────────────────
 
+
 def test_memclaw_write():
     global _created_memory_id, _created_entity_id
     print("\n[1/12] memclaw_write")
 
     # 1a: single write
-    rpc = call("memclaw_write", {
-        "content": "The SSH alias for host 192.168.1.53 is 'dns'. User ubuntu.",
-        "agent_id": AGENT,
-        "visibility": "scope_org",
-    })
+    rpc = call(
+        "memclaw_write",
+        {
+            "content": "The SSH alias for host 192.168.1.53 is 'dns'. User ubuntu.",
+            "agent_id": AGENT,
+            "visibility": "scope_org",
+        },
+    )
     is_err, data = tool_result(rpc)
     ok = not is_err and isinstance(data, dict) and "id" in data
     log("memclaw_write", "single write — returns id", ok, str(data) if not ok else "")
@@ -122,13 +129,16 @@ def test_memclaw_write():
             _created_entity_id = ents[0].get("entity_id") if isinstance(ents[0], dict) else None
 
     # 1b: batch write (2 items)
-    rpc = call("memclaw_write", {
-        "items": [
-            {"content": "MemClaw test batch item A — ephemeral."},
-            {"content": "MemClaw test batch item B — ephemeral."},
-        ],
-        "agent_id": AGENT,
-    })
+    rpc = call(
+        "memclaw_write",
+        {
+            "items": [
+                {"content": "MemClaw test batch item A — ephemeral."},
+                {"content": "MemClaw test batch item B — ephemeral."},
+            ],
+            "agent_id": AGENT,
+        },
+    )
     is_err, data = tool_result(rpc)
     ok = not is_err and isinstance(data, dict) and "created" in data
     log("memclaw_write", "batch write — returns created count", ok, str(data) if not ok else "")
@@ -156,28 +166,39 @@ def test_memclaw_recall():
     log("memclaw_recall", "basic recall — returns results list", ok, str(data) if not ok else "")
 
     # 2b: recall with include_brief
-    rpc = call("memclaw_recall", {
-        "query": "MemClaw test",
-        "agent_id": AGENT,
-        "include_brief": True,
-        "top_k": 3,
-    })
+    rpc = call(
+        "memclaw_recall",
+        {
+            "query": "MemClaw test",
+            "agent_id": AGENT,
+            "include_brief": True,
+            "top_k": 3,
+        },
+    )
     is_err, data = tool_result(rpc)
     # brief may be None if no results or LLM not configured
     ok = not is_err and isinstance(data, dict) and "results" in data and "brief" in data
     log("memclaw_recall", "recall with include_brief — brief key present", ok, str(data) if not ok else "")
 
     # 2c: cross_context recall
-    rpc = call("memclaw_recall", {
-        "query": "host alias",
-        "agent_id": AGENT,
-        "cross_context": True,
-        "cc_threshold": 0.1,
-        "top_k": 5,
-    })
+    rpc = call(
+        "memclaw_recall",
+        {
+            "query": "host alias",
+            "agent_id": AGENT,
+            "cross_context": True,
+            "cc_threshold": 0.1,
+            "top_k": 5,
+        },
+    )
     is_err, data = tool_result(rpc)
     ok = not is_err and isinstance(data, dict) and "results" in data
-    log("memclaw_recall", "cross_context=True — no error, results list present", ok, str(data) if not ok else "")
+    log(
+        "memclaw_recall",
+        "cross_context=True — no error, results list present",
+        ok,
+        str(data) if not ok else "",
+    )
 
     # 2d: invalid memory_type
     rpc = call("memclaw_recall", {"query": "x", "memory_type": "not_a_real_type"})
@@ -203,23 +224,29 @@ def test_memclaw_manage():
     log("memclaw_manage", "op=read — returns content", ok, str(data) if not ok else "")
 
     # 3b: update
-    rpc = call("memclaw_manage", {
-        "op": "update",
-        "memory_id": mid,
-        "agent_id": AGENT,
-        "title": "Updated test title",
-    })
+    rpc = call(
+        "memclaw_manage",
+        {
+            "op": "update",
+            "memory_id": mid,
+            "agent_id": AGENT,
+            "title": "Updated test title",
+        },
+    )
     is_err, data = tool_result(rpc)
     ok = not is_err and isinstance(data, dict)
     log("memclaw_manage", "op=update — returns updated memory", ok, str(data) if not ok else "")
 
     # 3c: transition
-    rpc = call("memclaw_manage", {
-        "op": "transition",
-        "memory_id": mid,
-        "agent_id": AGENT,
-        "status": "archived",
-    })
+    rpc = call(
+        "memclaw_manage",
+        {
+            "op": "transition",
+            "memory_id": mid,
+            "agent_id": AGENT,
+            "status": "archived",
+        },
+    )
     is_err, data = tool_result(rpc)
     ok = not is_err
     log("memclaw_manage", "op=transition — status to archived", ok, str(data) if not ok else "")
@@ -228,7 +255,12 @@ def test_memclaw_manage():
     rpc = call("memclaw_manage", {"op": "lineage", "memory_id": mid, "agent_id": AGENT})
     is_err, data = tool_result(rpc)
     ok = not is_err and isinstance(data, dict) and "this" in data
-    log("memclaw_manage", "op=lineage — returns this/superseded_by/supersessors", ok, str(data) if not ok else "")
+    log(
+        "memclaw_manage",
+        "op=lineage — returns this/superseded_by/supersessors",
+        ok,
+        str(data) if not ok else "",
+    )
 
     # 3e: invalid op
     rpc = call("memclaw_manage", {"op": "florp", "memory_id": mid})
@@ -265,7 +297,12 @@ def test_memclaw_list():
     is_err, data = tool_result(rpc)
     # fleet/all requires trust >= 2; standalone may succeed or get FORBIDDEN
     ok = isinstance(data, dict) and ("results" in data or "error" in data)
-    log("memclaw_list", "scope=all — returns results or trust error (both valid)", ok, str(data) if not ok else "")
+    log(
+        "memclaw_list",
+        "scope=all — returns results or trust error (both valid)",
+        ok,
+        str(data) if not ok else "",
+    )
 
     # 4d: invalid scope
     rpc = call("memclaw_list", {"agent_id": AGENT, "scope": "badscope"})
@@ -279,10 +316,15 @@ def test_memclaw_list():
     ok = not is_err and isinstance(data, dict)
     log("memclaw_list", "pagination fields present (next_cursor key)", ok, str(data) if not ok else "")
     if ok and data.get("next_cursor"):
-        rpc2 = call("memclaw_list", {
-            "agent_id": AGENT, "scope": "agent", "limit": 2,
-            "cursor": data["next_cursor"],
-        })
+        rpc2 = call(
+            "memclaw_list",
+            {
+                "agent_id": AGENT,
+                "scope": "agent",
+                "limit": 2,
+                "cursor": data["next_cursor"],
+            },
+        )
         is_err2, data2 = tool_result(rpc2)
         ok2 = not is_err2 and isinstance(data2, dict) and "results" in data2
         log("memclaw_list", "pagination: second page with cursor", ok2, str(data2) if not ok2 else "")
@@ -296,13 +338,16 @@ def test_memclaw_doc():
     _created_doc_key = key
 
     # 5a: write (field is "data", not "content")
-    rpc = call("memclaw_doc", {
-        "op": "write",
-        "collection": col,
-        "doc_id": key,
-        "data": {"hello": "world", "ts": time.time()},
-        "agent_id": AGENT,
-    })
+    rpc = call(
+        "memclaw_doc",
+        {
+            "op": "write",
+            "collection": col,
+            "doc_id": key,
+            "data": {"hello": "world", "ts": time.time()},
+            "agent_id": AGENT,
+        },
+    )
     is_err, data = tool_result(rpc)
     ok = not is_err
     log("memclaw_doc", "op=write — creates doc", ok, str(data) if not ok else "")
@@ -314,12 +359,15 @@ def test_memclaw_doc():
     log("memclaw_doc", "op=read — returns doc", ok, str(data) if not ok else "")
 
     # 5c: query
-    rpc = call("memclaw_doc", {
-        "op": "query",
-        "collection": col,
-        "filter": {"hello": "world"},
-        "agent_id": AGENT,
-    })
+    rpc = call(
+        "memclaw_doc",
+        {
+            "op": "query",
+            "collection": col,
+            "filter": {"hello": "world"},
+            "agent_id": AGENT,
+        },
+    )
     is_err, data = tool_result(rpc)
     ok = not is_err
     log("memclaw_doc", "op=query — filter query returns", ok, str(data) if not ok else "")
@@ -331,23 +379,34 @@ def test_memclaw_doc():
     log("memclaw_doc", "op=list_collections — returns list", ok, str(data) if not ok else "")
 
     # 5e: search (semantic) — may fail with fake embeddings, both outcomes noted
-    rpc = call("memclaw_doc", {
-        "op": "search",
-        "collection": col,
-        "query": "hello world",
-        "agent_id": AGENT,
-    })
+    rpc = call(
+        "memclaw_doc",
+        {
+            "op": "search",
+            "collection": col,
+            "query": "hello world",
+            "agent_id": AGENT,
+        },
+    )
     is_err, data = tool_result(rpc)
     ok = isinstance(data, (dict, list, str))  # any response is fine; semantic needs real embeddings
-    log("memclaw_doc", "op=search — responds (semantic may be empty with fake embeddings)", ok, str(data) if not ok else "")
+    log(
+        "memclaw_doc",
+        "op=search — responds (semantic may be empty with fake embeddings)",
+        ok,
+        str(data) if not ok else "",
+    )
 
     # 5f: delete
-    rpc = call("memclaw_doc", {
-        "op": "delete",
-        "collection": col,
-        "doc_id": key,
-        "agent_id": AGENT,
-    })
+    rpc = call(
+        "memclaw_doc",
+        {
+            "op": "delete",
+            "collection": col,
+            "doc_id": key,
+            "agent_id": AGENT,
+        },
+    )
     is_err, data = tool_result(rpc)
     ok = not is_err
     log("memclaw_doc", "op=delete — deletes doc", ok, str(data) if not ok else "")
@@ -375,7 +434,12 @@ def test_memclaw_entity_get():
     is_err, data = tool_result(rpc)
     # Either "Entity not found." string or a not-found error
     ok = not is_err  # it returns "Entity not found." string, not error
-    log("memclaw_entity_get", "non-existent UUID — returns not-found (no crash)", ok, str(data) if not ok else "")
+    log(
+        "memclaw_entity_get",
+        "non-existent UUID — returns not-found (no crash)",
+        ok,
+        str(data) if not ok else "",
+    )
 
     # 6c: real entity (if we captured one from memclaw_write)
     if _created_entity_id:
@@ -387,11 +451,26 @@ def test_memclaw_entity_get():
             rpc = call("memclaw_entity_get", {"entity_id": eid})
             is_err, data = tool_result(rpc)
             ok = not is_err
-            log("memclaw_entity_get", "real entity lookup — returns entity or not-found", ok, str(data) if not ok else "")
+            log(
+                "memclaw_entity_get",
+                "real entity lookup — returns entity or not-found",
+                ok,
+                str(data) if not ok else "",
+            )
         else:
-            log("memclaw_entity_get", "real entity lookup", False, f"invalid entity_id format: {_created_entity_id}")
+            log(
+                "memclaw_entity_get",
+                "real entity lookup",
+                False,
+                f"invalid entity_id format: {_created_entity_id}",
+            )
     else:
-        log("memclaw_entity_get", "real entity lookup — SKIPPED (none created)", True, "OK with fake embeddings")
+        log(
+            "memclaw_entity_get",
+            "real entity lookup — SKIPPED (none created)",
+            True,
+            "OK with fake embeddings",
+        )
 
 
 def test_memclaw_tune():
@@ -426,16 +505,24 @@ def test_memclaw_insights():
     print("\n[8/12] memclaw_insights")
 
     for focus in ("contradictions", "failures", "stale", "patterns", "discover"):
-        rpc = call("memclaw_insights", {
-            "focus": focus,
-            "scope": "agent",
-            "agent_id": AGENT,
-            "dry_run": True,  # don't persist insight memories
-        })
+        rpc = call(
+            "memclaw_insights",
+            {
+                "focus": focus,
+                "scope": "agent",
+                "agent_id": AGENT,
+                "dry_run": True,  # don't persist insight memories
+            },
+        )
         is_err, data = tool_result(rpc)
         # succeed or return a structured error — crashes are the only failure
         ok = isinstance(data, (dict, list, str))
-        log("memclaw_insights", f"focus={focus} dry_run=True — no crash", ok, str(data)[:200] if not ok else "")
+        log(
+            "memclaw_insights",
+            f"focus={focus} dry_run=True — no crash",
+            ok,
+            str(data)[:200] if not ok else "",
+        )
 
     # invalid focus
     rpc = call("memclaw_insights", {"focus": "badmode", "scope": "agent"})
@@ -448,10 +535,13 @@ def test_memclaw_evolve():
     print("\n[9/12] memclaw_evolve")
 
     # First write a memory to evolve against (unique content to avoid dedup on re-runs)
-    rpc = call("memclaw_write", {
-        "content": f"MemClaw test: always ping the host before SSHing. run-{uuid.uuid4().hex[:8]}",
-        "agent_id": AGENT,
-    })
+    rpc = call(
+        "memclaw_write",
+        {
+            "content": f"MemClaw test: always ping the host before SSHing. run-{uuid.uuid4().hex[:8]}",
+            "agent_id": AGENT,
+        },
+    )
     is_err, data = tool_result(rpc)
     if is_err or "id" not in (data or {}):
         log("memclaw_evolve", "setup write — FAILED, skipping evolve tests", False, str(data))
@@ -460,29 +550,37 @@ def test_memclaw_evolve():
 
     run_tag = uuid.uuid4().hex[:8]
     # 9a: success outcome (outcome=description, outcome_type=success|failure|partial, related_ids=UUIDs)
-    rpc = call("memclaw_evolve", {
-        "outcome": f"SSHed into 192.168.1.53 after pinging — worked perfectly. [{run_tag}]",
-        "outcome_type": "success",
-        "related_ids": [mem_id],
-        "agent_id": AGENT,
-    })
+    rpc = call(
+        "memclaw_evolve",
+        {
+            "outcome": f"SSHed into 192.168.1.53 after pinging — worked perfectly. [{run_tag}]",
+            "outcome_type": "success",
+            "related_ids": [mem_id],
+            "agent_id": AGENT,
+        },
+    )
     is_err, data = tool_result(rpc)
     ok = not is_err
     log("memclaw_evolve", "outcome_type=success with related_ids", ok, str(data) if not ok else "")
 
     # 9b: failure outcome
-    rpc = call("memclaw_evolve", {
-        "outcome": f"Connection refused — port 22 not open from this network. [{run_tag}]",
-        "outcome_type": "failure",
-        "related_ids": [mem_id],
-        "agent_id": AGENT,
-    })
+    rpc = call(
+        "memclaw_evolve",
+        {
+            "outcome": f"Connection refused — port 22 not open from this network. [{run_tag}]",
+            "outcome_type": "failure",
+            "related_ids": [mem_id],
+            "agent_id": AGENT,
+        },
+    )
     is_err, data = tool_result(rpc)
     ok = not is_err
     log("memclaw_evolve", "outcome_type=failure with related_ids", ok, str(data) if not ok else "")
 
     # 9c: invalid outcome_type
-    rpc = call("memclaw_evolve", {"outcome": "something happened", "outcome_type": "magic", "agent_id": AGENT})
+    rpc = call(
+        "memclaw_evolve", {"outcome": "something happened", "outcome_type": "magic", "agent_id": AGENT}
+    )
     is_err, data = tool_result(rpc)
     ok = is_err
     log("memclaw_evolve", "error: invalid outcome_type rejected", ok, str(data) if not ok else "")
@@ -510,7 +608,12 @@ def test_memclaw_stats():
     rpc = call("memclaw_stats", {"scope": "all", "agent_id": AGENT})
     is_err, data = tool_result(rpc)
     ok = isinstance(data, dict) and ("total" in data or "error" in data)
-    log("memclaw_stats", "scope=all — returns stats or trust error (both valid)", ok, str(data) if not ok else "")
+    log(
+        "memclaw_stats",
+        "scope=all — returns stats or trust error (both valid)",
+        ok,
+        str(data) if not ok else "",
+    )
 
     # 10d: invalid scope
     rpc = call("memclaw_stats", {"scope": "badscope"})
@@ -543,15 +646,18 @@ def test_memclaw_keystones_set():
     # 12a: set a keystone — requires title, weight, doc_id, content.
     # NOTE: in standalone mode the caller's trust_level=1; set/delete require trust_level>=2.
     # FORBIDDEN is expected and correct here — it proves the trust gate works.
-    rpc = call("memclaw_keystones_set", {
-        "op": "set",
-        "doc_id": doc_slug,
-        "title": "Ephemeral test keystone",
-        "content": f"TEST RULE: this is an ephemeral test keystone ({doc_slug}) — delete me.",
-        "scope": "agent",
-        "weight": "low",
-        "agent_id": AGENT,
-    })
+    rpc = call(
+        "memclaw_keystones_set",
+        {
+            "op": "set",
+            "doc_id": doc_slug,
+            "title": "Ephemeral test keystone",
+            "content": f"TEST RULE: this is an ephemeral test keystone ({doc_slug}) — delete me.",
+            "scope": "agent",
+            "weight": "low",
+            "agent_id": AGENT,
+        },
+    )
     is_err, data = tool_result(rpc)
     set_succeeded = not is_err
     is_trust_gate = (
@@ -561,24 +667,42 @@ def test_memclaw_keystones_set():
     )
     ok = set_succeeded or is_trust_gate
     note = "(trust gate — expected in standalone/dev mode, trust_level<2)" if is_trust_gate else ""
-    log("memclaw_keystones_set", f"op=set — creates keystone or trust-gate FORBIDDEN {note}", ok, str(data) if not ok else "")
+    log(
+        "memclaw_keystones_set",
+        f"op=set — creates keystone or trust-gate FORBIDDEN {note}",
+        ok,
+        str(data) if not ok else "",
+    )
 
     # 12b: verify keystones read still works
     rpc = call("memclaw_keystones", {"agent_id": AGENT})
     is_err2, data2 = tool_result(rpc)
     ok2 = not is_err2
-    log("memclaw_keystones_set", "set → keystones read returns without error", ok2, str(data2) if not ok2 else "")
+    log(
+        "memclaw_keystones_set",
+        "set → keystones read returns without error",
+        ok2,
+        str(data2) if not ok2 else "",
+    )
 
     # 12c: delete — only attempt if set succeeded (otherwise nothing to delete)
     if set_succeeded:
-        rpc = call("memclaw_keystones_set", {
-            "op": "delete",
-            "doc_id": doc_slug,
-            "agent_id": AGENT,
-        })
+        rpc = call(
+            "memclaw_keystones_set",
+            {
+                "op": "delete",
+                "doc_id": doc_slug,
+                "agent_id": AGENT,
+            },
+        )
         is_err3, data3 = tool_result(rpc)
         ok3 = not is_err3
-        log("memclaw_keystones_set", "op=delete — removes keystone by doc_id", ok3, str(data3) if not ok3 else "")
+        log(
+            "memclaw_keystones_set",
+            "op=delete — removes keystone by doc_id",
+            ok3,
+            str(data3) if not ok3 else "",
+        )
     else:
         log("memclaw_keystones_set", "op=delete — SKIPPED (set was trust-gated)", True, "nothing to delete")
 
@@ -590,6 +714,7 @@ def test_memclaw_keystones_set():
 
 
 # ─── Report ───────────────────────────────────────────────────────────────────
+
 
 def write_report(path: str):
     total = len(log_entries)
@@ -622,9 +747,9 @@ def write_report(path: str):
         for e in failures:
             lines += [
                 f"### {e['tool']} — {e['sub_test']}",
-                f"```",
+                "```",
                 f"{e['detail'] or '(no detail)'}",
-                f"```",
+                "```",
                 "",
             ]
 
@@ -636,7 +761,7 @@ def write_report(path: str):
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print(f"MemClaw Tool Test Suite")
+    print("MemClaw Tool Test Suite")
     print(f"Target: {MCP}")
     print(f"Started: {datetime.utcnow().isoformat()}Z")
     print("=" * 60)
@@ -675,6 +800,6 @@ if __name__ == "__main__":
     passed = sum(1 for e in log_entries if e["passed"])
     failed = total - passed
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Results: {passed}/{total} passed, {failed} failed")
     sys.exit(0 if failed == 0 else 1)

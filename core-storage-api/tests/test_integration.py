@@ -747,7 +747,7 @@ class TestMemories:
 
         Regression for the count-inflation bug: prior to the fix these
         endpoints reported tombstoned rows alongside live ones, so the
-        marketing-site landing-page tiles were ~10× higher than the
+        marketing-site landing-page tiles were ~10x higher than the
         actually-queryable footprint.
         """
         # Use a fresh, dedicated agent_id so distinct-agent / distinct-tenant

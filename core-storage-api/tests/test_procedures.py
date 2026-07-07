@@ -25,9 +25,7 @@ def _procedure_body(tenant_id: str, fleet_id: str, **overrides) -> dict:
 
 @pytest.mark.asyncio
 async def test_create_get_procedure_round_trip(client, tenant_id, fleet_id):
-    resp = await client.post(
-        "/api/v1/storage/procedures", json=_procedure_body(tenant_id, fleet_id)
-    )
+    resp = await client.post("/api/v1/storage/procedures", json=_procedure_body(tenant_id, fleet_id))
     assert resp.status_code == 200, resp.text
     created = resp.json()
     pid = created["id"]
@@ -62,9 +60,7 @@ async def test_create_with_stats_seed(client, tenant_id, fleet_id):
 
 @pytest.mark.asyncio
 async def test_update_stats_and_quarantine(client, tenant_id, fleet_id):
-    resp = await client.post(
-        "/api/v1/storage/procedures", json=_procedure_body(tenant_id, fleet_id)
-    )
+    resp = await client.post("/api/v1/storage/procedures", json=_procedure_body(tenant_id, fleet_id))
     pid = resp.json()["id"]
 
     patch = {
@@ -73,9 +69,7 @@ async def test_update_stats_and_quarantine(client, tenant_id, fleet_id):
         "reliability_score": 0.83,
         "is_quarantined": True,
     }
-    upd = await client.patch(
-        f"/api/v1/storage/procedures/{pid}/stats", json=patch
-    )
+    upd = await client.patch(f"/api/v1/storage/procedures/{pid}/stats", json=patch)
     assert upd.status_code == 200, upd.text
     body = upd.json()
     assert body["reliability_score"] == 0.83
@@ -173,9 +167,7 @@ async def test_invalidate_excludes_from_ranker_path(client, tenant_id, fleet_id)
     )
     pid = resp.json()["id"]
 
-    patched = await client.patch(
-        f"/api/v1/storage/procedures/{pid}", json={"status": "invalidated"}
-    )
+    patched = await client.patch(f"/api/v1/storage/procedures/{pid}", json={"status": "invalidated"})
     assert patched.status_code == 200, patched.text
     assert patched.json()["status"] == "invalidated"
 
@@ -196,8 +188,4 @@ async def test_invalidate_excludes_from_ranker_path(client, tenant_id, fleet_id)
     assert "retire-me" in {p["name"] for p in with_retired.json()}
 
     # Missing-id PATCH and unknown status handling.
-    assert (
-        await client.patch(
-            f"/api/v1/storage/procedures/{pid}", json={}
-        )
-    ).status_code == 422
+    assert (await client.patch(f"/api/v1/storage/procedures/{pid}", json={})).status_code == 422

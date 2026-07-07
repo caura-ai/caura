@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from core_storage_api.config import settings
 
-
 # ---------------------------------------------------------------------------
 # Database schema setup (once per session)
 # ---------------------------------------------------------------------------
@@ -42,14 +41,14 @@ async def _ensure_schema():
     engine = create_async_engine(settings.database_url, echo=False)
 
     # Import all models so metadata is populated
-    import common.models.memory  # noqa: F401
-    import common.models.entity  # noqa: F401
-    import common.models.agent  # noqa: F401
-    import common.models.audit  # noqa: F401
-    import common.models.fleet  # noqa: F401
-    import common.models.document  # noqa: F401
-    import common.models.background_task  # noqa: F401
-    import common.models.analysis_report  # noqa: F401
+    import common.models.agent
+    import common.models.analysis_report
+    import common.models.audit
+    import common.models.background_task
+    import common.models.document
+    import common.models.entity
+    import common.models.fleet
+    import common.models.memory
     import common.models.procedure  # noqa: F401
     from common.models.base import Base
 
