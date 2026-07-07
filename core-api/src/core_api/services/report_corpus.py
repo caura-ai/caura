@@ -12,6 +12,10 @@ from __future__ import annotations
 
 import re
 
+# Reporting window lengths in days, shared by the live report and the digest
+# generator so "day"/"week" mean the same thing on both surfaces.
+PERIOD_DAYS: dict[str, int] = {"day": 1, "week": 7}
+
 # Episodic activity-log type(s) + the unattributed firehose agent excluded so the
 # report reflects durable, decision-bearing per-agent work.
 NON_DURABLE_TYPES = ("episode",)

@@ -21,6 +21,7 @@ class AgentActivityDigest(Base):
       ok        — narrative generated from the agent's window memories
       quiet     — below the activity threshold; no LLM call made
       truncated — window exceeded the per-agent cap; summary is partial
+      fallback  — LLM unavailable; narrative is a template placeholder
       skipped   — run-level cost/token cap hit before this agent
       error     — the LLM call (or fetch) failed; ``error_detail`` explains
     """

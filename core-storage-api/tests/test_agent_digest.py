@@ -113,6 +113,27 @@ async def test_agent_id_filter(client: AsyncClient):
     assert len(rows) == 1 and rows[0]["agent_id"] == "a"
 
 
+async def test_prune_deletes_rows_older_than_cutoff(client: AsyncClient):
+    tenant = f"dig-{_uid()}"
+    await _post(client, _row(tenant, "old", generated_at="2020-01-01T00:00:00+00:00"))
+    await _post(client, _row(tenant, "new", generated_at="2026-07-06T00:00:00+00:00"))
+    resp = await client.post(
+        f"{PREFIX}/reports/agent-activity/prune",
+        json={"tenant_id": tenant, "older_than": "2021-01-01T00:00:00+00:00"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["deleted"] == 1
+    rows = await _latest(client, tenant)
+    assert [r["agent_id"] for r in rows] == ["new"]
+
+
+async def test_prune_validation(client: AsyncClient):
+    resp = await client.post(
+        f"{PREFIX}/reports/agent-activity/prune", json={"older_than": "2021-01-01T00:00:00+00:00"}
+    )
+    assert resp.status_code == 422 and "tenant_id" in resp.text
+
+
 @pytest.mark.parametrize(
     "mutate,detail_needle",
     [

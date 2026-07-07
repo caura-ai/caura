@@ -144,7 +144,11 @@ async def _fire_agent_digest(period: str) -> None:
             extra={"period": period, "status_code": resp.status_code, "body": resp.text[:500]},
         )
         return
-    logger.info("agent-digest run fired", extra={"period": period, "summary": resp.json()})
+    try:
+        summary = resp.json()
+    except Exception:
+        summary = resp.text[:200]
+    logger.info("agent-digest run fired", extra={"period": period, "summary": summary})
 
 
 async def run_agent_digest_tick() -> None:

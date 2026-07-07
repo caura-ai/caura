@@ -8365,6 +8365,18 @@ class PostgresService:
                 select_stmt = select_stmt.where(AgentActivityDigest.fleet_id == data["fleet_id"])
             return (await session.execute(select_stmt)).scalar_one()
 
+    async def agent_activity_digest_prune(self, tenant_id: str, older_than: datetime) -> int:
+        """Delete this tenant's digest rows generated before ``older_than``
+        (retention sweep). Returns the number of rows deleted."""
+        async with get_session() as session:
+            result = await session.execute(
+                delete(AgentActivityDigest).where(
+                    AgentActivityDigest.tenant_id == tenant_id,
+                    AgentActivityDigest.generated_at < older_than,
+                )
+            )
+            return result.rowcount or 0  # type: ignore[attr-defined]
+
     # ══════════════════════════════════════════════════════════════════════
     #  TASKS (BackgroundTaskLog)
     # ══════════════════════════════════════════════════════════════════════

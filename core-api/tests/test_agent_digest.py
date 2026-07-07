@@ -35,6 +35,10 @@ class FakeStorage:
         self.upserts.append(row)
         return row
 
+    async def prune_agent_activity_digests(self, tenant_id: str, older_than: str) -> int:
+        self.pruned: tuple[str, str] = (tenant_id, older_than)
+        return 3
+
 
 def _mem(*, mtype: str = "decision", title: str = "did a thing", recall: int = 1, agent: str = "a") -> dict:
     return {
@@ -48,12 +52,17 @@ def _mem(*, mtype: str = "decision", title: str = "did a thing", recall: int = 1
 
 @pytest.fixture
 def wire(monkeypatch):
-    """Return a helper that wires a FakeStorage + a deterministic LLM (fake tier)."""
+    """Return a helper that wires a FakeStorage + a deterministic LLM.
 
-    async def _fake_cwf(provider, call_fn, fake_fn, **kw):
-        return fake_fn()
+    The default LLM mock simulates the REAL provider succeeding (returns a dict
+    directly, without touching the fake tier) so ``used_fallback`` stays False
+    and status is ``ok``/``truncated``. The fallback path is exercised
+    separately in ``test_llm_fallback_marks_status``."""
 
-    monkeypatch.setattr(agent_digest, "call_with_fallback", _fake_cwf)
+    async def _real_cwf(provider, call_fn, fake_fn, **kw):
+        return {"narrative": "real summary", "shipped": ["shipped a thing"]}
+
+    monkeypatch.setattr(agent_digest, "call_with_fallback", _real_cwf)
 
     def _install(storage: FakeStorage) -> FakeStorage:
         monkeypatch.setattr(agent_digest, "get_storage_client", lambda: storage)
@@ -115,9 +124,7 @@ async def test_cost_cap_trims_agents(wire):
 
 
 async def test_truncation_status_and_capped_source_count(wire):
-    storage = wire(
-        FakeStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 5})
-    )
+    storage = wire(FakeStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 5}))
     await agent_digest.generate_for_org("org1", "day", {**CONFIG, "max_memories_per_agent": 2}, now=NOW)
     assert storage.upserts[0]["status"] == "truncated"
     assert storage.upserts[0]["source_count"] == 2
@@ -150,6 +157,93 @@ async def test_run_agent_digest_enumerates_opted_in_orgs(monkeypatch, wire):
     assert summary["orgs"] == 2
     assert summary["completed"] == 2
     assert summary["digests"] == 2
+
+
+async def test_llm_fallback_marks_status(monkeypatch, wire):
+    """When call_with_fallback drops to the template tier, the row is marked
+    'fallback' (not 'ok') and counts as neither generated nor errored."""
+    storage = wire(FakeStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 4}))
+
+    async def _fallback_cwf(provider, call_fn, fake_fn, **kw):
+        return fake_fn()  # real + fallback providers failed → template narrative
+
+    monkeypatch.setattr(agent_digest, "call_with_fallback", _fallback_cwf)
+    summary = await agent_digest.generate_for_org("org1", "day", CONFIG, now=NOW)
+    assert storage.upserts[0]["status"] == "fallback"
+    assert summary["fallback"] == 1
+    assert summary["generated"] == 0
+    assert summary["errored"] == 0
+
+
+async def test_fallback_overrides_truncated(monkeypatch, wire):
+    """A template (fallback) narrative wins over 'truncated' so the caller can
+    tell the narrative is fake, not merely partial."""
+    storage = wire(FakeStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 5}))
+
+    async def _fallback_cwf(provider, call_fn, fake_fn, **kw):
+        return fake_fn()
+
+    monkeypatch.setattr(agent_digest, "call_with_fallback", _fallback_cwf)
+    await agent_digest.generate_for_org("org1", "day", {**CONFIG, "max_memories_per_agent": 2}, now=NOW)
+    assert storage.upserts[0]["status"] == "fallback"
+
+
+async def test_daily_window_is_previous_utc_day(wire):
+    """A mid-day run normalizes to the full previous UTC calendar day."""
+    now = datetime(2026, 7, 6, 15, 30, tzinfo=UTC)
+    storage = wire(FakeStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 3}))
+    await agent_digest.generate_for_org("org1", "day", CONFIG, now=now)
+    row = storage.upserts[0]
+    assert row["window_end"] == "2026-07-06T00:00:00+00:00"  # today 00:00
+    assert row["window_start"] == "2026-07-05T00:00:00+00:00"  # yesterday 00:00
+
+
+async def test_weekly_window_aligns_to_monday(wire):
+    """A mid-week run normalizes to the previous full Mon-Mon week."""
+    now = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)  # a Wednesday
+    storage = wire(FakeStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 3}))
+    await agent_digest.generate_for_org("org1", "week", CONFIG, now=now)
+    row = storage.upserts[0]
+    assert row["window_end"] == "2026-07-06T00:00:00+00:00"  # Monday of that week
+    assert row["window_start"] == "2026-06-29T00:00:00+00:00"  # previous Monday
+
+
+async def test_empty_narrative_from_real_llm_is_error(monkeypatch, wire):
+    """A real (non-fallback) response missing the narrative is an error row, not
+    a NULL 'ok' row."""
+    storage = wire(FakeStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 3}))
+
+    async def _empty_cwf(provider, call_fn, fake_fn, **kw):
+        return {"shipped": ["x"]}  # no narrative key
+
+    monkeypatch.setattr(agent_digest, "call_with_fallback", _empty_cwf)
+    summary = await agent_digest.generate_for_org("org1", "day", CONFIG, now=NOW)
+    row = storage.upserts[0]
+    assert row["status"] == "error"
+    assert row["error_detail"] == "LLM returned no narrative"
+    assert row["narrative"] is None
+    assert summary["errored"] == 1
+    assert summary["generated"] == 0
+
+
+async def test_upsert_failure_counts_as_errored(wire):
+    """An upsert failure re-raises and is counted as errored, not generated."""
+
+    class FailingStorage(FakeStorage):
+        async def upsert_agent_activity_digest(self, row: dict) -> dict:
+            raise RuntimeError("db down")
+
+    wire(FailingStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 3}))
+    summary = await agent_digest.generate_for_org("org1", "day", CONFIG, now=NOW)
+    assert summary["errored"] == 1
+    assert summary["generated"] == 0
+
+
+async def test_retention_prune_runs_with_cutoff(wire):
+    storage = wire(FakeStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 3}))
+    summary = await agent_digest.generate_for_org("org1", "day", {**CONFIG, "retention_days": 30}, now=NOW)
+    assert summary["pruned"] == 3
+    assert storage.pruned == ("org1", "2026-06-06T00:00:00+00:00")  # NOW - 30d
 
 
 async def test_run_agent_digest_rejects_bad_period(wire):

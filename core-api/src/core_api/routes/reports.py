@@ -45,6 +45,9 @@ from core_api.services.report_corpus import (
     RESERVED_FIREHOSE_AGENTS,
 )
 from core_api.services.report_corpus import (
+    PERIOD_DAYS as _PERIOD_DAYS,
+)
+from core_api.services.report_corpus import (
     is_cohesive as _cohesive,
 )
 
@@ -68,7 +71,6 @@ _DETAIL_AUDIENCES = {AUDIENCE_OWNER_1TO1, AUDIENCE_GROUP, AUDIENCE_PRIVATE}
 # "self" audiences scope to the caller's OWN contributions (narrowest).
 _SELF_AUDIENCES = {AUDIENCE_OWNER_1TO1, AUDIENCE_PRIVATE}
 
-_PERIOD_DAYS = {"day": 1, "week": 7}
 _LEARNING_LIMIT = 5
 _HIGHLIGHTS_LIMIT = 5
 _TOP_AGENTS_LIMIT = 25

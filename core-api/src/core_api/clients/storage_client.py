@@ -2477,6 +2477,13 @@ class CoreStorageClient:
         """Insert/replace one agent-activity digest row (digest generator writes)."""
         return await self._post("/reports/agent-activity", data)  # type: ignore[return-value]
 
+    async def prune_agent_activity_digests(self, tenant_id: str, older_than: str) -> int:
+        """Delete a tenant's digest rows older than ``older_than`` (ISO); count."""
+        result = await self._post(
+            "/reports/agent-activity/prune", {"tenant_id": tenant_id, "older_than": older_than}
+        )
+        return result.get("deleted", 0) if isinstance(result, dict) else 0
+
     # =====================================================================
     # Tasks
     # =====================================================================
