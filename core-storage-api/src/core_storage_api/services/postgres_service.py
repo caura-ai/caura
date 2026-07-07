@@ -1243,9 +1243,23 @@ class PostgresService:
         # empty tsquery (matches nothing here), so the gate is inert for
         # vector-only / entity-only callers and conflicted stays demoted.
         _exact_lexical_match = Memory.search_vector.op("@@")(ts_query) if query and query.strip() else false()
+        # RE-05: ``archived`` joins ``outdated`` as a default demotion (0.5) — a
+        # soft penalty, not exclusion, so archived rows stay reachable via an
+        # explicit ``status='archived'`` filter (which scales the whole filtered
+        # set equally, preserving intra-filter order). CASE is first-match-wins,
+        # but status values are mutually exclusive, so this arm cannot overlap the
+        # outdated/conflicted arms; placing it AFTER them keeps the #357
+        # exact-lexical carve-out (the conflicted arm) byte-identical. The plan's
+        # superseded_by arm is intentionally omitted: there is no ``superseded_by``
+        # column (the model has ``supersedes_id``, which points the other way — it
+        # marks the newer superseder), and the superseded (older) row is already
+        # set ``status='outdated'`` by the contradiction path
+        # (contradiction_detector.py) so arm 1 already demotes it. Approved by
+        # Leon 2026-07-07; see docs/plans/saas-code-recall-efficiency.md P3.
         status_penalty = case(
             (Memory.status == "outdated", 0.5),
             (and_(Memory.status == "conflicted", ~_exact_lexical_match), 0.5),
+            (Memory.status == "archived", 0.5),
             else_=1.0,
         ).label("status_penalty")
 

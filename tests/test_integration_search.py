@@ -436,3 +436,65 @@ class TestConflictedExactMatchSurfaces:
         assert not any("vortex" in r.content for r in results), (
             "outdated exact-match should remain excluded"
         )
+
+
+@pytest.mark.integration
+class TestArchivedDemotion:
+    """RE-05: ``archived`` rows are demoted by the status_penalty (0.5) in the
+    default search, but — unlike ``outdated`` — are NOT excluded, so they stay
+    reachable both in default results (ranked lower) and via an explicit
+    ``status='archived'`` filter."""
+
+    async def test_archived_ranked_below_active_twin(self, db, tenant_id):
+        # The archived twin is given the HIGHER weight, so absent the penalty it
+        # would rank first (base_score blends similarity with Memory.weight). The
+        # 0.5 archived penalty is therefore the sole reason it sinks below the
+        # lower-weight active row — removing the CASE arm flips the order.
+        await _insert_memory(
+            tenant_id,
+            "Quarterly budget review scheduled for the marketing team alpha",
+            weight=0.30,
+            status="active",
+        )
+        await _insert_memory(
+            tenant_id,
+            "Quarterly budget review scheduled for the marketing team beta",
+            weight=0.95,
+            status="archived",
+        )
+
+        from core_api.services.memory_service import search_memories
+
+        results = await search_memories(
+            tenant_id, "quarterly budget review marketing", top_k=10
+        )
+        contents = [r.content for r in results]
+        assert any("alpha" in c for c in contents), "active twin missing from results"
+        assert any("beta" in c for c in contents), (
+            "archived twin should stay reachable (penalty, not exclusion)"
+        )
+        active_idx = next(i for i, c in enumerate(contents) if "alpha" in c)
+        archived_idx = next(i for i, c in enumerate(contents) if "beta" in c)
+        assert active_idx < archived_idx, (
+            "archived twin should rank below its active counterpart"
+        )
+
+    async def test_archived_retrievable_with_explicit_status_filter(self, db, tenant_id):
+        # An explicit status='archived' filter scopes the search to archived
+        # rows; the penalty scales all candidates equally, so they remain
+        # retrievable (relative order within the filter is preserved).
+        await _insert_memory(
+            tenant_id,
+            "Legacy onboarding runbook for the zeta platform",
+            weight=0.7,
+            status="archived",
+        )
+
+        from core_api.services.memory_service import search_memories
+
+        results = await search_memories(
+            tenant_id, "zeta platform onboarding", top_k=10, status_filter="archived"
+        )
+        assert any("zeta" in r.content for r in results), (
+            "archived row must be retrievable with an explicit status filter"
+        )
