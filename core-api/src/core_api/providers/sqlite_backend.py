@@ -18,7 +18,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-import aiosqlite
+import aiosqlite  # type: ignore[import-not-found]
 
 from core_api.protocols import SearchFilters
 

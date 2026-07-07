@@ -38,7 +38,7 @@ from core_api.services.organization_settings import resolve_config
 # pull + import time. When absent, the ingest endpoints return 501 (see
 # ``_extract_with_kreuzberg``); every other code path works unchanged.
 try:
-    import kreuzberg
+    import kreuzberg  # type: ignore[import-not-found]
 except ImportError:  # pragma: no cover - only in slim (no-ingest) builds
     kreuzberg = None  # type: ignore[assignment]
 

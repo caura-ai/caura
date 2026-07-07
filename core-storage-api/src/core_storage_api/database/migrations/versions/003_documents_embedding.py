@@ -15,7 +15,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import Vector  # type: ignore[import-not-found]
 
 revision: str = "003"
 down_revision: str | None = "002"

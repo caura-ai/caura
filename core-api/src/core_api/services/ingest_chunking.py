@@ -307,7 +307,7 @@ def _split_oversized_paragraph(text: str, hard_tokens: int) -> list[str]:
     try:
         # Import inside the function — pysbd warmup is non-trivial and
         # most paragraphs DON'T need this path.
-        import pysbd  # type: ignore[import-untyped]
+        import pysbd  # type: ignore[import-not-found]
 
         seg = pysbd.Segmenter(language="en", clean=False)
         sents = [s.strip() for s in seg.segment(text) if s.strip()]

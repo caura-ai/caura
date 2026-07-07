@@ -77,7 +77,7 @@ def _fetch_blocking(audience: str) -> str | _NoCredentials:
     try:
         import requests as _requests  # type: ignore[import-untyped]
         from google.auth.transport.requests import Request  # type: ignore[import-untyped]
-        from google.oauth2 import id_token  # type: ignore[import-untyped]
+        from google.oauth2 import id_token  # type: ignore[import-untyped,attr-defined]
     except ImportError as exc:  # pragma: no cover — import-time only
         # Only catch actual missing-package errors. A broken-but-
         # installed google.auth (AttributeError, RuntimeError at
