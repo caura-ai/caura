@@ -612,7 +612,10 @@ async def get_report(
 
 @router.get("/reports/agent-activity")
 async def get_agent_activity_digest(
-    tenant_id: str = Query(..., description="Home tenant scope."),
+    tenant_id: str | None = Query(
+        None,
+        description="Home tenant scope. Required and used for scope='own'; ignored for scope='org'.",
+    ),
     period: str = Query("day", description="Digest window: 'day' or 'week'."),
     scope: str = Query(
         "own",
@@ -664,16 +667,23 @@ async def get_agent_activity_digest(
         else:
             tenants = list(auth.readable_tenant_ids)
     else:
+        if tenant_id is None:
+            raise HTTPException(status_code=422, detail="'tenant_id' is required for scope='own'.")
         tenants = [tenant_id]
     # Bound which tenants: every target must be in the credential's readable set.
     for t in tenants:
         auth.enforce_readable_tenant(t)
 
     sc = get_storage_client()
+    # return_exceptions: one tenant's storage failure must not sink the whole
+    # org report — skip the failed tenant and return what did resolve.
     per_tenant = await asyncio.gather(
-        *(sc.get_agent_activity_digest(t, period, agent_id=agent_id, as_of=as_of) for t in tenants)
+        *(sc.get_agent_activity_digest(t, period, agent_id=agent_id, as_of=as_of) for t in tenants),
+        return_exceptions=True,
     )
-    digests: list[dict] = [row for rows in per_tenant for row in (rows or [])]
+    digests: list[dict] = [
+        row for rows in per_tenant if not isinstance(rows, BaseException) for row in (rows or [])
+    ]
 
     # Meta reflects the freshest run represented in the result set. Under
     # scope='org' the digests can span tenants whose scheduled passes ran over
