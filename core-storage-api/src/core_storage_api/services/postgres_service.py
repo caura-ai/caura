@@ -18,10 +18,11 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import (
+    Table,
     and_,
     bindparam,
     case,
@@ -41,6 +42,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import load_only
+from sqlalchemy.sql.dml import ReturningInsert
 from sqlalchemy.sql.elements import ColumnElement
 
 from common.constants import (
@@ -369,6 +371,9 @@ def _verify_audit_chain_rows(
                     "created_at": row.created_at.astimezone(UTC).isoformat(),
                 },
             }
+        assert (
+            row.event_hash is not None
+        )  # else branch above proves compute_event_hash(...) == row.event_hash, so it can't be None
         expected_prev = row.event_hash
         expected_seq += 1
 
@@ -2057,7 +2062,7 @@ class PostgresService:
             )
             if node_ids:
                 cmd_result = await session.execute(
-                    FleetCommand.__table__.delete().where(FleetCommand.node_id.in_(node_ids))
+                    cast("Table", FleetCommand.__table__).delete().where(FleetCommand.node_id.in_(node_ids))
                 )
                 counts["fleet_commands"] = cmd_result.rowcount  # type: ignore[attr-defined]
             else:
@@ -2477,7 +2482,7 @@ class PostgresService:
         shows up in operator profiles.
         """
         async with get_session() as session:
-            base_filters = [
+            base_filters: list[ColumnElement[bool]] = [
                 Memory.embedding.is_(None),
                 Memory.deleted_at.is_(None),
             ]
@@ -3044,7 +3049,10 @@ class PostgresService:
         admin ``/admin/fleets`` (``exclude_scope_agent`` False, cross-tenant
         when ``tenant_id`` is None). Read-only (reader replica).
         """
-        filters = [Memory.deleted_at.is_(None), Memory.fleet_id.isnot(None)]
+        filters: list[ColumnElement[bool]] = [
+            Memory.deleted_at.is_(None),
+            Memory.fleet_id.isnot(None),
+        ]
         if exclude_scope_agent:
             # ``Memory.visibility`` is NOT NULL with a server default, so the
             # three-valued-logic NULL pitfall doesn't apply.
@@ -3581,7 +3589,7 @@ class PostgresService:
         SETS aggregation, same cross-tenant widening + ``by_tenant`` breakdown,
         and same ``include_deleted`` CTE. Read-only (reader replica).
         """
-        scope_filters = []
+        scope_filters: list[ColumnElement[bool]] = []
         if readable_tenant_ids:
             scope_filters.append(Memory.tenant_id.in_(readable_tenant_ids))
         else:
@@ -4154,7 +4162,7 @@ class PostgresService:
         from sqlalchemy.exc import IntegrityError
 
         async with get_session() as session:
-            entity = Entity(**data)
+            entity: Entity | None = Entity(**data)
             session.add(entity)
             try:
                 await session.flush()
@@ -4180,6 +4188,7 @@ class PostgresService:
                     raise ValueError(
                         f"Entity '{data.get('canonical_name')}' conflict but re-select returned nothing"
                     )
+            assert entity is not None
             return entity
 
     async def entity_update(self, entity_id: UUID, data: dict) -> Entity | None:
@@ -4644,7 +4653,7 @@ class PostgresService:
                 mid = UUID(mid)
             if not isinstance(eid, UUID):
                 eid = UUID(eid)
-            ins_stmt = (
+            ins_stmt: ReturningInsert[tuple[UUID, UUID, str, Any]] = (
                 pg_insert(MemoryEntityLink)
                 .values(memory_id=mid, entity_id=eid, role=it["role"])
                 .on_conflict_do_update(
@@ -5474,7 +5483,7 @@ class PostgresService:
                 # entities.id`` (prod 2026-06-16). ``update(Entity.__table__)`` is a
                 # plain Core executemany UPDATE that honours the custom bindparams and
                 # has no ORM bulk-by-PK or session-synchronisation behaviour at all.
-                sql_update(Entity.__table__)
+                sql_update(cast("Table", Entity.__table__))
                 .where(
                     Entity.__table__.c.id == bindparam("eid"),
                     Entity.__table__.c.tenant_id == tenant_id,
@@ -5826,6 +5835,7 @@ class PostgresService:
         span every collection across the readable set (collections with the
         same name across multiple tenants merge into one row).
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -5861,6 +5871,7 @@ class PostgresService:
         not advertise non-active skills in the count. ``readable_tenant_ids``
         widens to ``ANY($readable)`` over the same scope the listing used.
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -5901,6 +5912,7 @@ class PostgresService:
         equality filter. Returns ``(Document, similarity)`` pairs where
         ``similarity = 1 - cosine_distance``.
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -5940,6 +5952,7 @@ class PostgresService:
         sibling tenants; ``tenant_id`` stays the binding/home tenant.
         Mirrors core-api ``document_repository.get_by_doc_id``.
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -5972,6 +5985,7 @@ class PostgresService:
         for cross-tenant credentials. Mirrors core-api
         ``document_repository.query``.
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -7350,11 +7364,13 @@ class PostgresService:
 
             if node_ids:
                 await session.execute(
-                    FleetCommand.__table__.delete().where(FleetCommand.node_id.in_(node_ids))
+                    cast("Table", FleetCommand.__table__).delete().where(FleetCommand.node_id.in_(node_ids))
                 )
 
             await session.execute(
-                FleetNode.__table__.delete().where(
+                cast("Table", FleetNode.__table__)
+                .delete()
+                .where(
                     FleetNode.tenant_id == tenant_id,
                     FleetNode.fleet_id == fleet_id,
                 )
@@ -7368,7 +7384,7 @@ class PostgresService:
         values: dict[str, Any],
     ) -> UUID:
         async with get_session() as session:
-            stmt = pg_insert(FleetNode.__table__).values(**values)
+            stmt = pg_insert(cast("Table", FleetNode.__table__)).values(**values)
             stmt = stmt.on_conflict_do_update(  # type: ignore[assignment]
                 constraint="uq_fleet_nodes_tenant_node",
                 set_={k: v for k, v in values.items() if k not in ("tenant_id", "node_name")},
@@ -7616,7 +7632,9 @@ class PostgresService:
         if not node_ids:
             return
         async with get_session() as session:
-            await session.execute(FleetCommand.__table__.delete().where(FleetCommand.node_id.in_(node_ids)))
+            await session.execute(
+                cast("Table", FleetCommand.__table__).delete().where(FleetCommand.node_id.in_(node_ids))
+            )
 
     # ══════════════════════════════════════════════════════════════════════
     #  AUDIT
@@ -7700,7 +7718,7 @@ class PostgresService:
             # head exists; the unconditional FOR UPDATE select below is what
             # actually serializes writers.
             await session.execute(
-                pg_insert(AuditChainHead.__table__)
+                pg_insert(cast("Table", AuditChainHead.__table__))
                 .values(tenant_id=tenant_id, last_seq=0, last_hash=GENESIS_PREV_HASH)
                 .on_conflict_do_nothing(index_elements=["tenant_id"])
             )
