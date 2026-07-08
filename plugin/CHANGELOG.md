@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.14.0](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.13.0...plugin-v2.14.0) (2026-07-08)
+
+
+### Features
+
+* **plugin:** opt-in recall-gating + cross-agent recall (F2/A44) ([#530](https://github.com/caura-ai/caura-memclaw/issues/530)) ([a68b3d0](https://github.com/caura-ai/caura-memclaw/commit/a68b3d0d4d141bd15bc185afb2c4922847d449ec))
+
 ## [2.13.0](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.12.0...plugin-v2.13.0) (2026-07-05)
 
 

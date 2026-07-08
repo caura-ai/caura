@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.20.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.19.0...backend-v2.20.0) (2026-07-08)
+
+
+### Features
+
+* **plugin:** opt-in recall-gating + cross-agent recall (F2/A44) ([#530](https://github.com/caura-ai/caura-memclaw/issues/530)) ([a68b3d0](https://github.com/caura-ai/caura-memclaw/commit/a68b3d0d4d141bd15bc185afb2c4922847d449ec))
+* **reports:** agent-activity digest — Phase 1 (inert read slice) [CAURA-222] ([#533](https://github.com/caura-ai/caura-memclaw/issues/533)) ([d0d458f](https://github.com/caura-ai/caura-memclaw/commit/d0d458f33d60e11397dc1613000fbdb163f825e9))
+* **reports:** agent-activity digest generation — Phase 2 [CAURA-222] ([#537](https://github.com/caura-ai/caura-memclaw/issues/537)) ([4595284](https://github.com/caura-ai/caura-memclaw/commit/45952841639e454e020d09371e43778beecd1565))
+* **search:** tenant-wide default search profile (agent &gt; tenant &gt; constant) ([#534](https://github.com/caura-ai/caura-memclaw/issues/534)) ([09faf6a](https://github.com/caura-ai/caura-memclaw/commit/09faf6a1c669736ea9d1607e3dc92dbd418fd47e))
+
+
+### Bug Fixes
+
+* **reports:** count agent-private durable writes in report aggregates ([#535](https://github.com/caura-ai/caura-memclaw/issues/535)) ([f8c7914](https://github.com/caura-ai/caura-memclaw/commit/f8c7914b34043d37df5f5a72810521d34ecd6d13))
+* **scoring:** cap freshness at 1.0 for future ts_valid_start (A43) ([#529](https://github.com/caura-ai/caura-memclaw/issues/529)) ([b128553](https://github.com/caura-ai/caura-memclaw/commit/b128553c1e4a3159744bdb542ad49c6332d33fe4))
+
 ## [2.19.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.18.0...backend-v2.19.0) (2026-07-05)
 
 
