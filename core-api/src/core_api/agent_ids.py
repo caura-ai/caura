@@ -12,6 +12,22 @@ otherwise couple the route module to the whole MCP tool surface.
 # anonymous writes are never silently attributed to one shared identity.
 DEFAULT_AGENT_ID = "mcp-agent"
 
+# Dedicated system identity for the automated nightly insights run
+# (``lifecycle_audit._CoreApiLifecycleAdapter.insights`` → ``generate_insights``).
+# Distinct from ``DEFAULT_AGENT_ID`` above: that is the generic "caller specified
+# nothing" fallback, whereas the scheduled insights pass has no human/agent
+# caller and must write under a stable, registerable identity rather than
+# collapsing onto the anonymous default (which is unregistered, so its writes
+# never surface in Prism or the per-agent report). Registered per-tenant with
+# ``belonging_type='service'`` the first time the job runs for that tenant.
+INSIGHTER_AGENT_ID = "memclaw-insighter"
+
+# Trust tier the insighter self-registers at: service level, granting cross-fleet
+# read (>=2, needed for scope='all') and write (>=3, it persists scope_org
+# insights). The automated path calls the service directly and bypasses the
+# route trust gate, so this is future-proofing for any gated re-route.
+INSIGHTER_TRUST_LEVEL = 3
+
 # Bare ``"main"`` is the OpenClaw plugin's *unset* default agent_id: when an
 # operator never sets ``MEMCLAW_AGENT_ID`` every install collapses onto this one
 # shared identity (the eToro "firehose"). Unlike ``DEFAULT_AGENT_ID``

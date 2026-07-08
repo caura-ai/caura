@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
+from core_api.agent_ids import INSIGHTER_AGENT_ID, INSIGHTER_TRUST_LEVEL
 from core_api.clients.storage_client import CoreStorageClient
 from core_api.constants import LIFECYCLE_STALE_ARCHIVE_WEIGHT
 from core_api.services.organization_settings import resolve_config
@@ -144,11 +145,47 @@ class _CoreApiLifecycleAdapter:
             if latest_non_insight <= latest_insight:
                 return 0
 
+        # Register the dedicated system identity for this org BEFORE persisting,
+        # so the insights are attributed to a real, Prism-visible service agent
+        # instead of the anonymous ``mcp-agent`` fallback. This is the "registered
+        # at any new tenant" hook: the first nightly run for a tenant registers it.
+        #
+        # One-time setup, guarded by an existence check rather than a bare upsert:
+        # create_or_update_agent's conflict path *updates* trust_level /
+        # display_name (etc.) when the supplied value differs, so re-registering
+        # every night would silently overwrite an operator's later customisation
+        # of this agent. Only create it when absent.
+        #
+        # Best-effort: a transient storage error here must not abort the whole
+        # insights run. The write below works even without the agent row (writes
+        # don't require the agent to be registered), and the next nightly run
+        # retries registration.
+        try:
+            existing = await self._storage.get_agent(INSIGHTER_AGENT_ID, org_id)
+            if existing is None:
+                await self._storage.create_or_update_agent(
+                    {
+                        "tenant_id": org_id,
+                        "agent_id": INSIGHTER_AGENT_ID,
+                        "fleet_id": None,
+                        "display_name": "MemClaw Insighter",
+                        "belonging_type": "service",
+                        "trust_level": INSIGHTER_TRUST_LEVEL,
+                    }
+                )
+        except Exception:
+            logger.warning(
+                "Failed to register insighter agent for org %s; proceeding without registration",
+                org_id,
+                exc_info=True,
+            )
+
         result = await generate_insights(
             org_id,
             focus="discover",
             scope="fleet" if fleet_id else "all",
             fleet_id=fleet_id,
+            agent_id=INSIGHTER_AGENT_ID,
         )
 
         return len(result.get("insight_memory_ids", []))
