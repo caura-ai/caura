@@ -664,7 +664,7 @@ class TestMigrationChain:
     def test_single_head(self):
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"029"}, f"Expected single head '029', got {sorted(heads)}"
+        assert heads == {"030"}, f"Expected single head '030', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -684,6 +684,8 @@ class TestMigrationChain:
         assert chain.get("028") == "027", "028 must follow 027"
         # 029: agent activity digest (cached per-agent summaries, CAURA-222)
         assert chain.get("029") == "028", "029 must follow 028"
+        # 030: register the memclaw-insighter service agent for existing tenants
+        assert chain.get("030") == "029", "030 must follow 029"
 
     def test_no_plain_create_index_on_large_tables(self):
         """Indexes on large, pre-existing tables MUST be built ``CONCURRENTLY``
