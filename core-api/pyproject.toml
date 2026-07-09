@@ -1,6 +1,6 @@
 [project]
 name = "core-api"
-version = "2.20.0"
+version = "2.21.0"
 description = "MemClaw Core API service"
 license = "Apache-2.0"
 requires-python = ">=3.12"

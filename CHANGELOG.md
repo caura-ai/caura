@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.21.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.20.0...backend-v2.21.0) (2026-07-09)
+
+
+### Features
+
+* **insights:** give the nightly insights run a dedicated registered identity ([#540](https://github.com/caura-ai/caura-memclaw/issues/540)) ([e74413d](https://github.com/caura-ai/caura-memclaw/commit/e74413d22e98fd838a6899af9b2989c2952ae06a))
+* **reports:** weekly agent-digest cron tick [CAURA-222] ([#543](https://github.com/caura-ai/caura-memclaw/issues/543)) ([2adad51](https://github.com/caura-ai/caura-memclaw/commit/2adad51b4c5ad0699da84058a3f969ff927e540a))
+
 ## [2.20.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.19.0...backend-v2.20.0) (2026-07-08)
 
 
