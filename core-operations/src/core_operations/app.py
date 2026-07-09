@@ -49,9 +49,14 @@ configure_logging(
     log_file=settings.log_file or None,
 )
 
-from core_operations.scheduler import scheduler, seconds_until_next_utc_hour
+from core_operations.scheduler import (
+    scheduler,
+    seconds_until_next_utc_hour,
+    seconds_until_next_utc_weekday_hour,
+)
 from core_operations.tasks import (
     run_agent_digest_tick,
+    run_agent_digest_weekly_tick,
     run_archive_expired_tick,
     run_archive_stale_tick,
     run_crystallize_tick,
@@ -76,6 +81,11 @@ def _register_scheduled_tasks() -> None:
         # Bind the setting lookup lazily so an operator override applied
         # before start() is still picked up, and recompute each cycle.
         return lambda: seconds_until_next_utc_hour(getattr(settings, hour_attr))
+
+    def _weekly_at(weekday_attr: str, hour_attr: str):
+        return lambda: seconds_until_next_utc_weekday_hour(
+            getattr(settings, weekday_attr), getattr(settings, hour_attr)
+        )
 
     scheduler.register(
         "lifecycle-archive-expired",
@@ -118,6 +128,12 @@ def _register_scheduled_tasks() -> None:
         24 * 3600,
         run_agent_digest_tick,
         delay_provider=_daily_at("agent_digest_run_at_hour"),
+    )
+    scheduler.register(
+        "agent-digest-weekly",
+        7 * 24 * 3600,
+        run_agent_digest_weekly_tick,
+        delay_provider=_weekly_at("agent_digest_weekly_run_at_weekday", "agent_digest_weekly_run_at_hour"),
     )
 
 

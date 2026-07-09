@@ -53,6 +53,29 @@ def seconds_until_next_utc_hour(hour: int, *, now: datetime | None = None) -> fl
     return (target - current).total_seconds()
 
 
+def seconds_until_next_utc_weekday_hour(weekday: int, hour: int, *, now: datetime | None = None) -> float:
+    """Seconds from ``now`` until the next ``weekday``@``hour``:00 UTC.
+
+    ``weekday`` is Python's ``date.weekday()`` convention: 0=Monday … 6=Sunday.
+    Same strict-future guarantee as :func:`seconds_until_next_utc_hour` (always
+    positive, at most 7 days): when ``now`` is exactly at or past this week's
+    target slot, it rolls forward a full week — so an aligned weekly task can't
+    hot-loop after a fast failure.
+
+    ``now`` is injectable for tests; defaults to the current UTC time.
+    """
+    if not 0 <= weekday <= 6:
+        raise ValueError(f"weekday must be in 0..6 (Mon..Sun), got {weekday}")
+    if not 0 <= hour <= 23:
+        raise ValueError(f"hour must be in 0..23, got {hour}")
+    current = now or datetime.now(UTC)
+    target = current.replace(hour=hour, minute=0, second=0, microsecond=0)
+    target += timedelta(days=(weekday - current.weekday()) % 7)
+    if target <= current:  # today IS the weekday but the hour has passed
+        target += timedelta(days=7)
+    return (target - current).total_seconds()
+
+
 @dataclass(frozen=True)
 class ScheduledTask:
     name: str

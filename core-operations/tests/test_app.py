@@ -24,6 +24,8 @@ _EXPECTED_JOBS = {
     "lifecycle-crystallize",
     "lifecycle-entity-link",
     "lifecycle-insights",
+    "agent-digest",
+    "agent-digest-weekly",
 }
 
 
@@ -39,7 +41,9 @@ def test_all_lifecycle_jobs_registered_and_wall_clock_aligned(monkeypatch):
         # Aligned => no immediate boot tick, no drift.
         assert t.delay_provider is not None, f"{t.name} is not wall-clock aligned"
         delay = t.delay_provider()
-        assert 0 < delay <= 24 * 3600, f"{t.name} delay out of range: {delay}"
+        # Weekly-aligned jobs are up to 7 days out; daily ones up to 24h.
+        max_delay = 7 * 24 * 3600 if t.name == "agent-digest-weekly" else 24 * 3600
+        assert 0 < delay <= max_delay, f"{t.name} delay out of range: {delay}"
 
 
 def test_run_at_hour_override_is_threaded_through(monkeypatch):

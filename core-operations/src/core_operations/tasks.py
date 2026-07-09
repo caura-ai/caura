@@ -156,3 +156,9 @@ async def run_agent_digest_tick() -> None:
     enumerates opted-in orgs and generates inline; a tenant that hasn't opted in
     pays zero cost. Safe to fire daily."""
     await _fire_agent_digest("day")
+
+
+async def run_agent_digest_weekly_tick() -> None:
+    """Weekly per-agent digest (period=week). Same trigger as the daily tick,
+    fired once a week so the previous full Mon-Mon window gets summarized."""
+    await _fire_agent_digest("week")

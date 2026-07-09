@@ -102,6 +102,20 @@ async def test_agent_digest_tick_posts_to_run_endpoint(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
+async def test_agent_digest_weekly_tick_posts_period_week(monkeypatch: pytest.MonkeyPatch):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    response = _StubResponse(200, {"period": "week", "orgs": 1, "completed": 1, "digests": 3})
+    async with _patch_client(monkeypatch, response=response) as stub:
+        await tasks.run_agent_digest_weekly_tick()
+
+    assert len(stub.calls) == 1
+    url, _ = stub.calls[0]
+    assert url == "http://core-api/api/v1/admin/reports/agent-digest/run?period=week"
+
+
+@pytest.mark.asyncio
 async def test_archive_stale_tick_hits_correct_path(monkeypatch: pytest.MonkeyPatch):
     settings.core_api_url = "http://core-api"
     settings.core_api_admin_api_key = "admin-key-xyz"

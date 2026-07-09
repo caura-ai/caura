@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     # (``agent_digest.enabled``, default off); a tenant that hasn't opted in
     # costs nothing, so a daily fire is safe.
     agent_digest_run_at_hour: int = 2
+    # Weekly digest (period=week) — a separate wall-clock-aligned tick so the UI's
+    # "week" toggle isn't dead. Fires once a week on ``weekday`` (0=Mon..6=Sun) at
+    # ``hour``; default Monday 03:00 UTC, just after the Monday daily tick, so the
+    # just-closed Mon-Mon window is covered.
+    agent_digest_weekly_run_at_weekday: int = 0
+    agent_digest_weekly_run_at_hour: int = 3
     # Generation runs INLINE in core-api (LLM per agent across opted-in orgs), so
     # its trigger POST can take minutes — a generous timeout, not the 30s default.
     agent_digest_http_timeout_s: float = 600.0
@@ -76,11 +82,19 @@ class Settings(BaseSettings):
         "lifecycle_pipeline_run_at_hour",
         "lifecycle_insights_run_at_hour",
         "agent_digest_run_at_hour",
+        "agent_digest_weekly_run_at_hour",
     )
     @classmethod
     def _validate_run_at_hour(cls, v: int, info: ValidationInfo) -> int:
         if not 0 <= v <= 23:
             raise ValueError(f"{info.field_name} must be in 0..23 (UTC hour)")
+        return v
+
+    @field_validator("agent_digest_weekly_run_at_weekday")
+    @classmethod
+    def _validate_weekday(cls, v: int, info: ValidationInfo) -> int:
+        if not 0 <= v <= 6:
+            raise ValueError(f"{info.field_name} must be in 0..6 (Mon..Sun)")
         return v
 
 

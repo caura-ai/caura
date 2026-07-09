@@ -7,7 +7,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from core_operations.scheduler import Scheduler, seconds_until_next_utc_hour
+from core_operations.scheduler import (
+    Scheduler,
+    seconds_until_next_utc_hour,
+    seconds_until_next_utc_weekday_hour,
+)
 
 
 @pytest.mark.asyncio
@@ -208,6 +212,36 @@ def test_seconds_until_next_utc_hour_always_positive_and_bounded():
     s = seconds_until_next_utc_hour(2, now=now)
     assert 0 < s <= 24 * 3600
     assert s == 1.0
+
+
+def test_seconds_until_next_weekday_hour_same_day_future():
+    now = datetime(2026, 6, 8, 0, 0, 0, tzinfo=UTC)  # a Monday
+    # Today is the target weekday and 03:00 hasn't passed → 3h out.
+    assert seconds_until_next_utc_weekday_hour(0, 3, now=now) == 3 * 3600
+
+
+def test_seconds_until_next_weekday_hour_rolls_a_week_when_past():
+    now = datetime(2026, 6, 8, 5, 0, 0, tzinfo=UTC)  # Monday, past 03:00
+    assert seconds_until_next_utc_weekday_hour(0, 3, now=now) == (7 * 24 - 5 + 3) * 3600
+
+
+def test_seconds_until_next_weekday_hour_future_weekday():
+    now = datetime(2026, 6, 3, 0, 0, 0, tzinfo=UTC)  # a Wednesday
+    # Next Monday (2026-06-08) 03:00 = 5 days + 3h.
+    assert seconds_until_next_utc_weekday_hour(0, 3, now=now) == (5 * 24 + 3) * 3600
+
+
+def test_seconds_until_next_weekday_hour_exact_boundary_rolls_forward():
+    now = datetime(2026, 6, 8, 3, 0, 0, tzinfo=UTC)  # exactly Monday 03:00
+    assert seconds_until_next_utc_weekday_hour(0, 3, now=now) == 7 * 24 * 3600
+
+
+def test_seconds_until_next_weekday_hour_validates_range():
+    now = datetime(2026, 6, 8, 0, 0, 0, tzinfo=UTC)
+    with pytest.raises(ValueError):
+        seconds_until_next_utc_weekday_hour(7, 3, now=now)
+    with pytest.raises(ValueError):
+        seconds_until_next_utc_weekday_hour(0, 24, now=now)
 
 
 def test_seconds_until_next_utc_hour_rejects_out_of_range():
