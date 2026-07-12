@@ -39,7 +39,22 @@ logger = logging.getLogger(__name__)
 # well past the hot-path budget; cancelling it mid-flight is pointless
 # (the purge is one transaction per tenant and idempotent on retry), so
 # it opts out and is bounded by the storage client's own timeout instead.
-_TIMEOUT_OPT_OUT_PATHS: frozenset[str] = frozenset({"/api/v1/memories/bulk", "/api/v1/admin/org/purge-data"})
+# ``/ingest/{preview,commit}`` are LLM-bound operator-plane calls that
+# scale with document size (preview: one extraction round per ~3k-token
+# section; commit: strong-mode enrichment across up-to-BULK_MAX_ITEMS
+# chunks). A fact-dense wiki page blew the 45s budget mid-commit,
+# 504ing AFTER earlier chunks had persisted — the same
+# partial-write-then-cancel shape as the bulk case above. Both are
+# bounded by the per-call LLM timeouts + the caller's own client
+# timeout instead.
+_TIMEOUT_OPT_OUT_PATHS: frozenset[str] = frozenset(
+    {
+        "/api/v1/memories/bulk",
+        "/api/v1/admin/org/purge-data",
+        "/api/v1/ingest/preview",
+        "/api/v1/ingest/commit",
+    }
+)
 
 
 def _is_opted_out(path: str) -> bool:

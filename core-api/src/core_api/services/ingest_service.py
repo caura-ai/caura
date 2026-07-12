@@ -16,7 +16,7 @@ from fastapi import HTTPException
 
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
-from core_api.constants import MEMORY_TYPES
+from core_api.constants import BULK_MAX_ITEMS, MEMORY_TYPES
 from core_api.providers._retry import call_with_fallback
 from core_api.schemas import (
     BulkMemoryCreate,
@@ -871,6 +871,8 @@ async def _write_parent_ingest_document(
         "uploaded_at": datetime.now(UTC).isoformat(),
         "ingest_ms": ingest_ms,
         "agent_id": request.agent_id,
+        "source_doc_id": request.source_doc_id,
+        "ts_valid_start": request.ts_valid_start.isoformat() if request.ts_valid_start else None,
     }
     summary = _summarize_batch_for_embedding(survivors)
     if summary is not None:
@@ -1040,6 +1042,8 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
             }
             if request.doc_hash:
                 metadata["doc_hash"] = request.doc_hash
+            if request.source_doc_id:
+                metadata["source_doc_id"] = request.source_doc_id
             salience_value = getattr(fact, "salience", None)
             if salience_value is not None:
                 metadata["salience"] = salience_value
@@ -1050,47 +1054,66 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
                     source_uri=effective_source,
                     run_id=run_id,
                     metadata=metadata,
+                    # Explicit source timestamp wins over enrichment's
+                    # content-inferred value (bulk path only fills
+                    # ts_valid_start from enrichment when it's None).
+                    ts_valid_start=request.ts_valid_start,
                 )
             )
-        bulk_data = BulkMemoryCreate(
-            tenant_id=request.tenant_id,
-            fleet_id=request.fleet_id,
-            agent_id=request.agent_id,
-            items=bulk_items,
-        )
-        try:
-            bulk_response = await create_memories_bulk(bulk_data, bulk_attempt_id=run_id)
-            created = bulk_response.created
-            skipped_in_loop = bulk_response.duplicates
-            errored = bulk_response.errors
-            # Surface per-item error reasons in the logs so the cleanup
-            # message at the bottom of this function still points at the
-            # offending facts.
-            for item in bulk_response.results:
-                if item.status == "error":
-                    # Mirror the legacy "fact[N]" log format the
-                    # P1.C-lite runbook + operator greps depend on.
-                    logger.warning(
-                        "ingest_commit: fact[%d] write failed (run_id=%s): %s",
-                        item.index,
-                        run_id,
-                        item.error,
-                    )
-        except HTTPException as e:
-            # A 4xx/5xx from the bulk endpoint aborts the whole batch
-            # (e.g. 504 from the bulk-embedding timeout). Mirror the
-            # prior behaviour where a non-409 escape raised through
-            # gather and aborted the run — but now the run_id is still
-            # logged so the operator can locate any partial rows.
-            logger.exception(
-                "ingest_commit: bulk write failed with HTTP %d (run_id=%s) — "
-                "0 facts persisted on this attempt; safe to retry",
-                e.status_code,
-                run_id,
+        # Fact-dense documents can exceed ``BULK_MAX_ITEMS`` (first hit
+        # importing real wiki pages: 115-194 facts per page — the single
+        # BulkMemoryCreate 500'd on its own validator). Split into
+        # ≤BULK_MAX_ITEMS chunks. Attempt-id scheme: chunk 0 keeps the
+        # bare ``run_id`` (byte-identical to the pre-split contract, so
+        # a retry that straddles a deploy still dedups); later chunks
+        # append ``#<n>``, deterministic so a retry of the same run
+        # re-derives the same ids and sees ``duplicate_attempt``.
+        created = 0
+        skipped_in_loop = 0
+        errored = 0
+        chunks = [bulk_items[i : i + BULK_MAX_ITEMS] for i in range(0, len(bulk_items), BULK_MAX_ITEMS)]
+        for chunk_index, chunk in enumerate(chunks):
+            bulk_data = BulkMemoryCreate(
+                tenant_id=request.tenant_id,
+                fleet_id=request.fleet_id,
+                agent_id=request.agent_id,
+                items=chunk,
             )
-            created = 0
-            skipped_in_loop = 0
-            errored = len(survivors)
+            attempt_id = run_id if chunk_index == 0 else f"{run_id}#{chunk_index}"
+            try:
+                bulk_response = await create_memories_bulk(bulk_data, bulk_attempt_id=attempt_id)
+                created += bulk_response.created
+                skipped_in_loop += bulk_response.duplicates
+                errored += bulk_response.errors
+                # Surface per-item error reasons in the logs so the cleanup
+                # message at the bottom of this function still points at the
+                # offending facts.
+                for item in bulk_response.results:
+                    if item.status == "error":
+                        # Mirror the legacy "fact[N]" log format the
+                        # P1.C-lite runbook + operator greps depend on.
+                        logger.warning(
+                            "ingest_commit: fact[%d] write failed (run_id=%s): %s",
+                            item.index + chunk_index * BULK_MAX_ITEMS,
+                            run_id,
+                            item.error,
+                        )
+            except HTTPException as e:
+                # A 4xx/5xx from the bulk endpoint aborts this chunk
+                # (e.g. 504 from the bulk-embedding timeout). Later
+                # chunks are independent — keep going; a retry of the
+                # run re-dedups the committed chunks via their attempt
+                # ids and re-attempts only what failed.
+                logger.exception(
+                    "ingest_commit: bulk chunk %d/%d failed with HTTP %d (run_id=%s) — "
+                    "%d facts not persisted on this attempt; safe to retry",
+                    chunk_index + 1,
+                    len(chunks),
+                    e.status_code,
+                    run_id,
+                    len(chunk),
+                )
+                errored += len(chunk)
     else:
         # All facts pre-deduped by the content-hash sweep above; nothing
         # to do here.

@@ -424,6 +424,17 @@ class IngestCommitRequest(BaseModel):
     # call (cache-hit). Backward-compatible: omitting it just disables
     # the cache for future previews of this content.
     doc_hash: str | None = None
+    # Source-document provenance (cold-start A0.1). One commit distills one
+    # source document, so both fields are request-level and apply to every
+    # fact in the batch. ``source_doc_id`` is the stable id in the source
+    # system (e.g. a Confluence page id) — stamped into each memory's
+    # metadata and onto the parent Document so a later re-sync can find
+    # everything derived from that doc. ``ts_valid_start`` is the source's
+    # last-edited time — stamped as each memory's temporal-validity start
+    # so imported facts inherit the age of the page they came from instead
+    # of landing as brand-new knowledge.
+    source_doc_id: str | None = None
+    ts_valid_start: datetime | None = None
 
 
 class RelationUpsertOut(BaseModel):

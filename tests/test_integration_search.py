@@ -436,3 +436,77 @@ class TestConflictedExactMatchSurfaces:
         assert not any("vortex" in r.content for r in results), (
             "outdated exact-match should remain excluded"
         )
+
+
+@pytest.mark.integration
+class TestArchivedAndCancelledExcluded:
+    """``archived``/``cancelled`` memories must not rank in scored search.
+
+    Archival is the connector source-deletion contract's "out of recall,
+    restorable" state (re-sync tombstones a doc's memories archived and can
+    restore them later). The exclusion list originally covered only
+    ``outdated``/``conflicted``, so archived rows kept surfacing in
+    /api/v1/search — an A/B recall demo returned a memory whose source doc
+    had been archived. Even an exact lexical match stays hidden: unlike
+    ``conflicted``, these statuses mean "not currently part of the corpus",
+    not "a competing claim exists".
+    """
+
+    async def test_archived_excluded_even_on_exact_match(self, db, tenant_id):
+        await _insert_memory(
+            tenant_id,
+            "Deployment host is plzkv cluster in region east",
+            weight=0.7,
+            status="archived",
+        )
+        await _insert_memory(
+            tenant_id,
+            "Deployment pipeline uses staging green gate before promote",
+            weight=0.7,
+            status="active",
+        )
+
+        from core_api.services.memory_service import search_memories
+
+        results = await search_memories(tenant_id, "plzkv deployment host", top_k=10)
+        assert not any("plzkv" in r.content for r in results), (
+            "archived memory leaked into scored search results"
+        )
+
+    async def test_cancelled_excluded(self, db, tenant_id):
+        await _insert_memory(
+            tenant_id,
+            "Initiative xrretq budget is nine million",
+            weight=0.7,
+            status="cancelled",
+        )
+
+        from core_api.services.memory_service import search_memories
+
+        results = await search_memories(tenant_id, "xrretq budget", top_k=10)
+        assert not any("xrretq" in r.content for r in results), (
+            "cancelled memory leaked into scored search results"
+        )
+
+    async def test_active_sibling_still_returned(self, db, tenant_id):
+        archived = await _insert_memory(
+            tenant_id,
+            "Runbook mmzzt covers failover drill steps",
+            weight=0.7,
+            status="archived",
+        )
+        live = await _insert_memory(
+            tenant_id,
+            "Runbook mmzzt failover drill runs quarterly",
+            weight=0.7,
+            status="active",
+        )
+
+        from core_api.services.memory_service import search_memories
+
+        results = await search_memories(tenant_id, "mmzzt failover drill", top_k=10)
+        result_ids = {str(r.id) for r in results}
+        assert str(archived["id"]) not in result_ids
+        assert str(live["id"]) in result_ids, (
+            "active memory was not returned alongside excluded archived sibling"
+        )

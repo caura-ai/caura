@@ -1392,9 +1392,15 @@ class PostgresService:
             # conflicted row un-demoted, and load_and_serialize still injects its
             # supersedes successor so both sides are visible. ``outdated`` stays
             # fully excluded.
+            # ``archived`` and ``cancelled`` joined the exclusion after an
+            # A/B recall demo surfaced an archived row ranking in search:
+            # archival is the source-deletion contract's "out of recall,
+            # restorable" state (connector re-sync tombstones), and it
+            # meant nothing while search still served the rows. Same
+            # explicit-``status_filter`` override applies for inspection.
             scored_stmt = scored_stmt.where(
                 or_(
-                    Memory.status.notin_(("outdated", "conflicted")),
+                    Memory.status.notin_(("outdated", "conflicted", "archived", "cancelled")),
                     and_(Memory.status == "conflicted", _exact_lexical_match),
                 )
             )
