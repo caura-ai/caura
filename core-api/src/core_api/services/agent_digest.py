@@ -57,6 +57,26 @@ DIGEST_SCHEMA: dict = {
 }
 
 _SECTION_KEYS = ("decisions", "shipped", "learned", "open_threads")
+_SECTION_LABELS = (
+    ("decisions", "decision"),
+    ("shipped", "shipped item"),
+    ("learned", "learning"),
+    ("open_threads", "open thread"),
+)
+
+
+def _narrative_from_sections(agent: dict, mems: list[dict], sections: dict) -> str:
+    """Terse prose salvaged from the structured sections when the model returned
+    them but omitted the narrative — a useful placeholder beats a blank row."""
+    name = agent.get("display_name") or agent.get("agent_id")
+    parts = []
+    for key, label in _SECTION_LABELS:
+        n = len(sections.get(key) or [])
+        if n:
+            parts.append(f"{n} {label}{'' if n == 1 else 's'}")
+    if parts:
+        return f"{name}: {', '.join(parts)} across {len(mems)} durable memories."
+    return f"{name} recorded {len(mems)} durable memories this period."
 
 
 def _build_prompt(agent: dict, mems: list[dict], period: str) -> str:
@@ -135,9 +155,12 @@ async def _summarize_agent(
         elif not narrative:
             # The provider uses strict=False (no server-side schema enforcement)
             # and there's no Pydantic guardrail here, so a real response can omit
-            # the narrative — treat that as an error, not a NULL "ok" row.
-            status = "error"
-            error = "LLM returned no narrative"
+            # the narrative. Salvage one from the structured sections and mark it
+            # fallback — a useful placeholder beats a blank error row (which is
+            # what agents like memclaw-insighter were producing in prod).
+            narrative = _narrative_from_sections(agent, mems, sections)
+            status = "fallback"
+            error = "LLM returned no narrative; synthesized from sections"
     except Exception as exc:  # storage/unexpected — real errors, not LLM fallback
         status, error = "error", repr(exc)
         logger.warning("agent_digest: summarize failed for %s/%s: %r", org_id, agent.get("agent_id"), exc)
@@ -195,7 +218,14 @@ async def generate_for_org(
     window_start = window_end - timedelta(days=days)
     top_n = int(config.get("top_n") or 25)
     max_mems = int(config.get("max_memories_per_agent") or 60)
-    min_activity = int(config.get("min_activity_threshold") or 3)
+    # Scale the activity floor to the window: a daily span is ~1/7 of a week, so
+    # applying the (week-tuned) threshold to a day starves the daily digest —
+    # in prod only ~3 agents/day clear it. Daily surfaces every active agent
+    # (floor 1); weekly keeps the configurable floor.
+    if period == "week":
+        min_activity = int(config.get("min_activity_threshold") or 3)
+    else:
+        min_activity = 1
     model = config.get("model") or "gpt-5.4-mini"
     provider = config.get("provider") or "openai"
     max_cost = float(config.get("max_cost_per_run_usd") or 0)

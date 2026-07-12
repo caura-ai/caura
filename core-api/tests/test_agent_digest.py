@@ -72,17 +72,35 @@ def wire(monkeypatch):
 
 
 async def test_generates_only_for_agents_above_threshold(wire):
+    # period="week" so the configured min_activity_threshold=3 applies (daily is
+    # floored to 1 — see test_daily_threshold_is_one).
     storage = wire(
         FakeStorage(
             [{"agent_id": "a", "fleet_id": None}, {"agent_id": "b", "fleet_id": "f1"}],
             {"a": [_mem(agent="a")] * 4, "b": [_mem(agent="b")] * 2},  # b below min_activity=3
         )
     )
-    summary = await agent_digest.generate_for_org("org1", "day", CONFIG, now=NOW)
+    summary = await agent_digest.generate_for_org("org1", "week", CONFIG, now=NOW)
     assert summary["generated"] == 1
     assert [r["agent_id"] for r in storage.upserts] == ["a"]
     assert storage.upserts[0]["status"] == "ok"
     assert storage.upserts[0]["source_count"] == 4
+
+
+async def test_daily_threshold_is_one(wire):
+    """Daily windows floor the activity threshold to 1 regardless of config, so a
+    barely-active agent still gets a daily digest (weekly would exclude it)."""
+    seed = {"a": [_mem(agent="a")] * 2, "b": [_mem(agent="b")] * 1}
+    agents = [{"agent_id": "a", "fleet_id": None}, {"agent_id": "b", "fleet_id": None}]
+
+    day = wire(FakeStorage(agents, seed))
+    s_day = await agent_digest.generate_for_org("org1", "day", CONFIG, now=NOW)
+    assert s_day["generated"] == 2  # both included at floor 1
+    assert sorted(r["agent_id"] for r in day.upserts) == ["a", "b"]
+
+    week = wire(FakeStorage(agents, seed))
+    s_week = await agent_digest.generate_for_org("org1", "week", CONFIG, now=NOW)
+    assert s_week["generated"] == 0  # both below the week floor of 3
 
 
 async def test_cohesive_filter_drops_noise_and_episodes(wire):
@@ -208,22 +226,23 @@ async def test_weekly_window_aligns_to_monday(wire):
     assert row["window_start"] == "2026-06-29T00:00:00+00:00"  # previous Monday
 
 
-async def test_empty_narrative_from_real_llm_is_error(monkeypatch, wire):
-    """A real (non-fallback) response missing the narrative is an error row, not
-    a NULL 'ok' row."""
+async def test_empty_narrative_from_real_llm_is_fallback_with_synthesis(monkeypatch, wire):
+    """A real response missing the narrative is salvaged from sections and marked
+    fallback (a useful placeholder) — never a blank error row."""
     storage = wire(FakeStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 3}))
 
     async def _empty_cwf(provider, call_fn, fake_fn, **kw):
-        return {"shipped": ["x"]}  # no narrative key
+        return {"shipped": ["x", "y"]}  # sections present, no narrative key
 
     monkeypatch.setattr(agent_digest, "call_with_fallback", _empty_cwf)
     summary = await agent_digest.generate_for_org("org1", "day", CONFIG, now=NOW)
     row = storage.upserts[0]
-    assert row["status"] == "error"
-    assert row["error_detail"] == "LLM returned no narrative"
-    assert row["narrative"] is None
-    assert summary["errored"] == 1
+    assert row["status"] == "fallback"
+    assert row["narrative"] and "2 shipped items" in row["narrative"]  # synthesized
+    assert row["error_detail"] == "LLM returned no narrative; synthesized from sections"
+    assert summary["fallback"] == 1
     assert summary["generated"] == 0
+    assert summary["errored"] == 0
 
 
 async def test_upsert_failure_counts_as_errored(wire):
