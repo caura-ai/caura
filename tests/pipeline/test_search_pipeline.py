@@ -283,7 +283,9 @@ async def test_track_recalls_fire_and_forget():
 
     mock_db = AsyncMock()
     ctx = PipelineContext(
-                data={"filtered_rows": rows},
+                # caller_agent_id present → genuine agent recall, so recall_count
+                # is bumped (agentless recalls are skipped; see track_recalls).
+                data={"filtered_rows": rows, "caller_agent_id": "test-agent"},
     )
 
     with patch("core_api.pipeline.steps.search.track_recalls.track_task") as mock_track:
