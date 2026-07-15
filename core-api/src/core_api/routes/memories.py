@@ -42,6 +42,7 @@ from core_api.middleware.rate_limit import search_limit, write_bulk_limit, write
 from core_api.pagination import decode_cursor, encode_cursor
 from core_api.schemas import (
     BulkMemoryCreate,
+    BulkMemoryItem,
     BulkMemoryResponse,
     IngestCommitRequest,
     IngestRequest,
@@ -931,7 +932,9 @@ async def write_memories_bulk(
     # — the broker's own per-
     # session ``client_hash`` de-dup is the design contract per
     # cloud-data-plane.md §2.4 (gap G3). Server-derive a per-request
-    # attempt id and attribute writes to the install. Non-broker
+    # attempt id and attribute the write to the agent the batch's per-item
+    # metadata names (memclawd Layer 1 stamps ``metadata.agent_id``); a mixed
+    # or pre-Layer-1 batch falls back to the install. Non-broker
     # callers (dashboard, SDK) keep the CAURA-602 invariants in full.
     if auth.is_install_credential:
         if not bulk_attempt_id:
@@ -939,7 +942,7 @@ async def write_memories_bulk(
 
             bulk_attempt_id = f"broker-{auth.install_uuid or 'unknown'}-{_uuid.uuid4()}"
         if not body.agent_id:
-            body.agent_id = f"broker:{auth.install_uuid or 'unknown'}"
+            body.agent_id = _broker_write_agent_id(body.items, auth.install_uuid)
     # Resolve a missing agent_id (mirrors write_memory). Install-credential
     # callers were already attributed above; everyone else either gets the
     # reserved standalone identity or must name a real agent. Defaulting
@@ -976,6 +979,29 @@ async def write_memories_bulk(
         return JSONResponse(content=_body, status_code=_status)
     async with per_tenant_slot("write", body.tenant_id):
         return await _write_memories_bulk_inner(body, response, auth, _idem, bulk_attempt_id)
+
+
+def _broker_write_agent_id(items: list[BulkMemoryItem], install_uuid: str | None) -> str:
+    """Attribute a broker (install-credential) bulk write to the agent that
+    produced it, when the batch unambiguously names one.
+
+    Each item's ``metadata.agent_id`` is stamped by the broker from the
+    capturing agent (memclawd Layer 1). When every item that carries an
+    agent_id agrees on a single value, the write is attributed to that agent —
+    so the memory view names the agent, not the bare install. Items with no
+    agent_id abstain rather than veto, so a mixed pre-Layer-1/Layer-1 batch that
+    still names a single agent attributes to it. A batch where named items
+    disagree, or where no item carries an agent_id at all, falls back to the
+    install identity; a write is never mis-attributed to the wrong agent.
+    """
+    agent_ids: set[str] = set()
+    for item in items:
+        aid = (item.metadata or {}).get("agent_id")
+        if isinstance(aid, str) and aid:
+            agent_ids.add(aid)
+    if len(agent_ids) == 1:
+        return next(iter(agent_ids))
+    return f"broker:{install_uuid or 'unknown'}"
 
 
 def _bulk_response(result: BulkMemoryResponse) -> JSONResponse:
