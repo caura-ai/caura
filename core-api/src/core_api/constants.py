@@ -613,6 +613,15 @@ CRYSTALLIZER_DEDUP_BATCH_SIZE = 500  # memories per ANN batch during dedup scan
 CRYSTALLIZER_DEDUP_NEIGHBORS = 5  # top-K neighbors to check per memory
 CRYSTALLIZER_MAX_DEDUP_PAIRS = 1000  # safety valve: cap total near-dup pairs per run
 
+# ── Interviewer (Phase 1) ──
+# Scheduled reflective work-reports (docs/plans/interviewer-phase1-decisions.md).
+INTERVIEW_MAX_EVENTS_PER_SUBMIT = 500  # plugin-side submit cap; the cursor-driven catch-up loop drains any backlog
+INTERVIEW_EVENT_MAX_CHARS = 8_000  # per-event content truncation before masking/prompting
+INTERVIEW_CHUNK_MAX_CHARS = 96_000  # ~24k tokens per map-phase chunk
+INTERVIEW_MAX_ITEMS_PER_SECTION = 15  # 6 sections × 15 = 90, safely under BULK_MAX_ITEMS
+INTERVIEW_MAX_KEYSTONES_IN_PROMPT = 8
+INTERVIEW_TEMPERATURE = 0.2
+
 # ── Bulk write ──
 BULK_MAX_ITEMS = 100  # max memories per bulk request
 BULK_EMBEDDING_CONCURRENCY = 10  # max parallel embedding calls in bulk mode

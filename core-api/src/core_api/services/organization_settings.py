@@ -249,6 +249,19 @@ DEFAULT_SETTINGS: dict = {
             "enabled": False,
         },
     },
+    # Interviewer (Phase 1) — scheduled reflective work-reports ingested as
+    # typed memories (docs/plans/interviewer-phase1-decisions.md). Default
+    # OFF: the core-operations scheduler only queues ``interview_request``
+    # commands for tenants that flip this on, and the submit endpoint
+    # re-checks it (defense in depth, same posture as skills_factory).
+    "interviewer": {
+        "enabled": False,
+        # Cadence the scheduler uses when queuing interview_request
+        # commands (the client ask: "once or twice daily").
+        "period_hours": 12,
+        # Report template identifier; Phase 1 ships only the static default.
+        "template_id": "default-v1",
+    },
     "entity_blocklist": [
         "team",
         "meeting",
@@ -560,6 +573,10 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "skills_factory.forge.llm_tokens_per_run": int,
     "skills_factory.forge.max_writes_per_run": int,
     "skills_factory.openclaw_bridge.enabled": bool,
+    # Interviewer Phase 1.
+    "interviewer.enabled": bool,
+    "interviewer.period_hours": int,
+    "interviewer.template_id": str,
     # Governance content policy (eToro). Enum values (action / disposition) are
     # type-checked here as str; their allowed values are checked by
     # ``_validate_governance_enums`` in update_settings.
@@ -597,6 +614,8 @@ _LEAF_RANGES: dict[str, tuple[int, int]] = {
     # surfaces as 422. Capping at 365 prevents a tenant from
     # accidentally writing a near-permanent poison entry.
     "skills_factory.rejection_cooloff_days": (1, 365),
+    # Interviewer cadence: 1 hour .. weekly.
+    "interviewer.period_hours": (1, 168),
     # Size caps must be > 0: a tenant misconfiguring these to 0 or
     # negative would silently break ALL skills writes (every doc
     # would trip BODY_TOO_LARGE / DESCRIPTION_TOO_LARGE in Sentinel's

@@ -52,6 +52,7 @@ from core_api.routes.evolve import router as evolve_router
 from core_api.routes.fleet import router as fleet_router
 from core_api.routes.health import router as health_router
 from core_api.routes.insights import router as insights_router
+from core_api.routes.interview import router as interview_router
 from core_api.routes.keystones import router as keystones_router
 from core_api.routes.lifecycle import router as lifecycle_router
 from core_api.routes.memories import admin_memories_router
@@ -650,6 +651,7 @@ app.include_router(plugin_bootstrap_router, prefix="/api")
 app.include_router(stats_router, prefix="/api/v1")
 app.include_router(stm_router, prefix="/api/v1")
 app.include_router(insights_router, prefix="/api/v1")
+app.include_router(interview_router, prefix="/api/v1")
 app.include_router(evolve_router, prefix="/api/v1")
 app.include_router(lifecycle_router, prefix="/api/v1")
 app.include_router(org_deletion_router, prefix="/api/v1")
