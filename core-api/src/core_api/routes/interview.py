@@ -20,8 +20,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from core_api.auth import AuthContext, get_auth_context
-from core_api.constants import INTERVIEW_MAX_EVENTS_PER_SUBMIT
-from core_api.services.interview_service import run_interview
+from core_api.constants import INTERVIEW_EVENT_MAX_CHARS, INTERVIEW_MAX_EVENTS_PER_SUBMIT
+from core_api.services.interview_service import run_interview, run_interview_schedule
 from core_api.services.organization_settings import get_settings_for_display
 
 router = APIRouter(tags=["Interview"])
@@ -35,7 +35,10 @@ class InterviewEventIn(BaseModel):
     session_id: str | None = None
     role: str = Field(min_length=1, max_length=64)
     kind: str = Field(min_length=1, max_length=64)
-    content: str = Field(min_length=0, max_length=32_000)
+    # Matches the worker's processing limit (mask_events truncates to the
+    # same constant) — accepting more would silently drop the excess from
+    # the LLM prompt with no error to the plugin caller.
+    content: str = Field(min_length=0, max_length=INTERVIEW_EVENT_MAX_CHARS)
     tool: str | None = Field(default=None, max_length=200)
     outcome: str | None = Field(default=None, max_length=200)
 
@@ -82,8 +85,8 @@ async def submit_interview(
     if body.cursor_to < body.cursor_from:
         raise HTTPException(status_code=422, detail="cursor_to must be >= cursor_from")
     seqs = [ev.seq for ev in body.events]
-    if seqs != sorted(seqs):
-        raise HTTPException(status_code=422, detail="events must be seq-ascending")
+    if any(seqs[i] >= seqs[i + 1] for i in range(len(seqs) - 1)):
+        raise HTTPException(status_code=422, detail="events must be strictly seq-ascending (no duplicates)")
     if seqs[0] < body.cursor_from or seqs[-1] > body.cursor_to:
         raise HTTPException(
             status_code=422,
@@ -110,10 +113,27 @@ async def submit_interview(
 
     if result["status"] == "failed":
         # Whole window failed to persist: watermark NOT advanced; the
-        # plugin must NOT prune. 502 → the command retries next tick.
-        raise HTTPException(status_code=502, detail="interview ingest failed; window not consumed")
+        # plugin must NOT prune. 500 (origin error, not 502 — proxies/ALBs
+        # rewrite 502 and strip the JSON body) → the command retries next
+        # tick (caller checks >= 400).
+        raise HTTPException(status_code=500, detail="interview ingest failed; window not consumed")
     if result["status"] == "partial":
         # Mirror the bulk endpoint's 207 semantics: some rows landed, the
         # cursor advanced, caller reads per-field detail.
         return JSONResponse(status_code=207, content=InterviewSubmitOut(**result).model_dump())
     return InterviewSubmitOut(**result)
+
+
+@router.post("/admin/interview/schedule/run")
+async def run_interview_schedule_endpoint(
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict:
+    """Queue due ``interview_request`` fleet commands (admin/cron only).
+
+    The core-operations hourly tick POSTs this. Enumerates orgs with
+    ``interviewer.enabled``, and per live node queues at most one pending
+    command, gated by the watermark's ``last_interview_at`` against the
+    tenant's ``period_hours``. Returns a bounded counts summary.
+    """
+    auth.enforce_admin()
+    return await run_interview_schedule()

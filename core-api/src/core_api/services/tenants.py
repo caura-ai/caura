@@ -54,3 +54,12 @@ async def list_tenants_with_agent_digest_enabled(db: AsyncSession | None = None)
     zero cost. Orgs without a settings row are excluded (default off). ``db`` is
     ignored (reads via core-storage-api)."""
     return await get_storage_client().list_agent_digest_enabled_orgs()
+
+
+async def list_tenants_with_interviewer_enabled(db: AsyncSession | None = None) -> list[str]:
+    """Return ``org_id`` values whose ``interviewer.enabled`` is True, sorted.
+
+    Used by the interviewer schedule tick so a tenant that hasn't opted in pays
+    zero cost. Orgs without a settings row are excluded (default off). ``db`` is
+    ignored (reads via core-storage-api)."""
+    return await get_storage_client().list_interviewer_enabled_orgs()

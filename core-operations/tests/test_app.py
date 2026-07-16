@@ -26,6 +26,7 @@ _EXPECTED_JOBS = {
     "lifecycle-insights",
     "agent-digest",
     "agent-digest-weekly",
+    "interviewer-schedule",
 }
 
 

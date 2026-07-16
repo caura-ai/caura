@@ -37,10 +37,12 @@ from core_api.constants import (
     INTERVIEW_MAX_KEYSTONES_IN_PROMPT,
     INTERVIEW_TEMPERATURE,
     MAX_CONTENT_LENGTH,
+    NODE_OFFLINE_SECONDS,
 )
 from core_api.schemas import BulkMemoryCreate, BulkMemoryItem, BulkMemoryResponse
 from core_api.services.memory_service import create_memories_bulk
-from core_api.services.organization_settings import resolve_config
+from core_api.services.organization_settings import get_settings_for_display, resolve_config
+from core_api.services.tenants import list_tenants_with_interviewer_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -84,22 +86,34 @@ def watermark_doc_id(node_id: str) -> str:
 
 
 def mask_events(events: list[dict]) -> tuple[list[dict], int]:
-    """Deterministically mask PII/secrets in event content pre-LLM.
+    """Deterministically mask PII/secrets in event fields pre-LLM.
 
-    All categories are scanned unconditionally: this runs before the
-    tenant-configurable persistence gate, and a masked token in the
-    interview prompt is always acceptable while a leaked secret is not.
-    Returns the masked copies and the total finding count (audit/log).
+    Covers every field that reaches the prompt via ``_serialize_events``:
+    ``content``, ``tool``, and ``outcome``. All categories are scanned
+    unconditionally: this runs before the tenant-configurable persistence
+    gate, and a masked token in the interview prompt is always acceptable
+    while a leaked secret is not. Returns the masked copies and the total
+    finding count (audit/log).
     """
+
+    def _mask_field(text: str | None, max_len: int) -> tuple[str, int]:
+        val = (text or "")[:max_len]
+        findings = scan(val)
+        return (mask(val, findings) if findings else val), len(findings)
+
     masked: list[dict] = []
     total = 0
     for ev in events:
-        content = (ev.get("content") or "")[:INTERVIEW_EVENT_MAX_CHARS]
-        findings = scan(content)
-        if findings:
-            total += len(findings)
-            content = mask(content, findings)
-        masked.append({**ev, "content": content})
+        masked_content, n1 = _mask_field(ev.get("content"), INTERVIEW_EVENT_MAX_CHARS)
+        masked_tool, n2 = _mask_field(ev.get("tool"), 200)
+        masked_outcome, n3 = _mask_field(ev.get("outcome"), 200)
+        total += n1 + n2 + n3
+        update: dict = {"content": masked_content}
+        if ev.get("tool") is not None:
+            update["tool"] = masked_tool
+        if ev.get("outcome") is not None:
+            update["outcome"] = masked_outcome
+        masked.append({**ev, **update})
     return masked, total
 
 
@@ -112,7 +126,15 @@ def chunk_events(events: list[dict]) -> list[list[dict]]:
     current: list[dict] = []
     size = 0
     for ev in events:
-        ev_len = len(ev.get("content") or "") + 64  # + envelope overhead
+        # Budget every field _serialize_events puts on the prompt line:
+        # content, tool (" tool="), outcome (" outcome="), plus the
+        # seq/ts/session/role envelope.
+        ev_len = (
+            len(ev.get("content") or "")
+            + (len(ev.get("tool") or "") + 6 if ev.get("tool") else 0)
+            + (len(ev.get("outcome") or "") + 9 if ev.get("outcome") else 0)
+            + 80
+        )
         if current and size + ev_len > INTERVIEW_CHUNK_MAX_CHARS:
             chunks.append(current)
             current, size = [], 0
@@ -253,7 +275,13 @@ def _parse_ts(value: Any) -> datetime | None:
     if not value or not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        # LLM-emitted timestamps may omit the offset; treat naive as UTC so
+        # downstream aware/naive comparisons and timestamptz storage don't
+        # break.
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt
     except ValueError:
         return None
 
@@ -327,6 +355,20 @@ async def _keystone_lines(tenant_id: str, fleet_id: str | None, agent_id: str) -
 # ── Watermark ──
 
 
+async def _read_watermark_seq(sc, tenant_id: str, doc_id: str) -> int:
+    doc = await sc.get_document(tenant_id, WATERMARK_COLLECTION, doc_id, read=False)
+    if doc and isinstance(doc.get("data"), dict):
+        try:
+            return int(doc["data"].get("last_seq", -1))
+        except (TypeError, ValueError):
+            return -1
+    return -1
+
+
+# Bounded verify-and-repair passes for the read-max-write loop below.
+_WATERMARK_WRITE_ATTEMPTS = 3
+
+
 async def advance_watermark(
     tenant_id: str,
     *,
@@ -340,34 +382,70 @@ async def advance_watermark(
     A stale retry (its ``cursor_to`` at or behind the stored cursor) is a
     no-op — the bulk write already deduplicated its rows, and regressing
     the cursor would re-open a consumed range.
+
+    Concurrency contract: the doc store has no compare-and-set, so a bare
+    read-check-write would be a TOCTOU race. Two mitigations, in order of
+    load-bearing-ness:
+
+    1. **Writers are serialized by design.** The scheduler keeps at most
+       ONE pending ``interview_request`` per node and the plugin processes
+       commands sequentially, so two in-flight submits for the same node
+       only arise from a pathological zombie retry (e.g. a network-delayed
+       resubmit of an old window landing after a newer window committed).
+    2. **Verify-and-repair.** The write is max-preserving (re-reads and
+       writes ``max(stored, cursor_to)``), then verifies the stored value
+       and re-runs the pass if a concurrent smaller write clobbered it
+       (bounded attempts).
+
+    And the invariant is self-healing even if both miss: a regressed
+    cursor only makes the next scheduler tick re-issue an already-consumed
+    window, whose rows dedup via the deterministic bulk attempt id and
+    whose completion re-advances the cursor — wasted work, never data
+    corruption. If the doc store ever grows a conditional upsert /
+    GREATEST semantics, this loop collapses to one call.
     """
     sc = get_storage_client()
     doc_id = watermark_doc_id(node_id)
-    existing = await sc.get_document(tenant_id, WATERMARK_COLLECTION, doc_id, read=False)
-    existing_seq = -1
-    if existing and isinstance(existing.get("data"), dict):
-        try:
-            existing_seq = int(existing["data"].get("last_seq", -1))
-        except (TypeError, ValueError):
-            existing_seq = -1
-    if cursor_to <= existing_seq:
-        return existing_seq
-    await sc.upsert_document(
-        {
-            "tenant_id": tenant_id,
-            "collection": WATERMARK_COLLECTION,
-            "doc_id": doc_id,
-            "data": {
-                "node_id": node_id,
-                "agent_id": agent_id,
+    effective = cursor_to
+    for _attempt in range(_WATERMARK_WRITE_ATTEMPTS):
+        existing_seq = await _read_watermark_seq(sc, tenant_id, doc_id)
+        if cursor_to <= existing_seq:
+            return existing_seq
+        await sc.upsert_document(
+            {
                 "tenant_id": tenant_id,
-                "last_seq": cursor_to,
-                "last_interview_at": datetime.now(UTC).isoformat(),
-                "last_command_id": command_id,
-            },
-        }
-    )
-    return cursor_to
+                "collection": WATERMARK_COLLECTION,
+                "doc_id": doc_id,
+                "data": {
+                    "node_id": node_id,
+                    "agent_id": agent_id,
+                    "tenant_id": tenant_id,
+                    "last_seq": cursor_to,
+                    "last_interview_at": datetime.now(UTC).isoformat(),
+                    "last_command_id": command_id,
+                },
+            }
+        )
+        # Verify: if a concurrent (smaller) writer landed between our write
+        # and this read, repair on the next pass.
+        stored = await _read_watermark_seq(sc, tenant_id, doc_id)
+        if stored >= cursor_to:
+            return stored
+        logger.warning(
+            "interview watermark: concurrent write regressed cursor (tenant=%s node=%s "
+            "stored=%d want=%d); repairing",
+            tenant_id,
+            node_id,
+            stored,
+            cursor_to,
+        )
+    # Verify-and-repair attempts exhausted: report what is actually stored
+    # rather than optimistically claiming ``cursor_to`` landed.
+    try:
+        final_stored = await _read_watermark_seq(sc, tenant_id, doc_id)
+        return final_stored if final_stored >= 0 else effective
+    except Exception:
+        return effective
 
 
 # ── Orchestrator ──
@@ -460,3 +538,139 @@ async def run_interview(
         "memories_written": written,
         "errors": errors,
     }
+
+
+# ── Schedule (cron entry point) ──
+
+
+def _is_due(watermark_data: dict | None, period_hours: int, now: datetime) -> bool:
+    """A node is due when it has never been interviewed, or its last
+    interview is at least one period old."""
+    if not watermark_data:
+        return True
+    last = watermark_data.get("last_interview_at")
+    if not last or not isinstance(last, str):
+        return True
+    try:
+        last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return (now - last_dt).total_seconds() >= period_hours * 3600
+
+
+def _node_is_eligible(node: dict, now: datetime) -> bool:
+    """Live, real nodes only: skip fleet-registration sentinels and nodes
+    whose heartbeat has gone dark (an offline node can't answer the
+    command anyway — it would just sit pending and block the next tick)."""
+    name = node.get("node_name") or ""
+    metadata = node.get("metadata") or {}
+    if metadata.get("sentinel") or name.startswith("_fleet_"):
+        return False
+    hb = node.get("last_heartbeat")
+    if not hb or not isinstance(hb, str):
+        return False
+    try:
+        hb_dt = datetime.fromisoformat(hb.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (now - hb_dt).total_seconds() <= NODE_OFFLINE_SECONDS
+
+
+async def run_interview_schedule() -> dict:
+    """Queue ``interview_request`` fleet commands for every due node of every
+    opted-in tenant. The core-operations hourly tick calls this via
+    ``POST /admin/interview/schedule/run``.
+
+    Per node, at most ONE interview_request is in flight: an existing
+    pending command skips the node (no stacking while a node is slow or
+    briefly offline). Dueness is driven by the watermark doc's
+    ``last_interview_at`` vs the tenant's ``interviewer.period_hours``, so
+    the same tick cadence serves every tenant regardless of their period —
+    and a backlog (submit cap reached) naturally drains because the
+    watermark's ``last_seq`` advances while ``last_interview_at`` gates the
+    NEXT window. Commands are queued unsigned in OSS (the plugin default is
+    permissive; enterprise signing gateways sign in transit).
+    """
+    sc = get_storage_client()
+    now = datetime.now(UTC)
+    tenants = await list_tenants_with_interviewer_enabled()
+    summary = {
+        "tenants": len(tenants),
+        "nodes_considered": 0,
+        "commands_queued": 0,
+        "skipped_pending": 0,
+        "skipped_not_due": 0,
+    }
+    for tenant_id in tenants:
+        settings = await get_settings_for_display(tenant_id)
+        cfg = settings.get("interviewer") or {}
+        period_hours = int(cfg.get("period_hours") or 12)
+        template_id = cfg.get("template_id") or "default-v1"
+
+        try:
+            nodes = await sc.list_nodes(tenant_id)
+            # High limit so the pending-dedup set is complete for any
+            # realistic fleet size — a truncated set would re-queue nodes
+            # whose pending command fell outside the page.
+            pending = await sc.list_commands(
+                tenant_id, status="pending", command="interview_request", limit=10_000
+            )
+        except Exception:
+            logger.exception("interview schedule: tenant scan failed (tenant=%s)", tenant_id)
+            continue
+        pending_nodes = {str(c.get("node_id")) for c in pending}
+
+        for node in nodes:
+            if not _node_is_eligible(node, now):
+                continue
+            node_id = str(node.get("id") or "")
+            if not node_id:
+                continue
+            summary["nodes_considered"] += 1
+            if node_id in pending_nodes:
+                summary["skipped_pending"] += 1
+                continue
+            # Per-node isolation: one node's storage failure must not abort
+            # scheduling for the tenant's remaining nodes (or later tenants).
+            try:
+                # read=False → primary, matching the advance path: a stale
+                # replica cursor would re-issue a consumed window (dedup makes
+                # it harmless but wasted LLM work) or mis-time dueness.
+                watermark = await sc.get_document(
+                    tenant_id, WATERMARK_COLLECTION, watermark_doc_id(node_id), read=False
+                )
+                data = watermark.get("data") if isinstance(watermark, dict) else None
+                if not _is_due(data, period_hours, now):
+                    summary["skipped_not_due"] += 1
+                    continue
+                last_seq = -1
+                if isinstance(data, dict):
+                    try:
+                        last_seq = int(data.get("last_seq", -1))
+                    except (TypeError, ValueError):
+                        last_seq = -1
+                await sc.create_command(
+                    {
+                        "tenant_id": tenant_id,
+                        "node_id": node_id,
+                        "command": "interview_request",
+                        "payload": {
+                            # Echoed so the plugin submits with the SAME node key
+                            # the watermark is stored under (it only knows its
+                            # node_name locally; the watermark is keyed by the
+                            # fleet-node UUID).
+                            "node_id": node_id,
+                            "since_seq": last_seq + 1,
+                            "template_id": template_id,
+                            "period_hours": period_hours,
+                        },
+                    }
+                )
+                summary["commands_queued"] += 1
+            except Exception:
+                logger.exception(
+                    "interview schedule: node scan failed (tenant=%s node=%s)",
+                    tenant_id,
+                    node_id,
+                )
+    return summary

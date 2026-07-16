@@ -56,3 +56,10 @@ async def list_agent_digest_enabled_orgs() -> OrgIdsResponse:
     """Orgs whose ``agent_digest.enabled`` setting is True (nightly digest
     fanout target)."""
     return OrgIdsResponse(org_ids=await _svc.tenants_list_agent_digest_enabled())
+
+
+@router.get("/interviewer-enabled")
+async def list_interviewer_enabled_orgs() -> OrgIdsResponse:
+    """Orgs whose ``interviewer.enabled`` setting is True (interviewer
+    schedule-tick target)."""
+    return OrgIdsResponse(org_ids=await _svc.tenants_list_interviewer_enabled())

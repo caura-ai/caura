@@ -162,3 +162,43 @@ async def run_agent_digest_weekly_tick() -> None:
     """Weekly per-agent digest (period=week). Same trigger as the daily tick,
     fired once a week so the previous full Mon-Mon window gets summarized."""
     await _fire_agent_digest("week")
+
+
+async def run_interviewer_schedule_tick() -> None:
+    """Queue due ``interview_request`` fleet commands (Interviewer Phase 1).
+
+    POSTs ``/admin/interview/schedule/run`` on core-api, which enumerates
+    orgs with ``interviewer.enabled`` and queues at most one pending command
+    per live node, gated by each node's watermark vs the tenant's
+    ``period_hours``. Firing hourly is safe: a tenant that hasn't opted in
+    pays zero cost, and dueness gating makes the tick idempotent.
+    """
+    url = f"{settings.core_api_url.rstrip('/')}/api/v1/admin/interview/schedule/run"
+    headers: dict[str, str] = {}
+    if settings.core_api_admin_api_key:
+        headers["X-API-Key"] = settings.core_api_admin_api_key
+    else:
+        logger.warning(
+            "core-operations: CORE_API_ADMIN_API_KEY unset; interviewer schedule run will be unauthorised",
+        )
+
+    # Scheduling is queue-only (no LLM work inline) — the storage default
+    # timeout is plenty.
+    timeout = httpx.Timeout(settings.storage_http_timeout_s)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            resp = await client.post(url, headers=headers)
+        except httpx.HTTPError:
+            logger.exception("interviewer-schedule POST failed", extra={"url": url})
+            return
+    if resp.status_code >= 400:
+        logger.error(
+            "interviewer-schedule run returned non-2xx; will retry next tick",
+            extra={"status_code": resp.status_code, "body": resp.text[:500]},
+        )
+        return
+    try:
+        summary = resp.json()
+    except Exception:
+        summary = resp.text[:200]
+    logger.info("interviewer-schedule run fired", extra={"summary": summary})

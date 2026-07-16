@@ -7687,8 +7687,14 @@ class PostgresService:
         *,
         tenant_id: str,
         node_id: UUID | None = None,
+        status: str | None = None,
+        command: str | None = None,
         limit: int = 50,
     ) -> Sequence[FleetCommand]:
+        # ``status``/``command`` filter in SQL, BEFORE the limit — a
+        # post-limit filter would silently drop matching rows older than
+        # the ``limit`` newest commands (e.g. a long-pending
+        # interview_request behind 50 newer deploys).
         async with get_session() as session:
             stmt = (
                 select(FleetCommand)
@@ -7698,6 +7704,10 @@ class PostgresService:
             )
             if node_id:
                 stmt = stmt.where(FleetCommand.node_id == node_id)
+            if status:
+                stmt = stmt.where(FleetCommand.status == status)
+            if command:
+                stmt = stmt.where(FleetCommand.command == command)
             result = await session.execute(stmt)
             return result.scalars().all()
 
@@ -8204,6 +8214,19 @@ class PostgresService:
             result = await session.execute(
                 select(OrganizationSettings.org_id).where(
                     OrganizationSettings.settings["agent_digest"]["enabled"].as_boolean().is_(True)
+                )
+            )
+            return sorted(row[0] for row in result.all())
+
+    async def tenants_list_interviewer_enabled(self) -> list[str]:
+        """``org_id`` values whose ``interviewer.enabled`` JSONB flag is True,
+        sorted. The interviewer schedule tick uses this so a tenant that hasn't
+        opted in pays zero cost. Orgs with no settings row are excluded
+        (default off)."""
+        async with get_read_session() as session:
+            result = await session.execute(
+                select(OrganizationSettings.org_id).where(
+                    OrganizationSettings.settings["interviewer"]["enabled"].as_boolean().is_(True)
                 )
             )
             return sorted(row[0] for row in result.all())

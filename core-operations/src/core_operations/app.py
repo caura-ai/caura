@@ -52,6 +52,7 @@ configure_logging(
 from core_operations.scheduler import (
     scheduler,
     seconds_until_next_utc_hour,
+    seconds_until_next_utc_top_of_hour,
     seconds_until_next_utc_weekday_hour,
 )
 from core_operations.tasks import (
@@ -62,6 +63,7 @@ from core_operations.tasks import (
     run_crystallize_tick,
     run_entity_link_tick,
     run_insights_tick,
+    run_interviewer_schedule_tick,
     run_purge_soft_deleted_tick,
 )
 
@@ -134,6 +136,14 @@ def _register_scheduled_tasks() -> None:
         7 * 24 * 3600,
         run_agent_digest_weekly_tick,
         delay_provider=_weekly_at("agent_digest_weekly_run_at_weekday", "agent_digest_weekly_run_at_hour"),
+    )
+    # Interviewer Phase 1: hourly queue-only tick; per-tenant period_hours
+    # gates actual command creation, so opted-out tenants pay zero cost.
+    scheduler.register(
+        "interviewer-schedule",
+        3600,
+        run_interviewer_schedule_tick,
+        delay_provider=lambda: seconds_until_next_utc_top_of_hour(),
     )
 
 

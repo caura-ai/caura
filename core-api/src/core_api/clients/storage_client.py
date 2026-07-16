@@ -2057,12 +2057,16 @@ class CoreStorageClient:
         tenant_id: str,
         node_name: str | None = None,
         status: str | None = None,
+        command: str | None = None,
+        limit: int = 50,
     ) -> list[dict]:
-        params: dict[str, Any] = {"tenant_id": tenant_id}
+        params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit}
         if node_name is not None:
             params["node_name"] = node_name
         if status is not None:
             params["status"] = status
+        if command is not None:
+            params["command"] = command
         return await self._get_list("/fleet/commands", **params)
 
     async def update_command_status(
@@ -2413,6 +2417,13 @@ class CoreStorageClient:
         result = await self._get("/tenants/agent-digest-enabled")
         if result is None:
             raise RuntimeError("core-storage-api /tenants/agent-digest-enabled returned 404")
+        return result.get("org_ids", [])
+
+    async def list_interviewer_enabled_orgs(self) -> list[str]:
+        """Orgs whose ``interviewer.enabled`` setting is True."""
+        result = await self._get("/tenants/interviewer-enabled")
+        if result is None:
+            raise RuntimeError("core-storage-api /tenants/interviewer-enabled returned 404")
         return result.get("org_ids", [])
 
     # =====================================================================

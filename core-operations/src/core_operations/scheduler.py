@@ -53,6 +53,19 @@ def seconds_until_next_utc_hour(hour: int, *, now: datetime | None = None) -> fl
     return (target - current).total_seconds()
 
 
+def seconds_until_next_utc_top_of_hour(*, now: datetime | None = None) -> float:
+    """Seconds from ``now`` until the next :00 UTC of any hour.
+
+    Same strict-future guarantee as :func:`seconds_until_next_utc_hour`
+    (always positive, at most 1h) for hourly-cadence jobs — keeps an
+    aligned task from hot-looping after a fast failure at the top of the
+    hour.
+    """
+    current = now or datetime.now(UTC)
+    target = current.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    return (target - current).total_seconds()
+
+
 def seconds_until_next_utc_weekday_hour(weekday: int, hour: int, *, now: datetime | None = None) -> float:
     """Seconds from ``now`` until the next ``weekday``@``hour``:00 UTC.
 

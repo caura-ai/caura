@@ -134,20 +134,23 @@ async def list_commands(
     tenant_id: str,
     node_name: str | None = None,
     status: str | None = None,
+    command: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
     node_id: UUID | None = None
     if node_name:
         node_id = await _svc.fleet_get_node_id(tenant_id=tenant_id, node_name=node_name)
+    # status/command are filtered in SQL (pre-limit) — the previous
+    # post-limit status filter could silently hide matching rows older
+    # than the ``limit`` newest commands.
     commands = await _svc.fleet_list_commands(
         tenant_id=tenant_id,
         node_id=node_id,
+        status=status,
+        command=command,
         limit=limit,
     )
-    results = [orm_to_dict(c, FLEET_COMMAND_FIELDS) for c in commands]
-    if status:
-        results = [c for c in results if c.get("status") == status]
-    return results
+    return [orm_to_dict(c, FLEET_COMMAND_FIELDS) for c in commands]
 
 
 @router.get("/commands/pending")
