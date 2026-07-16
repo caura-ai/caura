@@ -21,6 +21,7 @@ async def get_or_create_agent(
     require_approval: bool = False,
     display_name: str | None = None,
     install_id: str | None = None,
+    owner_install_uuid: str | None = None,
 ) -> dict:
     """Return the agent dict, creating it on first encounter.
 
@@ -46,6 +47,8 @@ async def get_or_create_agent(
             backfill["display_name"] = display_name
         if install_id is not None and agent.get("install_id") is None:
             backfill["install_id"] = install_id
+        if owner_install_uuid is not None and agent.get("owner_install_uuid") is None:
+            backfill["owner_install_uuid"] = owner_install_uuid
         if backfill:
             agent.update(backfill)
             agent["updated_at"] = datetime.now(UTC)
@@ -93,6 +96,7 @@ async def get_or_create_agent(
         "fleet_id": fleet_id,
         "display_name": display_name,
         "install_id": install_id,
+        "owner_install_uuid": owner_install_uuid,
         "trust_level": initial_trust,
     }
     if inherited_search_profile is not None:
@@ -109,6 +113,7 @@ async def get_or_create_agent(
             "trust_level": initial_trust,
             "display_name": display_name,
             "install_id": install_id,
+            "owner_install_uuid": owner_install_uuid,
             "carried_from_legacy_main": inherited_trust is not None,
         },
     )

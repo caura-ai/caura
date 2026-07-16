@@ -944,6 +944,13 @@ async def write_memories_bulk(
             bulk_attempt_id = f"broker-{auth.install_uuid or 'unknown'}-{_uuid.uuid4()}"
         if not body.agent_id:
             body.agent_id = _broker_write_agent_id(body.items, auth.install_uuid)
+        # Ownership gate runs on EVERY broker write, not just the
+        # auto-derived case: a broker caller that pre-populates ``agent_id``
+        # in the request body must not bypass the check and write under an
+        # agent owned by a different install. The gate short-circuits
+        # (chosen == fallback, or owner NULL / this install) so the common
+        # paths stay lookup-free.
+        body.agent_id = await _broker_owned_agent_id(body.agent_id, auth.install_uuid, body.tenant_id)
     # Resolve a missing agent_id (mirrors write_memory). Install-credential
     # callers were already attributed above; everyone else either gets the
     # reserved standalone identity or must name a real agent. Defaulting
@@ -1002,7 +1009,63 @@ def _broker_write_agent_id(items: list[BulkMemoryItem], install_uuid: str | None
             agent_ids.add(aid)
     if len(agent_ids) == 1:
         return next(iter(agent_ids))
-    return f"broker:{install_uuid or 'unknown'}"
+    return _broker_label(install_uuid)
+
+
+_BROKER_LABEL_PREFIX = "broker:"
+
+
+def _broker_label(install_uuid: str | None) -> str:
+    """The bare-install fallback identity for a broker write."""
+    return f"{_BROKER_LABEL_PREFIX}{install_uuid or 'unknown'}"
+
+
+def _owned_by_other_install(owner_install_uuid: str | None, install_uuid: str | None) -> bool:
+    """True when an agent row is first-touch owned by a DIFFERENT install than
+    ``install_uuid`` — the single condition under which a broker write is
+    degraded to its own ``broker:<install>`` identity. A NULL owner (unclaimed
+    or grandfathered) is not "another install", so it never triggers a degrade.
+    """
+    return owner_install_uuid is not None and owner_install_uuid != install_uuid
+
+
+async def _broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id: str) -> str:
+    """Lenient ownership gate over ``_broker_write_agent_id``'s choice.
+
+    A broker write may be attributed to an agent named in the batch metadata.
+    Before trusting that name, verify this install owns it: ``owner_install_uuid``
+    is stamped (first-touch) with the install that first wrote as the agent.
+    Degrade to the bare-install identity ONLY when the named agent is owned by a
+    *different* install (``owner_install_uuid`` non-NULL AND != this install),
+    so one install can't write under another install's agent id.
+
+    Lenient — never blocks a legitimate first write:
+      - already the install fallback   -> no lookup, return as-is
+      - another install's broker:<x>   -> degrade (reserved namespace; no lookup)
+      - agent doesn't exist yet         -> keep (this write first-touches it)
+      - ``owner_install_uuid`` is NULL  -> keep (unclaimed; this write claims it)
+      - owned by THIS install           -> keep
+      - owned by a DIFFERENT install    -> degrade to ``broker:<install>``
+    """
+    fallback = _broker_label(install_uuid)
+    if chosen == fallback:
+        return chosen
+    # The ``broker:<install>`` namespace is RESERVED — an install may only ever
+    # write as its OWN bare-install identity. A chosen id in that namespace that
+    # isn't this install's own fallback (handled above) is *another* install's
+    # reserved identity (a broker that named ``broker:<other-uuid>`` in
+    # body.agent_id or item metadata). Degrade to this install's own fallback,
+    # with NO lookup: the fallback id is deterministic and guessable, so without
+    # this guard an attacker could first-touch ``broker:<victim>`` (stamping
+    # itself as owner) and thereby capture the victim's later degraded writes.
+    if chosen.startswith(_BROKER_LABEL_PREFIX):
+        return fallback
+    owner = await lookup_agent(tenant_id, chosen)
+    if owner is None:
+        return chosen
+    if _owned_by_other_install(owner.get("owner_install_uuid"), install_uuid):
+        return fallback
+    return chosen
 
 
 def _bulk_response(result: BulkMemoryResponse) -> JSONResponse:
@@ -1040,10 +1103,43 @@ async def _write_memories_bulk_inner(
     bulk_attempt_id: str,
 ):
     # Phase 2 (dark, default off): bind to the verified credential identity
-    # (see _write_memory_inner). Enabled only post-re-identification.
+    # (see _write_memory_inner). Enabled only post-re-identification. When this
+    # overrides body.agent_id, the outer ``_broker_owned_agent_id`` gate's work
+    # is discarded — harmless, because the post-create re-check below is the
+    # authoritative ownership guard; the outer gate is only a lookup-free fast
+    # path that spares this stricter check on the common broker flow.
     if app_settings.bind_write_identity_to_auth and auth.agent_id:
         body.agent_id = auth.agent_id
-    agent = await get_or_create_agent(body.tenant_id, body.agent_id, body.fleet_id)
+    agent = await get_or_create_agent(
+        body.tenant_id,
+        body.agent_id,
+        body.fleet_id,
+        # Stamp ownership only for broker (install-credential) writes, symmetric
+        # with the attribution gate above — never rely on the gateway happening
+        # to omit x-install-uuid for non-broker callers.
+        owner_install_uuid=auth.install_uuid if auth.is_install_credential else None,
+    )
+    # Post-create ownership re-check — closes the first-touch TOCTOU window in
+    # ``_broker_owned_agent_id``. That gate optimistically keeps the chosen
+    # agent id when no row exists yet (``owner is None`` -> pass), so two
+    # brokers racing the same new agent id both pass, but only one wins the
+    # create + ownership stamp. ``get_or_create_agent`` returns the
+    # authoritative committed row (storage re-selects FOR UPDATE and never
+    # overwrites a set ``owner_install_uuid``); if the winner is a different
+    # install, degrade this loser's write to its own ``broker:<install>``
+    # identity rather than mis-attribute it to the winner's agent.
+    if (
+        auth.is_install_credential
+        and auth.install_uuid
+        and _owned_by_other_install(agent.get("owner_install_uuid"), auth.install_uuid)
+    ):
+        body.agent_id = _broker_label(auth.install_uuid)
+        agent = await get_or_create_agent(
+            body.tenant_id,
+            body.agent_id,
+            body.fleet_id,
+            owner_install_uuid=auth.install_uuid,
+        )
     if not body.fleet_id and agent.get("fleet_id"):
         body.fleet_id = agent["fleet_id"]
     usage = None

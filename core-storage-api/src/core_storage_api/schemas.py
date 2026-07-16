@@ -121,6 +121,7 @@ AGENT_FIELDS: list[str] = [
     "agent_id",
     "display_name",
     "install_id",
+    "owner_install_uuid",
     "trust_level",
     "search_profile",
     "belonging_type",

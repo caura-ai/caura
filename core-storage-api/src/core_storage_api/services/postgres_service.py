@@ -5684,21 +5684,20 @@ class PostgresService:
             # plain idempotent re-register that just wants the
             # existing row back.
             changed = False
-            for key in ("fleet_id", "trust_level", "display_name", "install_id"):
+            for key in ("fleet_id", "trust_level", "display_name", "install_id", "owner_install_uuid"):
                 if key in data and data[key] is not None and getattr(agent, key) != data[key]:
-                    if key == "install_id" and getattr(agent, key) is not None:
-                        # ``install_id`` is the per-OpenClaw-install opaque
-                        # identity that disambiguates the default
-                        # ``agent_id="main"`` across fleet machines. Once
-                        # persisted it must be stable for the agent row's
-                        # lifetime: backfill when previously NULL but never
-                        # overwrite. ``agent_service.get_or_create_agent``
-                        # already enforces this at the application layer;
-                        # the guard is duplicated here so any future direct
-                        # caller of ``agent_add`` (REST endpoint, admin
-                        # tool) can't silently rewrite a stable identity.
-                        # ``display_name`` and ``fleet_id`` intentionally
-                        # overwrite on change (rename / reassignment).
+                    if key in ("install_id", "owner_install_uuid") and getattr(agent, key) is not None:
+                        # ``install_id`` / ``owner_install_uuid`` are stable
+                        # per-install identities: backfill when previously NULL
+                        # but never overwrite. ``install_id`` disambiguates the
+                        # default ``agent_id="main"`` across fleet machines;
+                        # ``owner_install_uuid`` records the credential-install
+                        # that first wrote as this agent (broker ownership gate).
+                        # ``get_or_create_agent`` enforces this at the app layer;
+                        # duplicated here so any direct ``agent_add`` caller
+                        # (REST endpoint, admin tool) can't silently rewrite a
+                        # stable identity. ``display_name`` / ``fleet_id``
+                        # intentionally overwrite on change (rename / reassign).
                         continue
                     setattr(agent, key, data[key])
                     changed = True

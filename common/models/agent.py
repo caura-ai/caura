@@ -29,6 +29,13 @@ class Agent(Base):
     # heartbeat and persists it to ``install.json`` in the plugin data dir;
     # never rotates. Indexed because the admin UI groups agents by install.
     install_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    # ``owner_install_uuid``: the credential-install (``x-install-uuid``, the
+    # 36-char value) that FIRST wrote memories as this agent. First-touch,
+    # never overwritten (mirrors ``install_id``'s stability). SEPARATE from
+    # ``install_id`` — this is the write-credential's install, used only for
+    # the broker lenient ownership gate; ``install_id`` stays the plugin's
+    # admin-grouping suffix. No index: read per-agent, never a query predicate.
+    owner_install_uuid: Mapped[str | None] = mapped_column(String(36))
     trust_level: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("1"))
     search_profile: Mapped[dict | None] = mapped_column(JSONB)
     # ``belonging_type`` / ``owner_ref``: the typed agent→owner relationship the
