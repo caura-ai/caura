@@ -214,6 +214,7 @@ async def test_load_and_serialize_uses_preloaded_entity_links():
     mem.tenant_id = "t1"
     mem.fleet_id = "f1"
     mem.agent_id = "a1"
+    mem.agent_display_name = None
     mem.memory_type = "fact"
     mem.title = "Test"
     mem.content = "test content"

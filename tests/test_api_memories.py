@@ -152,6 +152,80 @@ async def test_search_memories(client):
     assert isinstance(data["items"], list)
 
 
+async def test_memory_carries_agent_display_name(client, sc):
+    """agents.display_name surfaces as agent_display_name on memory reads.
+
+    Seed an agent WITH a display_name, then write a memory as it (the write
+    path's get_or_create_agent leaves an existing display_name untouched). A
+    second memory whose agent has no display_name reads back None (the frontend
+    then falls back to the raw agent_id).
+    """
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    named_agent = f"named-agent-{tag}"
+    fleet = f"adn-fleet-{tag}"
+
+    await sc.create_or_update_agent(
+        {
+            "tenant_id": tenant_id,
+            "agent_id": named_agent,
+            "fleet_id": fleet,
+            "display_name": "Web Box 01",
+            "trust_level": 1,
+        }
+    )
+    named = await _write_memory(
+        client,
+        tenant_id,
+        headers,
+        "named agent memory",
+        agent_id=named_agent,
+        fleet_id=fleet,
+    )
+    # No pre-seeded agent → the write creates the agent row with a NULL
+    # display_name, so the join yields None.
+    plain = await _write_memory(
+        client, tenant_id, headers, "plain agent memory", fleet_id=fleet
+    )
+
+    # get-by-id path (memory_get_detail)
+    r = await client.get(
+        f"/api/v1/memories/{named['id']}?tenant_id={tenant_id}", headers=headers
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["agent_display_name"] == "Web Box 01"
+    r = await client.get(
+        f"/api/v1/memories/{plain['id']}?tenant_id={tenant_id}", headers=headers
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["agent_display_name"] is None
+
+    # list path (memory_list_by_filters)
+    r = await client.get(
+        f"/api/v1/memories?tenant_id={tenant_id}&fleet_id={fleet}", headers=headers
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    items = data.get("items", data) if isinstance(data, dict) else data
+    by_id = {m["id"]: m for m in items}
+    assert by_id[named["id"]]["agent_display_name"] == "Web Box 01"
+    assert by_id[plain["id"]]["agent_display_name"] is None
+
+    # search path (memory_scored_search) serializes the field; semantic
+    # inclusion isn't guaranteed under fake embeddings, so only assert the
+    # value when our memory is actually in the results.
+    r = await client.post(
+        "/api/v1/search",
+        json={"tenant_id": tenant_id, "query": "named agent memory"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    for item in r.json()["items"]:
+        assert "agent_display_name" in item
+        if item["id"] == named["id"]:
+            assert item["agent_display_name"] == "Web Box 01"
+
+
 # ---------------------------------------------------------------------------
 # Delete
 # ---------------------------------------------------------------------------

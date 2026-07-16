@@ -55,6 +55,11 @@ MEMORY_FIELDS: list[str] = [
     "tenant_id",
     "fleet_id",
     "agent_id",
+    # Not a memories column — a LEFT JOIN output attached to the ORM instance by
+    # the query methods that join agents (scored-search, list, get-detail,
+    # load-by-ids, find-successors). orm_to_dict reads it via getattr, so it is
+    # null on any path that doesn't attach it.
+    "agent_display_name",
     "memory_type",
     "content",
     "embedding",

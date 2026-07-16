@@ -393,6 +393,27 @@ def _verify_audit_chain_rows(
     }
 
 
+# ── agents.display_name join (shared by the memory read paths) ──
+# Surfaces the agent's human label NULL-safe on memory responses. The join is
+# 1:0..1 (agents has UNIQUE(tenant_id, agent_id)), so it never multiplies rows;
+# a memory whose agent has no row / no display_name simply yields NULL.
+_AGENT_DISPLAY_JOIN = and_(
+    Agent.tenant_id == Memory.tenant_id,
+    Agent.agent_id == Memory.agent_id,
+)
+
+
+def _attach_agent_display_names(rows: Any) -> list[Memory]:
+    """Attach each joined ``agent_display_name`` onto its ``Memory`` — a
+    non-mapped instance attribute that ``orm_to_dict`` serialises via getattr.
+    ``rows`` are ``(Memory, display_name)`` tuples from the joined select."""
+    out: list[Memory] = []
+    for mem, agent_display_name in rows:
+        mem.agent_display_name = agent_display_name
+        out.append(mem)
+    return out
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PostgresService
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1444,9 +1465,11 @@ class PostgresService:
                 scored_cte.c.status_penalty,
                 MemoryEntityLink.entity_id,
                 MemoryEntityLink.role,
+                Agent.display_name.label("agent_display_name"),
             )
             .join(scored_cte, Memory.id == scored_cte.c.mem_id)
             .outerjoin(MemoryEntityLink, Memory.id == MemoryEntityLink.memory_id)
+            .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
             .order_by(scored_cte.c.score.desc(), Memory.created_at.desc())
         )
 
@@ -1463,6 +1486,7 @@ class PostgresService:
         for row in rows:
             mid = row.Memory.id
             if mid not in grouped:
+                row.Memory.agent_display_name = row.agent_display_name
                 grouped[mid] = SimpleNamespace(
                     Memory=row.Memory,
                     score=row.score,
@@ -1520,12 +1544,16 @@ class PostgresService:
         if not memory_ids:
             return []
         async with get_read_session() as session:
-            stmt = select(Memory).where(
-                Memory.id.in_(memory_ids),
-                Memory.tenant_id.in_(readable_tenant_ids)
-                if readable_tenant_ids
-                else Memory.tenant_id == tenant_id,
-                Memory.deleted_at.is_(None),
+            stmt = (
+                select(Memory, Agent.display_name.label("agent_display_name"))
+                .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+                .where(
+                    Memory.id.in_(memory_ids),
+                    Memory.tenant_id.in_(readable_tenant_ids)
+                    if readable_tenant_ids
+                    else Memory.tenant_id == tenant_id,
+                    Memory.deleted_at.is_(None),
+                )
             )
             if fleet_ids:
                 stmt = stmt.where(
@@ -1586,8 +1614,7 @@ class PostgresService:
                         _cast(Memory.ts_valid_start, _Date) <= _cast(_literal(_valid_at_date), _Date),
                     ),
                 )
-            result = await session.execute(stmt)
-            return list(result.scalars().all())
+            return _attach_agent_display_names((await session.execute(stmt)).all())
 
     # ------------------------------------------------------------------
     # D-0) Supersedes chain: find successor memories
@@ -1606,11 +1633,15 @@ class PostgresService:
     ) -> list[Memory]:
         """Find active/confirmed memories that supersede the given memory IDs."""
         async with get_session() as session:
-            stmt = select(Memory).where(
-                Memory.tenant_id == tenant_id,
-                Memory.supersedes_id.in_(supersedes_ids),
-                Memory.status.in_(("active", "confirmed")),
-                Memory.deleted_at.is_(None),
+            stmt = (
+                select(Memory, Agent.display_name.label("agent_display_name"))
+                .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+                .where(
+                    Memory.tenant_id == tenant_id,
+                    Memory.supersedes_id.in_(supersedes_ids),
+                    Memory.status.in_(("active", "confirmed")),
+                    Memory.deleted_at.is_(None),
+                )
             )
             if fleet_ids:
                 stmt = stmt.where(
@@ -1649,8 +1680,7 @@ class PostgresService:
                         Memory.ts_valid_end >= valid_at,
                     ),
                 )
-            result = await session.execute(stmt)
-            return list(result.scalars().all())
+            return _attach_agent_display_names((await session.execute(stmt)).all())
 
     # ------------------------------------------------------------------
     # D) Contradiction detection
@@ -2942,9 +2972,22 @@ class PostgresService:
         deleted, or belongs to another tenant. Read-only (reader replica).
         """
         async with get_read_session() as session:
-            memory = await session.get(Memory, memory_id)
-            if memory is None or memory.tenant_id != tenant_id or memory.deleted_at is not None:
+            # Fetch the memory + its agent label in one query (the agent join is
+            # free — 1:0..1 on the unique (tenant_id, agent_id)), consistent with
+            # the other read paths; entity links are the second query below.
+            mem_row = (
+                await session.execute(
+                    select(Memory, Agent.display_name.label("agent_display_name"))
+                    .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+                    .where(Memory.id == memory_id)
+                )
+            ).one_or_none()
+            if mem_row is None:
                 return None
+            memory, agent_display_name = mem_row
+            if memory.tenant_id != tenant_id or memory.deleted_at is not None:
+                return None
+            memory.agent_display_name = agent_display_name
 
             link_rows = (
                 await session.execute(
@@ -3351,10 +3394,13 @@ class PostgresService:
         a non-empty ``readable_tenant_ids`` expands ``tenant_id = $1`` to
         ``tenant_id = ANY($1)``; ``tenant_id`` stays the binding/home tenant.
         """
+        base = select(Memory, Agent.display_name.label("agent_display_name")).outerjoin(
+            Agent, _AGENT_DISPLAY_JOIN
+        )
         if readable_tenant_ids:
-            stmt = select(Memory).where(Memory.tenant_id.in_(readable_tenant_ids))
+            stmt = base.where(Memory.tenant_id.in_(readable_tenant_ids))
         else:
-            stmt = select(Memory).where(Memory.tenant_id == tenant_id)
+            stmt = base.where(Memory.tenant_id == tenant_id)
 
         # Visibility predicate (critical: prevents scope_agent leaks).
         if caller_agent_id:
@@ -3419,7 +3465,7 @@ class PostgresService:
         stmt = stmt.limit(limit + 1)
 
         async with get_read_session() as session:
-            return list((await session.execute(stmt)).scalars().all())
+            return _attach_agent_display_names((await session.execute(stmt)).all())
 
     async def memory_stats_breakdown(
         self,

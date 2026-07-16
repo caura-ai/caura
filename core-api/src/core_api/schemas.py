@@ -229,6 +229,11 @@ class MemoryOut(BaseModel):
     tenant_id: str
     fleet_id: str | None = None
     agent_id: str
+    # Human-readable agent label (agents.display_name), NULL-safe: null when the
+    # agent has no agents row yet (e.g. broker:<install> ids) — clients fall back
+    # to agent_id. Populated via a LEFT JOIN in the storage query methods, not
+    # stored on the memory row.
+    agent_display_name: str | None = None
     memory_type: str
     title: str | None = None
     content: str

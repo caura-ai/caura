@@ -559,6 +559,7 @@ async def get_memory(
             "tenant_id": memory["tenant_id"],
             "fleet_id": memory["fleet_id"],
             "agent_id": memory["agent_id"],
+            "agent_display_name": memory.get("agent_display_name"),
             "memory_type": memory["memory_type"],
             "title": memory["title"],
             "content": memory["content"],
