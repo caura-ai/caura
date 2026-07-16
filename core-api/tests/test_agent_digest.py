@@ -56,8 +56,8 @@ def wire(monkeypatch):
 
     The default LLM mock simulates the REAL provider succeeding (returns a dict
     directly, without touching the fake tier) so ``used_fallback`` stays False
-    and status is ``ok``/``truncated``. The fallback path is exercised
-    separately in ``test_llm_fallback_marks_status``."""
+    and status is ``ok``/``truncated``. The LLM-unavailable path is exercised
+    separately in ``test_llm_unavailable_is_skipped_no_row``."""
 
     async def _real_cwf(provider, call_fn, fake_fn, **kw):
         return {"narrative": "real summary", "shipped": ["shipped a thing"]}
@@ -177,33 +177,21 @@ async def test_run_agent_digest_enumerates_opted_in_orgs(monkeypatch, wire):
     assert summary["digests"] == 2
 
 
-async def test_llm_fallback_marks_status(monkeypatch, wire):
-    """When call_with_fallback drops to the template tier, the row is marked
-    'fallback' (not 'ok') and counts as neither generated nor errored."""
+async def test_llm_unavailable_is_skipped_no_row(monkeypatch, wire):
+    """When call_with_fallback drops to the template tier (LLM unavailable), the
+    agent is skipped: NO row is written (no generic placeholder), and it counts
+    as skipped, not generated/errored."""
     storage = wire(FakeStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 4}))
 
     async def _fallback_cwf(provider, call_fn, fake_fn, **kw):
-        return fake_fn()  # real + fallback providers failed → template narrative
+        return fake_fn()  # real + fallback providers failed → template tier
 
     monkeypatch.setattr(agent_digest, "call_with_fallback", _fallback_cwf)
     summary = await agent_digest.generate_for_org("org1", "day", CONFIG, now=NOW)
-    assert storage.upserts[0]["status"] == "fallback"
-    assert summary["fallback"] == 1
+    assert storage.upserts == []  # no placeholder row persisted
+    assert summary["skipped"] == 1
     assert summary["generated"] == 0
     assert summary["errored"] == 0
-
-
-async def test_fallback_overrides_truncated(monkeypatch, wire):
-    """A template (fallback) narrative wins over 'truncated' so the caller can
-    tell the narrative is fake, not merely partial."""
-    storage = wire(FakeStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 5}))
-
-    async def _fallback_cwf(provider, call_fn, fake_fn, **kw):
-        return fake_fn()
-
-    monkeypatch.setattr(agent_digest, "call_with_fallback", _fallback_cwf)
-    await agent_digest.generate_for_org("org1", "day", {**CONFIG, "max_memories_per_agent": 2}, now=NOW)
-    assert storage.upserts[0]["status"] == "fallback"
 
 
 async def test_daily_window_is_previous_utc_day(wire):
@@ -226,9 +214,9 @@ async def test_weekly_window_aligns_to_monday(wire):
     assert row["window_start"] == "2026-06-29T00:00:00+00:00"  # previous Monday
 
 
-async def test_empty_narrative_from_real_llm_is_fallback_with_synthesis(monkeypatch, wire):
-    """A real response missing the narrative is salvaged from sections and marked
-    fallback (a useful placeholder) — never a blank error row."""
+async def test_empty_narrative_is_skipped(monkeypatch, wire):
+    """A real response missing the narrative is skipped (no row) rather than
+    persisted with a synthesized placeholder."""
     storage = wire(FakeStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 3}))
 
     async def _empty_cwf(provider, call_fn, fake_fn, **kw):
@@ -236,11 +224,8 @@ async def test_empty_narrative_from_real_llm_is_fallback_with_synthesis(monkeypa
 
     monkeypatch.setattr(agent_digest, "call_with_fallback", _empty_cwf)
     summary = await agent_digest.generate_for_org("org1", "day", CONFIG, now=NOW)
-    row = storage.upserts[0]
-    assert row["status"] == "fallback"
-    assert row["narrative"] and "2 shipped items" in row["narrative"]  # synthesized
-    assert row["error_detail"] == "LLM returned no narrative; synthesized from sections"
-    assert summary["fallback"] == 1
+    assert storage.upserts == []
+    assert summary["skipped"] == 1
     assert summary["generated"] == 0
     assert summary["errored"] == 0
 

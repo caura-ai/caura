@@ -57,26 +57,6 @@ DIGEST_SCHEMA: dict = {
 }
 
 _SECTION_KEYS = ("decisions", "shipped", "learned", "open_threads")
-_SECTION_LABELS = (
-    ("decisions", "decision"),
-    ("shipped", "shipped item"),
-    ("learned", "learning"),
-    ("open_threads", "open thread"),
-)
-
-
-def _narrative_from_sections(agent: dict, mems: list[dict], sections: dict) -> str:
-    """Terse prose salvaged from the structured sections when the model returned
-    them but omitted the narrative — a useful placeholder beats a blank row."""
-    name = agent.get("display_name") or agent.get("agent_id")
-    parts = []
-    for key, label in _SECTION_LABELS:
-        n = len(sections.get(key) or [])
-        if n:
-            parts.append(f"{n} {label}{'' if n == 1 else 's'}")
-    if parts:
-        return f"{name}: {', '.join(parts)} across {len(mems)} durable memories."
-    return f"{name} recorded {len(mems)} durable memories this period."
 
 
 def _build_prompt(agent: dict, mems: list[dict], period: str) -> str:
@@ -89,16 +69,24 @@ def _build_prompt(agent: dict, mems: list[dict], period: str) -> str:
             f" (recalled {m.get('recall_count') or 0}x, {str(m.get('created_at'))[:10]})"
         )
     corpus = "\n".join(lines)
+    period_label = "day" if period == "day" else "week"
     return (
-        f"You are summarizing what the AI agent '{name}' did over the past "
-        f"{'day' if period == 'day' else 'week'}, based ONLY on its durable "
-        f"memories below. Do not invent anything not grounded in them. Quantify "
-        f"where natural (e.g. 'made 3 decisions'). If the memories are thin, say "
-        f"so briefly.\n\n"
+        f"You are writing a factual activity digest for the AI agent '{name}' over "
+        f"the past {period_label}, grounded ONLY in its durable memories below.\n\n"
+        f"Write a 2-4 sentence narrative of the concrete work the agent did — "
+        f"decisions made, work shipped, things learned, open threads — quantifying "
+        f"where natural (e.g. 'made 3 decisions'). Do not invent anything that is "
+        f"not grounded in the memories.\n\n"
+        f"IMPORTANT:\n"
+        f"- Never comment on or critique the amount, richness, or quality of the "
+        f"memories. Do not say they are thin, sparse, limited, or untitled, and do "
+        f"not describe what is missing or what cannot be reconstructed.\n"
+        f'- If the memories show no substantive work, set "narrative" to EXACTLY '
+        f'"No significant work by {name} has been recorded during this period." '
+        f"and leave all section lists empty.\n\n"
         f"Memories ({len(mems)}):\n{corpus}\n\n"
-        f"Return JSON: narrative (2-4 sentence prose recap), decisions, shipped, "
-        f"learned, open_threads (short bullet strings; omit or empty if none), "
-        f"and confidence (0-1)."
+        f"Return JSON: narrative, decisions, shipped, learned, open_threads "
+        f"(short bullet strings; empty if none), and confidence (0-1)."
     )
 
 
@@ -115,28 +103,33 @@ async def _summarize_agent(
     provider: str,
     truncated: bool,
 ) -> str:
-    """Build (via LLM) and persist one agent's digest row. Returns its status."""
+    """Summarize one agent via the LLM and persist a row ONLY when we got a real
+    narrative. Returns a status:
+
+      ok / truncated — row written with a genuine LLM summary
+      skipped        — LLM unavailable or returned no narrative; logged, NO row
+      errored        — the LLM call raised; logged, NO row
+
+    We deliberately do NOT persist a generic placeholder ("<agent> recorded N
+    durable memories") when the model is unavailable — a template row is noise in
+    the report, so the agent is dropped and the gap is logged instead.
+    """
+    agent_id = agent.get("agent_id")
     prompt = _build_prompt(agent, mems, period)
 
     async def _call(llm: Any) -> dict:
         return await llm.complete_json(prompt, response_schema=DIGEST_SCHEMA)
 
     # call_with_fallback silently drops to _fake() when the real (and fallback)
-    # provider both fail. This flag lets us mark the row so a placeholder
-    # narrative is never mistaken for a real LLM summary.
+    # provider both fail. This flag lets us detect that and skip rather than
+    # persist a template narrative.
     used_fallback = False
 
     def _fake() -> dict:
         nonlocal used_fallback
         used_fallback = True
-        return {"narrative": f"{agent.get('agent_id')} recorded {len(mems)} durable memories."}
+        return {}
 
-    status = "ok"
-    if truncated:
-        status = "truncated"
-    narrative: str | None = None
-    sections: dict = {}
-    error: str | None = None
     try:
         raw = await call_with_fallback(
             provider,
@@ -146,30 +139,28 @@ async def _summarize_agent(
             service_label="agent-digest",
             model_override=model,
         )
-        narrative = raw.get("narrative") or None
-        sections = {k: raw.get(k) or [] for k in _SECTION_KEYS}
-        if used_fallback:
-            # Template narrative — overrides truncated so the caller can tell
-            # it's a placeholder, not a real (if partial) summary.
-            status = "fallback"
-        elif not narrative:
-            # The provider uses strict=False (no server-side schema enforcement)
-            # and there's no Pydantic guardrail here, so a real response can omit
-            # the narrative. Salvage one from the structured sections and mark it
-            # fallback — a useful placeholder beats a blank error row (which is
-            # what agents like memclaw-insighter were producing in prod).
-            narrative = _narrative_from_sections(agent, mems, sections)
-            status = "fallback"
-            error = "LLM returned no narrative; synthesized from sections"
-    except Exception as exc:  # storage/unexpected — real errors, not LLM fallback
-        status, error = "error", repr(exc)
-        logger.warning("agent_digest: summarize failed for %s/%s: %r", org_id, agent.get("agent_id"), exc)
+    except Exception as exc:
+        logger.warning("agent_digest: LLM call failed for %s/%s: %r — skipping", org_id, agent_id, exc)
+        return "errored"
 
+    if used_fallback:
+        logger.warning(
+            "agent_digest: LLM unavailable for %s/%s — skipping (no row written)", org_id, agent_id
+        )
+        return "skipped"
+
+    narrative = (raw.get("narrative") or "").strip() or None
+    if not narrative:
+        logger.warning("agent_digest: LLM returned no narrative for %s/%s — skipping", org_id, agent_id)
+        return "skipped"
+
+    sections = {k: raw.get(k) or [] for k in _SECTION_KEYS}
+    status = "truncated" if truncated else "ok"
     row = {
         "run_id": run_id,
         "tenant_id": org_id,
         "fleet_id": agent.get("fleet_id"),
-        "agent_id": agent["agent_id"],
+        "agent_id": agent_id,
         "period": period,
         "window_start": window_start.isoformat(),
         "window_end": window_end.isoformat(),
@@ -179,18 +170,13 @@ async def _summarize_agent(
         "recall_count": sum(m.get("recall_count") or 0 for m in mems),
         "model": model,
         "status": status,
-        "error_detail": error,
+        "error_detail": None,
     }
     try:
         await get_storage_client().upsert_agent_activity_digest(row)
     except Exception as exc:
         # Re-raise so gather still counts this agent as errored; log for traceability.
-        logger.warning(
-            "agent_digest: upsert failed for %s/%s: %r",
-            org_id,
-            agent.get("agent_id"),
-            exc,
-        )
+        logger.warning("agent_digest: upsert failed for %s/%s: %r", org_id, agent_id, exc)
         raise
     return status
 
@@ -290,8 +276,8 @@ async def generate_for_org(
 
     statuses = await asyncio.gather(*(_one(a, m) for a, m in selected), return_exceptions=True)
     generated = sum(1 for s in statuses if s in ("ok", "truncated"))
-    fallback = sum(1 for s in statuses if s == "fallback")
-    errored = sum(1 for s in statuses if isinstance(s, BaseException) or s == "error")
+    skipped = sum(1 for s in statuses if s == "skipped")
+    errored = sum(1 for s in statuses if isinstance(s, BaseException) or s == "errored")
 
     # Retention sweep, folded into the run (this org's latest run is always
     # fresh, so old runs age out). NOTE: an org that later DISABLES the digest
@@ -312,7 +298,7 @@ async def generate_for_org(
         "agents": len(agents),
         "candidates": len(candidates),
         "generated": generated,
-        "fallback": fallback,
+        "skipped": skipped,
         "errored": errored,
         "pruned": pruned,
         "window_start": window_start.isoformat(),
@@ -347,7 +333,7 @@ async def run_agent_digest(period: str = "day") -> dict:
     completed = 0
     failed = 0
     digests = 0
-    agent_fallbacks = 0
+    agent_skipped = 0
     agent_errors = 0
     for org_id, res in zip(org_ids, results, strict=True):
         if isinstance(res, BaseException):
@@ -356,17 +342,17 @@ async def run_agent_digest(period: str = "day") -> dict:
         elif res:
             completed += 1
             digests += res.get("generated", 0)
-            agent_fallbacks += res.get("fallback", 0)
+            agent_skipped += res.get("skipped", 0)
             agent_errors += res.get("errored", 0)
     logger.info(
         "agent_digest run: period=%s orgs=%d completed=%d failed=%d "
-        "digests=%d agent_fallbacks=%d agent_errors=%d",
+        "digests=%d agent_skipped=%d agent_errors=%d",
         period,
         len(org_ids),
         completed,
         failed,
         digests,
-        agent_fallbacks,
+        agent_skipped,
         agent_errors,
     )
     return {
@@ -375,7 +361,7 @@ async def run_agent_digest(period: str = "day") -> dict:
         "completed": completed,
         "failed": failed,
         "digests": digests,
-        "agent_fallbacks": agent_fallbacks,
+        "agent_skipped": agent_skipped,
         "agent_errors": agent_errors,
     }
 
