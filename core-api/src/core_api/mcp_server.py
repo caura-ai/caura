@@ -54,6 +54,7 @@ from core_api.services.agent_service import (
     enforce_fleet_read,
     enforce_fleet_write,
     get_or_create_agent,
+    resolve_write_agent,
 )
 from core_api.services.audit_service import log_action, log_cross_tenant_read
 from core_api.services.capability_usage import record_usage
@@ -105,6 +106,16 @@ _readable_tenant_ids_var: contextvars.ContextVar[list[str] | None] = contextvars
     "mcp_readable_tenant_ids", default=None
 )
 _scopes_var: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar("mcp_scopes", default=None)
+# memclawd (broker) identity, plumbed from the gateway on the verified path.
+# X-Caura-Credential-Kind distinguishes ``install_credential`` (broker) from
+# ``user_api_key`` (dashboard/SDK); X-Install-UUID is the broker's install id.
+# Drives the agent-ownership boundary on MCP writes (parity with REST auth).
+_credential_kind_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "mcp_credential_kind", default=None
+)
+_install_uuid_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "mcp_install_uuid", default=None
+)
 
 _UNAUTH = "__unauthenticated__"
 _ADMIN = "__admin__"
@@ -276,6 +287,18 @@ class MCPAuthMiddleware:
                 else ""
             )
             _scopes_var.set({s.strip() for s in caps_header.split(",") if s.strip()} if caps_header else None)
+            # Credential provenance for the write-ownership boundary. Only
+            # honored on the gateway-verified path — a direct client must not
+            # be able to self-assert an install identity and write under a
+            # broker's ownership namespace.
+            _credential_kind_var.set(
+                (headers.get(b"x-caura-credential-kind", b"").decode().lower() or None)
+                if via_gateway
+                else None
+            )
+            _install_uuid_var.set(
+                (headers.get(b"x-install-uuid", b"").decode() or None) if via_gateway else None
+            )
 
         await self.app(scope, receive, send)
 
@@ -297,6 +320,17 @@ def _get_readable_tenants() -> list[str]:
 def _get_scopes() -> set[str] | None:
     """Return the credential's scope set, or None for full-scope (legacy) keys."""
     return _scopes_var.get(None)
+
+
+def _is_install_credential() -> bool:
+    """True when the gateway authenticated this call with a memclawd install
+    credential (kind=install_credential) — mirrors ``AuthContext.is_install_credential``."""
+    return _credential_kind_var.get(None) == "install_credential"
+
+
+def _get_install_uuid() -> str | None:
+    """The broker's install UUID (X-Install-UUID), or None for non-broker calls."""
+    return _install_uuid_var.get(None)
 
 
 def _is_write_allowed() -> bool:
@@ -766,6 +800,20 @@ async def memclaw_write(
     # ``db``-first signatures satisfied.
     async with _no_db():
         try:
+            # Broker (install-credential) agent-ownership boundary — the same
+            # gate + owner-stamp + post-create re-check the REST write paths use
+            # (``resolve_write_agent``), so an install can't attribute a memory
+            # to an agent owned by a different install via MCP. Non-broker
+            # (interactive) callers pass straight through. Runs before
+            # ``enforce_fleet_write`` so the trust gate applies to the resolved
+            # (possibly degraded ``broker:<install>``) id.
+            _agent, agent_id = await resolve_write_agent(
+                agent_id,
+                tenant_id,
+                fleet_id,
+                is_install_credential=_is_install_credential(),
+                install_uuid=_get_install_uuid(),
+            )
             # Register the calling agent (auto-create row on first write) and
             # enforce trust gating for cross-fleet writes — same surface the
             # REST write path uses. Without this, MCP writes succeed without

@@ -177,6 +177,32 @@ def mcp_env(monkeypatch):
 
     monkeypatch.setattr(mcp_server, "enforce_fleet_write", _stub_enforce_fleet_write)
 
+    # Write tools route attribution through ``resolve_write_agent`` (the broker
+    # ownership boundary, shared with the REST write paths). There's no DB in
+    # unit tests, so stub it as a passthrough returning the caller's identity
+    # unchanged. Tests exercising the boundary itself replace this (or restore
+    # the real function and mock ``agent_service`` get/lookup).
+    async def _stub_resolve_write_agent(
+        chosen_agent_id,
+        tenant_id,
+        fleet_id,
+        *,
+        is_install_credential,
+        install_uuid,
+        require_approval=False,
+    ):
+        return (
+            {
+                "agent_id": chosen_agent_id,
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "trust_level": 3,
+            },
+            chosen_agent_id,
+        )
+
+    monkeypatch.setattr(mcp_server, "resolve_write_agent", _stub_resolve_write_agent)
+
     service_mocks: dict[str, AsyncMock] = {}
 
     def service(name: str) -> AsyncMock:

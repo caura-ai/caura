@@ -125,6 +125,119 @@ async def lookup_agent(tenant_id: str, agent_id: str) -> dict | None:
     return await sc.get_agent(agent_id, tenant_id)
 
 
+_BROKER_LABEL_PREFIX = "broker:"
+
+
+def broker_label(install_uuid: str | None) -> str:
+    """The bare-install fallback identity for a broker write."""
+    return f"{_BROKER_LABEL_PREFIX}{install_uuid or 'unknown'}"
+
+
+def _owned_by_other_install(owner_install_uuid: str | None, install_uuid: str | None) -> bool:
+    """True when an agent row is first-touch owned by a DIFFERENT install than
+    ``install_uuid`` — the single condition under which a broker write is
+    degraded to its own ``broker:<install>`` identity. A NULL owner (unclaimed
+    or grandfathered) is not "another install", so it never triggers a degrade.
+    """
+    return owner_install_uuid is not None and owner_install_uuid != install_uuid
+
+
+async def _broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id: str) -> str:
+    """Lenient ownership gate over a broker write's chosen agent id.
+
+    A broker write may be attributed to an agent named by the caller (REST item
+    metadata / body.agent_id, or the MCP agent id). Before trusting that name,
+    verify this install owns it: ``owner_install_uuid`` is stamped (first-touch)
+    with the install that first wrote as the agent. Degrade to the bare-install
+    identity ONLY when the named agent is owned by a *different* install, so one
+    install can't write under another install's agent id.
+
+    Lenient — never blocks a legitimate first write:
+      - already the install fallback   -> no lookup, return as-is
+      - another install's broker:<x>   -> degrade (reserved namespace; no lookup)
+      - agent doesn't exist yet         -> keep (this write first-touches it)
+      - ``owner_install_uuid`` is NULL  -> keep (unclaimed; this write claims it)
+      - owned by THIS install           -> keep
+      - owned by a DIFFERENT install    -> degrade to ``broker:<install>``
+    """
+    fallback = broker_label(install_uuid)
+    if chosen == fallback:
+        return chosen
+    # The ``broker:<install>`` namespace is RESERVED — an install may only ever
+    # write as its OWN bare-install identity. A chosen id in that namespace that
+    # isn't this install's own fallback (handled above) is *another* install's
+    # reserved identity. Degrade to this install's own fallback, with NO lookup:
+    # the fallback id is deterministic and guessable, so without this guard an
+    # attacker could first-touch ``broker:<victim>`` (stamping itself as owner)
+    # and thereby capture the victim's later degraded writes.
+    if chosen.startswith(_BROKER_LABEL_PREFIX):
+        return fallback
+    owner = await lookup_agent(tenant_id, chosen)
+    if owner is None:
+        return chosen
+    if _owned_by_other_install(owner.get("owner_install_uuid"), install_uuid):
+        return fallback
+    return chosen
+
+
+async def resolve_write_agent(
+    chosen_agent_id: str,
+    tenant_id: str,
+    fleet_id: str | None,
+    *,
+    is_install_credential: bool,
+    install_uuid: str | None,
+    require_approval: bool = False,
+) -> tuple[dict, str]:
+    """Resolve the agent a write is attributed to, enforcing the broker
+    ownership boundary, and return ``(agent_row, safe_agent_id)``.
+
+    Shared by every write entry point — the REST single- and bulk-write paths
+    and the MCP write tool — so the boundary can't be bypassed by a caller's
+    choice of endpoint. For a broker (install-credential) caller it:
+
+      1. Gates ``chosen_agent_id`` through :func:`_broker_owned_agent_id`
+         (degrade to ``broker:<install>`` when it names an agent owned by a
+         different install, or another install's reserved ``broker:`` id).
+      2. Stamps ``owner_install_uuid`` first-touch via ``get_or_create_agent``.
+      3. Re-checks the committed row and degrades the loser of a first-touch
+         race to its own ``broker:<install>`` identity — the row is now
+         authoritative (storage re-selects FOR UPDATE and never overwrites a
+         set owner), so this closes the gate's optimistic ``owner is None``
+         window.
+
+    Non-broker callers (dashboard / SDK / interactive MCP) pass straight through
+    ``get_or_create_agent`` unchanged — the stamp and gate are broker-only, keyed
+    on ``is_install_credential`` (a stray ``install_uuid`` without the credential
+    kind is ignored).
+    """
+    if is_install_credential:
+        chosen_agent_id = await _broker_owned_agent_id(chosen_agent_id, install_uuid, tenant_id)
+    agent = await get_or_create_agent(
+        tenant_id,
+        chosen_agent_id,
+        fleet_id,
+        require_approval=require_approval,
+        # Stamp ownership only for broker writes — never rely on the gateway
+        # happening to omit x-install-uuid for non-broker callers.
+        owner_install_uuid=install_uuid if is_install_credential else None,
+    )
+    if (
+        is_install_credential
+        and install_uuid
+        and _owned_by_other_install(agent.get("owner_install_uuid"), install_uuid)
+    ):
+        chosen_agent_id = broker_label(install_uuid)
+        agent = await get_or_create_agent(
+            tenant_id,
+            chosen_agent_id,
+            fleet_id,
+            require_approval=require_approval,
+            owner_install_uuid=install_uuid,
+        )
+    return agent, chosen_agent_id
+
+
 async def enforce_fleet_write(
     tenant_id: str,
     agent_id: str,
