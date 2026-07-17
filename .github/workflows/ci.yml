@@ -76,6 +76,17 @@ jobs:
       - name: Run Ruff formatter check (core-storage-api)
         run: uv run ruff format --check core-storage-api/src/
 
+      - name: Run Ruff formatter check (vendored common/ files at ruff defaults)
+        # This list mirrors the policy=identical entries of caura-memclaw-enterprise's
+        # scripts/vendored_files_manifest.json — the source of truth; keep in sync.
+        # Enterprise CI format-checks the vendored copies at ruff DEFAULTS (88 cols),
+        # so gate them here too or a merge turns enterprise CI red until a reflow
+        # lands (full story: the vendoring note in common/structlog_config.py's
+        # docstring). ``--isolated`` pins default behavior even if a root ruff
+        # config is ever added; deliberately NOT all of common/ — non-vendored
+        # files there are not held to the 88-col contract.
+        run: uv run ruff format --check --isolated common/__init__.py common/structlog_config.py
+
       - name: Guard against raw-string MCP error returns (audit B4 / CAURA-000 #147)
         # MCP tool handlers must build error envelopes via ``_error_response(...)``
         # so ``_with_latency`` can flip ``CallToolResult.isError = True``. Raw
