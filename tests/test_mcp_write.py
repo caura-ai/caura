@@ -13,6 +13,8 @@ Covers:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi import HTTPException
 
@@ -291,3 +293,59 @@ async def test_write_batch_omitted_fleet_resolves_home_fleet(mcp_env):
     )
 
     assert cmb.await_args.args[0].fleet_id == "home-f"
+
+
+async def test_write_unapproved_agent_blocked(mcp_env, monkeypatch):
+    # Per-agent approval gate (parity with REST single-write): under
+    # require_agent_approval a new agent resolves at trust_level 0, so MCP refuses
+    # the write with AGENT_NOT_APPROVED and never persists.
+    mcp_env["service"]("resolve_config").return_value = SimpleNamespace(
+        require_agent_approval=True, recall_boost=False, graph_expand=False
+    )
+
+    async def _resolve(
+        agent_id,
+        tenant_id,
+        fleet_id,
+        *,
+        is_install_credential,
+        install_uuid,
+        require_approval=False,
+    ):
+        return {"agent_id": agent_id, "trust_level": 0, "fleet_id": fleet_id}, agent_id
+
+    monkeypatch.setattr(mcp_server, "resolve_write_agent", _resolve)
+    cm = mcp_env["service"]("create_memory")
+
+    out = await mcp_server.memclaw_write(content="x", agent_id="new-agent")
+    payload = parse_envelope(out)
+    assert payload["error"]["code"] == "AGENT_NOT_APPROVED"
+    cm.assert_not_awaited()
+
+
+async def test_write_threads_require_approval_to_resolver(mcp_env, monkeypatch):
+    # The tenant's require_agent_approval reaches resolve_write_agent, so a new
+    # agent is created at trust 0 when required (the creation half of the gate).
+    mcp_env["service"]("resolve_config").return_value = SimpleNamespace(
+        require_agent_approval=True, recall_boost=False, graph_expand=False
+    )
+    captured: dict[str, object] = {}
+
+    async def _resolve(
+        agent_id,
+        tenant_id,
+        fleet_id,
+        *,
+        is_install_credential,
+        install_uuid,
+        require_approval=False,
+    ):
+        captured["require_approval"] = require_approval
+        return {"agent_id": agent_id, "trust_level": 3, "fleet_id": fleet_id}, agent_id
+
+    monkeypatch.setattr(mcp_server, "resolve_write_agent", _resolve)
+    mcp_env["service"]("create_memory").return_value = _OutStub("m-1")
+
+    out = await mcp_server.memclaw_write(content="x", agent_id="a1")
+    assert parse_envelope(out)["id"] == "m-1"
+    assert captured["require_approval"] is True

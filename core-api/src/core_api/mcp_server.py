@@ -800,6 +800,12 @@ async def memclaw_write(
     # ``db``-first signatures satisfied.
     async with _no_db():
         try:
+            # Per-agent approval gate (require_agent_approval): resolve the
+            # tenant config so a new agent is created at trust_level 0 and the
+            # check below can refuse it — parity with the REST single-write path
+            # (routes/memories.py). REST bulk deliberately does NOT gate approval
+            # (broker fan-in path — see _write_memories_bulk_inner).
+            config = await resolve_config(tenant_id)
             # Broker (install-credential) agent-ownership boundary — the same
             # gate + owner-stamp + post-create re-check the REST write paths use
             # (``resolve_write_agent``), so an install can't attribute a memory
@@ -807,13 +813,26 @@ async def memclaw_write(
             # (interactive) callers pass straight through. Runs before
             # ``enforce_fleet_write`` so the trust gate applies to the resolved
             # (possibly degraded ``broker:<install>``) id.
-            _agent, agent_id = await resolve_write_agent(
+            agent, agent_id = await resolve_write_agent(
                 agent_id,
                 tenant_id,
                 fleet_id,
                 is_install_credential=_is_install_credential(),
                 install_uuid=_get_install_uuid(),
+                require_approval=config.require_agent_approval,
             )
+            # Per-agent approval gate: a new agent under require_agent_approval
+            # starts at trust_level 0 and can't write until an admin approves it
+            # (mirrors _write_memory_inner's 403).
+            if agent.get("trust_level", 0) == 0:
+                return _with_latency(
+                    _error_response(
+                        "AGENT_NOT_APPROVED",
+                        f"Agent '{agent_id}' is not approved. Contact the tenant "
+                        "admin to set trust_level >= 1.",
+                    ),
+                    t0,
+                )
             # Register the calling agent (auto-create row on first write) and
             # enforce trust gating for cross-fleet writes — same surface the
             # REST write path uses. Without this, MCP writes succeed without

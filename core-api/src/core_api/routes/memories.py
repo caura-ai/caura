@@ -1059,6 +1059,14 @@ async def _write_memories_bulk_inner(
         body.agent_id = auth.agent_id
     # Ownership boundary (gate + owner stamp + post-create re-check), shared
     # with the single-write path.
+    #
+    # NOTE: unlike single-write (_write_memory_inner) and the MCP write tool,
+    # bulk deliberately does NOT enforce the per-agent approval gate
+    # (require_agent_approval / trust_level==0): it passes no require_approval and
+    # has no trust==0 check. Bulk is the broker (memclawd) fan-in path that
+    # auto-registers many agents from item metadata; gating each on admin
+    # approval would create trust-0 rows and 403 whole batches, breaking capture.
+    # Per-agent approval is an interactive / single-agent concern.
     agent, body.agent_id = await resolve_write_agent(
         body.agent_id,
         body.tenant_id,

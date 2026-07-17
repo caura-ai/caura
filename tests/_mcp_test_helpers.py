@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -202,6 +203,18 @@ def mcp_env(monkeypatch):
         )
 
     monkeypatch.setattr(mcp_server, "resolve_write_agent", _stub_resolve_write_agent)
+
+    # Write tools resolve the tenant config for the per-agent approval gate
+    # (require_agent_approval); search resolves it for recall knobs. Stub a
+    # permissive default (approval off) so handlers don't hit storage. Tests that
+    # assert on config replace this via ``service("resolve_config")`` or a local
+    # monkeypatch.
+    async def _stub_resolve_config(tenant_id):
+        return SimpleNamespace(
+            require_agent_approval=False, recall_boost=False, graph_expand=False
+        )
+
+    monkeypatch.setattr(mcp_server, "resolve_config", _stub_resolve_config)
 
     service_mocks: dict[str, AsyncMock] = {}
 
