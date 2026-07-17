@@ -817,9 +817,13 @@ async def _write_memory_inner(
     # `main` creds are re-identified, else it pins them back onto `main`.
     if app_settings.bind_write_identity_to_auth and auth.agent_id:
         body.agent_id = auth.agent_id
-    agent = await get_or_create_agent(
-        body.tenant_id,
+    # Ownership boundary (gate + owner stamp + post-create re-check), shared
+    # with the bulk path so a broker single-write can't attribute a memory to
+    # an agent owned by a different install.
+    agent, body.agent_id = await resolve_write_agent(
         body.agent_id,
+        auth,
+        body.tenant_id,
         body.fleet_id,
         require_approval=write_config.require_agent_approval,
     )
@@ -944,13 +948,12 @@ async def write_memories_bulk(
             bulk_attempt_id = f"broker-{auth.install_uuid or 'unknown'}-{_uuid.uuid4()}"
         if not body.agent_id:
             body.agent_id = _broker_write_agent_id(body.items, auth.install_uuid)
-        # Ownership gate runs on EVERY broker write, not just the
-        # auto-derived case: a broker caller that pre-populates ``agent_id``
-        # in the request body must not bypass the check and write under an
-        # agent owned by a different install. The gate short-circuits
-        # (chosen == fallback, or owner NULL / this install) so the common
-        # paths stay lookup-free.
-        body.agent_id = await _broker_owned_agent_id(body.agent_id, auth.install_uuid, body.tenant_id)
+        # The ownership gate + owner stamp + post-create re-check run in
+        # ``resolve_write_agent`` inside ``_write_memories_bulk_inner`` (shared
+        # with the single-write path). This block only does the bulk-specific
+        # fan-in (derive the batch's agent from item metadata); the safety
+        # gate applies to that result — and to an explicitly-supplied
+        # ``agent_id`` — there.
     # Resolve a missing agent_id (mirrors write_memory). Install-credential
     # callers were already attributed above; everyone else either gets the
     # reserved standalone identity or must name a real agent. Defaulting
@@ -1068,6 +1071,62 @@ async def _broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_i
     return chosen
 
 
+async def resolve_write_agent(
+    chosen_agent_id: str,
+    auth: AuthContext,
+    tenant_id: str,
+    fleet_id: str | None,
+    *,
+    require_approval: bool = False,
+) -> tuple[dict, str]:
+    """Resolve the agent a write is attributed to, enforcing the broker
+    ownership boundary, and return ``(agent_row, safe_agent_id)``.
+
+    Shared by the single- (``_write_memory_inner``) and bulk-write
+    (``_write_memories_bulk_inner``) paths so the boundary can't be bypassed
+    by an install's choice of endpoint. For a broker (install-credential)
+    caller it:
+
+      1. Gates ``chosen_agent_id`` through :func:`_broker_owned_agent_id`
+         (degrade to ``broker:<install>`` when it names an agent owned by a
+         different install, or another install's reserved ``broker:`` id).
+      2. Stamps ``owner_install_uuid`` first-touch via ``get_or_create_agent``.
+      3. Re-checks the committed row and degrades the loser of a first-touch
+         race to its own ``broker:<install>`` identity — the row is now
+         authoritative (storage re-selects FOR UPDATE and never overwrites a
+         set owner), so this closes the gate's optimistic ``owner is None``
+         window.
+
+    Non-broker callers (dashboard / SDK) pass straight through
+    ``get_or_create_agent`` unchanged — the stamp and the gate are broker-only.
+    """
+    if auth.is_install_credential:
+        chosen_agent_id = await _broker_owned_agent_id(chosen_agent_id, auth.install_uuid, tenant_id)
+    agent = await get_or_create_agent(
+        tenant_id,
+        chosen_agent_id,
+        fleet_id,
+        require_approval=require_approval,
+        # Stamp ownership only for broker writes — never rely on the gateway
+        # happening to omit x-install-uuid for non-broker callers.
+        owner_install_uuid=auth.install_uuid if auth.is_install_credential else None,
+    )
+    if (
+        auth.is_install_credential
+        and auth.install_uuid
+        and _owned_by_other_install(agent.get("owner_install_uuid"), auth.install_uuid)
+    ):
+        chosen_agent_id = _broker_label(auth.install_uuid)
+        agent = await get_or_create_agent(
+            tenant_id,
+            chosen_agent_id,
+            fleet_id,
+            require_approval=require_approval,
+            owner_install_uuid=auth.install_uuid,
+        )
+    return agent, chosen_agent_id
+
+
 def _bulk_response(result: BulkMemoryResponse) -> JSONResponse:
     """Pick HTTP status per CAURA-602 contract:
 
@@ -1103,43 +1162,13 @@ async def _write_memories_bulk_inner(
     bulk_attempt_id: str,
 ):
     # Phase 2 (dark, default off): bind to the verified credential identity
-    # (see _write_memory_inner). Enabled only post-re-identification. When this
-    # overrides body.agent_id, the outer ``_broker_owned_agent_id`` gate's work
-    # is discarded — harmless, because the post-create re-check below is the
-    # authoritative ownership guard; the outer gate is only a lookup-free fast
-    # path that spares this stricter check on the common broker flow.
+    # (see _write_memory_inner). Enabled only post-re-identification. Runs
+    # before resolve_write_agent so the gate/stamp apply to the bound identity.
     if app_settings.bind_write_identity_to_auth and auth.agent_id:
         body.agent_id = auth.agent_id
-    agent = await get_or_create_agent(
-        body.tenant_id,
-        body.agent_id,
-        body.fleet_id,
-        # Stamp ownership only for broker (install-credential) writes, symmetric
-        # with the attribution gate above — never rely on the gateway happening
-        # to omit x-install-uuid for non-broker callers.
-        owner_install_uuid=auth.install_uuid if auth.is_install_credential else None,
-    )
-    # Post-create ownership re-check — closes the first-touch TOCTOU window in
-    # ``_broker_owned_agent_id``. That gate optimistically keeps the chosen
-    # agent id when no row exists yet (``owner is None`` -> pass), so two
-    # brokers racing the same new agent id both pass, but only one wins the
-    # create + ownership stamp. ``get_or_create_agent`` returns the
-    # authoritative committed row (storage re-selects FOR UPDATE and never
-    # overwrites a set ``owner_install_uuid``); if the winner is a different
-    # install, degrade this loser's write to its own ``broker:<install>``
-    # identity rather than mis-attribute it to the winner's agent.
-    if (
-        auth.is_install_credential
-        and auth.install_uuid
-        and _owned_by_other_install(agent.get("owner_install_uuid"), auth.install_uuid)
-    ):
-        body.agent_id = _broker_label(auth.install_uuid)
-        agent = await get_or_create_agent(
-            body.tenant_id,
-            body.agent_id,
-            body.fleet_id,
-            owner_install_uuid=auth.install_uuid,
-        )
+    # Ownership boundary (gate + owner stamp + post-create re-check), shared
+    # with the single-write path.
+    agent, body.agent_id = await resolve_write_agent(body.agent_id, auth, body.tenant_id, body.fleet_id)
     if not body.fleet_id and agent.get("fleet_id"):
         body.fleet_id = agent["fleet_id"]
     usage = None
