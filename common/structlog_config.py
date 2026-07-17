@@ -6,7 +6,17 @@ this, log lines written through `structlog` end up as severity `DEFAULT`
 (unlabeled) in Cloud Logging, which breaks severity filtering and distorts
 severity-based histograms.
 
-This module wires those two fields in via processors, and is safe to call
+Datadog derives a log's official status from the JSON `status` field (the
+first attribute its JSON preprocessing checks). Observed intake behavior for
+our org: `severity` is NOT consulted, and the serverless-init sidecar that
+ships Cloud Run stdout stamps every line with the stream-derived status
+`info` — so without an explicit `status` field every log, ERRORs included,
+lands in Datadog as status:info, leaving `status:error` queries and log
+monitors blind (verified 2026-07-17 against prod/staging logs, all 1.6M/3d
+status:info). `_add_datadog_status` emits the field so both backends see
+the real level.
+
+This module wires those fields in via processors, and is safe to call
 from multiple service entry points because it's idempotent. Callers pass
 their own `environment` and `log_level` so this module stays agnostic of
 per-service settings schemas.
@@ -33,6 +43,19 @@ _LEVEL_TO_SEVERITY = {
     "info": "INFO",
     "debug": "DEBUG",
 }
+
+# GCP severity enum values beyond what the standard log-level methods emit —
+# reachable only via an explicit `severity=` override (see _LEVEL_TO_SEVERITY's
+# comment). Each lowercases to a status Datadog's syslog-style vocabulary
+# recognizes (notice/alert/emergency), so overrides carry through to both
+# backends instead of being demoted.
+_OVERRIDE_ONLY_SEVERITIES = frozenset({"NOTICE", "ALERT", "EMERGENCY"})
+
+# Every GCP severity that maps 1:1 onto a Datadog status via `.lower()`.
+# Derived from _LEVEL_TO_SEVERITY so the two can't drift; GCP's DEFAULT is
+# deliberately absent (Datadog has no equivalent — the processor falls back
+# to the method-derived level instead).
+_DATADOG_STATUS_SEVERITIES = frozenset(_LEVEL_TO_SEVERITY.values()) | _OVERRIDE_ONLY_SEVERITIES
 
 # Allowlist for log_level validation. `isinstance(min_level, int)` would
 # admit `logging.NOTSET` (== 0), which silently disables both the level
@@ -109,6 +132,14 @@ _LOG_RECORD_STANDARD_ATTRS: frozenset[str] = frozenset(
 #     log-level-derived value, producing an invalid GCP severity, and
 #     potentially misrouting log-based alerts.
 #
+#   * ``status`` — ``_add_datadog_status`` derives it from the final
+#     severity / method level, and Datadog's JSON preprocessing remaps
+#     it into the log's official status. An ``extra={"status": 200}``
+#     (an application-domain value, e.g. an HTTP status code) would be
+#     unrecognized at intake and degrade the whole line to `info` —
+#     re-opening the every-log-is-info blindness the processor exists
+#     to fix.
+#
 #   * ``stack`` — set by ``StackInfoRenderer`` ONLY when the caller
 #     passes ``stack_info=True``. Without that flag, the renderer is
 #     a no-op and an ``extra={"stack": "noise"}`` would propagate
@@ -120,7 +151,7 @@ _LOG_RECORD_STANDARD_ATTRS: frozenset[str] = frozenset(
 #     ``extra={"exception": "fake"}`` persists in the JSON payload,
 #     fabricating exception data on a non-exception log line.
 _RESERVED_OUTPUT_KEYS: frozenset[str] = frozenset(
-    {"event", "message", "severity", "stack", "exception"}
+    {"event", "message", "severity", "status", "stack", "exception"}
 )
 
 
@@ -176,6 +207,33 @@ def _map_to_gcp_severity(
     severity = event_dict.get("severity")
     if severity is None or severity == "":
         event_dict["severity"] = _LEVEL_TO_SEVERITY.get(method_name, "DEFAULT")
+    return event_dict
+
+
+def _add_datadog_status(
+    _logger: Any,
+    method_name: str,
+    event_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Emit the Datadog `status` field alongside GCP's `severity`.
+
+    Any recognized GCP severity — method-derived or an explicit
+    `severity=` override, NOTICE/ALERT/EMERGENCY included — lowercases to
+    a status Datadog's syslog-style vocabulary understands, keeping both
+    backends' views of the line in agreement. GCP's DEFAULT and garbage /
+    non-string severities (the falsy-but-intentional values
+    `_map_to_gcp_severity` preserves) fall back to the method-derived
+    level so the status at least stays truthful to the call site rather
+    than leak a value Datadog would degrade to `info`. Always overwrites:
+    a caller- or contextvar-supplied `status` would otherwise remap the
+    line to an arbitrary value at Datadog intake. The `isinstance` guard
+    is load-bearing — unhashable overrides like `[]` would raise on set
+    membership.
+    """
+    severity = event_dict.get("severity")
+    if not (isinstance(severity, str) and severity in _DATADOG_STATUS_SEVERITIES):
+        severity = _LEVEL_TO_SEVERITY.get(method_name, "INFO")
+    event_dict["status"] = severity.lower()
     return event_dict
 
 
@@ -255,6 +313,9 @@ def _json_processors() -> list[Any]:
         structlog.processors.format_exc_info,
         _drop_level_field,
         _map_to_gcp_severity,
+        # After _map_to_gcp_severity so the status derives from the final
+        # (possibly caller-overridden) severity.
+        _add_datadog_status,
         _rename_event_to_message,
     ]
 
@@ -554,10 +615,10 @@ def _configure_logging_impl(
         processors.append(structlog.dev.ConsoleRenderer(colors=sys.stdout.isatty()))
     else:
         # JSON for Cloud Run. The JSON chain (`format_exc_info` → drop
-        # `level` → GCP severity → `event` → `message`) is centralised in
-        # `_json_processors()` because the stdlib bridge below needs the
-        # same sequence. ConsoleRenderer handles `exc_info` directly, so
-        # `format_exc_info` MUST NOT run in the dev branch.
+        # `level` → GCP severity → Datadog status → `event` → `message`)
+        # is centralised in `_json_processors()` because the stdlib bridge
+        # below needs the same sequence. ConsoleRenderer handles `exc_info`
+        # directly, so `format_exc_info` MUST NOT run in the dev branch.
         processors.extend(_json_processors())
         processors.append(structlog.processors.JSONRenderer(default=str))
 

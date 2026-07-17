@@ -9,6 +9,7 @@ import pytest
 
 from common.structlog_config import (
     _THIRD_PARTY_LOGGERS_TO_REROUTE,
+    _add_datadog_status,
     _map_to_gcp_severity,
     _rename_event_to_message,
     _reset_for_testing,
@@ -66,6 +67,63 @@ def test_map_to_gcp_severity_preserves_falsy_non_none_non_empty() -> None:
     for value in values:
         result = _map_to_gcp_severity(None, "info", {"event": "x", "severity": value})
         assert result["severity"] == value
+
+
+def test_add_datadog_status_maps_each_level() -> None:
+    # Run after _map_to_gcp_severity, exactly as ordered in
+    # _json_processors(), so the status derives from the final severity.
+    for method, expected in [
+        ("info", "info"),
+        ("warning", "warning"),
+        ("warn", "warning"),
+        ("error", "error"),
+        ("critical", "critical"),
+        ("debug", "debug"),
+    ]:
+        event_dict = _map_to_gcp_severity(None, method, {"event": "hello"})
+        result = _add_datadog_status(None, method, event_dict)
+        assert result["status"] == expected
+
+
+def test_add_datadog_status_unknown_method_falls_back_to_info() -> None:
+    # "notice" isn't a structlog level method: severity lands DEFAULT and
+    # status degrades to "info" (Datadog's own default for unrecognized
+    # values) rather than leaking "default".
+    event_dict = _map_to_gcp_severity(None, "notice", {"event": "hi"})
+    result = _add_datadog_status(None, "notice", event_dict)
+    assert result["status"] == "info"
+
+
+def test_add_datadog_status_severity_override_carries_through() -> None:
+    # Explicit severity= overrides — the module-documented route to levels
+    # the standard methods can't emit — must agree across both backends.
+    # NOTICE/ALERT/EMERGENCY are valid syslog-style Datadog statuses.
+    for override, expected in [
+        ("ERROR", "error"),
+        ("NOTICE", "notice"),
+        ("ALERT", "alert"),
+        ("EMERGENCY", "emergency"),
+    ]:
+        result = _add_datadog_status(None, "info", {"event": "x", "severity": override})
+        assert result["status"] == expected
+
+
+def test_add_datadog_status_unrecognized_severity_uses_method_level() -> None:
+    # A severity outside the GCP enum (e.g. an app-domain label that slipped
+    # through) has no Datadog meaning; status falls back to the real
+    # call-site level instead of a value intake would degrade to info.
+    result = _add_datadog_status(None, "warning", {"event": "x", "severity": "P1"})
+    assert result["status"] == "warning"
+
+
+def test_add_datadog_status_falsy_severity_uses_method_level() -> None:
+    # 0/False/[] severities are preserved for GCP (see
+    # test_map_to_gcp_severity_preserves_falsy_non_none_non_empty); status
+    # must derive from the method rather than crash or emit garbage.
+    values: list[object] = [0, False, []]
+    for value in values:
+        result = _add_datadog_status(None, "error", {"event": "x", "severity": value})
+        assert result["status"] == "error"
 
 
 def test_rename_event_to_message_moves_field() -> None:
@@ -423,6 +481,10 @@ def test_extra_message_key_is_rejected_by_stdlib_then_blocked_in_depth(
         # None/""; a non-empty extra value would survive and produce
         # an invalid GCP severity or misroute alerts.
         ("severity", "P1", "INFO"),
+        # ``status`` — an application-domain value (e.g. an HTTP status
+        # code) would reach Datadog's JSON preprocessing as the log's
+        # official status and degrade the line to `info`.
+        ("status", "200", "info"),
         # ``stack`` — StackInfoRenderer only sets this when
         # stack_info=True; an extra would propagate untouched.
         ("stack", "fake-traceback", None),
@@ -435,8 +497,8 @@ def test_extra_message_key_is_rejected_by_stdlib_then_blocked_in_depth(
 def test_extra_pipeline_reserved_keys_are_dropped(
     _json_log_buffer, extra_key: str, extra_value: str, expected_value
 ) -> None:
-    """Reserved-output-key extras (``severity``, ``stack``, ``exception``)
-    must be dropped by ``_add_logrecord_extras`` so a caller can't
+    """Reserved-output-key extras (``severity``, ``status``, ``stack``,
+    ``exception``) must be dropped by ``_add_logrecord_extras`` so a caller can't
     silently inject pipeline-managed fields via ``extra={...}``. Each
     one corresponds to a real corruption vector documented on
     ``_RESERVED_OUTPUT_KEYS``."""
@@ -462,3 +524,25 @@ def test_extra_pipeline_reserved_keys_are_dropped(
     # break the happy path.
     assert record["ok"] is True
     assert record["message"] == "real-message"
+
+
+def test_stdlib_logger_emits_datadog_status_alongside_severity(
+    _json_log_buffer,
+) -> None:
+    """The JSON payload must carry ``status`` (Datadog) next to
+    ``severity`` (GCP). Pre-fix, the serverless-init envelope's
+    stream-derived status (``info`` for stdout) won at Datadog intake and
+    every log — ERRORs included — landed as status:info, making
+    ``status:error`` queries and log monitors blind."""
+    logger = logging.getLogger("test_dd_status_e2e")
+    logger.warning("warn-level message")
+    logger.error("error-level message")
+    lines = _json_log_buffer.getvalue().strip().splitlines()
+    for needle, severity, status in [
+        ('"warn-level message"', "WARNING", "warning"),
+        ('"error-level message"', "ERROR", "error"),
+    ]:
+        records = [json.loads(line) for line in lines if needle in line]
+        assert len(records) == 1, f"expected one record for {needle}, got: {lines}"
+        assert records[0]["severity"] == severity
+        assert records[0]["status"] == status
