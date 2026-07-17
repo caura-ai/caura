@@ -77,6 +77,14 @@ export const MEMCLAW_AUTO_WRITE_TURNS =
 export const MEMCLAW_REQUIRE_SIGNED_COMMANDS =
   process.env.MEMCLAW_REQUIRE_SIGNED_COMMANDS === "true";
 
+// Interviewer Phase 1 opt-in. Default OFF: enabling starts writing the
+// node's conversation events to the durable on-disk interview buffer
+// (~/.openclaw/plugins/memclaw/interview-buffer.jsonl) — a footprint /
+// privacy change an operator must choose, mirroring the server-side
+// per-tenant ``interviewer.enabled`` flag. Both must be on for the
+// feature to function end-to-end.
+export const MEMCLAW_INTERVIEWER = process.env.MEMCLAW_INTERVIEWER === "true";
+
 // Warn at import time if API key is set but URL is HTTP
 warnIfInsecureUrl(MEMCLAW_API_URL, MEMCLAW_API_KEY);
 
@@ -256,6 +264,17 @@ export const RECALL_TIMEOUT_MS = 10_000;
 export const MIN_TURN_CONTENT_LENGTH = 100;
 export const MAX_TURN_SUMMARY_LENGTH = 500;
 export const MAX_RECALL_CONTENT_LENGTH = 300;
+
+// --- Interviewer (Phase 1): node-local durable event buffer + the ---
+// --- interview_request command handler. Dark by default: without   ---
+// --- the opt-in flag the plugin writes nothing to disk and answers ---
+// --- interview_request with a failed/disabled result.              ---
+// Caps mirror the server contract (core_api/constants.py INTERVIEW_*):
+// the submit endpoint 422s above these, so truncate at append time.
+export const INTERVIEW_SUBMIT_MAX_EVENTS = 500;
+export const INTERVIEW_EVENT_MAX_CHARS = 8_000;
+export const INTERVIEW_FIELD_MAX_CHARS = 200;
+export const INTERVIEW_BUFFER_MAX_BYTES = 50_000_000;
 
 // --- Keystones (CAURA-000): mandatory governance rules auto-injected ---
 //

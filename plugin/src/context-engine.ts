@@ -30,8 +30,10 @@ import {
   RECALL_MACHINE_PATTERNS,
   RECALL_GATE_MODE,
   RECALL_CROSS_AGENT,
+  MEMCLAW_INTERVIEWER,
   type RecallPolicy,
 } from "./env.js";
+import { appendInterviewEvent } from "./interview-buffer.js";
 import { memclawPromptSectionText } from "./prompt-section.js";
 import { MEMCLAW_TOOLS } from "./tools.js";
 import { resolveAgentId, resolveAgentIdQuiet } from "./resolve-agent.js";
@@ -640,6 +642,23 @@ export class MemClawContextEngine {
       message as unknown as Record<string, unknown>,
     );
     pushToBuffer(sessionKey, message);
+
+    // Interviewer Phase 1 (opt-in): mirror every message into the durable
+    // on-disk buffer the interview_request handler reads. Fire-and-forget —
+    // the write chain inside the buffer preserves ordering, and a disk
+    // error must never break the turn.
+    if (MEMCLAW_INTERVIEWER) {
+      const bufContent =
+        typeof message.content === "string"
+          ? message.content
+          : JSON.stringify(message.content);
+      appendInterviewEvent({
+        session_id: sessionKey,
+        role: message.role,
+        kind: "message",
+        content: bufContent,
+      }).catch((e: unknown) => logError("interview buffer append failed", e));
+    }
 
     // Persist user messages as episode memories (async, non-blocking).
     // Capped at MAX_INGEST_WRITES_PER_SESSION to prevent memory spam in long sessions.

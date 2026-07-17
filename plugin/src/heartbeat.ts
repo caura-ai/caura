@@ -31,9 +31,22 @@ import {
   MEMCLAW_NODE_NAME,
   MEMCLAW_FLEET_ID,
   MEMCLAW_REQUIRE_SIGNED_COMMANDS,
+  MEMCLAW_INTERVIEWER,
+  INTERVIEW_SUBMIT_MAX_EVENTS,
   BUILD_TIMEOUT_MS,
   MAX_SOURCE_SIZE,
+  ensureTenantId,
 } from "./env.js";
+import { readInterviewEvents, pruneInterviewBuffer } from "./interview-buffer.js";
+import { resolveAgentIdQuiet } from "./resolve-agent.js";
+
+// Test seam: MEMCLAW_INTERVIEWER is captured at env.js import time, so
+// tests can't flip it via process.env after module load. Production
+// always reads the env-derived constant.
+let _interviewerEnabledOverride: boolean | undefined;
+function interviewerEnabled(): boolean {
+  return _interviewerEnabledOverride ?? MEMCLAW_INTERVIEWER;
+}
 import { PLUGIN_VERSION } from "./version.js";
 import { MEMCLAW_TOOLS } from "./tools.js";
 import {
@@ -161,6 +174,14 @@ export const __DEPLOY_INTERNALS__ = {
   // permanently behind).
   processCommand: (cmd: Parameters<typeof processCommand>[0]) =>
     processCommand(cmd),
+  // Test-only: force the interviewer opt-in on/off (the env const is
+  // captured at import time). Pass ``undefined`` to restore. Gated to
+  // ``NODE_ENV === "test"`` so production can't silently enable a
+  // disk-writing feature the operator didn't opt into.
+  setInterviewerEnabledForTests: (v: boolean | undefined) => {
+    if (process.env.NODE_ENV !== "test") return;
+    _interviewerEnabledOverride = v;
+  },
   // Pass a function to install a spy; pass ``null`` to restore the
   // production scheduler (use in ``afterEach`` so subsequent tests in
   // the same process don't inherit the spy state — without this, a
@@ -1072,6 +1093,71 @@ async function processCommand(cmd: {
               tools_updated: filesResult.toolsUpdated,
               agents_updated: filesResult.agentsUpdated,
             },
+          };
+        }
+      }
+    } else if (cmd.command === "interview_request") {
+      // Interviewer Phase 1 (contract frozen in PR #558): read the durable
+      // buffer from the server's cursor, submit ONE window, prune only
+      // through the committed watermark. No client-side retry loop — a
+      // failed submit reports status=failed and the scheduler re-issues a
+      // fresh command (with a fresh cursor from the server watermark) on
+      // the next tick. Any throw below (incl. apiCall on ANY non-2xx —
+      // intermediaries may rewrite statuses, so no per-status handling)
+      // lands in the outer catch → status=failed → buffer NOT pruned.
+      const payload = cmd.payload || {};
+      const nodeId = typeof payload.node_id === "string" ? payload.node_id : "";
+      const sinceSeq =
+        typeof payload.since_seq === "number" && payload.since_seq >= 0
+          ? payload.since_seq
+          : 0;
+      if (!interviewerEnabled()) {
+        status = "failed";
+        result = {
+          error:
+            "interviewer buffer is disabled on this node — set " +
+            "MEMCLAW_INTERVIEWER=true in the plugin env and restart the gateway",
+        };
+      } else if (!nodeId) {
+        status = "failed";
+        result = { error: "interview_request payload missing node_id" };
+      } else {
+        const events = await readInterviewEvents(sinceSeq, INTERVIEW_SUBMIT_MAX_EVENTS);
+        if (events.length === 0) {
+          // Nothing new since the cursor: done, nothing submitted. The
+          // server watermark is untouched, so the node stays "due" and
+          // will simply be asked again next period.
+          result = { ok: true, submitted: false, reason: "no new events since cursor" };
+        } else {
+          const tenantId = await ensureTenantId();
+          // Phase-1 grain is per-node (matches the server watermark):
+          // the install-default agent is the report subject; per-event
+          // session keys still carry per-agent context for the prompt.
+          const agentId = resolveAgentIdQuiet();
+          const resp = (await apiCall("POST", "/interview/submit", {
+            tenant_id: tenantId,
+            fleet_id: MEMCLAW_FLEET_ID || undefined,
+            node_id: nodeId,
+            agent_id: agentId,
+            command_id: cmd.id,
+            cursor_from: events[0].seq,
+            cursor_to: events[events.length - 1].seq,
+            events: events as unknown as Record<string, unknown>[],
+          })) as { status?: string; watermark?: number; memories_written?: number };
+          // Committed (200) or partial (207): the server advanced its
+          // watermark — prune ONLY through what it reports as committed.
+          const watermark =
+            typeof resp?.watermark === "number"
+              ? resp.watermark
+              : events[events.length - 1].seq;
+          await pruneInterviewBuffer(watermark);
+          result = {
+            ok: true,
+            submitted: true,
+            events: events.length,
+            watermark,
+            server_status: resp?.status,
+            memories_written: resp?.memories_written,
           };
         }
       }
