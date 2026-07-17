@@ -49,6 +49,7 @@ _plugin_files = [
     "reconcile-skills.ts",
     "keystones.ts",
     "openclaw-sdk-bridge.ts",
+    "interview-buffer.ts",
 ]
 
 
@@ -405,7 +406,7 @@ fi
 
 if [ -z "$SRC_FILES" ] || [ -z "$ROOT_FILES" ]; then
   echo "WARNING: Could not fetch/parse /api/v1/plugin-manifest (python3 missing or endpoint unreachable). Falling back to hardcoded file list."
-  SRC_FILES="index.ts prompt-section.ts tools.ts tool-specs.ts version.ts env.ts transport.ts validation.ts config.ts paths.ts logger.ts resolve-agent.ts tool-definitions.ts deploy.ts heartbeat.ts educate.ts context-engine.ts context-engine.internal.ts agent-auth.ts health.ts install-id.ts identity.ts reconcile-skills.ts keystones.ts openclaw-sdk-bridge.ts"
+  SRC_FILES="index.ts prompt-section.ts tools.ts tool-specs.ts version.ts env.ts transport.ts validation.ts config.ts paths.ts logger.ts resolve-agent.ts tool-definitions.ts deploy.ts heartbeat.ts educate.ts context-engine.ts context-engine.internal.ts agent-auth.ts health.ts install-id.ts identity.ts reconcile-skills.ts keystones.ts openclaw-sdk-bridge.ts interview-buffer.ts"
   ROOT_FILES="openclaw.plugin.json tools.json skills/memclaw/SKILL.md"
 fi
 

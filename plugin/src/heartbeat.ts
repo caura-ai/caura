@@ -728,6 +728,10 @@ async function processCommand(cmd: {
           // and the upgrade loops without progress. Lockstep with
           // ``_plugin_files`` in ``core_api/routes/plugin.py``.
           "keystones.ts",
+          // ``interview-buffer.ts`` — same class as keystones.ts above:
+          // statically imported by ``context-engine.ts``, so a fallback
+          // list without it bricks a fresh-ish deploy with TS2307.
+          "interview-buffer.ts",
         ];
         const FALLBACK_ROOT_FILES = [
           "openclaw.plugin.json", "tools.json", "skills/memclaw/SKILL.md",
