@@ -20,6 +20,13 @@ This module wires those fields in via processors, and is safe to call
 from multiple service entry points because it's idempotent. Callers pass
 their own `environment` and `log_level` so this module stays agnostic of
 per-service settings schemas.
+
+Vendoring constraint: this file is copied byte-identically into
+caura-memclaw-enterprise (scripts/vendored_files_manifest.json there,
+policy=identical), whose CI runs `ruff format --check common/` at ruff's
+default 88-column width — OSS CI does not format-check common/ at all.
+Keep code format-stable at 88 columns (magic-trailing-comma collections
+are width-independent) or enterprise CI goes red on the next re-vendor.
 """
 
 from __future__ import annotations
@@ -44,18 +51,18 @@ _LEVEL_TO_SEVERITY = {
     "debug": "DEBUG",
 }
 
-# GCP severity enum values beyond what the standard log-level methods emit —
-# reachable only via an explicit `severity=` override (see _LEVEL_TO_SEVERITY's
-# comment). Each lowercases to a status Datadog's syslog-style vocabulary
-# recognizes (notice/alert/emergency), so overrides carry through to both
-# backends instead of being demoted.
-_OVERRIDE_ONLY_SEVERITIES = frozenset({"NOTICE", "ALERT", "EMERGENCY"})
-
 # Every GCP severity that maps 1:1 onto a Datadog status via `.lower()`.
-# Derived from _LEVEL_TO_SEVERITY so the two can't drift; GCP's DEFAULT is
-# deliberately absent (Datadog has no equivalent — the processor falls back
-# to the method-derived level instead).
-_DATADOG_STATUS_SEVERITIES = frozenset(_LEVEL_TO_SEVERITY.values()) | _OVERRIDE_ONLY_SEVERITIES
+# The standard five derive from _LEVEL_TO_SEVERITY so the two can't drift;
+# NOTICE/ALERT/EMERGENCY are reachable only via an explicit `severity=`
+# override (see _LEVEL_TO_SEVERITY's comment) and each lowercases to a
+# status Datadog's syslog-style vocabulary recognizes. GCP's DEFAULT is
+# deliberately absent (Datadog has no equivalent — the processor falls
+# back to the method-derived level instead).
+_DATADOG_STATUS_SEVERITIES = frozenset(_LEVEL_TO_SEVERITY.values()) | {
+    "NOTICE",
+    "ALERT",
+    "EMERGENCY",
+}
 
 # Allowlist for log_level validation. `isinstance(min_level, int)` would
 # admit `logging.NOTSET` (== 0), which silently disables both the level
