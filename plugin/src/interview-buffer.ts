@@ -58,6 +58,19 @@ export function getInterviewBufferPath(): string {
   return _pathOverride ?? join(getPluginDir(), "interview-buffer.jsonl");
 }
 
+/**
+ * Sidecar carrying the next seq across the one state the JSONL tail can't
+ * represent: an EMPTY buffer. After a full prune + gateway restart,
+ * seeding from the (empty) tail would restart seq at 0 — BELOW the
+ * server's watermark, making every new event invisible to the next
+ * interview window forever. Found by the VM wet test (task #6); the meta
+ * file is written on prune/compact so a restart seeds from
+ * max(tail+1, meta.next_seq).
+ */
+function getInterviewMetaPath(): string {
+  return getInterviewBufferPath() + ".meta.json";
+}
+
 let _pathOverride: string | undefined;
 let _nextSeq: number | undefined; // lazily seeded from the file tail
 let _approxBytes = 0;
@@ -98,12 +111,42 @@ async function _load(): Promise<InterviewEvent[]> {
   }
 }
 
+async function _readMetaNextSeq(): Promise<number> {
+  try {
+    const raw = await readFile(getInterviewMetaPath(), "utf-8");
+    const meta = JSON.parse(raw) as { next_seq?: number };
+    return typeof meta.next_seq === "number" && meta.next_seq >= 0 ? meta.next_seq : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function _writeMetaNextSeq(nextSeq: number): Promise<void> {
+  const path = getInterviewMetaPath();
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify({ next_seq: nextSeq }), "utf-8");
+}
+
 async function _ensureSeeded(): Promise<void> {
   if (_nextSeq !== undefined) return;
-  const events = await _load();
-  _nextSeq = events.length ? events[events.length - 1].seq + 1 : 0;
+  const path = getInterviewBufferPath();
+  // Self-heal a torn final line that lacks its newline (crash mid-append):
+  // without this, the NEXT append concatenates onto the torn fragment and
+  // the merged line swallows one real event. Found by the VM wet test.
   try {
-    _approxBytes = (await stat(getInterviewBufferPath())).size;
+    const raw = await readFile(path, "utf-8");
+    if (raw.length > 0 && !raw.endsWith("\n")) {
+      await appendFile(path, "\n", "utf-8");
+    }
+  } catch {
+    // ENOENT — nothing to heal.
+  }
+  const events = await _load();
+  const tailSeq = events.length ? events[events.length - 1].seq + 1 : 0;
+  const metaSeq = await _readMetaNextSeq();
+  _nextSeq = Math.max(tailSeq, metaSeq);
+  try {
+    _approxBytes = (await stat(path)).size;
   } catch {
     _approxBytes = 0;
   }
@@ -155,6 +198,7 @@ export function appendInterviewEvent(input: InterviewEventInput): Promise<number
           `compacted ${events.length} -> ${keep.length} events (oldest dropped)`,
       );
       await _rewrite(keep);
+      await _writeMetaNextSeq(_nextSeq!);
     }
     return seq;
   });
@@ -184,6 +228,9 @@ export function pruneInterviewBuffer(committedSeq: number): Promise<void> {
     const keep = events.filter((e) => e.seq > committedSeq);
     if (keep.length === events.length) return;
     await _rewrite(keep);
+    // Persist the cursor: after a prune-to-empty + restart, the JSONL
+    // tail can no longer carry the next seq — the meta sidecar does.
+    await _writeMetaNextSeq(_nextSeq!);
   });
 }
 

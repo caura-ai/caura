@@ -159,3 +159,51 @@ describe("interview buffer", () => {
     assert.equal(getInterviewBufferPath(), bufPath);
   });
 });
+
+describe("interview buffer — wet-test regressions (task #6)", () => {
+  let tmp: string;
+  let bufPath: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "memclaw-interview-wet-"));
+    bufPath = join(tmp, "interview-buffer.jsonl");
+    __INTERVIEW_BUFFER_INTERNALS__.setPathForTests(bufPath);
+  });
+
+  afterEach(() => {
+    __INTERVIEW_BUFFER_INTERNALS__.setPathForTests(undefined);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("seq does NOT reset after a full prune + restart (meta sidecar)", async () => {
+    // VM wet-test finding #1: prune-to-empty + gateway restart reseeded
+    // seq at 0 — below the server watermark, hiding all new events.
+    for (let i = 0; i < 3; i++) {
+      await appendInterviewEvent({ role: "user", kind: "message", content: `m${i}` });
+    }
+    await pruneInterviewBuffer(2); // buffer now EMPTY
+    __INTERVIEW_BUFFER_INTERNALS__.setPathForTests(bufPath); // restart
+    const next = await appendInterviewEvent({ role: "user", kind: "message", content: "after" });
+    assert.equal(next, 3); // continues past the pruned range, not 0
+  });
+
+  test("torn line WITHOUT trailing newline does not swallow the next append", async () => {
+    // VM wet-test finding #2: a crash mid-append leaves a partial line
+    // with no newline; the next append must not concatenate onto it.
+    await appendInterviewEvent({ role: "user", kind: "message", content: "good" });
+    const raw = readFileSync(bufPath, "utf-8");
+    writeFileSync(bufPath, raw + '{"seq":1,"ts":"2026-07-17T', "utf-8"); // no \n
+    __INTERVIEW_BUFFER_INTERNALS__.setPathForTests(bufPath); // restart
+
+    const a = await appendInterviewEvent({ role: "user", kind: "message", content: "next-1" });
+    const b = await appendInterviewEvent({ role: "user", kind: "message", content: "next-2" });
+    const events = await readInterviewEvents(0, 500);
+    // good + next-1 + next-2 all survive; the torn fragment is skipped.
+    assert.equal(events.length, 3);
+    assert.deepEqual(
+      events.map((e) => e.content),
+      ["good", "next-1", "next-2"],
+    );
+    assert.deepEqual([a, b], [1, 2]);
+  });
+});
