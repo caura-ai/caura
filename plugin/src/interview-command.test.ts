@@ -200,4 +200,28 @@ describe("interview_request command handler", () => {
     // The no-loss invariant: nothing pruned on a failed window.
     assert.equal((await readInterviewEvents(0, 500)).length, 3);
   });
+
+  test("2xx with missing watermark is a protocol error: failed, buffer preserved", async () => {
+    for (let i = 0; i < 3; i++) {
+      await appendInterviewEvent({ role: "user", kind: "message", content: `keep ${i}` });
+    }
+    // Misbehaving upstream: 200 OK but the body lacks a numeric watermark
+    // (e.g. a proxy swallowed the JSON). Pruning here would silently drop
+    // an uncommitted window.
+    submitResponse = { status: 200, body: { ok: true } };
+
+    await __DEPLOY_INTERNALS__.processCommand({
+      id: "cmd-no-watermark",
+      command: "interview_request",
+      payload: { node_id: "node-uuid-1", since_seq: 0 },
+    });
+
+    const rp = resultPost();
+    assert.equal(rp!.body!.status, "failed");
+    assert.match(
+      String((rp!.body!.result as Record<string, unknown>).error),
+      /no numeric watermark/,
+    );
+    assert.equal((await readInterviewEvents(0, 500)).length, 3);
+  });
 });

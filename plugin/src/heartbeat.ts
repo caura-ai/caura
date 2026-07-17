@@ -1150,18 +1150,24 @@ async function processCommand(cmd: {
           })) as { status?: string; watermark?: number; memories_written?: number };
           // Committed (200) or partial (207): the server advanced its
           // watermark — prune ONLY through what it reports as committed.
-          const watermark =
-            typeof resp?.watermark === "number"
-              ? resp.watermark
-              : events[events.length - 1].seq;
-          await pruneInterviewBuffer(watermark);
+          // A 2xx without a numeric watermark (body-stripping proxy,
+          // protocol drift) is a protocol error, NOT permission to prune:
+          // throwing lands in the outer catch → status=failed → buffer
+          // preserved for the scheduler's next-tick retry.
+          if (typeof resp?.watermark !== "number") {
+            throw new Error(
+              `interview/submit returned 2xx but no numeric watermark ` +
+                `(server_status=${resp?.status ?? "unknown"}); buffer preserved`,
+            );
+          }
+          await pruneInterviewBuffer(resp.watermark);
           result = {
             ok: true,
             submitted: true,
             events: events.length,
-            watermark,
-            server_status: resp?.status,
-            memories_written: resp?.memories_written,
+            watermark: resp.watermark,
+            server_status: resp.status,
+            memories_written: resp.memories_written,
           };
         }
       }
