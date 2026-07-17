@@ -60,6 +60,7 @@ from core_api.schemas import (
 from core_api.services.agent_service import (
     authorize_memory_access,
     broker_label,
+    broker_owned_agent_id,
     enforce_delete,
     enforce_fleet_read,
     enforce_fleet_write,
@@ -1492,6 +1493,12 @@ async def ingest_commit_endpoint(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
+    # Broker ownership boundary: degrade a foreign / reserved agent id to the
+    # install's own broker:<install> fallback so a broker can't attribute an
+    # ingested memory to an agent owned by another install (parity with the
+    # data-plane write paths; ingest_commit itself takes no AuthContext).
+    if auth.is_install_credential and body.agent_id:
+        body.agent_id = await broker_owned_agent_id(body.agent_id, auth.install_uuid, body.tenant_id)
     if auth.tenant_id:  # skip for admin
         await check_and_increment(body.tenant_id, "write")
     return await ingest_commit(body)

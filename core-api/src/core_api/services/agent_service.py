@@ -153,6 +153,7 @@ async def broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id
     install can't write under another install's agent id.
 
     Lenient — never blocks a legitimate first write:
+      - ``install_uuid`` is None        -> keep (no identity to enforce against)
       - already the install fallback   -> no lookup, return as-is
       - another install's broker:<x>   -> degrade (reserved namespace; no lookup)
       - agent doesn't exist yet         -> keep (this write first-touches it)
@@ -160,6 +161,23 @@ async def broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id
       - owned by THIS install           -> keep
       - owned by a DIFFERENT install    -> degrade to ``broker:<install>``
     """
+    # No install identity means there is nothing to enforce ownership against:
+    # the gateway couples ``x-caura-credential-kind`` with ``x-install-uuid`` behind
+    # its shared-secret perimeter (auth.py Path 4), so a set credential kind without
+    # a uuid is a contract violation, never the real adversary (a *different* install
+    # always carries its own uuid and is still gated below; forging this state
+    # requires the gateway secret, which already permits direct x-agent-id spoofing).
+    # Fall through UNGATED — write as named, as before the boundary — rather than
+    # pool every such caller onto the shared ``broker:unknown`` id. Log it: the state
+    # should never occur in prod, so surface it in telemetry without blocking.
+    if install_uuid is None:
+        logger.warning(
+            "broker write carried an install credential with no install_uuid; "
+            "writing agent_id=%s as-named ungated (tenant=%s)",
+            chosen,
+            tenant_id,
+        )
+        return chosen
     fallback = broker_label(install_uuid)
     if chosen == fallback:
         return chosen

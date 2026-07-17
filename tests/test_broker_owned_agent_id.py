@@ -8,6 +8,7 @@ agent id. Lenient — never raises. Lives in ``agent_service`` so every write
 entry point (REST + MCP) shares it via ``resolve_write_agent``.
 """
 
+import logging
 from unittest.mock import AsyncMock
 
 import pytest
@@ -65,6 +66,23 @@ async def test_nonexistent_agent_kept(monkeypatch):
         await agent_service.broker_owned_agent_id("agent-a", "install-1", "t")
         == "agent-a"
     )
+
+
+async def test_null_install_uuid_kept_without_lookup(monkeypatch, caplog):
+    # No install identity to enforce ownership against (the gateway couples the
+    # credential-kind and install-uuid headers, so a set kind without a uuid is a
+    # contract violation, not the real adversary). Fall through ungated: keep the
+    # chosen id, with NO lookup, rather than pool onto the shared broker:unknown id.
+    # The contract violation is logged (never blocked) so it surfaces in telemetry.
+    spy = AsyncMock(
+        return_value={"agent_id": "agent-a", "owner_install_uuid": "install-2"}
+    )
+    monkeypatch.setattr(agent_service, "lookup_agent", spy)
+    with caplog.at_level(logging.WARNING, logger="core_api.services.agent_service"):
+        result = await agent_service.broker_owned_agent_id("agent-a", None, "t")
+    assert result == "agent-a"
+    spy.assert_not_awaited()
+    assert any("no install_uuid" in r.getMessage() for r in caplog.records)
 
 
 async def test_already_fallback_short_circuits(monkeypatch):

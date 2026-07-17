@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings
+from core_api.services.agent_service import broker_owned_agent_id
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,14 @@ async def promote_stm(
             status_code=403,
             detail=f"agent_id '{body.agent_id}' does not match the authenticated agent identity.",
         )
+    # Broker ownership boundary: an install-credential caller may only promote
+    # under an agent it owns. Degrade a foreign / reserved-namespace agent id to
+    # its own broker:<install> fallback (parity with the data-plane write paths).
+    # The auth.agent_id guard above is a no-op for brokers (auth.agent_id is None),
+    # so this is the check that actually constrains a broker's promote target.
+    if auth.is_install_credential and body.agent_id:
+        body.agent_id = await broker_owned_agent_id(body.agent_id, auth.install_uuid, tenant_id)
+
     from core_api.services.stm_service import promote
 
     result = await promote(
