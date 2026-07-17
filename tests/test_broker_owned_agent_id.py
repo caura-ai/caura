@@ -1,4 +1,4 @@
-"""Unit tests for the broker-attribution ownership gate (_broker_owned_agent_id).
+"""Unit tests for the broker-attribution ownership gate (broker_owned_agent_id).
 
 A broker (install-credential) write may name an agent (REST item metadata /
 body.agent_id, or the MCP agent id); the gate keeps that attribution only when
@@ -26,7 +26,7 @@ async def test_owned_by_this_install_kept(monkeypatch):
         ),
     )
     assert (
-        await agent_service._broker_owned_agent_id("agent-a", "install-1", "t")
+        await agent_service.broker_owned_agent_id("agent-a", "install-1", "t")
         == "agent-a"
     )
 
@@ -40,7 +40,7 @@ async def test_owned_by_different_install_degraded(monkeypatch):
         ),
     )
     assert (
-        await agent_service._broker_owned_agent_id("agent-a", "install-1", "t")
+        await agent_service.broker_owned_agent_id("agent-a", "install-1", "t")
         == "broker:install-1"
     )
 
@@ -53,7 +53,7 @@ async def test_null_owner_kept(monkeypatch):
         AsyncMock(return_value={"agent_id": "agent-a", "owner_install_uuid": None}),
     )
     assert (
-        await agent_service._broker_owned_agent_id("agent-a", "install-1", "t")
+        await agent_service.broker_owned_agent_id("agent-a", "install-1", "t")
         == "agent-a"
     )
 
@@ -62,7 +62,7 @@ async def test_nonexistent_agent_kept(monkeypatch):
     # No row yet — this write creates + owns it via get_or_create_agent.
     monkeypatch.setattr(agent_service, "lookup_agent", AsyncMock(return_value=None))
     assert (
-        await agent_service._broker_owned_agent_id("agent-a", "install-1", "t")
+        await agent_service.broker_owned_agent_id("agent-a", "install-1", "t")
         == "agent-a"
     )
 
@@ -71,7 +71,7 @@ async def test_already_fallback_short_circuits(monkeypatch):
     # The chosen id is already the install fallback — no lookup needed.
     spy = AsyncMock(return_value=None)
     monkeypatch.setattr(agent_service, "lookup_agent", spy)
-    result = await agent_service._broker_owned_agent_id(
+    result = await agent_service.broker_owned_agent_id(
         "broker:install-1", "install-1", "t"
     )
     assert result == "broker:install-1"
@@ -84,7 +84,7 @@ async def test_foreign_broker_label_degraded_without_lookup(monkeypatch):
     # (guessable) fallback id can't be pre-claimed to capture a victim's writes.
     spy = AsyncMock(return_value=None)
     monkeypatch.setattr(agent_service, "lookup_agent", spy)
-    result = await agent_service._broker_owned_agent_id(
+    result = await agent_service.broker_owned_agent_id(
         "broker:install-1", "install-3", "t"
     )
     assert result == "broker:install-3"

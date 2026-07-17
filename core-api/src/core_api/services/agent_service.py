@@ -142,7 +142,7 @@ def _owned_by_other_install(owner_install_uuid: str | None, install_uuid: str | 
     return owner_install_uuid is not None and owner_install_uuid != install_uuid
 
 
-async def _broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id: str) -> str:
+async def broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id: str) -> str:
     """Lenient ownership gate over a broker write's chosen agent id.
 
     A broker write may be attributed to an agent named by the caller (REST item
@@ -196,7 +196,7 @@ async def resolve_write_agent(
     and the MCP write tool — so the boundary can't be bypassed by a caller's
     choice of endpoint. For a broker (install-credential) caller it:
 
-      1. Gates ``chosen_agent_id`` through :func:`_broker_owned_agent_id`
+      1. Gates ``chosen_agent_id`` through :func:`broker_owned_agent_id`
          (degrade to ``broker:<install>`` when it names an agent owned by a
          different install, or another install's reserved ``broker:`` id).
       2. Stamps ``owner_install_uuid`` first-touch via ``get_or_create_agent``.
@@ -212,7 +212,7 @@ async def resolve_write_agent(
     kind is ignored).
     """
     if is_install_credential:
-        chosen_agent_id = await _broker_owned_agent_id(chosen_agent_id, install_uuid, tenant_id)
+        chosen_agent_id = await broker_owned_agent_id(chosen_agent_id, install_uuid, tenant_id)
     agent = await get_or_create_agent(
         tenant_id,
         chosen_agent_id,
