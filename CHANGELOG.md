@@ -6,6 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.22.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.21.0...backend-v2.22.0) (2026-07-18)
+
+
+### Features
+
+* **interview:** Interviewer Phase 1 — server side (submit endpoint, worker, scheduler) ([#558](https://github.com/caura-ai/caura-memclaw/issues/558)) ([ca82758](https://github.com/caura-ai/caura-memclaw/commit/ca82758a72ba5fea0fdacdd8603a668cee2d97a9))
+* **memories:** attribute broker bulk writes to the originating agent ([#556](https://github.com/caura-ai/caura-memclaw/issues/556)) ([42c76f9](https://github.com/caura-ai/caura-memclaw/commit/42c76f9d7778b4cbe2e62dcde3d88fe6a9845862))
+* **memories:** enforce broker-write ownership boundary on the MCP write path ([#565](https://github.com/caura-ai/caura-memclaw/issues/565)) ([3e8bbaa](https://github.com/caura-ai/caura-memclaw/commit/3e8bbaa9ace5bf5dae138822a17ce569ff6f4d86))
+* **memories:** enforce per-agent approval gate on MCP writes ([#568](https://github.com/caura-ai/caura-memclaw/issues/568)) ([f2cabcd](https://github.com/caura-ai/caura-memclaw/commit/f2cabcd19d7d0edf0c7e83f15417aeaa105a4914))
+* **memories:** extend broker-write ownership boundary to evolve/insights ([#566](https://github.com/caura-ai/caura-memclaw/issues/566)) ([6c1b742](https://github.com/caura-ai/caura-memclaw/commit/6c1b742270389b5893db909f9a1745a65eadbee0))
+* **memories:** extend broker-write ownership boundary to ingest/stm ([#569](https://github.com/caura-ai/caura-memclaw/issues/569)) ([12c1cd9](https://github.com/caura-ai/caura-memclaw/commit/12c1cd9ae67153e6e718e30d8b76e892201c309c))
+* **memories:** extend broker-write ownership boundary to single writes ([#562](https://github.com/caura-ai/caura-memclaw/issues/562)) ([e81f9f1](https://github.com/caura-ai/caura-memclaw/commit/e81f9f1b752214b024981bca0e198efee0adb6d1))
+* **memories:** surface agent display_name on memory responses ([#559](https://github.com/caura-ai/caura-memclaw/issues/559)) ([809bb2b](https://github.com/caura-ai/caura-memclaw/commit/809bb2b2e03dc41102dd891248b3fb6867765ad1))
+* **memories:** verify broker-write agent ownership (lenient) ([#560](https://github.com/caura-ai/caura-memclaw/issues/560)) ([730fc19](https://github.com/caura-ai/caura-memclaw/commit/730fc19459381a8b5898df35490d589598592f61))
+* **plugin:** Interviewer Phase 1 — OpenClaw plugin side (durable buffer + interview_request handler) ([#564](https://github.com/caura-ai/caura-memclaw/issues/564)) ([5e2d5e7](https://github.com/caura-ai/caura-memclaw/commit/5e2d5e770aa47e1349a87813921c082ac08b90ab))
+
+
+### Bug Fixes
+
+* **agent-digest:** drop placeholder rows + stop 'thin memories' narratives ([#557](https://github.com/caura-ai/caura-memclaw/issues/557)) ([9c39fd0](https://github.com/caura-ai/caura-memclaw/commit/9c39fd0295380d08846b2e1578009980f267eae2))
+* **logging:** emit Datadog `status` field so log levels survive intake ([#561](https://github.com/caura-ai/caura-memclaw/issues/561)) ([75672dc](https://github.com/caura-ai/caura-memclaw/commit/75672dc3d5eaf7a0d5cb793cf8e8418d9eecf9a7))
+* **logging:** format-stabilize the severity set for the vendored copy ([#563](https://github.com/caura-ai/caura-memclaw/issues/563)) ([5c88870](https://github.com/caura-ai/caura-memclaw/commit/5c88870d167e0689b242d385854b6681935fd14d))
+* **recall:** don't inflate recall_count on agentless recalls (A26) ([#549](https://github.com/caura-ai/caura-memclaw/issues/549)) ([c2ea3df](https://github.com/caura-ai/caura-memclaw/commit/c2ea3df2ccb85a523ada427041ecdaceb05ad112))
+* **reports:** salvage empty-narrative digests + period-scaled activity floor ([#545](https://github.com/caura-ai/caura-memclaw/issues/545)) ([84459e9](https://github.com/caura-ai/caura-memclaw/commit/84459e90a33805a02a1074abe47d35689bb43a89))
+
 ## [2.21.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.20.0...backend-v2.21.0) (2026-07-09)
 
 

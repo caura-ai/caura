@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.15.0](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.14.0...plugin-v2.15.0) (2026-07-18)
+
+
+### Features
+
+* **plugin:** Interviewer Phase 1 — OpenClaw plugin side (durable buffer + interview_request handler) ([#564](https://github.com/caura-ai/caura-memclaw/issues/564)) ([5e2d5e7](https://github.com/caura-ai/caura-memclaw/commit/5e2d5e770aa47e1349a87813921c082ac08b90ab))
+
 ## [2.14.0](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.13.0...plugin-v2.14.0) (2026-07-08)
 
 
