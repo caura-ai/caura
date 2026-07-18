@@ -6,6 +6,10 @@
 # plugin/ directory with dist/ built and the backend up on
 # $MEMCLAW_API_URL. Exits non-zero on the first failed assertion.
 set -u
+# pipefail so H()'s `node ... | tail -1` propagates node's exit code —
+# without it the P0 `|| exit` guards never fire (tail always exits 0) and
+# a dead backend surfaces as confusing downstream assertion mismatches.
+set -o pipefail
 
 : "${MEMCLAW_API_URL:=http://localhost:8000}"
 : "${MEMCLAW_API_KEY:?set MEMCLAW_API_KEY (admin key)}"
