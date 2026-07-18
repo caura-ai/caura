@@ -202,8 +202,10 @@ export function appendInterviewEvent(input: InterviewEventInput): Promise<number
         `[memclaw] interview buffer exceeded ${INTERVIEW_BUFFER_MAX_BYTES} bytes; ` +
           `compacted ${events.length} -> ${keep.length} events (oldest dropped)`,
       );
-      await _rewrite(keep);
+      // Meta BEFORE the rename — same crash-ordering rule as
+      // pruneInterviewBuffer (see there for the full rationale).
       await _writeMetaNextSeq(_nextSeq!);
+      await _rewrite(keep);
     }
     return seq;
   });
@@ -232,10 +234,16 @@ export function pruneInterviewBuffer(committedSeq: number): Promise<void> {
     const events = await _load();
     const keep = events.filter((e) => e.seq > committedSeq);
     if (keep.length === events.length) return;
-    await _rewrite(keep);
-    // Persist the cursor: after a prune-to-empty + restart, the JSONL
-    // tail can no longer carry the next seq — the meta sidecar does.
+    // Meta BEFORE the rename. A SIGKILL between the two writes must not
+    // recreate the seq-reset bug: rewrite-first would leave an emptied
+    // buffer with a stale/absent meta, so a restart reseeds at 0 — below
+    // the server watermark, hiding all new events. Meta-first's crash
+    // window is benign: the buffer keeps its (already-committed) events,
+    // the handler reports failed, and the next window reads from
+    // watermark+1 — the leftovers are skipped and swept by the next
+    // successful prune.
     await _writeMetaNextSeq(_nextSeq!);
+    await _rewrite(keep);
   });
 }
 
