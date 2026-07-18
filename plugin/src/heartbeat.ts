@@ -39,14 +39,6 @@ import {
 } from "./env.js";
 import { readInterviewEvents, pruneInterviewBuffer } from "./interview-buffer.js";
 import { resolveAgentIdQuiet } from "./resolve-agent.js";
-
-// Test seam: MEMCLAW_INTERVIEWER is captured at env.js import time, so
-// tests can't flip it via process.env after module load. Production
-// always reads the env-derived constant.
-let _interviewerEnabledOverride: boolean | undefined;
-function interviewerEnabled(): boolean {
-  return _interviewerEnabledOverride ?? MEMCLAW_INTERVIEWER;
-}
 import { PLUGIN_VERSION } from "./version.js";
 import { MEMCLAW_TOOLS } from "./tools.js";
 import {
@@ -73,6 +65,14 @@ import { logError } from "./logger.js";
 import { getInstallId } from "./install-id.js";
 import { getDisplayName } from "./identity.js";
 import { reconcileSkills, type ReconcileSummary } from "./reconcile-skills.js";
+
+// Test seam: MEMCLAW_INTERVIEWER is captured at env.js import time, so
+// tests can't flip it via process.env after module load. Production
+// always reads the env-derived constant.
+let _interviewerEnabledOverride: boolean | undefined;
+function interviewerEnabled(): boolean {
+  return _interviewerEnabledOverride ?? MEMCLAW_INTERVIEWER;
+}
 
 let heartbeatCount = 0;
 let bakCleanupDone = false;

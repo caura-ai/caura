@@ -138,8 +138,13 @@ async function _ensureSeeded(): Promise<void> {
     if (raw.length > 0 && !raw.endsWith("\n")) {
       await appendFile(path, "\n", "utf-8");
     }
-  } catch {
-    // ENOENT — nothing to heal.
+  } catch (err: unknown) {
+    // Only a missing file is benign. A FAILED heal (disk full, EACCES)
+    // must propagate: swallowing it would let the next append concatenate
+    // onto the torn fragment and lose both events. _nextSeq is still
+    // unset here, so seeding is retried on the next enqueued operation.
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    // ENOENT — file does not exist yet, nothing to heal.
   }
   const events = await _load();
   const tailSeq = events.length ? events[events.length - 1].seq + 1 : 0;
