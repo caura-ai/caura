@@ -499,8 +499,10 @@ visible). Three pillars:
   `candidate → staged → active` (with `rejected` / `quarantined` / `stale` /
   `deprecated` exits). Six automated gates plus a Sentinel content scan decide
   what may be promoted, and a **Skills Inbox** lets an operator approve, edit,
-  reject, or quarantine staged skills. An agent write lands as `staged`, never
-  instantly `active`.
+  defer, reject, or quarantine staged skills over a REST surface —
+  `GET /api/v1/skills-inbox` lists the staged cards, and
+  `POST /api/v1/skills-inbox/{slug}/approve|edit|defer|quarantine|reject`
+  acts on them. An agent write lands as `staged`, never instantly `active`.
 - **Delivery — pull and push.** Agents *pull* active skills over MCP
   (`memclaw_doc op=search`/`op=read`), or the **OpenClaw plugin** *pushes* them:
   its reconciler fetches every active skill from `POST /api/v1/skills/installable`
@@ -509,8 +511,10 @@ visible). Three pillars:
   feature is enabled.
 
 Deep dives: [`docs/mcp-skill-delivery.md`](docs/mcp-skill-delivery.md) (the
-active-only delivery contract + plugin reconcile targets) and
-[`docs/operator-forge-cron.md`](docs/operator-forge-cron.md) (scheduling Forge).
+active-only delivery contract + plugin reconcile targets),
+[`docs/operator-forge-cron.md`](docs/operator-forge-cron.md) (scheduling Forge),
+and [`docs/skills-inbox-api.md`](docs/skills-inbox-api.md) (the operator REST
+API for the Skills Inbox).
 The full operator/developer guide lives in the
 [MemClaw docs → Skill Factory](https://memclaw.net/docs/skill-factory).
 
