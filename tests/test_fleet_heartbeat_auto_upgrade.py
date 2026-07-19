@@ -850,3 +850,49 @@ def test_attempt_budget_constants_are_sensible():
     assert fleet_mod.AUTO_UPGRADE_MAX_ATTEMPTS <= 20, (
         "must brake a true wedge well below the ~1,440/day un-budgeted rate"
     )
+
+
+# ---------------------------------------------------------------------------
+# _should_log_outdated_plugin — per-(node, version) dedup so a stuck node
+# doesn't emit the "outdated plugin heartbeat" WARNING on every tick
+# (prod 2026-07: 3 internal nodes produced 6.3k lines/day).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clear_outdated_log_cache():
+    fleet_mod._outdated_plugin_logged.clear()
+    yield
+    fleet_mod._outdated_plugin_logged.clear()
+
+
+def test_outdated_log_dedups_same_node_version():
+    assert fleet_mod._should_log_outdated_plugin("node-a", "1.0.1") is True
+    assert fleet_mod._should_log_outdated_plugin("node-a", "1.0.1") is False
+    assert fleet_mod._should_log_outdated_plugin("node-a", "1.0.1") is False
+
+
+def test_outdated_log_relogs_on_version_change():
+    assert fleet_mod._should_log_outdated_plugin("node-a", "1.0.1") is True
+    assert fleet_mod._should_log_outdated_plugin("node-a", "2.5.0") is True
+    assert fleet_mod._should_log_outdated_plugin("node-a", "2.5.0") is False
+
+
+def test_outdated_log_is_per_node():
+    assert fleet_mod._should_log_outdated_plugin("node-a", "1.0.1") is True
+    assert fleet_mod._should_log_outdated_plugin("node-b", "1.0.1") is True
+
+
+def test_outdated_log_window_expiry(monkeypatch):
+    t = {"now": 1000.0}
+    monkeypatch.setattr(fleet_mod.time, "monotonic", lambda: t["now"])
+    assert fleet_mod._should_log_outdated_plugin("node-a", "1.0.1") is True
+    t["now"] += fleet_mod._OUTDATED_PLUGIN_LOG_TTL + 1
+    assert fleet_mod._should_log_outdated_plugin("node-a", "1.0.1") is True
+
+
+def test_outdated_log_cache_is_bounded(monkeypatch):
+    monkeypatch.setattr(fleet_mod, "_OUTDATED_PLUGIN_LOG_MAX", 3)
+    for i in range(10):
+        fleet_mod._should_log_outdated_plugin(f"node-{i}", "1.0.1")
+    assert len(fleet_mod._outdated_plugin_logged) <= 3

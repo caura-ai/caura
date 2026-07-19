@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -20,6 +21,33 @@ from core_api.version_compat import (
     MIN_RECOMMENDED_PLUGIN_VERSION,
     is_plugin_outdated,
 )
+
+# Dedup for the outdated-plugin warning. ``heartbeat`` runs on every plugin
+# tick (~every 20-60s per node), so a node stuck on an old plugin emits this
+# WARNING thousands of times a day (prod 2026-07: 3 internal nodes produced
+# 6.3k lines/day, one node ~every 20s). Log at most once per (node, version)
+# per hour so the fleet-health signal survives without drowning real warnings.
+# Keyed on (node, version) so a version change re-logs promptly. Per-instance
+# (module-level, not shared across Cloud Run instances), so worst case is one
+# line per instance per node per hour — still orders of magnitude below one
+# per tick. Bounded + oldest-evicted so churn in node names can't grow it.
+_OUTDATED_PLUGIN_LOG_TTL = 3600.0
+_OUTDATED_PLUGIN_LOG_MAX = 5000
+_outdated_plugin_logged: dict[tuple[str, str], float] = {}
+
+
+def _should_log_outdated_plugin(node: str, version: str) -> bool:
+    """True at most once per (node, version) per ``_OUTDATED_PLUGIN_LOG_TTL``."""
+    now = time.monotonic()
+    key = (node, version)
+    last = _outdated_plugin_logged.get(key)
+    if last is not None and now - last < _OUTDATED_PLUGIN_LOG_TTL:
+        return False
+    if key not in _outdated_plugin_logged and len(_outdated_plugin_logged) >= _OUTDATED_PLUGIN_LOG_MAX:
+        _outdated_plugin_logged.pop(next(iter(_outdated_plugin_logged)))
+    _outdated_plugin_logged[key] = now
+    return True
+
 
 # How long an ``acked`` deploy command counts as "in flight" before the
 # auto-upgrade gate allows queueing another. CAURA-000: customer prod
@@ -594,7 +622,9 @@ async def heartbeat(
     """Plugin pushes status; receives pending commands in response."""
     auth.enforce_tenant(body.tenant_id)
 
-    if is_plugin_outdated(body.plugin_version):
+    if is_plugin_outdated(body.plugin_version) and _should_log_outdated_plugin(
+        body.node_name or "", body.plugin_version or ""
+    ):
         logger.warning(
             "outdated plugin heartbeat",
             extra={
