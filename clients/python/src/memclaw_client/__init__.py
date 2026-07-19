@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ._version import __version__
 from .client import DEFAULT_BASE_URL, MemClaw
 from .exceptions import AuthError, MemClawAPIError, MemClawError, NotFoundError
 from .models import Memory, RecallResult
@@ -15,6 +16,5 @@ __all__ = [
     "AuthError",
     "NotFoundError",
     "DEFAULT_BASE_URL",
+    "__version__",
 ]
-
-__version__ = "0.1.0"

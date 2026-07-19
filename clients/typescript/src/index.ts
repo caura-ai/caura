@@ -6,7 +6,26 @@
  * (`http://localhost:8000`) deployment.
  */
 
+import { createRequire } from "node:module";
+
 export const DEFAULT_BASE_URL = "https://memclaw.net";
+
+// Single-source the version from package.json so it never drifts from the
+// published version. We read it at runtime via `createRequire` rather than a
+// static JSON import: `resolveJsonModule` + `import ... with { type: "json" }`
+// would pull package.json (which sits above `rootDir: "src"`) into the compile
+// graph and break `tsc`'s rootDir/declaration emit. `createRequire` keeps
+// package.json out of the type graph while still resolving it at runtime — from
+// the compiled `dist/index.js`, `../package.json` is the package root, which npm
+// always includes in the published tarball.
+const _require = createRequire(import.meta.url);
+const { version: CLIENT_VERSION } = _require("../package.json") as { version: string };
+
+// NOTE: `User-Agent` is a Forbidden header name in browsers — `fetch` there will
+// silently drop it. This client is server/Node-side (see DEFAULT_BASE_URL / the
+// Node `fetch` requirement), so the header is honoured in its primary environment;
+// in a browser it is simply ignored, which is harmless.
+const USER_AGENT = `memclaw-client-ts/${CLIENT_VERSION}`;
 
 export class MemClawError extends Error {}
 
@@ -101,7 +120,11 @@ export class MemClaw {
     this.agentId = options.agentId;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
     this.timeoutMs = options.timeoutMs ?? 30000;
-    this.headers = { "X-API-Key": apiKey, "Content-Type": "application/json" };
+    this.headers = {
+      "X-API-Key": apiKey,
+      "Content-Type": "application/json",
+      "User-Agent": USER_AGENT,
+    };
     const f = options.fetch ?? globalThis.fetch;
     if (!f) throw new Error("global fetch is unavailable; pass options.fetch or use Node 18+");
     this.fetchImpl = f;

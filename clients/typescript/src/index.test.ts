@@ -121,3 +121,14 @@ test("constructor validates apiKey and tenantId", () => {
   assert.throws(() => new MemClaw("", { tenantId: "t" }));
   assert.throws(() => new MemClaw("k", { tenantId: "" } as never));
 });
+
+test("sends a versioned User-Agent header identifying the client", async () => {
+  let headers: Record<string, string> = {};
+  const client = makeClient((_url, init) => {
+    headers = init.headers as Record<string, string>;
+    return jsonResponse(200, { status: "ok" });
+  });
+  await client.health();
+  assert.ok(headers["User-Agent"], "User-Agent header should be present");
+  assert.match(headers["User-Agent"], /^memclaw-client-ts\/\d+\.\d+\.\d+/);
+});

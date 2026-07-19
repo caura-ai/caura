@@ -11,10 +11,16 @@ from typing import Any
 
 import httpx
 
+from ._version import __version__
 from .exceptions import AuthError, MemClawAPIError, NotFoundError
 from .models import Memory, RecallResult
 
 DEFAULT_BASE_URL = "https://memclaw.net"
+
+#: Identifies this client (and its version) to the server on every request.
+#: Set unconditionally in ``__init__`` — not caller-overridable — so the server
+#: always sees an accurate client identity.
+_USER_AGENT = f"memclaw-client-python/{__version__}"
 
 
 class MemClaw:
@@ -48,7 +54,11 @@ class MemClaw:
         self.agent_id = agent_id
         self._http = httpx.Client(
             base_url=base_url.rstrip("/"),
-            headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+            headers={
+                "X-API-Key": api_key,
+                "Content-Type": "application/json",
+                "User-Agent": _USER_AGENT,
+            },
             timeout=timeout,
             transport=transport,
         )
