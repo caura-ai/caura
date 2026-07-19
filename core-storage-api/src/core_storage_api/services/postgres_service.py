@@ -3381,6 +3381,7 @@ class PostgresService:
         fleet_id: str | None = None,
         written_by: str | None = None,
         memory_type: str | None = None,
+        exclude_memory_types: list[str] | None = None,
         status: str | None = None,
         run_id: str | None = None,
         weight_min: float | None = None,
@@ -3439,6 +3440,8 @@ class PostgresService:
             stmt = stmt.where(Memory.agent_id == written_by)
         if memory_type:
             stmt = stmt.where(Memory.memory_type == memory_type)
+        if exclude_memory_types:
+            stmt = stmt.where(Memory.memory_type.notin_(exclude_memory_types))
         if status:
             stmt = stmt.where(Memory.status == status)
         if run_id is not None:

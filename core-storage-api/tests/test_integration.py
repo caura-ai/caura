@@ -1947,3 +1947,49 @@ class TestKeystones:
         assert resp.status_code == 200
         assert resp.json()["data"]["weight"] == 100
         assert resp.json()["data"]["content"] == "updated"
+
+
+async def test_list_by_filters_exclude_types_and_date_window(client, tenant_id, fleet_id):
+    """POST /memories/list honors exclude_memory_types + created_after/before —
+    the backend contract behind the Prism agent deeplink (durable = non-episode,
+    scoped to the digest window)."""
+    agent = f"prism-agent-{_uid()}"
+
+    def _mk(mtype: str, created_at: str) -> dict:
+        p = _memory_payload(tenant_id, fleet_id, content=f"{mtype}-{_uid()}")
+        p["agent_id"] = agent
+        p["memory_type"] = mtype
+        p["created_at"] = created_at
+        return p
+
+    # in-window durable, in-window episode (noise), out-of-window durable
+    for mtype, ts in (
+        ("decision", "2026-07-08T10:00:00+00:00"),
+        ("episode", "2026-07-08T11:00:00+00:00"),
+        ("decision", "2026-06-01T10:00:00+00:00"),
+    ):
+        r = await client.post(f"{PREFIX}/memories", json=_mk(mtype, ts))
+        assert r.status_code in (200, 201), r.text
+
+    resp = await client.post(
+        f"{PREFIX}/memories/list",
+        json={
+            "tenant_id": tenant_id,
+            "written_by": agent,
+            "exclude_memory_types": ["episode"],
+            "created_after": "2026-07-06T00:00:00+00:00",
+            "created_before": "2026-07-13T00:00:00+00:00",
+            "limit": 50,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    # only the in-window 'decision' survives: episode excluded, June row out of window
+    assert [r["memory_type"] for r in rows] == ["decision"], rows
+
+    # a memory_type that also appears in exclude_memory_types is contradictory → 422
+    bad = await client.post(
+        f"{PREFIX}/memories/list",
+        json={"tenant_id": tenant_id, "memory_type": "decision", "exclude_memory_types": ["decision"]},
+    )
+    assert bad.status_code == 422 and "exclude_memory_types" in bad.text

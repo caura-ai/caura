@@ -1057,12 +1057,20 @@ async def list_by_filters(request: Request) -> list[dict]:
         )
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=f"invalid datetime fields: {exc}") from exc
+    memory_type = body.get("memory_type")
+    exclude_memory_types = body.get("exclude_memory_types")
+    if memory_type and exclude_memory_types and memory_type in exclude_memory_types:
+        raise HTTPException(
+            status_code=422,
+            detail="memory_type cannot also appear in exclude_memory_types",
+        )
     memories = await _svc.memory_list_by_filters(
         tenant_id=tenant_id,
         caller_agent_id=body.get("caller_agent_id"),
         fleet_id=body.get("fleet_id"),
         written_by=body.get("written_by"),
-        memory_type=body.get("memory_type"),
+        memory_type=memory_type,
+        exclude_memory_types=exclude_memory_types,
         status=body.get("status"),
         run_id=body.get("run_id"),
         weight_min=body.get("weight_min"),
