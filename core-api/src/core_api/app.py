@@ -4,6 +4,7 @@ import os as _os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -626,6 +627,44 @@ async def global_exception_handler(request: Request, exc: Exception):
     if app_settings.environment != "production":
         content["error_type"] = type(exc).__name__
     return JSONResponse(status_code=500, content=content)
+
+
+@app.exception_handler(httpx.HTTPStatusError)
+async def upstream_http_error_handler(request: Request, exc: httpx.HTTPStatusError) -> JSONResponse:
+    """Map an unhandled upstream (storage-api etc.) 5xx/429 to a retryable
+    503 instead of letting it reach the catch-all as an ``INTERNAL_ERROR``
+    500 "unhandled exception".
+
+    A dependency returning 5xx/429 is a transient infrastructure blip, not a
+    bug in this request — surfacing it as 503 lets the caller back off and
+    retry. Prod 2026-07: a single storage-writer 503 on POST /fleet/heartbeat
+    bubbled through ``_post``'s ``raise_for_status`` as an unhandled 500 and
+    opened an Error-Tracking issue; the plugin should have just retried the
+    next tick.
+
+    A 4xx from an upstream is a bug in OUR request shape (genuinely
+    unexpected), so it must surface exactly as before this handler existed —
+    re-raise it unchanged rather than swallowing it into a response, so it
+    reaches the catch-all as a 500 (and callers that deliberately let a
+    storage 4xx propagate, e.g. the bulk-write atomicity path, keep seeing the
+    raw ``HTTPStatusError``). ``response`` is a required, non-Optional field
+    on ``HTTPStatusError``, so it's always present.
+    """
+    from core_api.errors import code_for_status, make_error_payload
+
+    status = exc.response.status_code
+    if status < 500 and status != 429:
+        raise exc
+
+    logger.warning(
+        "upstream %s on %s %s → 503 (retryable)",
+        status,
+        request.method,
+        request.url.path,
+    )
+    message = "Upstream dependency unavailable; retry."
+    body = {"detail": message, **make_error_payload(code_for_status(503), message)}
+    return JSONResponse(status_code=503, content=body)
 
 
 app.include_router(health_router, prefix="/api/v1")
