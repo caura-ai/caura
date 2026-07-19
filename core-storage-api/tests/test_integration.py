@@ -790,6 +790,96 @@ class TestMemories:
             f"b_score={b_score} must not exceed a_score={a_score}"
         )
 
+    async def test_scored_search_candidate_pool_selects_by_similarity(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """A49: ``candidate_pool_size`` > 0 selects the candidate pool by semantic
+        similarity, so a boost-demoted-but-strong match is retained where the default
+        score-order drops it.
+
+        H: high similarity (0.70), no boost.  L: lower similarity (0.35) but a
+        ``date_range_boost`` (2x) that pushes its *score* above H's.  With the pool
+        OFF (score-order) L outranks H; with the pool ON (size 1, similarity-order)
+        the single surviving row is H. Also asserts pool=0 is a no-op vs the default.
+        """
+        import math
+
+        seed = f"a49_{_uid()}"
+        q = fake_embedding(seed + "_q")
+
+        def _unit(v: list[float]) -> list[float]:
+            n = math.sqrt(sum(x * x for x in v)) or 1.0
+            return [x / n for x in v]
+
+        def _emb_cos(target: float, rseed: str) -> list[float]:
+            # exact cosine=target vs q, via a Gram-Schmidt orthonormal basis {q, r_orth}
+            r = fake_embedding(rseed)
+            dot = sum(a * b for a, b in zip(r, q, strict=False))
+            r_orth = _unit([ri - dot * qi for ri, qi in zip(r, q, strict=False)])
+            a, b = target, math.sqrt(max(0.0, 1.0 - target * target))
+            return _unit([a * qi + b * ri for qi, ri in zip(q, r_orth, strict=False)])
+
+        # H: sim 0.70, weight 0.0, anchor = today (outside the queried date range).
+        ph = _memory_payload(tenant_id, fleet_id, content=f"H {seed}")
+        ph["embedding"] = _emb_cos(0.70, seed + "_h")
+        ph["weight"] = 0.0
+        rh = await client.post(f"{PREFIX}/memories", json=ph)
+        assert rh.status_code == 200, rh.text
+        h_id = rh.json()["id"]
+
+        # L: sim 0.35, weight 1.0, ts_valid_start inside the queried date range -> 2x boost.
+        pl = _memory_payload(tenant_id, fleet_id, content=f"L {seed}")
+        pl["embedding"] = _emb_cos(0.35, seed + "_l")
+        pl["weight"] = 1.0
+        pl["ts_valid_start"] = "2020-01-15T00:00:00+00:00"
+        rl = await client.post(f"{PREFIX}/memories", json=pl)
+        assert rl.status_code == 200, rl.text
+        l_id = rl.json()["id"]
+
+        base_params = {
+            "fts_weight": 0.0,  # similarity == pure vec_sim -> deterministic on constructed cosines
+            "freshness_floor": 0.7,
+            "freshness_decay_days": 90.0,
+            "recall_boost_cap": 1.1,
+            "recall_decay_window_days": 14.0,
+            "similarity_blend": 0.85,
+        }
+        base_body = {
+            "tenant_id": tenant_id,
+            "embedding": q,
+            "query": seed,
+            "fleet_ids": [fleet_id],
+            "date_range_start": "2020-01-01",
+            "date_range_end": "2020-01-31",
+            "top_k": 10,
+        }
+
+        # Pool OFF (default score-order): boosted L outranks H.
+        off = {**base_body, "search_params": base_params}
+        r_off = await client.post(f"{PREFIX}/memories/scored-search", json=off)
+        assert r_off.status_code == 200, r_off.text
+        off_ids = [r["id"] for r in r_off.json()]
+        assert h_id in off_ids and l_id in off_ids
+        assert off_ids.index(l_id) < off_ids.index(h_id), (
+            f"score-order should rank boosted L above H; got {off_ids}"
+        )
+
+        # Pool ON (size 1, similarity-order): the single surviving row is high-similarity H.
+        on = {**base_body, "search_params": {**base_params, "candidate_pool_size": 1}}
+        r_on = await client.post(f"{PREFIX}/memories/scored-search", json=on)
+        assert r_on.status_code == 200, r_on.text
+        on_ids = [r["id"] for r in r_on.json()]
+        assert on_ids == [h_id], f"cosine pool (size 1) should keep high-similarity H; got {on_ids}"
+
+        # Safety: candidate_pool_size=0 is a no-op vs. omitting the key entirely.
+        zero = {**base_body, "search_params": {**base_params, "candidate_pool_size": 0}}
+        r_zero = await client.post(f"{PREFIX}/memories/scored-search", json=zero)
+        assert r_zero.status_code == 200, r_zero.text
+        assert [r["id"] for r in r_zero.json()] == off_ids, "pool_size=0 must equal default behaviour"
+
     async def test_public_counters_exclude_soft_deleted(
         self,
         client: AsyncClient,

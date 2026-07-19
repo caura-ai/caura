@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from core_api.constants import (
+    CANDIDATE_POOL_SIZE,
     FRESHNESS_DECAY_DAYS,
     FRESHNESS_FLOOR,
     GRAPH_MAX_HOPS,
@@ -52,5 +53,7 @@ class ResolveSearchProfile:
             "recall_decay_window_days": sp.get("recall_decay_window_days", RECALL_DECAY_WINDOW_DAYS),
             "graph_max_hops": sp.get("graph_max_hops", GRAPH_MAX_HOPS),
             "similarity_blend": sp.get("similarity_blend", SIMILARITY_BLEND),
+            # A49: 0 = off; >0 = storage selects a cosine-dominant candidate pool of this size.
+            "candidate_pool_size": sp.get("candidate_pool_size", CANDIDATE_POOL_SIZE),
         }
         return None

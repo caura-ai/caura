@@ -153,6 +153,15 @@ MAX_QUERY_LENGTH = 5000
 DEFAULT_SEARCH_TOP_K = 5
 MAX_SEARCH_TOP_K = 20
 MIN_SEARCH_SIMILARITY = 0.3
+# A49: cosine-dominant candidate selection. 0 = OFF (the first-stage candidate pool
+# is selected by the boost-distorted ``score`` — current behaviour). >0 = select the
+# candidate pool by semantic relevance (``similarity``, boost-free) at this size, so
+# boost-demoted-but-strong matches survive the LIMIT into the ranking/rerank (A50)
+# stage instead of being evicted by the boost stack. Enable per-tenant via
+# ``default_search_profile.candidate_pool_size``; keep 0 globally until the A49/A50
+# A/B validates it. Offline ceiling (LongMemEval): pool=50 recovers 95% of the gold
+# production dropped from top-20; >70 adds nothing. See benchmark/a49_ceiling_check.py.
+CANDIDATE_POOL_SIZE = 0
 FRESHNESS_DECAY_DAYS = 90
 FRESHNESS_FLOOR = 0.7
 ENTITY_BOOST_FACTOR = 1.3

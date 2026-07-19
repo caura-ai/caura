@@ -1103,6 +1103,10 @@ class PostgresService:
         _recall_decay_window_days = sp["recall_decay_window_days"]
         _similarity_blend = sp["similarity_blend"]
         _top_k = sp.get("top_k", top_k)
+        # A49: 0 = off (candidate pool by boosted score, below); >0 = select the pool by
+        # semantic relevance (``similarity``) at this size so boost-demoted-but-strong
+        # matches survive the LIMIT into ranking/rerank. Arrives via search_params.
+        _candidate_pool_size = int(sp.get("candidate_pool_size", 0) or 0)
 
         # -- Scoring expressions --
         # CAURA-594: pgvector's `<=>` is strict — NULL in → NULL out. A
@@ -1450,7 +1454,19 @@ class PostgresService:
         # NOTE: date_range_start/end no longer produces a hard WHERE filter;
         # the multiplier ``date_range_boost`` above handles it softly.
 
-        scored_stmt = scored_stmt.order_by(score.desc(), Memory.created_at.desc()).limit(_top_k)
+        if _candidate_pool_size > 0:
+            # A49: select the candidate POOL by semantic relevance (``similarity``)
+            # rather than the boost-distorted ``score``, so boost-demoted-but-strong
+            # matches survive the LIMIT and reach the ranking/rerank (A50) stage. The
+            # outer query below still orders the surfaced pool by ``score`` and
+            # PostFilterResults trims to the caller's top_k — so with A49 alone this
+            # only *widens/relevance-selects the pool*, it does not reorder the final
+            # result; the reorder is A50. Off (0) by default → unchanged behaviour.
+            scored_stmt = scored_stmt.order_by(similarity.desc(), Memory.created_at.desc()).limit(
+                _candidate_pool_size
+            )
+        else:
+            scored_stmt = scored_stmt.order_by(score.desc(), Memory.created_at.desc()).limit(_top_k)
 
         scored_cte = scored_stmt.cte("scored")
 

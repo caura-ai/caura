@@ -1059,6 +1059,8 @@ _SEARCH_PROFILE_RULES: dict[str, tuple[type, tuple, object]] = {
     "recall_decay_window_days": (int, (7, 365), None),
     "graph_max_hops": (int, (0, 5), None),
     "similarity_blend": (float, (0.0, 1.0), None),
+    # A49: 0 = off (candidate pool by boosted score); >0 = cosine-dominant pool of this size.
+    "candidate_pool_size": (int, (0, 200), None),
 }
 
 
