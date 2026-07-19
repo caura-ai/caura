@@ -38,7 +38,7 @@ body:
       label: Affected surface
       description: Which surface from the Public API list does this touch? (Pick the closest; reviewers will retag if needed.)
       options:
-        - MCP tool (one of the 9)
+        - MCP tool
         - REST endpoint (under /api/v1)
         - Plugin env var or behavior
         - Server configuration / env var
