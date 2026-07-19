@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to (re-)publish (e.g. v1.0.0)"
+        description: "Release tag to (re-)publish (e.g. backend-v1.0.0 — the full git tag created by release-please)"
         required: true
         type: string
       push_latest:
@@ -33,6 +33,12 @@ permissions:
 
 jobs:
   build-and-push:
+    # Backend releases only. release-please cuts component-prefixed tags
+    # (``backend-vX.Y.Z`` / ``plugin-vX.Y.Z``) from the same repo; without
+    # this gate a plugin-only release rebuilt the BACKEND images from a
+    # possibly newer main and silently advanced ``:latest`` outside any
+    # backend release (observed alongside the 2026-07-19 tag audit).
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'backend-')
     runs-on: ubuntu-latest
     strategy:
       # All-or-nothing publish: if one image fails, abort the other so
@@ -82,18 +88,26 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+            # inputs.tag is the FULL git tag (backend-vX.Y.Z) — checkout
+            # needs it verbatim; metadata-action needs it stripped, same
+            # as the release path below.
+            echo "tag=${INPUT_TAG#backend-}" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+            # release-please tags are component-prefixed (backend-vX.Y.Z).
+            # metadata-action's semver parser cannot read the prefix — the
+            # backend-v2.22.0 release published ONLY ``:latest`` because
+            # every semver pattern silently produced nothing. Strip the
+            # component prefix so the parser sees ``vX.Y.Z``.
+            echo "tag=${RELEASE_TAG#backend-}" >> "$GITHUB_OUTPUT"
           fi
 
       # Fail-fast on malformed workflow_dispatch input (e.g. "latest",
       # "main", or a typo). metadata-action's semver derivation would
-      # otherwise produce confusing tags or no tags at all. Release-event
-      # tags come pre-validated by GitHub's release-creation flow, so
-      # this gate is workflow_dispatch-only.
+      # otherwise produce confusing tags or no tags at all.
+      # Both event types are validated: the release path produces a stripped vX.Y.Z
+      # tag that GitHub's release flow never directly created, so it must be checked
+      # here to catch prefix-scheme changes before they silently suppress semver tags.
       - name: Validate tag format
-        if: github.event_name == 'workflow_dispatch'
         env:
           TAG: ${{ steps.resolve.outputs.tag }}
         run: |
@@ -102,7 +116,7 @@ jobs:
           # so ``v1.0.0garbage`` is rejected. ``+build.metadata`` is
           # deliberately excluded — ``+`` is not a valid Docker tag char.
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][a-zA-Z0-9._-]+)?$ ]]; then
-            echo "::error::inputs.tag must be a semver tag starting with 'v' (got: $TAG)"
+            echo "::error::resolved tag must be a semver tag starting with 'v' (got: $TAG). For releases this means the tag no longer matches backend-vX.Y.Z — update the prefix-strip in the resolve step; for workflow_dispatch, fix inputs.tag."
             exit 1
           fi
 
@@ -116,10 +130,19 @@ jobs:
           # ``latest``. For the recovery use case (e.g. transient
           # registry outage when the release event fired), the dispatch
           # input ``push_latest`` is an explicit opt-in.
+          # Three bare-semver tags plus their v-prefixed twins — the README
+          # documents ``:v1 / :v1.0 / :v1.0.0`` pins, so both forms must
+          # exist at every granularity (a v-exact tag without v-floating
+          # siblings would break ``image:v1`` pins). NOTE: no comments
+          # inside the block below — a ``|`` literal treats them as data
+          # and metadata-action would parse them as tag entries.
           tags: |
             type=semver,pattern={{version}},value=${{ steps.resolve.outputs.tag }}
             type=semver,pattern={{major}}.{{minor}},value=${{ steps.resolve.outputs.tag }}
             type=semver,pattern={{major}},value=${{ steps.resolve.outputs.tag }}
+            type=semver,pattern=v{{version}},value=${{ steps.resolve.outputs.tag }}
+            type=semver,pattern=v{{major}}.{{minor}},value=${{ steps.resolve.outputs.tag }}
+            type=semver,pattern=v{{major}},value=${{ steps.resolve.outputs.tag }}
             type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
             type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && inputs.push_latest == 'true' }}
           labels: |
