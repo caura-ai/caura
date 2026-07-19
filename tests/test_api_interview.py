@@ -500,3 +500,36 @@ def test_parse_ts_coerces_naive_to_utc():
     assert items[0].ts_valid_start is not None
     assert items[0].ts_valid_start.tzinfo is not None
     assert items[0].ts_valid_start.utcoffset().total_seconds() == 0
+
+
+async def test_submit_times_out_with_504_and_unconsumed_window(client, monkeypatch):
+    """Route-enforced deadline (real-LLM pilot finding): a too-slow
+    interview 504s with the window NOT consumed — retry-safe by design."""
+    import asyncio as _asyncio
+
+    import core_api.routes.interview as interview_route
+
+    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    await _enable_interviewer(client, tenant_id, headers)
+
+    async def _slow_interview(**kwargs):
+        await _asyncio.sleep(1.0)
+        return {
+            "status": "committed",
+            "watermark": 10,
+            "memories_written": 0,
+            "errors": 0,
+        }
+
+    monkeypatch.setattr(interview_route, "run_interview", _slow_interview)
+    monkeypatch.setattr(
+        interview_route.app_settings, "interview_request_timeout_seconds", 0.05
+    )
+
+    resp = await client.post(
+        "/api/v1/interview/submit",
+        json=_payload(tenant_id, f"node-{uid()}", f"agent-{uid()}"),
+        headers=headers,
+    )
+    assert resp.status_code == 504
+    assert "not consumed" in resp.json()["detail"]

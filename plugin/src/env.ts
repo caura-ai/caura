@@ -275,6 +275,12 @@ export const INTERVIEW_SUBMIT_MAX_EVENTS = 500;
 export const INTERVIEW_EVENT_MAX_CHARS = 8_000;
 export const INTERVIEW_FIELD_MAX_CHARS = 200;
 export const INTERVIEW_BUFFER_MAX_BYTES = 50_000_000;
+// The submit call runs the server's full map-reduce LLM interview
+// SYNCHRONOUSLY — a realistic window is several sequential LLM calls,
+// far beyond transport's 15s default (found in the real-LLM pilot:
+// the default timeout aborted every full-window submit). Generous
+// like BUILD_TIMEOUT_MS; a timeout still fails safe (no prune).
+export const INTERVIEW_SUBMIT_TIMEOUT_MS = 300_000;
 
 // --- Keystones (CAURA-000): mandatory governance rules auto-injected ---
 //

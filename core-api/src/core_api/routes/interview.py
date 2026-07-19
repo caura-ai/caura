@@ -13,6 +13,7 @@ this check is defense in depth, mirroring the skills_factory pattern).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,6 +21,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from core_api.auth import AuthContext, get_auth_context
+from core_api.config import settings as app_settings
 from core_api.constants import INTERVIEW_EVENT_MAX_CHARS, INTERVIEW_MAX_EVENTS_PER_SUBMIT
 from core_api.services.interview_service import run_interview, run_interview_schedule
 from core_api.services.organization_settings import get_settings_for_display
@@ -100,16 +102,32 @@ async def submit_interview(
         # for a disabled tenant; refuse rather than silently ingest.
         raise HTTPException(status_code=403, detail="interviewer is not enabled for this tenant")
 
-    result = await run_interview(
-        tenant_id=tenant_id,
-        fleet_id=body.fleet_id,
-        agent_id=body.agent_id,
-        node_id=body.node_id,
-        command_id=body.command_id,
-        cursor_from=body.cursor_from,
-        cursor_to=body.cursor_to,
-        events=[ev.model_dump(mode="json") for ev in body.events],
-    )
+    # Route-enforced deadline (the path opts out of the blanket 45s
+    # middleware, which 504'd every realistic window — the synchronous
+    # map-reduce interview measured ~63s for a full 400-event window in
+    # the real-LLM pilot). A 504 here is retry-safe end-to-end: the
+    # watermark advances only after the bulk write commits, the plugin
+    # never prunes on error, and the deterministic attempt id dedups any
+    # rows that did land before the deadline.
+    try:
+        result = await asyncio.wait_for(
+            run_interview(
+                tenant_id=tenant_id,
+                fleet_id=body.fleet_id,
+                agent_id=body.agent_id,
+                node_id=body.node_id,
+                command_id=body.command_id,
+                cursor_from=body.cursor_from,
+                cursor_to=body.cursor_to,
+                events=[ev.model_dump(mode="json") for ev in body.events],
+            ),
+            timeout=app_settings.interview_request_timeout_seconds,
+        )
+    except TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="interview exceeded its request budget; window not consumed",
+        )
 
     if result["status"] == "failed":
         # Whole window failed to persist: watermark NOT advanced; the

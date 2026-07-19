@@ -39,7 +39,19 @@ logger = logging.getLogger(__name__)
 # well past the hot-path budget; cancelling it mid-flight is pointless
 # (the purge is one transaction per tenant and idempotent on retry), so
 # it opts out and is bounded by the storage client's own timeout instead.
-_TIMEOUT_OPT_OUT_PATHS: frozenset[str] = frozenset({"/api/v1/memories/bulk", "/api/v1/admin/org/purge-data"})
+# ``/interview/submit`` (Interviewer Phase 1) runs a synchronous
+# map-reduce LLM interview — a realistic window measured ~63s in the
+# real-LLM pilot, well past the blanket budget. Like bulk, the route
+# enforces its own deadline (``interview_request_timeout_seconds``) and
+# its failure mode is retry-safe (watermark advances only post-commit;
+# the plugin never prunes on error; the attempt id dedups).
+_TIMEOUT_OPT_OUT_PATHS: frozenset[str] = frozenset(
+    {
+        "/api/v1/memories/bulk",
+        "/api/v1/admin/org/purge-data",
+        "/api/v1/interview/submit",
+    }
+)
 
 
 def _is_opted_out(path: str) -> bool:

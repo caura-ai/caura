@@ -6,6 +6,14 @@ from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
 
+# The infrastructure request ceiling every route budget must fit under:
+# nginx ``proxy_read_timeout`` and the Cloud Run service are both pinned
+# at 120s (CAURA-623). A route budget above this is dead config — the
+# platform severs the connection first while the handler keeps burning
+# provider spend. If the platform timeout is ever raised, update this
+# constant in the same change.
+PLATFORM_REQUEST_CEILING_SECONDS = 120.0
+
 
 # Postgres connection settings. Canonical env var names follow the
 # official ``postgres`` Docker image conventions (POSTGRES_USER,
@@ -113,6 +121,24 @@ class Settings(BaseSettings):
     # the 300s unconfigured default before the platform service was
     # pinned at 120s).
     bulk_request_timeout_seconds: float = 90.0
+    # Interview-submit budget (Interviewer Phase 1). The route runs the
+    # full map-reduce LLM interview SYNCHRONOUSLY — a realistic window
+    # (400 events, ~4 chunks) measured ~63s in the real-LLM pilot, so the
+    # blanket 45s cap 504'd every full window. The route opts out of the
+    # middleware (like bulk) and enforces this budget itself; a 504 here
+    # is retry-safe end-to-end: the watermark only advances after the
+    # bulk write commits, the plugin never prunes on error, and the
+    # deterministic attempt id dedups any rows that did land.
+    #
+    # 90s matches bulk's 30s headroom under the 120s platform ceiling
+    # (``PLATFORM_REQUEST_CEILING_SECONDS``) — a larger value is dead
+    # config behind Cloud Run/nginx, which sever the connection at 120s
+    # while the server keeps interviewing (and burning provider spend).
+    # If a window can't fit, shrink it (INTERVIEW_SUBMIT_MAX_EVENTS) or
+    # move the interview off the request path (async, Phase 1.1) — and
+    # raise the platform timeout BEFORE raising this budget (the
+    # startup validator enforces the ceiling).
+    interview_request_timeout_seconds: float = 90.0
     # Per-phase cap on the storage roundtrip inside
     # ``create_memories_bulk`` (CAURA-599). Embedding and enrichment
     # already enforce their own 30s caps; storage was the only phase
@@ -339,6 +365,18 @@ class Settings(BaseSettings):
                 f"bulk_request_timeout_seconds ({self.bulk_request_timeout_seconds}s) "
                 f"must be >= BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS "
                 f"({BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS}s)."
+            )
+        if self.interview_request_timeout_seconds > PLATFORM_REQUEST_CEILING_SECONDS:
+            # A budget past the platform ceiling can never fire — the
+            # gateway/Cloud Run severs the connection first while the
+            # handler keeps interviewing. Catch the misconfig at startup.
+            raise ValueError(
+                f"interview_request_timeout_seconds "
+                f"({self.interview_request_timeout_seconds}s) must be <= "
+                f"PLATFORM_REQUEST_CEILING_SECONDS "
+                f"({PLATFORM_REQUEST_CEILING_SECONDS}s); raise the platform "
+                "timeout (nginx proxy_read_timeout / Cloud Run) and update "
+                "the constant before raising this budget."
             )
         if (
             self.storage_bulk_timeout_seconds

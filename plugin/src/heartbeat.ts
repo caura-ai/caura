@@ -33,6 +33,7 @@ import {
   MEMCLAW_REQUIRE_SIGNED_COMMANDS,
   MEMCLAW_INTERVIEWER,
   INTERVIEW_SUBMIT_MAX_EVENTS,
+  INTERVIEW_SUBMIT_TIMEOUT_MS,
   BUILD_TIMEOUT_MS,
   MAX_SOURCE_SIZE,
   ensureTenantId,
@@ -1147,7 +1148,14 @@ async function processCommand(cmd: {
             cursor_from: events[0].seq,
             cursor_to: events[events.length - 1].seq,
             events: events as unknown as Record<string, unknown>[],
-          })) as { status?: string; watermark?: number; memories_written?: number };
+            // The server interviews the window synchronously (several
+            // sequential LLM calls) — transport's 15s default aborts any
+            // realistic window. Timeout still fails safe: no prune.
+          }, undefined, AbortSignal.timeout(INTERVIEW_SUBMIT_TIMEOUT_MS))) as {
+            status?: string;
+            watermark?: number;
+            memories_written?: number;
+          };
           // Committed (200) or partial (207): the server advanced its
           // watermark — prune ONLY through what it reports as committed.
           // A 2xx without a numeric watermark (body-stripping proxy,
