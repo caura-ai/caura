@@ -13,7 +13,7 @@ dependencies = [
     "pydantic-settings>=2.0,<3",
     "httpx>=0.27,<1",
     "structlog>=25.4,<27",
-    "openai>=2.1,<3",
+    "openai>=2.46.0,<3",
     # CAURA-595: ``common.enrichment.service._parse_temporal`` validates
     # the LLM's ``ts_valid_*`` output via ``dateutil.parser`` — runtime
     # dep dragged in by the extraction. Same version pin as
