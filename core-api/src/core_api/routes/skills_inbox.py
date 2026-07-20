@@ -121,6 +121,31 @@ def _require_inbox_admin(auth: AuthContext) -> None:
 # ── Pydantic shapes ────────────────────────────────────────────────
 
 
+class SentinelScanSummary(BaseModel):
+    """Nested scan verdict, shaped for the dashboard card UI.
+
+    ``status`` mirrors ``data.scan.state`` (``clean`` / ``quarantined``
+    / ``failed``); the counts mirror ``critical`` / ``warn``. The flat
+    ``scan_state`` / ``scan_critical`` / ``scan_warn`` card fields carry
+    the same values for pre-existing consumers.
+    """
+
+    status: str | None = None
+    critical_count: int = 0
+    warning_count: int = 0
+
+
+class ForgeEvidence(BaseModel):
+    """Forge cluster evidence, surfaced only for ``source='forge'``
+    cards: how many behavior traces the candidate was distilled from
+    and how many distinct agents produced them. Values live in
+    ``data.origin`` on disk (the auto-gate evaluator reads them there).
+    """
+
+    cluster_size: int = 0
+    distinct_agents: int = 0
+
+
 class InboxCard(BaseModel):
     """One row in the Inbox list response. Shape matches what the
     card-UI surfaces — keep the field list in sync with plan §10.
@@ -131,6 +156,12 @@ class InboxCard(BaseModel):
     name: str | None = None
     description: str | None = None
     summary: str | None = None
+    # Full SKILL.md body. The list response is the ONLY inbox read
+    # surface (there is no per-slug GET); the edit UI needs the body to
+    # pre-fill the Edit form, but bodies are heavy
+    # (``skills_factory.body_max_bytes``, 40 KB default, times the page limit),
+    # so the list omits them UNLESS ``?include_content=true`` is passed.
+    content: str | None = None
     domain: str | None = None
     tags: list[str] = Field(default_factory=list)
     source: str | None = None
@@ -139,9 +170,25 @@ class InboxCard(BaseModel):
     scan_state: str | None = None
     scan_critical: int = 0
     scan_warn: int = 0
+    # Nested duplicates of the scan / evidence fields in the shape the
+    # dashboard card UI consumes. Kept alongside the flat fields (and
+    # ``origin``) so neither consumer generation breaks.
+    sentinel_scan: SentinelScanSummary | None = None
+    forge_evidence: ForgeEvidence | None = None
     origin: dict = Field(default_factory=dict)
-    evidence: dict = Field(default_factory=dict)
+    # Forge writes a free-text rationale string; hand-authored or
+    # legacy docs may carry a structured dict. Accept both — typing
+    # this ``dict`` made the whole list endpoint 500 on the first
+    # Forge-minted card. Absent evidence serializes as ``{}``, never
+    # null (downstream card UIs predate the union and may lack a
+    # null guard), so ``None`` is deliberately NOT in the type.
+    evidence: str | dict = Field(default_factory=dict)
+    # Memory-ID provenance: the memories this skill was distilled
+    # from. Present on every Forge candidate (SF-002 validator
+    # requires it); empty for hand-authored docs.
+    cites: list[str] = Field(default_factory=list)
     created_at: str | None = None
+    updated_at: str | None = None
     content_hash: str | None = None
     kind: str | None = None
     target: dict | None = None
@@ -209,12 +256,44 @@ def _card_from_doc(doc: dict) -> InboxCard:
     # 404 for Forge-namespaced candidates.
     doc_id: str = doc.get("doc_id") or ""
     slug: str = doc_id or data.get("slug") or ""
+
+    sentinel_scan: SentinelScanSummary | None = None
+    if scan:
+        sentinel_scan = SentinelScanSummary(
+            status=scan.get("state"),
+            critical_count=scan.get("critical", 0),
+            warning_count=scan.get("warn", 0),
+        )
+
+    # Evidence counters ride in ``data.origin`` (Forge stamps them for
+    # the auto-gate evaluator). Only surface the nested block for Forge
+    # cards — for hand-authored docs ``origin`` describes the writer,
+    # not a cluster, and a zero-filled block would render as
+    # "0 occurrences across 0 agents".
+    origin = data.get("origin") or {}
+    forge_evidence: ForgeEvidence | None = None
+    if (
+        data.get("source") == "forge"
+        and isinstance(origin, dict)
+        and ("cluster_size" in origin or "distinct_agents" in origin)
+    ):
+        forge_evidence = ForgeEvidence(
+            cluster_size=origin.get("cluster_size") or 0,
+            distinct_agents=origin.get("distinct_agents") or 0,
+        )
+
+    # Bound to a local so mypy can narrow the ``None`` away (two
+    # separate ``data.get`` calls in a ternary don't narrow).
+    raw_evidence = data.get("evidence")
+    evidence: str | dict = raw_evidence if raw_evidence is not None else {}
+
     return InboxCard(
         slug=slug,
         doc_id=doc_id,
         name=data.get("name"),
         description=data.get("description"),
         summary=data.get("summary"),
+        content=data.get("content"),
         domain=data.get("domain"),
         tags=data.get("tags") or [],
         source=data.get("source"),
@@ -223,9 +302,19 @@ def _card_from_doc(doc: dict) -> InboxCard:
         scan_state=scan.get("state"),
         scan_critical=scan.get("critical", 0),
         scan_warn=scan.get("warn", 0),
-        origin=data.get("origin") or {},
-        evidence=data.get("evidence") or {},
+        sentinel_scan=sentinel_scan,
+        forge_evidence=forge_evidence,
+        origin=origin,
+        # Absent evidence stays an EMPTY OBJECT (never null on the wire):
+        # downstream card UIs predate the nullable union and may lack a
+        # null guard. Forge string/dict values pass through unchanged.
+        evidence=evidence,
+        # Stringify defensively — cites are memory UUIDs written as
+        # strings, but a malformed row must degrade to a bad link in
+        # the UI, not a 500 on the whole page.
+        cites=[str(c) for c in (data.get("cites") or []) if c is not None],
         created_at=data.get("created_at"),
+        updated_at=data.get("updated_at"),
         content_hash=data.get("content_hash"),
         kind=data.get("kind"),
         target=data.get("target"),
@@ -326,13 +415,23 @@ async def _persist_status_transition(
 # ── Endpoints ──────────────────────────────────────────────────────
 
 
-@router.get("/", response_model=InboxListResponse)
+# Registered at BOTH ``/skills-inbox`` and ``/skills-inbox/``: browser
+# clients call the bare path and Starlette's redirect_slashes would
+# otherwise answer with a 307 whose Location is built from the backend
+# host — behind the SaaS gateway that leaks the internal upstream URL
+# and costs an extra round-trip. The bare path is the canonical
+# (schema-visible) one.
+@router.get("", response_model=InboxListResponse)
+@router.get("/", response_model=InboxListResponse, include_in_schema=False)
 async def list_inbox(
     fleet_id: str | None = None,
     # Validated at the FastAPI layer: 1 ≤ limit ≤ 200. A bare ``int=50``
     # default would 200 on any non-negative input — including ``limit=0``
     # (silently empty list) and ``limit=10_000`` (DoS via wide query).
     limit: int = Query(50, ge=1, le=200),
+    # Full SKILL.md bodies are heavy (body_max_bytes times the page limit); the
+    # list stays lean by default and the edit UI opts in explicitly.
+    include_content: bool = Query(False),
     auth: AuthContext = Depends(get_auth_context),
 ) -> InboxListResponse:
     """List ``status='staged'`` skill candidates for the tenant.
@@ -419,6 +518,12 @@ async def list_inbox(
     remaining = effective_limit - len(items)
     if remaining > 0:
         items.extend(deferred[:remaining])
+
+    if not include_content:
+        # Lean default: drop the SKILL.md bodies from the page. The edit
+        # UI re-requests with ?include_content=true when it needs them.
+        for card in items:
+            card.content = None
 
     return InboxListResponse(
         tenant_id=tenant_id,
@@ -775,7 +880,10 @@ async def quarantine(
 @router.post("/{slug:path}/defer", response_model=ActionResponse)
 async def defer(
     slug: str,
-    body: DeferRequest,
+    # Optional: every DeferRequest field is optional, so a bodyless
+    # ``POST`` (curl operators, the documented "empty body" contract)
+    # must not 422 on the envelope itself.
+    body: DeferRequest | None = None,
     auth: AuthContext = Depends(get_auth_context),
 ) -> ActionResponse:
     """Defer — leaves the doc in ``staged`` so Forge can revise it on
@@ -798,8 +906,9 @@ async def defer(
     # Status stays 'staged'; only stamp deferred_at + optional reason.
     new_data = dict(data)
     new_data["deferred_at"] = datetime.now(UTC).isoformat(timespec="seconds")
-    if body.reason:
-        new_data["defer_reason"] = body.reason
+    reason = body.reason if body else None
+    if reason:
+        new_data["defer_reason"] = reason
     # Defer doesn't transition status (stays ``staged``), so it never
     # reaches ``_persist_status_transition``'s ``updated_at`` bump.
     # Stamp it here so a Deferred-but-not-status-changed doc still
@@ -827,7 +936,7 @@ async def defer(
             # human-readable and grep-friendly in the audit log; keep
             # the directive intact and suppress the type warning.
             resource_id=doc.get("doc_id") or slug,  # type: ignore[arg-type]
-            detail={"slug": slug, "reason": body.reason},
+            detail={"slug": slug, "reason": reason},
         )
     except Exception:
         logger.error(

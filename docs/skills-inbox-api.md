@@ -70,6 +70,7 @@ Query parameters:
 |---|---|---|
 | `limit` | `50` | 1–200. Additionally capped by `org_settings.skills_factory.inbox_max_pending`. |
 | `fleet_id` | – | Optional; narrow the list to one fleet. |
+| `include_content` | `false` | Include the full SKILL.md body on each card. The default list is lean (`content: null`); the edit UI opts in. |
 
 Returns the tenant's `status='staged'` skill cards, newest first.
 Cards an operator has **deferred** carry a `deferred_at` timestamp and
@@ -78,7 +79,8 @@ first. (`candidate` and `quarantined` docs do not appear here —
 candidates are Forge/promoter territory, and quarantined docs live in
 the security-review queue.)
 
-Response shape:
+Response shape (this example was requested with
+`?include_content=true`; by default `content` is `null`):
 
 ```json
 {
@@ -92,6 +94,7 @@ Response shape:
       "name": "Summarize on-call handoff",
       "description": "Produce the standard handoff summary…",
       "summary": "Turns the last on-call window into the 5-section handoff format.",
+      "content": "# Summarize on-call handoff\n\n1. Pull the window…",
       "domain": "ops",
       "tags": ["oncall", "handoff"],
       "source": "forge",
@@ -101,6 +104,8 @@ Response shape:
       "scan_state": "clean",
       "scan_critical": 0,
       "scan_warn": 1,
+      "sentinel_scan": { "status": "clean", "critical_count": 0, "warning_count": 1 },
+      "forge_evidence": { "cluster_size": 5, "distinct_agents": 4 },
       "origin": {
         "agent_id": "forge",
         "run_id": "forge-cron-acme-20260718T0600",
@@ -109,7 +114,9 @@ Response shape:
         "window_end": "2026-07-18T06:00:00+00:00"
       },
       "evidence": "Five agents repeated this procedure successfully…",
+      "cites": ["b7e2…", "91cc…"],
       "created_at": "2026-07-18T06:02:11+00:00",
+      "updated_at": "2026-07-18T07:00:00+00:00",
       "content_hash": "sha256:9b2e…",
       "target": null,
       "deferred_at": null
@@ -122,13 +129,27 @@ Field notes:
 
 - `slug` — the **full** doc id (with the `forge/` prefix where
   present). Feed it back verbatim to the action endpoints.
-- `scan_state` / `scan_critical` / `scan_warn` — the latest Sentinel
-  scan verdict and its critical/warning finding counts.
-- `origin.cluster_size` / `origin.distinct_agents` — Forge evidence:
-  how many behavior traces the candidate was distilled from, and how
-  many distinct agents produced them.
+- `content` — the full SKILL.md body, included **only when the request
+  passes `?include_content=true`** (the default list is lean; bodies are
+  bounded by `skills_factory.body_max_bytes`, 40 KB default, × the page
+  limit). The list is the only inbox read surface (there is no per-slug
+  `GET`), so the edit UI opts in to pre-fill the Edit form; it's what an
+  Edit must send back (see below).
+- `sentinel_scan` — the latest Sentinel verdict:
+  `{ status, critical_count, warning_count }` where `status` is
+  `clean` / `quarantined` / `failed`, or `null` when the doc was never
+  scanned. The flat `scan_state` / `scan_critical` / `scan_warn`
+  fields carry the same values (kept for older consumers).
+- `forge_evidence` — `{ cluster_size, distinct_agents }`: how many
+  behavior traces the candidate was distilled from and how many
+  distinct agents produced them. Only present on `source: "forge"`
+  cards; the same counters also appear in `origin`.
 - `evidence` — Forge's human-readable rationale for minting the
-  candidate.
+  candidate: a string on Forge cards (hand-authored docs may carry a
+  structured object), and an **empty object `{}` when absent** —
+  never `null` on the wire.
+- `cites` — memory-ID provenance: the memories the skill was
+  distilled from. Empty for hand-authored docs.
 - `kind` / `target` — `create` for a brand-new skill; `update`
   candidates carry a `target` binding to the live skill they revise.
 - `deferred_at` — set when an operator deferred the card; deferred
@@ -160,7 +181,7 @@ curl -X POST "$BASE/api/v1/skills-inbox/forge/abc-123/approve" \
 
 ### `defer` — stash for later (stays `staged`)
 
-Body: `{ "reason"? }` (optional). Defer does **not** change the
+Body optional: `{ "reason"? }`, or no body at all. Defer does **not** change the
 status — it stamps `deferred_at` so the card sorts to the bottom of
 the inbox and Forge may revise the candidate on a later run. Editing
 or approving the card clears the defer marker.
