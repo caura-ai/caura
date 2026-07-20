@@ -451,6 +451,24 @@ async def get_auth_context(
         credential_kind = (request.headers.get("x-caura-credential-kind") or "").lower()
         is_install_credential = credential_kind == "install_credential"
         install_uuid = request.headers.get("x-install-uuid") or None
+        # Org-level role of the human principal behind the request
+        # (``org_members``: "admin" | "member"), plumbed by the
+        # gateway's /_auth subrequest from the session row / JWT
+        # claim. Drives the admin gates on operator surfaces (e.g.
+        # the Skills Inbox actions). Read on THIS branch only: the
+        # header is trustworthy exactly when the request came through
+        # the gateway — enforced by the X-Gateway-Secret check above
+        # when configured, and the gateway overwrites any
+        # client-supplied X-Org-Role via proxy_set_header. (Without a
+        # secret, this path already trusts X-Tenant-ID itself, so
+        # X-Org-Role adds no new spoofing surface.) Values outside
+        # the org-membership model are dropped, not forwarded —
+        # downstream ``== "admin"`` gates must never see a smuggled
+        # third role. Agent-credential requests carry no org
+        # membership, so the auth service never emits the header for
+        # them and API keys stay unable to act on admin-only routes.
+        org_role_raw = (request.headers.get("x-org-role") or "").strip().lower()
+        org_role = org_role_raw if org_role_raw in ("admin", "member") else None
         set_current_tenant(tenant_id)
         _stash_request_tenant(request, tenant_id)
         # When the gateway plumbs a multi-tenant read set, expose it to the
@@ -466,6 +484,7 @@ async def get_auth_context(
             set_readable_tenants(None)
         return AuthContext(
             tenant_id=tenant_id,
+            org_role=org_role,
             agent_id=agent_id,
             is_read_only=is_read_only,
             is_install_credential=is_install_credential,
