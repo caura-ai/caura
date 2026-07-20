@@ -215,9 +215,15 @@ jobs:
 
   # Runs on @claude comment — only for public org members (MEMBER or OWNER).
   claude-retrigger:
+    # Hardening: gate at the job level on author_association so the runner never
+    # even starts for a non-member's @claude comment. The step-level "Check
+    # commenter is org member" below still re-validates and sets the
+    # ``authorized`` output for defense-in-depth — both read the same
+    # ``author_association`` field, so the two conditions cannot disagree.
     if: >-
       github.event_name == 'issue_comment'
       && contains(github.event.comment.body, '@claude')
+      && contains(fromJSON('["MEMBER", "OWNER"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -268,16 +274,21 @@ jobs:
             exit 0
           }
 
-          HEAD_REF=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.ref')
           echo "is_pr=true" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout PR branch
+      # Check out the BASE repo's default branch — deliberately NOT the PR/fork
+      # code. This job runs on ``issue_comment``, which (unlike fork
+      # ``pull_request`` events) DOES receive repo secrets (ANTHROPIC_API_KEY, a
+      # write GH_TOKEN). The review script below is fetched from trusted base
+      # code and pulls the PR diff via the GitHub API, so a malicious fork can
+      # never get its code executed with our secrets. This also fixes the old
+      # failure: the previous ``ref: <head_ref>`` pointed at the fork's branch,
+      # which doesn't exist in the base repo, so checkout exited 1 (.github#111).
+      - name: Checkout base repo (trusted review script)
         if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
         uses: actions/checkout@v6
         with:
-          ref: ${{ steps.pr.outputs.head_ref }}
           fetch-depth: 1
 
       - name: Install Claude CLI
