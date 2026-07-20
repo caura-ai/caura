@@ -193,6 +193,26 @@ async def test_rest_single_accepts_none_memory_type(client, monkeypatch):
     create_mock.assert_awaited_once()
 
 
+@pytest.mark.parametrize("reserved_type", RESERVED_TYPES)
+async def test_rest_update_rejects_reserved_type(client, reserved_type):
+    """CAURA-702: PATCH /memories/{id} rejects each reserved type at the route
+    layer (422 before the service/404 is reached), closing the previously
+    unguarded update path."""
+    tenant_id, headers = get_test_auth()
+    resp = await client.patch(
+        f"/api/v1/memories/{uuid4()}?tenant_id={tenant_id}",
+        json={"memory_type": reserved_type},
+        headers=headers,
+    )
+    assert resp.status_code == 422, resp.text
+    detail = resp.json().get("detail", "")
+    if isinstance(detail, list):
+        detail = " ".join(str(e) for e in detail)
+    assert _mention_of(reserved_type, detail), (
+        f"422 detail did not mention reserved type {reserved_type!r}: {detail!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # REST bulk-write surface — POST /api/v1/memories/bulk
 # ---------------------------------------------------------------------------
@@ -296,6 +316,23 @@ async def test_mcp_single_accepts_allowed_type(mcp_env):
     payload = parse_envelope(out)
     assert payload.get("id") == "m-fact-mcp"
     mcp_env["service_mocks"]["create_memory"].assert_awaited_once()
+
+
+@pytest.mark.parametrize("reserved_type", RESERVED_TYPES)
+async def test_mcp_update_rejects_reserved_type(mcp_env, reserved_type):
+    """CAURA-702: ``memclaw_manage(op='update')`` rejects each reserved type at
+    the boundary and never reaches ``update_memory`` — the update path was the
+    remaining unguarded write surface."""
+    update_mock = mcp_env["service"]("update_memory")
+    update_mock.return_value = _OutStub("should-not-be-used")
+
+    out = await mcp_server.memclaw_manage(
+        op="update", memory_id=str(uuid4()), memory_type=reserved_type
+    )
+    payload = parse_envelope(out)
+    assert payload["error"]["code"] == "INVALID_ARGUMENTS"
+    assert _mention_of(reserved_type, payload["error"]["message"])
+    mcp_env["service_mocks"]["update_memory"].assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

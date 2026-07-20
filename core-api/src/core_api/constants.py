@@ -25,11 +25,13 @@ from common.constants import (  # noqa: F401
 # Re-export memory-vocabulary constants from common.enrichment (CAURA-595).
 # common is the source of truth so core-api and core-worker stay in sync.
 from common.enrichment.constants import (  # noqa: F401
+    CLASSIFIER_DEPRECATED_MEMORY_TYPES,
     DEFAULT_MEMORY_TYPE,
     DEFAULT_MEMORY_WEIGHT,
     MEMORY_STATUSES,
     MEMORY_TYPE_DESCRIPTIONS,
     MEMORY_TYPES,
+    SERVER_RESERVED_MEMORY_TYPES,
     MemoryType,
 )
 
@@ -103,8 +105,26 @@ EMBEDDING_CACHE_TTL = 259200  # 3 days — embeddings are deterministic per mode
 # Derived from MEMORY_TYPES (the SoT) so adding a new type in
 # common/enrichment/constants.py propagates here without hand-editing.
 MEMORY_TYPES_PATTERN = "^(" + "|".join(MEMORY_TYPES) + ")$"
-MEMORY_TYPES_DESCRIPTION = (
-    "Memory type. Auto-classified by LLM if omitted. Valid values: " + ", ".join(MEMORY_TYPES) + "."
+
+# Types a caller may CREATE: the full vocabulary minus server-reserved types
+# (outcome/rule/insight — authored only by internal flows and rejected at the
+# write boundary) and classifier-deprecated types (semantic — folded into
+# ``fact``; CAURA-701/702). Kept in ``MEMORY_TYPES`` order.
+MEMORY_TYPES_WRITE = tuple(
+    t
+    for t in MEMORY_TYPES
+    if t not in SERVER_RESERVED_MEMORY_TYPES and t not in CLASSIFIER_DEPRECATED_MEMORY_TYPES
+)
+# Shown on WRITE fields (create/update): only the types a caller may set. Keeps
+# deprecated/reserved values out of the schema so agents stop picking them.
+MEMORY_TYPES_WRITE_DESCRIPTION = (
+    "Memory type. Auto-classified by LLM if omitted. Valid values: " + ", ".join(MEMORY_TYPES_WRITE) + "."
+)
+# Shown on the recall/list FILTER field: any type that may EXIST in storage,
+# including historical rows written before a type was reserved/deprecated
+# (legacy ``semantic``/``insight``/… rows stay queryable).
+MEMORY_TYPES_FILTER_DESCRIPTION = (
+    "Filter results to a single memory type. Valid values: " + ", ".join(MEMORY_TYPES) + "."
 )
 
 # ── Memory status lifecycle ──

@@ -43,7 +43,9 @@ from core_api.constants import (
     BULK_ENRICHMENT_CONCURRENCY,
     BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS,
     CHUNKING_THRESHOLD_CHARS,
+    CLASSIFIER_DEPRECATED_MEMORY_TYPES,
     CRYSTALLIZER_SHORT_CONTENT_CHARS,
+    DEFAULT_MEMORY_TYPE,
     DEFAULT_MEMORY_WEIGHT,
     DEFAULT_SEARCH_TOP_K,
     EMBEDDING_CACHE_TTL,
@@ -1304,6 +1306,13 @@ async def create_memories_bulk(
         # Apply enrichment
         enrichment = enrichments[i]
         memory_type = item.memory_type
+        # CAURA-702: fold classifier-deprecated types (currently ``semantic``)
+        # into the default on the bulk/ingest path. The single-write pipeline
+        # does this in ``MergeEnrichmentFields``; bulk + ingest (which funnels
+        # through here) skip that step, so enforce the merger here too —
+        # otherwise a caller-supplied deprecated type persists after CAURA-701.
+        if memory_type in CLASSIFIER_DEPRECATED_MEMORY_TYPES:
+            memory_type = DEFAULT_MEMORY_TYPE
         weight = item.weight
         title = None
         metadata = item.metadata or {}
@@ -1333,7 +1342,7 @@ async def create_memories_bulk(
             metadata["business_relevance"] = enrichment.business_relevance
 
         if memory_type is None:
-            memory_type = "fact"
+            memory_type = DEFAULT_MEMORY_TYPE
         if weight is None:
             weight = DEFAULT_MEMORY_WEIGHT
 
@@ -2460,6 +2469,23 @@ async def update_memory(
                 if isinstance(val, datetime):
                     val = val.isoformat()
                 patch[attr_name] = val
+
+    # CAURA-702: caller-supplied classifier-deprecated types (currently
+    # ``semantic``) fold into the default on the update path too. Update
+    # bypasses ``MergeEnrichmentFields``, so mirror the create/bulk demotion
+    # here to keep the merger consistent across every write path. The
+    # ``simple_fields`` loop above may have staged the raw deprecated value
+    # (``fact != semantic``), so reconcile against the *current* stored type:
+    # only record a real change, otherwise drop the phantom entry so a
+    # semantic->fact PATCH on an already-``fact`` row is a clean no-op.
+    if "memory_type" in fields_set and data.memory_type in CLASSIFIER_DEPRECATED_MEMORY_TYPES:
+        current_type = str(mem.get("memory_type")) if mem.get("memory_type") is not None else None
+        if current_type != DEFAULT_MEMORY_TYPE:
+            patch["memory_type"] = DEFAULT_MEMORY_TYPE
+            changes["memory_type"] = {"old": current_type, "new": DEFAULT_MEMORY_TYPE}
+        else:
+            patch.pop("memory_type", None)
+            changes.pop("memory_type", None)
 
     # Metadata: merge by default (load-test review feedback —
     # ``patch-metadata-replace`` MEDIUM finding). Pre-2026-04-26 this

@@ -1209,6 +1209,11 @@ async def memclaw_manage(
                 )
                 return _with_latency(f"Memory {memory_id} status updated: {old_status} -> {status}", t0)
             if op == "update":
+                # C3/C8: reject agent-supplied server-reserved types on update,
+                # mirroring the single-write guard above. No-op when memory_type
+                # is None or non-reserved.
+                if refuse := _refuse_reserved_memory_type(memory_type):
+                    return _with_latency(refuse, t0)
                 fields: dict = {}
                 if content is not None:
                     fields["content"] = content

@@ -1349,6 +1349,10 @@ async def update_memory_endpoint(
       defined behaviour, not a partial-merge anomaly.
     """
     auth.enforce_tenant(tenant_id)
+    # C3/C8: server-reserved types (outcome/rule/insight) are authored only by
+    # internal flows — reject agent-supplied values on update too, mirroring the
+    # create (POST /memories) and bulk-create handlers.
+    _reject_reserved_memory_type(body.memory_type)
     # C7: propagate ``?metadata_mode=...`` query param into the body when
     # body didn't supply its own. Body wins on conflict, so a caller who
     # sends both ?metadata_mode=replace AND {"metadata_mode": "merge"} in

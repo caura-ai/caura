@@ -13,7 +13,8 @@ from core_api.constants import (
     MAX_SEARCH_TOP_K,
     MAX_TRUST_LEVEL,
     MEMORY_STATUSES_PATTERN,
-    MEMORY_TYPES_DESCRIPTION,
+    MEMORY_TYPES_FILTER_DESCRIPTION,
+    MEMORY_TYPES_WRITE_DESCRIPTION,
     MEMORY_VISIBILITIES_PATTERN,
     MIN_TRUST_LEVEL,
     MemoryType,
@@ -37,7 +38,7 @@ class MemoryCreate(BaseModel):
     # never silently attributed to one shared identity. min_length=1 rejects an
     # empty string at the schema layer (None still means "unset").
     agent_id: str | None = Field(default=None, min_length=1)
-    memory_type: MemoryType | None = Field(default=None, description=MEMORY_TYPES_DESCRIPTION)
+    memory_type: MemoryType | None = Field(default=None, description=MEMORY_TYPES_WRITE_DESCRIPTION)
     content: str = Field(min_length=1, max_length=MAX_CONTENT_LENGTH)
     weight: float | None = Field(default=None, ge=0.0, le=1.0)
     source_uri: str | None = None
@@ -67,7 +68,7 @@ class MemoryCreate(BaseModel):
 class BulkMemoryItem(BaseModel):
     """Single item in a bulk write request. tenant_id/fleet_id/agent_id inherited from parent."""
 
-    memory_type: MemoryType | None = Field(default=None, description=MEMORY_TYPES_DESCRIPTION)
+    memory_type: MemoryType | None = Field(default=None, description=MEMORY_TYPES_WRITE_DESCRIPTION)
     content: str = Field(min_length=1, max_length=MAX_CONTENT_LENGTH)
     weight: float | None = Field(default=None, ge=0.0, le=1.0)
     source_uri: str | None = None
@@ -162,7 +163,7 @@ class RedistributeResponse(BaseModel):
 
 class MemoryUpdate(BaseModel):
     content: str | None = Field(default=None, min_length=1, max_length=MAX_CONTENT_LENGTH)
-    memory_type: MemoryType | None = Field(default=None, description=MEMORY_TYPES_DESCRIPTION)
+    memory_type: MemoryType | None = Field(default=None, description=MEMORY_TYPES_WRITE_DESCRIPTION)
     weight: float | None = Field(default=None, ge=0.0, le=1.0)
     title: str | None = None
     status: str | None = Field(default=None, pattern=MEMORY_STATUSES_PATTERN)
@@ -318,7 +319,7 @@ class SearchRequest(BaseModel):
     filter_agent_id: str | None = None
     memory_type_filter: MemoryType | None = Field(
         default=None,
-        description="Filter results to a single memory type. " + MEMORY_TYPES_DESCRIPTION,
+        description=MEMORY_TYPES_FILTER_DESCRIPTION,
     )
     status_filter: str | None = Field(default=None, pattern=MEMORY_STATUSES_PATTERN)
     valid_at: datetime | None = None
