@@ -53,6 +53,45 @@ For credentials, scopes, and the full API surface, see the
 [MemClaw docs](https://memclaw.net/docs). Production fleets should use
 [per-agent keys](https://memclaw.net/docs/integrations/per-agent-keys).
 
+## memclaw-interviewer — Claude Code adapter (Interviewer Phase 2)
+
+Installing this package also provides the `memclaw-interviewer` CLI: the
+MemClaw Interviewer's disk-parser adapter for Claude Code workstations. It
+reads Claude Code session transcripts (`~/.claude/projects/…/*.jsonl`)
+**read-only**, tracks a per-file cursor via the server's forward-only
+watermark documents (no local state), and submits event windows to
+`POST /api/v1/interview/submit`, where MemClaw synthesizes them into typed
+memories. Requires the tenant to have `interviewer.enabled = true`.
+
+```bash
+export MEMCLAW_API_KEY=mc_xxx MEMCLAW_TENANT_ID=my-team
+export MEMCLAW_INTERVIEWER_PROJECTS="-Users-me-work-*"   # allowlist, default-deny
+
+memclaw-interviewer status --since-hours 24     # cursors vs. local line counts
+memclaw-interviewer run --dry-run -v            # parse + window, submit nothing
+memclaw-interviewer run --max-windows 8         # submit due windows
+```
+
+**Privacy:** default-deny — with no allowlist the CLI lists discovered
+project dirs and exits with guidance; `--all-projects` is the explicit
+opt-in. Credential-shaped strings are scrubbed locally before anything
+leaves the machine, and the server masks PII again on receipt.
+
+**Triggers:** run it from cron, or wire Claude Code's SessionEnd hook so a
+session is interviewed the moment it ends (a failed harvest never fails
+the session — the hook always exits 0):
+
+```json
+{ "hooks": { "SessionEnd": [ { "hooks": [
+  { "type": "command", "command": "memclaw-interviewer hook", "timeout": 300 }
+] } ] } }
+```
+
+Crash-safety is inherited from the Interviewer protocol: the watermark
+advances only after the server commits a window, and retries of the same
+window dedup server-side via a deterministic attempt id — never a gap,
+never a duplicate.
+
 ## License
 
 Apache-2.0
