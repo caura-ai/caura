@@ -247,6 +247,22 @@ async def test_run_id_on_column_and_source_in_metadata(captured):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_ingest_marks_memory_type_not_agent_set(captured):
+    """CAURA-703: an ingested fact's type comes from the extraction LLM's
+    ``suggested_type``, not the calling agent, so each write is stamped
+    ``metadata.memory_type_agent_set = False``. ``create_memories_bulk``
+    honours this pre-stamped value instead of inferring ``True`` from the
+    (LLM-supplied) ``memory_type`` on the item."""
+    req = _request("t1", "fact one", "fact two")
+    await ingest_service.ingest_commit(request=req)
+
+    assert len(captured.writes) == 2
+    for mc in captured.writes:
+        assert mc.metadata["memory_type_agent_set"] is False
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_parent_document_written_once_per_batch(captured):
     """One ingest_commit produces exactly one ``documents`` row with
     ``collection='ingest-sources'`` and ``doc_id == run_id``. The

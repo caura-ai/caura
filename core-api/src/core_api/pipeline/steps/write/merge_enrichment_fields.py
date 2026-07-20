@@ -26,6 +26,15 @@ class MergeEnrichmentFields:
         ts_valid_start = data.ts_valid_start
         ts_valid_end = data.ts_valid_end
 
+        # CAURA-703: record whether the CALLER chose the type, vs the enrichment
+        # classifier / default fallback filling it. Captured from the raw agent
+        # value BEFORE the deprecation demotion below, so an agent who supplied a
+        # now-deprecated type (e.g. "semantic", coerced to fact) still counts as
+        # agent-set. Fully determined at write time — the async enrichment worker
+        # never overrides memory_type when the agent set it (``agent_provided_fields``
+        # skip), so this flag needs no worker-side finalisation.
+        memory_type_agent_set = memory_type is not None
+
         # CAURA-701: caller-supplied deprecated types (currently ``semantic``)
         # bypass the enrichment-LLM demotion in ``_validate_enrichment`` because
         # a non-``None`` ``data.memory_type`` short-circuits the fill-gaps branch
@@ -81,6 +90,8 @@ class MergeEnrichmentFields:
             metadata["write_mode"] = resolved_write_mode
         if resolved_write_mode == "fast" and enrichment is None:
             metadata["enrichment_pending"] = True
+
+        metadata["memory_type_agent_set"] = memory_type_agent_set
 
         ctx.data["memory_fields"] = {
             "memory_type": memory_type,

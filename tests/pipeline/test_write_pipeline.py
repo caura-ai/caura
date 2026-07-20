@@ -61,6 +61,87 @@ async def test_validate_step_rejects_short_content():
 
 
 @pytest.mark.asyncio
+async def test_merge_flags_memory_type_agent_set_when_caller_supplies_type():
+    """CAURA-703: an agent-supplied type sets metadata.memory_type_agent_set=True
+    and wins over the enrichment classifier's suggestion."""
+    from common.enrichment.schema import EnrichmentResult
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.write.merge_enrichment_fields import (
+        MergeEnrichmentFields,
+    )
+
+    ctx = PipelineContext(
+        data={
+            "input": _make_input(memory_type="decision"),
+            "enrichment": EnrichmentResult(memory_type="fact"),
+        }
+    )
+    await MergeEnrichmentFields().execute(ctx)
+    fields = ctx.data["memory_fields"]
+    assert fields["memory_type"] == "decision"
+    assert fields["metadata"]["memory_type_agent_set"] is True
+
+
+@pytest.mark.asyncio
+async def test_merge_flags_not_agent_set_when_classifier_fills_type():
+    """CAURA-703: when the caller omits the type, the classifier fills it and
+    the flag is False."""
+    from common.enrichment.schema import EnrichmentResult
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.write.merge_enrichment_fields import (
+        MergeEnrichmentFields,
+    )
+
+    ctx = PipelineContext(
+        data={
+            "input": _make_input(),  # no memory_type
+            "enrichment": EnrichmentResult(memory_type="decision"),
+        }
+    )
+    await MergeEnrichmentFields().execute(ctx)
+    fields = ctx.data["memory_fields"]
+    assert fields["memory_type"] == "decision"
+    assert fields["metadata"]["memory_type_agent_set"] is False
+
+
+@pytest.mark.asyncio
+async def test_merge_agent_set_true_even_when_deprecated_type_demoted():
+    """CAURA-703: an agent who supplied a deprecated type (semantic → demoted to
+    fact) still counts as agent-set — the flag is captured before demotion."""
+    from common.enrichment.schema import EnrichmentResult
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.write.merge_enrichment_fields import (
+        MergeEnrichmentFields,
+    )
+
+    ctx = PipelineContext(
+        data={
+            "input": _make_input(memory_type="semantic"),
+            "enrichment": EnrichmentResult(memory_type="episode"),
+        }
+    )
+    await MergeEnrichmentFields().execute(ctx)
+    fields = ctx.data["memory_fields"]
+    assert fields["memory_type"] == "fact"  # deprecated → demoted
+    assert fields["metadata"]["memory_type_agent_set"] is True  # agent still chose it
+
+
+@pytest.mark.asyncio
+async def test_merge_flags_not_agent_set_on_default_fallback():
+    """CAURA-703: no caller type and no enrichment → default fact, not agent-set."""
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.write.merge_enrichment_fields import (
+        MergeEnrichmentFields,
+    )
+
+    ctx = PipelineContext(data={"input": _make_input()})  # no enrichment
+    await MergeEnrichmentFields().execute(ctx)
+    fields = ctx.data["memory_fields"]
+    assert fields["memory_type"] == "fact"
+    assert fields["metadata"]["memory_type_agent_set"] is False
+
+
+@pytest.mark.asyncio
 async def test_compute_content_hash_skips_cache_lookup_when_embedding_deferred(
     monkeypatch,
 ):

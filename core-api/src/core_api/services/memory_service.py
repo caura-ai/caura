@@ -1319,6 +1319,12 @@ async def create_memories_bulk(
         ts_valid_start = item.ts_valid_start
         ts_valid_end = item.ts_valid_end
 
+        # CAURA-703: provenance of memory_type. Ingest pre-stamps this False on
+        # its items (the type comes from the extraction LLM, not the caller), so
+        # honour an existing value; otherwise the type is agent-set iff the item
+        # carried one.
+        metadata.setdefault("memory_type_agent_set", item.memory_type is not None)
+
         if enrichment:
             if memory_type is None:
                 memory_type = enrichment.memory_type

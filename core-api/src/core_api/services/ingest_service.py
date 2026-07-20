@@ -1037,6 +1037,9 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
             metadata: dict = {
                 "source": "ingest",
                 "ingest_url": request_url_override or fact.source_uri or None,
+                # CAURA-703: ingest types come from the extraction LLM's
+                # suggested_type, not the calling agent — mark as not agent-set.
+                "memory_type_agent_set": False,
             }
             if request.doc_hash:
                 metadata["doc_hash"] = request.doc_hash
