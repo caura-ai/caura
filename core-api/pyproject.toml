@@ -41,7 +41,7 @@ dependencies = [
     # the full test suite under 8.0.0. <9 keeps the next major out as a guardrail.
     "redis[hiredis]>=5.0,<9",
     "slowapi>=0.1.9,<1.0",
-    "sentry-sdk[fastapi]>=2.0,<3",
+    "sentry-sdk[fastapi]>=2.66.0,<3",
     "structlog>=25.4,<27",
     # PR #7 (Tier-1 ingest A4): structure-aware document chunking.
     # All three are pure-Python (no system C deps); together ~1 MB.
