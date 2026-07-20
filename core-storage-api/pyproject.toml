@@ -31,7 +31,7 @@ dependencies = [
     # its docstring: "Run inside the docker-compose stack so envs are
     # wired up correctly"). Pin matches ``core-worker``'s pin so the
     # OpenAI SDK version is consistent across services.
-    "openai>=2.1,<3",
+    "openai>=2.46.0,<3",
 ]
 
 [project.optional-dependencies]
