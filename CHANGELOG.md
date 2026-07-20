@@ -6,6 +6,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.23.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.22.0...backend-v2.23.0) (2026-07-20)
+
+
+### Features
+
+* **auth:** read gateway-plumbed X-Org-Role into AuthContext (Skills Inbox A2, reader side) ([#583](https://github.com/caura-ai/caura-memclaw/issues/583)) ([5680c7c](https://github.com/caura-ai/caura-memclaw/commit/5680c7c5fe2d47f58536a42d846b09dc7c749884))
+* **client:** memclaw-interviewer — Claude Code disk-parser adapter (Interviewer Phase 2) ([#581](https://github.com/caura-ai/caura-memclaw/issues/581)) ([bef753c](https://github.com/caura-ai/caura-memclaw/commit/bef753ccbd9f2071f52e5fd0af9613c10f54a5ca))
+* **memories:** list filters — created_after/before + exclude_memory_types ([#573](https://github.com/caura-ai/caura-memclaw/issues/573)) ([fd597c7](https://github.com/caura-ai/caura-memclaw/commit/fd597c723e5ec2c93544ed9804710a96c1778d7c))
+* **search:** cosine-dominant candidate pool selection (A49), off by default ([#579](https://github.com/caura-ai/caura-memclaw/issues/579)) ([1ce740a](https://github.com/caura-ai/caura-memclaw/commit/1ce740ab97aa292c37cf935f3010bc47edd2fd0f))
+
+
+### Bug Fixes
+
+* **ci:** publish semver image tags for component-prefixed release tags ([#580](https://github.com/caura-ai/caura-memclaw/issues/580)) ([5918ed8](https://github.com/caura-ai/caura-memclaw/commit/5918ed8cb11e8316b8cc1d4d3b91fe92d64173ff))
+* **clients:** raise on unexpected search() response shape ([#510](https://github.com/caura-ai/caura-memclaw/issues/510)) ([#539](https://github.com/caura-ai/caura-memclaw/issues/539)) ([5af356e](https://github.com/caura-ai/caura-memclaw/commit/5af356e826bdc85633a9fbd23d8adc6b3a5fde54))
+* **core-api:** map unhandled upstream 5xx/429 to a retryable 503 ([#575](https://github.com/caura-ai/caura-memclaw/issues/575)) ([0ecc274](https://github.com/caura-ai/caura-memclaw/commit/0ecc2748149c106d5a95d74e74b4eba956adb4f2))
+* **fleet:** dedup the outdated-plugin heartbeat warning ([#574](https://github.com/caura-ai/caura-memclaw/issues/574)) ([b912f71](https://github.com/caura-ai/caura-memclaw/commit/b912f71c1f3872c295e00356194ced769cc8c8d0))
+* **interview:** latency budgets for realistic submit windows (real-LLM pilot finding) ([#572](https://github.com/caura-ai/caura-memclaw/issues/572)) ([740505d](https://github.com/caura-ai/caura-memclaw/commit/740505da50aa6bdc2916a1ca7aecb0a993855718))
+* **mcp:** add warning when top_k is capped and document search limit ([#516](https://github.com/caura-ai/caura-memclaw/issues/516)) ([df259cf](https://github.com/caura-ai/caura-memclaw/commit/df259cf0feb4e0126c202f6fb44d9297b8e3fb93))
+* **skills-inbox:** converge the inbox card contract with the dashboard UI (A1) ([#582](https://github.com/caura-ai/caura-memclaw/issues/582)) ([3ab73b4](https://github.com/caura-ai/caura-memclaw/commit/3ab73b42d64248f565afa9a6543f0405356c0275))
+
+
+### Documentation
+
+* document TESTING=1 env var with production-danger warning ([#544](https://github.com/caura-ai/caura-memclaw/issues/544)) ([13a256c](https://github.com/caura-ai/caura-memclaw/commit/13a256cecce7bdb55bf70501596914dd07a6abc4))
+* fix agent install reference ([#542](https://github.com/caura-ai/caura-memclaw/issues/542)) ([30d9bc9](https://github.com/caura-ai/caura-memclaw/commit/30d9bc9fd365c7dba93183b2d1fe386a9da8ceb4))
+* Skills Inbox REST API reference (Skill Factory GA prep) ([#578](https://github.com/caura-ai/caura-memclaw/issues/578)) ([6625bd1](https://github.com/caura-ai/caura-memclaw/commit/6625bd10fb55de4de14048684d7677b0557a9294))
+
 ## [2.22.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.21.0...backend-v2.22.0) (2026-07-18)
 
 
