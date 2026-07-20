@@ -87,6 +87,7 @@ Response shape (this example was requested with
   "tenant_id": "acme",
   "fleet_id": null,
   "count": 1,
+  "truncated": false,
   "items": [
     {
       "slug": "forge/summarize-oncall-handoff",
@@ -104,7 +105,14 @@ Response shape (this example was requested with
       "scan_state": "clean",
       "scan_critical": 0,
       "scan_warn": 1,
-      "sentinel_scan": { "status": "clean", "critical_count": 0, "warning_count": 1 },
+      "sentinel_scan": {
+        "status": "clean",
+        "critical_count": 0,
+        "warning_count": 1,
+        "findings": [
+          { "code": "S-STYLE-001", "severity": "warn", "message": "description exceeds recommended length", "fatal": false, "locator": "description" }
+        ]
+      },
       "forge_evidence": { "cluster_size": 5, "distinct_agents": 4 },
       "origin": {
         "agent_id": "forge",
@@ -136,10 +144,17 @@ Field notes:
   `GET`), so the edit UI opts in to pre-fill the Edit form; it's what an
   Edit must send back (see below).
 - `sentinel_scan` — the latest Sentinel verdict:
-  `{ status, critical_count, warning_count }` where `status` is
-  `clean` / `quarantined` / `failed`, or `null` when the doc was never
-  scanned. The flat `scan_state` / `scan_critical` / `scan_warn`
-  fields carry the same values (kept for older consumers).
+  `{ status, critical_count, warning_count, findings }` where `status`
+  is `clean` / `quarantined` / `failed`, or `null` when the doc was
+  never scanned. `findings` carries up to 20 entries
+  (`{ code, severity, message, fatal, locator? }`) so the UI can show
+  WHY a scan tripped; the full list stays on the doc. The flat
+  `scan_state` / `scan_critical` / `scan_warn` fields carry the same
+  counts (kept for older consumers).
+- `truncated` (top-level) — `true` when more staged cards exist than
+  this page returned (the effective limit —
+  `min(limit, inbox_max_pending, 200)` — cut the list). Narrow by
+  `fleet_id` or raise `skills_factory.inbox_max_pending` to see more.
 - `forge_evidence` — `{ cluster_size, distinct_agents }`: how many
   behavior traces the candidate was distilled from and how many
   distinct agents produced them. Only present on `source: "forge"`

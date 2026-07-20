@@ -75,7 +75,15 @@ def forge_doc(**data_overrides) -> dict:
             "critical": 0,
             "warn": 1,
             "info": 0,
-            "findings": [],
+            "findings": [
+                {
+                    "code": "S-STYLE-001",
+                    "severity": "warn",
+                    "message": "description exceeds recommended length",
+                    "fatal": False,
+                    "locator": "description",
+                }
+            ],
         },
         "content_hash": "sha256:9b2e",
         "created_at": "2026-07-18T06:02:11+00:00",
@@ -268,6 +276,7 @@ async def test_list_returns_enriched_golden_card(storage, settings):
     body = r.json()
     assert body["tenant_id"] == TENANT
     assert body["count"] == 1
+    assert body["truncated"] is False
     card = body["items"][0]
 
     # The full doc_id (WITH the forge/ prefix) is the action handle.
@@ -281,6 +290,15 @@ async def test_list_returns_enriched_golden_card(storage, settings):
         "status": "clean",
         "critical_count": 0,
         "warning_count": 1,
+        "findings": [
+            {
+                "code": "S-STYLE-001",
+                "severity": "warn",
+                "message": "description exceeds recommended length",
+                "fatal": False,
+                "locator": "description",
+            }
+        ],
     }
     assert card["forge_evidence"] == {"cluster_size": 5, "distinct_agents": 4}
     assert card["cites"] == ["mem-1", "mem-2"]
@@ -775,3 +793,72 @@ async def test_edit_concurrent_approve_409(storage, settings, side_effects):
         r = await client.post(f"{BASE}/{SLUG}/edit", json={"summary": "x"})
     assert r.status_code == 409
     assert storage.upserts == []
+
+
+# ---------------------------------------------------------------------------
+# Phase B: scan findings on the card + the truncated flag
+# ---------------------------------------------------------------------------
+
+
+async def test_findings_capped_and_malformed_entries_skipped(storage, settings):
+    """A pathological doc can carry an unbounded/garbage findings list —
+    the card surfaces at most _MAX_CARD_FINDINGS well-formed entries."""
+    many = [
+        {"code": f"S-{i:03d}", "severity": "warn", "message": f"finding {i}", "fatal": False}
+        for i in range(30)
+    ]
+    many.insert(0, "not-a-dict")  # malformed entry must be skipped, not 500
+    storage.query_rows = [
+        forge_doc(scan={"state": "quarantined", "critical": 30, "warn": 0, "info": 0, "findings": many})
+    ]
+    async with make_client() as client:
+        r = await client.get(BASE)
+    assert r.status_code == 200, r.text
+    findings = r.json()["items"][0]["sentinel_scan"]["findings"]
+    assert len(findings) == 20  # capped, and the junk entry didn't count
+    assert findings[0]["code"] == "S-000"
+    assert all(f["message"] for f in findings)
+
+
+async def test_scan_without_findings_key_yields_empty_list(storage, settings):
+    """Legacy docs whose scan block predates findings persistence."""
+    storage.query_rows = [
+        forge_doc(scan={"state": "clean", "critical": 0, "warn": 0, "info": 0})
+    ]
+    async with make_client() as client:
+        r = await client.get(BASE)
+    assert r.json()["items"][0]["sentinel_scan"]["findings"] == []
+
+
+async def test_truncated_true_when_cap_cuts_the_page(storage, settings):
+    settings["skills_factory"]["inbox_max_pending"] = 2
+    storage.query_rows = [forge_doc(slug=f"s{i}") for i in range(4)]
+    async with make_client() as client:
+        r = await client.get(f"{BASE}?limit=50")
+    body = r.json()
+    assert body["count"] == 2
+    assert body["truncated"] is True
+
+
+async def test_truncated_true_when_oversample_saturates(storage, settings):
+    """The oversample window (2x effective limit) filled — even the
+    fetched set may be missing the tail."""
+    settings["skills_factory"]["inbox_max_pending"] = 2
+    # oversample = min(2*2, 400) = 4; return exactly 4 rows, but make
+    # them all deferred so the page itself isn't even full.
+    storage.query_rows = [
+        forge_doc(slug=f"s{i}", deferred_at="2026-07-19T00:00:00+00:00") for i in range(4)
+    ]
+    async with make_client() as client:
+        r = await client.get(f"{BASE}?limit=50")
+    body = r.json()
+    assert body["truncated"] is True
+
+
+async def test_truncated_false_on_partial_page(storage, settings):
+    storage.query_rows = [forge_doc(slug="only-one")]
+    async with make_client() as client:
+        r = await client.get(f"{BASE}?limit=50")
+    body = r.json()
+    assert body["count"] == 1
+    assert body["truncated"] is False

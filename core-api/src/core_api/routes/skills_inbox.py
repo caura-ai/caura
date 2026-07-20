@@ -121,18 +121,40 @@ def _require_inbox_admin(auth: AuthContext) -> None:
 # ── Pydantic shapes ────────────────────────────────────────────────
 
 
+# Cap on findings surfaced per card. A pathological doc can carry an
+# unbounded findings list; the card only needs enough for an operator
+# to see WHY a scan tripped — the full list stays on ``data.scan``.
+_MAX_CARD_FINDINGS = 20
+
+
+class ScanFindingOut(BaseModel):
+    """One Sentinel finding, shaped for the card UI: enough to render
+    '<severity> <code>: <message>' under the scan badge. Mirrors the
+    ``data.scan.findings[]`` entries written by ``ScanResult.as_doc_field``.
+    """
+
+    code: str = ""
+    severity: str = ""
+    message: str = ""
+    fatal: bool = False
+    locator: str | None = None
+
+
 class SentinelScanSummary(BaseModel):
     """Nested scan verdict, shaped for the dashboard card UI.
 
     ``status`` mirrors ``data.scan.state`` (``clean`` / ``quarantined``
     / ``failed``); the counts mirror ``critical`` / ``warn``. The flat
     ``scan_state`` / ``scan_critical`` / ``scan_warn`` card fields carry
-    the same values for pre-existing consumers.
+    the same values for pre-existing consumers. ``findings`` carries up
+    to ``_MAX_CARD_FINDINGS`` entries so the UI can say WHY a scan
+    tripped instead of just showing counts.
     """
 
     status: str | None = None
     critical_count: int = 0
     warning_count: int = 0
+    findings: list[ScanFindingOut] = Field(default_factory=list)
 
 
 class ForgeEvidence(BaseModel):
@@ -201,6 +223,13 @@ class InboxListResponse(BaseModel):
     tenant_id: str
     fleet_id: str | None
     count: int
+    # True when more staged cards exist than this page returned (the
+    # effective limit — min(limit, inbox_max_pending, 200) — cut the
+    # list, or the oversample window saturated). Lets the UI say
+    # "there's more" instead of guessing from page fullness: a page of
+    # exactly ``count`` items is indistinguishable from a capped one
+    # without this flag.
+    truncated: bool = False
     items: list[InboxCard]
 
 
@@ -259,10 +288,30 @@ def _card_from_doc(doc: dict) -> InboxCard:
 
     sentinel_scan: SentinelScanSummary | None = None
     if scan:
+        raw_findings = scan.get("findings")
+        findings: list[ScanFindingOut] = []
+        if isinstance(raw_findings, list):
+            for f in raw_findings:
+                if len(findings) >= _MAX_CARD_FINDINGS:
+                    break
+                # Skip malformed entries (don't 500 the page, and don't
+                # let junk consume one of the capped slots).
+                if not isinstance(f, dict):
+                    continue
+                findings.append(
+                    ScanFindingOut(
+                        code=str(f.get("code") or ""),
+                        severity=str(f.get("severity") or ""),
+                        message=str(f.get("message") or ""),
+                        fatal=bool(f.get("fatal", False)),
+                        locator=(str(f["locator"]) if f.get("locator") else None),
+                    )
+                )
         sentinel_scan = SentinelScanSummary(
             status=scan.get("state"),
             critical_count=scan.get("critical", 0),
             warning_count=scan.get("warn", 0),
+            findings=findings,
         )
 
     # Evidence counters ride in ``data.origin`` (Forge stamps them for
@@ -519,6 +568,12 @@ async def list_inbox(
     if remaining > 0:
         items.extend(deferred[:remaining])
 
+    # More staged cards exist than this page shows when either the
+    # effective limit cut the fetched set, or the oversample window
+    # itself saturated (in which case even ``all_cards`` is missing
+    # the tail — see the warning above).
+    truncated = len(all_cards) > len(items) or (oversample_limit > 0 and len(all_cards) >= oversample_limit)
+
     if not include_content:
         # Lean default: drop the SKILL.md bodies from the page. The edit
         # UI re-requests with ?include_content=true when it needs them.
@@ -529,6 +584,7 @@ async def list_inbox(
         tenant_id=tenant_id,
         fleet_id=fleet_id,
         count=len(items),
+        truncated=truncated,
         items=items,
     )
 
