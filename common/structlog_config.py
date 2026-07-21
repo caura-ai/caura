@@ -38,6 +38,16 @@ from typing import Any
 
 import structlog
 
+# ddtrace is an optional dependency — only the `datadog` extra (SaaS + APM
+# builds) installs it. Import it guarded so OSS / on-prem / local, which never
+# install it, keep importing this module. `_add_dd_trace_context` no-ops when
+# this is None. Top-level (not a deferred import) so the name is patchable in
+# tests and the dependency is visible at module scope.
+try:
+    from ddtrace import tracer as _dd_tracer
+except ImportError:  # pragma: no cover - exercised only in non-datadog installs
+    _dd_tracer = None
+
 # structlog's log-level method names → GCP Cloud Logging's severity enum.
 # Severities beyond ERROR (CRITICAL/ALERT/EMERGENCY) aren't emitted by the
 # standard log-level methods; use `logger.critical(...)` for CRITICAL, or
@@ -275,6 +285,39 @@ def _drop_level_field(
     return event_dict
 
 
+def _add_dd_trace_context(
+    _logger: Any,
+    _method_name: str,
+    event_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Inject Datadog trace/span IDs so logs correlate to APM traces.
+
+    ddtrace's built-in injection (``DD_LOGS_INJECTION``) patches the stdlib
+    ``logging.LogRecord`` only; this pipeline uses ``PrintLoggerFactory`` and
+    bypasses stdlib entirely, so injection never fires and Datadog can't link a
+    log line to its trace. Read the active span directly via ddtrace's public
+    helper instead — its keys are already ``dd.trace_id`` / ``dd.span_id``.
+
+    No-op when ddtrace isn't installed (OSS / on-prem) or no span is active
+    (``dd.trace_id`` == "0"), so ambient logs stay clean. Lives in
+    ``_base_processors`` so it runs on both the native and stdlib-bridge chains.
+    """
+    if _dd_tracer is None:
+        return event_dict
+    ctx = _dd_tracer.get_log_correlation_context()
+    # "0" is ddtrace's sentinel for "no active span". Read both keys defensively
+    # (.get) and require both present and non-zero: never stamp a log with a
+    # trace ID but no span ID (Datadog can't correlate that), and never KeyError
+    # out of the processor if a future ddtrace — or a test double — returns a
+    # partial context.
+    trace_id = ctx.get("dd.trace_id", "0")
+    span_id = ctx.get("dd.span_id", "0")
+    if trace_id != "0" and span_id != "0":
+        event_dict["dd.trace_id"] = trace_id
+        event_dict["dd.span_id"] = span_id
+    return event_dict
+
+
 # Processors shared by both the structlog-native chain and the stdlib bridge —
 # extracted so adding a new cross-cutting processor (e.g. request-id injection)
 # only needs a single edit.
@@ -283,6 +326,10 @@ def _base_processors() -> list[Any]:
         # merge_contextvars first so a context-bound `level` can't clobber
         # the one add_log_level derives from the real call site.
         structlog.contextvars.merge_contextvars,
+        # Datadog trace/span IDs for log↔trace correlation. Placed right after
+        # contextvars so the IDs are present for every downstream renderer;
+        # no-ops without ddtrace installed or an active span.
+        _add_dd_trace_context,
         # add_log_level populates `level`, needed by stdlib records (which
         # don't have `method_name`) and kept on the native side for shape
         # consistency across the two pipelines.

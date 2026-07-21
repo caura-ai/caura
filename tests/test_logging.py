@@ -7,9 +7,11 @@ import logging
 
 import pytest
 
+import common.structlog_config as structlog_config
 from common.structlog_config import (
     _THIRD_PARTY_LOGGERS_TO_REROUTE,
     _add_datadog_status,
+    _add_dd_trace_context,
     _map_to_gcp_severity,
     _rename_event_to_message,
     _reset_for_testing,
@@ -124,6 +126,72 @@ def test_add_datadog_status_falsy_severity_uses_method_level() -> None:
     for value in values:
         result = _add_datadog_status(None, "error", {"event": "x", "severity": value})
         assert result["status"] == "error"
+
+
+class _FakeTracer:
+    """Stand-in for ddtrace's tracer exposing get_log_correlation_context()."""
+
+    def __init__(self, ctx: dict[str, str]) -> None:
+        self._ctx = ctx
+
+    def get_log_correlation_context(self) -> dict[str, str]:
+        return self._ctx
+
+
+def test_add_dd_trace_context_noop_without_ddtrace(monkeypatch) -> None:
+    # OSS / on-prem: ddtrace isn't installed, so the guarded import left the
+    # module-level tracer None. The processor must pass the event dict through
+    # untouched — no dd.* keys, no crash.
+    monkeypatch.setattr(structlog_config, "_dd_tracer", None)
+    event_dict = {"event": "hello"}
+    result = _add_dd_trace_context(None, "info", event_dict)
+    assert result == {"event": "hello"}
+
+
+def test_add_dd_trace_context_injects_ids_for_active_span(monkeypatch) -> None:
+    monkeypatch.setattr(
+        structlog_config,
+        "_dd_tracer",
+        _FakeTracer(
+            {
+                "dd.trace_id": "6a5fc7b3000000006d13f630a5c9fb22",
+                "dd.span_id": "12914032455535133506",
+                "dd.service": "core-api",
+                "dd.version": "",
+                "dd.env": "production",
+            }
+        ),
+    )
+    result = _add_dd_trace_context(None, "info", {"event": "x"})
+    assert result["dd.trace_id"] == "6a5fc7b3000000006d13f630a5c9fb22"
+    assert result["dd.span_id"] == "12914032455535133506"
+
+
+def test_add_dd_trace_context_skips_when_no_active_span(monkeypatch) -> None:
+    # ddtrace returns trace_id "0" when no span is active; the processor must
+    # NOT stamp ambient (non-request) logs with a null trace.
+    monkeypatch.setattr(
+        structlog_config,
+        "_dd_tracer",
+        _FakeTracer({"dd.trace_id": "0", "dd.span_id": "0"}),
+    )
+    result = _add_dd_trace_context(None, "info", {"event": "x"})
+    assert "dd.trace_id" not in result
+    assert "dd.span_id" not in result
+
+
+def test_add_dd_trace_context_skips_partial_context(monkeypatch) -> None:
+    # Defensive: a partial context (trace_id present, span_id missing/zero — a
+    # future ddtrace shape or a test double) must not KeyError or emit an
+    # uncorrelatable trace-without-span.
+    monkeypatch.setattr(
+        structlog_config,
+        "_dd_tracer",
+        _FakeTracer({"dd.trace_id": "6a5fc7b3000000006d13f630a5c9fb22"}),
+    )
+    result = _add_dd_trace_context(None, "info", {"event": "x"})
+    assert "dd.trace_id" not in result
+    assert "dd.span_id" not in result
 
 
 def test_rename_event_to_message_moves_field() -> None:
