@@ -57,7 +57,7 @@ test = [
 ]
 
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
