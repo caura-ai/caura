@@ -21,7 +21,7 @@ mcp>=1.26,<2
 # openai>=1.0,<2
 
 # Auth: password hashing, JWT, TOTP, encryption
-argon2-cffi>=23.1
+argon2-cffi>=25.1.0
 cryptography>=42.0
 python-jose[cryptography]>=3.3
 pyotp>=2.9
