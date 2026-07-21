@@ -518,6 +518,49 @@ API for the Skills Inbox).
 The full operator/developer guide lives in the
 [MemClaw docs → Skill Factory](https://memclaw.net/docs/skill-factory).
 
+### The Interviewer
+
+`memclaw_write` captures what an agent *chose* to record. **The Interviewer**
+captures what it *did*. On a schedule, it reads an agent's own **durable work
+trail** — the transcript or event log the harness already keeps — and asks an
+LLM to synthesize the activity into typed memories, so the decisions,
+blockers, and preferences an agent never stopped to journal still get stored.
+It never re-runs the agent — it works only from the real trail, which grounds
+it in actual activity. (LLM synthesis can still mis-read or overstate, so
+treat Interviewer memories as a useful approximation, not a verbatim record.)
+
+It's a third way memories enter MemClaw, alongside realtime writes and
+ingestion. Like Skill Factory it's **opt-in per tenant and off by default** —
+inert until you set `interviewer.enabled = true` in the tenant's org
+settings.
+
+- **What it writes.** Six report sections map onto the memory-type enum:
+  `worked_on → episode`, `decisions → decision`, `outcomes → outcome`,
+  `blockers → task`, `open_questions → fact`, `preferences_learned →
+  preference`. They land as ordinary enriched, embedded, governed memories,
+  with the trail's real event timestamps preserved.
+- **How activity is captured.** Two families, one submit protocol:
+  - **Plugin-buffer** — the OpenClaw plugin keeps a durable node-local buffer
+    and submits windows (add `MEMCLAW_INTERVIEWER=true` to the plugin env).
+  - **Disk-parser** — the `memclaw-interviewer` CLI (shipped in the
+    `memclaw-client` package) reads a harness's on-disk transcript read-only
+    and submits windows. Ships for **Claude Code** (`~/.claude/projects`) and
+    **Cursor** (`~/.cursor/…/agent-transcripts`) today; **Hermes** and others
+    are planned.
+- **Crash-safe by construction.** Each window is written under a
+  deterministic attempt id (`sha1(node_id:cursor_from:cursor_to)`) *then* the
+  per-node watermark advances — a crash mid-flight re-submits and dedups, so
+  never a gap and never a duplicate. There is no local cursor state; the
+  server watermark is the source of truth.
+- **Privacy.** The disk-parser is default-deny — it harvests nothing until
+  you allowlist projects — and credential-shaped strings are scrubbed locally
+  before submit and masked again server-side.
+
+Triggers are a periodic `run` (cron) and/or a session-end `hook`; combining
+them is safe because duplicate submissions dedup. Full setup, per-harness
+wiring, and the protocol are in the
+[MemClaw docs → Interviewer](https://memclaw.net/docs/interviewer).
+
 ### Install the skill (Claude Code & Codex)
 
 Install MemClaw's usage guide as a **skill** so your agent knows *when* and
