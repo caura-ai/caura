@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memclaw-client"
-version = "0.2.0"
+version = "0.3.0"
 description = "Official Python client for MemClaw — governed shared memory for AI agent fleets (multi-agent, multi-tenant, MCP-native)."
 readme = "README.md"
 requires-python = ">=3.9"

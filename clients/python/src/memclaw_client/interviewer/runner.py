@@ -27,20 +27,27 @@ import httpx
 
 from ..client import MemClaw
 from ..exceptions import AuthError, MemClawAPIError, NotFoundError
-from .discovery import Transcript
+from .discovery import HARNESS_CLAUDE_CODE, HARNESS_CURSOR, Transcript
 from .parser import count_lines, scan_events
 from .windows import Window, build_windows, window_is_worth_interviewing
 
 WATERMARK_COLLECTION = "interview_watermarks"
 
 
-def node_id_for(machine12: str, path: Path) -> str:
+# Harness → node-id namespace. Distinct prefixes keep a Claude Code and a
+# Cursor session with a colliding stem (both UUID4 — effectively never)
+# on separate watermark streams, and make node provenance greppable
+# server-side.
+_NODE_PREFIX = {HARNESS_CLAUDE_CODE: "cc", HARNESS_CURSOR: "cursor"}
+
+
+def node_id_for(machine12: str, path: Path, dialect: str = HARNESS_CLAUDE_CODE) -> str:
     # The stem is the session UUID — globally unique, so the project dir
     # is DELIBERATELY excluded: (a) renaming/moving a project dir (the
     # slug is the cwd path) must not orphan every watermark under it,
     # and (b) long path slugs could overflow the server's 200-char
     # node_id cap. A moved transcript keeps its cursor, by design.
-    return f"cc:{machine12}:{path.stem}"
+    return f"{_NODE_PREFIX.get(dialect, 'cc')}:{machine12}:{path.stem}"
 
 
 def watermark_doc_id(node_id: str) -> str:
@@ -117,7 +124,7 @@ def _submit_window(mc: MemClaw, cfg: RunConfig, node_id: str, window: Window) ->
 def run_file(mc: MemClaw, transcript: Transcript, cfg: RunConfig, windows_budget: int) -> FileResult:
     """Drain one transcript up to the shared windows budget."""
     result = FileResult(path=transcript.path)
-    node_id = node_id_for(cfg.machine12, transcript.path)
+    node_id = node_id_for(cfg.machine12, transcript.path, transcript.dialect)
     # Dry-run is fully offline: no watermark read, no submit — parse and
     # window from the start of the file as if never interviewed.
     last_seq = -1 if cfg.dry_run else read_watermark(mc, node_id)
@@ -148,6 +155,7 @@ def run_file(mc: MemClaw, transcript: Transcript, cfg: RunConfig, windows_budget
         start_line=cursor_from,
         project=transcript.project,
         max_event_chars=cfg.max_event_chars,
+        dialect=transcript.dialect,
     )
     if scan.last_complete_line < cursor_from:
         result.skipped_reason = "no complete new lines (mid-append tail)"

@@ -26,11 +26,14 @@ from typing import Optional
 from ..client import MemClaw
 from ..exceptions import AuthError
 from .discovery import (
+    DEFAULT_CURSOR_PROJECTS_ROOT,
     DEFAULT_PROJECTS_ROOT,
-    Transcript,
+    HARNESS_CLAUDE_CODE,
+    HARNESS_CURSOR,
     find_transcripts,
     list_project_dirs,
     project_allowed,
+    transcript_from_path,
 )
 from .machine import machine_id_short
 from .parser import count_lines
@@ -63,7 +66,18 @@ def _build_parser() -> argparse.ArgumentParser:
             help="project-dir globs to allow (default: MEMCLAW_INTERVIEWER_PROJECTS env; DEFAULT-DENY without either)",
         )
         p.add_argument("--all-projects", action="store_true", help="explicit opt-in: harvest every project dir")
-        p.add_argument("--projects-root", type=Path, default=DEFAULT_PROJECTS_ROOT)
+        p.add_argument(
+            "--harness",
+            choices=(HARNESS_CLAUDE_CODE, HARNESS_CURSOR),
+            default=os.environ.get("MEMCLAW_INTERVIEWER_HARNESS", HARNESS_CLAUDE_CODE),
+            help="which agent's transcripts to harvest (default: claude-code; env MEMCLAW_INTERVIEWER_HARNESS)",
+        )
+        p.add_argument(
+            "--projects-root",
+            type=Path,
+            default=None,
+            help="override the harness's default projects root (~/.claude/projects or ~/.cursor/projects)",
+        )
         p.add_argument("-v", "--verbose", action="store_true")
 
     run_p = sub.add_parser("run", help="scan transcripts and submit due interview windows")
@@ -87,6 +101,14 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _projects_root(args: argparse.Namespace) -> Path:
+    if args.projects_root is not None:
+        return args.projects_root
+    if args.harness == HARNESS_CURSOR:
+        return DEFAULT_CURSOR_PROJECTS_ROOT
+    return DEFAULT_PROJECTS_ROOT
+
+
 def _resolve_allowlist(args: argparse.Namespace) -> list[str]:
     if args.projects is not None:
         return list(args.projects)
@@ -103,10 +125,10 @@ def _require_config(args: argparse.Namespace) -> Optional[str]:
 
 
 def _deny_guidance(args: argparse.Namespace) -> str:
-    projects = list_project_dirs(args.projects_root)
+    projects = list_project_dirs(_projects_root(args))
     lines = [
         "No project allowlist configured - refusing to harvest by default.",
-        "Claude Code transcripts can contain sensitive work across ALL projects;",
+        "Agent transcripts can contain sensitive work across ALL projects;",
         "opt in explicitly with --projects <glob...>, MEMCLAW_INTERVIEWER_PROJECTS,",
         "or --all-projects.",
         "",
@@ -186,25 +208,28 @@ def _cmd_run(args: argparse.Namespace) -> int:
             return 2
         # --transcript must not bypass the project allowlist — including
         # the EMPTY-allowlist case (default-deny has no carve-outs; same
-        # pattern as _cmd_hook and the discovery path below).
-        project = args.transcript.parent.name
-        if not args.all_projects and not (allow and project_allowed(project, allow)):
+        # pattern as _cmd_hook and the discovery path below). Harness is
+        # inferred from the path shape, not --harness: the file IS the
+        # ground truth.
+        transcript = transcript_from_path(args.transcript)
+        if not args.all_projects and not (allow and project_allowed(transcript.project, allow)):
             print(
-                f"[interviewer] transcript project '{project}' not in allowlist; "
+                f"[interviewer] transcript project '{transcript.project}' not in allowlist; "
                 "pass --all-projects or --projects to opt in",
                 file=sys.stderr,
             )
             return 2
-        transcripts = [Transcript(path=args.transcript, project=project)]
+        transcripts = [transcript]
     else:
         if not allow and not args.all_projects:
             print(_deny_guidance(args), file=sys.stderr)
             return 2
         transcripts = find_transcripts(
-            root=args.projects_root,
+            root=_projects_root(args),
             allow_globs=allow,
             since_hours=args.since_hours or None,
             all_projects=args.all_projects,
+            harness=args.harness,
         )
     if not transcripts:
         print("[interviewer] nothing to do (no matching transcripts)")
@@ -248,15 +273,16 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(_deny_guidance(args), file=sys.stderr)
         return 2
     transcripts = find_transcripts(
-        root=args.projects_root,
+        root=_projects_root(args),
         allow_globs=allow,
         since_hours=args.since_hours or None,
         all_projects=args.all_projects,
+        harness=args.harness,
     )
     machine12 = machine_id_short()
     with _make_client(args) as mc:
         for transcript in transcripts:
-            node_id = node_id_for(machine12, transcript.path)
+            node_id = node_id_for(machine12, transcript.path, transcript.dialect)
             try:
                 last_seq = read_watermark(mc, node_id)
                 # Inside the guard: the transcript can vanish between
@@ -277,20 +303,24 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_hook(args: argparse.Namespace) -> int:
-    """SessionEnd hook: read {transcript_path,...} JSON from stdin, drain
-    that one file. ALWAYS exit 0 — never fail the user's session."""
+    """Session-end hook: read {transcript_path,...} JSON from stdin, drain
+    that one file. ALWAYS exit 0 — never fail the user's session.
+
+    Both Claude Code (SessionEnd) and Cursor (sessionEnd/stop) hooks send
+    ``transcript_path`` in their stdin payload; the harness is inferred
+    from the path shape, so ONE hook command serves both."""
     try:
         payload = json.loads(sys.stdin.read() or "{}")
         transcript_path = Path(str(payload.get("transcript_path") or ""))
         if not transcript_path.is_file():
             return 0
         allow = _resolve_allowlist(args)
-        project = transcript_path.parent.name
-        if not args.all_projects and not (allow and project_allowed(project, allow)):
+        transcript = transcript_from_path(transcript_path)
+        if not args.all_projects and not (allow and project_allowed(transcript.project, allow)):
             # Warn so operators can tell a config gap from an empty
             # session; exit code stays 0 (never fail the session hook).
             print(
-                f"[interviewer] hook: project '{project}' not in allowlist; skipping "
+                f"[interviewer] hook: project '{transcript.project}' not in allowlist; skipping "
                 "(set MEMCLAW_INTERVIEWER_PROJECTS or --all-projects)",
                 file=sys.stderr,
             )
@@ -304,7 +334,7 @@ def _cmd_hook(args: argparse.Namespace) -> int:
         try:
             cfg = _make_config(args, flush=True)  # session over: drain the tail
             with _make_client(args) as mc:
-                run_all(mc, [Transcript(path=transcript_path, project=project)], cfg)
+                run_all(mc, [transcript], cfg)
         finally:
             if hasattr(lock, "close"):
                 lock.close()
@@ -314,7 +344,23 @@ def _cmd_hook(args: argparse.Namespace) -> int:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    # argparse's choices= only validates values passed on the command line,
+    # NOT a default sourced from os.environ — so a bad
+    # MEMCLAW_INTERVIEWER_HARNESS (wrong case "Cursor", a typo) would slip
+    # through and silently fall back to Claude Code behavior. Fail loudly —
+    # but ONLY for run/status: parser.error() exits 2, and `hook` both
+    # ignores --harness (it infers from path shape) and must ALWAYS exit 0.
+    if (
+        args.command in ("run", "status")
+        and hasattr(args, "harness")
+        and args.harness not in (HARNESS_CLAUDE_CODE, HARNESS_CURSOR)
+    ):
+        parser.error(
+            f"Invalid harness '{args.harness}' — set MEMCLAW_INTERVIEWER_HARNESS to "
+            f"'{HARNESS_CLAUDE_CODE}' or '{HARNESS_CURSOR}'"
+        )
     if args.command == "run":
         return _cmd_run(args)
     if args.command == "status":
