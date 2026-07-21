@@ -9,7 +9,7 @@ dependencies = [
     # instead of walking app.routes (0.137's include_router mounts a sub-app,
     # hiding prefixed paths from app.routes). The committed uv.lock pins the exact
     # version; this range only bounds future re-locks.
-    "fastapi>=0.115,<1",
+    "fastapi>=0.139.2,<1",
     "uvicorn[standard]>=0.34,<1",
     "sqlalchemy[asyncio]>=2.0,<3",
     # SQLAlchemy[asyncio] pulls in greenlet. greenlet 3.5.0 shipped wheels for
@@ -18,22 +18,22 @@ dependencies = [
     # <3.6.0 (kept only as a major-version guardrail).
     "greenlet<3.6.0",
     "asyncpg>=0.30,<1",
-    "pgvector>=0.3,<1",
-    "alembic>=1.14,<2",
+    "pgvector>=0.5.0,<1",
+    "alembic>=1.18.5,<2",
     "pydantic>=2.0,<3",
-    "pydantic-settings>=2.0,<3",
-    "google-cloud-aiplatform>=1.80,<2",
-    "google-genai>=0.3",
+    "pydantic-settings>=2.14.2,<3",
+    "google-cloud-aiplatform>=1.161.0,<2",
+    "google-genai>=2.12.1",
     "openai",
     "python-dateutil>=2.8,<3",
     "httpx>=0.27,<1",
-    "mcp>=1.26,<2",
+    "mcp>=1.28.1,<2",
     "argon2-cffi>=23.1",
     "cryptography>=42.0",
     "python-jose[cryptography]>=3.3",
     "pyotp>=2.9",
     "cachetools>=5.3",
-    "croniter>=2.0",
+    "croniter>=6.2.4",
     # redis-py cap lifted <6 -> <9 (lock resolves 8.0.0). 8.x dropped its pyjwt
     # transitive and reworked the connection pool, but core-api only uses
     # ``redis.asyncio.from_url`` (cache.py) and ``r.pipeline(transaction=False)``
@@ -64,21 +64,21 @@ pubsub = ["google-cloud-pubsub>=2.23,<3"]
 # local images carry zero Datadog code. Build with `--extra datadog`
 # (Dockerfile: --build-arg DD_APM_ENABLED=true). Auto-instruments FastAPI /
 # SQLAlchemy / asyncpg / httpx / redis with no code changes.
-datadog = ["ddtrace>=4.10.6"]
+datadog = ["ddtrace>=4.11.1"]
 # Optional: multi-format document extraction for the /ingest/* endpoints.
 # Kreuzberg (~64MB, Elastic-2.0) is excluded from the default image to cut
 # cold-start pull + import time — the ingest endpoints return 501 without it
 # (see core_api.services.ingest_service guarded import). Build with
 # `--extra ingest` (Dockerfile: --build-arg WITH_INGEST=1) to enable ingest.
-ingest = ["kreuzberg>=4.9,<5"]
+ingest = ["kreuzberg>=4.10.2,<5"]
 dev = [
     "core-api[test,pubsub,ingest]",
-    "mypy>=1.13,<3.0",
-    "ruff>=0.8,<1.0",
-    "types-croniter>=2.0",
+    "mypy>=2.3.0,<3.0",
+    "ruff>=0.15.22,<1.0",
+    "types-croniter>=6.2.4.20260711",
 ]
 test = [
-    "pytest>=8.3,<10.0",
+    "pytest>=9.1.1,<10.0",
     "pytest-asyncio>=0.24,<2.0",
     "pytest-cov>=6.0,<8.0",
     "httpx>=0.27,<1.0",
