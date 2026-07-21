@@ -7,7 +7,7 @@ alembic>=1.14,<2
 pydantic>=2.0,<3
 pydantic-settings>=2.0,<3
 google-cloud-aiplatform>=1.80,<2
-google-genai>=0.3
+google-genai>=2.12.1
 # Used directly by core_api.clients.identity_token (Cloud Run ID-token
 # fetch) — explicit here instead of relying on google-cloud-aiplatform's
 # transitive pull, so a future GCP-SDK cleanup can't silently break it.
