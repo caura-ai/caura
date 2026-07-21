@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.15.1](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.15.0...plugin-v2.15.1) (2026-07-20)
+
+
+### Bug Fixes
+
+* **interview:** latency budgets for realistic submit windows (real-LLM pilot finding) ([#572](https://github.com/caura-ai/caura-memclaw/issues/572)) ([740505d](https://github.com/caura-ai/caura-memclaw/commit/740505da50aa6bdc2916a1ca7aecb0a993855718))
+
 ## [2.15.0](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.14.0...plugin-v2.15.0) (2026-07-18)
 
 
