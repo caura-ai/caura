@@ -48,6 +48,11 @@ try:
 except ImportError:  # pragma: no cover - exercised only in non-datadog installs
     _dd_tracer = None
 
+# Flips true after the first ddtrace correlation failure so we warn once (to
+# stderr, never through structlog — that would recurse), keeping a persistent
+# tracer fault visible without spamming every log call.
+_dd_tracer_warned = False
+
 # structlog's log-level method names → GCP Cloud Logging's severity enum.
 # Severities beyond ERROR (CRITICAL/ALERT/EMERGENCY) aren't emitted by the
 # standard log-level methods; use `logger.critical(...)` for CRITICAL, or
@@ -302,9 +307,31 @@ def _add_dd_trace_context(
     (``dd.trace_id`` == "0"), so ambient logs stay clean. Lives in
     ``_base_processors`` so it runs on both the native and stdlib-bridge chains.
     """
+    # Declared global up-front (must precede any read of _dd_tracer): the except
+    # branch reassigns _dd_tracer to None to disable a persistently-failing tracer.
+    global _dd_tracer, _dd_tracer_warned
     if _dd_tracer is None:
         return event_dict
-    ctx = _dd_tracer.get_log_correlation_context()
+    # ddtrace can raise here (tracer shutdown, forked-process re-init, internal
+    # bug). This processor runs on EVERY log call, so a tracer-side failure must
+    # never break the logging chain — bail to the unmodified event_dict instead
+    # of propagating (which would drop the log line or surface as a caller 500).
+    try:
+        ctx = _dd_tracer.get_log_correlation_context()
+    except Exception as exc:  # pragma: no cover - defensive; tracer-side failure
+        if not _dd_tracer_warned:
+            # Direct stderr, NOT structlog (logging here recurses through this
+            # processor). Emit once so a persistent tracer fault is visible.
+            print(
+                f"[structlog] ddtrace log correlation disabled after error: {exc!r}",
+                file=sys.stderr,
+            )
+            _dd_tracer_warned = True
+        # Disable the tracer so the `if _dd_tracer is None` guard above
+        # short-circuits every later call — no repeated raise+catch on the hot
+        # path, and the "disabled" message stays accurate.
+        _dd_tracer = None
+        return event_dict
     # "0" is ddtrace's sentinel for "no active span". Read both keys defensively
     # (.get) and require both present and non-zero: never stamp a log with a
     # trace ID but no span ID (Datadog can't correlate that), and never KeyError
