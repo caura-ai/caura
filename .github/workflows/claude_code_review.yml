@@ -192,7 +192,7 @@ jobs:
       # review script (lets a workflow/script change self-test on its own PR).
       # Secrets are withheld from fork-PR runs and pre-checks gate the rest.
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
@@ -287,7 +287,7 @@ jobs:
       # which doesn't exist in the base repo, so checkout exited 1 (.github#111).
       - name: Checkout base repo (trusted review script)
         if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
