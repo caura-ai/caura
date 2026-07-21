@@ -4,6 +4,11 @@
 # Labels follow .github/labels.yml taxonomy: every PR is `kind/chore` +
 # `dependencies` + the relevant `area/*` so it routes through triage
 # and gets surfaced in release-please's Dependencies section.
+#
+# Minor/patch bumps are grouped per ecosystem into a single PR to avoid a PR
+# flood; majors stay individual so they get a dedicated review — this includes
+# GitHub Actions (a major like actions/checkout v4->v7 gets its own PR).
+# Mirrors the caura-memclaw-enterprise grouping strategy.
 
 version: 2
 
@@ -20,6 +25,9 @@ updates:
       - "area/infra"
     commit-message:
       prefix: "deps"
+    groups:
+      pip-minor-patch:
+        update-types: ["minor", "patch"]
 
   # --- Python (uv): core-api — manages pyproject + the committed uv.lock ---
   # uv (not pip): core-api installs FROZEN from uv.lock, so only the uv ecosystem
@@ -35,6 +43,9 @@ updates:
       - "area/core-api"
     commit-message:
       prefix: "deps(core-api)"
+    groups:
+      uv-minor-patch:
+        update-types: ["minor", "patch"]
 
   # --- Python (uv): core-storage-api — manages pyproject + the committed uv.lock ---
   - package-ecosystem: "uv"
@@ -48,6 +59,9 @@ updates:
       - "area/core-storage-api"
     commit-message:
       prefix: "deps(core-storage-api)"
+    groups:
+      uv-minor-patch:
+        update-types: ["minor", "patch"]
 
   # --- Python (uv): core-worker — manages pyproject + the committed uv.lock ---
   - package-ecosystem: "uv"
@@ -61,6 +75,9 @@ updates:
       - "area/core-worker"
     commit-message:
       prefix: "deps(core-worker)"
+    groups:
+      uv-minor-patch:
+        update-types: ["minor", "patch"]
 
   # --- Python (uv): core-operations — manages pyproject + the committed uv.lock ---
   - package-ecosystem: "uv"
@@ -74,6 +91,9 @@ updates:
       - "area/core-operations"
     commit-message:
       prefix: "deps(core-operations)"
+    groups:
+      uv-minor-patch:
+        update-types: ["minor", "patch"]
 
   # --- npm: root (Playwright e2e) ---
   - package-ecosystem: "npm"
@@ -87,6 +107,9 @@ updates:
       - "area/infra"
     commit-message:
       prefix: "deps"
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
 
   # --- npm: plugin ---
   - package-ecosystem: "npm"
@@ -100,6 +123,9 @@ updates:
       - "area/plugin"
     commit-message:
       prefix: "deps(plugin)"
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
 
   # --- GitHub Actions ---
   - package-ecosystem: "github-actions"
@@ -113,6 +139,10 @@ updates:
       - "area/infra"
     commit-message:
       prefix: "deps(actions)"
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   # --- Docker ---
   - package-ecosystem: "docker"
@@ -126,3 +156,6 @@ updates:
       - "area/infra"
     commit-message:
       prefix: "deps(docker)"
+    groups:
+      docker-minor-patch:
+        update-types: ["minor", "patch"]
