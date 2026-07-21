@@ -39,7 +39,7 @@ dependencies = [
 # core-api dispatches directly to the consumer in the same process).
 pubsub = ["google-cloud-pubsub>=2.23,<3"]
 vertex = ["google-cloud-aiplatform>=1.161.0,<2"]
-local = ["sentence-transformers>=3.0,<4"]
+local = ["sentence-transformers>=5.6.0,<6"]
 # Datadog APM tracer (CAURA-0000). Opt-in: installed only in SaaS builds via
 # --build-arg DD_APM_ENABLED=true (--extra datadog); OSS/on-prem carry no
 # Datadog code. Auto-instruments FastAPI/httpx/pubsub.
