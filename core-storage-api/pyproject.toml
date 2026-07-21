@@ -10,7 +10,7 @@ dependencies = [
     # exact version; this range only bounds future re-locks.
     "fastapi>=0.139.2,<1",
     "uvicorn[standard]>=0.34,<1",
-    "sqlalchemy[asyncio]>=2.0,<3",
+    "sqlalchemy[asyncio]>=2.0.51,<3",
     # SQLAlchemy[asyncio] pulls in greenlet. greenlet 3.5.0 shipped wheels for
     # macOS/Windows ARM only (no Linux x86_64) which broke the Linux runner, but
     # 3.5.1 restored the Linux x86_64 wheels — so the old <3.5.0 cap is lifted to
