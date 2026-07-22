@@ -385,7 +385,7 @@
     "trust_required": 1
   },
   {
-    "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' (default) lists your memories at trust \u2265 1; scope='fleet'/'all' requires trust \u2265 2. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use memclaw_recall.",
+    "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' (default) lists your memories at trust \u2265 1; scope='fleet' reads your OWN fleet at trust \u2265 1, a different fleet at trust \u2265 2; scope='all' (tenant-wide) requires trust \u2265 2. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use memclaw_recall.",
     "error_codes": [],
     "impl_status": "live",
     "name": "memclaw_list",
@@ -400,14 +400,14 @@
       },
       {
         "default": "agent",
-        "description": "agent|fleet|all. 'agent' (default) = your memories only (trust \u2265 1). 'fleet'/'all' = cross-agent (trust \u2265 2).",
+        "description": "agent|fleet|all. 'agent' (default) = your memories only (trust \u2265 1). 'fleet' = cross-agent in a fleet: your OWN fleet is trust \u2265 1, a different fleet trust \u2265 2. 'all' = tenant-wide (trust \u2265 2).",
         "name": "scope",
         "required": false,
         "type": "str"
       },
       {
         "default": null,
-        "description": "Fleet.",
+        "description": "Fleet. When scope='fleet' and omitted, defaults to your home fleet.",
         "name": "fleet_id",
         "required": false,
         "type": "str | None"
@@ -690,7 +690,7 @@
     "trust_required": 0
   },
   {
-    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' (default) counts only memories visible to YOU (trust \u2265 1); scope='fleet'/'all' aggregates across agents (trust \u2265 2). Counts exclude soft-deleted memories by default; set include_deleted=true for additional 'deleted' and 'total_including_deleted' fields. Read-only \u2014 useful for self-introspection and dashboard-style summaries.",
+    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' (default) counts only memories visible to YOU (trust \u2265 1); scope='fleet' aggregates your OWN fleet at trust \u2265 1, a different fleet at trust \u2265 2; scope='all' (tenant-wide) requires trust \u2265 2. Counts exclude soft-deleted memories by default; set include_deleted=true for additional 'deleted' and 'total_including_deleted' fields. Read-only \u2014 useful for self-introspection and dashboard-style summaries.",
     "error_codes": [],
     "impl_status": "live",
     "name": "memclaw_stats",
@@ -698,14 +698,14 @@
     "params": [
       {
         "default": "agent",
-        "description": "agent|fleet|all. 'agent' (default) = your memories only (trust \u2265 1). 'fleet'/'all' = aggregate across agents (trust \u2265 2).",
+        "description": "agent|fleet|all. 'agent' (default) = your memories only (trust \u2265 1). 'fleet' = aggregate cross-agent in a fleet: your OWN fleet trust \u2265 1, a different fleet trust \u2265 2. 'all' = tenant-wide (trust \u2265 2).",
         "name": "scope",
         "required": false,
         "type": "str"
       },
       {
         "default": null,
-        "description": "Filter by fleet.",
+        "description": "Filter by fleet. When scope='fleet' and omitted, defaults to your home fleet.",
         "name": "fleet_id",
         "required": false,
         "type": "str | None"

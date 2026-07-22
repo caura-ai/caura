@@ -1,7 +1,8 @@
 """Unit tests for ``memclaw_list`` — non-semantic memory enumeration.
 
 Covers:
-- Scope-based trust gating: scope='agent' at trust ≥ 1, scope='fleet'/'all' at trust ≥ 2.
+- Scope-based trust gating: scope='agent' at trust ≥ 1; scope='fleet' own-fleet at
+  trust ≥ 1, cross-fleet at trust ≥ 2; scope='all' at trust ≥ 2.
 - scope='agent' forces written_by to the caller's agent_id.
 - Filter / sort / order validation (422).
 - ``include_deleted`` only honored at trust ≥ 3 (silently ignored below).
@@ -13,8 +14,10 @@ Covers:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
+import httpx
 import pytest
 
 from core_api import mcp_server
@@ -59,8 +62,10 @@ async def test_list_scope_agent_allowed_at_trust_1(mcp_env, monkeypatch):
     assert payload["scope"] == "agent"
 
 
-async def test_list_scope_fleet_blocked_at_trust_1(mcp_env, monkeypatch):
-    """scope='fleet' requires trust ≥ 2; trust-1 agent is rejected."""
+async def test_list_scope_fleet_own_allowed_at_trust_1(mcp_env, monkeypatch):
+    """scope='fleet' targeting the caller's OWN fleet is allowed at trust ≥ 1
+    (spec: L1 = read within own fleet). An omitted fleet_id is pinned to the
+    caller's home fleet so the read can't fan out to other fleets' rows."""
 
     async def _trust_1(tenant_id, agent_id, min_level):  # noqa: ARG001
         if min_level > 1:
@@ -72,7 +77,33 @@ async def test_list_scope_fleet_blocked_at_trust_1(mcp_env, monkeypatch):
         return 1, False, None
 
     monkeypatch.setattr(mcp_server, "_require_trust", _trust_1)
+    sc = stub_storage_client(
+        monkeypatch,
+        get_agent={"fleet_id": "RND", "trust_level": 1},
+        list_memories_by_filters=[],
+    )
     out = await mcp_server.memclaw_list(agent_id="alice", scope="fleet")
+    assert "FORBIDDEN" not in as_text(out)
+    # Omitted fleet_id is pinned to the caller's home fleet.
+    payload = sc.list_memories_by_filters.await_args.args[0]
+    assert payload["fleet_id"] == "RND"
+
+
+async def test_list_scope_fleet_cross_blocked_at_trust_1(mcp_env, monkeypatch):
+    """scope='fleet' targeting a DIFFERENT fleet still requires trust ≥ 2."""
+
+    async def _trust_1(tenant_id, agent_id, min_level):  # noqa: ARG001
+        if min_level > 1:
+            return (
+                1,
+                False,
+                f"Error (403): Agent 'alice' (trust_level=1) < required {min_level}.",
+            )
+        return 1, False, None
+
+    monkeypatch.setattr(mcp_server, "_require_trust", _trust_1)
+    stub_storage_client(monkeypatch, get_agent={"fleet_id": "RND", "trust_level": 1})
+    out = await mcp_server.memclaw_list(agent_id="alice", scope="fleet", fleet_id="OTHER")
     assert "FORBIDDEN" in as_text(out)
     assert "trust_level=1" in as_text(out)
 
@@ -92,6 +123,118 @@ async def test_list_scope_all_blocked_at_trust_1(mcp_env, monkeypatch):
     monkeypatch.setattr(mcp_server, "_require_trust", _trust_1)
     out = await mcp_server.memclaw_list(agent_id="alice", scope="all")
     assert "FORBIDDEN" in as_text(out)
+
+
+async def test_resolve_read_fleet_gate_scope_agent_no_lookup(monkeypatch):
+    """scope='agent' returns (1, fleet_id) without any agent lookup."""
+    sc = stub_storage_client(monkeypatch)  # get_agent would blow up if awaited
+    lvl, fleet = await mcp_server._resolve_read_fleet_gate("t", "alice", "agent", None)
+    assert (lvl, fleet) == (1, None)
+    sc.get_agent.assert_not_called()
+
+
+async def test_resolve_read_fleet_gate_scope_all_is_l2_no_lookup(monkeypatch):
+    """scope='all' is always cross-fleet (L2) and needs no lookup."""
+    sc = stub_storage_client(monkeypatch)
+    lvl, fleet = await mcp_server._resolve_read_fleet_gate("t", "alice", "all", None)
+    assert lvl == 2
+    sc.get_agent.assert_not_called()
+
+
+async def test_resolve_read_fleet_gate_own_fleet_pins_and_is_l1(monkeypatch):
+    """scope='fleet' with no fleet_id + constrained caller → L1, pinned to home."""
+    stub_storage_client(monkeypatch, get_agent={"fleet_id": "RND", "trust_level": 1})
+    lvl, fleet = await mcp_server._resolve_read_fleet_gate("t", "alice", "fleet", None)
+    assert (lvl, fleet) == (1, "RND")
+
+
+async def test_resolve_read_fleet_gate_explicit_own_fleet_is_l1(monkeypatch):
+    """scope='fleet' naming the caller's own fleet → L1, unchanged."""
+    stub_storage_client(monkeypatch, get_agent={"fleet_id": "RND", "trust_level": 1})
+    lvl, fleet = await mcp_server._resolve_read_fleet_gate("t", "alice", "fleet", "RND")
+    assert (lvl, fleet) == (1, "RND")
+
+
+async def test_resolve_read_fleet_gate_different_fleet_is_l2(monkeypatch):
+    """scope='fleet' naming a DIFFERENT fleet → L2, fleet_id preserved."""
+    stub_storage_client(monkeypatch, get_agent={"fleet_id": "RND", "trust_level": 1})
+    lvl, fleet = await mcp_server._resolve_read_fleet_gate("t", "alice", "fleet", "OTHER")
+    assert (lvl, fleet) == (2, "OTHER")
+
+
+async def test_resolve_read_fleet_gate_trusted_caller_not_pinned(monkeypatch):
+    """A trust-≥2 caller that omits fleet_id is NOT pinned; the unfiltered
+    cross-fleet fan-out is gated at L2 (not L1) so the enforcement bar matches
+    the access granted and the demotion-race window is closed."""
+    stub_storage_client(monkeypatch, get_agent={"fleet_id": "RND", "trust_level": 2})
+    lvl, fleet = await mcp_server._resolve_read_fleet_gate("t", "alice", "fleet", None)
+    assert (lvl, fleet) == (2, None)
+
+
+async def test_resolve_read_fleet_gate_unknown_agent_soft_passes(monkeypatch):
+    """Unregistered caller (no row) soft-passes at L1 with no pin (matches recall)."""
+    stub_storage_client(monkeypatch, get_agent=None)
+    lvl, fleet = await mcp_server._resolve_read_fleet_gate("t", "ghost", "fleet", None)
+    assert (lvl, fleet) == (1, None)
+
+
+async def test_list_fleet_gate_storage_error_returns_structured_envelope(mcp_env, monkeypatch):
+    """A get_agent failure in the scope='fleet' gate is caught at the call site
+    and surfaced as a structured error, not an unhandled raise."""
+    sc = stub_storage_client(monkeypatch)
+    sc.get_agent = AsyncMock(side_effect=RuntimeError("storage down"))
+    out = await mcp_server.memclaw_list(agent_id="alice", scope="fleet")
+    assert "INTERNAL_ERROR" in as_text(out)
+
+
+async def test_list_fleet_gate_httpx_error_returns_storage_envelope(mcp_env, monkeypatch):
+    """An httpx.HTTPStatusError from the gate maps through _storage_error_envelope."""
+    sc = stub_storage_client(monkeypatch)
+    req = httpx.Request("GET", "http://storage/agents/alice")
+    resp = httpx.Response(503, request=req)
+    sc.get_agent = AsyncMock(
+        side_effect=httpx.HTTPStatusError("unavailable", request=req, response=resp)
+    )
+    out = await mcp_server.memclaw_list(agent_id="alice", scope="fleet")
+    # Structured error envelope (not an unhandled exception).
+    assert "error" in as_text(out).lower()
+
+
+async def test_stats_fleet_gate_storage_error_returns_structured_envelope(mcp_env, monkeypatch):
+    """Same call-site guard for memclaw_stats: gate failures → INTERNAL_ERROR."""
+    sc = stub_storage_client(monkeypatch)
+    sc.get_agent = AsyncMock(side_effect=RuntimeError("storage down"))
+    out = await mcp_server.memclaw_stats(agent_id="alice", scope="fleet")
+    assert "INTERNAL_ERROR" in as_text(out)
+
+
+async def test_stats_fleet_gate_httpx_error_returns_storage_envelope(mcp_env, monkeypatch):
+    """memclaw_stats maps a gate httpx error through _storage_error_envelope too
+    (preserving upstream status), matching memclaw_list — not a flat INTERNAL_ERROR."""
+    sc = stub_storage_client(monkeypatch)
+    req = httpx.Request("GET", "http://storage/agents/alice")
+    resp = httpx.Response(503, request=req)
+    sc.get_agent = AsyncMock(
+        side_effect=httpx.HTTPStatusError("unavailable", request=req, response=resp)
+    )
+    out = await mcp_server.memclaw_stats(agent_id="alice", scope="fleet")
+    assert "error" in as_text(out).lower()
+
+
+async def test_resolve_read_fleet_gate_registered_fleetless_no_fleet_is_l2(monkeypatch):
+    """Registered trust-1 caller with NO home fleet and no fleet_id param can't
+    prove fleet membership → L2 (require_trust then rejects), not an unfiltered
+    L1 scan across all fleets' scope_team rows."""
+    stub_storage_client(monkeypatch, get_agent={"fleet_id": None, "trust_level": 1})
+    lvl, fleet = await mcp_server._resolve_read_fleet_gate("t", "alice", "fleet", None)
+    assert (lvl, fleet) == (2, None)
+
+
+async def test_resolve_read_fleet_gate_unknown_agent_explicit_fleet_is_l2(monkeypatch):
+    """Unregistered caller with explicit fleet_id cannot confirm ownership → L2."""
+    stub_storage_client(monkeypatch, get_agent=None)
+    lvl, fleet = await mcp_server._resolve_read_fleet_gate("t", "ghost", "fleet", "SOME_FLEET")
+    assert (lvl, fleet) == (2, "SOME_FLEET")
 
 
 async def test_list_invalid_scope(mcp_env):

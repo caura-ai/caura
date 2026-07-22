@@ -192,6 +192,9 @@ async def test_memclaw_list_emits_cross_tenant_audit(
             _memory_row_dict("tenant-home"),
             _memory_row_dict("tenant-sibling"),
         ],
+        # scope='fleet' resolves the caller's home fleet via get_agent
+        # (_resolve_read_fleet_gate); None keeps the cross-tenant widening.
+        get_agent=None,
     )
     # Trust gate stubbed so the handler doesn't 403 before reaching the list.
     monkeypatch.setattr(
@@ -232,6 +235,9 @@ async def test_memclaw_stats_emits_cross_tenant_audit(
             "by_status": {"active": 5},
             "by_tenant": {"tenant-home": 3, "tenant-sibling": 2},
         },
+        # scope='fleet' resolves the caller's home fleet via get_agent
+        # (_resolve_read_fleet_gate); None keeps the cross-tenant widening.
+        get_agent=None,
     )
 
     await mcp_server.memclaw_stats(scope="fleet", agent_id="a1")

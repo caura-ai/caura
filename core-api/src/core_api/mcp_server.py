@@ -31,6 +31,7 @@ from core_api.auth import get_admin_key
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.constants import (
     DEFAULT_SEARCH_TOP_K,
+    DEFAULT_TRUST_LEVEL,
     EVOLVE_OUTCOME_TYPES,
     INSIGHTS_FOCUS_MODES,
     MAX_SEARCH_TOP_K,
@@ -2125,15 +2126,100 @@ async def memclaw_doc(
             return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
 
 
+async def _resolve_read_fleet_gate(
+    tenant_id: str,
+    agent_id: str,
+    scope: str,
+    fleet_id: str | None,
+) -> tuple[int, str | None]:
+    """Resolve ``(min_trust, effective_fleet_id)`` for the read-enumeration
+    tools (``memclaw_list`` / ``memclaw_stats``).
+
+    Trust ladder per the product spec: level 1 = read within the caller's OWN
+    fleet; level 2 = cross-fleet read. The requirement therefore keys off the
+    TARGET, not the ``scope`` string alone:
+
+    * ``scope='agent'`` → ``(1, fleet_id)`` — own memories (caller-filtered
+      upstream); no agent lookup needed.
+    * ``scope='all'``   → ``(2, fleet_id)`` — spans fleets by definition, so it
+      is always a cross-fleet read.
+    * ``scope='fleet'`` → the caller's own fleet is level 1; a DIFFERENT
+      explicit ``fleet_id`` is level 2. Mirrors ``enforce_fleet_read`` and the
+      ``memclaw_recall`` gate so all read surfaces agree.
+
+    For ``scope='fleet'`` with no ``fleet_id`` this is a security decision, not
+    a convenience: ``memory_list_by_filters`` / ``memory_stats_breakdown`` only
+    apply the ``fleet_id`` filter when it is set, and their visibility predicate
+    returns ``scope_team`` rows across ALL fleets — so an unfiltered level-1 read
+    would fan out to other fleets' shared rows. A constrained caller (trust < 2)
+    that omits ``fleet_id`` is therefore resolved by three cases:
+
+    (a) has a home fleet          → PIN ``fleet_id`` to it (own-fleet read, L1);
+    (b) registered but fleet-less → force L2 — the caller can't prove membership
+        in any fleet, so ``require_trust`` rejects it (trust 1 < 2) rather than
+        granting an unfiltered scan;
+    (c) unregistered (no row)     → soft-pass at L1 with no pin, matching the
+        read-ergonomics soft-pass in ``require_trust`` / ``memclaw_recall``.
+
+    A trust ≥ 2 caller is never pinned (it is allowed cross-fleet reads). With
+    an explicit fleet it resolves as above; with NO ``fleet_id`` the query would
+    fan out across all fleets, so this returns ``(2, fleet_id)`` — the caller
+    clears L2, while a caller demoted below 2 between this read and the
+    ``_require_trust`` re-read does not.
+    """
+    if scope == "agent":
+        return 1, fleet_id
+    if scope == "all":
+        return 2, fleet_id
+    # scope == "fleet": decide by target fleet vs the caller's home fleet.
+    agent = await get_storage_client().get_agent(agent_id, tenant_id)
+    home_fleet = (agent or {}).get("fleet_id")
+    # trust_level pre-read from the agent storage row (agents.trust_level is the
+    # single source of truth; update_trust_level writes it directly). Used to:
+    #   1. Pick the pin branch (docstring a/b): trust < 2 pins to the home fleet,
+    #      or forces L2 when the caller is fleet-less.
+    #   2. Pick the fan-out branch: trust >= 2 with no fleet_id returns L2, so the
+    #      unfiltered cross-fleet scan is gated at the level it actually needs.
+    # Every branch returns a min_level that MATCHES the access it grants, so a
+    # stale read can only UNDER-grant (a narrower result), never over-grant:
+    # _require_trust re-reads trust and rejects a caller demoted below the
+    # returned bar. get_agent is uncached, keeping even that transient divergence
+    # to a single async context switch (do NOT add caching — it would widen it).
+    trust = (agent or {}).get("trust_level", DEFAULT_TRUST_LEVEL)
+    # A different fleet is cross-fleet (L2). An unregistered / fleet-less caller
+    # (no home_fleet) that names an explicit fleet also can't prove ownership,
+    # so it must clear the L2 gate too — require_trust then rejects an
+    # unregistered id (effective trust 1 < 2) rather than granting an
+    # own-fleet pass for a fleet the caller has no established membership in.
+    if fleet_id and (not home_fleet or fleet_id != home_fleet):
+        return 2, fleet_id  # cross-fleet read → level 2
+    if not fleet_id and trust < 2:
+        if home_fleet:
+            fleet_id = home_fleet  # (a) pin to own fleet → L1
+        elif agent is not None:
+            return 2, fleet_id  # (b) registered fleet-less → L2 (require_trust rejects)
+        # (c) unregistered soft-pass → falls through to (1, None).
+    elif not fleet_id:
+        # trust >= 2, no pin requested — but fleet_id=None means the downstream
+        # query fans out across all fleets (scope_team rows). Return L2 so
+        # _require_trust enforces the correct bar and eliminates the TOCTOU
+        # window: a still-trust-2 caller passes L2; a race-demoted trust-1
+        # caller does not.
+        return 2, fleet_id
+    return 1, fleet_id
+
+
 async def memclaw_list(
     agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
     scope: Annotated[
         str,
         Field(
-            description="agent|fleet|all. 'agent' (default) = your memories only (trust ≥ 1). 'fleet'/'all' = cross-agent (trust ≥ 2)."
+            description="agent|fleet|all. 'agent' (default) = your memories only (trust ≥ 1). 'fleet' = cross-agent in a fleet: your OWN fleet is trust ≥ 1, a different fleet trust ≥ 2. 'all' = tenant-wide (trust ≥ 2)."
         ),
     ] = "agent",
-    fleet_id: Annotated[str | None, Field(description="Fleet.")] = None,
+    fleet_id: Annotated[
+        str | None, Field(description="Fleet. When scope='fleet' and omitted, defaults to your home fleet.")
+    ] = None,
     written_by: Annotated[str | None, Field(description="Author.")] = None,
     memory_type: Annotated[str | None, Field(description="Type.")] = None,
     status: Annotated[str | None, Field(description="Status.")] = None,
@@ -2148,8 +2234,10 @@ async def memclaw_list(
     include_deleted: Annotated[bool, Field(description="Trust-3 only.")] = False,
 ) -> str:
     """Non-semantic memory enumeration: filter, sort, paginate by metadata.
-    scope='agent' (default) requires trust ≥ 1; scope='fleet'/'all' requires
-    trust ≥ 2. Trust 3 unlocks ``include_deleted``."""
+    scope='agent' (default) requires trust ≥ 1. scope='fleet' reads cross-agent
+    within a fleet: the caller's OWN fleet requires trust ≥ 1, a different fleet
+    requires trust ≥ 2. scope='all' (tenant-wide) requires trust ≥ 2. Trust 3
+    unlocks ``include_deleted``."""
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
@@ -2211,8 +2299,20 @@ async def memclaw_list(
             t0,
         )
 
-    # Dynamic trust: scope='agent' requires trust ≥ 1, 'fleet'/'all' requires ≥ 2.
-    min_level = 1 if scope == "agent" else 2
+    # Trust ladder resolves by TARGET (spec: L1 = read within own fleet, L2 =
+    # cross-fleet read): scope='agent' and an own-fleet scope='fleet' read stay
+    # at L1; a different fleet or tenant-wide scope='all' needs L2. Also pins an
+    # omitted fleet_id to the caller's home fleet for constrained callers (see
+    # _resolve_read_fleet_gate) so scope='fleet' can't leak other fleets' rows.
+    # The gate does a storage get_agent (scope='fleet'); catch its failures here
+    # so they surface as a structured envelope rather than an unstructured raise.
+    try:
+        min_level, fleet_id = await _resolve_read_fleet_gate(tenant_id, agent_id, scope, fleet_id)
+    except httpx.HTTPStatusError as e:
+        return _storage_error_envelope(e, t0)
+    except Exception as e:
+        logger.error("MCP list fleet-gate error: %s", e, exc_info=True)
+        return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
 
     # ``_require_trust`` is storage-routed (trust_service → storage client) and
     # ``log_cross_tenant_read`` is fire-and-forget (audit queue → storage); the
@@ -2331,10 +2431,13 @@ async def memclaw_stats(
     scope: Annotated[
         str,
         Field(
-            description="agent|fleet|all. 'agent' (default) = your memories only (trust ≥ 1). 'fleet'/'all' = aggregate across agents (trust ≥ 2)."
+            description="agent|fleet|all. 'agent' (default) = your memories only (trust ≥ 1). 'fleet' = aggregate cross-agent in a fleet: your OWN fleet trust ≥ 1, a different fleet trust ≥ 2. 'all' = tenant-wide (trust ≥ 2)."
         ),
     ] = "agent",
-    fleet_id: Annotated[str | None, Field(description="Filter by fleet.")] = None,
+    fleet_id: Annotated[
+        str | None,
+        Field(description="Filter by fleet. When scope='fleet' and omitted, defaults to your home fleet."),
+    ] = None,
     agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
     memory_type: Annotated[str | None, Field(description="Filter by type.")] = None,
     status: Annotated[str | None, Field(description="Filter by status.")] = None,
@@ -2346,7 +2449,9 @@ async def memclaw_stats(
     ] = False,
 ) -> str:
     """Aggregate counts: total plus breakdowns by type, agent, status.
-    scope='agent' (default) requires trust ≥ 1; scope='fleet'/'all' requires
+    scope='agent' (default) requires trust ≥ 1. scope='fleet' aggregates
+    cross-agent within a fleet: the caller's OWN fleet requires trust ≥ 1, a
+    different fleet requires trust ≥ 2. scope='all' (tenant-wide) requires
     trust ≥ 2. scope='agent' counts only memories visible to the caller (mirrors
     memclaw_list visibility scoping); broader scopes drop the per-caller filter.
     Counts exclude soft-deleted memories by default; pass include_deleted=true
@@ -2380,7 +2485,22 @@ async def memclaw_stats(
     agent_id = _get_agent_id() or agent_id
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
-    min_level = 1 if scope == "agent" else 2
+    # Trust ladder resolves by TARGET (spec: L1 = read within own fleet, L2 =
+    # cross-fleet): own-fleet scope='fleet' aggregates stay at L1; a different
+    # fleet or tenant-wide scope='all' needs L2. Pins an omitted fleet_id to the
+    # caller's home fleet for constrained callers so the aggregate can't span
+    # fleets at L1 (mirrors memclaw_list / memclaw_recall).
+    # The gate does a storage get_agent (scope='fleet'); catch its failures here
+    # so they surface as a structured envelope rather than an unstructured raise.
+    # Mirrors memclaw_list: an httpx error keeps its upstream status/body via
+    # _storage_error_envelope; anything else degrades to INTERNAL_ERROR.
+    try:
+        min_level, fleet_id = await _resolve_read_fleet_gate(tenant_id, agent_id, scope, fleet_id)
+    except httpx.HTTPStatusError as e:
+        return _storage_error_envelope(e, t0)
+    except Exception as e:
+        logger.error("MCP stats fleet-gate error: %s", e, exc_info=True)
+        return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
 
     # ``_require_trust`` is storage-routed; ``compute_memory_stats`` (db-bound
     # GROUPING SETS) becomes the storage client's ``memory_stats_breakdown``

@@ -476,7 +476,16 @@ async def update_trust_level(
     trust_level: int,
     fleet_id: str | None = None,
 ) -> dict:
-    """Update an agent's trust level (and optionally fleet). Returns the updated agent."""
+    """Update an agent's trust level (and optionally fleet). Returns the updated agent.
+
+    Invariant: ``agents.trust_level`` is the SINGLE source of truth for agent
+    trust. There is no separate trust cache/service to keep in sync — this
+    writes the column directly (via ``sc.update_trust_level``) and every gate
+    (``require_trust``) and the fleet-pin decision in
+    ``mcp_server._resolve_read_fleet_gate`` reads that same column live through
+    an uncached ``get_agent``. Do not introduce a second trust store; if one is
+    ever added, this write must become a write-through to keep them consistent.
+    """
     agent = await lookup_agent(tenant_id, agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
