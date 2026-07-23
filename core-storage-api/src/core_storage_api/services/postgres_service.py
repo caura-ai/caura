@@ -1129,8 +1129,8 @@ class PostgresService:
         has_embedding = Memory.embedding.is_not(None).label("has_embedding")
 
         ts_query = func.plainto_tsquery("english", query)
-        raw_fts = func.ts_rank_cd(Memory.search_vector, ts_query)
-        fts_score = (raw_fts / (1.0 + raw_fts)).label("fts_score")
+        raw_keyword_rank = func.ts_rank_cd(Memory.search_vector, ts_query)
+        fts_score = (raw_keyword_rank / (1.0 + raw_keyword_rank)).label("fts_score")
 
         # CAURA-679: NULL-embedding rows fall back to `fts_score` alone
         # rather than the `(1 - w) * 0 + w * fts_score` haircut that
