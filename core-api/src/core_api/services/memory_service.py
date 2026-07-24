@@ -60,6 +60,7 @@ from core_api.constants import (
     GRAPH_MAX_HOPS,
     MAX_CONTENT_LENGTH,
     MEMORY_STATUSES,
+    MEMORY_TYPES,
     MIN_SEARCH_SIMILARITY,
     OPENAI_EMBEDDING_MODEL,
     RECALL_BOOST_CAP,
@@ -1113,6 +1114,16 @@ async def create_memories_bulk(
         for i, item in enumerate(items)
         if item.status is not None and item.status not in MEMORY_STATUSES
     }
+    # memory_type is a plain str on BulkMemoryItem (not the typed MemoryType
+    # enum used on single-write), so an unknown value reaches here instead of
+    # 422-ing the whole batch at the schema. Validate against the same full
+    # vocabulary the enum accepted (MEMORY_TYPES); reserved/deprecated-but-known
+    # types stay valid here and are handled downstream exactly as before.
+    memory_type_errors: dict[int, str] = {
+        i: f"memory_type must be one of: {', '.join(MEMORY_TYPES)}"
+        for i, item in enumerate(items)
+        if item.memory_type is not None and item.memory_type not in MEMORY_TYPES
+    }
 
     # -- Resolve per-tenant config once --
     from core_api.services.organization_settings import resolve_config
@@ -1129,6 +1140,7 @@ async def create_memories_bulk(
         and i not in oversized_content_errors
         and i not in weight_errors
         and i not in status_errors
+        and i not in memory_type_errors
     ]
 
     # -- Deterministic governance gate (eToro). Runs BEFORE embeddings +
@@ -1274,6 +1286,7 @@ async def create_memories_bulk(
         item_errors = [
             errs[i]
             for errs in (
+                memory_type_errors,
                 short_content_errors,
                 oversized_content_errors,
                 weight_errors,

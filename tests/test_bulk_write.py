@@ -151,19 +151,19 @@ class TestBulkSchemaValidation:
         assert item.memory_type == "decision"
         assert item.weight == 0.8
 
-    def test_invalid_memory_type_rejected(self):
-        # memory_type is deliberately still a typed enum on BulkMemoryItem — the
-        # per-item relaxation (content/weight/status) did NOT extend to it, since
-        # making it per-item needs an enum→str change with downstream impact
-        # (tracked as a follow-up). So an invalid value still raises at the schema.
-        with pytest.raises(Exception):
-            BulkMemoryItem(content="test", memory_type="invalid_type")
+    def test_invalid_memory_type_accepted_at_schema(self):
+        """memory_type is now a plain ``str`` on BulkMemoryItem (not the typed
+        MemoryType enum), so an unknown value parses WITHOUT raising and is
+        enforced per-item in create_memories_bulk (207 error row) — matching
+        content/weight/status. (Single-write MemoryCreate keeps the typed enum,
+        so it still rejects at the schema — see test_single_write_* above.)"""
+        item = BulkMemoryItem(content="test", memory_type="invalid_type")
+        assert item.memory_type == "invalid_type"
 
-    # Bad ``status`` and out-of-range ``weight`` are intentionally NOT rejected
-    # at the schema anymore — those constraints moved to per-item 207 errors in
-    # create_memories_bulk. Covered by
-    # test_out_of_range_weight_and_bad_status_accepted_at_schema (above) and, for
-    # the batch behavior, test_bad_weight_and_status_in_mixed_batch_return_207.
+    # Bad memory_type / status / out-of-range weight are intentionally NOT
+    # rejected at the schema anymore — those constraints moved to per-item 207
+    # errors in create_memories_bulk. Covered by the *_accepted_at_schema tests
+    # here and the batch-behavior tests in test_bulk_atomicity.py.
 
 
 # ---------------------------------------------------------------------------

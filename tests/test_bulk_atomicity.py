@@ -274,6 +274,37 @@ async def test_item_failing_multiple_validations_aggregates_errors(client):
     assert "status" in err["error"]
 
 
+async def test_bad_memory_type_in_mixed_batch_returns_207(client):
+    """An unknown memory_type on one item is a per-item 207 error (memory_type is
+    now a plain str on BulkMemoryItem, validated against MEMORY_TYPES in the
+    service) rather than a whole-batch 422. A VALID explicit memory_type still
+    flows through and is written, and valid siblings are unaffected."""
+    tenant_id, headers = get_test_auth()
+    body = {
+        "tenant_id": tenant_id,
+        "agent_id": f"badtype-{uid()}",
+        "items": [
+            {"content": f"valid explicit type {uid()}", "memory_type": "decision"},
+            {"content": f"bad type {uid()}", "memory_type": "not_a_type"},
+            {"content": f"valid default type {uid()}"},
+        ],
+    }
+    resp = await client.post(
+        "/api/v1/memories/bulk",
+        json=body,
+        headers={**headers, "X-Bulk-Attempt-Id": _attempt_id("badtype")},
+    )
+    assert resp.status_code == 207
+    data = resp.json()
+    assert data["created"] == 2
+    assert data["errors"] == 1
+    by_index = {r["index"]: r for r in data["results"]}
+    assert by_index[0]["status"] == "created" and by_index[0]["id"]
+    assert by_index[1]["status"] == "error" and by_index[1]["id"] is None
+    assert "memory_type" in by_index[1]["error"]
+    assert by_index[2]["status"] == "created" and by_index[2]["id"]
+
+
 # ── X-Bulk-Attempt-Id contract ──
 
 
