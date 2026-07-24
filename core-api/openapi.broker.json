@@ -1,0 +1,1101 @@
+{
+  "components": {
+    "schemas": {
+      "BulkItemResult": {
+        "description": "Per-item outcome of a bulk write (CAURA-602).\n\nStatus semantics:\n\n- ``\"created\"``: this attempt newly inserted the row; ``id`` is the\n  new row's id.\n- ``\"duplicate_attempt\"``: same ``X-Bulk-Attempt-Id``+index already\n  committed in a prior call. ``id`` is the canonical row from that\n  first attempt. Returned when a retry hits the per-item unique\n  constraint — what eliminates the silent-create class.\n- ``\"duplicate_content\"``: a different attempt's row with the same\n  ``content_hash`` already exists. ``id`` and ``duplicate_of`` both\n  point at the existing row; emitted in place of an insert.\n- ``\"error\"``: the row could not be processed (validation,\n  enrichment timeout, missing storage id). ``error`` describes.\n\nThe legacy ``\"duplicate\"`` status is gone — callers must read\n``duplicate_attempt`` vs ``duplicate_content`` because they imply\ndifferent client-side actions (an idempotent retry succeeded vs\n\"you already wrote this content earlier\").",
+        "properties": {
+          "client_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Request Id"
+          },
+          "duplicate_of": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duplicate Of"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "created",
+              "duplicate_attempt",
+              "duplicate_content",
+              "error"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "status"
+        ],
+        "title": "BulkItemResult",
+        "type": "object"
+      },
+      "BulkMemoryCreate": {
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id"
+          },
+          "fleet_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fleet Id"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BulkMemoryItem"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          },
+          "tenant_id": {
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "visibility": {
+            "anyOf": [
+              {
+                "pattern": "^(scope_agent|scope_team|scope_org)$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visibility"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "items"
+        ],
+        "title": "BulkMemoryCreate",
+        "type": "object"
+      },
+      "BulkMemoryItem": {
+        "description": "Single item in a bulk write request. tenant_id/fleet_id/agent_id inherited from parent.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "entity_links": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/EntityLinkIn"
+            },
+            "title": "Entity Links",
+            "type": "array"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "memory_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Memory type. Auto-classified by LLM if omitted. Valid values: fact, episode, decision, preference, task, intention, plan, commitment, action, cancellation.",
+            "title": "Memory Type"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          },
+          "object_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Value"
+          },
+          "predicate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Predicate"
+          },
+          "reference_datetime": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Datetime"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "source_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Uri"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "subject_entity_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Entity Id"
+          },
+          "ts_valid_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ts Valid End"
+          },
+          "ts_valid_start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ts Valid Start"
+          },
+          "weight": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "BulkMemoryItem",
+        "type": "object"
+      },
+      "BulkMemoryResponse": {
+        "description": "Aggregate response from the bulk-write endpoint.\n\n``duplicates`` rolls up both ``duplicate_attempt`` and\n``duplicate_content`` for top-level metric continuity; per-item\ndetail lives in ``results``. The route returns 200 when everything\nsucceeded and 207 Multi-Status when at least one item is in error —\ncallers must read per-item ``status`` and never infer success from\na 2xx alone.",
+        "properties": {
+          "bulk_ms": {
+            "title": "Bulk Ms",
+            "type": "integer"
+          },
+          "created": {
+            "title": "Created",
+            "type": "integer"
+          },
+          "duplicates": {
+            "title": "Duplicates",
+            "type": "integer"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/BulkItemResult"
+            },
+            "title": "Results",
+            "type": "array"
+          }
+        },
+        "required": [
+          "created",
+          "duplicates",
+          "errors",
+          "results",
+          "bulk_ms"
+        ],
+        "title": "BulkMemoryResponse",
+        "type": "object"
+      },
+      "ContradictionInfo": {
+        "description": "Summary of a contradiction detected on write.\n\n``old_memory_id`` always refers to the **pre-existing candidate**\n(never to ``new_memory``), regardless of which row ended up being\nthe older one in the supersession chain. The ``direction`` field\ndisambiguates the two cases:\n\n  - ``\"canonical\"`` — the candidate is older than ``new_memory``;\n    the candidate became outdated/conflicted, ``new_memory``\n    carries ``supersedes_id`` pointing at it. (Historical behaviour.)\n  - ``\"flipped\"`` — the candidate is newer than ``new_memory``;\n    ``new_memory`` is the row that became outdated/conflicted, and\n    the candidate now carries ``supersedes_id`` pointing back at\n    ``new_memory``. This branch was previously unreachable\n    (CAURA-125; gap A6) and is now exercised by deferred-embedding\n    races and ``created_at`` ties.",
+        "properties": {
+          "direction": {
+            "default": "canonical",
+            "enum": [
+              "canonical",
+              "flipped"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "old_content_preview": {
+            "title": "Old Content Preview",
+            "type": "string"
+          },
+          "old_memory_id": {
+            "format": "uuid",
+            "title": "Old Memory Id",
+            "type": "string"
+          },
+          "old_status": {
+            "title": "Old Status",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "old_memory_id",
+          "old_status",
+          "reason",
+          "old_content_preview"
+        ],
+        "title": "ContradictionInfo",
+        "type": "object"
+      },
+      "EntityLinkIn": {
+        "properties": {
+          "entity_id": {
+            "format": "uuid",
+            "title": "Entity Id",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity_id",
+          "role"
+        ],
+        "title": "EntityLinkIn",
+        "type": "object"
+      },
+      "EntityLinkOut": {
+        "properties": {
+          "entity_id": {
+            "format": "uuid",
+            "title": "Entity Id",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity_id",
+          "role"
+        ],
+        "title": "EntityLinkOut",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "MemoryOut": {
+        "properties": {
+          "agent_display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Display Name"
+          },
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "entity_links": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/EntityLinkOut"
+            },
+            "title": "Entity Links",
+            "type": "array"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "fleet_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fleet Id"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_recalled_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Recalled At"
+          },
+          "memory_type": {
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          },
+          "object_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Value"
+          },
+          "predicate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Predicate"
+          },
+          "recall_count": {
+            "default": 0,
+            "title": "Recall Count",
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "similarity": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Similarity"
+          },
+          "source_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Uri"
+          },
+          "status": {
+            "default": "active",
+            "title": "Status",
+            "type": "string"
+          },
+          "subject_entity_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Entity Id"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ContradictionInfo"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By"
+          },
+          "supersedes_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Id"
+          },
+          "tenant_id": {
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "ts_valid_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ts Valid End"
+          },
+          "ts_valid_start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ts Valid Start"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "visibility": {
+            "default": "scope_team",
+            "title": "Visibility",
+            "type": "string"
+          },
+          "weight": {
+            "title": "Weight",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "tenant_id",
+          "agent_id",
+          "memory_type",
+          "content",
+          "weight",
+          "source_uri",
+          "run_id",
+          "metadata",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "MemoryOut",
+        "type": "object"
+      },
+      "MemoryType": {
+        "description": "Typed enum for the memory-type vocabulary.\n\nInheriting from ``str`` keeps full backward compatibility with the\nstring-based call sites: ``MemoryType.FACT == \"fact\"`` is True,\ndict lookup with the enum hashes the same as the literal, JSON\nserialisation emits the bare string, and SQLAlchemy reads of a\n``Text`` column coerce cleanly via Pydantic.",
+        "enum": [
+          "fact",
+          "episode",
+          "decision",
+          "preference",
+          "task",
+          "semantic",
+          "intention",
+          "plan",
+          "commitment",
+          "action",
+          "outcome",
+          "cancellation",
+          "rule",
+          "insight"
+        ],
+        "title": "MemoryType",
+        "type": "string"
+      },
+      "SearchRequest": {
+        "properties": {
+          "diagnostic": {
+            "default": false,
+            "title": "Diagnostic",
+            "type": "boolean"
+          },
+          "filter_agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filter Agent Id"
+          },
+          "fleet_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fleet Ids"
+          },
+          "memory_type_filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MemoryType"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Filter results to a single memory type. Valid values: fact, episode, decision, preference, task, semantic, intention, plan, commitment, action, outcome, cancellation, rule, insight."
+          },
+          "query": {
+            "maxLength": 5000,
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          },
+          "status_filter": {
+            "anyOf": [
+              {
+                "pattern": "^(active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted)$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Filter"
+          },
+          "tenant_id": {
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "top_k": {
+            "default": 5,
+            "description": "Maximum results to return (1-20, default 5).",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Top K",
+            "type": "integer"
+          },
+          "valid_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid At"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "query"
+        ],
+        "title": "SearchRequest",
+        "type": "object"
+      },
+      "SearchResponse": {
+        "description": "Envelope for search results — matches PaginatedMemoryResponse shape.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryOut"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "SearchResponse",
+        "type": "object"
+      },
+      "UsageSummary": {
+        "properties": {
+          "memories_limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memories Limit"
+          },
+          "memories_stored": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memories Stored"
+          },
+          "writes_remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Writes Remaining"
+          }
+        },
+        "title": "UsageSummary",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "APIKeyHeader": {
+        "in": "header",
+        "name": "X-API-Key",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "title": "MemClaw core-api broker contract",
+    "version": "v1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/health": {
+      "get": {
+        "description": "Liveness + readiness probe.\n\nReturns 503 when any required dependency is unavailable so deploy\ngates and Cloud Run health checks can fail-fast on status code alone.\nRequired deps:\n  - storage (core-storage-api): always\n  - redis:                      only when ``settings.redis_url`` is set\n                                (empty url = in-memory fallback, OSS default)\n  - event_bus:                  ``InProcessEventBus`` always reports ok;\n                                ``PubSubEventBus`` reports ``unhealthy``\n                                when a pull loop has halted on a permanent\n                                subscription / IAM error.\n\nNon-critical issues (platform provider init errors) flip status to\n``\"degraded\"`` but keep a 200 — the app can still serve requests.",
+        "operationId": "health_api_v1_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health",
+        "tags": [
+          "System"
+        ]
+      }
+    },
+    "/api/v1/memories/bulk": {
+      "post": {
+        "description": "Write up to 100 memories with per-attempt idempotency (CAURA-602).\n\nRequired header ``X-Bulk-Attempt-Id`` identifies the *attempt*. A\nretry of the same logical batch reuses the same value; storage's\nper-item unique constraint then converts each row into either\n``created`` or ``duplicate_attempt`` deterministically. The route\nreturns:\n\n- ``200`` when every item resolved as ``created``,\n  ``duplicate_attempt``, or ``duplicate_content``.\n- ``207 Multi-Status`` when at least one item has ``status=\"error\"``\n  (validation, enrichment timeout, missing storage id) AND at least\n  one item succeeded — partial outcomes are explicit, never inferred\n  from a 5xx with side effects.\n- ``200`` when every item is an error too — the request was processed\n  successfully; per-item ``status`` carries the rejection. We\n  deliberately don't reuse 422 here because FastAPI already emits\n  422 for request-body Pydantic validation, and clients that branch\n  on status code alone shouldn't have to disambiguate \"request was\n  malformed\" from \"request parsed and every item was rejected on\n  merit.\"\n- ``504`` when the bulk-only budget burns before storage commits;\n  the response carries no per-item state, so a retry with the same\n  attempt id is the recovery path.\n\nThe pre-existing ``Idempotency-Key`` header still controls\n*response*-level replay; ``X-Bulk-Attempt-Id`` is a separate\ncontract operating one layer down. Both are honoured: the header\ncache short-circuits when the receipt is final, the per-row\nconstraint resolves the slow path when the receipt is missing or\npending.",
+        "operationId": "write_memories_bulk_api_v1_memories_bulk_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Bulk-Attempt-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Bulk-Attempt-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkMemoryCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkMemoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "207": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkMemoryResponse"
+                }
+              }
+            },
+            "description": "Multi-Status"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Write Memories Bulk",
+        "tags": [
+          "Memory"
+        ]
+      }
+    },
+    "/api/v1/search": {
+      "post": {
+        "operationId": "search_api_v1_search_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Search",
+        "tags": [
+          "Memory"
+        ]
+      }
+    },
+    "/api/v1/version": {
+      "get": {
+        "operationId": "version_api_v1_version_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Version",
+        "tags": [
+          "System"
+        ]
+      }
+    }
+  }
+}

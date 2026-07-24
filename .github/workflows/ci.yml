@@ -73,6 +73,51 @@ jobs:
           uv pip install -e core-storage-api/[dev] -e core-api/[dev]
           echo "$VIRTUAL_ENV/bin" >> $GITHUB_PATH
 
+      # --- Broker↔cloud API-versioning gate (Gate C / Phase 1, deliverables A+B) ---
+      # core-api/openapi.broker.json is the FROZEN v1 contract for the four
+      # broker-facing gateway endpoints (POST /api/v1/memories/bulk,
+      # POST /api/v1/search, GET /api/v1/health, GET /api/v1/version) that
+      # memclawd calls against Caura cloud. It is a subset of the full ~91-path
+      # OpenAPI surface, with info normalized to the frozen contract version so
+      # it changes ONLY when a broker endpoint's shape changes. Regenerate with
+      # `python core-api/scripts/gen_broker_openapi.py` and commit the result;
+      # breaking changes require a deliberate contract bump per the RFC
+      # (see core-api/scripts/README.md).
+      - name: Broker OpenAPI baseline is current (freeze v1)
+        # Regenerates the broker-contract subset from the live app and fails if
+        # the committed baseline is stale vs the code on this branch.
+        run: uv run python core-api/scripts/gen_broker_openapi.py --check
+        env:
+          # core_api is installed editable above; `.` puts the repo root on the
+          # path for the `common` package (mirrors the test/migration steps).
+          PYTHONPATH: core-api/src:core-storage-api/src:.
+
+      - name: Broker OpenAPI has no breaking change vs main
+        # oasdiff compares main's committed baseline (base) against this branch's
+        # baseline (revision) and fails on any BREAKING change (removed path or
+        # param, new required request field, narrowed type, ...). oasdiff is
+        # pinned to the tufin/oasdiff Docker image by tag; `--fail-on ERR` is
+        # required for a non-zero exit on breaking changes. On the very first
+        # merge main has no baseline yet — the gate detects that and skips.
+        run: |
+          set -euo pipefail
+          # caura-memclaw is public, so anonymous fetch works even though
+          # actions/checkout ran with persist-credentials: false.
+          git fetch --no-tags --depth=1 origin main
+          if git cat-file -e origin/main:core-api/openapi.broker.json 2>/dev/null; then
+            work="$RUNNER_TEMP/oasdiff"
+            mkdir -p "$work"
+            git show origin/main:core-api/openapi.broker.json > "$work/base.json"
+            cp core-api/openapi.broker.json "$work/revision.json"
+            # Pinned by digest (not just the mutable :v1.26.0 tag) so a retagged
+            # image can't silently exit 0 and hollow out the gate.
+            docker run --rm -v "$work:/specs:ro" \
+              tufin/oasdiff:v1.26.0@sha256:95a3f551ebecb6fd0fed3ff0f078bba3d51b66b379c4ca811370652d7e4d0cef \
+              breaking /specs/base.json /specs/revision.json --fail-on ERR
+          else
+            echo "No broker baseline on main yet (first-merge bootstrap) — skipping breaking-change gate."
+          fi
+
       - name: Run Ruff linter (core-api)
         run: uv run ruff check core-api/src/
 
