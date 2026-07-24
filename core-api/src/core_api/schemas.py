@@ -69,8 +69,22 @@ class BulkMemoryItem(BaseModel):
     """Single item in a bulk write request. tenant_id/fleet_id/agent_id inherited from parent."""
 
     memory_type: MemoryType | None = Field(default=None, description=MEMORY_TYPES_WRITE_DESCRIPTION)
-    content: str = Field(min_length=1, max_length=MAX_CONTENT_LENGTH)
-    weight: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Additive-tolerance policy (broker↔cloud API-versioning RFC): a bulk write
+    # must NOT 422 the whole batch because one item has a bad field — the valid
+    # items must still be written. So schema-level constraints that would reject
+    # the ENTIRE request are deliberately dropped here (unlike single-write
+    # ``MemoryCreate`` / ``MemoryUpdate``, which keep them) and re-enforced PER
+    # ITEM in ``create_memories_bulk`` as a ``status="error"`` 207 row:
+    #   - content length → short_content_errors
+    #     (``< CRYSTALLIZER_SHORT_CONTENT_CHARS`` = 10, subsumes the old
+    #     ``min_length=1``) + oversized_content_errors (``> MAX_CONTENT_LENGTH``).
+    #   - weight range [0.0, 1.0] → weight_errors.
+    #   - status enum → status_errors.
+    # ``memory_type`` still uses its typed enum below (an invalid value 422s the
+    # whole batch); making it per-item needs an enum→str change with downstream
+    # impact, tracked as a follow-up.
+    content: str
+    weight: float | None = Field(default=None)
     source_uri: str | None = None
     run_id: str | None = None
     metadata: dict | None = None
@@ -82,7 +96,7 @@ class BulkMemoryItem(BaseModel):
     ts_valid_start: datetime | None = None
     ts_valid_end: datetime | None = None
     reference_datetime: datetime | None = None
-    status: str | None = Field(default=None, pattern=MEMORY_STATUSES_PATTERN)
+    status: str | None = Field(default=None)  # validated per-item (status_errors); see note above
 
 
 class BulkMemoryCreate(BaseModel):

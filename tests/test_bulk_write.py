@@ -16,12 +16,18 @@ from uuid import uuid4
 
 import pytest
 
-from core_api.constants import BULK_MAX_ITEMS, DEFAULT_MEMORY_WEIGHT, VECTOR_DIM
+from core_api.constants import (
+    BULK_MAX_ITEMS,
+    DEFAULT_MEMORY_WEIGHT,
+    MAX_CONTENT_LENGTH,
+    VECTOR_DIM,
+)
 from core_api.schemas import (
     BulkItemResult,
     BulkMemoryCreate,
     BulkMemoryItem,
     BulkMemoryResponse,
+    MemoryCreate,
 )
 from common.embedding import fake_embedding
 
@@ -81,10 +87,46 @@ class TestBulkSchemaValidation:
         req = _make_bulk_request(1)
         assert len(req.items) == 1
 
-    def test_item_content_validation(self):
-        """Empty content should be rejected."""
+    def test_empty_content_accepted_at_schema(self):
+        """Empty bulk-item content must parse WITHOUT raising: ``min_length``
+        was removed from ``BulkMemoryItem.content`` (alongside ``max_length``)
+        so an empty item no longer 422s the whole batch. Empty/whitespace/short
+        content is enforced per-item in ``create_memories_bulk`` via the
+        short-content check (< ``CRYSTALLIZER_SHORT_CONTENT_CHARS`` = 10, which
+        subsumes empty), surfaced as a 207 per-item error — consistent with the
+        oversized path below."""
+        item = BulkMemoryItem(content="")
+        assert item.content == ""
+
+    def test_oversized_content_accepted_at_schema(self):
+        """Oversized bulk-item content must parse WITHOUT raising: the
+        ``max_length`` constraint was removed from ``BulkMemoryItem.content``
+        so one oversized item no longer 422s the whole batch. The
+        ``MAX_CONTENT_LENGTH`` cap is enforced per-item in
+        ``create_memories_bulk`` (surfaced as a 207 per-item error), not at
+        the schema layer."""
+        item = BulkMemoryItem(content="x" * (MAX_CONTENT_LENGTH + 1))
+        assert len(item.content) == MAX_CONTENT_LENGTH + 1
+
+    def test_single_write_schema_still_caps_content(self):
+        """Scope guard: the per-item relaxation is bulk-only. ``MemoryCreate``
+        (single-write) must still reject oversized content at the schema
+        layer — this fix must not have touched it."""
         with pytest.raises(Exception):
-            BulkMemoryItem(content="")
+            MemoryCreate(
+                tenant_id="t",
+                agent_id="a",
+                content="x" * (MAX_CONTENT_LENGTH + 1),
+            )
+
+    def test_out_of_range_weight_and_bad_status_accepted_at_schema(self):
+        """weight (ge/le) and status (pattern) Field constraints were removed
+        from ``BulkMemoryItem`` so a single bad value no longer 422s the batch;
+        they are enforced per-item in ``create_memories_bulk`` (207 error rows).
+        The schema must therefore parse them without raising."""
+        item = BulkMemoryItem(content="ok", weight=1.5, status="nonsense")
+        assert item.weight == 1.5
+        assert item.status == "nonsense"
 
     def test_item_inherits_no_tenant(self):
         """BulkMemoryItem should not have tenant_id field."""
@@ -110,16 +152,18 @@ class TestBulkSchemaValidation:
         assert item.weight == 0.8
 
     def test_invalid_memory_type_rejected(self):
+        # memory_type is deliberately still a typed enum on BulkMemoryItem — the
+        # per-item relaxation (content/weight/status) did NOT extend to it, since
+        # making it per-item needs an enum→str change with downstream impact
+        # (tracked as a follow-up). So an invalid value still raises at the schema.
         with pytest.raises(Exception):
             BulkMemoryItem(content="test", memory_type="invalid_type")
 
-    def test_invalid_status_rejected(self):
-        with pytest.raises(Exception):
-            BulkMemoryItem(content="test", status="invalid_status")
-
-    def test_weight_out_of_range_rejected(self):
-        with pytest.raises(Exception):
-            BulkMemoryItem(content="test", weight=1.5)
+    # Bad ``status`` and out-of-range ``weight`` are intentionally NOT rejected
+    # at the schema anymore — those constraints moved to per-item 207 errors in
+    # create_memories_bulk. Covered by
+    # test_out_of_range_weight_and_bad_status_accepted_at_schema (above) and, for
+    # the batch behavior, test_bad_weight_and_status_in_mixed_batch_return_207.
 
 
 # ---------------------------------------------------------------------------

@@ -58,6 +58,8 @@ from core_api.constants import (
     GRAPH_HOP_BOOST,
     GRAPH_MAX_BOOSTED_MEMORIES,
     GRAPH_MAX_HOPS,
+    MAX_CONTENT_LENGTH,
+    MEMORY_STATUSES,
     MIN_SEARCH_SIMILARITY,
     OPENAI_EMBEDDING_MODEL,
     RECALL_BOOST_CAP,
@@ -1083,15 +1085,51 @@ async def create_memories_bulk(
         if len(item.content.strip()) < CRYSTALLIZER_SHORT_CONTENT_CHARS
     }
 
+    # -- Per-item validation. Oversized content (over ``MAX_CONTENT_LENGTH``)
+    # used to 422 the whole batch via ``BulkMemoryItem.content``'s schema
+    # ``max_length``; that constraint was removed (see schemas.py) so a single
+    # oversized item no longer rejects its valid siblings. Enforce the cap here
+    # as a per-item "error" instead — additive-tolerant, matching the
+    # short-content path exactly. Length is measured on the raw string (not
+    # ``.strip()``d), preserving the old schema-``max_length`` semantics.
+    oversized_content_errors: dict[int, str] = {
+        i: f"content exceeds maximum length of {MAX_CONTENT_LENGTH} characters"
+        for i, item in enumerate(items)
+        if i not in short_content_errors and len(item.content) > MAX_CONTENT_LENGTH
+    }
+
+    # weight out of [0.0, 1.0] and unknown status used to 422 the whole batch via
+    # BulkMemoryItem's schema Field constraints (ge/le, pattern); those were
+    # removed (see schemas.py) so one bad field no longer rejects valid siblings.
+    # Enforce per-item here, preserving the old bounds exactly. (memory_type is
+    # still a typed enum on the schema — a follow-up.)
+    weight_errors: dict[int, str] = {
+        i: "weight must be between 0.0 and 1.0"
+        for i, item in enumerate(items)
+        if item.weight is not None and not (0.0 <= item.weight <= 1.0)
+    }
+    status_errors: dict[int, str] = {
+        i: f"status must be one of: {', '.join(sorted(MEMORY_STATUSES))}"
+        for i, item in enumerate(items)
+        if item.status is not None and item.status not in MEMORY_STATUSES
+    }
+
     # -- Resolve per-tenant config once --
     from core_api.services.organization_settings import resolve_config
 
     tenant_config = await resolve_config(data.tenant_id)
 
     # -- Batch embeddings + parallel enrichment (valid items only). Short
-    # items are skipped so we don't spend provider budget on content
-    # that will surface as an error anyway.
-    valid_indices = [i for i in range(n) if i not in short_content_errors]
+    # and oversized items are skipped so we don't spend provider budget on
+    # content that will surface as an error anyway.
+    valid_indices = [
+        i
+        for i in range(n)
+        if i not in short_content_errors
+        and i not in oversized_content_errors
+        and i not in weight_errors
+        and i not in status_errors
+    ]
 
     # -- Deterministic governance gate (eToro). Runs BEFORE embeddings +
     # content-hash so masked content flows through dedup + storage, and dropped
@@ -1227,14 +1265,28 @@ async def create_memories_bulk(
         # request body — same body + same attempt id ⇒ same per-item id.
         item_request_id = f"{bulk_attempt_id}:{i}"
 
-        # Short-content items surface as per-item errors; never embedded,
-        # enriched, deduped, or written.
-        if i in short_content_errors:
+        # Input-validation errors surface as per-item error rows (never embedded,
+        # enriched, deduped, or written — they're excluded from valid_indices):
+        # content length (short/oversized), weight range, status enum. These were
+        # all whole-batch 422s at the schema before the additive-tolerance work.
+        # ALL applicable messages for the item are aggregated into one row so a
+        # caller sees every problem at once rather than one per round-trip.
+        item_errors = [
+            errs[i]
+            for errs in (
+                short_content_errors,
+                oversized_content_errors,
+                weight_errors,
+                status_errors,
+            )
+            if i in errs
+        ]
+        if item_errors:
             results[i] = BulkItemResult(
                 index=i,
                 client_request_id=item_request_id,
                 status="error",
-                error=short_content_errors[i],
+                error="; ".join(item_errors),
             )
             error_count += 1
             continue

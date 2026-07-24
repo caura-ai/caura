@@ -23,6 +23,7 @@ import time
 
 import pytest
 
+from core_api.constants import MAX_CONTENT_LENGTH
 from tests.conftest import get_test_auth, uid
 
 pytestmark = pytest.mark.asyncio
@@ -93,6 +94,184 @@ async def test_all_short_content_batch_returns_200(client):
     assert data["errors"] == 3
     assert data["duplicates"] == 0
     assert all(r["status"] == "error" for r in data["results"])
+
+
+async def test_oversized_content_in_mixed_batch_returns_207(client):
+    """One item whose ``content`` exceeds ``MAX_CONTENT_LENGTH`` must NOT
+    422 the whole batch (the pre-fix behaviour, caused by the schema-level
+    ``max_length`` on ``BulkMemoryItem.content``). Instead the valid items
+    are written and the oversized item surfaces as a per-item
+    ``status="error"`` — same additive-tolerant contract as short-content.
+    """
+    tenant_id, headers = get_test_auth()
+    oversized = "x" * (MAX_CONTENT_LENGTH + 1)
+    body = {
+        "tenant_id": tenant_id,
+        "agent_id": f"oversized-{uid()}",
+        "items": [
+            {"content": f"well-formed content one {uid()}"},
+            {"content": oversized},  # over MAX_CONTENT_LENGTH
+            {"content": f"well-formed content two {uid()}"},
+        ],
+    }
+    resp = await client.post(
+        "/api/v1/memories/bulk",
+        json=body,
+        headers={**headers, "X-Bulk-Attempt-Id": _attempt_id("oversized")},
+    )
+    # 207 Multi-Status: two created + one error — NOT a whole-batch 422.
+    assert resp.status_code == 207
+    data = resp.json()
+    assert data["created"] == 2
+    assert data["errors"] == 1
+    assert data["duplicates"] == 0
+
+    by_index = {r["index"]: r for r in data["results"]}
+    assert by_index[0]["status"] == "created"
+    assert by_index[0]["id"]
+    assert by_index[1]["status"] == "error"
+    assert "exceeds" in by_index[1]["error"]
+    assert str(MAX_CONTENT_LENGTH) in by_index[1]["error"]
+    # The oversized item was never written — no id on the error row.
+    assert by_index[1]["id"] is None
+    assert by_index[2]["status"] == "created"
+    assert by_index[2]["id"]
+    # Server-derived per-item attempt id is present on every row.
+    for r in data["results"]:
+        assert r["client_request_id"]
+        assert r["client_request_id"].endswith(f":{r['index']}")
+
+
+async def test_all_valid_batch_returns_200(client):
+    """An all-valid batch (including an item at exactly ``MAX_CONTENT_LENGTH``,
+    the boundary) still returns 200 with every item ``created`` — the fix
+    doesn't perturb the happy path."""
+    tenant_id, headers = get_test_auth()
+    # Exactly MAX_CONTENT_LENGTH chars: (MAX-9) filler + "-" + 8-char uid.
+    at_cap = ("y" * (MAX_CONTENT_LENGTH - 9)) + f"-{uid()}"
+    assert len(at_cap) == MAX_CONTENT_LENGTH
+    body = {
+        "tenant_id": tenant_id,
+        "agent_id": f"all-valid-{uid()}",
+        "items": [
+            {"content": f"valid alpha {uid()}"},
+            {"content": at_cap},
+            {"content": f"valid gamma {uid()}"},
+        ],
+    }
+    resp = await client.post(
+        "/api/v1/memories/bulk",
+        json=body,
+        headers={**headers, "X-Bulk-Attempt-Id": _attempt_id("all-valid")},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["created"] == 3
+    assert data["errors"] == 0
+    assert data["duplicates"] == 0
+    assert all(r["status"] == "created" and r["id"] for r in data["results"])
+
+
+async def test_empty_content_in_mixed_batch_returns_207(client):
+    """An empty-content item must NOT 422 the whole batch either. Dropping the
+    schema-level ``min_length=1`` from ``BulkMemoryItem.content`` lets an empty
+    item reach the per-item short-content check (``< CRYSTALLIZER_SHORT_CONTENT_CHARS``
+    = 10, which subsumes empty), so it surfaces as a per-item ``status="error"``
+    while valid siblings are written — the same additive-tolerant contract as
+    oversized content, closing the empty-vs-oversized asymmetry."""
+    tenant_id, headers = get_test_auth()
+    body = {
+        "tenant_id": tenant_id,
+        "agent_id": f"empty-{uid()}",
+        "items": [
+            {"content": f"well-formed content one {uid()}"},
+            {"content": ""},  # empty — previously 422'd the entire batch
+            {"content": f"well-formed content two {uid()}"},
+        ],
+    }
+    resp = await client.post(
+        "/api/v1/memories/bulk",
+        json=body,
+        headers={**headers, "X-Bulk-Attempt-Id": _attempt_id("empty")},
+    )
+    # 207 Multi-Status: two created + one error — NOT a whole-batch 422.
+    assert resp.status_code == 207
+    data = resp.json()
+    assert data["created"] == 2
+    assert data["errors"] == 1
+    assert data["duplicates"] == 0
+
+    by_index = {r["index"]: r for r in data["results"]}
+    assert by_index[0]["status"] == "created" and by_index[0]["id"]
+    assert by_index[1]["status"] == "error"
+    # The empty item was never written — no id on the error row.
+    assert by_index[1]["id"] is None
+    assert by_index[2]["status"] == "created" and by_index[2]["id"]
+
+
+async def test_bad_weight_and_status_in_mixed_batch_return_207(client):
+    """Out-of-range ``weight`` and an unknown ``status`` must each surface as a
+    per-item error, not a whole-batch 422: those schema-level ``Field``
+    constraints (``ge``/``le``, ``pattern``) were moved to per-item checks in
+    ``create_memories_bulk`` for additive-tolerance, like content. Valid
+    siblings are still written. (``memory_type`` is deferred — still a typed
+    enum on the schema.)"""
+    tenant_id, headers = get_test_auth()
+    body = {
+        "tenant_id": tenant_id,
+        "agent_id": f"badfields-{uid()}",
+        "items": [
+            {"content": f"valid one {uid()}"},
+            {"content": f"bad weight {uid()}", "weight": 1.5},  # > 1.0
+            {"content": f"bad status {uid()}", "status": "nonsense"},  # not a lifecycle status
+            {"content": f"valid two {uid()}"},
+        ],
+    }
+    resp = await client.post(
+        "/api/v1/memories/bulk",
+        json=body,
+        headers={**headers, "X-Bulk-Attempt-Id": _attempt_id("badfields")},
+    )
+    assert resp.status_code == 207
+    data = resp.json()
+    assert data["created"] == 2
+    assert data["errors"] == 2
+    by_index = {r["index"]: r for r in data["results"]}
+    assert by_index[0]["status"] == "created" and by_index[0]["id"]
+    assert by_index[1]["status"] == "error" and by_index[1]["id"] is None
+    assert "weight" in by_index[1]["error"]
+    assert by_index[2]["status"] == "error" and by_index[2]["id"] is None
+    assert "status" in by_index[2]["error"]
+    assert by_index[3]["status"] == "created" and by_index[3]["id"]
+
+
+async def test_item_failing_multiple_validations_aggregates_errors(client):
+    """An item violating several constraints at once surfaces ONE per-item error
+    row listing all of them (not just the first), so a caller can fix everything
+    in a single round-trip rather than discovering problems one at a time."""
+    tenant_id, headers = get_test_auth()
+    body = {
+        "tenant_id": tenant_id,
+        "agent_id": f"multi-{uid()}",
+        "items": [
+            {"content": f"valid {uid()}"},
+            {"content": f"both bad {uid()}", "weight": 1.5, "status": "nonsense"},
+        ],
+    }
+    resp = await client.post(
+        "/api/v1/memories/bulk",
+        json=body,
+        headers={**headers, "X-Bulk-Attempt-Id": _attempt_id("multi")},
+    )
+    assert resp.status_code == 207
+    data = resp.json()
+    assert data["created"] == 1
+    assert data["errors"] == 1
+    err = {r["index"]: r for r in data["results"]}[1]
+    assert err["status"] == "error" and err["id"] is None
+    # Both problems reported in the single aggregated message.
+    assert "weight" in err["error"]
+    assert "status" in err["error"]
 
 
 # ── X-Bulk-Attempt-Id contract ──
