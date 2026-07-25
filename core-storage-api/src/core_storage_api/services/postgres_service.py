@@ -1107,6 +1107,9 @@ class PostgresService:
         # semantic relevance (``similarity``) at this size so boost-demoted-but-strong
         # matches survive the LIMIT into ranking/rerank. Arrives via search_params.
         _candidate_pool_size = int(sp.get("candidate_pool_size", 0) or 0)
+        # A50 unified: which ranking formula computes `score`. 0 = legacy multiplicative
+        # boost stack; 1 = unified relevance-dominant additive formula (see below).
+        _score_formula = int(sp.get("score_formula", 0) or 0)
 
         # -- Scoring expressions --
         # CAURA-594: pgvector's `<=>` is strict — NULL in → NULL out. A
@@ -1291,6 +1294,8 @@ class PostgresService:
         else:
             currency_factor = literal_column("1.0").label("currency_factor")
 
+        # Entity/graph boost — always defined (1.0 when no boosted ids) so both
+        # scoring formulas below can reference it uniformly.
         if boosted_memory_ids and memory_boost_factor:
             boost_tiers: dict[float, list[UUID]] = {}
             for mid, factor in memory_boost_factor.items():
@@ -1299,20 +1304,39 @@ class PostgresService:
                 (Memory.id.in_(mids), factor) for factor, mids in sorted(boost_tiers.items(), reverse=True)
             ]
             entity_boost = case(*whens, else_=1.0).label("entity_boost")
+        else:
+            entity_boost = literal_column("1.0").label("entity_boost")
+
+        if _score_formula == 1:
+            # -- A50 UNIFIED formula: relevance-dominant, bounded additive, query-gated --
+            # score = similarity (dominant) + small ADDITIVE, GATED nudges, then x status.
+            # A nudge can reorder within a relevance band but never override a real
+            # relevance gap. Drops the 0.15·weight floor (A46) and popularity
+            # recall_boost (A41). Weights are small so |Σ nudges| stays well below the
+            # similarity spread; tune via the offline calibration harness before default-on.
+            # Freshness is GATED to temporal queries (temporal_window set) — an always-on
+            # recency term is what hurt non-temporal recall in the legacy stack.
+            _V2_W_FRESH = 0.10  # recency nudge (gated to temporal queries)
+            _V2_W_DATE = 0.10  # date-window nudge (date_range_boost is 1.0 off-query -> term 0)
+            _V2_W_ENTITY = 0.10  # entity/graph nudge (entity_boost is 1.0 when absent -> term 0)
+            _V2_W_STALE = 0.20  # staleness penalty (currency_factor is 1.0 when current -> term 0)
+            _recency_gate = 1.0 if temporal_window is not None else 0.0
+            score = (
+                (
+                    similarity
+                    + _V2_W_FRESH * _recency_gate * (freshness - _freshness_floor)
+                    + _V2_W_DATE * (date_range_boost - 1.0)
+                    + _V2_W_ENTITY * (entity_boost - 1.0)
+                    - _V2_W_STALE * (1.0 - currency_factor)
+                )
+                * status_penalty
+            ).label("score")
+        else:
+            # -- LEGACY formula: multiplicative boost stack (unchanged) --
             score = (
                 base_score
                 * freshness
                 * entity_boost
-                * recall_boost_expr
-                * temporal_boost
-                * date_range_boost
-                * currency_factor
-                * status_penalty
-            ).label("score")
-        else:
-            score = (
-                base_score
-                * freshness
                 * recall_boost_expr
                 * temporal_boost
                 * date_range_boost

@@ -182,6 +182,15 @@ MIN_SEARCH_SIMILARITY = 0.3
 # A/B validates it. Offline ceiling (LongMemEval): pool=50 recovers 95% of the gold
 # production dropped from top-20; >70 adds nothing. See benchmark/a49_ceiling_check.py.
 CANDIDATE_POOL_SIZE = 0
+# Ranking formula selector (A50 unified). 0 = LEGACY multiplicative boost stack
+# (score = base_score x freshness x recall x temporal x date x currency x status --
+# current behaviour). 1 = UNIFIED relevance-dominant formula: score = similarity plus
+# BOUNDED, query-gated ADDITIVE nudges (freshness gated to temporal queries, date/entity
+# gated to their triggers), minus a staleness penalty, times status_penalty; drops the
+# 0.15·weight floor (A46) and popularity recall_boost (A41). Off by default; flip per
+# tenant via default_search_profile.score_formula to A/B old vs new on the benchmark.
+# Rationale + offline calibration: docs/ranking/unified-ranking-formula.md.
+SCORE_FORMULA = 0
 FRESHNESS_DECAY_DAYS = 90
 FRESHNESS_FLOOR = 0.7
 ENTITY_BOOST_FACTOR = 1.3

@@ -880,6 +880,81 @@ class TestMemories:
         assert r_zero.status_code == 200, r_zero.text
         assert [r["id"] for r in r_zero.json()] == off_ids, "pool_size=0 must equal default behaviour"
 
+    async def test_scored_search_unified_formula(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """A50 unified: score_formula=1 makes `score` relevance-dominant, so a
+        boost-inflated low-similarity row no longer outranks a strong match.
+
+        H: similarity 0.70, weight 0.0, no boosts.
+        L: similarity 0.35, weight 1.0, ts_valid_start inside the queried date range
+           (legacy date_range_boost 2x pushes its multiplicative score above H).
+        Legacy (0): boosted L outranks H. Unified (1): H (0.70) > L (0.35 + 0.10·date) = 0.45.
+        """
+        import math
+
+        seed = f"a50u_{_uid()}"
+        q = fake_embedding(seed + "_q")
+
+        def _unit(v: list[float]) -> list[float]:
+            n = math.sqrt(sum(x * x for x in v)) or 1.0
+            return [x / n for x in v]
+
+        def _emb_cos(target: float, rseed: str) -> list[float]:
+            r = fake_embedding(rseed)
+            dot = sum(a * b for a, b in zip(r, q, strict=False))
+            r_orth = _unit([ri - dot * qi for ri, qi in zip(r, q, strict=False)])
+            a, b = target, math.sqrt(max(0.0, 1.0 - target * target))
+            return _unit([a * qi + b * ri for qi, ri in zip(q, r_orth, strict=False)])
+
+        ph = _memory_payload(tenant_id, fleet_id, content=f"H {seed}")
+        ph["embedding"] = _emb_cos(0.70, seed + "_h")
+        ph["weight"] = 0.0
+        h_id = (await client.post(f"{PREFIX}/memories", json=ph)).json()["id"]
+
+        pl = _memory_payload(tenant_id, fleet_id, content=f"L {seed}")
+        pl["embedding"] = _emb_cos(0.35, seed + "_l")
+        pl["weight"] = 1.0
+        pl["ts_valid_start"] = "2020-01-15T00:00:00+00:00"
+        l_id = (await client.post(f"{PREFIX}/memories", json=pl)).json()["id"]
+
+        base = {
+            "tenant_id": tenant_id,
+            "embedding": q,
+            "query": seed,
+            "fleet_ids": [fleet_id],
+            "date_range_start": "2020-01-01",
+            "date_range_end": "2020-01-31",
+            "top_k": 10,
+            "search_params": {
+                "fts_weight": 0.0,
+                "freshness_floor": 0.7,
+                "freshness_decay_days": 90.0,
+                "recall_boost_cap": 1.1,
+                "recall_decay_window_days": 14.0,
+                "similarity_blend": 0.85,
+            },
+        }
+
+        legacy = {**base, "search_params": {**base["search_params"], "score_formula": 0}}
+        legacy_ids = [
+            r["id"] for r in (await client.post(f"{PREFIX}/memories/scored-search", json=legacy)).json()
+        ]
+        assert legacy_ids.index(l_id) < legacy_ids.index(h_id), (
+            f"legacy formula should rank boosted L above H; got {legacy_ids}"
+        )
+
+        unified = {**base, "search_params": {**base["search_params"], "score_formula": 1}}
+        unified_ids = [
+            r["id"] for r in (await client.post(f"{PREFIX}/memories/scored-search", json=unified)).json()
+        ]
+        assert unified_ids.index(h_id) < unified_ids.index(l_id), (
+            f"unified formula should rank high-similarity H above L; got {unified_ids}"
+        )
+
     async def test_public_counters_exclude_soft_deleted(
         self,
         client: AsyncClient,
