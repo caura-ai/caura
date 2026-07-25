@@ -167,8 +167,12 @@ _REPORT_SCHEMA_INSTRUCTION = """Respond with ONLY a JSON object of this exact sh
   "open_questions":      [{"summary": "...", "ts": "ISO8601 or null"}],
   "preferences_learned": [{"summary": "...", "ts": "ISO8601 or null"}]
 }
-Rules: every item must be standalone and concrete (names, paths, numbers). Take ts values from the
-event timestamps you actually used — never invent times. Do not restate the same fact in two sections.
+Rules: every item must be standalone and concrete. Preserve exact figures VERBATIM — metrics,
+benchmark scores, thresholds, counts, durations, version numbers, and file/table/branch names —
+never round or generalize them (write "recall@10 0.87 vs 0.83, index -33%", not "better recall").
+Keep each decision whole: capture its conditions, sequencing, and alternatives ("migrate to X after
+the Y fix ships; keep Z as fallback"), not just the headline choice. Take ts values from the event
+timestamps you actually used — never invent times. Do not restate the same fact in two sections.
 Skip routine/mechanical steps; report only what a teammate would need to know."""
 
 

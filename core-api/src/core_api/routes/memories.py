@@ -200,7 +200,15 @@ async def list_memories(
     ),
     order: str = Query(default="desc", pattern=r"^(asc|desc)$"),
     offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT),
+    limit: int = Query(
+        default=DEFAULT_LIST_LIMIT,
+        ge=1,
+        le=MAX_LIST_LIMIT,
+        description=(
+            f"Items per page, 1-{MAX_LIST_LIMIT}. A value above {MAX_LIST_LIMIT} is rejected "
+            "with 422 (not silently clamped); page via `cursor`/`offset` for more."
+        ),
+    ),
     include_deleted: bool = Query(default=False),
     auth: AuthContext = Depends(get_auth_context),
 ):
@@ -1848,7 +1856,15 @@ async def admin_list_memories(
     ),
     order: str = Query(default="desc", pattern=r"^(asc|desc)$"),
     offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT),
+    limit: int = Query(
+        default=DEFAULT_LIST_LIMIT,
+        ge=1,
+        le=MAX_LIST_LIMIT,
+        description=(
+            f"Items per page, 1-{MAX_LIST_LIMIT}. A value above {MAX_LIST_LIMIT} is rejected "
+            "with 422 (not silently clamped); page via `cursor`/`offset` for more."
+        ),
+    ),
     include_deleted: bool = Query(default=False),
     auth: AuthContext = Depends(get_auth_context),
 ):

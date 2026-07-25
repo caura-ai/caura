@@ -257,6 +257,33 @@ def test_attempt_id_is_deterministic_and_valid():
     assert re.match(r"^[A-Za-z0-9._:\-]{1,128}$", a)
 
 
+def test_build_prompt_demands_verbatim_figures_and_whole_decisions():
+    """Staging quality eval (Gemini flash-lite) showed the model dropped
+    exact numbers and flattened compound/conditional decisions; the prompt
+    must instruct otherwise."""
+    prompt = interview_service.build_prompt(
+        [
+            {
+                "seq": 0,
+                "ts": "2026-07-23T09:00:00Z",
+                "session_id": "s",
+                "role": "assistant",
+                "kind": "reply",
+                "content": "recall@10 0.87 vs 0.83; migrate after the chunking fix, keep 3-small as fallback",
+            }
+        ],
+        agent_id="a1",
+        keystone_lines=[],
+        chunk_index=0,
+        chunk_count=1,
+    )
+    low = prompt.lower()
+    # preserve exact figures verbatim
+    assert "verbatim" in low and "version numbers" in low
+    # keep compound/conditional decisions whole
+    assert "keep each decision whole" in low and "fallback" in low
+
+
 def test_mask_events_masks_pii_before_llm():
     events = [
         {"seq": 0, "content": "email me at ran@caura.ai, card 4111 1111 1111 1111"}
