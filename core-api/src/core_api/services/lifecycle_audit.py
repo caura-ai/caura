@@ -85,7 +85,15 @@ class _CoreApiLifecycleAdapter:
         config = await resolve_config(org_id)
         if not config.auto_crystallize_enabled:
             return 0
-        active = await self._storage.count_active(org_id, fleet_id)
+        # Explicit ``status="active"``: this gate gets the literal active count,
+        # NOT the wider live set (active/confirmed/pending) that ``count_active``
+        # returns by default since #626. #626 fixed a read-path under-count, but
+        # this call site is a *spend* gate — widening it would silently open
+        # auto-crystallization (LLM work) for orgs that sit under the threshold
+        # on active rows alone. Keep the two decisions decoupled; revisit the
+        # threshold deliberately if the live set is the better measure of "big
+        # enough corpus to be worth crystallizing".
+        active = await self._storage.count_active(org_id, fleet_id, status="active")
         if active <= _CRYSTALLIZE_MIN_ACTIVE_MEMORIES:
             return 0
         # Lazy import: the crystallizer service has heavy transitive
