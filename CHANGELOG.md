@@ -6,6 +6,63 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.24.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.23.0...backend-v2.24.0) (2026-07-26)
+
+
+### Features
+
+* **agent-digest:** stop over-filtering agents — floor, episode-fallback, subagent rollup ([#624](https://github.com/caura-ai/caura-memclaw/issues/624)) ([1df326f](https://github.com/caura-ai/caura-memclaw/commit/1df326f47fc6c05e76d474c03c8d4b20be4760ac))
+* **client:** memclaw-interviewer --harness cursor — Cursor adapter (Interviewer Phase 3) ([#612](https://github.com/caura-ai/caura-memclaw/issues/612)) ([efe2ff1](https://github.com/caura-ai/caura-memclaw/commit/efe2ff1504956a5ea89b1e9aa9df27c2703f3b55))
+* **search:** unified relevance-dominant ranking formula behind score_formula flag ([#622](https://github.com/caura-ai/caura-memclaw/issues/622)) ([c721c6d](https://github.com/caura-ai/caura-memclaw/commit/c721c6d1fef76fad1330da5b127ec76cf23ea9ca))
+* **skills-inbox:** scan findings on the card + truncated page flag (Phase B backend) ([#587](https://github.com/caura-ai/caura-memclaw/issues/587)) ([dce9e59](https://github.com/caura-ai/caura-memclaw/commit/dce9e5922119ea7d6ebdd0812ee5cc88b9f944ac))
+
+
+### Bug Fixes
+
+* **common:** guard ddtrace call in the structlog processor ([#615](https://github.com/caura-ai/caura-memclaw/issues/615)) ([cad8287](https://github.com/caura-ai/caura-memclaw/commit/cad8287ea842d50a1d7911e07f477b984bd5e9f5))
+* **core-api:** bulk unknown memory_type → per-item 207 (stacked on [#619](https://github.com/caura-ai/caura-memclaw/issues/619)) ([#621](https://github.com/caura-ai/caura-memclaw/issues/621)) ([5d80392](https://github.com/caura-ai/caura-memclaw/commit/5d80392d2b914a7eda3c546466d0c90d9d693eff))
+* **interviewer:** preserve exact figures in synthesis + document list-limit cap ([#623](https://github.com/caura-ai/caura-memclaw/issues/623)) ([ebc4bbb](https://github.com/caura-ai/caura-memclaw/commit/ebc4bbb2ea00d2cd8a8c33d1e08564fa116ff0d4))
+* **logging:** correlate structlog output with Datadog APM traces ([#614](https://github.com/caura-ai/caura-memclaw/issues/614)) ([dbd0742](https://github.com/caura-ai/caura-memclaw/commit/dbd074282bb90e11d6c1a7ca771582ee4cc9c57b))
+* **mcp:** allow own-fleet list/stats reads at trust 1 ([#617](https://github.com/caura-ai/caura-memclaw/issues/617)) ([1a6fe9f](https://github.com/caura-ai/caura-memclaw/commit/1a6fe9fbf37acee03ef26074dc6f24910ad570da))
+
+
+### Dependencies
+
+* **actions:** bump actions/checkout from 4 to 7 ([#435](https://github.com/caura-ai/caura-memclaw/issues/435)) ([63cb824](https://github.com/caura-ai/caura-memclaw/commit/63cb8248f7662f431bf0a3ff2515c8c211e96c0d))
+* **actions:** bump actions/stale from 9.1.0 to 10.4.0 ([#593](https://github.com/caura-ai/caura-memclaw/issues/593)) ([db1f8cb](https://github.com/caura-ai/caura-memclaw/commit/db1f8cb2a1ae40614b066aebcc7f19ac55335b82))
+* **actions:** bump the actions group with 8 updates ([#591](https://github.com/caura-ai/caura-memclaw/issues/591)) ([39b8d09](https://github.com/caura-ai/caura-memclaw/commit/39b8d090481a7221d2f9a77e4f8439066fc2de02))
+* bump @playwright/test from 1.59.0 to 1.61.1 ([#499](https://github.com/caura-ai/caura-memclaw/issues/499)) ([a6ddf1f](https://github.com/caura-ai/caura-memclaw/commit/a6ddf1f7ac9137f88a3cb198982ea3eec18fe78b))
+* **core-api:** bump the uv-minor-patch group in /core-api with 16 updates ([#605](https://github.com/caura-ai/caura-memclaw/issues/605)) ([dde9cac](https://github.com/caura-ai/caura-memclaw/commit/dde9cac57aa26eec49fd95410a5bedcf0ffef435))
+* **core-api:** update redis[hiredis] requirement from &lt;9,&gt;=5.0 to &gt;=8.0.1,&lt;9 in /core-api ([#609](https://github.com/caura-ai/caura-memclaw/issues/609)) ([5e16fb9](https://github.com/caura-ai/caura-memclaw/commit/5e16fb9920694401227faf95f1da1235ce9aa11f))
+* **core-api:** update sentry-sdk[fastapi] requirement from &lt;3,&gt;=2.0 to &gt;=2.66.0,&lt;3 in /core-api ([#608](https://github.com/caura-ai/caura-memclaw/issues/608)) ([3739f62](https://github.com/caura-ai/caura-memclaw/commit/3739f620e5cffda57674a4fe510a441fe16462a4))
+* **core-api:** update setuptools requirement from &gt;=75 to &gt;=83.0.0 in /core-api ([#607](https://github.com/caura-ai/caura-memclaw/issues/607)) ([a55e120](https://github.com/caura-ai/caura-memclaw/commit/a55e120b6f36345e12e2e753d027c6a27c12a034))
+* **core-api:** update uvicorn[standard] requirement from &lt;1,&gt;=0.34 to &gt;=0.51.0,&lt;1 in /core-api ([#606](https://github.com/caura-ai/caura-memclaw/issues/606)) ([fa4b8b8](https://github.com/caura-ai/caura-memclaw/commit/fa4b8b80373b2ca3716d687a2496074d35942330))
+* **core-operations:** bump the uv-minor-patch group in /core-operations with 6 updates ([#595](https://github.com/caura-ai/caura-memclaw/issues/595)) ([2d40ecf](https://github.com/caura-ai/caura-memclaw/commit/2d40ecfb74f5fe5b72e81df431d5eb36e606bcee))
+* **core-operations:** update setuptools requirement from &gt;=75 to &gt;=83.0.0 in /core-operations ([#597](https://github.com/caura-ai/caura-memclaw/issues/597)) ([60ffa11](https://github.com/caura-ai/caura-memclaw/commit/60ffa11eea8f53f9f3c22628465766249bd89284))
+* **core-operations:** update uvicorn[standard] requirement from &lt;1,&gt;=0.34 to &gt;=0.51.0,&lt;1 in /core-operations ([#596](https://github.com/caura-ai/caura-memclaw/issues/596)) ([197d25a](https://github.com/caura-ai/caura-memclaw/commit/197d25a93734ec6e942f953a1bc1a08821018bf3))
+* **core-storage-api:** bump the uv-minor-patch group in /core-storage-api with 10 updates ([#598](https://github.com/caura-ai/caura-memclaw/issues/598)) ([ef60419](https://github.com/caura-ai/caura-memclaw/commit/ef6041921542c11d77acc4eee172f839342ced5a))
+* **core-storage-api:** update setuptools requirement from &gt;=75 to &gt;=83.0.0 in /core-storage-api ([#602](https://github.com/caura-ai/caura-memclaw/issues/602)) ([c6a35d0](https://github.com/caura-ai/caura-memclaw/commit/c6a35d0a4c7ee09eb491108779e975a156b183e3))
+* **core-storage-api:** update sqlalchemy[asyncio] requirement from &lt;3,&gt;=2.0 to &gt;=2.0.51,&lt;3 in /core-storage-api ([#453](https://github.com/caura-ai/caura-memclaw/issues/453)) ([1b87d82](https://github.com/caura-ai/caura-memclaw/commit/1b87d82acf6a1c2c4303a8c8b61575ce3500766a))
+* **core-storage-api:** update uvicorn[standard] requirement from &lt;1,&gt;=0.34 to &gt;=0.51.0,&lt;1 in /core-storage-api ([#600](https://github.com/caura-ai/caura-memclaw/issues/600)) ([25c2eb8](https://github.com/caura-ai/caura-memclaw/commit/25c2eb83a8101f1f7e4400c9717d665031da635c))
+* **core-worker:** bump sentence-transformers from 3.4.1 to 5.6.0 in /core-worker ([#601](https://github.com/caura-ai/caura-memclaw/issues/601)) ([b4c7df2](https://github.com/caura-ai/caura-memclaw/commit/b4c7df2a2e8c1cedf04f8bd4641e4d428c0fa3eb))
+* **core-worker:** bump setuptools from 81.0.0 to 83.0.0 in /core-worker ([#604](https://github.com/caura-ai/caura-memclaw/issues/604)) ([afb07b1](https://github.com/caura-ai/caura-memclaw/commit/afb07b10247355148490389adb1c43a708302e5e))
+* **core-worker:** bump the uv-minor-patch group in /core-worker with 8 updates ([#599](https://github.com/caura-ai/caura-memclaw/issues/599)) ([e4c1fbe](https://github.com/caura-ai/caura-memclaw/commit/e4c1fbecb3ca74aa3336523fe39cc2d63be7bf50))
+* **core-worker:** update uvicorn[standard] requirement from &lt;1,&gt;=0.34 to &gt;=0.51.0,&lt;1 in /core-worker ([#603](https://github.com/caura-ai/caura-memclaw/issues/603)) ([7b89597](https://github.com/caura-ai/caura-memclaw/commit/7b895977bfc06d2da10d9192d8763654967d3c70))
+* group Dependabot minor/patch bumps per ecosystem ([#588](https://github.com/caura-ai/caura-memclaw/issues/588)) ([49ccc11](https://github.com/caura-ai/caura-memclaw/commit/49ccc1170cfd06c576d4eea04e8e5f8868a699c8))
+* **plugin:** bump @types/node from 25.4.0 to 26.1.1 in /plugin ([#546](https://github.com/caura-ai/caura-memclaw/issues/546)) ([caa2659](https://github.com/caura-ai/caura-memclaw/commit/caa26595153ffb24e2cadcfeca7572c0d45bb1e3))
+* **plugin:** upgrade TypeScript to 7 (supersedes [#547](https://github.com/caura-ai/caura-memclaw/issues/547)) ([#611](https://github.com/caura-ai/caura-memclaw/issues/611)) ([081551e](https://github.com/caura-ai/caura-memclaw/commit/081551e91846221b0ba3582f3ef255a5b1e25647))
+* update argon2-cffi requirement from &gt;=23.1 to &gt;=25.1.0 ([#443](https://github.com/caura-ai/caura-memclaw/issues/443)) ([309b785](https://github.com/caura-ai/caura-memclaw/commit/309b785a841dd9b756b0e2bfda349e58499ce2ba))
+* update cachetools requirement from &gt;=5.3 to &gt;=7.1.4 ([#440](https://github.com/caura-ai/caura-memclaw/issues/440)) ([516b81f](https://github.com/caura-ai/caura-memclaw/commit/516b81fda15a01f6f828ce82063e1da0e3eb3670))
+* update google-genai requirement from &gt;=0.3 to &gt;=2.12.1 ([#590](https://github.com/caura-ai/caura-memclaw/issues/590)) ([e274048](https://github.com/caura-ai/caura-memclaw/commit/e27404832de97900d0db4ed9d3cdb830f0c1777e))
+* update mcp requirement from &lt;2,&gt;=1.26 to &gt;=1.28.1,&lt;2 ([#592](https://github.com/caura-ai/caura-memclaw/issues/592)) ([8963d0b](https://github.com/caura-ai/caura-memclaw/commit/8963d0bebcd51565cd3251992c4c8a237edd1e67))
+* update sentry-sdk requirement from &lt;3,&gt;=2.0 to &gt;=2.66.0,&lt;3 ([#594](https://github.com/caura-ai/caura-memclaw/issues/594)) ([cc4d6be](https://github.com/caura-ai/caura-memclaw/commit/cc4d6be6c0a15e2a5a796a84796904be9896a360))
+
+
+### Documentation
+
+* OSS-side fixes from the 2026-07-26 product-coordination audit ([#625](https://github.com/caura-ai/caura-memclaw/issues/625)) ([71debfd](https://github.com/caura-ai/caura-memclaw/commit/71debfd8fb6db2b36e46322c987a8e57aef63597))
+* **readme:** document the Interviewer feature ([#613](https://github.com/caura-ai/caura-memclaw/issues/613)) ([62c21e7](https://github.com/caura-ai/caura-memclaw/commit/62c21e7c9fd09efc07789c2cd6910a80dfd362a4))
+
 ## [2.23.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.22.0...backend-v2.23.0) (2026-07-20)
 
 

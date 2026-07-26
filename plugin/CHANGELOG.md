@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.15.2](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.15.1...plugin-v2.15.2) (2026-07-26)
+
+
+### Bug Fixes
+
+* **mcp:** allow own-fleet list/stats reads at trust 1 ([#617](https://github.com/caura-ai/caura-memclaw/issues/617)) ([1a6fe9f](https://github.com/caura-ai/caura-memclaw/commit/1a6fe9fbf37acee03ef26074dc6f24910ad570da))
+
+
+### Dependencies
+
+* **plugin:** bump @types/node from 25.4.0 to 26.1.1 in /plugin ([#546](https://github.com/caura-ai/caura-memclaw/issues/546)) ([caa2659](https://github.com/caura-ai/caura-memclaw/commit/caa26595153ffb24e2cadcfeca7572c0d45bb1e3))
+* **plugin:** upgrade TypeScript to 7 (supersedes [#547](https://github.com/caura-ai/caura-memclaw/issues/547)) ([#611](https://github.com/caura-ai/caura-memclaw/issues/611)) ([081551e](https://github.com/caura-ai/caura-memclaw/commit/081551e91846221b0ba3582f3ef255a5b1e25647))
+
+
+### Documentation
+
+* OSS-side fixes from the 2026-07-26 product-coordination audit ([#625](https://github.com/caura-ai/caura-memclaw/issues/625)) ([71debfd](https://github.com/caura-ai/caura-memclaw/commit/71debfd8fb6db2b36e46322c987a8e57aef63597))
+
 ## [2.15.1](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.15.0...plugin-v2.15.1) (2026-07-20)
 
 
