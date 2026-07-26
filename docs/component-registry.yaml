@@ -1,0 +1,81 @@
+# Component registry — the checked-in inventory of shipped moving parts.
+#
+# Purpose: convert "shipped component absent from docs" drift into a test
+# failure. tests/test_component_registry.py asserts that every
+# ``scheduler.register(...)`` call in core-operations/src/core_operations/app.py
+# has an entry under ``cron_ticks`` below, and vice versa. When you add,
+# rename, or remove a cron tick, update this file in the same PR.
+#
+# Format note: the drift test parses the ``cron_ticks`` section with a
+# line-based regex (no YAML library dependency) — keep each tick as a
+# ``- name: <tick>`` list item directly under ``cron_ticks:``.
+
+services:
+  - name: core-api
+    purpose: REST + MCP surface; inline mode (deployment_mode=inline, the OSS default) runs embedding/enrichment in-process
+    path: core-api/
+  - name: core-storage-api
+    purpose: storage service — SQL + vector search over Postgres/pgvector
+    path: core-storage-api/
+  - name: core-operations
+    purpose: cron/scheduled background jobs host (no business HTTP surface, /healthz only)
+    path: core-operations/
+  - name: core-worker
+    purpose: event consumers for managed/deferred-mode deployments (deployment_mode=deferred); not part of the shipped OSS compose stack
+    path: core-worker/
+
+# Every entry corresponds 1:1 to a scheduler.register(...) call in
+# core-operations/src/core_operations/app.py (enforced by
+# tests/test_component_registry.py).
+cron_ticks:
+  - name: lifecycle-archive-expired
+    cadence: daily (configurable UTC hour, default 02:00)
+    module: core_operations.app
+  - name: lifecycle-archive-stale
+    cadence: daily (configurable UTC hour, default 02:00)
+    module: core_operations.app
+  - name: lifecycle-purge-soft-deleted
+    cadence: daily (configurable UTC hour, default 02:00)
+    module: core_operations.app
+  - name: lifecycle-crystallize
+    cadence: daily (configurable UTC hour, default 02:00)
+    module: core_operations.app
+  - name: lifecycle-entity-link
+    cadence: daily (configurable UTC hour, default 02:00)
+    module: core_operations.app
+  - name: lifecycle-insights
+    cadence: daily (configurable UTC hour, default 02:00)
+    module: core_operations.app
+  - name: agent-digest
+    cadence: daily (configurable UTC hour)
+    module: core_operations.app
+  - name: agent-digest-weekly
+    cadence: weekly (configurable UTC weekday + hour)
+    module: core_operations.app
+  - name: interviewer-schedule
+    cadence: hourly (top of UTC hour)
+    module: core_operations.app
+
+# The str-enum families in common/events/topics.py. Topic strings follow
+# ``memclaw.<domain>.<verb>``.
+event_topic_families:
+  - name: Memory
+    topics: 5   # created, embed-requested, embedded, enrich-requested, enriched
+  - name: Audit
+    topics: 1   # event-recorded
+  - name: Pipeline
+    topics: 2   # entity-extract-requested, entity-extracted
+  - name: Org
+    topics: 2   # suppression-changed, settings-changed
+  - name: Lifecycle
+    topics: 7   # archive-expired/-stale/purge/crystallize/entity-link/insights/forge-distill (all -requested)
+
+# Components that are NOT driven by core-operations' scheduler and need an
+# operator-provided external schedule.
+external_schedulers:
+  - name: forge-distill
+    requirement: >
+      Forge distillation is fanned out by an external scheduler (Cloud
+      Scheduler / k8s CronJob / cron) hitting
+      POST /admin/lifecycle/fanout/forge-distill — it is intentionally NOT
+      one of the core-operations cron ticks. See docs/operator-forge-cron.md.
