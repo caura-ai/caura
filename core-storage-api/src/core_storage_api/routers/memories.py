@@ -784,17 +784,22 @@ async def get_lifecycle_candidates(tenant_id: str) -> dict:
 
 @router.get("/count")
 async def count_memories(
-    tenant_id: str,
+    tenant_id: str | None = None,
     fleet_id: str | None = None,
     status: str | None = None,
 ) -> dict:
     """Count live memories for a tenant. ``status`` narrows to one exact status.
 
-    An empty ``tenant_id`` (``?tenant_id=`` — an omitted param is a 422, since
-    the annotation is non-optional) falls through to the whole-corpus counter,
-    which takes no filters: ``fleet_id`` and ``status`` do NOT apply there. That
-    branch predates this endpoint's filters; it stays as-is rather than growing
-    a second filtered code path.
+    Omitting ``tenant_id`` (or passing it empty) returns the whole-corpus
+    counter, which takes no filters: ``fleet_id`` and ``status`` do NOT apply
+    on that path. It stays filterless rather than growing a second filtered
+    code path.
+
+    The annotation is optional so both forms reach that branch. It used to be
+    a bare ``str``, i.e. required, so only the empty-string form worked and an
+    omitted param 422'd — even though ``core-api``'s public-stats caller
+    (``routes/stats.py``, ``count_all(tenant_id="")``) and the whole-corpus
+    branch were both written for "no tenant".
     """
     if not tenant_id:
         count = await _svc.memory_count_all()

@@ -34,30 +34,40 @@ _schema_ready = False
 
 @pytest.fixture(scope="session")
 async def _ensure_schema():
-    """Create extensions + tables for the test database once per session."""
+    """Provision the test database once per session, the way the app does.
+
+    Runs the Alembic migrations via ``init_database()`` — the same call the
+    FastAPI lifespan hook makes — rather than ``Base.metadata.create_all``
+    over a hand-maintained model import list.
+
+    ``create_all`` diverged from the real schema in two directions that both
+    produced failures unrelated to the code under test:
+
+    * Tables with no SQLAlchemy model were never created at all. Migration
+      ``019_tenant_suppression`` owns ``tenant_suppression``, which has no
+      model, so every suppression test failed on a pristine database.
+    * ``create_all`` only CREATEs; it never ALTERs. A database carried over
+      from an earlier revision kept its old columns, so a migration that
+      added one (e.g. ``agent_activity_digests.subagents``) left the suite
+      failing until the database was rebuilt by hand.
+
+    Migrating instead makes the suite depend on the migration chain that
+    production uses, so a fresh database and a reused one provision
+    identically.
+    """
     global _schema_ready
     if _schema_ready:
         return
 
+    from core_storage_api.database.init import init_database
+
     engine = create_async_engine(settings.database_url, echo=False)
-
-    # Import all models so metadata is populated
-    import common.models.memory  # noqa: F401
-    import common.models.entity  # noqa: F401
-    import common.models.agent  # noqa: F401
-    import common.models.audit  # noqa: F401
-    import common.models.fleet  # noqa: F401
-    import common.models.document  # noqa: F401
-    import common.models.background_task  # noqa: F401
-    import common.models.analysis_report  # noqa: F401
-    import common.models.agent_activity_digest  # noqa: F401
-    from common.models.base import Base
-
     async with engine.begin() as conn:
+        # pgvector must exist before the migrations that declare vector columns.
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        await conn.run_sync(Base.metadata.create_all)
-
     await engine.dispose()
+
+    await init_database()
     _schema_ready = True
 
 

@@ -1002,6 +1002,32 @@ class TestMemories:
         assert post_total == before_total
         assert post_agents == before_agents
 
+    async def test_count_whole_corpus_accepts_omitted_and_empty_tenant(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """Both "no tenant" spellings reach the whole-corpus counter.
+
+        ``core-api``'s public-stats caller uses the empty-string form
+        (``routes/stats.py`` → ``count_all(tenant_id="")``), so that one is
+        load-bearing; the omitted form used to 422 because the annotation was
+        a bare ``str``. Pin both so neither regresses, and confirm the
+        whole-corpus number really is tenant-independent.
+        """
+        omitted = await client.get(f"{PREFIX}/memories/count")
+        empty = await client.get(f"{PREFIX}/memories/count", params={"tenant_id": ""})
+        assert omitted.status_code == 200, omitted.text
+        assert empty.status_code == 200, empty.text
+        assert omitted.json()["count"] == empty.json()["count"]
+
+        # Scoping to a tenant is a different (smaller-or-equal) number, so the
+        # global path isn't silently returning the tenant count.
+        scoped = await client.get(f"{PREFIX}/memories/count", params={"tenant_id": tenant_id})
+        assert scoped.status_code == 200, scoped.text
+        assert scoped.json()["count"] <= omitted.json()["count"]
+
     async def test_embedding_coverage_spans_the_live_status_set(
         self,
         client: AsyncClient,
