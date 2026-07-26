@@ -1028,6 +1028,43 @@ class TestMemories:
         assert scoped.status_code == 200, scoped.text
         assert scoped.json()["count"] <= omitted.json()["count"]
 
+    async def test_embedding_coverage_is_not_capped_by_a_batch_size(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        """``missing_embeddings`` is an exact COUNT, not a capped row fetch.
+
+        The numerator used to be ``len(rows)`` off a query with
+        ``LIMIT :batch_size`` (default 100), so any tenant with more than 100
+        un-embedded memories under-reported the number missing and therefore
+        over-reported coverage. Seeding past that boundary is the whole point
+        of this test — at 100 rows or fewer it passes either way.
+        """
+        fleet = f"embcov-cap-{_uid()}"
+        missing_count = 105  # > the old batch_size of 100
+        embedded_count = 3
+
+        for i in range(missing_count):
+            payload = _memory_payload(tenant_id, fleet, content=f"unembedded {i} {_uid()}")
+            payload["embedding"] = None
+            assert (await client.post(f"{PREFIX}/memories", json=payload)).status_code in (200, 201)
+        for i in range(embedded_count):
+            payload = _memory_payload(tenant_id, fleet, content=f"embedded {i} {_uid()}")
+            assert (await client.post(f"{PREFIX}/memories", json=payload)).status_code in (200, 201)
+
+        resp = await client.get(
+            f"{PREFIX}/memories/embedding-coverage",
+            params={"tenant_id": tenant_id, "fleet_id": fleet},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        # Pre-fix this read 100 (the cap), making coverage look like 5.4%.
+        assert body["missing_embeddings"] == missing_count
+        assert body["total_active"] == missing_count + embedded_count
+        assert body["coverage_pct"] == 2.8  # 3/108
+
     async def test_embedding_coverage_spans_the_live_status_set(
         self,
         client: AsyncClient,

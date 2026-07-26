@@ -2245,6 +2245,40 @@ class PostgresService:
             result = await session.execute(stmt)
             return result.scalar() or 0
 
+    async def memory_count_missing_embeddings(
+        self,
+        tenant_id: str,
+        fleet_id: str | None = None,
+    ) -> int:
+        """Count live memories with no embedding — /embedding-coverage's numerator.
+
+        Deliberately adjacent to ``memory_count_active``: that one is the
+        denominator of the same ratio, and the two only produce a meaningful
+        percentage while their population predicates stay identical (live
+        statuses, not soft-deleted, same tenant/fleet scope). Keep them in
+        sync — a mismatch here is what previously let coverage_pct exceed
+        100% or go negative.
+
+        A COUNT rather than ``len(rows)``: the caller needs a number, and the
+        row-returning version it replaced was ``LIMIT``-ed, so it silently
+        capped the numerator (and fetched ``content`` it never read).
+        """
+        async with get_read_session() as session:
+            stmt = (
+                select(func.count())
+                .select_from(Memory)
+                .where(
+                    Memory.tenant_id == tenant_id,
+                    Memory.status.in_(LIVE_MEMORY_STATUSES),
+                    Memory.deleted_at.is_(None),
+                    Memory.embedding.is_(None),
+                )
+            )
+            if fleet_id:
+                stmt = stmt.where(Memory.fleet_id == fleet_id)
+            result = await session.execute(stmt)
+            return result.scalar() or 0
+
     async def memory_entity_coverage_count(
         self,
         tenant_id: str,
@@ -2451,39 +2485,6 @@ class PostgresService:
                 [(r[0], r[1]) for r in rows],
                 int(total_remaining),
             )
-
-    async def memory_find_missing_embeddings(
-        self,
-        tenant_id: str,
-        fleet_id: str | None,
-        batch_size: int = 100,
-    ) -> list[tuple]:
-        """Live memories with no embedding (drives /embedding-coverage).
-
-        Scoped to ``LIVE_MEMORY_STATUSES`` so it counts the same population as
-        ``memory_count_active``, which is the coverage denominator. Without the
-        status filter the numerator spanned every status while the denominator
-        did not, so coverage_pct could exceed 100% or go negative.
-        """
-        async with get_session() as session:
-            scope, params = _scope_sql(tenant_id, fleet_id)
-            result = await session.execute(
-                text(f"""
-                SELECT m.id, m.content
-                FROM memories m
-                WHERE {scope}
-                  AND m.embedding IS NULL
-                  AND m.deleted_at IS NULL
-                  AND m.status = ANY(CAST(:live_statuses AS text[]))
-                LIMIT :batch_size
-            """),
-                {
-                    **params,
-                    "batch_size": batch_size,
-                    "live_statuses": list(LIVE_MEMORY_STATUSES),
-                },
-            )
-            return result.all()  # type: ignore[return-value]
 
     async def memory_find_near_duplicate_candidates(
         self,

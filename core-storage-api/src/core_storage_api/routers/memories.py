@@ -721,17 +721,20 @@ async def get_embedding_coverage(
 ) -> dict:
     """Share of live memories that have an embedding.
 
-    Numerator and denominator both scope to ``LIVE_MEMORY_STATUSES`` — they
-    used to disagree (missing spanned every status, total only ``active``),
-    which let coverage_pct exceed 100% or go negative. ``missing_embeddings``
-    is still capped by the finder's batch_size, so treat it as a floor.
+    Numerator and denominator scope to the same population
+    (``LIVE_MEMORY_STATUSES``, not soft-deleted, same tenant/fleet), so
+    ``missing_embeddings <= total_active`` holds and ``coverage_pct`` stays
+    within 0-100. Both are exact COUNTs; the numerator used to be
+    ``len(rows)`` off a ``LIMIT``-ed query, which capped it at the batch size
+    and made coverage read high on any tenant with more missing rows than
+    that.
     """
-    missing = await _svc.memory_find_missing_embeddings(tenant_id, fleet_id)
+    missing = await _svc.memory_count_missing_embeddings(tenant_id, fleet_id)
     total = await _svc.memory_count_active(tenant_id, fleet_id)
     return {
         "total_active": total,
-        "missing_embeddings": len(missing),
-        "coverage_pct": round((total - len(missing)) / total * 100, 1) if total > 0 else 0.0,
+        "missing_embeddings": missing,
+        "coverage_pct": round((total - missing) / total * 100, 1) if total > 0 else 0.0,
     }
 
 
