@@ -14,9 +14,14 @@ Lifespan ordering:
    as a no-op; OSS standalone deployments should not deploy this image
    at all, but the flag is a defensive short-circuit.
 3. Otherwise: register cron jobs via ``scheduler.register(...)`` and call
-   ``scheduler.start()``. Each registration is its own follow-up ticket
-   (CAURA-655 lifecycle migration, CAURA-656 memory retention, etc.) —
-   this scaffold registers nothing.
+   ``scheduler.start()``. Nine jobs are registered: six daily lifecycle
+   ticks (``lifecycle-archive-expired``, ``lifecycle-archive-stale``,
+   ``lifecycle-purge-soft-deleted``, ``lifecycle-crystallize``,
+   ``lifecycle-entity-link``, ``lifecycle-insights``), each wall-clock
+   aligned to its configurable UTC hour; ``agent-digest`` (daily) and
+   ``agent-digest-weekly`` (weekly) for per-agent activity digests; and
+   ``interviewer-schedule`` (hourly, top of hour) which queues Interviewer
+   work — per-tenant settings gate actual command creation.
 4. Shutdown cancels all running tasks and awaits their unwind.
 """
 
