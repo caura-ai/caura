@@ -129,6 +129,19 @@ visible to the fleet because it went in at `scope_team`.
 Never paste secrets — API keys, tokens, credentials — into memory `content`.
 The PII scan is a safety net, not permission; keep them out entirely.
 
+**Some memories may be written for you.** If your tenant has the MemClaw
+Interviewer enabled, a scheduled server-side job reads your durable work trail
+(the transcript your harness already keeps) and synthesizes typed memories from
+it — episodes, decisions, outcomes — after the fact. You don't invoke it and
+won't see it run. This is a **different mechanism** from the plugin's per-turn
+auto-writes (`MEMCLAW_AUTO_WRITE_TURNS`, described in the preamble): the
+auto-write layer summarizes turns locally as you work; the Interviewer is a
+server-side scheduled synthesis from the work trail. Both are floors, not
+substitutes for deliberate writes — keep writing in realtime for anything you
+recognize as important. Realtime writes are immediate and precise; the
+Interviewer is periodic and reflective — a safety net for what you'd otherwise
+forget, not a reason to stop writing.
+
 ## 4 · Report outcomes so the memory compounds
 
 When you act on memories you recalled, tell the memory how it went:
@@ -292,6 +305,23 @@ memclaw_doc op=delete collection=skills doc_id=<slug>
 Slugs are filesystem-safe: `[a-z0-9][a-z0-9._-]{0,99}`. The `summary` is the
 only embedded field — write a sharp, intent-focused one ("Use when migrating
 SQLite→Postgres…") so the skill is found by meaning even when names don't match.
+
+**Your tenant may run the Skill Factory** — a governed lifecycle around this
+collection (off by default; until an operator enables it, nothing below
+changes):
+
+- **A `staged` landing is not an error.** With the Factory on, your `op=write`
+  persists with `status=staged`, pending operator review in the
+  **Skills Inbox** before it can become `active`. Don't retry, rewrite, or
+  delete a write that landed staged — that's governance working.
+- **`doc_id` prefixes carry provenance.** `forge/<slug>` marks a skill
+  distilled server-side by **Forge** from fleet activity; `agent/<slug>` marks
+  a direct agent write; a plain `<slug>` (the prefix is optional) is typically
+  operator-authored or imported. Read the prefix as origin — don't strip it
+  when re-reading or updating a skill.
+- **Active skills may be pushed.** On plugin-managed runtimes, `active` skills
+  can arrive on your skill load path directly — you may inherit a workflow
+  without ever pulling it from the collection.
 
 ## A full loop, end to end
 

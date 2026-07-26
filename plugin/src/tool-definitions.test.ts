@@ -210,6 +210,37 @@ describe("drift checks across tool surface artefacts", () => {
     }
   });
 
+  // Content invariants mirroring tests/test_direct_mcp_skill.py for the
+  // canonical variant: facts the plugin SKILL.md must keep stating. If you
+  // remove one, justify it; if you add a must-keep fact, pin it here.
+  test("SKILL.md keeps the canonical content invariants", () => {
+    const skillPath = join(
+      import.meta.dirname,
+      "..",
+      "skills",
+      "memclaw",
+      "SKILL.md",
+    );
+    const skill = readFileSync(skillPath, "utf-8");
+    const mustContain = [
+      // Reflective ingest (Interviewer) — realtime writes stay mandatory,
+      // and the note must not conflate it with the plugin auto-write layer
+      "Some memories may be written for you",
+      "Interviewer is periodic and reflective",
+      "different mechanism",
+      // Skill Factory governance — staged is not an error, prefixes are provenance
+      "Skill Factory",
+      "Skills Inbox",
+      "forge/<slug>",
+    ];
+    for (const phrase of mustContain) {
+      assert.ok(
+        skill.includes(phrase),
+        `SKILL.md missing invariant phrase: ${phrase}`,
+      );
+    }
+  });
+
   // TOOLS.md (per-workspace bootstrap) is built from buildToolsMd() and
   // injected into every turn. It must mention every exposed tool by name.
   test("buildToolsMd output mentions every tool in MEMCLAW_TOOLS", () => {
