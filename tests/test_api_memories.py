@@ -71,6 +71,111 @@ async def test_memory_count(client):
     assert resp.json() == {"count": 2}
 
 
+async def _set_status(
+    client, tenant_id: str, headers: dict, memory_id: str, status: str
+) -> None:
+    """Promote a memory past ``active``, the way enrichment does on write."""
+    resp = await client.patch(
+        f"/api/v1/memories/{memory_id}/status?tenant_id={tenant_id}",
+        json={"status": status},
+        headers=headers,
+    )
+    assert resp.status_code == 200, f"status transition failed: {resp.text}"
+
+
+async def test_memory_count_includes_enriched_statuses(client):
+    """/memories/count counts the LIVE set, not just literal status='active'.
+
+    Regression: the count filtered ``status == "active"`` while the list
+    endpoint left status unfiltered, so a tenant whose rows enrichment had
+    promoted to ``confirmed``/``pending`` read count=0 with a full list.
+    """
+    tenant_id, headers = get_test_auth()
+    fleet = f"count-live-{_uid()}"
+
+    await _write_memory(client, tenant_id, headers, "a", fleet_id=fleet)
+    becomes_confirmed = await _write_memory(
+        client, tenant_id, headers, "b", fleet_id=fleet
+    )
+    becomes_pending = await _write_memory(
+        client, tenant_id, headers, "c", fleet_id=fleet
+    )
+    await _set_status(client, tenant_id, headers, becomes_confirmed["id"], "confirmed")
+    await _set_status(client, tenant_id, headers, becomes_pending["id"], "pending")
+
+    resp = await client.get(
+        f"/api/v1/memories/count?tenant_id={tenant_id}&fleet_id={fleet}",
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    # Would have been 1 (only ``stays_active``) before the fix.
+    assert resp.json() == {"count": 3}
+
+    # …and the count now agrees with what the list returns — the exact
+    # discrepancy that surfaced this bug.
+    listed = await client.get(
+        f"/api/v1/memories?tenant_id={tenant_id}&fleet_id={fleet}&limit=50",
+        headers=headers,
+    )
+    assert listed.status_code == 200, listed.text
+    data = listed.json()
+    memories = data.get("items", data) if isinstance(data, dict) else data
+    assert len(memories) == 3
+
+
+async def test_memory_count_status_param_narrows(client):
+    """``?status=`` counts exactly one status (the old narrow behaviour)."""
+    tenant_id, headers = get_test_auth()
+    fleet = f"count-narrow-{_uid()}"
+
+    await _write_memory(client, tenant_id, headers, "stays active", fleet_id=fleet)
+    promoted = await _write_memory(
+        client, tenant_id, headers, "promoted", fleet_id=fleet
+    )
+    await _set_status(client, tenant_id, headers, promoted["id"], "confirmed")
+
+    async def count(**params) -> int:
+        qs = "".join(f"&{k}={v}" for k, v in params.items())
+        resp = await client.get(
+            f"/api/v1/memories/count?tenant_id={tenant_id}&fleet_id={fleet}{qs}",
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()["count"]
+
+    assert await count() == 2  # live set
+    assert await count(status="active") == 1
+    assert await count(status="confirmed") == 1
+    assert await count(status="archived") == 0
+
+
+async def test_memory_count_excludes_shelved_statuses(client):
+    """Live means live: ``archived`` and friends drop out of the default count."""
+    tenant_id, headers = get_test_auth()
+    fleet = f"count-shelved-{_uid()}"
+
+    await _write_memory(client, tenant_id, headers, "live one", fleet_id=fleet)
+    shelved = await _write_memory(
+        client, tenant_id, headers, "shelved one", fleet_id=fleet
+    )
+    await _set_status(client, tenant_id, headers, shelved["id"], "archived")
+
+    resp = await client.get(
+        f"/api/v1/memories/count?tenant_id={tenant_id}&fleet_id={fleet}",
+        headers=headers,
+    )
+    assert resp.json() == {"count": 1}
+
+
+async def test_memory_count_rejects_invalid_status(client):
+    """``status`` is pattern-validated, so typos 422 instead of counting 0."""
+    tenant_id, headers = get_test_auth()
+    resp = await client.get(
+        f"/api/v1/memories/count?tenant_id={tenant_id}&status=bogus", headers=headers
+    )
+    assert resp.status_code == 422
+
+
 async def test_list_memories(client):
     """Write 3 memories, GET /api/memories?tenant_id=X → list includes them."""
     tenant_id, headers = get_test_auth()

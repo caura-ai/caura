@@ -49,6 +49,7 @@ from common.constants import (
     ENTITY_RESOLUTION_CANDIDATE_LIMIT,
     GRAPH_MAX_EXPANDED_ENTITIES,
     GRAPH_MAX_HOPS,
+    LIVE_MEMORY_STATUSES,
     RECALL_BOOST_SCALE,
     RELATION_TYPE_WEIGHTS,
     SEMANTIC_DEDUP_CANDIDATE_LIMIT,
@@ -2216,14 +2217,26 @@ class PostgresService:
         self,
         tenant_id: str,
         fleet_id: str | None = None,
+        status: str | None = None,
     ) -> int:
+        """Count live (non-deleted) memories for a tenant, optionally a fleet.
+
+        ``status=None`` counts the whole live set (``LIVE_MEMORY_STATUSES``),
+        matching what the sibling dedup/successor queries treat as live. It
+        used to test ``status == "active"`` literally, which silently returned
+        0 for tenants whose rows enrichment had promoted to ``confirmed`` /
+        ``pending``. Pass an explicit ``status`` to count exactly that one.
+        """
+        status_filter = (
+            Memory.status == status if status is not None else Memory.status.in_(LIVE_MEMORY_STATUSES)
+        )
         async with get_read_session() as session:
             stmt = (
                 select(func.count())
                 .select_from(Memory)
                 .where(
                     Memory.tenant_id == tenant_id,
-                    Memory.status == "active",
+                    status_filter,
                     Memory.deleted_at.is_(None),
                 )
             )
@@ -2445,6 +2458,13 @@ class PostgresService:
         fleet_id: str | None,
         batch_size: int = 100,
     ) -> list[tuple]:
+        """Live memories with no embedding (drives /embedding-coverage).
+
+        Scoped to ``LIVE_MEMORY_STATUSES`` so it counts the same population as
+        ``memory_count_active``, which is the coverage denominator. Without the
+        status filter the numerator spanned every status while the denominator
+        did not, so coverage_pct could exceed 100% or go negative.
+        """
         async with get_session() as session:
             scope, params = _scope_sql(tenant_id, fleet_id)
             result = await session.execute(
@@ -2454,9 +2474,14 @@ class PostgresService:
                 WHERE {scope}
                   AND m.embedding IS NULL
                   AND m.deleted_at IS NULL
+                  AND m.status = ANY(CAST(:live_statuses AS text[]))
                 LIMIT :batch_size
             """),
-                {**params, "batch_size": batch_size},
+                {
+                    **params,
+                    "batch_size": batch_size,
+                    "live_statuses": list(LIVE_MEMORY_STATUSES),
+                },
             )
             return result.all()  # type: ignore[return-value]
 

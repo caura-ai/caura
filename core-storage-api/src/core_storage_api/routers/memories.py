@@ -719,6 +719,13 @@ async def get_embedding_coverage(
     tenant_id: str,
     fleet_id: str | None = None,
 ) -> dict:
+    """Share of live memories that have an embedding.
+
+    Numerator and denominator both scope to ``LIVE_MEMORY_STATUSES`` — they
+    used to disagree (missing spanned every status, total only ``active``),
+    which let coverage_pct exceed 100% or go negative. ``missing_embeddings``
+    is still capped by the finder's batch_size, so treat it as a floor.
+    """
     missing = await _svc.memory_find_missing_embeddings(tenant_id, fleet_id)
     total = await _svc.memory_count_active(tenant_id, fleet_id)
     return {
@@ -779,17 +786,34 @@ async def get_lifecycle_candidates(tenant_id: str) -> dict:
 async def count_memories(
     tenant_id: str,
     fleet_id: str | None = None,
+    status: str | None = None,
 ) -> dict:
+    """Count live memories for a tenant. ``status`` narrows to one exact status.
+
+    An empty ``tenant_id`` (``?tenant_id=`` — an omitted param is a 422, since
+    the annotation is non-optional) falls through to the whole-corpus counter,
+    which takes no filters: ``fleet_id`` and ``status`` do NOT apply there. That
+    branch predates this endpoint's filters; it stays as-is rather than growing
+    a second filtered code path.
+    """
     if not tenant_id:
         count = await _svc.memory_count_all()
     else:
-        count = await _svc.memory_count_active(tenant_id, fleet_id)
+        count = await _svc.memory_count_active(tenant_id, fleet_id, status=status)
     return {"count": count}
 
 
 @router.get("/count-active")
-async def count_active_memories(tenant_id: str, fleet_id: str | None = None) -> dict:
-    count = await _svc.memory_count_active(tenant_id, fleet_id)
+async def count_active_memories(
+    tenant_id: str,
+    fleet_id: str | None = None,
+    status: str | None = None,
+) -> dict:
+    """Count live memories (``LIVE_MEMORY_STATUSES``), not just literal ``active``.
+
+    Pass ``status=active`` for the old narrow behaviour.
+    """
+    count = await _svc.memory_count_active(tenant_id, fleet_id, status=status)
     return {"count": count}
 
 

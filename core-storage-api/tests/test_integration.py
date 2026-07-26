@@ -1002,6 +1002,48 @@ class TestMemories:
         assert post_total == before_total
         assert post_agents == before_agents
 
+    async def test_embedding_coverage_spans_the_live_status_set(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        """``/embedding-coverage`` numerator and denominator cover the same rows.
+
+        Regression: ``missing_embeddings`` spanned every status while
+        ``total_active`` counted only literal ``status='active'``, so an
+        enriched tenant's coverage_pct was computed against a denominator that
+        excluded most of the numerator (it could exceed 100% or go negative).
+
+        Own fleet so the counts are exact rather than baseline-relative.
+        """
+        fleet = f"embcov-{_uid()}"
+
+        # Promoted past 'active' by enrichment, and still awaiting its embedding.
+        promoted = _memory_payload(tenant_id, fleet, content=f"promoted {_uid()}")
+        promoted["status"] = "confirmed"
+        promoted["embedding"] = None
+        assert (await client.post(f"{PREFIX}/memories", json=promoted)).status_code in (200, 201)
+
+        # Plain active row that already has its embedding.
+        embedded = _memory_payload(tenant_id, fleet, content=f"embedded {_uid()}")
+        assert (await client.post(f"{PREFIX}/memories", json=embedded)).status_code in (200, 201)
+
+        resp = await client.get(
+            f"{PREFIX}/memories/embedding-coverage",
+            params={"tenant_id": tenant_id, "fleet_id": fleet},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        # Denominator counts the confirmed row too (it was 1, not 2, pre-fix).
+        assert body["total_active"] == 2
+        assert body["missing_embeddings"] == 1
+        assert body["coverage_pct"] == 50.0
+        # The invariant that made this a bug: numerator can never exceed
+        # denominator, so the percentage can never go negative.
+        assert body["missing_embeddings"] <= body["total_active"]
+        assert body["coverage_pct"] >= 0.0
+
     async def test_patch_entities_is_bulk_and_idempotent(
         self,
         client: AsyncClient,
