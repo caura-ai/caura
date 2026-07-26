@@ -149,3 +149,24 @@ async def test_upsert_validation(client: AsyncClient, mutate: dict, detail_needl
     resp = await _post(client, body)
     assert resp.status_code == 422, resp.text
     assert detail_needle in resp.text
+
+
+async def test_upsert_roundtrips_subagents(client: AsyncClient):
+    """The rolled-up subagents list persists and is returned by the read path."""
+    tenant = f"dig-{_uid()}"
+    subs = [
+        {"agent_id": "cmoclaw-affiliate-fix", "fleet_id": "etoro0", "source_count": 3},
+        {"agent_id": "cmoclaw-a11y-audit", "fleet_id": None, "source_count": 1},
+    ]
+    r = await _post(client, _row(tenant, "cmoclaw", subagents=subs))
+    assert r.status_code == 200, r.text
+    rows = await _latest(client, tenant)
+    assert rows[0]["subagents"] == subs
+
+
+async def test_upsert_subagents_defaults_to_empty_list(client: AsyncClient):
+    """A row written without subagents comes back with an empty list, not null."""
+    tenant = f"dig-{_uid()}"
+    await _post(client, _row(tenant, "solo"))
+    rows = await _latest(client, tenant)
+    assert rows[0]["subagents"] == []

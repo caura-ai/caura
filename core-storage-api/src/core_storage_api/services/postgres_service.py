@@ -8438,6 +8438,7 @@ class PostgresService:
                 "window_end": insert_stmt.excluded.window_end,
                 "narrative": insert_stmt.excluded.narrative,
                 "sections": insert_stmt.excluded.sections,
+                "subagents": insert_stmt.excluded.subagents,
                 "source_count": insert_stmt.excluded.source_count,
                 "recall_count": insert_stmt.excluded.recall_count,
                 "model": insert_stmt.excluded.model,

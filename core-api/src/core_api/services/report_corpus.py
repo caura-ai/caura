@@ -38,12 +38,55 @@ NON_COHESIVE_TITLE_REGEX = (
 _NON_COHESIVE_TITLE_RE = re.compile(NON_COHESIVE_TITLE_REGEX, re.IGNORECASE)
 
 
-def is_cohesive(m: dict) -> bool:
-    """True if a memory row belongs in the durable report corpus: not episodic,
-    not from a firehose agent, and not heartbeat/health/status-poll noise
-    (title-only match, mirroring the ``exclude_title_regex`` predicate)."""
-    return (
-        m.get("memory_type") not in NON_DURABLE_TYPES
-        and m.get("agent_id") not in RESERVED_FIREHOSE_AGENTS
-        and not _NON_COHESIVE_TITLE_RE.search(m.get("title") or "")
+def passes_noise_filter(m: dict) -> bool:
+    """True if a row is real signal — not a firehose agent and not
+    heartbeat/health/status-poll noise (title-only match). Includes episodes:
+    this is the base filter the digest's episode-fallback uses when an agent has
+    no durable rows (its activity IS episodic)."""
+    return m.get("agent_id") not in RESERVED_FIREHOSE_AGENTS and not _NON_COHESIVE_TITLE_RE.search(
+        m.get("title") or ""
     )
+
+
+def is_cohesive(m: dict) -> bool:
+    """True if a memory row belongs in the durable report corpus: passes the
+    noise filter AND is not an episodic activity-log type."""
+    return passes_noise_filter(m) and m.get("memory_type") not in NON_DURABLE_TYPES
+
+
+_SUBAGENT_RE = re.compile(r"^agent:(?P<parent>[^:]+):subagent:")
+
+
+def resolve_parent(agent_id: str, known_ids: frozenset[str] | set[str]) -> str:
+    """Resolve a subagent's top-level parent agent_id, for family rollup.
+
+    The structured ``agents.owner_ref`` pointer is unpopulated in production, so
+    the parent is derived from id conventions and resolved transitively to the
+    root:
+      1. ``agent:<parent>:subagent:<uuid>``            -> <parent>
+      2. ``<parent>-<task>`` where <parent> is itself a known agent id
+         (longest such prefix, boundary '-')           -> <parent>
+      3. otherwise the agent is already top-level       -> itself
+
+    ``known_ids`` is the tenant's agent-id set (already fetched by list_agents),
+    so this needs no extra query. Prefer ``owner_ref`` upstream once populated.
+    """
+    seen: set[str] = set()
+    cur = agent_id
+    while cur not in seen:
+        seen.add(cur)
+        m = _SUBAGENT_RE.match(cur)
+        if m:
+            nxt = m.group("parent")
+        else:
+            # longest known-agent prefix on a '-' boundary (avoids matching an
+            # unrelated agent that merely shares a leading substring)
+            best = ""
+            for pid in known_ids:
+                if pid != cur and cur.startswith(pid + "-") and len(pid) > len(best):
+                    best = pid
+            nxt = best
+        if not nxt or nxt == cur:
+            return cur
+        cur = nxt
+    return cur

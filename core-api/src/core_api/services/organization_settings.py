@@ -80,7 +80,13 @@ DEFAULT_SETTINGS: dict = {
         "model": "gpt-5.4-mini",
         "top_n": 25,
         "max_memories_per_agent": 60,
-        "min_activity_threshold": 3,
+        # Durable floor (a single decision/fact is worth surfacing).
+        "min_activity_threshold": 1,
+        # Min non-noise events to summarize an agent whose work is episodic;
+        # below it the agent still appears as a count-only listed row.
+        "event_floor": 1,
+        # Cap on count-only rows past top_n (active-but-not-summarized agents).
+        "listed_max": 25,
         "max_cost_per_run_usd": 2.0,
         "retention_days": 90,
     },

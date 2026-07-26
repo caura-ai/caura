@@ -242,6 +242,7 @@ AGENT_DIGEST_FIELDS: list[str] = [
     "window_end",
     "narrative",
     "sections",
+    "subagents",
     "source_count",
     "recall_count",
     "model",
