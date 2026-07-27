@@ -1,0 +1,208 @@
+name: Dependabot auto-merge (minor/patch groups)
+
+# Auto-merges Dependabot's minor/patch GROUP PRs once the required CI is green,
+# so the high-volume dependency backlog stops needing a manual merge each time.
+# Ported from caura-memclaw-enterprise's workflow of the same name and tailored
+# for this (OSS, public) repo — see the OSS-SPECIFIC notes below.
+#
+# Scope is deliberately narrow — a carve-out from the never-auto-merge policy:
+#   * ONLY the `pip-minor-patch`, `uv-minor-patch`, and `npm-minor-patch` groups
+#     qualify. Those groups are defined in .github/dependabot.yml with
+#     update-types [minor, patch], so a group PR can only contain minor/patch
+#     bumps. Majors arrive as separate, ungrouped PRs (different branch names)
+#     and are intentionally left for manual review.
+#   * Also intentionally MANUAL: the github-actions group and any ungrouped
+#     constraint-update / major PRs.
+#
+# pull_request_target (not pull_request): Dependabot-triggered `pull_request`
+# runs get a read-only token and NO secrets, so they cannot mint the App token
+# needed to merge under branch protection. pull_request_target runs in the base
+# repo context with secrets. Safe here because this workflow NEVER checks out or
+# executes PR-provided code — it only reads the trusted event payload (PR
+# number/author/branch) and calls gh. The `if` also gates on the dependabot[bot]
+# actor, which cannot be spoofed (it is the authenticated actor of the event).
+#
+# OSS-SPECIFIC vs the enterprise version:
+#   * This repo's `main` uses CLASSIC branch protection (not a ruleset): required
+#     checks are `CI` + `dco`, and it requires 1 approving review.
+#   * PREREQUISITE for the merge to succeed: the deploy App must be allowed to
+#     bypass that required review — add it to
+#     Settings → Branches → main → "Allow specified actors to bypass required
+#     pull requests" (and it must be able to merge with the strict/up-to-date
+#     rule). Until then the merge is blocked; this workflow DETECTS that and
+#     no-ops (logs + exits 0) rather than failing the job, so it's safe to land
+#     before the bypass is configured.
+#   * DEPLOY_APP_ID / DEPLOY_APP_PRIVATE_KEY org secrets are already shared with
+#     this repo (used by release-please.yml).
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  # Read-only: github.token only does gh reads (pr view + api). ALL writes (the
+  # merge) go through the App token, so least-privilege in this
+  # pull_request_target context.
+  contents: read
+  pull-requests: read
+  checks: read
+  statuses: read
+
+concurrency:
+  # One run per PR; serialize (don't cancel) so a synchronize event can't race
+  # the merge of an in-flight run.
+  group: dependabot-automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  automerge:
+    # github.actor (who triggered THIS event) AND the PR opener must both be
+    # dependabot[bot]: on a `synchronize` the opener stays dependabot even if a
+    # human pushed the new commit, so gating on the opener alone would let a
+    # maintainer's hand-pushed commit auto-merge. Requiring the actor too closes
+    # that — legitimate Dependabot rebases/recreates still run as dependabot[bot].
+    if: >-
+      github.actor == 'dependabot[bot]' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      (contains(github.event.pull_request.head.ref, 'pip-minor-patch') ||
+       contains(github.event.pull_request.head.ref, 'uv-minor-patch') ||
+       contains(github.event.pull_request.head.ref, 'npm-minor-patch'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # App token = the branch-protection bypass actor (see PREREQUISITE above).
+      # Because the App bypasses the required-check gate, we must NOT use
+      # `gh pr merge --auto` (it could merge before CI finishes under a bypass
+      # actor); instead we wait for the required checks ourselves and then merge.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v2
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+
+      - name: Wait for required CI, then squash-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          echo "Auto-merge candidate: Dependabot minor/patch group PR #${PR}"
+
+          # The App token BYPASSES the required-check gate, so THIS script is the
+          # sole enforcer of "all required checks passed." Read the required-check
+          # names from classic branch protection so the list never drifts; fall
+          # back to the known pair if it can't be read (github.token may lack
+          # admin:read for the protection endpoint — the fallback is correct).
+          # Read from BOTH `checks[].context` (modern required checks, added via
+          # the UI as Actions check runs) and `contexts[]` (the legacy mirror);
+          # union + de-dupe. Reading only one field can come back empty depending
+          # on how protection was configured, silently forcing the fallback.
+          mapfile -t REQUIRED < <(
+            gh api "repos/${REPO}/branches/${BASE}/protection/required_status_checks" \
+              --jq '([.checks[]?.context] + [.contexts[]?]) | map(select(. != null and . != "")) | unique[]' \
+              2>/dev/null || true
+          )
+          if [ "${#REQUIRED[@]}" -eq 0 ]; then
+            REQUIRED=("CI" "dco")
+            echo "Could not read branch-protection required checks — falling back to: ${REQUIRED[*]}"
+          fi
+          echo "Gating on required checks: ${REQUIRED[*]}"
+
+          # A required check is satisfied when it PASSED or was SKIPPED/NEUTRAL
+          # (GitHub counts a skipped required check as passing). Never gate on
+          # this workflow itself — it isn't required, and doing so self-deadlocks.
+          satisfied() { case "$1" in SUCCESS|SKIPPED|NEUTRAL) return 0 ;; *) return 1 ;; esac; }
+
+          # Poll up to ~20 min for the required checks to register + finish. A
+          # transient gh error RETRIES (doesn't bail). If a required check fails,
+          # or they aren't all green by the deadline, exit 0 WITHOUT merging — a
+          # later synchronize re-runs this; the daily shepherd/human can pick it up.
+          deadline=$(( $(date +%s) + 1200 ))
+          head=""
+          # NB: every `gh pr view`/`gh pr merge` below needs an explicit
+          # `-R "$REPO"` — this job never checks out the repo (pull_request_target
+          # runs no PR code), so with no local .git gh can't infer the repo and
+          # each call fails ("not a git repository"), polling uselessly to the
+          # deadline and never merging. Don't drop the flag.
+          while :; do
+            if ! roll=$(gh pr view "$PR" -R "$REPO" --json statusCheckRollup,headRefOid,state 2>/tmp/gh_err); then
+              echo "gh pr view failed ($(tr '\n' ' ' < /tmp/gh_err)) — retrying."
+            else
+              st=$(printf '%s' "$roll" | jq -r '.state // "UNKNOWN"')
+              if [ "$st" != OPEN ]; then
+                echo "PR #${PR} is ${st} — nothing to merge."; exit 0
+              fi
+              head=$(printf '%s' "$roll" | jq -r '.headRefOid // ""')
+              all_ok=1; any_failed=0; summary=""
+              for chk in "${REQUIRED[@]}"; do
+                # statusCheckRollup mixes two GraphQL union types: CheckRun
+                # (Actions jobs) exposes .name + .conclusion/.status (uppercase),
+                # while StatusContext (legacy commit statuses) exposes .context +
+                # .state (lowercase). Match on either key, coalesce either value,
+                # and upper-case the result so satisfied()/the bail case work for
+                # both. (Today all required checks here are CheckRuns — `dco`
+                # included — so this is defensive, but it's the correct handling.)
+                state=$(printf '%s' "$roll" | jq -r --arg n "$chk" \
+                  '[.statusCheckRollup[]? | select((.name // .context)==$n) | (.conclusion // .state // .status)][0] // "MISSING"' \
+                  | tr '[:lower:]' '[:upper:]')
+                summary="${summary}  ${chk}=${state}"
+                # ACTION_REQUIRED (parked awaiting manual "approve and run") and
+                # STALE (check run superseded, won't re-run on its own) can't pass
+                # by themselves — treat as not-passing and bail immediately rather
+                # than polling uselessly to the deadline.
+                case "$state" in *FAILURE*|*CANCELLED*|*TIMED_OUT*|*ACTION_REQUIRED*|STALE) any_failed=1 ;; esac
+                satisfied "$state" || all_ok=0
+              done
+              echo "  head=${head:0:7}${summary}"
+              if [ "$any_failed" = 1 ]; then
+                echo "A required check did not pass — not merging #${PR} (left for manual/next run)."; exit 0
+              fi
+              [ "$all_ok" = 1 ] && break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "Required checks not green within budget — not merging #${PR}."; exit 0
+            fi
+            sleep 30
+          done
+
+          # jq '.headRefOid // ""' yields "" if the field is ever absent (schema
+          # drift / transient null); gh accepts --match-head-commit "" as valid
+          # and it matches ANY head, defeating the race guard. Refuse to merge
+          # without a resolved head.
+          [ -n "$head" ] || { echo "Could not resolve head commit SHA — not merging #${PR}."; exit 0; }
+          echo "All required checks satisfied on ${head:0:7} — squash-merging #${PR} under the App token."
+          # --match-head-commit: the App bypasses the required-check gate, so a
+          # `synchronize` landing a new commit after we observed green CI could
+          # otherwise be merged unverified. Pinning the validated head makes the
+          # merge fail (and a fresh run re-verify) if the head moved.
+          #
+          if ! merge_out=$(GH_TOKEN="$APP_TOKEN" gh pr merge "$PR" -R "$REPO" --squash --delete-branch --match-head-commit "$head" 2>&1); then
+            # Always log the raw output first so any failure is diagnosable even
+            # if neither pattern below matches (GitHub error text isn't stable).
+            echo "Merge attempt did not succeed: ${merge_out}"
+            # Head moved during polling: --match-head-commit correctly rejects and
+            # a fresh synchronize run re-verifies the new commit. Expected no-op.
+            # GitHub's real 409 for a --match-head-commit mismatch is
+            # "Head/Base branch was modified. Review and try the merge again."
+            # — so match "branch was modified" and 409, not just head/mismatch.
+            if printf '%s' "$merge_out" | grep -qiE "match.*head|head.*(mismatch|changed)|branch was modified|409"; then
+              echo "Head moved during polling — a fresh run will re-verify. Exiting cleanly."; exit 0
+            fi
+            # Merge blocked by the required review because the App isn't yet a
+            # review-bypass actor on main (see PREREQUISITE). Expected until that
+            # is configured — leave for manual/next run rather than failing loudly
+            # on every Dependabot PR. 422 = GitHub's code for a protection-rule
+            # violation; included so a message-text change can't turn this
+            # expected state into a red run.
+            if printf '%s' "$merge_out" | grep -qiE "review|protected branch|bypass|not authorized|allowed to|not mergeable|422|approval"; then
+              echo "Merge blocked — likely the App isn't a review-bypass actor yet (see PREREQUISITE). Leaving for manual/next run."; exit 0
+            fi
+            # Anything else (conflict, network, permission) is a real problem.
+            echo "Merge failed (unclassified) — treating as a real error."; exit 1
+          fi
+          echo "Merged #${PR}."
