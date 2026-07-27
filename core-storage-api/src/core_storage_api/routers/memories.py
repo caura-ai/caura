@@ -16,7 +16,7 @@ from common.events.lifecycle_purge_request import (
 from core_storage_api.observability import bind_timer, log_request
 from core_storage_api.routers._validation import _require
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
-from core_storage_api.services.postgres_service import PostgresService
+from core_storage_api.services.postgres_service import BulkValidationError, PostgresService
 
 router = APIRouter(prefix="/memories", tags=["Memories"])
 _svc = PostgresService()
@@ -100,7 +100,22 @@ async def create_memories_bulk(request: Request) -> list[dict]:
     body: list[dict] = await request.json()
     for item in body:
         _parse_datetimes(item)
-    return await _svc.memory_add_all(body)
+    try:
+        return await _svc.memory_add_all(body)
+    except BulkValidationError as exc:
+        # Malformed batch (an item missing ``client_request_id``, or mixed
+        # ``tenant_id`` / ``fleet_id``). Unwrapped it escaped as a 500 — a
+        # server-fault code for what is squarely a bad request, which pages
+        # and lands in the DLQ instead of being fixed by the caller. Same
+        # 4xx-at-the-edge convention as ``_parse_datetimes`` above and
+        # ``dedup_review_enqueue`` below.
+        #
+        # Catches the dedicated subclass, NOT bare ``ValueError``: those three
+        # guards all run before ``memory_add_all`` opens its session, but the
+        # try block spans the whole call, so a plain ``except ValueError``
+        # would also swallow anything raised from inside the session and
+        # relabel a genuine server fault as a client error.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # ------------------------------------------------------------------

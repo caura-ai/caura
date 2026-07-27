@@ -124,11 +124,19 @@ jobs:
       - name: Run Ruff linter (core-storage-api)
         run: uv run ruff check core-storage-api/src/
 
+      - name: Run Ruff linter (core-storage-api tests)
+        # The test tree was unlinted for as long as it was un-run; both halves
+        # of that blind spot close together or it just drifts again.
+        run: uv run ruff check core-storage-api/tests/
+
       - name: Run Ruff formatter check (core-api)
         run: uv run ruff format --check core-api/src/
 
       - name: Run Ruff formatter check (core-storage-api)
         run: uv run ruff format --check core-storage-api/src/
+
+      - name: Run Ruff formatter check (core-storage-api tests)
+        run: uv run ruff format --check core-storage-api/tests/
 
       - name: Run Ruff formatter check (vendored common/ files at ruff defaults)
         # This list mirrors the policy=identical entries of caura-memclaw-enterprise's
@@ -195,6 +203,41 @@ jobs:
           POSTGRES_DB: memclaw
           POSTGRES_REQUIRE_SSL: "false"
           TEST_DATABASE_URL: "postgresql+asyncpg://memclaw:changeme@localhost:5432/memclaw"
+          EMBEDDING_PROVIDER: fake
+          ENTITY_EXTRACTION_PROVIDER: none
+          USE_LLM_FOR_MEMORY_CREATION: "false"
+
+      - name: Create the storage-suite database
+        # Its own database, NOT the one `tests/` uses. The two suites provision
+        # differently — `tests/` conftest calls Base.metadata.create_all, the
+        # storage conftest runs the real Alembic chain via init_database(). On a
+        # shared database whichever ran first would win: create_all going first
+        # leaves tables with no alembic_version, so init_database() stamps head
+        # and skips the migrations, and every migration-only table (e.g.
+        # tenant_suppression, which has no ORM model) stays missing. Isolating
+        # removes that ordering coupling instead of relying on step order.
+        #
+        # Idempotent: Postgres has no CREATE DATABASE IF NOT EXISTS, so this
+        # guards on pg_database and creates only when absent. Fed via stdin
+        # rather than -c because \gexec is a psql meta-command and -c sends
+        # its argument as a single SQL string (where \gexec is a syntax
+        # error). ON_ERROR_STOP=1 is kept deliberately over the simpler
+        # `|| true`, which would also swallow a genuine connection or auth
+        # failure and defer the confusion to the pytest step below.
+        run: |
+          PGPASSWORD=changeme psql -h localhost -U memclaw -d memclaw -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT 'CREATE DATABASE memclaw_storage'
+          WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'memclaw_storage')\gexec
+          SQL
+
+      - name: Run core-storage-api integration tests
+        run: uv run pytest core-storage-api/tests/ -v --tb=short
+        env:
+          PYTHONPATH: core-api/src:core-storage-api/src:.
+          POSTGRES_REQUIRE_SSL: "false"
+          # This suite reads DATABASE_URL (not TEST_DATABASE_URL) — its conftest
+          # migrates whatever core_storage_api.config points at.
+          DATABASE_URL: "postgresql+asyncpg://memclaw:changeme@localhost:5432/memclaw_storage"
           EMBEDDING_PROVIDER: fake
           ENTITY_EXTRACTION_PROVIDER: none
           USE_LLM_FOR_MEMORY_CREATION: "false"

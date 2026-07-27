@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from core_storage_api.config import settings
 
-
 # ---------------------------------------------------------------------------
 # Database schema setup (once per session)
 # ---------------------------------------------------------------------------

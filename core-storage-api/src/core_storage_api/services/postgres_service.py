@@ -420,6 +420,18 @@ def _attach_agent_display_names(rows: Any) -> list[Memory]:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+class BulkValidationError(ValueError):
+    """A bulk batch violated its input contract before any DB work started.
+
+    Distinct from a bare ``ValueError`` so the bulk route can map exactly these
+    to 422 and let anything unexpected from inside the session keep surfacing
+    as a 500. Catching plain ``ValueError`` around the whole call would mean a
+    future in-session failure got mislabelled as a client error — the inverse
+    of the bug that motivated the 422 in the first place. Subclasses
+    ``ValueError`` so existing callers that catch it broadly still work.
+    """
+
+
 class PostgresService:
     """Single point of DB access for all core tables.
 
@@ -506,7 +518,7 @@ class PostgresService:
                 # than at the FastAPI route, also catches in-process
                 # callers (auto-chunk via ``sc.create_memories``) that
                 # forgot to mint an id.
-                raise ValueError("memory_add_all: every item must carry client_request_id")
+                raise BulkValidationError("memory_add_all: every item must carry client_request_id")
 
         # All callers send a single-tenant, single-fleet batch (the
         # bulk endpoint is tenant-and-fleet-scoped on the way in). Pin
@@ -520,9 +532,9 @@ class PostgresService:
         tenant_id = items[0]["tenant_id"]
         fleet_id = items[0].get("fleet_id")
         if any(d.get("tenant_id") != tenant_id for d in items):
-            raise ValueError("memory_add_all: all items must share the same tenant_id")
+            raise BulkValidationError("memory_add_all: all items must share the same tenant_id")
         if any(d.get("fleet_id") != fleet_id for d in items):
-            raise ValueError("memory_add_all: all items must share the same fleet_id")
+            raise BulkValidationError("memory_add_all: all items must share the same fleet_id")
 
         async with get_session() as session:
             rows = [self._filter_memory_fields(d) for d in items]

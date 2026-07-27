@@ -158,7 +158,7 @@ class TestMemories:
 
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
-            json={"status": "archived"},
+            json={"tenant_id": tenant_id, "status": "archived"},
         )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
@@ -203,12 +203,18 @@ class TestMemories:
 
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
-            json={"metadata_patch": {"embedding_pending": False, "summary": "done"}},
+            json={
+                "tenant_id": tenant_id,
+                "metadata_patch": {"embedding_pending": False, "summary": "done"},
+            },
         )
         assert resp.status_code == 200, resp.text
 
         updated = (await client.get(f"{PREFIX}/memories/{memory_id}")).json()
-        md = updated["metadata"]
+        # Storage serialises the ORM attribute name verbatim, so the wire key
+        # is ``metadata_`` (as the seed payload above already uses) — not the
+        # ``metadata`` spelling core-api uses in its own internal field dicts.
+        md = updated["metadata_"]
         # Patched keys reflect the new values.
         assert md["embedding_pending"] is False
         assert md["summary"] == "done"
@@ -245,6 +251,7 @@ class TestMemories:
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
             json={
+                "tenant_id": tenant_id,
                 "ts_valid_start": "2026-09-14T00:00:00+00:00",
                 "ts_valid_end": "2026-10-15T23:59:59+00:00",
             },
@@ -278,7 +285,10 @@ class TestMemories:
 
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
-            json={"ts_valid_start": "tomorrow"},  # not a valid ISO string
+            json={
+                "tenant_id": tenant_id,
+                "ts_valid_start": "tomorrow",  # not a valid ISO string
+            },
         )
         assert resp.status_code == 422, resp.text
         body = resp.json()
@@ -296,16 +306,22 @@ class TestMemories:
         m1 = (await client.post(f"{PREFIX}/memories", json=p1)).json()
         m2 = (await client.post(f"{PREFIX}/memories", json=p2)).json()
 
-        resp = await client.patch(
-            f"{PREFIX}/memories/batch-status",
+        # POST /batch-update-status, with tenant_id carried at the batch level
+        # (the route's cross-tenant write guard). The old PATCH /batch-status
+        # spelling in this test matched no route at all — it fell through to
+        # PATCH /memories/{memory_id} and 422'd on UUID coercion of the
+        # literal "batch-status". core-api's storage_client uses this path.
+        resp = await client.post(
+            f"{PREFIX}/memories/batch-update-status",
             json={
+                "tenant_id": tenant_id,
                 "updates": [
                     {"memory_id": m1["id"], "status": "archived"},
                     {"memory_id": m2["id"], "status": "archived"},
                 ],
             },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         assert resp.json()["ok"] is True
 
     async def test_soft_delete(
@@ -359,7 +375,11 @@ class TestMemories:
         # route must surface 404.
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
-            json={"status": "active", "metadata_patch": {"resurrect_attempt": True}},
+            json={
+                "tenant_id": tenant_id,
+                "status": "active",
+                "metadata_patch": {"resurrect_attempt": True},
+            },
         )
         assert resp.status_code == 404, resp.text
 
@@ -368,11 +388,15 @@ class TestMemories:
         after = (await client.get(f"{PREFIX}/memories/{memory_id}")).json()
         assert after["deleted_at"] is not None
         assert after["status"] == "deleted"
-        assert (after.get("metadata") or {}).get("resurrect_attempt") is None
+        # ``metadata_``, not ``metadata`` — with the wrong key this assertion
+        # was vacuous (always {} → always None) and could never have caught a
+        # resurrected metadata merge.
+        assert (after.get("metadata_") or {}).get("resurrect_attempt") is None
 
     async def test_patch_on_nonexistent_memory_returns_404(
         self,
         client: AsyncClient,
+        tenant_id: str,
     ) -> None:
         """PATCH on a memory_id that never existed must surface 404 too,
         not the legacy ``200 {"ok": True}`` silent success.
@@ -385,7 +409,7 @@ class TestMemories:
         fake_id = str(uuid.uuid4())
         resp = await client.patch(
             f"{PREFIX}/memories/{fake_id}",
-            json={"status": "active"},
+            json={"tenant_id": tenant_id, "status": "active"},
         )
         assert resp.status_code == 404, resp.text
 
@@ -448,10 +472,13 @@ class TestMemories:
         bypass it (CAURA-602)."""
         payload = _memory_payload(tenant_id, fleet_id)  # no client_request_id
         resp = await client.post(f"{PREFIX}/memories/bulk", json=[payload])
-        # Storage-writer surfaces the ValueError as 500; core-api would
-        # be the layer that returns a clean 4xx — but at this layer the
-        # important assertion is "no row was inserted."
-        assert resp.status_code >= 400
+        # 422, not 500: a batch missing client_request_id is a bad request,
+        # not a server fault. This used to let the service's ValueError escape
+        # unhandled — a 500 that pages and lands in the DLQ for something only
+        # the caller can fix. Asserting the exact code (the old assertion was
+        # a permissive >= 400) is what keeps it from regressing to a 5xx.
+        assert resp.status_code == 422, resp.text
+        assert "client_request_id" in resp.json()["detail"]
 
     async def test_find_by_content_hash(
         self,
@@ -477,10 +504,10 @@ class TestMemories:
                 "fleet_id": fleet_id,
             },
         )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["memory"] is not None
-        assert body["memory"]["content_hash"] == content_hash
+        assert resp.status_code == 200, resp.text
+        # Flat ORM dict, not an {"memory": ...} envelope — core-api's
+        # check_exact_duplicate step reads dup["id"] straight off this.
+        assert resp.json()["content_hash"] == content_hash
 
     async def test_find_by_content_hash_not_found(
         self,
@@ -491,8 +518,10 @@ class TestMemories:
             f"{PREFIX}/memories/by-content-hash",
             params={"tenant_id": tenant_id, "content_hash": "nonexistent"},
         )
-        assert resp.status_code == 200
-        assert resp.json()["memory"] is None
+        # 404-on-miss, which core-api's shared _get maps back to None — a
+        # 200 with a null envelope would make the duplicate check treat every
+        # write as a duplicate.
+        assert resp.status_code == 404, resp.text
 
     async def test_get_stats(
         self,
@@ -966,7 +995,7 @@ class TestMemories:
 
         Regression for the count-inflation bug: prior to the fix these
         endpoints reported tombstoned rows alongside live ones, so the
-        marketing-site landing-page tiles were ~10× higher than the
+        marketing-site landing-page tiles were ~10x higher than the
         actually-queryable footprint.
         """
         # Use a fresh, dedicated agent_id so distinct-agent / distinct-tenant
@@ -1250,7 +1279,7 @@ class TestEntities:
         await client.post(f"{PREFIX}/entities", json=payload)
 
         resp = await client.get(
-            f"{PREFIX}/entities/by-name",
+            f"{PREFIX}/entities/exact",
             params={
                 "tenant_id": tenant_id,
                 "name": name,
@@ -1258,10 +1287,10 @@ class TestEntities:
                 "fleet_id": fleet_id,
             },
         )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["entity"] is not None
-        assert body["entity"]["canonical_name"] == name
+        assert resp.status_code == 200, resp.text
+        # Flat entity dict (orm_to_dict), not an {"entity": ...} envelope —
+        # matches what core-api's find_exact_entity consumes.
+        assert resp.json()["canonical_name"] == name
 
     async def test_find_exact_entity_not_found(
         self,
@@ -1269,15 +1298,17 @@ class TestEntities:
         tenant_id: str,
     ) -> None:
         resp = await client.get(
-            f"{PREFIX}/entities/by-name",
+            f"{PREFIX}/entities/exact",
             params={
                 "tenant_id": tenant_id,
                 "name": "NoSuchEntity",
                 "entity_type": "person",
             },
         )
-        assert resp.status_code == 200
-        assert resp.json()["entity"] is None
+        # 404-on-miss is the contract, not 200-with-null: core-api's shared
+        # storage-client _get maps 404 → None, which is how find_exact_entity
+        # produces its `| None` return.
+        assert resp.status_code == 404, resp.text
 
     async def test_create_relation(
         self,
@@ -1421,21 +1452,21 @@ class TestEntities:
         memory_id = mem["id"]
 
         link_resp = await client.post(
-            f"{PREFIX}/entities/memory-links/create",
+            f"{PREFIX}/entities/links",
             json={
                 "memory_id": memory_id,
                 "entity_id": entity_id,
                 "role": "subject",
             },
         )
-        assert link_resp.status_code == 200
+        assert link_resp.status_code == 200, link_resp.text
 
         # Get entity with linked memories
         resp = await client.get(
-            f"{PREFIX}/entities/linked-memories/{entity_id}",
+            f"{PREFIX}/entities/{entity_id}/with-memories",
             params={"tenant_id": tenant_id},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["entity"]["id"] == entity_id
         assert len(body["linked_memories"]) >= 1
@@ -1525,7 +1556,9 @@ class TestAgents:
         )
 
         resp = await client.patch(
-            f"{PREFIX}/agents/{agent_id}/trust",
+            # Storage spells this /trust-level; /trust is the PUBLIC core-api
+            # route (core_api/routes/agents.py). The two layers differ.
+            f"{PREFIX}/agents/{agent_id}/trust-level",
             json={
                 "tenant_id": tenant_id,
                 "trust_level": 3,
@@ -1583,12 +1616,15 @@ class TestDocuments:
         assert body["doc_id"] == doc_id
         assert body["data"]["title"] == "Test Document"
 
-        # GET by doc_id
+        # GET by doc_id. Collection is a path segment here, not a query param:
+        # the route is /{collection}/{doc_id:path} so that doc_ids containing
+        # slashes work. The single-segment form silently matched the
+        # list-documents route instead and returned 200 [].
         resp2 = await client.get(
-            f"{PREFIX}/documents/{doc_id}",
-            params={"tenant_id": tenant_id, "collection": collection},
+            f"{PREFIX}/documents/{collection}/{doc_id}",
+            params={"tenant_id": tenant_id},
         )
-        assert resp2.status_code == 200
+        assert resp2.status_code == 200, resp2.text
         assert resp2.json()["doc_id"] == doc_id
 
     async def test_upsert_updates_existing(
@@ -1670,18 +1706,18 @@ class TestDocuments:
         )
 
         resp = await client.delete(
-            f"{PREFIX}/documents/{doc_id}",
-            params={"tenant_id": tenant_id, "collection": collection},
+            f"{PREFIX}/documents/{collection}/{doc_id}",
+            params={"tenant_id": tenant_id},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         assert "deleted_id" in resp.json()
 
         # Verify deleted
         resp2 = await client.get(
-            f"{PREFIX}/documents/{doc_id}",
-            params={"tenant_id": tenant_id, "collection": collection},
+            f"{PREFIX}/documents/{collection}/{doc_id}",
+            params={"tenant_id": tenant_id},
         )
-        assert resp2.status_code == 404
+        assert resp2.status_code == 404, resp2.text
 
     async def test_get_nonexistent_document_returns_404(
         self,
@@ -1689,10 +1725,10 @@ class TestDocuments:
         tenant_id: str,
     ) -> None:
         resp = await client.get(
-            f"{PREFIX}/documents/nonexistent-doc",
-            params={"tenant_id": tenant_id, "collection": "nope"},
+            f"{PREFIX}/documents/nope/nonexistent-doc",
+            params={"tenant_id": tenant_id},
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 404, resp.text
 
 
 # =====================================================================
@@ -1823,11 +1859,12 @@ class TestFleet:
                 },
             )
 
+        # node_name is a query param on this route, not a path segment.
         resp = await client.get(
-            f"{PREFIX}/fleet/commands/pending/{node_name}",
-            params={"tenant_id": tenant_id},
+            f"{PREFIX}/fleet/commands/pending",
+            params={"tenant_id": tenant_id, "node_name": node_name},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         pending = resp.json()
         assert isinstance(pending, list)
         assert len(pending) >= 2
