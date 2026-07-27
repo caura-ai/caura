@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import overload
 
 
 def read_int_env(name: str, default: int) -> int:
@@ -53,6 +54,42 @@ def read_int_env(name: str, default: int) -> int:
         )
         return default
     return value
+
+
+@overload
+def read_float_env(name: str, default: float) -> float: ...
+
+
+@overload
+def read_float_env(name: str, default: None) -> float | None: ...
+
+
+def read_float_env(name: str, default: float | None) -> float | None:
+    """Read ``name`` from the environment, parse as float, fall back on bad input.
+
+    Same rationale as ``read_int_env``: a bare
+    ``float(os.environ.get(...))`` raises ``ValueError`` at module import
+    on a misconfigured value (e.g. ``"30s"`` instead of ``"30"``),
+    crashing core-api / the worker before structured logging exists to
+    report it.
+
+    Unlike ``read_int_env`` this permits 0 and negatives — callers use
+    them meaningfully (an explicit ``0.0`` timeout means "don't wait") —
+    and ``None`` is a valid default meaning "unset, track another
+    budget". The overloads keep ``float``-in / ``float``-out so callers
+    with a concrete default don't inherit an ``Optional``.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        print(
+            f"WARN: {name}={raw!r} is not a valid float; falling back to {default}",
+            file=sys.stderr,
+        )
+        return default
 
 
 def clamp_keepalive(
