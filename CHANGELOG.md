@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.24.1](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.24.0...backend-v2.24.1) (2026-07-27)
+
+
+### Bug Fixes
+
+* **lifecycle:** pin the crystallize spend gate to literal status='active' ([#628](https://github.com/caura-ai/caura-memclaw/issues/628)) ([0f0ae91](https://github.com/caura-ai/caura-memclaw/commit/0f0ae919d5862c884544e0e458c8f605f0ef89c9))
+* **storage:** count missing embeddings instead of len()-ing a LIMITed fetch ([#631](https://github.com/caura-ai/caura-memclaw/issues/631)) ([469678b](https://github.com/caura-ai/caura-memclaw/commit/469678b4e92efd67c1539f5d209c4e08c8382fe0))
+* **storage:** provision test DB via migrations; accept omitted tenant_id on /count ([#630](https://github.com/caura-ai/caura-memclaw/issues/630)) ([b5fa7f8](https://github.com/caura-ai/caura-memclaw/commit/b5fa7f89a17d742b0f7d81261578ba85614e2334))
+
 ## [2.24.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.23.0...backend-v2.24.0) (2026-07-26)
 
 
