@@ -650,9 +650,15 @@ async def test_reembed_is_failure_fallback_triggers_backoff() -> None:
 
 
 async def test_bulk_reembed_fallback_passes_is_failure_fallback() -> None:
-    """Batch-call failure must fan out to per-item _reembed_memory with
-    is_failure_fallback=True, otherwise the per-items skip their sleep
-    and thunder onto the failing provider."""
+    """Batch-call failure must fan out per-item through
+    _schedule_embed_or_reembed with is_failure_fallback=True.
+
+    The fan-out goes through the inline/deferred router (not _reembed_memory
+    directly) so the retry is DURABLE in deferred mode — one EMBED_REQUESTED
+    publish per item, retried by Pub/Sub. The flag still matters: it is what
+    gives the INLINE branch its backoff, without which the per-items skip
+    their sleep and thunder onto the failing provider. See
+    tests/test_durable_reembed_fallback.py for the per-branch behaviour."""
     from core_api.services import memory_service
 
     called_with: list[dict] = []
@@ -677,7 +683,7 @@ async def test_bulk_reembed_fallback_passes_is_failure_fallback() -> None:
 
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_failing_batch),
-        patch.object(memory_service, "_reembed_memory", new=_capture),
+        patch.object(memory_service, "_schedule_embed_or_reembed", new=_capture),
         patch.object(memory_service, "track_task"),
         patch.object(
             memory_service,
@@ -727,7 +733,7 @@ async def test_bulk_reembed_fallback_catches_unexpected_exception_types() -> Non
 
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_failing_batch),
-        patch.object(memory_service, "_reembed_memory", new=_capture),
+        patch.object(memory_service, "_schedule_embed_or_reembed", new=_capture),
         patch.object(memory_service, "track_task"),
         patch.object(
             memory_service,

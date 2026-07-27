@@ -1736,6 +1736,7 @@ async def _schedule_embed_or_reembed(
     tenant_id: str,
     *,
     content_hash: str | None = None,
+    is_failure_fallback: bool = False,
 ) -> None:
     """Backfill the embedding for a memory persisted with ``embedding=NULL``.
 
@@ -1746,9 +1747,14 @@ async def _schedule_embed_or_reembed(
     circuit the provider call when the same content was already
     embedded for this tenant — pass it whenever the caller has it in
     scope.
+
+    ``is_failure_fallback`` only affects the INLINE branch, where it adds
+    the thundering-herd backoff before retrying in-process. The deferred
+    branch needs no equivalent: Pub/Sub owns redelivery and backoff, so
+    the publish is a single cheap hand-off regardless.
     """
     if settings.inline_embedding:
-        await _reembed_memory(memory_id, content, tenant_id)
+        await _reembed_memory(memory_id, content, tenant_id, is_failure_fallback=is_failure_fallback)
     else:
         await publish_memory_embed_request(
             memory_id=memory_id,
@@ -2036,10 +2042,25 @@ async def _reembed_memories_bulk(
         for memory_id, content in items:
             track_task(
                 tracked_task(
-                    # is_failure_fallback=True: provider just failed for
-                    # the whole batch, so the per-item retries need the
-                    # 30s backoff to avoid a thundering herd.
-                    _reembed_memory(memory_id, content, tenant_id, is_failure_fallback=True),
+                    # Route through the inline/deferred router rather than
+                    # calling _reembed_memory directly. In deferred mode this
+                    # hands each item to EMBED_REQUESTED, so the retry lives on
+                    # Pub/Sub (redelivery + DLQ) instead of in this process.
+                    #
+                    # That is what makes the fallback DURABLE. Direct in-process
+                    # retry meant a failed 50-item batch fanned out to 50 x
+                    # _REEMBED_MAX_RETRIES x EMBEDDING_RETRY_ATTEMPTS provider
+                    # calls, all contending for the same saturated backend; when
+                    # they exhausted, the rows stayed embedding=NULL with no
+                    # further recovery — a manual CLI backfill was the only way
+                    # out. That is exactly how ~430 memories were stranded in
+                    # the 2026-07-27 incident.
+                    #
+                    # is_failure_fallback=True still gives the INLINE branch its
+                    # thundering-herd backoff (the provider just failed for the
+                    # whole batch); the deferred branch ignores it because
+                    # Pub/Sub owns backoff.
+                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
                     "reembed",
                     memory_id,
                     tenant_id,
@@ -2060,7 +2081,7 @@ async def _reembed_memories_bulk(
         for memory_id, content in items:
             track_task(
                 tracked_task(
-                    _reembed_memory(memory_id, content, tenant_id, is_failure_fallback=True),
+                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
                     "reembed",
                     memory_id,
                     tenant_id,
@@ -2085,7 +2106,7 @@ async def _reembed_memories_bulk(
                 tracked_task(
                     # Per-item None after a partial batch success is
                     # still a provider partial-failure — back off.
-                    _reembed_memory(memory_id, content, tenant_id, is_failure_fallback=True),
+                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
                     "reembed",
                     memory_id,
                     tenant_id,
@@ -2103,7 +2124,7 @@ async def _reembed_memories_bulk(
             )
             track_task(
                 tracked_task(
-                    _reembed_memory(memory_id, content, tenant_id, is_failure_fallback=True),
+                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
                     "reembed",
                     memory_id,
                     tenant_id,
@@ -2148,7 +2169,7 @@ async def _reembed_memories_bulk(
             )
             track_task(
                 tracked_task(
-                    _reembed_memory(memory_id, content, tenant_id, is_failure_fallback=True),
+                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
                     "reembed",
                     memory_id,
                     tenant_id,
