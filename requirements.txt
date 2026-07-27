@@ -42,7 +42,7 @@ slowapi>=0.1.9,<1.0
 sentry-sdk[fastapi]>=2.66.0,<3
 
 # Structured logging with GCP Cloud Logging severity mapping (common/structlog_config.py)
-structlog>=25.4,<26
+structlog>=26.1.0,<27
 
 # NOTE: google-cloud-pubsub is NOT listed here so OSS standalone deploys
 # (EVENT_BUS_BACKEND=inprocess, default) stay lightweight. GCP/SaaS
