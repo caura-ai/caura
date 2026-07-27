@@ -151,11 +151,12 @@ jobs:
                   '[.statusCheckRollup[]? | select((.name // .context)==$n) | (.conclusion // .state // .status)][0] // "MISSING"' \
                   | tr '[:lower:]' '[:upper:]')
                 summary="${summary}  ${chk}=${state}"
-                # ACTION_REQUIRED (parked awaiting manual "approve and run") and
-                # STALE (check run superseded, won't re-run on its own) can't pass
-                # by themselves — treat as not-passing and bail immediately rather
-                # than polling uselessly to the deadline.
-                case "$state" in *FAILURE*|*CANCELLED*|*TIMED_OUT*|*ACTION_REQUIRED*|STALE) any_failed=1 ;; esac
+                # ACTION_REQUIRED (parked awaiting manual "approve and run"),
+                # STALE (check run superseded, won't re-run on its own), and ERROR
+                # (a StatusContext that errored — lowercase "error" upper-cased
+                # above) can't pass by themselves — treat as not-passing and bail
+                # immediately rather than polling uselessly to the deadline.
+                case "$state" in *FAILURE*|*CANCELLED*|*TIMED_OUT*|*ACTION_REQUIRED*|STALE|ERROR) any_failed=1 ;; esac
                 satisfied "$state" || all_ok=0
               done
               echo "  head=${head:0:7}${summary}"
@@ -187,10 +188,10 @@ jobs:
             echo "Merge attempt did not succeed: ${merge_out}"
             # Head moved during polling: --match-head-commit correctly rejects and
             # a fresh synchronize run re-verifies the new commit. Expected no-op.
-            # GitHub's real 409 for a --match-head-commit mismatch is
+            # GitHub's real error for a --match-head-commit mismatch is
             # "Head/Base branch was modified. Review and try the merge again."
-            # — so match "branch was modified" and 409, not just head/mismatch.
-            if printf '%s' "$merge_out" | grep -qiE "match.*head|head.*(mismatch|changed)|branch was modified|409"; then
+            # — so match "branch was modified", not just head/mismatch.
+            if printf '%s' "$merge_out" | grep -qiE "match.*head|head.*(mismatch|changed)|branch was modified"; then
               echo "Head moved during polling — a fresh run will re-verify. Exiting cleanly."; exit 0
             fi
             # Merge blocked by the required review because the App isn't yet a
