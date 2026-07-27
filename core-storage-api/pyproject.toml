@@ -8,7 +8,7 @@ dependencies = [
     # FastAPI 0.137+ is OK since #364 made core-api's startup guard read
     # app.openapi() instead of walking app.routes. The committed uv.lock pins the
     # exact version; this range only bounds future re-locks.
-    "fastapi>=0.139.2,<1",
+    "fastapi>=0.140.0,<1",
     "uvicorn[standard]>=0.51.0,<1",
     "sqlalchemy[asyncio]>=2.0.51,<3",
     # SQLAlchemy[asyncio] pulls in greenlet. greenlet 3.5.0 shipped wheels for
@@ -31,7 +31,7 @@ dependencies = [
     # its docstring: "Run inside the docker-compose stack so envs are
     # wired up correctly"). Pin matches ``core-worker``'s pin so the
     # OpenAI SDK version is consistent across services.
-    "openai>=2.46.0,<3",
+    "openai>=2.48.0,<3",
 ]
 
 [project.optional-dependencies]
@@ -45,7 +45,7 @@ datadog = ["ddtrace>=4.11.1"]
 dev = [
     "core-storage-api[test,pubsub]",
     "mypy>=2.3.0,<3.0",
-    "ruff>=0.15.22,<1.0",
+    "ruff>=0.16.0,<1.0",
 ]
 test = [
     "pytest>=9.1.1,<10.0",
