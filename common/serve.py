@@ -28,6 +28,13 @@ to uvicorn as a string so the workers can re-import it. ``<settings_import>`` is
 ``module:attr`` for the service's settings singleton, imported here only to read
 ``environment`` / ``log_level`` / ``log_format_json`` / ``log_file`` — matching
 the app's own ``configure_logging()`` call exactly.
+
+Vendoring constraint: this file is vendored byte-for-byte into
+caura-memclaw-enterprise as an ``identical``-policy ``common/`` file, whose CI
+runs ``ruff format --check`` with no resolved config (ruff's 88-col default).
+Keep every line <= 88 cols so the vendored copy stays format-stable there — a
+wider line passes OSS CI (which does not format-check ``common/``) but wedges
+the enterprise re-vendor (the 2026-06 structlog_config drift incident).
 """
 
 from __future__ import annotations
@@ -60,7 +67,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, required=True)
     p.add_argument("--workers", type=int, default=1)
-    p.add_argument("--timeout-keep-alive", type=int, default=65, dest="timeout_keep_alive")
+    p.add_argument(
+        "--timeout-keep-alive", type=int, default=65, dest="timeout_keep_alive"
+    )
     return p
 
 
