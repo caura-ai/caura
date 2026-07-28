@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.16.0](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.15.2...plugin-v2.16.0) (2026-07-28)
+
+
+### Features
+
+* **plugin:** interviewer task-trail capture — mirror OpenClaw task_runs into the interview buffer ([#658](https://github.com/caura-ai/caura-memclaw/issues/658)) ([ba5f4b7](https://github.com/caura-ai/caura-memclaw/commit/ba5f4b76a6a261f3c8884f6bcf624be7e5ea8951))
+
 ## [2.15.2](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.15.1...plugin-v2.15.2) (2026-07-26)
 
 

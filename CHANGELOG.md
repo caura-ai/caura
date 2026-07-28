@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.25.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.24.1...backend-v2.25.0) (2026-07-28)
+
+
+### Features
+
+* **plugin:** interviewer task-trail capture — mirror OpenClaw task_runs into the interview buffer ([#658](https://github.com/caura-ai/caura-memclaw/issues/658)) ([ba5f4b7](https://github.com/caura-ai/caura-memclaw/commit/ba5f4b76a6a261f3c8884f6bcf624be7e5ea8951))
+
+
+### Bug Fixes
+
+* **client-ci:** pin ruff to the 0.15 line so client CI stops floating into 0.16 ([#655](https://github.com/caura-ai/caura-memclaw/issues/655)) ([24a137a](https://github.com/caura-ai/caura-memclaw/commit/24a137ad630806ade504324ed47b37d75970f259))
+* **embedding:** make batch-failure re-embed fallback durable ([#653](https://github.com/caura-ai/caura-memclaw/issues/653)) ([b489c8f](https://github.com/caura-ai/caura-memclaw/commit/b489c8f44602c7839c5b4c4d7e4a1be3c5d1ba53))
+* **logging:** route uvicorn parent-supervisor lines through structlog ([#661](https://github.com/caura-ai/caura-memclaw/issues/661)) ([b61fcb5](https://github.com/caura-ai/caura-memclaw/commit/b61fcb5936a4812d6bf1048b61ab85f66b269850))
+
+
+### Performance
+
+* **entities:** add HNSW index on entities.name_embedding ([#660](https://github.com/caura-ai/caura-memclaw/issues/660)) ([f8e8229](https://github.com/caura-ai/caura-memclaw/commit/f8e8229df390d95332732a418d26fa147e54b57d))
+
+
+### Dependencies
+
+* bump the uv-minor-patch group across 4 directories with 8 updates ([#649](https://github.com/caura-ai/caura-memclaw/issues/649)) ([79857d4](https://github.com/caura-ai/caura-memclaw/commit/79857d462d5ea14c181db33c22bdbdeac477613f))
+
 ## [2.24.1](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.24.0...backend-v2.24.1) (2026-07-27)
 
 
