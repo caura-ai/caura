@@ -85,6 +85,20 @@ export const MEMCLAW_REQUIRE_SIGNED_COMMANDS =
 // feature to function end-to-end.
 export const MEMCLAW_INTERVIEWER = process.env.MEMCLAW_INTERVIEWER === "true";
 
+// Interviewer Phase 1.5 (issue #654): mirror OpenClaw's ``task_runs``
+// SQLite trail into the interview buffer at interview time, so task /
+// sub-agent-driven work is interviewed, not just the host chat stream.
+// Default ON whenever the interviewer itself is on — this is the fix
+// for the empty-interview gap, not a separate feature. ``"false"`` is
+// the escape hatch if a node's task DB misbehaves.
+export const MEMCLAW_INTERVIEWER_TASKS = process.env.MEMCLAW_INTERVIEWER_TASKS !== "false";
+
+// Operator override for the task_runs database location. Normally
+// discovered (legacy <base>/tasks/runs.sqlite, else a shallow scan for
+// a task_runs table — the >= 2026.6 consolidated state DB has no stable
+// filename); set this when a deployment relocates OpenClaw state.
+export const MEMCLAW_TASK_DB_PATH = process.env.MEMCLAW_TASK_DB_PATH || "";
+
 // Warn at import time if API key is set but URL is HTTP
 warnIfInsecureUrl(MEMCLAW_API_URL, MEMCLAW_API_KEY);
 
@@ -281,6 +295,15 @@ export const INTERVIEW_BUFFER_MAX_BYTES = 50_000_000;
 // the default timeout aborted every full-window submit). Generous
 // like BUILD_TIMEOUT_MS; a timeout still fails safe (no prune).
 export const INTERVIEW_SUBMIT_TIMEOUT_MS = 300_000;
+// Task-trail sync (Phase 1.5): at most this many task events are
+// appended per interview tick — bounds the first-sync burst on a busy
+// node; the sidecar only advances for emitted rows, so the remainder
+// drains on later ticks.
+export const INTERVIEW_TASK_SYNC_MAX_PER_TICK = 200;
+// Sidecar entries older than this are pruned. One day past OpenClaw's
+// 7-day terminal-task retention (task-retention.ts) — anything older
+// can never resurface from the DB, so tracking it is waste.
+export const INTERVIEW_TASK_SIDECAR_RETENTION_MS = 8 * 24 * 60 * 60_000;
 
 // --- Keystones (CAURA-000): mandatory governance rules auto-injected ---
 //
