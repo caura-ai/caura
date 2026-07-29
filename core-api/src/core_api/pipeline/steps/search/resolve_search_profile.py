@@ -27,7 +27,7 @@ class ResolveSearchProfile:
         from core_api.services.organization_settings import validate_search_profile
 
         search_profile = ctx.data.get("search_profile")
-        sp = validate_search_profile(search_profile) if search_profile else {}
+        resolved_profile = validate_search_profile(search_profile) if search_profile else {}
 
         # Tenant-wide default profile (A47) sits BELOW the agent profile and
         # ABOVE the global constants: a per-agent tuned knob wins, the tenant
@@ -39,24 +39,30 @@ class ResolveSearchProfile:
         if tenant_config is not None:
             tenant_default = getattr(tenant_config, "default_search_profile", {}) or {}
             if tenant_default:
-                sp = {**tenant_default, **sp}
+                resolved_profile = {**tenant_default, **resolved_profile}
 
         query = ctx.data["query"]
         top_k = ctx.data["top_k"]
 
         ctx.data["search_params"] = {
-            "top_k": sp.get("top_k", top_k),
-            "min_similarity": sp.get("min_similarity", MIN_SEARCH_SIMILARITY),
-            "fts_weight": (sp["fts_weight"] if "fts_weight" in sp else _adaptive_fts_weight(query)),
-            "freshness_floor": sp.get("freshness_floor", FRESHNESS_FLOOR),
-            "freshness_decay_days": sp.get("freshness_decay_days", FRESHNESS_DECAY_DAYS),
-            "recall_boost_cap": sp.get("recall_boost_cap", RECALL_BOOST_CAP),
-            "recall_decay_window_days": sp.get("recall_decay_window_days", RECALL_DECAY_WINDOW_DAYS),
-            "graph_max_hops": sp.get("graph_max_hops", GRAPH_MAX_HOPS),
-            "similarity_blend": sp.get("similarity_blend", SIMILARITY_BLEND),
+            "top_k": resolved_profile.get("top_k", top_k),
+            "min_similarity": resolved_profile.get("min_similarity", MIN_SEARCH_SIMILARITY),
+            "fts_weight": (
+                resolved_profile["fts_weight"]
+                if "fts_weight" in resolved_profile
+                else _adaptive_fts_weight(query)
+            ),
+            "freshness_floor": resolved_profile.get("freshness_floor", FRESHNESS_FLOOR),
+            "freshness_decay_days": resolved_profile.get("freshness_decay_days", FRESHNESS_DECAY_DAYS),
+            "recall_boost_cap": resolved_profile.get("recall_boost_cap", RECALL_BOOST_CAP),
+            "recall_decay_window_days": resolved_profile.get(
+                "recall_decay_window_days", RECALL_DECAY_WINDOW_DAYS
+            ),
+            "graph_max_hops": resolved_profile.get("graph_max_hops", GRAPH_MAX_HOPS),
+            "similarity_blend": resolved_profile.get("similarity_blend", SIMILARITY_BLEND),
             # A49: 0 = off; >0 = storage selects a cosine-dominant candidate pool of this size.
-            "candidate_pool_size": sp.get("candidate_pool_size", CANDIDATE_POOL_SIZE),
+            "candidate_pool_size": resolved_profile.get("candidate_pool_size", CANDIDATE_POOL_SIZE),
             # A50 unified: 0 = legacy multiplicative score; 1 = unified relevance-dominant formula.
-            "score_formula": sp.get("score_formula", SCORE_FORMULA),
+            "score_formula": resolved_profile.get("score_formula", SCORE_FORMULA),
         }
         return None
