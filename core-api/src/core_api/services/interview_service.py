@@ -23,6 +23,7 @@ Design notes (see ``docs/plans/interviewer-phase1-decisions.md``):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from typing import Any
 
 from common.governance import mask, scan
 from core_api.clients.storage_client import get_storage_client
+from core_api.config import settings as app_settings
 from core_api.constants import (
     INTERVIEW_CHUNK_MAX_CHARS,
     INTERVIEW_EVENT_MAX_CHARS,
@@ -47,6 +49,36 @@ from core_api.services.tenants import list_tenants_with_interviewer_enabled
 logger = logging.getLogger(__name__)
 
 WATERMARK_COLLECTION = "interview_watermarks"
+# Durable async-submit job queue (#665): one doc per (node, window),
+# holding the MASKED event window until synthesis commits.
+JOBS_COLLECTION = "interview_jobs"
+
+
+class InterviewJobPermanentlyFailedError(RuntimeError):
+    """Raised when enqueue_interview_job is called for a job already parked
+    as failed_permanent — the route maps it to 409 so permanence is visible
+    as a distinct status instead of blending into transient 500s."""
+
+
+# A job stuck in "processing" longer than this is presumed dead (the
+# fire-and-forget task hard-crashed with the process between the
+# "processing" write and any terminal write) and is re-swept like a
+# pending job. Generous vs. the worst-case synthesis (multi-chunk
+# map-reduce with LLM fallback chains) so a slow-but-alive run is not
+# double-processed — and even if it were, re-processing is idempotent via
+# the deterministic bulk attempt id.
+INTERVIEW_JOB_STALE_PROCESSING_SECONDS = 600
+# Bounded fan-out for the scheduler sweep's job drain (#667): jobs
+# synthesize concurrently (each is an LLM map-reduce plus storage writes,
+# so a strictly sequential drain of a large backlog could outlive the
+# tick), capped so a backlog can't stampede the LLM provider or exhaust
+# the storage connection pool.
+INTERVIEW_SWEEP_CONCURRENCY = 5
+# ONE shared gate for every synthesis entry point (route fire-and-forget AND
+# the scheduler sweep): two independent Semaphore(N) instances would allow
+# 2N concurrent LLM map-reduces whenever the sweep overlaps in-flight route
+# tasks — exactly the quota/pool exhaustion the cap exists to prevent.
+synthesis_sem = asyncio.Semaphore(INTERVIEW_SWEEP_CONCURRENCY)
 
 # Report section → memory_type. The section label is preserved in
 # ``metadata.category`` so the original interview framing survives the
@@ -71,6 +103,16 @@ def interview_attempt_id(node_id: str, cursor_from: int, cursor_to: int) -> str:
     """
     digest = hashlib.sha1(f"{node_id}:{cursor_from}:{cursor_to}".encode()).hexdigest()
     return f"interview:{digest[:40]}"
+
+
+def interview_job_doc_id(node_id: str, cursor_from: int, cursor_to: int) -> str:
+    """Deterministic job-doc id for one (node, window) async submit (#665).
+
+    Derived from the same identity as the bulk attempt id, so a duplicate
+    submit of the same window upserts the SAME job doc instead of queueing
+    a second synthesis.
+    """
+    return f"job_{interview_attempt_id(node_id, cursor_from, cursor_to)}"
 
 
 def watermark_doc_id(node_id: str) -> str:
@@ -455,7 +497,7 @@ async def advance_watermark(
 # ── Orchestrator ──
 
 
-async def run_interview(
+async def _synthesize_and_write(
     *,
     tenant_id: str,
     fleet_id: str | None,
@@ -464,25 +506,21 @@ async def run_interview(
     command_id: str | None,
     cursor_from: int,
     cursor_to: int,
-    events: list[dict],
+    masked_events: list[dict],
+    advance_watermark_after: bool,
 ) -> dict:
-    """The full window interview: mask → map → reduce → bulk → watermark."""
-    started = datetime.now(UTC)
+    """Synthesis half of the interview: map → reduce → bulk (→ watermark).
 
-    masked, finding_count = mask_events(events)
-    if finding_count:
-        logger.info(
-            "%s interview: masked %d PII/secret findings pre-LLM (tenant=%s node=%s)",
-            started.isoformat(),
-            finding_count,
-            tenant_id,
-            node_id,
-        )
-
+    Shared by the legacy inline path (``run_interview``, which advances the
+    watermark here, after the bulk write) and the async job processor
+    (#665), which passes ``advance_watermark_after=False`` because the
+    watermark already advanced at accept time — then the returned status
+    dicts carry ``watermark: None``. Events MUST already be masked.
+    """
     config = await resolve_config(tenant_id)
     keystones = await _keystone_lines(tenant_id, fleet_id, agent_id)
 
-    chunks = chunk_events(masked)
+    chunks = chunk_events(masked_events)
     mini_reports = []
     for index, chunk in enumerate(chunks):
         prompt = build_prompt(
@@ -501,13 +539,15 @@ async def run_interview(
     if not items:
         # Nothing report-worthy in the window (e.g. pure noise). Still
         # advance the cursor: the window was consumed, not lost.
-        watermark = await advance_watermark(
-            tenant_id,
-            node_id=node_id,
-            agent_id=agent_id,
-            cursor_to=cursor_to,
-            command_id=command_id,
-        )
+        watermark = None
+        if advance_watermark_after:
+            watermark = await advance_watermark(
+                tenant_id,
+                node_id=node_id,
+                agent_id=agent_id,
+                cursor_to=cursor_to,
+                command_id=command_id,
+            )
         return {"status": "committed", "watermark": watermark, "memories_written": 0, "errors": 0}
 
     bulk: BulkMemoryResponse = await create_memories_bulk(
@@ -529,19 +569,616 @@ async def run_interview(
         # that did land dedup as duplicate_attempt).
         return {"status": "failed", "watermark": None, "memories_written": 0, "errors": errors}
 
-    watermark = await advance_watermark(
-        tenant_id,
-        node_id=node_id,
-        agent_id=agent_id,
-        cursor_to=cursor_to,
-        command_id=command_id,
-    )
+    watermark = None
+    if advance_watermark_after:
+        watermark = await advance_watermark(
+            tenant_id,
+            node_id=node_id,
+            agent_id=agent_id,
+            cursor_to=cursor_to,
+            command_id=command_id,
+        )
     return {
         "status": "partial" if errors else "committed",
         "watermark": watermark,
         "memories_written": written,
         "errors": errors,
     }
+
+
+async def run_interview(
+    *,
+    tenant_id: str,
+    fleet_id: str | None,
+    agent_id: str,
+    node_id: str,
+    command_id: str | None,
+    cursor_from: int,
+    cursor_to: int,
+    events: list[dict],
+) -> dict:
+    """The full window interview: mask → map → reduce → bulk → watermark.
+
+    Legacy inline path (``interview_async_submit=False``): synthesis runs on
+    the request and the watermark advances only after the bulk write.
+    """
+    started = datetime.now(UTC)
+
+    masked, finding_count = mask_events(events)
+    if finding_count:
+        logger.info(
+            "%s interview: masked %d PII/secret findings pre-LLM (tenant=%s node=%s)",
+            started.isoformat(),
+            finding_count,
+            tenant_id,
+            node_id,
+        )
+
+    return await _synthesize_and_write(
+        tenant_id=tenant_id,
+        fleet_id=fleet_id,
+        agent_id=agent_id,
+        node_id=node_id,
+        command_id=command_id,
+        cursor_from=cursor_from,
+        cursor_to=cursor_to,
+        masked_events=masked,
+        advance_watermark_after=True,
+    )
+
+
+# ── Async submit job queue (#665) ──
+
+
+async def enqueue_interview_job(
+    *,
+    tenant_id: str,
+    fleet_id: str | None,
+    agent_id: str,
+    node_id: str,
+    command_id: str | None,
+    cursor_from: int,
+    cursor_to: int,
+    events: list[dict],
+) -> str:
+    """Persist one (node, window) as a durable ``interview_jobs`` doc.
+
+    Masks FIRST — the job doc must never store unmasked PII/secrets (it
+    outlives the request and is read back by the sweep). Idempotent: a
+    duplicate submit of the same window resolves to the SAME doc id; the
+    existing doc's status decides what happens (see the status ladder
+    below). Returns the job doc id.
+    """
+    now = datetime.now(UTC)
+    masked, finding_count = mask_events(events)
+    if finding_count:
+        logger.info(
+            "%s interview: masked %d PII/secret findings pre-enqueue (tenant=%s node=%s)",
+            now.isoformat(),
+            finding_count,
+            tenant_id,
+            node_id,
+        )
+    doc_id = interview_job_doc_id(node_id, cursor_from, cursor_to)
+    sc = get_storage_client()
+    # Status ladder for a duplicate submit of the same window:
+    #   - "done": the window was already synthesized — skip the upsert
+    #     entirely (rewriting it would re-open a consumed window).
+    #   - "processing": a concurrent processor owns the job — skip the
+    #     upsert; downgrading to "pending" would hand the same window to a
+    #     second processor (re-synthesis dedups via the deterministic bulk
+    #     attempt id, but the race is pure wasted LLM work).
+    #   - missing / "pending" / "failed_permanent": (re-)enqueue as
+    #     "pending", PRESERVING attempts — resetting the retry budget
+    #     would let a plugin resubmit cycle a failing job past
+    #     interview_job_max_attempts forever.
+    prior_attempts = 0
+    prior_status: str | None = None
+    try:
+        existing = await sc.get_document(tenant_id, JOBS_COLLECTION, doc_id, read=False)
+        if isinstance(existing, dict):
+            prior_data = existing.get("data") or {}
+            prior_status = prior_data.get("status")
+            try:
+                prior_attempts = int(prior_data.get("attempts", 0))
+            except (TypeError, ValueError):
+                prior_attempts = 0
+    except Exception as exc:
+        # Never silent: a reset attempts counter (or a missed "done")
+        # bypasses interview_job_max_attempts / re-opens a consumed window.
+        logger.warning(
+            "interview job: could not read prior job state (tenant=%s doc=%s): %s "
+            "— failing the request so the plugin retries the window",
+            tenant_id,
+            doc_id,
+            exc,
+        )
+        # The doc's status is UNKNOWN — upserting "pending" here could
+        # overwrite a "done"/"processing" job (re-opening a consumed window
+        # / double-processing it) and reset its retry budget. But returning
+        # success is worse: on a first-time submit no doc exists, so the
+        # route would advance the watermark and the plugin would prune the
+        # window — losing it permanently. Re-raise instead: the route 500s,
+        # the plugin keeps its buffer and resubmits next tick.
+        raise
+    if prior_status in ("processing", "done"):
+        logger.debug(
+            "interview job: skipping enqueue over %s job (tenant=%s doc=%s)",
+            prior_status,
+            tenant_id,
+            doc_id,
+        )
+        return doc_id
+    if prior_status == "failed_permanent":
+        # Returning doc_id here would let the route advance the watermark and
+        # answer 200 — the plugin would prune a window the server has PARKED
+        # and will never re-synthesize: silent, permanent loss. Raising makes
+        # the route 500, the plugin keeps its buffer, and the failure stays
+        # visible every tick until an operator intervenes (the masked events
+        # remain in the job doc for recovery). Re-opening the job here is NOT
+        # an option: this racy read-check-write path would hand the window a
+        # fresh attempts budget (see the non-atomicity note below).
+        logger.warning(
+            "interview job: job permanently failed, cannot re-enqueue "
+            "(tenant=%s doc=%s) — returning error so the plugin retries",
+            tenant_id,
+            doc_id,
+        )
+        raise InterviewJobPermanentlyFailedError(
+            f"interview job {doc_id} is permanently failed and cannot be re-enqueued"
+        )
+    # NOTE: this read-check-write is NOT atomic — core-storage's document
+    # upsert is a plain replace (``ON CONFLICT DO UPDATE SET data = :data``,
+    # no conditional variant), so a processor can flip the doc to
+    # "processing"/"done" between our read above and this write. Worst
+    # case: a plugin resubmit in a multi-worker deployment can write a stale
+    # prior_attempts over a higher value a concurrent processor committed,
+    # allowing the job to exceed interview_job_max_attempts by up to
+    # (number of workers - 1) attempts before every concurrent snapshot
+    # sees the high value; a just-consumed window can also briefly re-open
+    # as "pending". A conditional upsert (UPDATE ... WHERE attempts <=
+    # :prior_attempts) in core-storage would close this; for now the
+    # overshoot is bounded and re-synthesis is idempotent via the
+    # deterministic bulk attempt id (wasted LLM work, never duplicate rows).
+    # Double-check (not a CAS — see the non-atomicity NOTE above): re-read
+    # immediately before the write to narrow the window in which a concurrent
+    # processor's "processing"/"done" (or a park) gets overwritten. A failed
+    # re-check raises — same invariant as the initial read: enqueue may only
+    # return normally when the window is durably owned server-side.
+    try:
+        recheck = await sc.get_document(tenant_id, JOBS_COLLECTION, doc_id, read=False)
+        if isinstance(recheck, dict):
+            recheck_status = (recheck.get("data") or {}).get("status")
+            if recheck_status in ("processing", "done"):
+                logger.debug(
+                    "interview job: skipping enqueue, status changed to %s during check (tenant=%s doc=%s)",
+                    recheck_status,
+                    tenant_id,
+                    doc_id,
+                )
+                return doc_id
+            if recheck_status == "failed_permanent":
+                logger.warning(
+                    "interview job: job permanently failed on re-check, cannot re-enqueue (tenant=%s doc=%s)",
+                    tenant_id,
+                    doc_id,
+                )
+                raise InterviewJobPermanentlyFailedError(
+                    f"interview job {doc_id} is permanently failed and cannot be re-enqueued"
+                )
+            # Adopt the freshest attempts: a concurrent processor may have
+            # incremented between the two reads — writing the stale
+            # first-read value back would silently reset the retry budget
+            # (the exact overwrite the double-check exists to narrow).
+            try:
+                prior_attempts = int((recheck.get("data") or {}).get("attempts", prior_attempts))
+            except (TypeError, ValueError):
+                pass
+    except InterviewJobPermanentlyFailedError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "interview job: re-check read failed (tenant=%s doc=%s): %s — failing request",
+            tenant_id,
+            doc_id,
+            exc,
+        )
+        raise
+    await sc.upsert_document(
+        {
+            "tenant_id": tenant_id,
+            "collection": JOBS_COLLECTION,
+            "doc_id": doc_id,
+            "data": {
+                "status": "pending",
+                "attempts": prior_attempts,
+                "fleet_id": fleet_id,
+                "agent_id": agent_id,
+                "node_id": node_id,
+                "command_id": command_id,
+                "cursor_from": cursor_from,
+                "cursor_to": cursor_to,
+                "events": masked,
+                "enqueued_at": now.isoformat(),
+            },
+        }
+    )
+    return doc_id
+
+
+async def process_interview_job(
+    tenant_id: str, doc_id: str, *, allow_stale_processing: bool = False
+) -> dict | None:
+    """Synthesize one persisted interview job. NEVER raises (#665).
+
+    Lifecycle: ``pending`` → ``processing`` (attempts+1) → ``done`` on
+    success; back to ``pending`` on failure so the scheduler sweep retries
+    it (re-synthesis is idempotent via the deterministic bulk attempt id);
+    parked as ``failed_permanent`` once attempts reach
+    ``interview_job_max_attempts``. Returns the synthesis result dict, or
+    None when there was nothing to do (missing/done/owned doc, parked, or
+    the attempt raised).
+
+    A ``processing`` doc is OWNED by whichever run wrote that status (the
+    route's fire-and-forget task, or a prior sweep) — a second processor
+    entering anyway would double-synthesize the window and its
+    finally-reset could flip the owner's subsequent "done" back to
+    "pending" (#667). So "processing" is a skip by default; only the
+    scheduler sweep may reclaim one, by passing
+    ``allow_stale_processing=True`` for docs whose owner is presumed dead
+    (see ``_job_processing_is_stale`` — the guard re-checks staleness
+    itself so the flag can never reclaim a fresh run).
+    """
+    sc = get_storage_client()
+    try:
+        doc = await sc.get_document(tenant_id, JOBS_COLLECTION, doc_id, read=False)
+    except Exception:
+        logger.exception("interview job: fetch failed (tenant=%s doc=%s)", tenant_id, doc_id)
+        return None
+    data = doc.get("data") if isinstance(doc, dict) else None
+    if not isinstance(data, dict) or data.get("status") in ("done", "failed_permanent"):
+        # Terminal states are no-ops: re-processing a parked job would
+        # recount it as jobs_parked every sweep instead of jobs_skipped.
+        return None
+    if data.get("status") == "processing" and not (
+        allow_stale_processing and _job_processing_is_stale(doc, datetime.now(UTC))
+    ):
+        return None
+
+    # Fallback base for _set_state when its fresh re-fetch can't produce
+    # one: the last merged payload this run wrote. Starts as the fetched
+    # snapshot; after the "processing" transition it carries the
+    # INCREMENTED attempts, so the status-only writes below ("done", the
+    # finally pending-reset) can't regress the counter to the
+    # pre-increment closure value when they hit the fallback path.
+    last_written = data
+
+    async def _set_state(
+        state: dict, *, increment_attempts: bool = False, skip_if_terminal: bool = False
+    ) -> bool:
+        # Returns True when the write landed, False when skip_if_terminal
+        # suppressed it — callers that must NOT proceed after a suppressed
+        # transition (the "processing" claim) branch on this instead of
+        # inferring from last_written, which can't distinguish a skip on
+        # the stale-reclaim path (its initial status is already "processing").
+        # upsert_document REPLACES the whole ``data`` payload server-side
+        # (``ON CONFLICT DO UPDATE SET data = :data`` — see
+        # core-storage-api ``document_upsert``), it does NOT merge keys. So
+        # writing only the transitioned keys would destroy the events
+        # payload, and writing the stale closure ``data`` snapshot would
+        # resurrect keys a concurrent writer (e.g. a duplicate enqueue)
+        # changed since our fetch. Re-fetch the CURRENT doc and merge the
+        # transition keys onto that fresh snapshot instead.
+        nonlocal last_written
+        base = last_written
+        fresh = await sc.get_document(tenant_id, JOBS_COLLECTION, doc_id, read=False)
+        if isinstance(fresh, dict) and isinstance(fresh.get("data"), dict):
+            base = fresh["data"]
+        if skip_if_terminal and base.get("status") in ("done", "failed_permanent"):
+            # A CONCURRENT run finished (or parked) the same window while
+            # this one was in flight — overwriting "done" would re-open a
+            # consumed window, and overwriting "failed_permanent" would
+            # re-enter the retry loop past the attempts cap (#667). The
+            # check runs on the SAME snapshot the merge uses, collapsing
+            # the old pre-check-then-write shape's two fetch-write gaps
+            # into one (round 6). On the fallback path (fresh fetch
+            # unusable → base is this run's own last-written snapshot) the
+            # check is best-effort only: our own snapshot can't show a
+            # concurrent terminal write, so a "done" landing while storage
+            # reads are failing may still be overwritten — the irreducible
+            # plain-replace race; re-synthesis stays idempotent via the
+            # deterministic bulk attempt id.
+            return False
+        merged = {**base, **state}
+        if increment_attempts:
+            # Increment from the FRESH base, not the caller's stale local
+            # snapshot: two concurrent processors would otherwise both read
+            # attempts=N and both write N+1, undercounting attempts and
+            # letting a job exceed interview_job_max_attempts.
+            try:
+                merged["attempts"] = int(base.get("attempts", 0)) + 1
+            except (TypeError, ValueError):
+                merged["attempts"] = 1
+        await sc.upsert_document(
+            {
+                "tenant_id": tenant_id,
+                "collection": JOBS_COLLECTION,
+                "doc_id": doc_id,
+                "data": merged,
+            }
+        )
+        last_written = merged
+        return True
+
+    try:
+        attempts = int(data.get("attempts", 0))
+    except (TypeError, ValueError):
+        attempts = 0
+    try:
+        if attempts >= app_settings.interview_job_max_attempts:
+            logger.warning(
+                "interview job: attempts exhausted, parking as failed_permanent "
+                "(tenant=%s doc=%s attempts=%d)",
+                tenant_id,
+                doc_id,
+                attempts,
+            )
+            # skip_if_terminal: a stale-processing reclaim can race the
+            # original (slow-but-alive) run — if that run wrote "done" just
+            # before this park, overwriting it would falsely discard a
+            # completed synthesis. Same rationale as the finally reset.
+            parked = await _set_state({"status": "failed_permanent"}, skip_if_terminal=True)
+            if not parked:
+                # A concurrent run finished the job between our fetch and
+                # this park — it owns the outcome; reporting parked here
+                # would miscount a completed window as failed_permanent.
+                return None
+            return {"status": "failed_permanent"}
+        # Local mirror for logging and the park-check above; the WRITTEN
+        # counter comes from increment_attempts (fresh-base increment).
+        attempts += 1
+        # processing_started_at drives the sweep's stale-"processing"
+        # recovery (INTERVIEW_JOB_STALE_PROCESSING_SECONDS).
+        claimed = await _set_state(
+            {
+                "status": "processing",
+                "processing_started_at": datetime.now(UTC).isoformat(),
+            },
+            increment_attempts=True,
+            skip_if_terminal=True,
+        )
+        if not claimed:
+            # A concurrent run finished (or parked) the job between our
+            # initial fetch and this claim — let it own the result rather
+            # than overwriting "done" with "processing" and re-synthesizing
+            # (whose failure path could later park a correctly-completed
+            # window as failed_permanent).
+            return None
+        # Use the actually-stored count (last_written carries the fresh-base
+        # increment) rather than the stale initial snapshot for logging and
+        # the park check on later paths.
+        attempts = last_written.get("attempts", attempts)
+    except Exception:
+        logger.exception("interview job: state write failed (tenant=%s doc=%s)", tenant_id, doc_id)
+        return None
+
+    # Every exit below without a committed "done" write MUST converge the
+    # job back to "pending" — synthesis failure, done-write failure, and
+    # cancellation alike — else it strands in "processing" until the
+    # (slower) stale-processing sweep. The finally block owns that
+    # convergence; ``wrote_done`` records the one exit that must not.
+    result: dict | None = None
+    wrote_done = False
+    try:
+        try:
+            result = await _synthesize_and_write(
+                tenant_id=tenant_id,
+                fleet_id=data.get("fleet_id"),
+                agent_id=str(data.get("agent_id") or ""),
+                node_id=str(data.get("node_id") or ""),
+                command_id=data.get("command_id"),
+                cursor_from=int(data.get("cursor_from") or 0),
+                cursor_to=int(data.get("cursor_to") or 0),
+                masked_events=data.get("events") or [],
+                # The watermark already advanced at accept time (route).
+                advance_watermark_after=False,
+            )
+        except Exception:
+            logger.exception(
+                "interview job: synthesis failed (tenant=%s doc=%s attempt=%d)",
+                tenant_id,
+                doc_id,
+                attempts,
+            )
+            # Sentinel (not None): the job WAS claimed and attempts WAS
+            # incremented before this failure — the sweep must count it as
+            # retried, while None stays reserved for true no-ops (missing/
+            # done doc, concurrent-ownership skip) where nothing happened.
+            result = {"status": "failed_transient"}
+        # "partial" is deliberately NOT terminal here: in the async path the
+        # watermark advanced at accept and the plugin pruned — marking a
+        # partial bulk write "done" would permanently lose the failed rows.
+        # Falling through to the pending reset lets the sweep re-drive it;
+        # re-synthesis is idempotent (already-written rows dedup as
+        # duplicate_attempt, failed rows get a fresh attempt).
+        if result and result.get("status") not in ("failed", "failed_transient", "partial"):
+            try:
+                # No "attempts" key: the "processing" transition already
+                # stamped the fresh-base increment; re-writing the local
+                # mirror here could clobber a concurrent run's newer count
+                # (#667). _set_state's merge base carries the stored value.
+                await _set_state(
+                    {
+                        "status": "done",
+                        "memories_written": result.get("memories_written", 0),
+                        "completed_at": datetime.now(UTC).isoformat(),
+                    }
+                )
+                wrote_done = True
+            except Exception:
+                logger.exception(
+                    "interview job: done-state write failed (tenant=%s doc=%s)", tenant_id, doc_id
+                )
+    finally:
+        # Runs for plain returns, ordinary Exceptions (already swallowed
+        # above — this function never raises for them), AND CancelledError
+        # (which re-raises on its own once this block ends, so cancellation
+        # still propagates to the asyncio runtime). Back to pending: the
+        # next sweep retries; the deterministic bulk attempt id makes the
+        # re-synthesis idempotent. The reset write itself gets one extra
+        # best-effort attempt — a single transient storage blip must not
+        # strand the job in "processing".
+        if not wrote_done:
+            for reset_try in (1, 2):
+                try:
+                    # skip_if_terminal: between our failure and this reset a
+                    # CONCURRENT run may have finished the same window —
+                    # _set_state backs off from a terminal status using the
+                    # SAME fresh snapshot it merges onto (one fetch-write
+                    # gap; round 6 collapsed the old separate pre-check +
+                    # write shape). Still not atomic (plain-replace upsert),
+                    # but the residual race is one gap, not two. No
+                    # "attempts" key on the reset either: the fresh merge
+                    # base already carries the stored count.
+                    await _set_state({"status": "pending"}, skip_if_terminal=True)
+                    break
+                # BaseException: a CancelledError-mid-teardown reset attempt
+                # must not mask the ORIGINAL in-flight exception (which the
+                # finally re-raises on its own once this block ends).
+                except BaseException:
+                    logger.warning(
+                        "interview job: pending-reset write failed (tenant=%s doc=%s try=%d)",
+                        tenant_id,
+                        doc_id,
+                        reset_try,
+                        exc_info=True,
+                    )
+    return result
+
+
+def _job_processing_is_stale(row: dict, now: datetime) -> bool:
+    """True when a ``processing`` job doc's run is presumed dead.
+
+    Stale = ``processing_started_at`` older than
+    ``INTERVIEW_JOB_STALE_PROCESSING_SECONDS`` — the owning task hard-
+    crashed between the "processing" write and any terminal write. A
+    missing/unparseable timestamp (docs written before it existed) also
+    counts as stale, else those docs would strand in "processing" forever.
+    """
+    data = row.get("data") if isinstance(row, dict) else None
+    if not isinstance(data, dict):
+        return False
+    started = data.get("processing_started_at")
+    if not started or not isinstance(started, str):
+        return True
+    try:
+        started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if started_dt.tzinfo is None:
+        started_dt = started_dt.replace(tzinfo=UTC)
+    return (now - started_dt).total_seconds() >= INTERVIEW_JOB_STALE_PROCESSING_SECONDS
+
+
+async def process_pending_interview_jobs(limit_per_tenant: int = 20) -> dict:
+    """Drain ``pending`` (and stale ``processing``) interview jobs across
+    opted-in tenants (#665).
+
+    The durable retry path behind the submit route's fire-and-forget task:
+    the scheduler sweep calls this, so a job whose immediate processing
+    died with the process (or failed transiently) still completes. Jobs
+    stranded in ``processing`` by a hard crash mid-run are recovered once
+    stale (see ``_job_processing_is_stale``); re-processing them is
+    idempotent via the deterministic bulk attempt id, so racing a
+    slow-but-alive run wastes work but never duplicates rows. Jobs run
+    concurrently, bounded by ``INTERVIEW_SWEEP_CONCURRENCY`` (round 6).
+    Returns a bounded counts summary.
+    """
+    sc = get_storage_client()
+    now = datetime.now(UTC)
+    tenants = await list_tenants_with_interviewer_enabled()
+    summary = {
+        "tenants": len(tenants),
+        "jobs_processed": 0,
+        "jobs_done": 0,
+        "jobs_retried": 0,
+        "jobs_parked": 0,
+        "jobs_skipped": 0,
+    }
+    # Pass 1: collect (tenant, doc, allow_stale) triples across tenants —
+    # per-tenant limits and stale filtering identical to the old
+    # sequential drain.
+    jobs: list[tuple[str, str, bool]] = []
+    for tenant_id in tenants:
+        try:
+            # Storage ``where`` is JSONB scalar equality on ``data->>key``
+            # (see skills_inbox), so pending-only filtering happens DB-side.
+            docs = await sc.query_documents(
+                {
+                    "tenant_id": tenant_id,
+                    "collection": JOBS_COLLECTION,
+                    "where": {"status": "pending"},
+                    "order_by": "created_at",
+                    "order": "asc",
+                    "limit": limit_per_tenant,
+                }
+            )
+            # ``where`` can't express "older than", so fetch processing
+            # docs by scalar equality and apply the staleness cutoff
+            # client-side.
+            processing = await sc.query_documents(
+                {
+                    "tenant_id": tenant_id,
+                    "collection": JOBS_COLLECTION,
+                    "where": {"status": "processing"},
+                    "order_by": "created_at",
+                    "order": "asc",
+                    # over-fetch; stale filter is client-side
+                    "limit": limit_per_tenant * 4,
+                }
+            )
+        except Exception:
+            logger.exception("interview jobs: pending query failed (tenant=%s)", tenant_id)
+            continue
+        stale = [row for row in processing or [] if _job_processing_is_stale(row, now)]
+        # allow_stale_processing only for the stale rows: the sweep is the
+        # ONE caller allowed to reclaim a stale "processing" doc (the
+        # fire-and-forget task owns fresh ones — see process_interview_job).
+        stale_ids = {str(row.get("doc_id") or "") for row in stale}
+        for row in list(docs or []) + stale:
+            doc_id = str(row.get("doc_id") or "")
+            if not doc_id:
+                continue
+            jobs.append((tenant_id, doc_id, doc_id in stale_ids))
+
+    # Pass 2: bounded fan-out.
+    semaphore = synthesis_sem  # shared with the route's fire-and-forget path
+
+    async def _run_one(tenant_id: str, doc_id: str, allow_stale: bool) -> dict | None:
+        async with semaphore:
+            return await process_interview_job(tenant_id, doc_id, allow_stale_processing=allow_stale)
+
+    # process_interview_job NEVER raises ordinary exceptions (every path
+    # inside it is wrapped — see its docstring), so a bare gather can only
+    # propagate BaseException (cancellation), which SHOULD abort the sweep.
+    results = await asyncio.gather(
+        *(_run_one(tenant_id, doc_id, allow_stale) for tenant_id, doc_id, allow_stale in jobs)
+    )
+    # Per-result counting is order-insensitive — summary semantics are
+    # identical to the old sequential loop.
+    for result in results:
+        summary["jobs_processed"] += 1
+        if result and result.get("status") == "committed":
+            summary["jobs_done"] += 1
+        elif result and result.get("status") == "failed_permanent":
+            summary["jobs_parked"] += 1
+        elif result is None:
+            # No-op: missing/done doc, or a concurrent run claimed the job
+            # between the sweep's fetch and our claim — nothing was retried.
+            summary["jobs_skipped"] += 1
+        else:
+            summary["jobs_retried"] += 1
+    return summary
 
 
 # ── Schedule (cron entry point) ──
@@ -677,4 +1314,18 @@ async def run_interview_schedule() -> dict:
                     tenant_id,
                     node_id,
                 )
+    # #665: drain persisted async-submit jobs in the same sweep — the
+    # durable retry path for jobs whose fire-and-forget processing at
+    # submit time died with the process or failed transiently.
+    # Zero-init unconditionally so the summary schema is identical whether
+    # the sweep succeeds or raises — callers index these keys directly.
+    for key in ("jobs_processed", "jobs_done", "jobs_retried", "jobs_parked", "jobs_skipped"):
+        summary[key] = 0
+    try:
+        jobs_summary = await process_pending_interview_jobs()
+    except Exception:
+        logger.exception("interview schedule: pending-jobs sweep failed")
+    else:
+        for key in ("jobs_processed", "jobs_done", "jobs_retried", "jobs_parked", "jobs_skipped"):
+            summary[key] = jobs_summary.get(key, 0)
     return summary

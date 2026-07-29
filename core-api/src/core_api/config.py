@@ -139,6 +139,18 @@ class Settings(BaseSettings):
     # raise the platform timeout BEFORE raising this budget (the
     # startup validator enforces the ceiling).
     interview_request_timeout_seconds: float = 90.0
+    # Async interview submit (#665). When True (default), the submit route
+    # persists the masked window as a durable ``interview_jobs`` doc,
+    # advances the watermark, and returns 200 ``accepted`` immediately;
+    # synthesis runs off the request path (fire-and-forget task + the
+    # hourly scheduler sweep). False is the escape hatch back to the
+    # legacy inline path, whose 60-90s synthesis intermediate proxies
+    # (on-prem nginx default 60s) 504'd mid-flight while the server
+    # committed anyway.
+    interview_async_submit: bool = True
+    # Max synthesis attempts per persisted interview job before it is
+    # parked as ``failed_permanent`` instead of retried by the sweep (#665).
+    interview_job_max_attempts: int = 3
     # Per-phase cap on the storage roundtrip inside
     # ``create_memories_bulk`` (CAURA-599). Embedding and enrichment
     # already enforce their own 30s caps; storage was the only phase

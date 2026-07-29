@@ -28,6 +28,12 @@ _TEST_DEFAULTS = {
     # silently break tests; flag-off / deferred-path tests override
     # this to ``"deferred"``.
     "DEPLOYMENT_MODE": "inline",
+    # Interviewer async submit (#665) defaults ON in prod, but the legacy
+    # route tests (tests/test_api_interview.py) assert the inline path's
+    # response shape (committed/memories_written/504-on-timeout), so tests
+    # pin the flag OFF here; tests/test_interview_async_submit.py flips it
+    # on explicitly per-test to exercise the async path.
+    "INTERVIEW_ASYNC_SUBMIT": "false",
 }
 for _k, _v in _TEST_DEFAULTS.items():
     os.environ.setdefault(_k, _v)
