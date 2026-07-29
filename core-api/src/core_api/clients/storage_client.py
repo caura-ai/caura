@@ -20,6 +20,30 @@ from core_api.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _reject_reserved_write_id(agent_id: str | None) -> None:
+    """Storage-boundary reserved-id backstop. No-op under ``allow``/``warn``;
+    only under ``reject`` does it raise ``ReservedAgentIdError`` for a reserved
+    id (the service maps it to HTTP 409).
+
+    Gated on ``reject`` on purpose: this runs on the normal service→storage
+    path, and the service layer has *already* called ``enforce_reserved_write_id``
+    (which logs one ``reserved_agent_write`` event under warn/reject). Calling it
+    again here would emit a duplicate log on every write, inflating the counter
+    ops uses to decide when to flip warn→reject. Under ``reject`` the service
+    path 409s before reaching storage, so this only fires for a *direct-storage*
+    caller that skipped the service guard — exactly the bypass we defend against,
+    and the single log/raise there is correct. ``main-<install_id>`` and named
+    ids are never reserved, so they pass.
+    """
+    from core_api.config import settings
+
+    if settings.reserved_agent_id_policy != "reject":
+        return
+    from core_api.services.agent_identity import enforce_reserved_write_id
+
+    enforce_reserved_write_id(agent_id)
+
+
 # Retry policy (F5 + the 2026-06-11 connect-timeout incident) lives in
 # ``common/http_retry.py``, shared with core-worker's storage client:
 # GET/PATCH/DELETE retry the full transient set + retryable 5xx;
@@ -408,6 +432,16 @@ class CoreStorageClient:
     # =====================================================================
 
     async def create_memory(self, data: dict) -> dict:
+        # Defense-in-depth reserved-id chokepoint. The service layer
+        # (memory_service.create_memory / create_memories_bulk) already rejects
+        # bare reserved "main" under policy=reject and is the path every current
+        # caller takes. Re-asserting it here — the single boundary EVERY memory
+        # insert funnels through — guarantees no present or future caller can
+        # persist a bare-"main" firehose row by reaching storage directly,
+        # skipping the service guard. Only exact ALWAYS_RESERVED_AGENT_IDS
+        # ({"main"}) reject; the de-collapsed main-<install_id> form (#507) and
+        # every named id pass untouched.
+        _reject_reserved_write_id(data.get("agent_id"))
         return await self._post("/memories", data)
 
     async def create_memories(self, data: list[dict]) -> list[dict]:
@@ -428,6 +462,9 @@ class CoreStorageClient:
         (concurrent soft-delete or a torn write); the upstream caller
         treats it as a per-item error.
         """
+        # Defense-in-depth reserved-id chokepoint (see create_memory).
+        for item in data:
+            _reject_reserved_write_id(item.get("agent_id"))
         return await self._post("/memories/bulk", data)
 
     async def get_memory(self, memory_id: str) -> dict | None:
