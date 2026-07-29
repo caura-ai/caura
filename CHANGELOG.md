@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.26.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.25.0...backend-v2.26.0) (2026-07-29)
+
+
+### Features
+
+* **interviewer:** async submit — persist window, accept fast, synthesize in the scheduler sweep ([#667](https://github.com/caura-ai/caura-memclaw/issues/667)) ([b66f82f](https://github.com/caura-ai/caura-memclaw/commit/b66f82f3e86a7cf29eac620c97dd35b511591a32))
+
+
+### Bug Fixes
+
+* **core-api:** reserved-id guard as a storage-boundary chokepoint + episode-path regression test ([#670](https://github.com/caura-ai/caura-memclaw/issues/670)) ([41f1152](https://github.com/caura-ai/caura-memclaw/commit/41f1152a652f80a3c0a4ac9b6759ffb86117f18b))
+
 ## [2.25.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.24.1...backend-v2.25.0) (2026-07-28)
 
 
