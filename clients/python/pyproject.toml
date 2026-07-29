@@ -41,7 +41,11 @@ dependencies = ["httpx>=0.27"]
 memclaw-interviewer = "memclaw_client.interviewer.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
+# ruff pinned to the 0.15 line (matches .pre-commit-config.yaml's v0.15.4): the
+# client CI installs ruff from this extra and `ruff>=0.6` floated to 0.16, whose
+# new default rules (RUF022, C408, …) fail on existing code. Adopting 0.16 is a
+# deliberate follow-up (fix the 18 findings), not a silent CI-breaking float.
+dev = ["pytest>=8", "ruff>=0.15.4,<0.16"]
 
 [project.urls]
 Homepage = "https://memclaw.net"

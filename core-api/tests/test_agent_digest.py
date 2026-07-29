@@ -71,39 +71,39 @@ def wire(monkeypatch):
     return _install
 
 
-async def test_generates_only_for_agents_above_threshold(wire):
-    # period="week" so the configured min_activity_threshold=3 applies (daily is
-    # floored to 1 — see test_daily_threshold_is_one).
+async def test_above_threshold_summarized_below_is_listed(wire):
+    # CONFIG sets min_activity_threshold=3. 'a' clears it (summarized). 'b' is
+    # below it AND has no events, so it's a count-only "listed" row — not dropped.
     storage = wire(
         FakeStorage(
             [{"agent_id": "a", "fleet_id": None}, {"agent_id": "b", "fleet_id": "f1"}],
-            {"a": [_mem(agent="a")] * 4, "b": [_mem(agent="b")] * 2},  # b below min_activity=3
+            {"a": [_mem(agent="a")] * 4, "b": [_mem(agent="b")] * 2},
         )
     )
     summary = await agent_digest.generate_for_org("org1", "week", CONFIG, now=NOW)
     assert summary["generated"] == 1
-    assert [r["agent_id"] for r in storage.upserts] == ["a"]
+    assert summary["listed"] == 1
+    by_status = {r["agent_id"]: r["status"] for r in storage.upserts}
+    assert by_status == {"a": "ok", "b": "listed"}
+    a_row = next(r for r in storage.upserts if r["agent_id"] == "a")
+    assert a_row["source_count"] == 4
+    b_row = next(r for r in storage.upserts if r["agent_id"] == "b")
+    assert b_row["narrative"] is None and b_row["source_count"] == 2
+
+
+async def test_default_floor_is_one(wire):
+    """With no configured threshold the durable floor defaults to 1, so a
+    single-durable agent is summarized rather than dropped."""
+    storage = wire(FakeStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")]}))
+    # No min_activity_threshold in config -> default 1.
+    summary = await agent_digest.generate_for_org("org1", "week", {"model": "gpt-5.4-mini"}, now=NOW)
+    assert summary["generated"] == 1
     assert storage.upserts[0]["status"] == "ok"
-    assert storage.upserts[0]["source_count"] == 4
 
 
-async def test_daily_threshold_is_one(wire):
-    """Daily windows floor the activity threshold to 1 regardless of config, so a
-    barely-active agent still gets a daily digest (weekly would exclude it)."""
-    seed = {"a": [_mem(agent="a")] * 2, "b": [_mem(agent="b")] * 1}
-    agents = [{"agent_id": "a", "fleet_id": None}, {"agent_id": "b", "fleet_id": None}]
-
-    day = wire(FakeStorage(agents, seed))
-    s_day = await agent_digest.generate_for_org("org1", "day", CONFIG, now=NOW)
-    assert s_day["generated"] == 2  # both included at floor 1
-    assert sorted(r["agent_id"] for r in day.upserts) == ["a", "b"]
-
-    week = wire(FakeStorage(agents, seed))
-    s_week = await agent_digest.generate_for_org("org1", "week", CONFIG, now=NOW)
-    assert s_week["generated"] == 0  # both below the week floor of 3
-
-
-async def test_cohesive_filter_drops_noise_and_episodes(wire):
+async def test_noise_dropped_episodes_become_events(wire):
+    """Heartbeat/noise titles are dropped entirely; episodes are retained as
+    events (not dropped) and counted toward the family total."""
     storage = wire(
         FakeStorage(
             [{"agent_id": "a", "fleet_id": None}],
@@ -111,8 +111,11 @@ async def test_cohesive_filter_drops_noise_and_episodes(wire):
         )
     )
     await agent_digest.generate_for_org("org1", "day", CONFIG, now=NOW)
-    # Only the 3 real decision rows survive the cohesive filter.
-    assert storage.upserts[0]["source_count"] == 3
+    row = storage.upserts[0]
+    # 3 durable (decisions) + 5 non-noise episodes (events); the 5 heartbeat rows
+    # are dropped. Durable path used (3 >= floor); source_count = family total.
+    assert row["source_count"] == 8
+    assert row["status"] == "ok"
 
 
 async def test_top_n_limits_llm_calls_to_busiest(wire):
@@ -141,11 +144,12 @@ async def test_cost_cap_trims_agents(wire):
     assert summary["generated"] == 2
 
 
-async def test_truncation_status_and_capped_source_count(wire):
+async def test_truncation_status_and_family_total_source_count(wire):
     storage = wire(FakeStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 5}))
     await agent_digest.generate_for_org("org1", "day", {**CONFIG, "max_memories_per_agent": 2}, now=NOW)
-    assert storage.upserts[0]["status"] == "truncated"
-    assert storage.upserts[0]["source_count"] == 2
+    assert storage.upserts[0]["status"] == "truncated"  # 5 durable > cap of 2
+    # source_count is the family total (meaningful writes), not the capped corpus.
+    assert storage.upserts[0]["source_count"] == 5
 
 
 async def test_fleet_id_passthrough_and_window(wire):
@@ -248,6 +252,113 @@ async def test_retention_prune_runs_with_cutoff(wire):
     summary = await agent_digest.generate_for_org("org1", "day", {**CONFIG, "retention_days": 30}, now=NOW)
     assert summary["pruned"] == 3
     assert storage.pruned == ("org1", "2026-06-06T00:00:00+00:00")  # NOW - 30d
+
+
+async def test_subagent_rollup_under_parent(wire):
+    """cmoclaw + its subagents (both id conventions) roll into ONE parent family
+    row; source_count is the family total and subagents lists the children."""
+    agents = [
+        {"agent_id": "cmoclaw", "fleet_id": "f1"},
+        {"agent_id": "cmoclaw-affiliate-fix", "fleet_id": "f1"},
+        {"agent_id": "agent:cmoclaw:subagent:abc", "fleet_id": "f1"},
+        {"agent_id": "other", "fleet_id": None},
+    ]
+    seed = {
+        "cmoclaw": [_mem(agent="cmoclaw")] * 2,
+        "cmoclaw-affiliate-fix": [_mem(agent="cmoclaw-affiliate-fix")] * 3,
+        "agent:cmoclaw:subagent:abc": [_mem(agent="agent:cmoclaw:subagent:abc")] * 1,
+        "other": [_mem(agent="other")] * 4,
+    }
+    storage = wire(FakeStorage(agents, seed))
+    await agent_digest.generate_for_org("org1", "week", CONFIG, now=NOW)
+    rows = {r["agent_id"]: r for r in storage.upserts}
+    assert set(rows) == {"cmoclaw", "other"}  # no standalone subagent rows
+    fam = rows["cmoclaw"]
+    assert fam["source_count"] == 6  # 2 + 3 + 1 rolled up
+    assert {s["agent_id"] for s in fam["subagents"]} == {
+        "cmoclaw-affiliate-fix",
+        "agent:cmoclaw:subagent:abc",
+    }
+
+
+async def test_episode_only_agent_summarized_as_activity(wire):
+    """An agent with only episodes (no durable rows) is summarized from its
+    events with status 'activity' — it is no longer invisible."""
+    storage = wire(
+        FakeStorage(
+            [{"agent_id": "tradingclaw", "fleet_id": "f1"}],
+            {"tradingclaw": [_mem(agent="tradingclaw", mtype="episode")] * 5},
+        )
+    )
+    summary = await agent_digest.generate_for_org("org1", "week", CONFIG, now=NOW)
+    assert summary["generated"] == 1
+    row = storage.upserts[0]
+    assert row["status"] == "activity"
+    assert row["source_count"] == 5
+
+
+async def test_active_beyond_top_n_are_listed(wire):
+    """Active families past top_n aren't dropped — they become count-only rows."""
+    agents = [{"agent_id": f"a{i}", "fleet_id": None} for i in range(3)]
+    seed = {f"a{i}": [_mem(agent=f"a{i}")] * (5 - i) for i in range(3)}  # 5,4,3
+    storage = wire(FakeStorage(agents, seed))
+    summary = await agent_digest.generate_for_org("org1", "week", {**CONFIG, "top_n": 1}, now=NOW)
+    assert summary["generated"] == 1
+    assert summary["listed"] == 2
+    statuses = {r["agent_id"]: r["status"] for r in storage.upserts}
+    assert statuses == {"a0": "ok", "a1": "listed", "a2": "listed"}
+
+
+async def test_events_fallback_keeps_durable_rows(monkeypatch, wire):
+    """When falling back to the event corpus, below-floor durable rows are still
+    included (prepended) so decisions aren't silently dropped."""
+    captured: dict = {}
+    orig = agent_digest._build_prompt
+
+    def _cap(agent, mems, period, mode="durable"):
+        captured["mems"] = mems
+        captured["mode"] = mode
+        return orig(agent, mems, period, mode)
+
+    monkeypatch.setattr(agent_digest, "_build_prompt", _cap)
+    # floor 3 (CONFIG): 2 durable < 3 -> event fallback (5 events >= event_floor 1)
+    wire(
+        FakeStorage(
+            [{"agent_id": "a", "fleet_id": None}],
+            {"a": [_mem(agent="a", title="key decision")] * 2 + [_mem(agent="a", mtype="episode")] * 5},
+        )
+    )
+    await agent_digest.generate_for_org("org1", "week", CONFIG, now=NOW)
+    assert captured["mode"] == "activity"
+    types = [m["memory_type"] for m in captured["mems"]]
+    assert types[:2] == ["decision", "decision"]  # durable prepended
+    assert "episode" in types
+
+
+async def test_listed_upsert_failure_counts_as_errored(wire):
+    """A storage failure on a count-only ('listed') row is surfaced in errored."""
+
+    class FailingStorage(FakeStorage):
+        async def upsert_agent_activity_digest(self, row: dict) -> dict:
+            raise RuntimeError("db down")
+
+    # 2 durable < floor 3, no events -> listed path; the upsert then fails.
+    wire(FailingStorage([{"agent_id": "a", "fleet_id": None}], {"a": [_mem(agent="a")] * 2}))
+    summary = await agent_digest.generate_for_org("org1", "week", CONFIG, now=NOW)
+    assert summary["listed"] == 0
+    assert summary["errored"] == 1
+
+
+async def test_build_prompt_tags_subagent_rows():
+    """Rolled-up rows from a subagent are attributed; the parent's own are not."""
+    agent = {"agent_id": "cmoclaw"}
+    mems = [
+        {"memory_type": "decision", "title": "x", "agent_id": "cmoclaw"},
+        {"memory_type": "decision", "title": "y", "agent_id": "cmoclaw-affiliate-fix"},
+    ]
+    prompt = agent_digest._build_prompt(agent, mems, "week")
+    assert "[from cmoclaw-affiliate-fix]" in prompt
+    assert "[from cmoclaw]" not in prompt
 
 
 async def test_run_agent_digest_rejects_bad_period(wire):

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 
+from common.env_utils import read_float_env as _read_float_env
+
 # ── Provider model defaults ──────────────────────────────────────────
 
 VERTEX_LLM_DEFAULT_MODEL = "gemini-2.0-flash-lite"
@@ -53,33 +55,6 @@ LLM_FALLBACK_MODEL_OPENAI = os.environ.get("LLM_FALLBACK_MODEL_OPENAI", "gpt-5.4
 # enough that a single hung upstream call eats the whole enrichment
 # budget silently. 25s gives the provider room to respond while still
 # leaving budget for one retry under the inline ceiling.
-def _read_float_env(name: str, default: float | None) -> float | None:
-    """Parse a float env var defensively.
-
-    Bare ``float(os.environ.get(...))`` would raise ``ValueError`` at
-    module import on a misconfigured value (e.g. ``"25s"`` instead of
-    ``"25"``), crashing the entire worker / core-api startup before any
-    structured-logging is wired. Catch it here, write a warning to
-    stderr, and fall back to the documented default.
-    """
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        # Module-level import has no logger configured yet — print to
-        # stderr with the key name so the bad value is visible in the
-        # crash log even before structlog wires up.
-        import sys
-
-        print(
-            f"WARN: {name}={raw!r} is not a valid float; falling back to {default}",
-            file=sys.stderr,
-        )
-        return default
-
-
 OPENAI_REQUEST_TIMEOUT_SECONDS = _read_float_env("OPENAI_REQUEST_TIMEOUT_SECONDS", 25.0)
 
 

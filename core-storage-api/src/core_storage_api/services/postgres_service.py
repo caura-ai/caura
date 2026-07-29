@@ -49,6 +49,7 @@ from common.constants import (
     ENTITY_RESOLUTION_CANDIDATE_LIMIT,
     GRAPH_MAX_EXPANDED_ENTITIES,
     GRAPH_MAX_HOPS,
+    LIVE_MEMORY_STATUSES,
     RECALL_BOOST_SCALE,
     RELATION_TYPE_WEIGHTS,
     SEMANTIC_DEDUP_CANDIDATE_LIMIT,
@@ -419,6 +420,18 @@ def _attach_agent_display_names(rows: Any) -> list[Memory]:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+class BulkValidationError(ValueError):
+    """A bulk batch violated its input contract before any DB work started.
+
+    Distinct from a bare ``ValueError`` so the bulk route can map exactly these
+    to 422 and let anything unexpected from inside the session keep surfacing
+    as a 500. Catching plain ``ValueError`` around the whole call would mean a
+    future in-session failure got mislabelled as a client error — the inverse
+    of the bug that motivated the 422 in the first place. Subclasses
+    ``ValueError`` so existing callers that catch it broadly still work.
+    """
+
+
 class PostgresService:
     """Single point of DB access for all core tables.
 
@@ -505,7 +518,7 @@ class PostgresService:
                 # than at the FastAPI route, also catches in-process
                 # callers (auto-chunk via ``sc.create_memories``) that
                 # forgot to mint an id.
-                raise ValueError("memory_add_all: every item must carry client_request_id")
+                raise BulkValidationError("memory_add_all: every item must carry client_request_id")
 
         # All callers send a single-tenant, single-fleet batch (the
         # bulk endpoint is tenant-and-fleet-scoped on the way in). Pin
@@ -519,9 +532,9 @@ class PostgresService:
         tenant_id = items[0]["tenant_id"]
         fleet_id = items[0].get("fleet_id")
         if any(d.get("tenant_id") != tenant_id for d in items):
-            raise ValueError("memory_add_all: all items must share the same tenant_id")
+            raise BulkValidationError("memory_add_all: all items must share the same tenant_id")
         if any(d.get("fleet_id") != fleet_id for d in items):
-            raise ValueError("memory_add_all: all items must share the same fleet_id")
+            raise BulkValidationError("memory_add_all: all items must share the same fleet_id")
 
         async with get_session() as session:
             rows = [self._filter_memory_fields(d) for d in items]
@@ -1107,6 +1120,9 @@ class PostgresService:
         # semantic relevance (``similarity``) at this size so boost-demoted-but-strong
         # matches survive the LIMIT into ranking/rerank. Arrives via search_params.
         _candidate_pool_size = int(sp.get("candidate_pool_size", 0) or 0)
+        # A50 unified: which ranking formula computes `score`. 0 = legacy multiplicative
+        # boost stack; 1 = unified relevance-dominant additive formula (see below).
+        _score_formula = int(sp.get("score_formula", 0) or 0)
 
         # -- Scoring expressions --
         # CAURA-594: pgvector's `<=>` is strict — NULL in → NULL out. A
@@ -1291,6 +1307,8 @@ class PostgresService:
         else:
             currency_factor = literal_column("1.0").label("currency_factor")
 
+        # Entity/graph boost — always defined (1.0 when no boosted ids) so both
+        # scoring formulas below can reference it uniformly.
         if boosted_memory_ids and memory_boost_factor:
             boost_tiers: dict[float, list[UUID]] = {}
             for mid, factor in memory_boost_factor.items():
@@ -1299,20 +1317,39 @@ class PostgresService:
                 (Memory.id.in_(mids), factor) for factor, mids in sorted(boost_tiers.items(), reverse=True)
             ]
             entity_boost = case(*whens, else_=1.0).label("entity_boost")
+        else:
+            entity_boost = literal_column("1.0").label("entity_boost")
+
+        if _score_formula == 1:
+            # -- A50 UNIFIED formula: relevance-dominant, bounded additive, query-gated --
+            # score = similarity (dominant) + small ADDITIVE, GATED nudges, then x status.
+            # A nudge can reorder within a relevance band but never override a real
+            # relevance gap. Drops the 0.15·weight floor (A46) and popularity
+            # recall_boost (A41). Weights are small so |Σ nudges| stays well below the
+            # similarity spread; tune via the offline calibration harness before default-on.
+            # Freshness is GATED to temporal queries (temporal_window set) — an always-on
+            # recency term is what hurt non-temporal recall in the legacy stack.
+            _V2_W_FRESH = 0.10  # recency nudge (gated to temporal queries)
+            _V2_W_DATE = 0.10  # date-window nudge (date_range_boost is 1.0 off-query -> term 0)
+            _V2_W_ENTITY = 0.10  # entity/graph nudge (entity_boost is 1.0 when absent -> term 0)
+            _V2_W_STALE = 0.20  # staleness penalty (currency_factor is 1.0 when current -> term 0)
+            _recency_gate = 1.0 if temporal_window is not None else 0.0
+            score = (
+                (
+                    similarity
+                    + _V2_W_FRESH * _recency_gate * (freshness - _freshness_floor)
+                    + _V2_W_DATE * (date_range_boost - 1.0)
+                    + _V2_W_ENTITY * (entity_boost - 1.0)
+                    - _V2_W_STALE * (1.0 - currency_factor)
+                )
+                * status_penalty
+            ).label("score")
+        else:
+            # -- LEGACY formula: multiplicative boost stack (unchanged) --
             score = (
                 base_score
                 * freshness
                 * entity_boost
-                * recall_boost_expr
-                * temporal_boost
-                * date_range_boost
-                * currency_factor
-                * status_penalty
-            ).label("score")
-        else:
-            score = (
-                base_score
-                * freshness
                 * recall_boost_expr
                 * temporal_boost
                 * date_range_boost
@@ -2192,15 +2229,61 @@ class PostgresService:
         self,
         tenant_id: str,
         fleet_id: str | None = None,
+        status: str | None = None,
     ) -> int:
+        """Count live (non-deleted) memories for a tenant, optionally a fleet.
+
+        ``status=None`` counts the whole live set (``LIVE_MEMORY_STATUSES``),
+        matching what the sibling dedup/successor queries treat as live. It
+        used to test ``status == "active"`` literally, which silently returned
+        0 for tenants whose rows enrichment had promoted to ``confirmed`` /
+        ``pending``. Pass an explicit ``status`` to count exactly that one.
+        """
+        status_filter = (
+            Memory.status == status if status is not None else Memory.status.in_(LIVE_MEMORY_STATUSES)
+        )
         async with get_read_session() as session:
             stmt = (
                 select(func.count())
                 .select_from(Memory)
                 .where(
                     Memory.tenant_id == tenant_id,
-                    Memory.status == "active",
+                    status_filter,
                     Memory.deleted_at.is_(None),
+                )
+            )
+            if fleet_id:
+                stmt = stmt.where(Memory.fleet_id == fleet_id)
+            result = await session.execute(stmt)
+            return result.scalar() or 0
+
+    async def memory_count_missing_embeddings(
+        self,
+        tenant_id: str,
+        fleet_id: str | None = None,
+    ) -> int:
+        """Count live memories with no embedding — /embedding-coverage's numerator.
+
+        Deliberately adjacent to ``memory_count_active``: that one is the
+        denominator of the same ratio, and the two only produce a meaningful
+        percentage while their population predicates stay identical (live
+        statuses, not soft-deleted, same tenant/fleet scope). Keep them in
+        sync — a mismatch here is what previously let coverage_pct exceed
+        100% or go negative.
+
+        A COUNT rather than ``len(rows)``: the caller needs a number, and the
+        row-returning version it replaced was ``LIMIT``-ed, so it silently
+        capped the numerator (and fetched ``content`` it never read).
+        """
+        async with get_read_session() as session:
+            stmt = (
+                select(func.count())
+                .select_from(Memory)
+                .where(
+                    Memory.tenant_id == tenant_id,
+                    Memory.status.in_(LIVE_MEMORY_STATUSES),
+                    Memory.deleted_at.is_(None),
+                    Memory.embedding.is_(None),
                 )
             )
             if fleet_id:
@@ -2414,27 +2497,6 @@ class PostgresService:
                 [(r[0], r[1]) for r in rows],
                 int(total_remaining),
             )
-
-    async def memory_find_missing_embeddings(
-        self,
-        tenant_id: str,
-        fleet_id: str | None,
-        batch_size: int = 100,
-    ) -> list[tuple]:
-        async with get_session() as session:
-            scope, params = _scope_sql(tenant_id, fleet_id)
-            result = await session.execute(
-                text(f"""
-                SELECT m.id, m.content
-                FROM memories m
-                WHERE {scope}
-                  AND m.embedding IS NULL
-                  AND m.deleted_at IS NULL
-                LIMIT :batch_size
-            """),
-                {**params, "batch_size": batch_size},
-            )
-            return result.all()  # type: ignore[return-value]
 
     async def memory_find_near_duplicate_candidates(
         self,
@@ -8414,6 +8476,7 @@ class PostgresService:
                 "window_end": insert_stmt.excluded.window_end,
                 "narrative": insert_stmt.excluded.narrative,
                 "sections": insert_stmt.excluded.sections,
+                "subagents": insert_stmt.excluded.subagents,
                 "source_count": insert_stmt.excluded.source_count,
                 "recall_count": insert_stmt.excluded.recall_count,
                 "model": insert_stmt.excluded.model,

@@ -5,9 +5,12 @@
 # `dependencies` + the relevant `area/*` so it routes through triage
 # and gets surfaced in release-please's Dependencies section.
 #
-# Minor/patch bumps are grouped per ecosystem into a single PR to avoid a PR
-# flood; majors stay individual so they get a dedicated review — this includes
-# GitHub Actions (a major like actions/checkout v4->v7 gets its own PR).
+# Each ecosystem opens at most TWO PRs per run: one `*-minor-patch` group and one
+# `*-majors` group. Majors stay OUT of the minor/patch group so a breaking bump is never
+# smuggled in with routine ones, but they are batched together rather than one-PR-each —
+# a fleet of individual major PRs was the main source of backlog (15 open bot PRs, 2026-07).
+# The uv services share ONE multi-directory entry for the same reason: four separate
+# entries emitted four near-identical group PRs every week.
 # Mirrors the caura-memclaw-enterprise grouping strategy.
 
 version: 2
@@ -28,12 +31,22 @@ updates:
     groups:
       pip-minor-patch:
         update-types: ["minor", "patch"]
+      # Majors batched into one reviewable PR instead of one PR per dependency.
+      pip-majors:
+        update-types: ["major"]
 
-  # --- Python (uv): core-api — manages pyproject + the committed uv.lock ---
-  # uv (not pip): core-api installs FROZEN from uv.lock, so only the uv ecosystem
-  # bumps both the lock and pyproject together (pip would leave the lock stale).
+  # --- Python (uv): the four core services, ONE entry across all their directories ---
+  # uv (not pip): these services install FROZEN from their committed uv.lock, so only the
+  # uv ecosystem bumps the lock and pyproject together (pip would leave the lock stale).
+  # ONE entry with `directories` (not four separate entries): four entries emitted four
+  # near-identical `uv-minor-patch` group PRs every week — the single biggest contributor
+  # to the backlog. One entry means one grouped PR spanning whichever services changed.
   - package-ecosystem: "uv"
-    directory: "/core-api"
+    directories:
+      - "/core-api"
+      - "/core-storage-api"
+      - "/core-worker"
+      - "/core-operations"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
@@ -41,59 +54,17 @@ updates:
       - "dependencies"
       - "kind/chore"
       - "area/core-api"
-    commit-message:
-      prefix: "deps(core-api)"
-    groups:
-      uv-minor-patch:
-        update-types: ["minor", "patch"]
-
-  # --- Python (uv): core-storage-api — manages pyproject + the committed uv.lock ---
-  - package-ecosystem: "uv"
-    directory: "/core-storage-api"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "kind/chore"
       - "area/core-storage-api"
-    commit-message:
-      prefix: "deps(core-storage-api)"
-    groups:
-      uv-minor-patch:
-        update-types: ["minor", "patch"]
-
-  # --- Python (uv): core-worker — manages pyproject + the committed uv.lock ---
-  - package-ecosystem: "uv"
-    directory: "/core-worker"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "kind/chore"
       - "area/core-worker"
-    commit-message:
-      prefix: "deps(core-worker)"
-    groups:
-      uv-minor-patch:
-        update-types: ["minor", "patch"]
-
-  # --- Python (uv): core-operations — manages pyproject + the committed uv.lock ---
-  - package-ecosystem: "uv"
-    directory: "/core-operations"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "kind/chore"
       - "area/core-operations"
     commit-message:
-      prefix: "deps(core-operations)"
+      prefix: "deps"
     groups:
       uv-minor-patch:
         update-types: ["minor", "patch"]
+      # Majors batched into one reviewable PR instead of one PR per dependency.
+      uv-majors:
+        update-types: ["major"]
 
   # --- npm: root (Playwright e2e) ---
   - package-ecosystem: "npm"
@@ -110,6 +81,8 @@ updates:
     groups:
       npm-minor-patch:
         update-types: ["minor", "patch"]
+      npm-majors:
+        update-types: ["major"]
 
   # --- npm: plugin ---
   - package-ecosystem: "npm"
@@ -126,6 +99,8 @@ updates:
     groups:
       npm-minor-patch:
         update-types: ["minor", "patch"]
+      npm-majors:
+        update-types: ["major"]
 
   # --- GitHub Actions ---
   - package-ecosystem: "github-actions"
@@ -143,6 +118,11 @@ updates:
       actions:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+      # e.g. actions/setup-python 5->7 and release-please-action 4->5 arrived as two
+      # separate PRs; batched they are one review.
+      actions-majors:
+        patterns: ["*"]
+        update-types: ["major"]
 
   # --- Docker ---
   - package-ecosystem: "docker"
@@ -159,3 +139,5 @@ updates:
     groups:
       docker-minor-patch:
         update-types: ["minor", "patch"]
+      docker-majors:
+        update-types: ["major"]

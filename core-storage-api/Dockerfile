@@ -76,4 +76,8 @@ USER appuser
 EXPOSE 8002
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-CMD ["uvicorn", "core_storage_api.app:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "2", "--timeout-keep-alive", "65"]
+# Launch via common.serve (not the uvicorn CLI directly) so the multiprocess
+# supervisor/parent configures structlog before starting — otherwise its
+# lifecycle lines ("Started parent process", "Received SIGTERM", ...) bypass
+# the JSON pipeline and land in Datadog as status:error. See common/serve.py.
+CMD ["python", "-m", "common.serve", "core_storage_api.app:app", "--settings", "core_storage_api.config:settings", "--host", "0.0.0.0", "--port", "8002", "--workers", "2", "--timeout-keep-alive", "65"]

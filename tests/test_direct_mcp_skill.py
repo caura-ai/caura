@@ -166,6 +166,13 @@ def test_contains_canonical_content_invariants() -> None:
         "scalar exact-match only",     # memclaw_doc where-filter gotcha
         # Trust self-awareness
         "trust 1",                     # auto-register tier
+        # Reflective ingest (Interviewer) — realtime writes stay mandatory
+        "Some memories may be written for you",
+        "Interviewer is periodic and reflective",
+        # Skill Factory governance — staged is not an error, prefixes are provenance
+        "Skill Factory",
+        "Skills Inbox",
+        "forge/<slug>",
     ]
     for phrase in must_contain:
         assert phrase in skill, f"adapter missing {phrase!r}"

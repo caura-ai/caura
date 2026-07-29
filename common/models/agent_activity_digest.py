@@ -41,6 +41,11 @@ class AgentActivityDigest(Base):
     # ({decisions[], shipped[], learned[], open_threads[]}).
     narrative: Mapped[str | None] = mapped_column(Text, nullable=True)
     sections: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    # Rolled-up subagents that contributed to this (parent) family row —
+    # list of {agent_id, fleet_id, source_count}. Empty for standalone agents.
+    subagents: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
     # Provenance / quality signals surfaced in the UI.
     source_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")

@@ -14,7 +14,12 @@ import time
 from collections.abc import Awaitable, Callable
 
 from common.embedding._registry import get_embedding_provider
-from common.embedding.constants import EMBEDDING_RETRY_ATTEMPTS, EMBEDDING_RETRY_DELAY_S
+from common.embedding.constants import (
+    EMBEDDING_GATE_TIMEOUT_SECONDS,
+    EMBEDDING_MAX_CONCURRENCY,
+    EMBEDDING_RETRY_ATTEMPTS,
+    EMBEDDING_RETRY_DELAY_S,
+)
 from common.embedding.protocols import InstructionAwareEmbedder
 
 logger = logging.getLogger(__name__)
@@ -74,6 +79,71 @@ _stats = _EmbeddingStats()
 # Module-level (process-scoped); restart resets the set, which is
 # the right cadence for "operator forgot a flag" errors.
 _misconfiguration_logged: set[str] = set()
+
+
+# Per-event-loop so a test that spins a fresh loop (or an app that
+# restarts one) doesn't reuse a semaphore bound to a dead loop — waiters
+# on the stale object would never be woken. Keyed on identity rather than
+# reset explicitly because there is no shutdown hook this deep in the
+# stack.
+_gate: asyncio.Semaphore | None = None
+_gate_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _concurrency_gate() -> asyncio.Semaphore:
+    """The process-wide cap on concurrent provider calls.
+
+    See ``EMBEDDING_MAX_CONCURRENCY`` for why the cap exists.
+    """
+    global _gate, _gate_loop
+    loop = asyncio.get_running_loop()
+    if _gate is None or _gate_loop is not loop:
+        _gate = asyncio.Semaphore(EMBEDDING_MAX_CONCURRENCY)
+        _gate_loop = loop
+    return _gate
+
+
+async def _call_gated[T](make_call: Callable[[], Awaitable[T]]) -> T:
+    """Run *make_call* holding a concurrency slot.
+
+    The slot is acquired per ATTEMPT, not per retry sequence, so a
+    backing-off retry never squats on a slot another caller could use.
+
+    A slot that doesn't free within ``EMBEDDING_GATE_TIMEOUT_SECONDS``
+    raises ``TimeoutError``, which callers already treat as a provider
+    failure — the pre-existing degradation path — rather than letting
+    waiters accumulate unboundedly and stall the write path.
+    """
+    gate = _concurrency_gate()
+    # Log saturation explicitly. During the 2026-07-27 incident the backend
+    # reported 3.5 ms inference while callers timed out, and nothing said
+    # where the time went. These two messages separate "queued behind our
+    # own cap" from "backend slow" for the next one.
+    if gate.locked():
+        logger.debug(
+            "Embedding concurrency gate saturated (cap=%d); queueing",
+            EMBEDDING_MAX_CONCURRENCY,
+        )
+    # ``asyncio.timeout`` rather than ``wait_for``: it matches the sibling
+    # gates (``per_tenant_concurrency``), and ``wait_for`` is reached via the
+    # shared ``asyncio`` module object, so tests that patch
+    # ``<their_module>.asyncio.wait_for`` to spy on their OWN ceiling would
+    # instead capture this gate's timeout and assert against the wrong value.
+    try:
+        async with asyncio.timeout(EMBEDDING_GATE_TIMEOUT_SECONDS):
+            await gate.acquire()
+    except TimeoutError:
+        logger.warning(
+            "Embedding concurrency gate timeout after %.1fs (cap=%d) — "
+            "degrading as provider failure; backend may be undersized",
+            EMBEDDING_GATE_TIMEOUT_SECONDS,
+            EMBEDDING_MAX_CONCURRENCY,
+        )
+        raise
+    try:
+        return await make_call()
+    finally:
+        gate.release()
 
 
 def _resolve_provider_name(tenant_config: object | None) -> str:
@@ -138,7 +208,7 @@ async def get_embeddings_batch(
         await _stats.record_failure()
         raise
     try:
-        result = await provider.embed_batch(texts)
+        result = await _call_gated(lambda: provider.embed_batch(texts))
     except Exception:
         await _stats.record_failure()
         raise
@@ -165,7 +235,7 @@ async def _run_with_retry(
     last_exc: BaseException | None = None
     for attempt in range(1, EMBEDDING_RETRY_ATTEMPTS + 1):
         try:
-            result = await make_call()
+            result = await _call_gated(make_call)
             await _stats.record_success()
             return result
         # Intentionally broad: must catch all provider-specific errors during retry.

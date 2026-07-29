@@ -727,10 +727,18 @@ class CoreStorageClient:
         result = await self._post("/preview/tenant-counts", {"tenant_id": tenant_id})
         return result.get("counts", {})  # type: ignore[union-attr,return-value]
 
-    async def count_active(self, tenant_id: str, fleet_id: str | None = None) -> int:
+    async def count_active(
+        self,
+        tenant_id: str,
+        fleet_id: str | None = None,
+        status: str | None = None,
+    ) -> int:
+        """Live-memory count; ``status`` narrows to one exact status."""
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
+        if status is not None:
+            params["status"] = status
         result = await self._get("/memories/count-active", **params)
         return (result or {}).get("count", 0)
 

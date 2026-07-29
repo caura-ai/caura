@@ -8,13 +8,15 @@ recommended version; no hard rejection — operators decide when to upgrade.
 
 # Auto-upgrade target / "outdated" floor. The fleet heartbeat queues a deploy
 # to this version for eligible nodes (>= MIN_AUTO_DEPLOY, auto-upgrade enabled).
-# Reconciled to the current shipped plugin release. 2.14.0 is a superset of
-# 2.13.0 (which carries the reserved-"main" write self-identification / firehose
-# de-collapse, #507 — preserved) plus opt-in recall-gating + cross-agent recall
-# (#530), both flag-gated OFF by default (MEMCLAW_RECALL_GATE / _CROSS_AGENT), so
-# auto-upgrading the fleet to 2.14.0 changes no recall behavior until those env
-# flags are set. Bumping the floor pulls the fleet onto 2.14.0.
-MIN_RECOMMENDED_PLUGIN_VERSION = "2.14.0"
+# Reconciled to the current shipped plugin release. 2.16.0 is a superset of
+# 2.15.2 (firehose de-collapse #507, flag-gated recall #530, Interviewer plugin
+# side #564 — all preserved) plus Interviewer task-trail capture (#658, fix for
+# #654): OpenClaw task_runs are mirrored into the interview buffer so tool/
+# write-pipeline-driven agents produce non-empty interviews. Still gated by
+# MEMCLAW_INTERVIEWER (buffer) + MEMCLAW_INTERVIEWER_TASKS (default on) per node
+# AND per-tenant interviewer.enabled, so auto-upgrading the fleet to 2.16.0
+# changes no behavior until those are set. Bumping the floor pulls the fleet onto 2.16.0.
+MIN_RECOMMENDED_PLUGIN_VERSION = "2.16.0"
 
 # Server-side floor below which plugins must NOT auto-upgrade — the
 # heartbeat path in ``routes/fleet.py`` enforces this hard, and

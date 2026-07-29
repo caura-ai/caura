@@ -25,6 +25,7 @@ process.env.MEMCLAW_API_URL = "http://localhost:8000";
 process.env.MEMCLAW_TENANT_ID = "t-test";
 
 const { __DEPLOY_INTERNALS__ } = await import("./heartbeat.js");
+const { __TASK_TRAIL_INTERNALS__ } = await import("./task-trail.js");
 const { appendInterviewEvent, readInterviewEvents, __INTERVIEW_BUFFER_INTERNALS__ } =
   await import("./interview-buffer.js");
 
@@ -51,6 +52,11 @@ describe("interview_request command handler", () => {
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), "memclaw-interview-cmd-"));
     __INTERVIEW_BUFFER_INTERNALS__.setPathForTests(join(tmp, "buf.jsonl"));
+    // Point the Phase-1.5 task-trail at the empty tmp dir so the handler's
+    // pre-read sync can never discover a REAL ~/.openclaw task DB on the
+    // machine running the tests (which would append nondeterministic events).
+    __TASK_TRAIL_INTERNALS__.setBaseDirForTests(tmp);
+    __TASK_TRAIL_INTERNALS__.setSidecarPathForTests(join(tmp, "task-sidecar.json"));
     __DEPLOY_INTERNALS__.setInterviewerEnabledForTests(true);
     captured = [];
     submitResponse = {
@@ -79,6 +85,8 @@ describe("interview_request command handler", () => {
     globalThis.fetch = originalFetch;
     __DEPLOY_INTERNALS__.setInterviewerEnabledForTests(undefined);
     __INTERVIEW_BUFFER_INTERNALS__.setPathForTests(undefined);
+    __TASK_TRAIL_INTERNALS__.setBaseDirForTests(undefined);
+    __TASK_TRAIL_INTERNALS__.setSidecarPathForTests(undefined);
     rmSync(tmp, { recursive: true, force: true });
   });
 

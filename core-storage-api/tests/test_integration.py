@@ -158,7 +158,7 @@ class TestMemories:
 
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
-            json={"status": "archived"},
+            json={"tenant_id": tenant_id, "status": "archived"},
         )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
@@ -203,12 +203,18 @@ class TestMemories:
 
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
-            json={"metadata_patch": {"embedding_pending": False, "summary": "done"}},
+            json={
+                "tenant_id": tenant_id,
+                "metadata_patch": {"embedding_pending": False, "summary": "done"},
+            },
         )
         assert resp.status_code == 200, resp.text
 
         updated = (await client.get(f"{PREFIX}/memories/{memory_id}")).json()
-        md = updated["metadata"]
+        # Storage serialises the ORM attribute name verbatim, so the wire key
+        # is ``metadata_`` (as the seed payload above already uses) — not the
+        # ``metadata`` spelling core-api uses in its own internal field dicts.
+        md = updated["metadata_"]
         # Patched keys reflect the new values.
         assert md["embedding_pending"] is False
         assert md["summary"] == "done"
@@ -245,6 +251,7 @@ class TestMemories:
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
             json={
+                "tenant_id": tenant_id,
                 "ts_valid_start": "2026-09-14T00:00:00+00:00",
                 "ts_valid_end": "2026-10-15T23:59:59+00:00",
             },
@@ -278,7 +285,10 @@ class TestMemories:
 
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
-            json={"ts_valid_start": "tomorrow"},  # not a valid ISO string
+            json={
+                "tenant_id": tenant_id,
+                "ts_valid_start": "tomorrow",  # not a valid ISO string
+            },
         )
         assert resp.status_code == 422, resp.text
         body = resp.json()
@@ -296,16 +306,22 @@ class TestMemories:
         m1 = (await client.post(f"{PREFIX}/memories", json=p1)).json()
         m2 = (await client.post(f"{PREFIX}/memories", json=p2)).json()
 
-        resp = await client.patch(
-            f"{PREFIX}/memories/batch-status",
+        # POST /batch-update-status, with tenant_id carried at the batch level
+        # (the route's cross-tenant write guard). The old PATCH /batch-status
+        # spelling in this test matched no route at all — it fell through to
+        # PATCH /memories/{memory_id} and 422'd on UUID coercion of the
+        # literal "batch-status". core-api's storage_client uses this path.
+        resp = await client.post(
+            f"{PREFIX}/memories/batch-update-status",
             json={
+                "tenant_id": tenant_id,
                 "updates": [
                     {"memory_id": m1["id"], "status": "archived"},
                     {"memory_id": m2["id"], "status": "archived"},
                 ],
             },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         assert resp.json()["ok"] is True
 
     async def test_soft_delete(
@@ -359,7 +375,11 @@ class TestMemories:
         # route must surface 404.
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
-            json={"status": "active", "metadata_patch": {"resurrect_attempt": True}},
+            json={
+                "tenant_id": tenant_id,
+                "status": "active",
+                "metadata_patch": {"resurrect_attempt": True},
+            },
         )
         assert resp.status_code == 404, resp.text
 
@@ -368,11 +388,15 @@ class TestMemories:
         after = (await client.get(f"{PREFIX}/memories/{memory_id}")).json()
         assert after["deleted_at"] is not None
         assert after["status"] == "deleted"
-        assert (after.get("metadata") or {}).get("resurrect_attempt") is None
+        # ``metadata_``, not ``metadata`` — with the wrong key this assertion
+        # was vacuous (always {} → always None) and could never have caught a
+        # resurrected metadata merge.
+        assert (after.get("metadata_") or {}).get("resurrect_attempt") is None
 
     async def test_patch_on_nonexistent_memory_returns_404(
         self,
         client: AsyncClient,
+        tenant_id: str,
     ) -> None:
         """PATCH on a memory_id that never existed must surface 404 too,
         not the legacy ``200 {"ok": True}`` silent success.
@@ -385,7 +409,7 @@ class TestMemories:
         fake_id = str(uuid.uuid4())
         resp = await client.patch(
             f"{PREFIX}/memories/{fake_id}",
-            json={"status": "active"},
+            json={"tenant_id": tenant_id, "status": "active"},
         )
         assert resp.status_code == 404, resp.text
 
@@ -448,10 +472,13 @@ class TestMemories:
         bypass it (CAURA-602)."""
         payload = _memory_payload(tenant_id, fleet_id)  # no client_request_id
         resp = await client.post(f"{PREFIX}/memories/bulk", json=[payload])
-        # Storage-writer surfaces the ValueError as 500; core-api would
-        # be the layer that returns a clean 4xx — but at this layer the
-        # important assertion is "no row was inserted."
-        assert resp.status_code >= 400
+        # 422, not 500: a batch missing client_request_id is a bad request,
+        # not a server fault. This used to let the service's ValueError escape
+        # unhandled — a 500 that pages and lands in the DLQ for something only
+        # the caller can fix. Asserting the exact code (the old assertion was
+        # a permissive >= 400) is what keeps it from regressing to a 5xx.
+        assert resp.status_code == 422, resp.text
+        assert "client_request_id" in resp.json()["detail"]
 
     async def test_find_by_content_hash(
         self,
@@ -477,10 +504,10 @@ class TestMemories:
                 "fleet_id": fleet_id,
             },
         )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["memory"] is not None
-        assert body["memory"]["content_hash"] == content_hash
+        assert resp.status_code == 200, resp.text
+        # Flat ORM dict, not an {"memory": ...} envelope — core-api's
+        # check_exact_duplicate step reads dup["id"] straight off this.
+        assert resp.json()["content_hash"] == content_hash
 
     async def test_find_by_content_hash_not_found(
         self,
@@ -491,8 +518,10 @@ class TestMemories:
             f"{PREFIX}/memories/by-content-hash",
             params={"tenant_id": tenant_id, "content_hash": "nonexistent"},
         )
-        assert resp.status_code == 200
-        assert resp.json()["memory"] is None
+        # 404-on-miss, which core-api's shared _get maps back to None — a
+        # 200 with a null envelope would make the duplicate check treat every
+        # write as a duplicate.
+        assert resp.status_code == 404, resp.text
 
     async def test_get_stats(
         self,
@@ -880,6 +909,81 @@ class TestMemories:
         assert r_zero.status_code == 200, r_zero.text
         assert [r["id"] for r in r_zero.json()] == off_ids, "pool_size=0 must equal default behaviour"
 
+    async def test_scored_search_unified_formula(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """A50 unified: score_formula=1 makes `score` relevance-dominant, so a
+        boost-inflated low-similarity row no longer outranks a strong match.
+
+        H: similarity 0.70, weight 0.0, no boosts.
+        L: similarity 0.35, weight 1.0, ts_valid_start inside the queried date range
+           (legacy date_range_boost 2x pushes its multiplicative score above H).
+        Legacy (0): boosted L outranks H. Unified (1): H (0.70) > L (0.35 + 0.10·date) = 0.45.
+        """
+        import math
+
+        seed = f"a50u_{_uid()}"
+        q = fake_embedding(seed + "_q")
+
+        def _unit(v: list[float]) -> list[float]:
+            n = math.sqrt(sum(x * x for x in v)) or 1.0
+            return [x / n for x in v]
+
+        def _emb_cos(target: float, rseed: str) -> list[float]:
+            r = fake_embedding(rseed)
+            dot = sum(a * b for a, b in zip(r, q, strict=False))
+            r_orth = _unit([ri - dot * qi for ri, qi in zip(r, q, strict=False)])
+            a, b = target, math.sqrt(max(0.0, 1.0 - target * target))
+            return _unit([a * qi + b * ri for qi, ri in zip(q, r_orth, strict=False)])
+
+        ph = _memory_payload(tenant_id, fleet_id, content=f"H {seed}")
+        ph["embedding"] = _emb_cos(0.70, seed + "_h")
+        ph["weight"] = 0.0
+        h_id = (await client.post(f"{PREFIX}/memories", json=ph)).json()["id"]
+
+        pl = _memory_payload(tenant_id, fleet_id, content=f"L {seed}")
+        pl["embedding"] = _emb_cos(0.35, seed + "_l")
+        pl["weight"] = 1.0
+        pl["ts_valid_start"] = "2020-01-15T00:00:00+00:00"
+        l_id = (await client.post(f"{PREFIX}/memories", json=pl)).json()["id"]
+
+        base = {
+            "tenant_id": tenant_id,
+            "embedding": q,
+            "query": seed,
+            "fleet_ids": [fleet_id],
+            "date_range_start": "2020-01-01",
+            "date_range_end": "2020-01-31",
+            "top_k": 10,
+            "search_params": {
+                "fts_weight": 0.0,
+                "freshness_floor": 0.7,
+                "freshness_decay_days": 90.0,
+                "recall_boost_cap": 1.1,
+                "recall_decay_window_days": 14.0,
+                "similarity_blend": 0.85,
+            },
+        }
+
+        legacy = {**base, "search_params": {**base["search_params"], "score_formula": 0}}
+        legacy_ids = [
+            r["id"] for r in (await client.post(f"{PREFIX}/memories/scored-search", json=legacy)).json()
+        ]
+        assert legacy_ids.index(l_id) < legacy_ids.index(h_id), (
+            f"legacy formula should rank boosted L above H; got {legacy_ids}"
+        )
+
+        unified = {**base, "search_params": {**base["search_params"], "score_formula": 1}}
+        unified_ids = [
+            r["id"] for r in (await client.post(f"{PREFIX}/memories/scored-search", json=unified)).json()
+        ]
+        assert unified_ids.index(h_id) < unified_ids.index(l_id), (
+            f"unified formula should rank high-similarity H above L; got {unified_ids}"
+        )
+
     async def test_public_counters_exclude_soft_deleted(
         self,
         client: AsyncClient,
@@ -891,7 +995,7 @@ class TestMemories:
 
         Regression for the count-inflation bug: prior to the fix these
         endpoints reported tombstoned rows alongside live ones, so the
-        marketing-site landing-page tiles were ~10× higher than the
+        marketing-site landing-page tiles were ~10x higher than the
         actually-queryable footprint.
         """
         # Use a fresh, dedicated agent_id so distinct-agent / distinct-tenant
@@ -926,6 +1030,111 @@ class TestMemories:
         post_agents = (await client.get(f"{PREFIX}/memories/distinct-agents")).json()["count"]
         assert post_total == before_total
         assert post_agents == before_agents
+
+    async def test_count_whole_corpus_accepts_omitted_and_empty_tenant(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """Both "no tenant" spellings reach the whole-corpus counter.
+
+        ``core-api``'s public-stats caller uses the empty-string form
+        (``routes/stats.py`` → ``count_all(tenant_id="")``), so that one is
+        load-bearing; the omitted form used to 422 because the annotation was
+        a bare ``str``. Pin both so neither regresses, and confirm the
+        whole-corpus number really is tenant-independent.
+        """
+        omitted = await client.get(f"{PREFIX}/memories/count")
+        empty = await client.get(f"{PREFIX}/memories/count", params={"tenant_id": ""})
+        assert omitted.status_code == 200, omitted.text
+        assert empty.status_code == 200, empty.text
+        assert omitted.json()["count"] == empty.json()["count"]
+
+        # Scoping to a tenant is a different (smaller-or-equal) number, so the
+        # global path isn't silently returning the tenant count.
+        scoped = await client.get(f"{PREFIX}/memories/count", params={"tenant_id": tenant_id})
+        assert scoped.status_code == 200, scoped.text
+        assert scoped.json()["count"] <= omitted.json()["count"]
+
+    async def test_embedding_coverage_is_not_capped_by_a_batch_size(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        """``missing_embeddings`` is an exact COUNT, not a capped row fetch.
+
+        The numerator used to be ``len(rows)`` off a query with
+        ``LIMIT :batch_size`` (default 100), so any tenant with more than 100
+        un-embedded memories under-reported the number missing and therefore
+        over-reported coverage. Seeding past that boundary is the whole point
+        of this test — at 100 rows or fewer it passes either way.
+        """
+        fleet = f"embcov-cap-{_uid()}"
+        missing_count = 105  # > the old batch_size of 100
+        embedded_count = 3
+
+        for i in range(missing_count):
+            payload = _memory_payload(tenant_id, fleet, content=f"unembedded {i} {_uid()}")
+            payload["embedding"] = None
+            assert (await client.post(f"{PREFIX}/memories", json=payload)).status_code in (200, 201)
+        for i in range(embedded_count):
+            payload = _memory_payload(tenant_id, fleet, content=f"embedded {i} {_uid()}")
+            assert (await client.post(f"{PREFIX}/memories", json=payload)).status_code in (200, 201)
+
+        resp = await client.get(
+            f"{PREFIX}/memories/embedding-coverage",
+            params={"tenant_id": tenant_id, "fleet_id": fleet},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        # Pre-fix this read 100 (the cap), making coverage look like 5.4%.
+        assert body["missing_embeddings"] == missing_count
+        assert body["total_active"] == missing_count + embedded_count
+        assert body["coverage_pct"] == 2.8  # 3/108
+
+    async def test_embedding_coverage_spans_the_live_status_set(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        """``/embedding-coverage`` numerator and denominator cover the same rows.
+
+        Regression: ``missing_embeddings`` spanned every status while
+        ``total_active`` counted only literal ``status='active'``, so an
+        enriched tenant's coverage_pct was computed against a denominator that
+        excluded most of the numerator (it could exceed 100% or go negative).
+
+        Own fleet so the counts are exact rather than baseline-relative.
+        """
+        fleet = f"embcov-{_uid()}"
+
+        # Promoted past 'active' by enrichment, and still awaiting its embedding.
+        promoted = _memory_payload(tenant_id, fleet, content=f"promoted {_uid()}")
+        promoted["status"] = "confirmed"
+        promoted["embedding"] = None
+        assert (await client.post(f"{PREFIX}/memories", json=promoted)).status_code in (200, 201)
+
+        # Plain active row that already has its embedding.
+        embedded = _memory_payload(tenant_id, fleet, content=f"embedded {_uid()}")
+        assert (await client.post(f"{PREFIX}/memories", json=embedded)).status_code in (200, 201)
+
+        resp = await client.get(
+            f"{PREFIX}/memories/embedding-coverage",
+            params={"tenant_id": tenant_id, "fleet_id": fleet},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        # Denominator counts the confirmed row too (it was 1, not 2, pre-fix).
+        assert body["total_active"] == 2
+        assert body["missing_embeddings"] == 1
+        assert body["coverage_pct"] == 50.0
+        # The invariant that made this a bug: numerator can never exceed
+        # denominator, so the percentage can never go negative.
+        assert body["missing_embeddings"] <= body["total_active"]
+        assert body["coverage_pct"] >= 0.0
 
     async def test_patch_entities_is_bulk_and_idempotent(
         self,
@@ -1070,7 +1279,7 @@ class TestEntities:
         await client.post(f"{PREFIX}/entities", json=payload)
 
         resp = await client.get(
-            f"{PREFIX}/entities/by-name",
+            f"{PREFIX}/entities/exact",
             params={
                 "tenant_id": tenant_id,
                 "name": name,
@@ -1078,10 +1287,10 @@ class TestEntities:
                 "fleet_id": fleet_id,
             },
         )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["entity"] is not None
-        assert body["entity"]["canonical_name"] == name
+        assert resp.status_code == 200, resp.text
+        # Flat entity dict (orm_to_dict), not an {"entity": ...} envelope —
+        # matches what core-api's find_exact_entity consumes.
+        assert resp.json()["canonical_name"] == name
 
     async def test_find_exact_entity_not_found(
         self,
@@ -1089,15 +1298,17 @@ class TestEntities:
         tenant_id: str,
     ) -> None:
         resp = await client.get(
-            f"{PREFIX}/entities/by-name",
+            f"{PREFIX}/entities/exact",
             params={
                 "tenant_id": tenant_id,
                 "name": "NoSuchEntity",
                 "entity_type": "person",
             },
         )
-        assert resp.status_code == 200
-        assert resp.json()["entity"] is None
+        # 404-on-miss is the contract, not 200-with-null: core-api's shared
+        # storage-client _get maps 404 → None, which is how find_exact_entity
+        # produces its `| None` return.
+        assert resp.status_code == 404, resp.text
 
     async def test_create_relation(
         self,
@@ -1241,21 +1452,21 @@ class TestEntities:
         memory_id = mem["id"]
 
         link_resp = await client.post(
-            f"{PREFIX}/entities/memory-links/create",
+            f"{PREFIX}/entities/links",
             json={
                 "memory_id": memory_id,
                 "entity_id": entity_id,
                 "role": "subject",
             },
         )
-        assert link_resp.status_code == 200
+        assert link_resp.status_code == 200, link_resp.text
 
         # Get entity with linked memories
         resp = await client.get(
-            f"{PREFIX}/entities/linked-memories/{entity_id}",
+            f"{PREFIX}/entities/{entity_id}/with-memories",
             params={"tenant_id": tenant_id},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["entity"]["id"] == entity_id
         assert len(body["linked_memories"]) >= 1
@@ -1345,7 +1556,9 @@ class TestAgents:
         )
 
         resp = await client.patch(
-            f"{PREFIX}/agents/{agent_id}/trust",
+            # Storage spells this /trust-level; /trust is the PUBLIC core-api
+            # route (core_api/routes/agents.py). The two layers differ.
+            f"{PREFIX}/agents/{agent_id}/trust-level",
             json={
                 "tenant_id": tenant_id,
                 "trust_level": 3,
@@ -1403,12 +1616,15 @@ class TestDocuments:
         assert body["doc_id"] == doc_id
         assert body["data"]["title"] == "Test Document"
 
-        # GET by doc_id
+        # GET by doc_id. Collection is a path segment here, not a query param:
+        # the route is /{collection}/{doc_id:path} so that doc_ids containing
+        # slashes work. The single-segment form silently matched the
+        # list-documents route instead and returned 200 [].
         resp2 = await client.get(
-            f"{PREFIX}/documents/{doc_id}",
-            params={"tenant_id": tenant_id, "collection": collection},
+            f"{PREFIX}/documents/{collection}/{doc_id}",
+            params={"tenant_id": tenant_id},
         )
-        assert resp2.status_code == 200
+        assert resp2.status_code == 200, resp2.text
         assert resp2.json()["doc_id"] == doc_id
 
     async def test_upsert_updates_existing(
@@ -1490,18 +1706,18 @@ class TestDocuments:
         )
 
         resp = await client.delete(
-            f"{PREFIX}/documents/{doc_id}",
-            params={"tenant_id": tenant_id, "collection": collection},
+            f"{PREFIX}/documents/{collection}/{doc_id}",
+            params={"tenant_id": tenant_id},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         assert "deleted_id" in resp.json()
 
         # Verify deleted
         resp2 = await client.get(
-            f"{PREFIX}/documents/{doc_id}",
-            params={"tenant_id": tenant_id, "collection": collection},
+            f"{PREFIX}/documents/{collection}/{doc_id}",
+            params={"tenant_id": tenant_id},
         )
-        assert resp2.status_code == 404
+        assert resp2.status_code == 404, resp2.text
 
     async def test_get_nonexistent_document_returns_404(
         self,
@@ -1509,10 +1725,10 @@ class TestDocuments:
         tenant_id: str,
     ) -> None:
         resp = await client.get(
-            f"{PREFIX}/documents/nonexistent-doc",
-            params={"tenant_id": tenant_id, "collection": "nope"},
+            f"{PREFIX}/documents/nope/nonexistent-doc",
+            params={"tenant_id": tenant_id},
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 404, resp.text
 
 
 # =====================================================================
@@ -1643,11 +1859,12 @@ class TestFleet:
                 },
             )
 
+        # node_name is a query param on this route, not a path segment.
         resp = await client.get(
-            f"{PREFIX}/fleet/commands/pending/{node_name}",
-            params={"tenant_id": tenant_id},
+            f"{PREFIX}/fleet/commands/pending",
+            params={"tenant_id": tenant_id, "node_name": node_name},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         pending = resp.json()
         assert isinstance(pending, list)
         assert len(pending) >= 2

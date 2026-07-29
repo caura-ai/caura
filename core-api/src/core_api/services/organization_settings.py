@@ -80,7 +80,13 @@ DEFAULT_SETTINGS: dict = {
         "model": "gpt-5.4-mini",
         "top_n": 25,
         "max_memories_per_agent": 60,
-        "min_activity_threshold": 3,
+        # Durable floor (a single decision/fact is worth surfacing).
+        "min_activity_threshold": 1,
+        # Min non-noise events to summarize an agent whose work is episodic;
+        # below it the agent still appears as a count-only listed row.
+        "event_floor": 1,
+        # Cap on count-only rows past top_n (active-but-not-summarized agents).
+        "listed_max": 25,
         "max_cost_per_run_usd": 2.0,
         "retention_days": 90,
     },
@@ -1061,6 +1067,8 @@ _SEARCH_PROFILE_RULES: dict[str, tuple[type, tuple, object]] = {
     "similarity_blend": (float, (0.0, 1.0), None),
     # A49: 0 = off (candidate pool by boosted score); >0 = cosine-dominant pool of this size.
     "candidate_pool_size": (int, (0, 200), None),
+    # A50 unified: 0 = legacy multiplicative score; 1 = unified relevance-dominant formula.
+    "score_formula": (int, (0, 1), None),
 }
 
 

@@ -1,5 +1,17 @@
 """DB-query constants shared between core-api and core-storage-api."""
 
+# ── Memory liveness ──
+# The statuses that mean "this memory is live". Broader than the literal
+# ``active`` value: enrichment promotes writes past ``active`` on the normal
+# path (the classifier assigns ``confirmed`` to outcome-shaped content and
+# ``pending`` to task/plan/commitment content, and the crystallizer writes
+# ``confirmed`` directly), so a liveness check that tests ``status ==
+# "active"`` silently drops enriched rows. Excludes the terminal/shelved
+# states (``cancelled``, ``outdated``, ``conflicted``, ``archived``,
+# ``deleted``). Callers that genuinely want one exact status filter on it
+# explicitly instead.
+LIVE_MEMORY_STATUSES = ("active", "confirmed", "pending")
+
 # ── Embeddings ──
 # Native dim of the default embedder (BAAI/bge-m3, see local-embedder docs).
 # Schema upgrade lives in alembic migration 012_vector_dim_1024.py — keep

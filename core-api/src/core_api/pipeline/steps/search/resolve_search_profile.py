@@ -10,6 +10,7 @@ from core_api.constants import (
     MIN_SEARCH_SIMILARITY,
     RECALL_BOOST_CAP,
     RECALL_DECAY_WINDOW_DAYS,
+    SCORE_FORMULA,
     SIMILARITY_BLEND,
 )
 from core_api.pipeline.context import PipelineContext
@@ -55,5 +56,7 @@ class ResolveSearchProfile:
             "similarity_blend": sp.get("similarity_blend", SIMILARITY_BLEND),
             # A49: 0 = off; >0 = storage selects a cosine-dominant candidate pool of this size.
             "candidate_pool_size": sp.get("candidate_pool_size", CANDIDATE_POOL_SIZE),
+            # A50 unified: 0 = legacy multiplicative score; 1 = unified relevance-dominant formula.
+            "score_formula": sp.get("score_formula", SCORE_FORMULA),
         }
         return None

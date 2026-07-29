@@ -9,9 +9,9 @@ import openai
 
 from common.constants import VECTOR_DIM
 from common.embedding.constants import (
+    EMBEDDING_HTTPX_MAX_CONNECTIONS,
+    EMBEDDING_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
     OPENAI_EMBEDDING_MODEL,
-    OPENAI_HTTPX_MAX_CONNECTIONS,
-    OPENAI_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
     OPENAI_REQUEST_TIMEOUT_SECONDS,
 )
 
@@ -71,8 +71,8 @@ class OpenAIEmbeddingProvider:
             "timeout": OPENAI_REQUEST_TIMEOUT_SECONDS,
             "http_client": httpx.AsyncClient(
                 limits=httpx.Limits(
-                    max_connections=OPENAI_HTTPX_MAX_CONNECTIONS,
-                    max_keepalive_connections=OPENAI_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
+                    max_connections=EMBEDDING_HTTPX_MAX_CONNECTIONS,
+                    max_keepalive_connections=EMBEDDING_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
                 ),
             ),
         }

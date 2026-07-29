@@ -30,6 +30,7 @@ from core_api.config import settings as app_settings
 from core_api.constants import (
     DEFAULT_LIST_LIMIT,
     MAX_LIST_LIMIT,
+    MEMORY_STATUSES_PATTERN,
 )
 from core_api.middleware.idempotency import (
     IDEMPOTENCY_HEADER,
@@ -200,7 +201,15 @@ async def list_memories(
     ),
     order: str = Query(default="desc", pattern=r"^(asc|desc)$"),
     offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT),
+    limit: int = Query(
+        default=DEFAULT_LIST_LIMIT,
+        ge=1,
+        le=MAX_LIST_LIMIT,
+        description=(
+            f"Items per page, 1-{MAX_LIST_LIMIT}. A value above {MAX_LIST_LIMIT} is rejected "
+            "with 422 (not silently clamped); page via `cursor`/`offset` for more."
+        ),
+    ),
     include_deleted: bool = Query(default=False),
     auth: AuthContext = Depends(get_auth_context),
 ):
@@ -353,9 +362,16 @@ async def memory_stats(
 async def memory_count(
     tenant_id: str | None = Query(default=None),
     fleet_id: str | None = Query(default=None),
+    status: str | None = Query(default=None, pattern=MEMORY_STATUSES_PATTERN),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Count active (non-deleted) memories for a tenant, optionally a fleet.
+    """Count live (non-deleted) memories for a tenant, optionally a fleet.
+
+    "Live" is the whole ``LIVE_MEMORY_STATUSES`` set (``active``,
+    ``confirmed``, ``pending``) — NOT just the literal ``active`` value, which
+    is what this counted before and why tenants whose rows enrichment had
+    promoted to ``confirmed``/``pending`` saw 0 while ``GET /memories`` listed
+    them. Pass ``status`` to count exactly one status instead.
 
     A lightweight operational primitive — for type/agent/status breakdowns use
     ``GET /memories/stats``. Declared BEFORE ``/memories/{memory_id}`` so the
@@ -376,7 +392,7 @@ async def memory_count(
         tenant_id = auth.tenant_id
     if not tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
-    count = await get_storage_client().count_active(tenant_id, fleet_id)
+    count = await get_storage_client().count_active(tenant_id, fleet_id, status=status)
     return {"count": count}
 
 
@@ -1848,7 +1864,15 @@ async def admin_list_memories(
     ),
     order: str = Query(default="desc", pattern=r"^(asc|desc)$"),
     offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT),
+    limit: int = Query(
+        default=DEFAULT_LIST_LIMIT,
+        ge=1,
+        le=MAX_LIST_LIMIT,
+        description=(
+            f"Items per page, 1-{MAX_LIST_LIMIT}. A value above {MAX_LIST_LIMIT} is rejected "
+            "with 422 (not silently clamped); page via `cursor`/`offset` for more."
+        ),
+    ),
     include_deleted: bool = Query(default=False),
     auth: AuthContext = Depends(get_auth_context),
 ):

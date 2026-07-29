@@ -25,11 +25,20 @@ from core_api.services.lifecycle_audit import (
 )
 
 
+_UNSET = object()  # "count_active was never called" sentinel
+
+
 class _FakeStorage:
     def __init__(self, active: int) -> None:
         self._active = active
+        # Records the status the gate asked for, so a refactor can't silently
+        # widen this spend gate to the live set (see the status= test below).
+        self.status_arg: str | None | object = _UNSET
 
-    async def count_active(self, org_id: str, fleet_id: str | None) -> int:
+    async def count_active(
+        self, org_id: str, fleet_id: str | None, status: str | None = None
+    ) -> int:
+        self.status_arg = status
         return self._active
 
 
@@ -76,6 +85,35 @@ async def test_crystallize_skips_when_auto_disabled() -> None:
         new=AsyncMock(return_value=_Off()),
     ):
         assert await adapter.crystallize(org_id="t1", fleet_id=None) == 0
+
+
+@pytest.mark.asyncio
+async def test_crystallize_gate_counts_only_literal_active_status() -> None:
+    """The spend gate asks for ``status="active"``, not the wider live set.
+
+    ``count_active`` defaults to the live set (active/confirmed/pending) since
+    #626, which fixed a read-path under-count. This call site gates LLM work,
+    so it stays pinned to the literal active count — widening it would open
+    auto-crystallization for orgs that sit under the threshold on active rows
+    alone. Asserting the argument (not just the outcome) is the point: without
+    it the gate could be widened by a one-word change and nothing would fail.
+    """
+    storage = _FakeStorage(active=_CRYSTALLIZE_MIN_ACTIVE_MEMORIES + 1)
+    adapter = _CoreApiLifecycleAdapter(storage)
+    with (
+        patch(
+            "core_api.services.lifecycle_audit.resolve_config",
+            new=AsyncMock(return_value=_Cfg()),
+        ),
+        patch(
+            "core_api.services.crystallizer_service.run_crystallization",
+            autospec=True,
+        ) as mock_run,
+    ):
+        mock_run.return_value = uuid4()
+        await adapter.crystallize(org_id="t1", fleet_id="f1")
+
+    assert storage.status_arg == "active"
 
 
 @pytest.mark.asyncio

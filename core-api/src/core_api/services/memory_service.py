@@ -58,6 +58,9 @@ from core_api.constants import (
     GRAPH_HOP_BOOST,
     GRAPH_MAX_BOOSTED_MEMORIES,
     GRAPH_MAX_HOPS,
+    MAX_CONTENT_LENGTH,
+    MEMORY_STATUSES,
+    MEMORY_TYPES,
     MIN_SEARCH_SIMILARITY,
     OPENAI_EMBEDDING_MODEL,
     RECALL_BOOST_CAP,
@@ -1083,15 +1086,62 @@ async def create_memories_bulk(
         if len(item.content.strip()) < CRYSTALLIZER_SHORT_CONTENT_CHARS
     }
 
+    # -- Per-item validation. Oversized content (over ``MAX_CONTENT_LENGTH``)
+    # used to 422 the whole batch via ``BulkMemoryItem.content``'s schema
+    # ``max_length``; that constraint was removed (see schemas.py) so a single
+    # oversized item no longer rejects its valid siblings. Enforce the cap here
+    # as a per-item "error" instead — additive-tolerant, matching the
+    # short-content path exactly. Length is measured on the raw string (not
+    # ``.strip()``d), preserving the old schema-``max_length`` semantics.
+    oversized_content_errors: dict[int, str] = {
+        i: f"content exceeds maximum length of {MAX_CONTENT_LENGTH} characters"
+        for i, item in enumerate(items)
+        if i not in short_content_errors and len(item.content) > MAX_CONTENT_LENGTH
+    }
+
+    # weight out of [0.0, 1.0] and unknown status used to 422 the whole batch via
+    # BulkMemoryItem's schema Field constraints (ge/le, pattern); those were
+    # removed (see schemas.py) so one bad field no longer rejects valid siblings.
+    # Enforce per-item here, preserving the old bounds exactly. (memory_type is
+    # still a typed enum on the schema — a follow-up.)
+    weight_errors: dict[int, str] = {
+        i: "weight must be between 0.0 and 1.0"
+        for i, item in enumerate(items)
+        if item.weight is not None and not (0.0 <= item.weight <= 1.0)
+    }
+    status_errors: dict[int, str] = {
+        i: f"status must be one of: {', '.join(sorted(MEMORY_STATUSES))}"
+        for i, item in enumerate(items)
+        if item.status is not None and item.status not in MEMORY_STATUSES
+    }
+    # memory_type is a plain str on BulkMemoryItem (not the typed MemoryType
+    # enum used on single-write), so an unknown value reaches here instead of
+    # 422-ing the whole batch at the schema. Validate against the same full
+    # vocabulary the enum accepted (MEMORY_TYPES); reserved/deprecated-but-known
+    # types stay valid here and are handled downstream exactly as before.
+    memory_type_errors: dict[int, str] = {
+        i: f"memory_type must be one of: {', '.join(MEMORY_TYPES)}"
+        for i, item in enumerate(items)
+        if item.memory_type is not None and item.memory_type not in MEMORY_TYPES
+    }
+
     # -- Resolve per-tenant config once --
     from core_api.services.organization_settings import resolve_config
 
     tenant_config = await resolve_config(data.tenant_id)
 
     # -- Batch embeddings + parallel enrichment (valid items only). Short
-    # items are skipped so we don't spend provider budget on content
-    # that will surface as an error anyway.
-    valid_indices = [i for i in range(n) if i not in short_content_errors]
+    # and oversized items are skipped so we don't spend provider budget on
+    # content that will surface as an error anyway.
+    valid_indices = [
+        i
+        for i in range(n)
+        if i not in short_content_errors
+        and i not in oversized_content_errors
+        and i not in weight_errors
+        and i not in status_errors
+        and i not in memory_type_errors
+    ]
 
     # -- Deterministic governance gate (eToro). Runs BEFORE embeddings +
     # content-hash so masked content flows through dedup + storage, and dropped
@@ -1227,14 +1277,29 @@ async def create_memories_bulk(
         # request body — same body + same attempt id ⇒ same per-item id.
         item_request_id = f"{bulk_attempt_id}:{i}"
 
-        # Short-content items surface as per-item errors; never embedded,
-        # enriched, deduped, or written.
-        if i in short_content_errors:
+        # Input-validation errors surface as per-item error rows (never embedded,
+        # enriched, deduped, or written — they're excluded from valid_indices):
+        # content length (short/oversized), weight range, status enum. These were
+        # all whole-batch 422s at the schema before the additive-tolerance work.
+        # ALL applicable messages for the item are aggregated into one row so a
+        # caller sees every problem at once rather than one per round-trip.
+        item_errors = [
+            errs[i]
+            for errs in (
+                memory_type_errors,
+                short_content_errors,
+                oversized_content_errors,
+                weight_errors,
+                status_errors,
+            )
+            if i in errs
+        ]
+        if item_errors:
             results[i] = BulkItemResult(
                 index=i,
                 client_request_id=item_request_id,
                 status="error",
-                error=short_content_errors[i],
+                error="; ".join(item_errors),
             )
             error_count += 1
             continue
@@ -1671,6 +1736,7 @@ async def _schedule_embed_or_reembed(
     tenant_id: str,
     *,
     content_hash: str | None = None,
+    is_failure_fallback: bool = False,
 ) -> None:
     """Backfill the embedding for a memory persisted with ``embedding=NULL``.
 
@@ -1681,9 +1747,14 @@ async def _schedule_embed_or_reembed(
     circuit the provider call when the same content was already
     embedded for this tenant — pass it whenever the caller has it in
     scope.
+
+    ``is_failure_fallback`` only affects the INLINE branch, where it adds
+    the thundering-herd backoff before retrying in-process. The deferred
+    branch needs no equivalent: Pub/Sub owns redelivery and backoff, so
+    the publish is a single cheap hand-off regardless.
     """
     if settings.inline_embedding:
-        await _reembed_memory(memory_id, content, tenant_id)
+        await _reembed_memory(memory_id, content, tenant_id, is_failure_fallback=is_failure_fallback)
     else:
         await publish_memory_embed_request(
             memory_id=memory_id,
@@ -1971,10 +2042,25 @@ async def _reembed_memories_bulk(
         for memory_id, content in items:
             track_task(
                 tracked_task(
-                    # is_failure_fallback=True: provider just failed for
-                    # the whole batch, so the per-item retries need the
-                    # 30s backoff to avoid a thundering herd.
-                    _reembed_memory(memory_id, content, tenant_id, is_failure_fallback=True),
+                    # Route through the inline/deferred router rather than
+                    # calling _reembed_memory directly. In deferred mode this
+                    # hands each item to EMBED_REQUESTED, so the retry lives on
+                    # Pub/Sub (redelivery + DLQ) instead of in this process.
+                    #
+                    # That is what makes the fallback DURABLE. Direct in-process
+                    # retry meant a failed 50-item batch fanned out to 50 x
+                    # _REEMBED_MAX_RETRIES x EMBEDDING_RETRY_ATTEMPTS provider
+                    # calls, all contending for the same saturated backend; when
+                    # they exhausted, the rows stayed embedding=NULL with no
+                    # further recovery — a manual CLI backfill was the only way
+                    # out. That is exactly how ~430 memories were stranded in
+                    # the 2026-07-27 incident.
+                    #
+                    # is_failure_fallback=True still gives the INLINE branch its
+                    # thundering-herd backoff (the provider just failed for the
+                    # whole batch); the deferred branch ignores it because
+                    # Pub/Sub owns backoff.
+                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
                     "reembed",
                     memory_id,
                     tenant_id,
@@ -1995,7 +2081,7 @@ async def _reembed_memories_bulk(
         for memory_id, content in items:
             track_task(
                 tracked_task(
-                    _reembed_memory(memory_id, content, tenant_id, is_failure_fallback=True),
+                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
                     "reembed",
                     memory_id,
                     tenant_id,
@@ -2020,7 +2106,7 @@ async def _reembed_memories_bulk(
                 tracked_task(
                     # Per-item None after a partial batch success is
                     # still a provider partial-failure — back off.
-                    _reembed_memory(memory_id, content, tenant_id, is_failure_fallback=True),
+                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
                     "reembed",
                     memory_id,
                     tenant_id,
@@ -2038,7 +2124,7 @@ async def _reembed_memories_bulk(
             )
             track_task(
                 tracked_task(
-                    _reembed_memory(memory_id, content, tenant_id, is_failure_fallback=True),
+                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
                     "reembed",
                     memory_id,
                     tenant_id,
@@ -2083,7 +2169,7 @@ async def _reembed_memories_bulk(
             )
             track_task(
                 tracked_task(
-                    _reembed_memory(memory_id, content, tenant_id, is_failure_fallback=True),
+                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
                     "reembed",
                     memory_id,
                     tenant_id,

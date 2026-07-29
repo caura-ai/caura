@@ -16,7 +16,7 @@ from common.events.lifecycle_purge_request import (
 from core_storage_api.observability import bind_timer, log_request
 from core_storage_api.routers._validation import _require
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
-from core_storage_api.services.postgres_service import PostgresService
+from core_storage_api.services.postgres_service import BulkValidationError, PostgresService
 
 router = APIRouter(prefix="/memories", tags=["Memories"])
 _svc = PostgresService()
@@ -100,7 +100,22 @@ async def create_memories_bulk(request: Request) -> list[dict]:
     body: list[dict] = await request.json()
     for item in body:
         _parse_datetimes(item)
-    return await _svc.memory_add_all(body)
+    try:
+        return await _svc.memory_add_all(body)
+    except BulkValidationError as exc:
+        # Malformed batch (an item missing ``client_request_id``, or mixed
+        # ``tenant_id`` / ``fleet_id``). Unwrapped it escaped as a 500 — a
+        # server-fault code for what is squarely a bad request, which pages
+        # and lands in the DLQ instead of being fixed by the caller. Same
+        # 4xx-at-the-edge convention as ``_parse_datetimes`` above and
+        # ``dedup_review_enqueue`` below.
+        #
+        # Catches the dedicated subclass, NOT bare ``ValueError``: those three
+        # guards all run before ``memory_add_all`` opens its session, but the
+        # try block spans the whole call, so a plain ``except ValueError``
+        # would also swallow anything raised from inside the session and
+        # relabel a genuine server fault as a client error.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # ------------------------------------------------------------------
@@ -719,12 +734,22 @@ async def get_embedding_coverage(
     tenant_id: str,
     fleet_id: str | None = None,
 ) -> dict:
-    missing = await _svc.memory_find_missing_embeddings(tenant_id, fleet_id)
+    """Share of live memories that have an embedding.
+
+    Numerator and denominator scope to the same population
+    (``LIVE_MEMORY_STATUSES``, not soft-deleted, same tenant/fleet), so
+    ``missing_embeddings <= total_active`` holds and ``coverage_pct`` stays
+    within 0-100. Both are exact COUNTs; the numerator used to be
+    ``len(rows)`` off a ``LIMIT``-ed query, which capped it at the batch size
+    and made coverage read high on any tenant with more missing rows than
+    that.
+    """
+    missing = await _svc.memory_count_missing_embeddings(tenant_id, fleet_id)
     total = await _svc.memory_count_active(tenant_id, fleet_id)
     return {
         "total_active": total,
-        "missing_embeddings": len(missing),
-        "coverage_pct": round((total - len(missing)) / total * 100, 1) if total > 0 else 0.0,
+        "missing_embeddings": missing,
+        "coverage_pct": round((total - missing) / total * 100, 1) if total > 0 else 0.0,
     }
 
 
@@ -777,19 +802,41 @@ async def get_lifecycle_candidates(tenant_id: str) -> dict:
 
 @router.get("/count")
 async def count_memories(
-    tenant_id: str,
+    tenant_id: str | None = None,
     fleet_id: str | None = None,
+    status: str | None = None,
 ) -> dict:
+    """Count live memories for a tenant. ``status`` narrows to one exact status.
+
+    Omitting ``tenant_id`` (or passing it empty) returns the whole-corpus
+    counter, which takes no filters: ``fleet_id`` and ``status`` do NOT apply
+    on that path. It stays filterless rather than growing a second filtered
+    code path.
+
+    The annotation is optional so both forms reach that branch. It used to be
+    a bare ``str``, i.e. required, so only the empty-string form worked and an
+    omitted param 422'd — even though ``core-api``'s public-stats caller
+    (``routes/stats.py``, ``count_all(tenant_id="")``) and the whole-corpus
+    branch were both written for "no tenant".
+    """
     if not tenant_id:
         count = await _svc.memory_count_all()
     else:
-        count = await _svc.memory_count_active(tenant_id, fleet_id)
+        count = await _svc.memory_count_active(tenant_id, fleet_id, status=status)
     return {"count": count}
 
 
 @router.get("/count-active")
-async def count_active_memories(tenant_id: str, fleet_id: str | None = None) -> dict:
-    count = await _svc.memory_count_active(tenant_id, fleet_id)
+async def count_active_memories(
+    tenant_id: str,
+    fleet_id: str | None = None,
+    status: str | None = None,
+) -> dict:
+    """Count live memories (``LIVE_MEMORY_STATUSES``), not just literal ``active``.
+
+    Pass ``status=active`` for the old narrow behaviour.
+    """
+    count = await _svc.memory_count_active(tenant_id, fleet_id, status=status)
     return {"count": count}
 
 
