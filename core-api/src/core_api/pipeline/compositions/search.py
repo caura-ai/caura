@@ -10,6 +10,7 @@ from core_api.pipeline.steps.search import (
     LogRecallEvent,
     ParallelEmbedAndEntityBoost,
     PostFilterResults,
+    RerankResults,
     ResolveSearchProfile,
     TrackRecalls,
 )
@@ -24,6 +25,7 @@ def build_search_pipeline() -> Pipeline:
             ClassifyQuery(),
             ParallelEmbedAndEntityBoost(),
             ExecuteScoredSearch(),
+            RerankResults(),
             PostFilterResults(),
             LoadAndSerialize(),
             InjectSTMContext(),
