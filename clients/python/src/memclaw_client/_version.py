@@ -12,7 +12,8 @@ This lives in its own module (rather than in ``__init__``) so that both
 
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 
 #: Used when distribution metadata is unavailable (uninstalled source checkout).
 FALLBACK_VERSION = "0.0.0+dev"
