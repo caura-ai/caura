@@ -101,6 +101,18 @@ Cursor (`~/.cursor/hooks.json`):
 } }
 ```
 
+**Schedule the cron in one command.** Rather than hand-editing crontab,
+`install` writes an idempotent cron entry (and a `0600` env file it sources,
+since cron doesn't inherit your shell environment). Config comes from the
+same flags/env as `run`:
+```bash
+memclaw-interviewer install --interval 30m        # add --harness cursor for Cursor
+memclaw-interviewer uninstall                      # removes the entry + env file
+```
+It refuses to schedule a job that would no-op (missing credentials or no
+project allowlist). On Windows (no `crontab`), use Task Scheduler to run
+`memclaw-interviewer run` on a timer instead.
+
 Crash-safety is inherited from the Interviewer protocol: the watermark
 advances only after the server commits a window, and retries of the same
 window dedup server-side via a deterministic attempt id — never a gap,
