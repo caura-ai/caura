@@ -10,13 +10,34 @@
 # members makes the policy explicit and stops fork PRs from triggering
 # silent-failure runs.
 #
-# Membership is checked at runtime against ``orgs/caura-ai/members/{user}``
-# (returns 204 for visible members, 404 otherwise). The ``pull_request``
-# event's ``author_association`` field is captured at PR-creation time
-# and never refreshes, so a member whose visibility was PRIVATE when
-# they opened a PR would be permanently locked out — the live API call
-# avoids that. Members must still make their org membership public for
-# the API to return 204.
+# OPERATIONAL REQUIREMENT: every member who wants their pull requests
+# reviewed must set their caura-ai org membership to **Public**
+# (Organization -> People -> their row -> Public). Nobody can set it on
+# their behalf. A member whose membership is private is skipped exactly
+# like a stranger — silently, behind a green check. This is not a
+# preference; it is what the gate below can actually see.
+#
+# Membership is checked at runtime against ``orgs/caura-ai/members/{user}``.
+# That endpoint answers for its CALLER, and ``GITHUB_TOKEN`` sees only
+# PUBLIC members: 204 for a public member, 404 for a private member and
+# for a non-member alike.
+#
+# Why not the payload's ``author_association``, which needs no API call:
+# it does not report org membership for a private member on a
+# ``pull_request`` event. Observed values here, all for the same private
+# member of this org:
+#
+#   github.event.pull_request.author_association  ->  CONTRIBUTOR
+#   github.event.comment.author_association       ->  MEMBER
+#   GET /repos/{repo}/pulls/{n} .author_association -> MEMBER
+#
+# Three things follow. The two payloads DISAGREE, which is why an
+# ``@claude`` retrigger worked for private members while the on-open
+# review did not. ``CONTRIBUTOR`` is unusable as a gate on a public repo,
+# since anyone with a merged commit earns it. And the REST value is
+# computed for whoever asks — a personal token reports ``MEMBER`` where
+# CI sees ``CONTRIBUTOR`` — so it must NOT be used to check this gate's
+# behaviour. Verify against a real workflow run, not a local ``gh`` call.
 
 name: Claude Code Review
 
@@ -91,12 +112,14 @@ jobs:
           REPO=${{ github.repository }}
 
           # 1. Org membership gate — checked at runtime, not via the
-          # webhook-frozen ``author_association`` field. The payload
-          # captures membership at PR-creation time, so a user whose
-          # caura-ai membership was PRIVATE at PR-open shows up as
-          # ``NONE`` even after they make it public. The ``orgs/{org}/
-          # members/{user}`` endpoint returns 204 for visible members
-          # and 404 for private members + non-members. We distinguish
+          # payload's ``author_association``, which on a ``pull_request``
+          # event reports ``CONTRIBUTOR`` for a private org member and so
+          # cannot distinguish one from any past contributor. The values
+          # are measured and recorded in the file header; read them before
+          # changing this, and note that a local ``gh`` call reports a
+          # DIFFERENT value than CI sees. The ``orgs/{org}/members/{user}``
+          # endpoint returns 204 for public members and 404 for private
+          # members and non-members alike. We distinguish
           # 404 (skip with the membership reason) from other failures
           # (rate-limit, network, bad token — skip but log a warning so
           # operators can tell a real "non-member" from a transient
@@ -238,9 +261,16 @@ jobs:
         run: |
           # ``author_association`` is set by GitHub on the event payload
           # and reflects the commenter's relationship to the repo's
-          # owner organization. ``MEMBER`` = public org member,
-          # ``OWNER`` = org owner. PRIVATE org members surface as
-          # ``NONE`` — see header comment for the workaround.
+          # owner organization. ``MEMBER`` = org member, ``OWNER`` = org
+          # owner.
+          #
+          # On an ``issue_comment`` payload this DOES resolve for a private
+          # org member — observed reporting ``MEMBER`` for a member whose
+          # org membership was private — which is why this path kept
+          # working while the on-open review was skipping everyone. Do not
+          # "align" the two gates by moving pre-checks onto this field: on a
+          # ``pull_request`` payload the same person reports ``CONTRIBUTOR``.
+          # See the header comment for the measured values.
           #
           # ``COLLABORATOR`` (non-org members granted direct repo write
           # access via Settings → Collaborators) is INTENTIONALLY
