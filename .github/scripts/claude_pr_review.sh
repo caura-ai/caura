@@ -20,9 +20,34 @@
 #   REVIEW_PROMPT     review instructions + output format
 # Optional env:
 #   MODEL             model id (default: claude-sonnet-4-6)
+#   MAX_BUDGET_USD    per-review spend ceiling, passed to --max-budget-usd (default 10.00)
 set -euo pipefail
 
 MODEL="${MODEL:-claude-sonnet-4-6}"
+
+# A ceiling so one runaway review cannot bill without bound. The reviewer reads the repo
+# across turns to judge a diff, which is what makes it useful and also what makes an
+# unbounded run possible; sibling repos on the org's shared pipeline have billed $6.11 on a
+# two-file diff. The org-membership gate above stops a fork pull request from triggering a
+# review at all, but it does not bound what a member's large pull request costs.
+#
+# A runaway guard, not a budget target. The CLI checks the ceiling BETWEEN turns, so a run
+# can overshoot it by roughly one turn, and on a single hung turn it never fires at all —
+# the job timeout is the only bound there. Sized above observed spend on purpose: the
+# expensive reviews are the ones that find real defects, so capping near the average would
+# truncate exactly the runs worth paying for.
+MAX_BUDGET_USD="${MAX_BUDGET_USD:-10.00}"
+# Shape, then value. Shape does not require a leading digit, so `.50` is accepted the way the
+# CLI accepts it, while `.`, `1.`, `10,00`, `$10`, `-1` and `1e3` are rejected. Value is
+# checked arithmetically rather than with a second pattern: a zero ceiling is accepted by the
+# CLI and makes every review fail on its first turn — which reads as a broken pipeline rather
+# than a bad setting — and spelling "zero" as a regex means enumerating 0, 00, 0.0, .0, 0.00
+# and .00, where the no-leading-digit forms are the easy ones to miss.
+if ! [[ "$MAX_BUDGET_USD" =~ ^[0-9]*\.?[0-9]+$ ]] \
+   || ! awk -v v="$MAX_BUDGET_USD" 'BEGIN { exit !(v + 0 > 0) }'; then
+  echo "::error::MAX_BUDGET_USD must be a positive decimal number, got '${MAX_BUDGET_USD}'" >&2
+  exit 1
+fi
 
 post() { gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="$1" >/dev/null; }
 
@@ -41,8 +66,27 @@ Review the PR diff provided on stdin. Review ONLY the changed lines. If after a 
 # No 2>&1: claude's stderr (warnings/progress) must not contaminate the JSON on
 # stdout, or jq would parse garbage and yield an empty review. A non-zero exit is
 # still caught below; stderr goes to the workflow log for debugging.
-RESULT=$(printf '%s' "$DIFF" | claude --print --model "$MODEL" --output-format json "$PROMPT") || {
-  post "⚠️ Claude Code review failed (check workflow logs)."
+RESULT=$(printf '%s' "$DIFF" | claude --print --model "$MODEL" --output-format json \
+  --max-budget-usd "$MAX_BUDGET_USD" \
+  "$PROMPT") || {
+  CLAUDE_EXIT=$?
+  # `VAR=$(cmd)` keeps cmd's stdout even when cmd fails, and claude reports several failures
+  # (auth, quota, and budget exhaustion) there rather than on stderr. This branch used to
+  # discard it and post "check workflow logs" above a log that held nothing — which would have
+  # made a ceiling hit the least diagnosable outcome in the script.
+  echo "Claude exited ${CLAUDE_EXIT}. First 2000 chars of its stdout:" >&2
+  printf '%s\n' "${RESULT:0:2000}" >&2
+  # Budget exhaustion is an EXPECTED outcome carrying a machine-readable marker, and it exits
+  # 1 exactly like a crash, so without this branch the ceiling would surface as a bare exit
+  # code and read as a broken pipeline. `jq -e` rather than `grep -q`: grep stops reading on
+  # match, the upstream printf takes SIGPIPE, and pipefail then turns a MATCH into a non-zero
+  # pipeline. jq drains stdin.
+  if printf '%s' "$RESULT" | jq -e '.subtype == "error_max_budget_usd"' >/dev/null 2>&1; then
+    SPENT=$(printf '%s' "$RESULT" | jq -r '.total_cost_usd // "unknown"' 2>/dev/null || echo unknown)
+    post "⚠️ Claude Code review reached the \$${MAX_BUDGET_USD} spend ceiling after \$${SPENT} without finishing. Split the PR, or raise \`MAX_BUDGET_USD\` on the workflow step."
+    exit 1
+  fi
+  post "⚠️ Claude Code review failed: exit ${CLAUDE_EXIT} (see workflow logs)."
   exit 1
 }
 
