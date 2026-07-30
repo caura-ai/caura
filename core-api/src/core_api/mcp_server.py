@@ -699,6 +699,7 @@ async def memclaw_recall(
             top_k=capped_top_k,
             recall_boost=config.recall_boost,
             graph_expand=config.graph_expand,
+            entity_retrieval=config.entity_retrieval,
             tenant_config=config,
             search_profile=agent_profile,
             readable_tenant_ids=_get_readable_tenants() or None,

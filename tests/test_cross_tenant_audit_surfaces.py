@@ -163,7 +163,7 @@ async def test_memclaw_recall_emits_cross_tenant_audit(
     monkeypatch.setattr(
         mcp_server,
         "resolve_config",
-        AsyncMock(return_value=SimpleNamespace(recall_boost=False, graph_expand=False)),
+        AsyncMock(return_value=SimpleNamespace(recall_boost=False, graph_expand=False, entity_retrieval=True)),
     )
     stub_storage_client(monkeypatch, get_agent=None)
 

@@ -80,6 +80,7 @@ def _minimal_config(recall_enabled: bool = True) -> SimpleNamespace:
         recall_model="fake-model",
         recall_boost=False,
         graph_expand=False,
+        entity_retrieval=True,
     )
 
 

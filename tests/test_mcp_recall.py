@@ -206,6 +206,7 @@ async def test_recall_brief_skipped_when_include_brief_false(mcp_env, monkeypatc
 class _FakeConfig:
     recall_boost = False
     graph_expand = False
+    entity_retrieval = True
 
 
 async def _fake_resolve_config(tenant_id):  # noqa: ARG001

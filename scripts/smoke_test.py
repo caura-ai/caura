@@ -130,6 +130,7 @@ class SmokeTest:
             self.test_min_similarity_filtering,
             self.test_recall,
             self.test_graph_retrieval,
+            self.test_entity_retrieval_flag,
             self.test_list_memories,
             # ── Update paths ──
             self.test_memory_update,
@@ -673,6 +674,157 @@ class SmokeTest:
             found,
             f"got {len(result_ids)} results: {result_ids}, looking for {mem_id}",
         )
+
+    def test_entity_retrieval_flag(self):
+        """search.entity_retrieval=false blocks entity/graph reads; reads still work.
+
+        The inverse of test_graph_retrieval. The fixture memory is reachable ONLY
+        through the entity graph — its content shares no wording with the query and
+        it is linked to a *related* entity, not the queried one — so:
+
+          flag ON  → found (ENTITY_LOOKUP short-circuits, and that path is not
+                     subject to the min_similarity floor)
+          flag OFF → not found by keyword/semantic search alone
+
+        The setting is always restored, including on early return.
+        """
+        # 1. Two entities + a relation between them: query one, link the memory to
+        #    the other, so only graph expansion can bridge the two.
+        queried = f"orbital widget foundry {uuid.uuid4().hex[:6]}"
+        linked = f"zelda pemberton {uuid.uuid4().hex[:6]}"
+        r_q = self.client.post(
+            f"{self.api}/entities/upsert",
+            json={
+                "tenant_id": TENANT,
+                "entity_type": "project",
+                "canonical_name": queried,
+            },
+        )
+        r_l = self.client.post(
+            f"{self.api}/entities/upsert",
+            json={
+                "tenant_id": TENANT,
+                "entity_type": "person",
+                "canonical_name": linked,
+            },
+        )
+        if r_q.status_code != 200 or r_l.status_code != 200:
+            self.check(
+                "Entity flag: create entities",
+                False,
+                f"queried={r_q.status_code} linked={r_l.status_code}",
+            )
+            return
+        queried_id, linked_id = r_q.json()["id"], r_l.json()["id"]
+        self.entity_ids.extend([queried_id, linked_id])
+
+        r_rel = self.client.post(
+            f"{self.api}/relations/upsert",
+            json={
+                "tenant_id": TENANT,
+                "from_entity_id": linked_id,
+                "relation_type": "works_on",
+                "to_entity_id": queried_id,
+            },
+        )
+        self.check(
+            "Entity flag: relation created",
+            r_rel.status_code == 200,
+            f"status={r_rel.status_code}",
+        )
+
+        # 2. Memory linked only to the related entity, worded so nothing in it
+        #    overlaps the query — no lexical or semantic route to this row.
+        flag_fleet = f"entity-flag-{uuid.uuid4().hex[:6]}"
+        tag = uuid.uuid4().hex[:8]
+        r_mem = self.client.post(
+            f"{self.api}/memories",
+            json={
+                "tenant_id": TENANT,
+                "agent_id": AGENT,
+                "fleet_id": flag_fleet,
+                "content": f"Sourdough starter {tag} needs feeding every twelve hours.",
+                "entity_links": [{"entity_id": linked_id, "role": "subject"}],
+            },
+        )
+        if r_mem.status_code not in (200, 201) or not r_mem.json().get("id"):
+            self.check(
+                "Entity flag: write linked memory", False, f"status={r_mem.status_code}"
+            )
+            return
+        mem_id = r_mem.json()["id"]
+        self.memory_ids.append(mem_id)
+
+        def search_queried_entity():
+            return self.client.post(
+                f"{self.api}/search",
+                json={"tenant_id": TENANT, "fleet_ids": [flag_fleet], "query": queried},
+            )
+
+        def set_entity_retrieval(enabled: bool):
+            return self.client.put(
+                f"{self.api}/settings",
+                params={"tenant_id": TENANT},
+                json={"search": {"entity_retrieval": enabled}},
+            )
+
+        try:
+            # 3. Baseline (flag defaults ON): reachable via the graph only.
+            r_on = _retry_until(
+                search_queried_entity,
+                predicate=lambda resp: (
+                    resp.status_code == 200
+                    and isinstance(resp.json(), list)
+                    and mem_id in [m.get("id") for m in resp.json()]
+                ),
+                max_wait=12.0,
+            )
+            on_ids = (
+                [m.get("id") for m in r_on.json()] if r_on.status_code == 200 else []
+            )
+            self.check(
+                "Entity flag ON: graph-only memory found",
+                mem_id in on_ids,
+                f"got {len(on_ids)} results: {on_ids}, looking for {mem_id}",
+            )
+
+            # 4. Flip the flag off and re-run the identical query.
+            r_put = set_entity_retrieval(False)
+            self.check(
+                "Entity flag: PUT search.entity_retrieval=false",
+                r_put.status_code == 200,
+                f"status={r_put.status_code} body={r_put.text[:200]}",
+            )
+            if r_put.status_code != 200:
+                return
+            self.check(
+                "Entity flag: setting reads back as false",
+                r_put.json().get("search", {}).get("entity_retrieval") is False,
+                f"search={r_put.json().get('search')}",
+            )
+
+            # The settings cache is invalidated on write, so no wait is needed.
+            r_off = search_queried_entity()
+            self.check(
+                "Entity flag OFF: search still succeeds",
+                r_off.status_code == 200 and isinstance(r_off.json(), list),
+                f"status={r_off.status_code} body={r_off.text[:200]}",
+            )
+            if r_off.status_code == 200 and isinstance(r_off.json(), list):
+                off_ids = [m.get("id") for m in r_off.json()]
+                self.check(
+                    "Entity flag OFF: graph-only memory NOT returned",
+                    mem_id not in off_ids,
+                    f"got {len(off_ids)} results: {off_ids}, {mem_id} should be absent",
+                )
+        finally:
+            # Restore the default so later tests (and the tenant) are unaffected.
+            r_restore = set_entity_retrieval(True)
+            self.check(
+                "Entity flag: restored to enabled",
+                r_restore.status_code == 200,
+                f"status={r_restore.status_code}",
+            )
 
     def test_memory_update(self):
         """Test PATCH /api/memories/{id}: update content, weight, and verify re-embedding."""

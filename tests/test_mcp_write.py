@@ -300,7 +300,10 @@ async def test_write_unapproved_agent_blocked(mcp_env, monkeypatch):
     # require_agent_approval a new agent resolves at trust_level 0, so MCP refuses
     # the write with AGENT_NOT_APPROVED and never persists.
     mcp_env["service"]("resolve_config").return_value = SimpleNamespace(
-        require_agent_approval=True, recall_boost=False, graph_expand=False
+        require_agent_approval=True,
+        recall_boost=False,
+        graph_expand=False,
+        entity_retrieval=True,
     )
 
     async def _resolve(
@@ -327,7 +330,10 @@ async def test_write_threads_require_approval_to_resolver(mcp_env, monkeypatch):
     # The tenant's require_agent_approval reaches resolve_write_agent, so a new
     # agent is created at trust 0 when required (the creation half of the gate).
     mcp_env["service"]("resolve_config").return_value = SimpleNamespace(
-        require_agent_approval=True, recall_boost=False, graph_expand=False
+        require_agent_approval=True,
+        recall_boost=False,
+        graph_expand=False,
+        entity_retrieval=True,
     )
     captured: dict[str, object] = {}
 

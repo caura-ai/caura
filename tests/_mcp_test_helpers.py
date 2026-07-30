@@ -211,7 +211,10 @@ def mcp_env(monkeypatch):
     # monkeypatch.
     async def _stub_resolve_config(tenant_id):
         return SimpleNamespace(
-            require_agent_approval=False, recall_boost=False, graph_expand=False
+            require_agent_approval=False,
+            recall_boost=False,
+            graph_expand=False,
+            entity_retrieval=True,
         )
 
     monkeypatch.setattr(mcp_server, "resolve_config", _stub_resolve_config)

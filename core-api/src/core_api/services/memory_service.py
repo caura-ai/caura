@@ -3205,6 +3205,7 @@ async def search_memories(
     top_k: int = DEFAULT_SEARCH_TOP_K,
     recall_boost: bool = True,
     graph_expand: bool = True,
+    entity_retrieval: bool = True,
     tenant_config=None,
     search_profile: dict | None = None,
     diagnostic: bool = False,
@@ -3226,6 +3227,7 @@ async def search_memories(
             top_k=top_k,
             recall_boost=recall_boost,
             graph_expand=graph_expand,
+            entity_retrieval=entity_retrieval,
             tenant_config=tenant_config,
             search_profile=search_profile,
             diagnostic=diagnostic,
@@ -3246,6 +3248,7 @@ async def search_memories(
         top_k=top_k,
         recall_boost=recall_boost,
         graph_expand=graph_expand,
+        entity_retrieval=entity_retrieval,
         tenant_config=tenant_config,
         search_profile=search_profile,
     )
@@ -3263,6 +3266,7 @@ async def _search_memories_pipeline(
     top_k: int = DEFAULT_SEARCH_TOP_K,
     recall_boost: bool = True,
     graph_expand: bool = True,
+    entity_retrieval: bool = True,
     tenant_config=None,
     search_profile: dict | None = None,
     diagnostic: bool = False,
@@ -3287,6 +3291,10 @@ async def _search_memories_pipeline(
             "top_k": top_k,
             "recall_boost_enabled": recall_boost,
             "graph_expand": graph_expand,
+            # ``search.entity_retrieval`` — read by ClassifyQuery (skips the
+            # ENTITY_LOOKUP short-circuit) and ParallelEmbedAndEntityBoost
+            # (skips hop-boosting). False ⇒ keyword/semantic reads only.
+            "entity_retrieval": entity_retrieval,
             "tenant_config": tenant_config,
             "search_profile": search_profile,
             "diagnostic": diagnostic,
@@ -3322,6 +3330,15 @@ async def _search_memories_pipeline(
     return ctx.data["results"]
 
 
+async def _no_entity_boost() -> tuple[set[UUID], dict[UUID, float]]:
+    """Neutral stand-in for ``_entity_boost_pipeline`` when entity retrieval is off.
+
+    Returned as a coroutine (rather than short-circuiting the caller) so the
+    legacy path's ``gather`` + cancel-on-error structure stays byte-identical.
+    """
+    return set(), {}
+
+
 async def _search_memories_legacy(
     tenant_id: str,
     query: str,
@@ -3334,6 +3351,7 @@ async def _search_memories_legacy(
     top_k: int = DEFAULT_SEARCH_TOP_K,
     recall_boost: bool = True,
     graph_expand: bool = True,
+    entity_retrieval: bool = True,
     tenant_config=None,
     search_profile: dict | None = None,
 ) -> list[MemoryOut]:
@@ -3357,10 +3375,14 @@ async def _search_memories_legacy(
     # Temporal hint
     temporal_window = _extract_temporal_hint(query)
 
-    # Parallel: embedding + entity pipeline
+    # Parallel: embedding + entity pipeline. ``search.entity_retrieval`` off ⇒
+    # no entity FTS / graph expansion / hop-boost on this path either, so the
+    # deprecated legacy search honours the org switch exactly like the pipeline.
     emb_task = asyncio.ensure_future(_get_or_cache_embedding(query, tenant_id, tenant_config))
     ent_task = asyncio.ensure_future(
         _entity_boost_pipeline(query, tenant_id, fleet_ids, graph_expand, _graph_max_hops)
+        if entity_retrieval
+        else _no_entity_boost()
     )
     try:
         embedding, (boosted_memory_ids, memory_boost_factor) = await asyncio.gather(emb_task, ent_task)

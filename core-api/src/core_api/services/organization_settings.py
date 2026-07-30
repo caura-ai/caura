@@ -93,6 +93,21 @@ DEFAULT_SETTINGS: dict = {
     "search": {
         "recall_boost": None,
         "graph_retrieval": None,
+        # Master switch for query-time entity/graph retrieval. ``False`` blocks
+        # BOTH read entry points: the ``ENTITY_LOOKUP`` short-circuit in
+        # ``ClassifyQuery`` (which skips embedding + scored search entirely) and
+        # the hop-boost in ``ParallelEmbedAndEntityBoost``. Every read then
+        # resolves through the keyword/semantic cascade alone, and no entity FTS
+        # or graph-expansion call is issued at all.
+        #
+        # Supersedes ``graph_retrieval`` and the ``graph_max_hops`` profile knob
+        # — those only bound expansion depth AFTER an entity match, so they
+        # cannot switch entity retrieval off on their own.
+        #
+        # Read-side only: entity extraction, entity linking (see
+        # ``entity_linking.auto_entity_linking_enabled``) and relation inference
+        # keep populating the graph, so flipping this back on needs no backfill.
+        "entity_retrieval": None,
         # Tenant-wide default search profile (A47). Any search_profile knob set
         # here (min_similarity, top_k, freshness_floor, ...) becomes the fallback
         # for EVERY agent in the tenant, filling the gap between a per-agent tuned
@@ -549,6 +564,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "security_audit.alert_score_drop_delta": (int, float),
     "search.recall_boost": bool,
     "search.graph_retrieval": bool,
+    "search.entity_retrieval": bool,
     "crystallizer.auto_crystallize": bool,
     "dedup.semantic_dedup_enabled": bool,
     "lifecycle.lifecycle_automation_enabled": bool,
@@ -871,6 +887,18 @@ class ResolvedConfig:
     def graph_expand(self) -> bool:
         val = self._ts.get("search", {}).get("graph_retrieval")
         return val if val is not None else True
+
+    @property
+    def entity_retrieval(self) -> bool:
+        """Query-time entity lookup + graph search (default ON).
+
+        ``False`` routes every read through keyword/semantic search alone. Falls
+        back to the ``ENTITY_RETRIEVAL_ENABLED`` env default (also ``True``) when
+        the tenant has no override, so the switch can be thrown fleet-wide on an
+        on-prem box without touching per-tenant settings.
+        """
+        val = self._ts.get("search", {}).get("entity_retrieval")
+        return val if val is not None else global_settings.entity_retrieval_enabled
 
     @property
     def default_search_profile(self) -> dict:

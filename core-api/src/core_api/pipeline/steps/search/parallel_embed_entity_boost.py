@@ -177,13 +177,29 @@ class ParallelEmbedAndEntityBoost:
         emb_task = asyncio.ensure_future(
             _get_or_cache_embedding(data["query"], data["tenant_id"], data["tenant_config"])
         )
-        # ClassifyQuery already ran the same tokenizer + entity FTS and
-        # declined the match as over-broad (CAURA-698). Re-deriving it here
-        # would hand GRAPH_HOP_BOOST to an arbitrary GRAPH_MAX_BOOSTED_MEMORIES
-        # subset of the sibling pool, outranking rows the scorer puts first.
+        # Two independent reasons to skip the entity boost entirely:
+        #
+        # 1. ``search.entity_retrieval`` is off for the tenant — the org-level
+        #    switch for query-time entity/graph retrieval. ClassifyQuery already
+        #    skipped its own entity block, so this leaves the read on pure
+        #    keyword/semantic scoring. Default True: an absent key means enabled.
+        # 2. ClassifyQuery ran the same tokenizer + entity FTS and declined the
+        #    match as over-broad (CAURA-698). Re-deriving it here would hand
+        #    GRAPH_HOP_BOOST to an arbitrary GRAPH_MAX_BOOSTED_MEMORIES subset of
+        #    the sibling pool, outranking rows the scorer puts first.
+        #
+        # Kept as distinct log reasons so ops can tell a deliberate org-level
+        # disable from the precision heuristic firing.
+        if not data.get("entity_retrieval", True):
+            ent_skip_reason = "disabled by org setting search.entity_retrieval"
+        elif data.get("entity_match_declined"):
+            ent_skip_reason = "entity match declined as over-broad in classify_query"
+        else:
+            ent_skip_reason = None
+
         ent_task = (
             None
-            if data.get("entity_match_declined")
+            if ent_skip_reason
             else asyncio.ensure_future(
                 _entity_boost_via_storage(
                     data["query"],
@@ -227,8 +243,8 @@ class ParallelEmbedAndEntityBoost:
         try:
             if ent_task is None:
                 logger.info(
-                    "parallel_embed_entity_boost: entity boost skipped "
-                    "(entity match declined as over-broad in classify_query)"
+                    "parallel_embed_entity_boost: entity boost skipped (%s)",
+                    ent_skip_reason,
                 )
                 boosted_memory_ids, memory_boost_factor = set(), {}
             else:

@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     entity_extraction_provider: str = "openai"  # none | fake | openai | anthropic | openrouter | gemini
     entity_extraction_model: str = "gpt-5.4-nano"
+    # Default for the ``search.entity_retrieval`` org setting: query-time entity
+    # lookup + graph search. A tenant override wins; this is the fleet-wide
+    # fallback so an operator can disable entity/graph reads on a whole box
+    # (env / compose override) without editing every tenant's settings.
+    # Read-side only — the write path keeps building the entity graph.
+    entity_retrieval_enabled: bool = True
     use_llm_for_memory_creation: bool = True
     sentry_dsn: str = ""  # Set to enable Sentry error tracking
     redis_url: str = ""  # e.g. redis://localhost:6379/0. Empty = in-memory fallback.

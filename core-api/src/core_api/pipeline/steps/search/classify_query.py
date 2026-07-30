@@ -72,7 +72,22 @@ class ClassifyQuery:
         graph_max_hops: int = search_params["graph_max_hops"]
         top_k: int = search_params["top_k"]
 
-        tokens = extract_entity_tokens(query)
+        # ``search.entity_retrieval`` org setting (default True — absent key on
+        # any internal caller means "enabled", so behaviour is unchanged). When
+        # off, skip the entity block entirely: no entity FTS, no graph
+        # expansion, and no ENTITY_LOOKUP short-circuit, so the query falls
+        # through to the temporal / recent-context / keyword / semantic cascade
+        # below. ``ParallelEmbedAndEntityBoost`` reads the same flag and skips
+        # hop-boosting, making this the single switch for query-time entity and
+        # graph retrieval. Deliberately independent of ``graph_expand``
+        # (``search.graph_retrieval``), which only bounds expansion depth once
+        # an entity has already matched.
+        entity_retrieval: bool = ctx.data.get("entity_retrieval", True)
+
+        tokens = extract_entity_tokens(query) if entity_retrieval else []
+
+        if not entity_retrieval:
+            logger.info("classify_query: entity retrieval disabled by org setting (tenant=%s)", tenant_id)
 
         if tokens:
             try:

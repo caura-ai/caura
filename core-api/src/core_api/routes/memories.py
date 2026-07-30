@@ -1466,6 +1466,7 @@ async def _search_inner(
             top_k=body.top_k,
             recall_boost=config.recall_boost,
             graph_expand=config.graph_expand,
+            entity_retrieval=config.entity_retrieval,
             tenant_config=config,
             search_profile=_agent.get("search_profile") if _agent else None,
             readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
@@ -1699,6 +1700,7 @@ async def recall_endpoint(
         valid_at=body.valid_at,
         recall_boost=config.recall_boost,
         graph_expand=config.graph_expand,
+        entity_retrieval=config.entity_retrieval,
         tenant_config=config,
         readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
     )

@@ -276,6 +276,7 @@ async def recall(
         valid_at=valid_at,
         recall_boost=config.recall_boost,
         graph_expand=config.graph_expand,
+        entity_retrieval=config.entity_retrieval,
         tenant_config=config,
         diagnostic=diagnostic,
         diagnostic_ctx=diagnostic_ctx if diagnostic else None,
