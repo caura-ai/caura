@@ -5,17 +5,22 @@ Sits between ``ExecuteScoredSearch`` (which produces ``raw_rows``) and
 configured ranker (``RANK_PROVIDER``) and reorders ``raw_rows`` by the new
 scores. This is the ``rerank seam`` from the ranking-component design.
 
-Ships dark: with ``RANK_PROVIDER=noop`` (the default) the ranker returns
-first-stage similarity and the reorder is a stable no-op — zero behaviour
-change until a deployment/tenant opts in. Any failure (misconfig, timeout,
-provider down) returns ``None`` from ``get_ranking`` and this step keeps
-the first-stage order. Recall never fails because rerank did.
+Ships dark two ways: (1) a master kill-switch ``RANK_ENABLED`` (default
+false) skips this step entirely — zero cost, no candidates built, no
+service call — independent of which provider is configured; (2) even when
+enabled, ``RANK_PROVIDER=noop`` (the default provider) is a true identity
+on first-stage order. Turning reranking ON therefore takes both
+``RANK_ENABLED=true`` and a non-noop ``RANK_PROVIDER`` (e.g. ``local``).
+
+Any failure (misconfig, timeout, provider down) returns ``None`` from
+``get_ranking`` and this step keeps the first-stage order. Recall never
+fails because rerank did.
 """
 
 from __future__ import annotations
 
 from common.ranking import RankCandidate, get_ranking
-from common.ranking.constants import RANK_CANDIDATE_LIMIT
+from common.ranking.constants import RANK_CANDIDATE_LIMIT, RANK_ENABLED
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
 
@@ -26,6 +31,18 @@ class RerankResults:
         return "rerank_results"
 
     async def execute(self, ctx: PipelineContext) -> StepResult | None:
+        # Master kill-switch. Tenant override (``rank_enabled``) wins over the
+        # ``RANK_ENABLED`` env default. Skipping here — rather than relying on
+        # ``RANK_PROVIDER=noop`` — is a true zero-cost bypass: no candidates
+        # built, no service call, no sort. This is the switch to flip reranking
+        # off in an incident without touching provider config.
+        tenant_config = ctx.data.get("tenant_config")
+        enabled = getattr(tenant_config, "rank_enabled", None)
+        if enabled is None:
+            enabled = RANK_ENABLED
+        if not enabled:
+            return StepResult(outcome=StepOutcome.SKIPPED)
+
         plan = ctx.data.get("retrieval_plan")
         # ENTITY_LOOKUP skipped scored-search and populated filtered_rows
         # directly (no raw_rows / no vector scores) — nothing to rerank.
@@ -56,7 +73,7 @@ class RerankResults:
             for r in head
         ]
 
-        scores = await get_ranking(ctx.data["query"], candidates, ctx.data.get("tenant_config"))
+        scores = await get_ranking(ctx.data["query"], candidates, tenant_config)
         if scores is None:
             # Degraded / noop-with-nothing-to-do: keep first-stage order.
             return None

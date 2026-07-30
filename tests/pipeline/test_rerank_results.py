@@ -38,7 +38,7 @@ async def test_rerank_reorders_by_ranker_score():
         data={
             "raw_rows": [r_unrelated, r_match],
             "query": "alpha",
-            "tenant_config": SimpleNamespace(rank_provider="fake"),
+            "tenant_config": SimpleNamespace(rank_enabled=True, rank_provider="fake"),
         },
     )
     await RerankResults().execute(ctx)
@@ -47,14 +47,29 @@ async def test_rerank_reorders_by_ranker_score():
 
 
 @pytest.mark.asyncio
+async def test_disabled_by_default_skips():
+    # RANK_ENABLED defaults false → the step is a zero-cost skip even with a
+    # full pool present. This is the ship-dark / kill-switch guarantee.
+    ctx = PipelineContext(data={"raw_rows": [_row("x", 0.5)], "query": "q"})
+    result = await RerankResults().execute(ctx)
+    assert result is not None and result.outcome.name == "SKIPPED"
+
+
+@pytest.mark.asyncio
 async def test_noop_keeps_first_stage_order():
-    # Default provider (noop). Similarity is NOT descending in input order;
-    # a correct noop must still keep the exact first-stage order (ship dark).
+    # Enabled + default provider (noop). Similarity is NOT descending in input
+    # order; a correct noop must still keep the exact first-stage order.
     r0 = _row("x", 0.2)
     r1 = _row("y", 0.9)
     r2 = _row("z", 0.5)
     ctx = PipelineContext(
-        data={"raw_rows": [r0, r1, r2], "query": "q"},  # no tenant_config → noop
+        data={
+            "raw_rows": [r0, r1, r2],
+            "query": "q",
+            "tenant_config": SimpleNamespace(
+                rank_enabled=True
+            ),  # provider defaults noop
+        },
     )
     await RerankResults().execute(ctx)
     assert ctx.data["raw_rows"] == [r0, r1, r2]
@@ -63,13 +78,22 @@ async def test_noop_keeps_first_stage_order():
 @pytest.mark.asyncio
 async def test_skips_on_entity_lookup_plan():
     plan = SimpleNamespace(skip_scored_search=True)
-    ctx = PipelineContext(data={"retrieval_plan": plan, "query": "q"})
+    ctx = PipelineContext(
+        data={
+            "retrieval_plan": plan,
+            "query": "q",
+            "tenant_config": SimpleNamespace(rank_enabled=True),
+        },
+    )
     result = await RerankResults().execute(ctx)
     assert result is not None and result.outcome.name == "SKIPPED"
 
 
 @pytest.mark.asyncio
 async def test_no_raw_rows_is_skipped():
-    ctx = PipelineContext(data={"query": "q"})
+    # Enabled, but no candidate pool (e.g. upstream produced nothing) → skip.
+    ctx = PipelineContext(
+        data={"query": "q", "tenant_config": SimpleNamespace(rank_enabled=True)}
+    )
     result = await RerankResults().execute(ctx)
     assert result is not None and result.outcome.name == "SKIPPED"

@@ -15,9 +15,22 @@ from __future__ import annotations
 
 import os
 
-# Provider selection default. ``noop`` = identity (keep first-stage
-# order) so the component ships dark: zero behaviour change until a
-# deployment or tenant opts in. Mirrors ``EMBEDDING_PROVIDER``.
+# Master on/off for the rerank step. When false (the default) the
+# RerankResults step is skipped entirely — a zero-cost kill-switch
+# (no candidates built, no service call) independent of RANK_PROVIDER,
+# which selects *which* ranker runs when enabled. Keeps the component
+# dark by default; flip to true (plus a non-noop RANK_PROVIDER) to turn
+# reranking on. Per-tenant override: tenant_config.rank_enabled.
+RANK_ENABLED: bool = os.environ.get("RANK_ENABLED", "").strip().lower() in (
+    "true",
+    "1",
+    "yes",
+    "on",
+)
+
+# Provider selection when reranking is enabled. ``noop`` = identity (keep
+# first-stage order); ``local`` = in-process MiniLM cross-encoder; ``fake``
+# = tests. Mirrors ``EMBEDDING_PROVIDER``.
 RANK_PROVIDER: str = os.environ.get("RANK_PROVIDER") or "noop"
 
 # Cross-encoder model for the in-process ``local`` provider. MiniLM-L6
