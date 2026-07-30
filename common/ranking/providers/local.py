@@ -66,7 +66,16 @@ class LocalCrossEncoderRanker:
     async def rank(self, query: str, candidates: list[RankCandidate]) -> list[float]:
         if not candidates:
             return []
-        await self._ensure_model()
+        # Shield the one-time model load from the caller's per-call deadline.
+        # The service wraps ``rank`` in ``asyncio.wait_for(RANK_TIMEOUT_SECONDS)``;
+        # a cold load takes seconds, so without the shield the first call's
+        # timeout cancels the load mid-flight and DISCARDS it (``self._model``
+        # stays None) — every subsequent call restarts the load and the
+        # provider never warms up, permanently falling back to first-stage
+        # order (verified by wet test). ``shield`` lets the load run to
+        # completion + cache even when this call is cancelled; the caller
+        # still degrades for the cold call(s), then warm calls score normally.
+        await asyncio.shield(self._ensure_model())
         pairs = [(query, c.content) for c in candidates]
         loop = asyncio.get_running_loop()
         # ``predict`` is synchronous, CPU-bound batched inference — run it

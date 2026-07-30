@@ -36,10 +36,13 @@ RANK_MAX_LENGTH: int = int(os.environ.get("RANK_MAX_LENGTH", "256"))
 RANK_BASE_URL: str | None = os.environ.get("RANK_BASE_URL") or None
 RANK_API_KEY: str = os.environ.get("RANK_API_KEY", "")
 
-# Hard per-call deadline. Recall is latency-critical: a slow rerank must
-# degrade to first-stage order, not extend the turn. Default 150ms matches
-# the small-pool MiniLM budget from the latency spike.
-RANK_TIMEOUT_SECONDS: float = float(os.environ.get("RANK_TIMEOUT_SECONDS", "0.15"))
+# Hard per-call deadline for SCORING (the one-time model load is shielded
+# from it — see LocalCrossEncoderRanker.rank). A slow rerank degrades to
+# first-stage order rather than extending the turn. Default 0.5s: wet-tested
+# warm MiniLM predict was ~112-201ms at pool<=20 on fast CPU (slower on prod
+# x86), so 0.15s would time out even when warm. 0.5s gives headroom while
+# staying far under the turn's multi-second LLM cost. Tune per deployment.
+RANK_TIMEOUT_SECONDS: float = float(os.environ.get("RANK_TIMEOUT_SECONDS", "0.5"))
 
 # Retry budget. Default 1 (no retry) — a reranker miss degrades, it does
 # not warrant spending more of the turn's latency budget.
