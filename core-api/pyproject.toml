@@ -19,6 +19,11 @@ dependencies = [
     "greenlet<3.6.0",
     "asyncpg>=0.30,<1",
     "pgvector>=0.5.0,<1",
+    # Required by the insights discover mode (services/insights_service.py
+    # ``_numpy_kmeans``). Declared explicitly because pgvector <0.5.0 used to
+    # pull it in transitively; 0.5.0 made numpy optional, which silently
+    # dropped it from the image and degraded discover to the flat fallback.
+    "numpy>=2.0,<3",
     "alembic>=1.18.5,<2",
     "pydantic>=2.0,<3",
     "pydantic-settings>=2.14.2,<3",

@@ -282,11 +282,24 @@ class TestFakeInsights:
 class TestNumpyKmeans:
     """Test the simple numpy k-means implementation."""
 
+    def test_numpy_is_installed(self):
+        """numpy is a hard runtime dependency of the discover focus mode.
+
+        It used to arrive transitively via pgvector; pgvector 0.5.0 made it
+        optional, which dropped it from the built image and silently degraded
+        discover to the flat non-clustered fallback for days (the fallback
+        only logs a warning — the run still reports success). This test must
+        FAIL rather than skip so a future dependency drop is caught in CI.
+        """
+        import importlib.util
+
+        assert importlib.util.find_spec("numpy") is not None, (
+            "numpy is missing — insights discover mode will silently fall back "
+            "to non-clustered analysis. It is declared in core-api/pyproject.toml."
+        )
+
     def test_basic_clustering(self):
-        try:
-            import numpy as np
-        except ImportError:
-            pytest.skip("numpy not available")
+        import numpy as np
 
         from core_api.services.insights_service import _numpy_kmeans
 

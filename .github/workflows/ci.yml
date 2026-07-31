@@ -288,3 +288,18 @@ jobs:
             echo "::error::baked version '$BAKED' != pyproject '$EXPECTED' — the version stamp drifted from the source of truth."
             exit 1
           fi
+
+      # Same class of bug as the version stamp above, and equally invisible to
+      # pytest: CI installs core-api editable, so a module that is only present
+      # transitively still imports fine in the test job while being absent from
+      # the built image. numpy was exactly this — it arrived via pgvector <0.5.0,
+      # and when 0.5.0 made it optional the insights discover mode silently
+      # degraded to its non-clustered fallback in production for days (the
+      # fallback logs a warning but the run still reports success). Assert the
+      # modules the runtime code imports directly are actually in the image.
+      - name: Assert directly-imported runtime deps are present in the image
+        run: |
+          docker run --rm core-api-versiontest python -c "import numpy; print('numpy', numpy.__version__)" || {
+            echo "::error::numpy is missing from the core-api image — insights discover mode would silently fall back to non-clustered analysis. It must stay declared in core-api/pyproject.toml (see services/insights_service.py::_numpy_kmeans)."
+            exit 1
+          }
