@@ -21,7 +21,6 @@ from pydantic import BaseModel, field_validator
 
 from common.enrichment.constants import MemoryType
 
-
 # A8 — number of tags retained after normalisation. Mirrors the cap
 # the prompt asks the LLM to respect; the validator enforces it
 # regardless of LLM output.

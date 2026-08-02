@@ -129,6 +129,15 @@ jobs:
         # of that blind spot close together or it just drifts again.
         run: uv run ruff check core-storage-api/tests/
 
+      - name: Run Ruff linter (common)
+        # ``--config`` is explicit on purpose. common/ had NO ruff config above it
+        # (no ruff.toml, no root pyproject.toml), so ruff fell back to built-in
+        # DEFAULTS here — meaning the rule set was "whatever the installed ruff
+        # version ships," and it changed under us on the 0.16.0 bump. common/ruff.toml
+        # pins it; naming the config keeps this step immune to future config
+        # discovery changes, the same reasoning as ``--isolated`` below. See #684.
+        run: uv run ruff check common/ --config common/ruff.toml
+
       - name: Run Ruff formatter check (core-api)
         run: uv run ruff format --check core-api/src/
 
@@ -144,9 +153,12 @@ jobs:
         # Enterprise CI format-checks the vendored copies at ruff DEFAULTS (88 cols),
         # so gate them here too or a merge turns enterprise CI red until a reflow
         # lands (full story: the vendoring note in common/structlog_config.py's
-        # docstring). ``--isolated`` pins default behavior even if a root ruff
-        # config is ever added; deliberately NOT all of common/ — non-vendored
-        # files there are not held to the 88-col contract.
+        # docstring). ``--isolated`` pins default behavior regardless of any ruff
+        # config in scope — which now includes common/ruff.toml (added in #684),
+        # so this step is deliberately unaffected by it. Still NOT all of common/:
+        # only the policy=identical files owe byte-parity to enterprise. Note
+        # common/ruff.toml also sets line-length = 88, so the two agree today;
+        # ``--isolated`` is what guarantees they cannot silently diverge.
         run: uv run ruff format --check --isolated common/__init__.py common/structlog_config.py common/serve.py
 
       - name: Guard against raw-string MCP error returns (audit B4 / CAURA-000 #147)

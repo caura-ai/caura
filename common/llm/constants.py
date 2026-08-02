@@ -76,7 +76,7 @@ PREGATE_CLASSIFIER_TIMEOUT_SECONDS = _read_float_env(
 #
 # CAURA-627: the SDK rides httpx's default (100 max_connections / 20
 # keepalive). Under bulk-write storms — 100-item batches with
-# ``BULK_ENRICHMENT_CONCURRENCY=10`` × ``per_tenant_write_concurrency=16``
+# ``BULK_ENRICHMENT_CONCURRENCY=10`` x ``per_tenant_write_concurrency=16``
 # in flight per worker — the pool saturates and queues subsequent
 # requests, including other tenants'. The defaults were sized for
 # request/response patterns where one user's bursty fan-out doesn't
@@ -86,7 +86,7 @@ PREGATE_CLASSIFIER_TIMEOUT_SECONDS = _read_float_env(
 # Sized for headroom over the worst-case fan-out per process. Env-
 # tunable so an operator can adjust during an incident (e.g. if the
 # upstream provider's per-IP cap is hit) without a redeploy.
-from common.env_utils import clamp_keepalive, read_int_env  # noqa: E402
+from common.env_utils import clamp_keepalive, read_int_env
 
 OPENAI_HTTPX_MAX_CONNECTIONS = read_int_env("OPENAI_HTTPX_MAX_CONNECTIONS", 200)
 OPENAI_HTTPX_MAX_KEEPALIVE_CONNECTIONS = clamp_keepalive(

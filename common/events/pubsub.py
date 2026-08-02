@@ -104,7 +104,7 @@ class PubSubEventBus(EventBus):
         # filtering) — preserves the pre-guard behaviour for single-env
         # deployments and in-process tests.
         env: str | None = None,
-        # Batch size per pull. Caps ``workers × max_messages``
+        # Batch size per pull. Caps ``workers x max_messages``
         # concurrent embed calls across the deployed pool, so 25
         # balances drain throughput against the OpenAI per-org
         # rate limit and the blast radius of a single wedged

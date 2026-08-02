@@ -87,7 +87,7 @@ class OpenAILLMProvider:
         # Explicit ``http_client`` with ``httpx.Limits`` sized for our
         # bulk-write fan-out (CAURA-627). The SDK's default httpx pool
         # (100 max / 20 keepalive) saturates under storm load — 16
-        # concurrent writes × 10 enrichment calls per request = 160
+        # concurrent writes x 10 enrichment calls per request = 160
         # concurrent LLM calls per worker process, with the next
         # tenant's traffic queueing at the pool layer. Sizing the pool
         # 2x the worst-case fan-out keeps headroom; values are env-

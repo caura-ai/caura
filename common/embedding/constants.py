@@ -53,10 +53,10 @@ EMBEDDING_RETRY_DELAY_S: float = float(os.environ.get("EMBEDDING_RETRY_DELAY_S",
 # tunable controls both the LLM and the embedding pools. Without an
 # explicit limits arg the SDK rides httpx's default (100 max / 20
 # keepalive) which saturates under bulk-write storm fan-out (16
-# concurrent writes × 10 enrichment calls = 160 concurrent LLM
+# concurrent writes x 10 enrichment calls = 160 concurrent LLM
 # requests per process, well over the keepalive budget). See
 # ``common/llm/constants.py`` for full rationale.
-from common.env_utils import (  # noqa: E402
+from common.env_utils import (
     clamp_keepalive,
     read_float_env,
     read_int_env,
@@ -101,7 +101,7 @@ EMBEDDING_HTTPX_MAX_KEEPALIVE_CONNECTIONS: int = clamp_keepalive(
 #
 # The embedding backend is finite and can be much smaller than the
 # fleet calling it: prod's TEI service serves
-# ``maxScale × containerConcurrency`` requests at once, while core-api
+# ``maxScale x containerConcurrency`` requests at once, while core-api
 # scales to many instances that each hold a large httpx pool. Aggregate
 # demand can therefore oversubscribe the backend by orders of magnitude.
 #

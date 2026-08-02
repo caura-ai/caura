@@ -1,0 +1,55 @@
+# Ruff contract for common/ — pinned deliberately.
+#
+# WHY THIS FILE EXISTS: before it, no ruff config governed common/. There is no
+# ruff.toml and no pyproject.toml at the repo root or in common/, so ruff walked
+# up from each file, found nothing, and fell back to its BUILT-IN DEFAULTS. That
+# made the effective rule set for this directory "whatever the installed ruff
+# version ships as default" — which grows on every upgrade. Under ruff 0.16.0
+# that default set (YTT, ASYNC, BLE, TRY, S, DTZ, G, ...) reported 21 findings
+# here that no one had chosen to enable, including two dead ``noqa: E402``
+# directives that were meaningful under an older default set. See issue #684.
+#
+# ``line-length`` is 88, NOT the 110 used by core-api and core-storage-api, and
+# that difference is load-bearing. Three files here are vendored into
+# caura-memclaw-enterprise under ``policy=identical`` (see its
+# ``scripts/vendored_files_manifest.json``) and are format-checked in CI at ruff
+# DEFAULTS via ``--isolated`` for byte-parity. This tree has been maintained to
+# 88 columns throughout: at 88 only 7 of 88 files would reflow, at 110 it would
+# be 49. Raising it would churn most of the directory and break that parity.
+#
+# Lint rules mirror ``core-api/pyproject.toml`` exactly, so shared code is held
+# to the same standard as the services importing it. ``E501`` is ignored there
+# and here, so ``line-length`` affects only ``ruff format`` — the 88/110 split
+# costs nothing on the lint side. Keep the two lists in sync when either moves.
+
+target-version = "py312"
+line-length = 88
+
+exclude = [
+    ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    ".venv", "__pycache__", "build", "dist",
+]
+
+[lint]
+select = [
+    "E", "W", "F", "I", "B", "C4", "UP", "ARG",
+    "SIM", "TCH", "PTH", "RUF", "ASYNC",
+]
+ignore = [
+    "E501", "TC001", "TC002", "TC003", "ARG001", "ARG002",
+    "B008", "B904", "RUF022", "PTH123", "RUF006", "SIM117",
+    "RUF012", "RUF009",
+    "SIM108", "SIM105", "SIM103", "E701", "E402",
+    "B905", "B007", "B023",
+    "UP042", "UP047",
+    "PTH103", "PTH111", "PTH120",
+    "RUF005", "RUF034", "RUF059",
+    "ASYNC109",
+]
+fixable = ["ALL"]
+
+[lint.per-file-ignores]
+"__init__.py" = ["F401", "E402"]
+
+[lint.isort]
+known-first-party = ["common"]

@@ -3,7 +3,8 @@ from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, Text, func, text
-from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.constants import VECTOR_DIM
