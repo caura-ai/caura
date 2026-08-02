@@ -1,14 +1,54 @@
 # Claude Code Review
 #
 # Runs automatically when a PR is opened/reopened by a public member of
-# the ``caura-ai`` organization. Re-trigger after pushing changes by
-# commenting "@claude" on the PR (also restricted to org members).
+# the ``caura-ai`` organization. Commenting "@claude" on the PR triggers a
+# review too (also restricted to org members) — that is how you re-review
+# after a push, AND the only way to review a draft. See "TWO ENTRY POINTS"
+# below, because the two paths do not enforce the same conditions.
 #
 # Why org-only: this workflow consumes ``ANTHROPIC_API_KEY`` and burns
 # real budget per review. ``pull_request`` events from forks don't
 # receive secrets anyway (GitHub strips them); restricting to org
 # members makes the policy explicit and stops fork PRs from triggering
 # silent-failure runs.
+#
+# TWO ENTRY POINTS, AND THEY DO NOT SHARE GATES. This is the single most
+# surprising thing about this workflow, so read it before adding a check.
+#
+#   ``pull_request``  -> pre-checks -> claude-review
+#   ``issue_comment`` -> claude-retrigger          (pre-checks never runs)
+#
+# ``pre-checks`` is gated on ``if: github.event_name == 'pull_request'``,
+# and ``claude-retrigger`` has no ``needs: pre-checks``. So on a comment
+# event ``pre-checks`` does not run at all, and EVERY condition it owns is
+# absent from that path. Today that is all six of them: org membership of
+# the PR author, synchronize-event skip, draft skip, bot skip, the
+# ``MAX_FILES`` cap, and the tests/docs/config-only skip.
+#
+# Consequences worth knowing:
+#
+#   * A DRAFT PR GETS NO REVIEW ON OPEN. ``pre-checks`` reports
+#     ``reason=draft PR`` and ``claude-review`` is skipped. Commenting
+#     "@claude" on that same draft DOES produce a full review, because the
+#     retrigger path never consults the draft check. So the effective
+#     policy is "drafts get opt-in review, not automatic review" — which is
+#     deliberate (drafts are unfinished; each review costs real budget), and
+#     is the intended way to request one. It is not discoverable from the
+#     skip message, which is why it is written down here.
+#   * The ``MAX_FILES`` cap is likewise bypassed on the comment path, so an
+#     "@claude" comment can review a PR of any size. Left as-is on purpose:
+#     it is a useful escape hatch for a large but genuinely reviewable PR.
+#     If that ever needs to change, change it deliberately — a member may
+#     be relying on it.
+#   * Membership IS still enforced on the comment path, but it validates the
+#     COMMENTER (``claude-retrigger``'s job-level ``author_association``
+#     gate plus its step-level re-check), not the PR author. A member
+#     vouching for someone else's PR is therefore a supported flow.
+#
+# MAINTAINER NOTE: adding a condition to ``pre-checks`` applies it to the
+# ``pull_request`` path ONLY. If a new gate should hold universally, it has
+# to be duplicated into ``claude-retrigger`` or lifted somewhere both jobs
+# consult. See issue #683 for the history.
 #
 # OPERATIONAL REQUIREMENT: every member who wants their pull requests
 # reviewed must set their caura-ai org membership to **Public**
