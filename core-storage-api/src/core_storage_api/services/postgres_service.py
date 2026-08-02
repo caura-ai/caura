@@ -22,9 +22,11 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    String,
     and_,
     bindparam,
     case,
+    cast,
     delete,
     distinct,
     false,
@@ -6803,10 +6805,29 @@ class PostgresService:
     # expects (NO embedding) except for discover-sample, which includes the
     # embedding (client-side k-means).
 
+    # Content-free reasoning artifact: an episode whose content is an empty
+    # thinking block carrying only an encrypted signature —
+    # ``[{"type":"thinking","thinking":"","thinkingSignature":"..."}]``.
+    # There is nothing for the insights LLM to analyze in these rows, yet they
+    # embed near-identically and so form the tightest clusters discover can
+    # find (measured on the eToro fleet: 4.3% of 30-day episodes but 23.9% of
+    # all insight citations). Excluded from EVERY insights read via
+    # ``_insights_scope_filters``; the rows themselves are untouched and stay
+    # recallable — this is an insights-input filter, not a lifecycle change.
+    _INSIGHTS_OPAQUE_CONTENT_PREFIX = '[{"type":"thinking","thinking":""%'
+
     @staticmethod
     def _insights_scope_filters(tenant_id: str, fleet_id: str | None, agent_id: str, scope: str) -> list:
-        """Reconstruct ``insights_service._scope_filters`` ORM WHERE clauses."""
-        base = [Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None)]
+        """Reconstruct ``insights_service._scope_filters`` ORM WHERE clauses,
+        plus the opaque-payload noise guard (see
+        ``_INSIGHTS_OPAQUE_CONTENT_PREFIX``) that applies to all 6 analytic
+        reads — including contradictions/divergence, since a row with no
+        readable content can't evidence anything."""
+        base = [
+            Memory.tenant_id == tenant_id,
+            Memory.deleted_at.is_(None),
+            Memory.content.notlike(PostgresService._INSIGHTS_OPAQUE_CONTENT_PREFIX),
+        ]
         if scope == "agent":
             base.append(Memory.agent_id == agent_id)
             if fleet_id:
@@ -6849,6 +6870,71 @@ class PostgresService:
                 emb = r.embedding
                 d["embedding"] = [float(x) for x in emb] if emb is not None else None
             out.append(d)
+        return out
+
+    @staticmethod
+    def _insights_dedup_stmt(filters: list, order_by, limit: int):
+        """Build a one-exemplar-per-exact-title select for the theme-finding
+        insight reads (patterns / stale / failures / discover-sample).
+
+        Routine operations on a busy fleet repeat the same episode title
+        hundreds of times per window (heartbeats, polling loops, bastion
+        sessions...). Feeding every instance to the insights LLM makes the
+        sample one giant echo — measured on the eToro fleet, "newest 200"
+        spanned under a day and ~1/3 of insight citations were repetition
+        noise. Collapsing to the NEWEST row per title keeps every distinct
+        activity discoverable while the ``dup_count`` / ``first_seen`` window
+        annotations preserve the frequency-and-duration signal the dropped
+        copies carried (rendered by the core-api prompt formatter as
+        "[repeats: Nx, first seen: date]").
+
+        Deliberately NOT used by contradictions/divergence: same-titled rows
+        that disagree are precisely the evidence those modes exist to find.
+
+        Correctness notes:
+        - NULL/empty titles must not collapse into one exemplar — the dedup
+          key falls back to the row id, so untitled rows all survive.
+        - ``dup_count``/``first_seen`` are computed over the FILTERED set
+          (the window functions run after ``filters``), so the annotation
+          means "N matching rows in this window", not "N rows ever".
+        - Exemplar choice is newest-by-created_at (id-desc tiebreak for
+          determinism); the caller's ``order_by`` is applied AFTER the join,
+          so each mode keeps its own result ordering. ``order_by`` may be a
+          callable receiving the inner subquery, for modes whose ordering
+          needs the window annotations themselves (failures sorts by
+          ``inner.c.dup_count`` so high-frequency patterns aren't cut by
+          LIMIT below one-off rows).
+        """
+        dedup_key = func.coalesce(func.nullif(Memory.title, ""), cast(Memory.id, String))
+        inner = (
+            select(
+                Memory.id.label("mid"),
+                func.row_number()
+                .over(partition_by=dedup_key, order_by=(Memory.created_at.desc(), Memory.id.desc()))
+                .label("rn"),
+                func.count().over(partition_by=dedup_key).label("dup_count"),
+                func.min(Memory.created_at).over(partition_by=dedup_key).label("first_seen"),
+            )
+            .where(*filters)
+            .subquery()
+        )
+        order_cols = order_by(inner) if callable(order_by) else order_by
+        return (
+            select(Memory, inner.c.dup_count, inner.c.first_seen)
+            .join(inner, Memory.id == inner.c.mid)
+            .where(inner.c.rn == 1)
+            .order_by(*order_cols)
+            .limit(limit)
+        )
+
+    def _insights_annotated_rows_to_dicts(self, rows, *, include_embedding: bool = False) -> list[dict]:
+        """Dictify ``(Memory, dup_count, first_seen)`` tuples from
+        ``_insights_dedup_stmt`` — the ``_rows_to_dicts`` shape plus the two
+        window annotations."""
+        out = self._insights_rows_to_dicts([r[0] for r in rows], include_embedding=include_embedding)
+        for d, r in zip(out, rows, strict=True):
+            d["dup_count"] = int(r[1] or 1)
+            d["first_seen"] = r[2].isoformat() if r[2] else None
         return out
 
     async def insights_query_contradictions(
@@ -6937,26 +7023,62 @@ class PostgresService:
         return self._insights_rows_to_dicts(rows[:max_memories])
 
     async def insights_query_failures(
-        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        agent_id: str,
+        scope: str,
+        max_memories: int,
+        window_start: datetime | None = None,
     ) -> list[dict]:
         """Low-weight memories that were recalled (agents acted on weak info).
-        Ports ``_query_failures`` verbatim."""
+        Ports ``_query_failures``, deduped to one exemplar per exact title
+        (see ``_insights_dedup_stmt``) — repeated weak-recall rows show up
+        once with a ``dup_count`` instead of crowding out distinct failures.
+
+        ``window_start`` (core-api clock, ``INSIGHTS_FAILURES_WINDOW_DAYS``)
+        bounds the dedup scan — the weight/recall predicates prune less as
+        the corpus grows, and the window-function subquery has no inner
+        LIMIT. Omitted (None) → the ORIGINAL pre-dedup query (identical
+        results AND cost for older core-api callers; no full-corpus window
+        scan for annotations they don't read).
+
+        Dedup ordering: ``dup_count`` is the secondary key — the exemplar is
+        the NEWEST row per title, whose individual ``recall_count`` may be
+        low even when the pattern repeats constantly, so without it a
+        40-instance pattern (newest rc=2) would be cut by LIMIT below a
+        one-off rc=5 row."""
         base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
+        filters = [
+            *base,
+            Memory.memory_type != "insight",
+            Memory.weight < 0.3,
+            Memory.recall_count > 0,
+            Memory.status == "active",
+        ]
         async with get_read_session() as session:
-            stmt = (
-                select(Memory)
-                .where(
-                    *base,
-                    Memory.memory_type != "insight",
-                    Memory.weight < 0.3,
-                    Memory.recall_count > 0,
-                    Memory.status == "active",
+            if window_start is None:
+                stmt = (
+                    select(Memory)
+                    .where(*filters)
+                    .order_by(Memory.recall_count.desc(), Memory.weight.asc())
+                    .limit(max_memories)
                 )
-                .order_by(Memory.recall_count.desc(), Memory.weight.asc())
-                .limit(max_memories)
+                result = await session.execute(stmt)
+                return self._insights_rows_to_dicts(result.scalars().all())
+            filters.append(Memory.created_at > window_start)
+            stmt = self._insights_dedup_stmt(
+                filters,
+                lambda inner: (
+                    Memory.recall_count.desc(),
+                    inner.c.dup_count.desc(),
+                    Memory.weight.asc(),
+                ),
+                max_memories,
             )
             result = await session.execute(stmt)
-            return self._insights_rows_to_dicts(result.scalars().all())
+            return self._insights_annotated_rows_to_dicts(result.all())
 
     async def insights_query_stale(
         self,
@@ -6968,34 +7090,48 @@ class PostgresService:
         thirty_days_ago: datetime,
         fourteen_days_ago: datetime,
         max_memories: int,
+        window_start: datetime | None = None,
     ) -> list[dict]:
         """Memories likely outdated based on age + recall activity. Ports
-        ``_query_stale`` verbatim. The two age thresholds are passed from the
-        caller's clock (core-api) and bound as datetimes server-side."""
+        ``_query_stale``, deduped to one exemplar per exact title (see
+        ``_insights_dedup_stmt``). The two age thresholds are passed from the
+        caller's clock (core-api) and bound as datetimes server-side.
+
+        ``window_start`` (core-api clock, ``INSIGHTS_STALE_WINDOW_DAYS`` —
+        deliberately WIDER than the 30-day age threshold rows must exceed to
+        qualify) bounds the dedup scan AND changes what the mode reports:
+        the ordered-oldest-first unbounded read perpetually re-reported the
+        same ancient tail; windowed, it surfaces the "recently became stale"
+        band instead (the ancient tail is the archive-stale lifecycle job's
+        business). Omitted (None) → the ORIGINAL pre-dedup query (identical
+        results AND cost for older core-api callers)."""
         base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
+        filters = [
+            *base,
+            Memory.memory_type != "insight",
+            Memory.status == "active",
+            ((Memory.recall_count == 0) & (Memory.created_at < thirty_days_ago))
+            | (
+                (Memory.weight < 0.3)
+                & or_(
+                    Memory.last_recalled_at.is_(None),
+                    Memory.last_recalled_at < fourteen_days_ago,
+                )
+            ),
+        ]
         async with get_read_session() as session:
-            stmt = (
-                select(Memory)
-                .where(
-                    *base,
-                    Memory.memory_type != "insight",
-                    Memory.status == "active",
-                )
-                .where(
-                    ((Memory.recall_count == 0) & (Memory.created_at < thirty_days_ago))
-                    | (
-                        (Memory.weight < 0.3)
-                        & or_(
-                            Memory.last_recalled_at.is_(None),
-                            Memory.last_recalled_at < fourteen_days_ago,
-                        )
-                    )
-                )
-                .order_by(Memory.created_at.asc())
-                .limit(max_memories)
+            if window_start is None:
+                stmt = select(Memory).where(*filters).order_by(Memory.created_at.asc()).limit(max_memories)
+                result = await session.execute(stmt)
+                return self._insights_rows_to_dicts(result.scalars().all())
+            filters.append(Memory.created_at > window_start)
+            stmt = self._insights_dedup_stmt(
+                filters,
+                (Memory.created_at.asc(),),
+                max_memories,
             )
             result = await session.execute(stmt)
-            return self._insights_rows_to_dicts(result.scalars().all())
+            return self._insights_annotated_rows_to_dicts(result.all())
 
     async def insights_query_divergence(
         self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
@@ -7038,48 +7174,94 @@ class PostgresService:
             return self._insights_rows_to_dicts(result.scalars().all())
 
     async def insights_query_patterns(
-        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        agent_id: str,
+        scope: str,
+        max_memories: int,
+        window_start: datetime | None = None,
     ) -> list[dict]:
         """Recent active memories for trend/pattern analysis. Ports
-        ``_query_patterns`` verbatim."""
+        ``_query_patterns``, deduped to one exemplar per exact title (see
+        ``_insights_dedup_stmt``).
+
+        ``window_start`` (core-api clock, ``INSIGHTS_PATTERNS_WINDOW_DAYS``)
+        bounds the dedup scan: the window-function subquery has no LIMIT, so
+        without it this read scans the tenant's ENTIRE active history to
+        return ``max_memories`` deduped rows — the pre-dedup query
+        early-terminated on the (tenant_id, created_at DESC) index instead.
+        A trailing window is also what the mode means ("recent memories").
+        Omitted (None) → the ORIGINAL pre-dedup query (identical results AND
+        cost for older core-api callers; no full-corpus window scan)."""
         base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
+        filters = [
+            *base,
+            Memory.memory_type != "insight",
+            Memory.status == "active",
+        ]
         async with get_read_session() as session:
-            stmt = (
-                select(Memory)
-                .where(
-                    *base,
-                    Memory.memory_type != "insight",
-                    Memory.status == "active",
-                )
-                .order_by(Memory.created_at.desc())
-                .limit(max_memories)
+            if window_start is None:
+                stmt = select(Memory).where(*filters).order_by(Memory.created_at.desc()).limit(max_memories)
+                result = await session.execute(stmt)
+                return self._insights_rows_to_dicts(result.scalars().all())
+            filters.append(Memory.created_at > window_start)
+            stmt = self._insights_dedup_stmt(
+                filters,
+                (Memory.created_at.desc(),),
+                max_memories,
             )
             result = await session.execute(stmt)
-            return self._insights_rows_to_dicts(result.scalars().all())
+            return self._insights_annotated_rows_to_dicts(result.all())
 
     async def insights_discover_sample(
-        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, sample_size: int
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        agent_id: str,
+        scope: str,
+        sample_size: int,
+        window_start: datetime | None = None,
     ) -> list[dict]:
         """Sample active memories WITH embeddings for client-side k-means.
         Ports ``_query_discover``'s row-fetch (the numpy clustering + cluster
         build stay on the core-api side). Returns rows INCLUDING ``embedding``,
         capped at ``sample_size`` (``INSIGHTS_DISCOVER_SAMPLE_SIZE`` forwarded
-        from core-api)."""
+        from core-api).
+
+        Two sampling changes vs the original newest-first fetch:
+
+        - Deduped to one exemplar per exact title (``_insights_dedup_stmt``).
+        - When ``window_start`` is given (computed on the core-api clock from
+          ``INSIGHTS_DISCOVER_WINDOW_DAYS``, mirroring the stale thresholds),
+          the draw is restricted to that window and SPREAD across it by
+          ordering on ``random()`` instead of recency. On a busy tenant
+          "newest N" spans hours — clustering yesterday's firehose rather
+          than the corpus — and a genuinely run-varying uniform draw both
+          widens coverage and de-correlates consecutive runs' samples (a
+          deterministic hash order like ``md5(id)`` would NOT: it's a fixed
+          permutation per corpus state, so low-hash rows re-enter the sample
+          every night). Omitted (None) → the ORIGINAL pre-dedup newest-first
+          query (identical results AND cost for older core-api callers; no
+          full-corpus window scan)."""
         base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
+        filters = [
+            *base,
+            Memory.status == "active",
+            Memory.memory_type != "insight",
+            Memory.embedding.isnot(None),
+        ]
         async with get_read_session() as session:
-            stmt = (
-                select(Memory)
-                .where(
-                    *base,
-                    Memory.status == "active",
-                    Memory.memory_type != "insight",
-                    Memory.embedding.isnot(None),
-                )
-                .order_by(Memory.created_at.desc())
-                .limit(sample_size)
-            )
+            if window_start is None:
+                stmt = select(Memory).where(*filters).order_by(Memory.created_at.desc()).limit(sample_size)
+                result = await session.execute(stmt)
+                return self._insights_rows_to_dicts(result.scalars().all(), include_embedding=True)
+            filters.append(Memory.created_at > window_start)
+            stmt = self._insights_dedup_stmt(filters, (func.random(),), sample_size)
             result = await session.execute(stmt)
-            return self._insights_rows_to_dicts(result.scalars().all(), include_embedding=True)
+            return self._insights_annotated_rows_to_dicts(result.all(), include_embedding=True)
 
     async def insights_supersede_priors(
         self,

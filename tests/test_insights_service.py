@@ -49,7 +49,11 @@ async def _seed_memory(
     """
     created = created_at or datetime.now(UTC)
     mem_id = str(uuid4())
-    emb_literal = "[" + ",".join(str(float(x)) for x in embedding) + "]" if embedding is not None else None
+    emb_literal = (
+        "[" + ",".join(str(float(x)) for x in embedding) + "]"
+        if embedding is not None
+        else None
+    )
     async with get_session() as session:
         await session.execute(
             text(
@@ -90,7 +94,8 @@ async def _status_of(mem_id: str) -> str:
     async with get_session() as session:
         row = (
             await session.execute(
-                text("SELECT status FROM memories WHERE id = CAST(:id AS uuid)"), {"id": mem_id}
+                text("SELECT status FROM memories WHERE id = CAST(:id AS uuid)"),
+                {"id": mem_id},
             )
         ).fetchone()
     return row.status
@@ -321,6 +326,85 @@ class TestNumpyKmeans:
         assert labels[0] != labels[20]
 
 
+class TestFormatterDedupAnnotation:
+    """The title-dedup exemplars carry dup_count/first_seen — the formatter
+    must render the frequency signal the dropped copies carried."""
+
+    def test_repeats_annotation_rendered(self):
+        from core_api.services.insights_service import _format_memories_for_analysis
+
+        text, shown = _format_memories_for_analysis(
+            [
+                {
+                    "id": "m1",
+                    "memory_type": "episode",
+                    "title": "Heartbeat OK",
+                    "content": "routine check",
+                    "weight": 0.5,
+                    "agent_id": "a1",
+                    "dup_count": 42,
+                    "first_seen": "2026-07-01T02:00:00+00:00",
+                }
+            ]
+        )
+        assert "[repeats: 42x, first seen: 2026-07-01]" in text
+        assert shown == {"m1"}
+
+    def test_no_annotation_for_singletons_or_undecorated_rows(self):
+        from core_api.services.insights_service import _format_memories_for_analysis
+
+        # dup_count == 1 and legacy rows without the field render identically.
+        for extra in ({"dup_count": 1, "first_seen": None}, {}):
+            text, _ = _format_memories_for_analysis(
+                [
+                    {
+                        "id": "m1",
+                        "memory_type": "fact",
+                        "title": "t",
+                        "content": "c",
+                        "weight": 0.5,
+                        "agent_id": "a1",
+                        **extra,
+                    }
+                ]
+            )
+            assert "repeats" not in text
+
+    def test_cluster_representatives_annotated(self):
+        from core_api.services.insights_service import _format_clusters_for_analysis
+
+        text, shown = _format_clusters_for_analysis(
+            [
+                {
+                    "cluster_id": 0,
+                    "size": 5,
+                    "weight_mean": 0.5,
+                    "weight_std": 0.1,
+                    "agent_count": 1,
+                    "agents": ["a1"],
+                    "type_distribution": {"episode": 5},
+                    "representatives": [
+                        {
+                            "id": "r1",
+                            "memory_type": "episode",
+                            "title": "Heartbeat OK",
+                            "content": "x",
+                            "dup_count": 7,
+                        },
+                        {
+                            "id": "r2",
+                            "memory_type": "episode",
+                            "title": "One-off fix",
+                            "content": "y",
+                        },
+                    ],
+                }
+            ]
+        )
+        assert "[repeats: 7x]" in text
+        assert shown == {"r1", "r2"}
+
+
 class TestScopeFilters:
     """Test _scope_filters returns correct conditions."""
 
@@ -338,7 +422,8 @@ class TestScopeFilters:
         from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as exc_info:
-            await generate_insights("t1", focus="patterns", scope="fleet", fleet_id=None
+            await generate_insights(
+                "t1", focus="patterns", scope="fleet", fleet_id=None
             )
         assert exc_info.value.status_code == 422
         assert "fleet_id" in exc_info.value.detail.lower()
@@ -492,7 +577,8 @@ async def test_generate_insights_with_fake_provider():
 
         from core_api.services.insights_service import generate_insights
 
-        result = await generate_insights(tenant_id=tenant_id,
+        result = await generate_insights(
+            tenant_id=tenant_id,
             focus="patterns",
             scope="agent",
             fleet_id=None,
@@ -525,7 +611,8 @@ async def test_insights_persists_as_memory():
 
         from core_api.services.insights_service import generate_insights
 
-        result = await generate_insights(tenant_id=tenant_id,
+        result = await generate_insights(
+            tenant_id=tenant_id,
             focus="patterns",
             scope="agent",
             agent_id="persist-agent",
@@ -613,15 +700,20 @@ class TestSupersedeScope:
 
             from core_api.services.insights_service import generate_insights
 
-            await generate_insights(tenant_id=tenant_id,
+            await generate_insights(
+                tenant_id=tenant_id,
                 focus="patterns",
                 scope="fleet",
                 fleet_id=f"fleet-A-{tag}",
                 agent_id=agent_id,
             )
 
-            assert await _status_of(prior_a_id) == "outdated", "fleet-A prior should be outdated"
-            assert await _status_of(prior_b_id) == "active", "fleet-B prior must stay active"
+            assert await _status_of(prior_a_id) == "outdated", (
+                "fleet-A prior should be outdated"
+            )
+            assert await _status_of(prior_b_id) == "active", (
+                "fleet-B prior must stay active"
+            )
         finally:
             await _cleanup_tenant(tenant_id)
 
@@ -675,7 +767,8 @@ class TestSupersedeScope:
 
             from core_api.services.insights_service import generate_insights
 
-            await generate_insights(tenant_id=tenant_id,
+            await generate_insights(
+                tenant_id=tenant_id,
                 focus="patterns",
                 scope="agent",
                 fleet_id=None,
@@ -683,7 +776,9 @@ class TestSupersedeScope:
             )
 
             assert await _status_of(ap_id) == "outdated"
-            assert await _status_of(all_id) == "active", "insight_scope='all' prior must stay active"
+            assert await _status_of(all_id) == "active", (
+                "insight_scope='all' prior must stay active"
+            )
         finally:
             await _cleanup_tenant(tenant_id)
 
@@ -692,7 +787,9 @@ class TestSupersedeOrdering:
     """P0: supersede must run BEFORE create, with a rollback safety net."""
 
     @pytest.mark.asyncio
-    async def test_new_finding_persists_despite_similar_prior_insight(self, monkeypatch):
+    async def test_new_finding_persists_despite_similar_prior_insight(
+        self, monkeypatch
+    ):
         """A prior similar insight is outdated first, so the new finding persists.
 
         Because the reorder moves the prior to 'outdated' before create_memory
@@ -737,7 +834,8 @@ class TestSupersedeOrdering:
 
             from core_api.services.insights_service import generate_insights
 
-            result = await generate_insights(tenant_id=tenant_id,
+            result = await generate_insights(
+                tenant_id=tenant_id,
                 focus="patterns",
                 scope="agent",
                 fleet_id=None,
@@ -803,7 +901,8 @@ class TestSupersedeOrdering:
 
             monkeypatch.setattr(ms_mod, "create_memories_bulk", failing_create_bulk)
 
-            result = await insights_service.generate_insights(tenant_id=tenant_id,
+            result = await insights_service.generate_insights(
+                tenant_id=tenant_id,
                 focus="patterns",
                 scope="agent",
                 fleet_id=None,
@@ -846,7 +945,8 @@ class TestSupersedeOrdering:
 
             from core_api.services.insights_service import generate_insights
 
-            await generate_insights(tenant_id=tenant_id,
+            await generate_insights(
+                tenant_id=tenant_id,
                 focus="patterns",
                 scope="agent",
                 fleet_id=None,
@@ -870,12 +970,18 @@ class TestHallucinatedIds:
         agent_id = f"agent-{tag}"
         try:
             a_id = await _seed_memory(
-                tenant_id=tenant_id, agent_id=agent_id, fleet_id=None,
-                content=f"Fact A [{tag}]", visibility="scope_agent",
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=None,
+                content=f"Fact A [{tag}]",
+                visibility="scope_agent",
             )
             b_id = await _seed_memory(
-                tenant_id=tenant_id, agent_id=agent_id, fleet_id=None,
-                content=f"Fact B [{tag}]", visibility="scope_agent",
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=None,
+                content=f"Fact B [{tag}]",
+                visibility="scope_agent",
             )
             hallucinated = "00000000-0000-0000-0000-deadbeef1234"
 
@@ -895,7 +1001,8 @@ class TestHallucinatedIds:
 
             from core_api.services.insights_service import generate_insights
 
-            result = await generate_insights(tenant_id=tenant_id,
+            result = await generate_insights(
+                tenant_id=tenant_id,
                 focus="patterns",
                 scope="agent",
                 fleet_id=None,
@@ -920,12 +1027,18 @@ class TestHallucinatedIds:
         agent_id = f"agent-{tag}"
         try:
             a_id = await _seed_memory(
-                tenant_id=tenant_id, agent_id=agent_id, fleet_id=None,
-                content=f"Fact A [{tag}]", visibility="scope_agent",
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=None,
+                content=f"Fact A [{tag}]",
+                visibility="scope_agent",
             )
             await _seed_memory(
-                tenant_id=tenant_id, agent_id=agent_id, fleet_id=None,
-                content=f"Fact B [{tag}]", visibility="scope_agent",
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=None,
+                content=f"Fact B [{tag}]",
+                visibility="scope_agent",
             )
 
             await _stub_llm(
@@ -944,7 +1057,8 @@ class TestHallucinatedIds:
 
             from core_api.services.insights_service import generate_insights
 
-            result = await generate_insights(tenant_id=tenant_id,
+            result = await generate_insights(
+                tenant_id=tenant_id,
                 focus="patterns",
                 scope="agent",
                 fleet_id=None,

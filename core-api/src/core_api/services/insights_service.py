@@ -17,8 +17,12 @@ from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     INSIGHTS_DISCOVER_CLUSTERS,
     INSIGHTS_DISCOVER_SAMPLE_SIZE,
+    INSIGHTS_DISCOVER_WINDOW_DAYS,
+    INSIGHTS_FAILURES_WINDOW_DAYS,
     INSIGHTS_FOCUS_MODES,
     INSIGHTS_MAX_MEMORIES,
+    INSIGHTS_PATTERNS_WINDOW_DAYS,
+    INSIGHTS_STALE_WINDOW_DAYS,
     INSIGHTS_TEMPERATURE,
 )
 from core_api.utils.sanitize import sanitize_content as _sanitize_content
@@ -286,7 +290,11 @@ async def _query_contradictions(tenant_id, fleet_id, agent_id, scope) -> list[di
 
 
 async def _query_failures(tenant_id, fleet_id, agent_id, scope) -> list[dict]:
-    """Fetch low-weight memories that were recalled (agents acted on weak info)."""
+    """Fetch low-weight memories that were recalled (agents acted on weak info).
+
+    ``window_start`` bounds the title-dedup scan — see
+    ``INSIGHTS_FAILURES_WINDOW_DAYS``.
+    """
     _scope_filters(tenant_id, fleet_id, agent_id, scope)
     sc = get_storage_client()
     return await sc.insights_query_failures(
@@ -295,6 +303,7 @@ async def _query_failures(tenant_id, fleet_id, agent_id, scope) -> list[dict]:
         agent_id=agent_id,
         scope=scope,
         max_memories=INSIGHTS_MAX_MEMORIES,
+        window_start=datetime.now(UTC) - timedelta(days=INSIGHTS_FAILURES_WINDOW_DAYS),
     )
 
 
@@ -302,6 +311,9 @@ async def _query_stale(tenant_id, fleet_id, agent_id, scope) -> list[dict]:
     """Fetch memories that are likely outdated based on age and recall activity."""
     _scope_filters(tenant_id, fleet_id, agent_id, scope)
     # Age thresholds computed on the caller's clock and bound server-side.
+    # The window (INSIGHTS_STALE_WINDOW_DAYS) is deliberately wider than the
+    # 30-day age threshold rows must exceed to qualify — stale reports the
+    # 30-to-window-days "recently became stale" band.
     now = datetime.now(UTC)
     thirty_days_ago = now - timedelta(days=30)
     fourteen_days_ago = now - timedelta(days=14)
@@ -314,6 +326,7 @@ async def _query_stale(tenant_id, fleet_id, agent_id, scope) -> list[dict]:
         thirty_days_ago=thirty_days_ago,
         fourteen_days_ago=fourteen_days_ago,
         max_memories=INSIGHTS_MAX_MEMORIES,
+        window_start=now - timedelta(days=INSIGHTS_STALE_WINDOW_DAYS),
     )
 
 
@@ -331,7 +344,11 @@ async def _query_divergence(tenant_id, fleet_id, agent_id, scope) -> list[dict]:
 
 
 async def _query_patterns(tenant_id, fleet_id, agent_id, scope) -> list[dict]:
-    """Fetch recent active memories for trend/pattern analysis."""
+    """Fetch recent active memories for trend/pattern analysis.
+
+    ``window_start`` (caller's clock, like the stale thresholds) bounds the
+    title-dedup scan — see ``INSIGHTS_PATTERNS_WINDOW_DAYS``.
+    """
     _scope_filters(tenant_id, fleet_id, agent_id, scope)
     sc = get_storage_client()
     return await sc.insights_query_patterns(
@@ -340,6 +357,7 @@ async def _query_patterns(tenant_id, fleet_id, agent_id, scope) -> list[dict]:
         agent_id=agent_id,
         scope=scope,
         max_memories=INSIGHTS_MAX_MEMORIES,
+        window_start=datetime.now(UTC) - timedelta(days=INSIGHTS_PATTERNS_WINDOW_DAYS),
     )
 
 
@@ -390,13 +408,16 @@ async def _query_discover(tenant_id, fleet_id, agent_id, scope) -> _DiscoverResu
     sc = get_storage_client()
     # ``rows`` are plain dicts (``_insights_rows_to_dicts(..., include_embedding=True)``)
     # — already the ``_rows_to_dicts`` shape the formatter consumes, with the
-    # raw embedding vector for clustering.
+    # raw embedding vector for clustering. ``window_start`` (caller's clock,
+    # mirroring the stale thresholds) spreads the draw over the trailing
+    # window instead of "newest N" — see ``INSIGHTS_DISCOVER_WINDOW_DAYS``.
     rows = await sc.insights_discover_sample(
         tenant_id=tenant_id,
         fleet_id=fleet_id,
         agent_id=agent_id,
         scope=scope,
         sample_size=INSIGHTS_DISCOVER_SAMPLE_SIZE,
+        window_start=datetime.now(UTC) - timedelta(days=INSIGHTS_DISCOVER_WINDOW_DAYS),
     )
 
     def _strip_embeddings(dicts: list[dict]) -> list[dict]:
@@ -506,6 +527,19 @@ def _format_memories_for_analysis(memories: list[dict]) -> tuple[str, set[str]]:
         meta_parts.append(f"[agent: {_sanitize_content(m.get('agent_id', '?'), max_len=100)}]")
         if m.get("recall_count", 0) > 0:
             meta_parts.append(f"[recalls: {m['recall_count']}]")
+        # Title-dedup annotation (storage collapses repeated exact titles to
+        # one exemplar): keep the frequency-and-duration signal the dropped
+        # copies carried, at 1/Nth of the token cost. ``first_seen`` is the
+        # oldest occurrence among the rows the QUERY considered (windowed for
+        # some modes, unbounded legacy for others) — the label is kept
+        # neutral so it doesn't overclaim either global history or a window.
+        if m.get("dup_count", 1) > 1:
+            first_seen = (m.get("first_seen") or "")[:10]
+            meta_parts.append(
+                f"[repeats: {m['dup_count']}x, first seen: {first_seen}]"
+                if first_seen
+                else f"[repeats: {m['dup_count']}x]"
+            )
         if m.get("supersedes_id"):
             meta_parts.append(f"[supersedes: {m['supersedes_id']}]")
         meta = " ".join(meta_parts)
@@ -534,7 +568,8 @@ def _format_clusters_for_analysis(clusters: list[dict]) -> tuple[str, set[str]]:
         for r in c.get("representatives", []):
             title = _sanitize_content(r.get("title", "untitled"), max_len=120)
             content = _sanitize_content(r.get("content", ""), max_len=200)
-            lines.append(f"    - (id:{r['id']}) [{r.get('memory_type', 'fact')}] {title}: {content}")
+            repeats = f" [repeats: {r['dup_count']}x]" if r.get("dup_count", 1) > 1 else ""
+            lines.append(f"    - (id:{r['id']}) [{r.get('memory_type', 'fact')}]{repeats} {title}: {content}")
             if r.get("id"):
                 shown_ids.add(str(r["id"]))
         lines.append("")

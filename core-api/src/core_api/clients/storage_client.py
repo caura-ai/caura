@@ -1849,8 +1849,18 @@ class CoreStorageClient:
         )
 
     async def insights_query_failures(
-        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        agent_id: str,
+        scope: str,
+        max_memories: int,
+        window_start: datetime | None = None,
     ) -> list[dict]:
+        """``window_start`` bounds the title-dedup scan (see
+        ``INSIGHTS_FAILURES_WINDOW_DAYS``); ``None`` keeps the legacy
+        unbounded read."""
         return await self._post(  # type: ignore[return-value]
             "/insights/failures",
             {
@@ -1859,6 +1869,7 @@ class CoreStorageClient:
                 "agent_id": agent_id,
                 "scope": scope,
                 "max_memories": max_memories,
+                "window_start": window_start.isoformat() if window_start else None,
             },
             read=True,
         )
@@ -1873,7 +1884,12 @@ class CoreStorageClient:
         thirty_days_ago: datetime,
         fourteen_days_ago: datetime,
         max_memories: int,
+        window_start: datetime | None = None,
     ) -> list[dict]:
+        """``window_start`` bounds the title-dedup scan (see
+        ``INSIGHTS_STALE_WINDOW_DAYS`` — wider than the 30-day age threshold
+        rows must exceed to qualify); ``None`` keeps the legacy unbounded
+        read."""
         return await self._post(  # type: ignore[return-value]
             "/insights/stale",
             {
@@ -1884,6 +1900,7 @@ class CoreStorageClient:
                 "thirty_days_ago": thirty_days_ago.isoformat(),
                 "fourteen_days_ago": fourteen_days_ago.isoformat(),
                 "max_memories": max_memories,
+                "window_start": window_start.isoformat() if window_start else None,
             },
             read=True,
         )
@@ -1904,8 +1921,18 @@ class CoreStorageClient:
         )
 
     async def insights_query_patterns(
-        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        agent_id: str,
+        scope: str,
+        max_memories: int,
+        window_start: datetime | None = None,
     ) -> list[dict]:
+        """``window_start`` bounds the title-dedup scan to a trailing window
+        (see ``INSIGHTS_PATTERNS_WINDOW_DAYS``); ``None`` keeps the legacy
+        unbounded read."""
         return await self._post(  # type: ignore[return-value]
             "/insights/patterns",
             {
@@ -1914,14 +1941,25 @@ class CoreStorageClient:
                 "agent_id": agent_id,
                 "scope": scope,
                 "max_memories": max_memories,
+                "window_start": window_start.isoformat() if window_start else None,
             },
             read=True,
         )
 
     async def insights_discover_sample(
-        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, sample_size: int
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        agent_id: str,
+        scope: str,
+        sample_size: int,
+        window_start: datetime | None = None,
     ) -> list[dict]:
-        """Sample active memories WITH embeddings for client-side k-means."""
+        """Sample active memories WITH embeddings for client-side k-means.
+
+        ``window_start`` bounds + spreads the draw over a trailing window
+        (see the storage router); ``None`` keeps the legacy newest-first."""
         return await self._post(  # type: ignore[return-value]
             "/insights/discover-sample",
             {
@@ -1930,6 +1968,7 @@ class CoreStorageClient:
                 "agent_id": agent_id,
                 "scope": scope,
                 "sample_size": sample_size,
+                "window_start": window_start.isoformat() if window_start else None,
             },
             read=True,
         )

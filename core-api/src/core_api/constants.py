@@ -563,7 +563,29 @@ MEMORY_RECALL_SUMMARY_MAX_TOKENS = 500
 INSIGHTS_MAX_MEMORIES = 50  # max memories per analysis pass (token budget ~10k)
 INSIGHTS_TEMPERATURE = 0.3  # analytical, not creative
 INSIGHTS_DISCOVER_SAMPLE_SIZE = 200  # memories to sample for vector clustering
+# Trailing window the discover sample is spread over. Without it the sample is
+# "newest N", which on a busy tenant spans hours — discover then clusters
+# yesterday's activity instead of the corpus, and consecutive nightly runs
+# re-find the same shapes in near-identical slices.
+INSIGHTS_DISCOVER_WINDOW_DAYS = 30
 INSIGHTS_DISCOVER_CLUSTERS = 6  # k-means cluster count for discover mode
+# Trailing window for the patterns read. Semantically aligned with the mode
+# (the prompt analyzes "recent" memories) — but primarily a cost bound: the
+# title-dedup subquery computes window functions over every row matching the
+# filters, so an unbounded patterns read would scan the tenant's whole active
+# history to return 50 deduped rows (pre-dedup it early-terminated on the
+# (tenant_id, created_at DESC) index). Separate from the discover window so
+# the two modes stay independently tunable.
+INSIGHTS_PATTERNS_WINDOW_DAYS = 30
+# Same cost bound for the failures and stale reads (their weight/recall
+# predicates prune less and less as the corpus grows; the dedup subquery has
+# no inner LIMIT). 90 days — deliberately wider than the stale mode's own
+# 30/14-day age thresholds, which rows must EXCEED to qualify: stale now
+# surfaces the 30-90-day "recently became stale" band instead of perpetually
+# re-reporting the same ancient tail (which is the archive-stale lifecycle
+# job's business, not nightly reporting's).
+INSIGHTS_FAILURES_WINDOW_DAYS = 90
+INSIGHTS_STALE_WINDOW_DAYS = 90
 INSIGHTS_FOCUS_MODES = ("contradictions", "failures", "stale", "divergence", "patterns", "discover")
 
 # Shared scope enum used by memclaw_list, memclaw_insights, memclaw_evolve and
