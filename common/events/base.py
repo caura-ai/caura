@@ -89,13 +89,13 @@ class EventBus(ABC):
         per-process subscription.
         """
 
-    async def start(self) -> None:  # noqa: B027 — optional hook, not abstract
+    async def start(self) -> None:
         """Start any background machinery (subscription listeners, etc.).
         In-process buses treat this as a no-op. Pub/Sub buses spin up
         subscriber pull-tasks here so they can receive messages.
         """
 
-    async def stop(self) -> None:  # noqa: B027 — optional hook, not abstract
+    async def stop(self) -> None:
         """Drain + shut down. Called on graceful shutdown."""
 
     @property

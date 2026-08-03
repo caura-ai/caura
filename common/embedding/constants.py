@@ -56,7 +56,7 @@ EMBEDDING_RETRY_DELAY_S: float = float(os.environ.get("EMBEDDING_RETRY_DELAY_S",
 # concurrent writes x 10 enrichment calls = 160 concurrent LLM
 # requests per process, well over the keepalive budget). See
 # ``common/llm/constants.py`` for full rationale.
-from common.env_utils import (
+from common.env_utils import (  # noqa: E402 — intentional late import, see module docstring
     clamp_keepalive,
     read_float_env,
     read_int_env,

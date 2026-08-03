@@ -1,30 +1,36 @@
-# Ruff contract for common/ — pinned deliberately.
+# Ruff contract for common/ — pinned deliberately, and SHARED VERBATIM between
+# caura-memclaw (OSS) and caura-memclaw-enterprise.
 #
-# WHY THIS FILE EXISTS: before it, no ruff config governed common/. There is no
-# ruff.toml and no pyproject.toml at the repo root or in common/, so ruff walked
-# up from each file, found nothing, and fell back to its BUILT-IN DEFAULTS. That
-# made the effective rule set for this directory "whatever the installed ruff
-# version ships as default" — which grows on every upgrade. Under ruff 0.16.0
-# that default set (YTT, ASYNC, BLE, TRY, S, DTZ, G, ...) reported 21 findings
-# here that no one had chosen to enable, including two dead ``noqa: E402``
-# directives that were meaningful under an older default set. See issue #684.
+# WHY THIS FILE EXISTS: common/ has no pyproject.toml of its own (it is
+# PYTHONPATH-mounted, not pip-installed), and neither repo has a root
+# [tool.ruff]. So `ruff check common/` had no ancestor config and fell back to
+# ruff's bare CLI defaults — meaning the effective rule set was "whatever the
+# installed ruff version ships," which silently expanded from 59 to 413 rules in
+# ruff 0.16 (enterprise #879/#898; OSS #684). Scoped to common/ ONLY (a ruff.toml
+# here, not a root-level [tool.ruff]) so other loose scripts keep their existing
+# behaviour rather than being pulled under stricter enforcement.
 #
-# ``line-length`` is 88, NOT the 110 used by core-api and core-storage-api, and
-# that difference is load-bearing. Three files here are vendored into
-# caura-memclaw-enterprise under ``policy=identical`` (see its
-# ``scripts/vendored_files_manifest.json``) and are format-checked in CI at ruff
-# DEFAULTS via ``--isolated`` for byte-parity. This tree has been maintained to
-# 88 columns throughout: at 88 only 7 of 88 files would reflow, at 110 it would
-# be 49. Raising it would churn most of the directory and break that parity.
+# WHY IT IS BYTE-IDENTICAL ACROSS REPOS: enterprise vendors common/ and its
+# scripts/vendored_files_manifest.json classifies this file `identical`, so
+# check_vendored_drift.py fails on any divergence. Edit it in OSS; the re-vendor
+# bot mirrors it downstream. Two consequences worth knowing:
 #
-# Lint rules mirror ``core-api/pyproject.toml`` exactly, so shared code is held
-# to the same standard as the services importing it. ``E501`` is ignored there
-# and here, so ``line-length`` affects only ``ruff format`` — the 88/110 split
-# costs nothing on the lint side. Keep the two lists in sync when either moves.
+#   * ``target-version`` is py312, NOT py313. common/ runs on py312 in OSS and
+#     py313 in enterprise, so the shared target must be the LOWER bound —
+#     otherwise pyupgrade rules suggest rewrites that break OSS.
+#   * The per-file-ignores below span BOTH trees, which are not the same file
+#     set (enterprise's common/ additionally has email_service.py, license/*).
+#     An entry with no matching file is inert, so each repo carries a few
+#     patterns that only matter in the other. That is the cost of one shared
+#     file, and is preferred over two configs drifting apart.
+#
+# ``line-length`` is 88, not the 110 used by core-api and core-storage-api. Three
+# files here are vendored `identical` and are format-checked at ruff DEFAULTS via
+# ``--isolated`` in OSS ci.yml for byte-parity; this tree has been maintained at
+# 88 throughout. E501 is ignored, so line-length affects only ``ruff format``.
 
 target-version = "py312"
 line-length = 88
-
 exclude = [
     ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache",
     ".venv", "__pycache__", "build", "dist",
@@ -37,19 +43,37 @@ select = [
 ]
 ignore = [
     "E501", "TC001", "TC002", "TC003", "ARG001", "ARG002",
-    "B008", "B904", "RUF022", "PTH123", "RUF006", "SIM117",
+    "B008", "B904", "RUF022", "PTH123", "SIM117",
     "RUF012", "RUF009",
-    "SIM108", "SIM105", "SIM103", "E701", "E402",
-    "B905", "B007", "B023",
-    "UP042", "UP047",
-    "PTH103", "PTH111", "PTH120",
-    "RUF005", "RUF034", "RUF059",
-    "ASYNC109",
 ]
 fixable = ["ALL"]
 
 [lint.per-file-ignores]
-"__init__.py" = ["F401", "E402"]
+# structlog_config.py is a BYTE-IDENTICAL vendored copy — its content can't
+# diverge between repos without failing check_vendored_drift.py. These are real,
+# minor findings (contextlib.suppress / pathlib style); fixing them upstream in
+# OSS and re-vendoring would let this entry go away.
+"structlog_config.py" = ["SIM105", "PTH120", "PTH103"]
+# EventBus.start/stop are DELIBERATELY non-abstract no-ops (see their
+# docstrings) — every bus implementation relies on that default; adding
+# @abstractmethod would force each to override it for no behavioural benefit.
+"events/base.py" = ["B027"]
+# ``(str, Enum)`` -> ``StrEnum`` is a real suggestion that ruff itself marks as
+# an unsafe/manual fix. These are all widely-imported shared types, so changing
+# a base class is its own deliberate decision, not something to bundle into a
+# tooling change. Applies in both trees.
+"enrichment/constants.py" = ["UP042"]
+"governance/pii_patterns.py" = ["UP042"]
+"license/claims.py" = ["UP042"]
+# ``timeout`` here configures an owned client's request timeout, not a manual
+# cancellation deadline — asyncio.timeout() does not apply to this pattern.
+# UP047 (PEP 695 type parameters) would rewrite public generic signatures in
+# shared retry code; same reasoning as UP042 above.
+"llm/retry.py" = ["ASYNC109", "UP047"]
+"license/phone_home.py" = ["ASYNC109"]
+# Customer-facing email copy — the en dash is intentional typography.
+"email_service.py" = ["RUF001"]
 
-[lint.isort]
-known-first-party = ["common"]
+[format]
+quote-style = "double"
+indent-style = "space"

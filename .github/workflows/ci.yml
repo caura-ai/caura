@@ -130,13 +130,21 @@ jobs:
         run: uv run ruff check core-storage-api/tests/
 
       - name: Run Ruff linter (common)
-        # ``--config`` is explicit on purpose. common/ had NO ruff config above it
-        # (no ruff.toml, no root pyproject.toml), so ruff fell back to built-in
-        # DEFAULTS here — meaning the rule set was "whatever the installed ruff
-        # version ships," and it changed under us on the 0.16.0 bump. common/ruff.toml
-        # pins it; naming the config keeps this step immune to future config
-        # discovery changes, the same reasoning as ``--isolated`` below. See #684.
-        run: uv run ruff check common/ --config common/ruff.toml
+        # common/ had NO ruff config above it (no ruff.toml, no root
+        # pyproject.toml), so ruff fell back to built-in DEFAULTS here — the rule
+        # set was "whatever the installed ruff version ships," and it changed
+        # under us on the 0.16.0 bump. common/ruff.toml pins it (#684).
+        #
+        # DO NOT add ``--config common/ruff.toml``. #685 did, reasoning that
+        # naming the config made the step immune to discovery changes; it instead
+        # broke every per-file-ignore silently. Those patterns are relative to the
+        # config's own directory under discovery (so ``llm/retry.py`` means
+        # ``common/llm/retry.py``), but ``--config`` resolves them against the CWD
+        # instead — from the repo root nothing matches, all per-file-ignores
+        # become inert, and the step fails on exactly the findings they exempt.
+        # Discovery is also what enterprise's equivalent step uses, which matters
+        # because the config is byte-identical across both repos (#696).
+        run: uv run ruff check common/
 
       - name: Run Ruff formatter check (core-api)
         run: uv run ruff format --check core-api/src/

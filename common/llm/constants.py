@@ -86,7 +86,10 @@ PREGATE_CLASSIFIER_TIMEOUT_SECONDS = _read_float_env(
 # Sized for headroom over the worst-case fan-out per process. Env-
 # tunable so an operator can adjust during an incident (e.g. if the
 # upstream provider's per-IP cap is hit) without a redeploy.
-from common.env_utils import clamp_keepalive, read_int_env
+from common.env_utils import (  # noqa: E402 — intentional late import, see module docstring
+    clamp_keepalive,
+    read_int_env,
+)
 
 OPENAI_HTTPX_MAX_CONNECTIONS = read_int_env("OPENAI_HTTPX_MAX_CONNECTIONS", 200)
 OPENAI_HTTPX_MAX_KEEPALIVE_CONNECTIONS = clamp_keepalive(

@@ -44,10 +44,7 @@ def _parse_temporal(val: str) -> datetime | None:
     """Parse a temporal string to UTC datetime, returning None on failure."""
     try:
         dt = dateutil_parser.parse(val, fuzzy=False)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        else:
-            dt = dt.astimezone(UTC)
+        dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
         # Sanity check: not before 1970, not after 2100
         if dt.year < 1970 or dt.year > 2100:
             logger.warning("Temporal value out of range: %s", val)
