@@ -7,6 +7,7 @@ They exercise both paths with identical inputs and compare the MemoryOut results
 import uuid
 
 import pytest
+from sqlalchemy import text
 
 from core_api.schemas import MemoryCreate, MemoryOut
 
@@ -567,3 +568,100 @@ async def test_search_pipeline_empty_results(db):
         assert results == []
     finally:
         memory_service._USE_PIPELINE_SEARCH = original
+
+
+# ---------------------------------------------------------------------------
+# Recall of a memory whose embedding backfill has not landed yet
+# (caura-memclaw#687)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
+async def test_recall_returns_memory_with_pending_embedding(db, monkeypatch, use_pipeline):
+    """A memory must be recallable before its embedding backfill lands.
+
+    Production defers the embedding: under ``deployment_mode=deferred`` the row
+    is stored with ``embedding IS NULL`` and ``metadata.embedding_pending=True``,
+    and a worker back-fills it seconds (prod) to minutes (staging) later. Three
+    pieces of machinery exist so the row stays discoverable in that window —
+    CAURA-594's admission predicate ``or_(embedding IS NOT NULL, fts_guard)``,
+    CAURA-679's FTS-only ``similarity`` for NULL-embedding rows, and
+    PostFilterResults exempting them from the ``vec_sim`` gate.
+
+    Nothing asserted that end to end, which is the gap #687 shipped through:
+    against the live control plane a row that is present and whose content is
+    byte-identical to the query is not returned until it has been embedded.
+    core-storage-api's own integration test covers the storage layer but POSTs
+    ``embedding=None`` straight to core-storage-api, bypassing core-api, and no
+    test anywhere pairs a pending embedding with a recall.
+
+    Both search implementations are exercised: ``search_memories`` dispatches on
+    ``_USE_PIPELINE_SEARCH``, so covering only the default would leave the other
+    path unpinned — and a divergence between them localises the defect.
+    """
+    from core_api.config import settings
+    from core_api.services import memory_service
+    from core_api.services.memory_service import create_memory, search_memories
+
+    monkeypatch.setattr(memory_service, "_USE_PIPELINE_SEARCH", use_pipeline)
+    # Faithful to production's deferred write rather than hand-inserting a NULL:
+    # this is what makes core-api store the row without an embedding.
+    monkeypatch.setattr(settings, "deployment_mode", "deferred")
+
+    tid = f"test-tenant-pending-embed-{uuid.uuid4().hex[:8]}"
+    token = f"zqxjvbn{uuid.uuid4().hex[:10]}"
+    content = (
+        "The quarterly irrigation schedule for the northern greenhouse was revised "
+        f"to alternate drip cycles on alternate mornings. Reference code {token}."
+    )
+
+    created = await create_memory(
+        MemoryCreate(
+            tenant_id=tid,
+            fleet_id=FLEET_ID,
+            agent_id=AGENT_ID,
+            content=content,
+            persist=True,
+            entity_links=[],
+        )
+    )
+
+    # Preconditions. Without these the test could pass vacuously (an embedded
+    # row proves nothing about the deferred window) or fail for a fixture
+    # reason rather than the behaviour under test: `search_vector` is populated
+    # by a trigger created in migration 001, so a metadata-only schema
+    # (``Base.metadata.create_all`` with no ``alembic upgrade head``) leaves it
+    # NULL and no NULL-embedding row can ever be admitted.
+    row = (
+        await db.execute(
+            text(
+                "SELECT embedding IS NULL AS embedding_null, "
+                "       search_vector IS NOT NULL AS sv_populated, "
+                "       search_vector @@ plainto_tsquery('english', :q) AS fts_matches "
+                "FROM memories WHERE id = :mid"
+            ),
+            {"mid": str(created.id), "q": token},
+        )
+    ).one()
+    assert row.embedding_null, (
+        "precondition: deployment_mode=deferred must store the row without an "
+        "embedding, otherwise this test says nothing about the deferred window"
+    )
+    assert row.sv_populated, (
+        "precondition: search_vector must be populated — if this fails the schema "
+        "was built without migration 001's trigger (run `alembic upgrade head`)"
+    )
+    assert row.fts_matches, (
+        "precondition: the query token must FTS-match the stored content, "
+        "otherwise the FTS fallback has nothing to match on"
+    )
+
+    results = await search_memories(tenant_id=tid, query=token, top_k=10)
+
+    assert str(created.id) in {str(r.id) for r in results}, (
+        f"a memory whose embedding backfill has not landed was not returned by "
+        f"recall (caura-memclaw#687). query={token!r} matched the row's content "
+        f"exactly and search_vector @@ plainto_tsquery is true, yet search "
+        f"returned {len(results)} other row(s): "
+        f"{[str(r.id) for r in results]}"
+    )

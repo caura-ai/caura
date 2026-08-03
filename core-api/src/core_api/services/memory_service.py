@@ -3437,13 +3437,26 @@ async def _search_memories_legacy(
     async with per_tenant_storage_slot("storage_search", tenant_id):
         rows = await sc.scored_search(search_data)
 
-    # Post-filter by min_similarity, then trim to top_k. The `vec_sim is None`
-    # branch is defensive: the scored_search SQL currently enforces
-    # `Memory.embedding IS NOT NULL` and the storage layer coerces None → 0.0,
-    # so this branch is never taken today. Left in place — mirrored in the
-    # pipeline post_filter step — so that FTS-only rows aren't silently gated
-    # out by the cosine threshold if either invariant ever changes.
-    rows = [r for r in rows if r.get("vec_sim") is None or float(r["vec_sim"]) >= _min_similarity]
+    # Post-filter by min_similarity, then trim to top_k.
+    #
+    # `has_embedding is False` is the clause that matters, and it was missing:
+    # the invariant the old comment here relied on ("the scored_search SQL
+    # enforces `Memory.embedding IS NOT NULL`") stopped holding at CAURA-594,
+    # which admits NULL-embedding rows that FTS-match via
+    # `or_(embedding IS NOT NULL, fts_guard)`. The storage layer coerces those
+    # rows' cosine to 0.0 rather than NULL — as that comment itself noted — so
+    # the `vec_sim is None` branch never fires for them and `0.0 >= threshold`
+    # gated out exactly the FTS-only rows CAURA-679 exists to keep discoverable
+    # during the deferred-embed window. `has_embedding` is the authoritative
+    # NULL signal for precisely this reason. Now genuinely mirrors the
+    # pipeline's post_filter step, which has carried this clause since CAURA-679.
+    rows = [
+        r
+        for r in rows
+        if r.get("has_embedding") is False
+        or r.get("vec_sim") is None
+        or float(r["vec_sim"]) >= _min_similarity
+    ]
     rows = rows[:_top_k]
 
     # Build results from storage API response
