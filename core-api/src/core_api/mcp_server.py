@@ -2621,6 +2621,7 @@ async def memclaw_insights(
     #   3. ``_no_db`` — persist findings (storage-routed; no commit)
     from core_api.services.insights_service import (
         _QUERY_DISPATCH,
+        _build_method,
         _DiscoverResult,
         _persist_findings,
         synthesize_insights,
@@ -2671,6 +2672,7 @@ async def memclaw_insights(
                             "findings": [],
                             "summary": "No relevant memories found for this analysis.",
                             "insight_memory_ids": [],
+                            "gate_rejected": 0,
                             "insights_ms": int((time.perf_counter() - t0) * 1000),
                         },
                         indent=2,
@@ -2696,7 +2698,15 @@ async def memclaw_insights(
         # ``_persist_findings`` are each storage-committed independently, so
         # there's no session to open or commit here (``_no_db()`` ⇒ db=None).
         async with _no_db():
-            insight_ids = await _persist_findings(tenant_id, agent_id, fleet_id, focus, scope, findings)
+            insight_ids = await _persist_findings(
+                tenant_id,
+                agent_id,
+                fleet_id,
+                focus,
+                scope,
+                findings,
+                method=_build_method(focus, scope, is_clustered, synth),
+            )
 
         result = {
             "focus": focus,
@@ -2705,6 +2715,7 @@ async def memclaw_insights(
             "findings": [{**f, "insight_memory_id": mid} for f, mid in zip(findings, insight_ids)],
             "summary": synth["summary"],
             "insight_memory_ids": [mid for mid in insight_ids if mid],
+            "gate_rejected": synth.get("gate_rejected", 0),
             "insights_ms": int((time.perf_counter() - t0) * 1000),
         }
         return _with_latency(json.dumps(result, indent=2, default=str), t0)

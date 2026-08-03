@@ -6,6 +6,7 @@ vector-space clusters. Findings are persisted as insight-type memories.
 """
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -46,194 +47,239 @@ _SCOPE_TO_VISIBILITY = {
 
 
 # -- Prompts -------------------------------------------------------------------
+#
+# Clarity contract ("the front-page test"): a persisted finding must read like
+# a line a human would put in a status report. Measured on the eToro fleet
+# BEFORE this contract, 80% of discover findings discussed the clustering
+# machinery itself ("Cluster 5 shows std=0.22 ... re-cluster with a finer
+# label set") and 67% of their recommendations targeted the memory system
+# rather than the work the memories describe — the old "memory analyst"
+# persona answered exactly what it was asked. The prompts below flip the
+# persona to an operations analyst, make the retrieval mechanics a LENS
+# rather than a SUBJECT, and require a structured finding (headline /
+# what_happened / why_it_matters / recommended_action). A deterministic
+# post-LLM gate (``_gate_findings``) enforces the contract with one
+# self-repair retry.
 
-_PROMPT_CONTRADICTIONS = """\
-You are a memory analyst specializing in contradiction detection.
-
-Analyze these {count} memories for contradiction clusters. Identify what is \
-contradicted, which memories conflict, which version is likely correct \
-(consider recency, weight, and agent trust), and what should be done to \
-resolve the conflict.
-
-Look for:
-- Direct factual contradictions (same entity, different values)
-- Superseded memories that may still be recalled
-- Status conflicts (e.g. "active" vs "conflicted")
-- Temporal contradictions (events placed at incompatible times)
-
-Memories:
-{memories}
-
+# Shared JSON response contract. Legacy keys (title/description/
+# recommendation) are still accepted at sanitize time for models that answer
+# old-style, and are mirrored back onto every finding for downstream
+# consumers.
+_FINDING_JSON_BLOCK = """\
 Respond with JSON:
 {{
   "findings": [
     {{
-      "type": "contradictions",
-      "title": "short headline (max 80 chars)",
-      "description": "2-3 sentence explanation",
+      "headline": "one declarative sentence about the work itself (max 80 chars)",
+      "what_happened": "2-3 concrete sentences naming the real systems, people, dates and values involved",
+      "why_it_matters": "one sentence: the impact or risk if nothing changes",
+      "recommended_action": "one imperative sentence starting with a verb, naming who or what should act",
       "confidence": 0.0 to 1.0,
-      "related_memory_ids": ["uuid1", "uuid2"],
-      "recommendation": "actionable next step"
+      "related_memory_ids": ["uuid1", "uuid2"]
     }}
   ],
-  "summary": "one paragraph overview"
+  "summary": "one short paragraph overview"
 }}"""
 
-_PROMPT_FAILURES = """\
-You are a memory analyst specializing in failure pattern detection.
+# World modes (discover / patterns): the subject must be the WORK, never the
+# records or the analysis machinery.
+_RULES_WORLD = """\
+RULES — your reader is a busy operator who never sees these records:
+- Report on the WORK the records describe (systems, incidents, deals, \
+decisions) — never on the records themselves, their grouping, this sample, \
+or this analysis. If a group of records reveals nothing about the work \
+itself, produce no finding for it.
+- Name things by their real names. Never reference numbering from this \
+prompt ("record 5", "group 3").
+- recommended_action must be something an operator or agent can do in their \
+systems or process. Suggestions to write, tag, merge, store or restructure \
+records are FORBIDDEN.
+- Fewer, sharper findings beat coverage. An empty findings list is a valid \
+answer.
 
-These {count} memories have low importance but were recalled by agents -- \
-meaning agents may have acted on weak or unreliable information. Identify \
-recurring failure patterns, common root causes, and memories that should be \
-deprecated or flagged.
+BAD finding (never produce): headline "Cluster 5 has high weight variance \
+(std=0.22)", action "Re-cluster with a finer label set".
+GOOD finding: headline "Health monitoring runs as two disconnected loops", \
+what_happened "Heartbeat checks and cleanup escalation fire independently \
+across 6 agents; a disk-full event on Jul 28 alerted twice with no shared \
+cooldown.", action "Unify triggers and cooldowns in the monitoring workflow \
+config."""
+
+# Hygiene modes (contradictions / failures / stale / divergence): the records
+# ARE the legitimate subject, but findings must name the disputed fact in
+# real-world terms and resolve it concretely.
+_RULES_HYGIENE = """\
+RULES — your reader is a busy operator deciding what to trust:
+- Name the disputed, weak or stale FACT in real-world terms ("gateway \
+endpoint: old.example vs new.example"), with the real names, dates and \
+values involved.
+- Never reference numbering from this prompt ("record 5"); when pointing at \
+a specific record, use its (id:...) value in related_memory_ids.
+- recommended_action must state the concrete resolution: which version to \
+trust and why, what to re-verify, or what to stop relying on — not generic \
+bookkeeping.
+- Fewer, sharper findings beat coverage. An empty findings list is a valid \
+answer."""
+
+_PROMPT_CONTRADICTIONS = (
+    """\
+You are an operations analyst reviewing the team's work records for \
+conflicting claims.
+
+Analyze these {count} records for contradictions. Identify what fact is \
+contradicted, which version is likely correct (consider recency and how \
+each record was produced), and how to resolve it.
 
 Look for:
-- Memories with very low weight that were recalled frequently
-- Patterns in the types of unreliable information
-- Agents that consistently rely on weak memories
-- Information that should have been superseded but wasn't
+- Direct factual contradictions (same thing, different values)
+- Corrected facts whose old version may still be trusted somewhere
+- Workflow states that cannot both be true (e.g. "sent" vs "blocked")
+- Events placed at incompatible times
 
-Memories:
+"""
+    + _RULES_HYGIENE
+    + """
+
+Records:
 {memories}
 
-Respond with JSON:
-{{
-  "findings": [
-    {{
-      "type": "failures",
-      "title": "short headline (max 80 chars)",
-      "description": "2-3 sentence explanation",
-      "confidence": 0.0 to 1.0,
-      "related_memory_ids": ["uuid1", "uuid2"],
-      "recommendation": "actionable next step"
-    }}
-  ],
-  "summary": "one paragraph overview"
-}}"""
+"""
+    + _FINDING_JSON_BLOCK
+)
 
-_PROMPT_STALE = """\
-You are a memory analyst specializing in knowledge freshness.
+_PROMPT_FAILURES = (
+    """\
+You are an operations analyst investigating where the team acted on weak or \
+unreliable information.
 
-These {count} memories are likely outdated -- they haven't been recalled \
-recently or have very low weight. Identify which are genuinely stale vs. \
-rarely needed, and flag ones that could cause harm if recalled.
+These {count} records carry low reliability yet were used by agents -- \
+meaning decisions may rest on shaky ground. Identify what unreliable \
+information was acted on, what could go wrong because of it, and what should \
+be trusted instead.
 
 Look for:
-- Memories about time-sensitive topics (deadlines, prices, versions)
-- Knowledge that likely changed since creation
-- Memories that were never recalled (possibly irrelevant from the start)
-- Low-weight memories that could mislead if surfaced
+- Weak information that was used repeatedly
+- Recurring kinds of unreliable information and their root causes
+- Actions taken on evidence that never confirmed success
+- Corrected facts that are still being relied on in their old form
 
-Memories:
+"""
+    + _RULES_HYGIENE
+    + """
+
+Records:
 {memories}
 
-Respond with JSON:
-{{
-  "findings": [
-    {{
-      "type": "stale",
-      "title": "short headline (max 80 chars)",
-      "description": "2-3 sentence explanation",
-      "confidence": 0.0 to 1.0,
-      "related_memory_ids": ["uuid1", "uuid2"],
-      "recommendation": "actionable next step"
-    }}
-  ],
-  "summary": "one paragraph overview"
-}}"""
+"""
+    + _FINDING_JSON_BLOCK
+)
 
-_PROMPT_DIVERGENCE = """\
-You are a memory analyst specializing in cross-agent knowledge consistency.
+_PROMPT_STALE = (
+    """\
+You are an operations analyst reviewing aging work records for information \
+that has likely gone stale.
 
-These {count} memories come from different agents about the same entities. \
-Identify where agents disagree, which agent's perspective is more credible, \
-and whether the divergence indicates a real disagreement or different contexts.
+These {count} records are old or rarely used. Identify which describe facts \
+that have probably changed since (versions, endpoints, prices, deadlines, \
+owners), what the team might still wrongly assume, and what should be \
+re-verified.
 
 Look for:
-- Same entity described differently by different agents
-- Conflicting conclusions or assessments
-- Different levels of detail or confidence
-- Cases where divergence reveals complementary rather than conflicting views
+- Time-sensitive facts recorded once and never revisited
+- States ("running", "blocked", "pending") frozen from a past moment
+- Old symptoms or incidents that likely no longer describe the system
+- Anything that would mislead an operator who trusted it today
 
-Memories:
+"""
+    + _RULES_HYGIENE
+    + """
+
+Records:
 {memories}
 
-Respond with JSON:
-{{
-  "findings": [
-    {{
-      "type": "divergence",
-      "title": "short headline (max 80 chars)",
-      "description": "2-3 sentence explanation",
-      "confidence": 0.0 to 1.0,
-      "related_memory_ids": ["uuid1", "uuid2"],
-      "recommendation": "actionable next step"
-    }}
-  ],
-  "summary": "one paragraph overview"
-}}"""
+"""
+    + _FINDING_JSON_BLOCK
+)
 
-_PROMPT_PATTERNS = """\
-You are a memory analyst specializing in trend and pattern recognition.
+_PROMPT_DIVERGENCE = (
+    """\
+You are an operations analyst reviewing where teammates disagree about the \
+same things.
 
-Analyze these {count} recent memories for emerging themes, trends, and \
-patterns. What topics are getting more attention? What decisions are being \
-made? Are there any concerning patterns?
+These {count} records come from different agents about the same entities. \
+Identify where agents hold different beliefs about the same fact, which \
+belief is likely correct, and whether the disagreement is real or just \
+different contexts.
 
 Look for:
-- Recurring topics or entities across multiple memories
-- Shifts in focus or priority over time
-- Decision patterns and their outcomes
-- Gaps in knowledge coverage
+- The same system/entity described with different values or states
+- Conflicting conclusions or assessments between agents
+- One agent acting on information another agent has already corrected
+- Divergence that is actually complementary detail, not conflict
 
-Memories:
+"""
+    + _RULES_HYGIENE
+    + """
+
+Records:
 {memories}
 
-Respond with JSON:
-{{
-  "findings": [
-    {{
-      "type": "patterns",
-      "title": "short headline (max 80 chars)",
-      "description": "2-3 sentence explanation",
-      "confidence": 0.0 to 1.0,
-      "related_memory_ids": ["uuid1", "uuid2"],
-      "recommendation": "actionable next step"
-    }}
-  ],
-  "summary": "one paragraph overview"
-}}"""
+"""
+    + _FINDING_JSON_BLOCK
+)
 
-_PROMPT_DISCOVER = """\
-You are a memory analyst specializing in knowledge topology.
+_PROMPT_PATTERNS = (
+    """\
+You are an operations analyst briefing the team on what their recent work \
+records show.
 
-These are {count} memories organized into natural clusters discovered in the \
-embedding vector space. For each cluster, what is the underlying theme? Are \
-any clusters surprising? Are there gaps in knowledge between clusters?
+Analyze these {count} recent records for what is actually going on in the \
+work: emerging themes, repeated struggles, decisions being made, risks \
+building up.
 
 Look for:
-- Unexpected groupings that reveal hidden connections
-- Clusters with high weight variance (inconsistent confidence)
-- Cross-agent clusters (same topic, multiple agents)
-- Missing clusters (topics you'd expect but don't see)
+- The same problem being fought repeatedly instead of fixed
+- Shifts in what the team spends its time on
+- Decisions and whether their outcomes ever materialized
+- Risks or frictions (auth, deploys, data quality) building up quietly
 
-Clusters:
+"""
+    + _RULES_WORLD
+    + """
+
+Records ("[repeats: Nx]" marks a record whose exact operation recurred N \
+times in the window — treat the repetition itself as signal about the work):
 {memories}
 
-Respond with JSON:
-{{
-  "findings": [
-    {{
-      "type": "discover",
-      "title": "short headline (max 80 chars)",
-      "description": "2-3 sentence explanation",
-      "confidence": 0.0 to 1.0,
-      "related_memory_ids": ["uuid1", "uuid2"],
-      "recommendation": "actionable next step"
-    }}
-  ],
-  "summary": "one paragraph overview"
-}}"""
+"""
+    + _FINDING_JSON_BLOCK
+)
+
+_PROMPT_DISCOVER = (
+    """\
+You are an operations analyst briefing the team on what their work records \
+reveal.
+
+These are {count} records grouped by similarity. THE GROUPS ARE A READING \
+AID, NOT THE SUBJECT — use them to scan efficiently, then report what the \
+records reveal about the work itself.
+
+Look for:
+- Recurring operational themes (and whether they represent progress or churn)
+- The same real-world problem showing up across several agents
+- Work that starts but never visibly completes or gets verified
+- Risks or dependencies the team may not have noticed
+
+"""
+    + _RULES_WORLD
+    + """
+
+Record groups:
+{memories}
+
+"""
+    + _FINDING_JSON_BLOCK
+)
 
 
 # -- Scope helpers -------------------------------------------------------------
@@ -555,16 +601,28 @@ def _format_clusters_for_analysis(clusters: list[dict]) -> tuple[str, set[str]]:
 
     Returns (text, shown_ids) — only representative IDs actually rendered
     into the prompt are included, keeping hallucination-filter accurate.
+
+    Scaffolding vocabulary is deliberately gate-neutral: an earlier revision
+    rendered "Cluster {id}" headers and "std=" stats — the exact tokens
+    ``_GATE_PROMPT_REF_RE`` / ``_GATE_META_RE`` reject in findings — priming
+    the model into violations and burning the repair round on the nightly
+    discover run (pre-contract, 80% of discover findings echoed this
+    vocabulary when shown it). Numeric cluster ids carry no value to the
+    model anyway (findings must reference records by their real ids), so
+    headers are anonymous groups, stats are worded, and the record noun
+    matches the prompts ("records", never "memories").
+    ``test_cluster_scaffolding_is_gate_neutral`` pins this invariant.
     """
     lines = []
     shown_ids: set[str] = set()
     for c in clusters:
-        lines.append(f"--- Cluster {c['cluster_id']} ({c['size']} memories) ---")
-        lines.append(f"  Weight: mean={c['weight_mean']:.2f}, std={c['weight_std']:.2f}")
+        lines.append(f"--- A group of {c['size']} related records ---")
+        lines.append(f"  Typical reliability {c['weight_mean']:.2f} (variability {c['weight_std']:.2f})")
         safe_agents = [_sanitize_content(a, max_len=100) for a in c["agents"]]
         lines.append(f"  Agents: {', '.join(safe_agents)} ({c['agent_count']} unique)")
-        lines.append(f"  Types: {c['type_distribution']}")
-        lines.append("  Representative memories:")
+        types = ", ".join(f"{t} x{n}" for t, n in c.get("type_distribution", {}).items())
+        lines.append(f"  Record types: {types}")
+        lines.append("  Representative records:")
         for r in c.get("representatives", []):
             title = _sanitize_content(r.get("title", "untitled"), max_len=120)
             content = _sanitize_content(r.get("content", ""), max_len=200)
@@ -601,16 +659,162 @@ def _fake_insights() -> dict:
     return {
         "findings": [
             {
-                "type": "patterns",
-                "title": "Fake insight for testing",
-                "description": "This is a placeholder finding generated by the fake provider.",
+                "headline": "Fake insight for testing",
+                "what_happened": "This is a placeholder finding generated by the fake provider.",
+                "why_it_matters": "It only exists so tests have a stable shape to assert on.",
+                "recommended_action": "Proceed; no action needed (fake provider).",
                 "confidence": 0.5,
                 "related_memory_ids": [],
-                "recommendation": "No action needed (fake provider).",
             }
         ],
         "summary": "Fake analysis complete.",
     }
+
+
+# -- Sharpness gate --------------------------------------------------------------
+#
+# Deterministic post-LLM enforcement of the clarity contract. The prompts
+# already forbid machinery-subject findings; the gate catches what slips
+# through, with one self-repair retry (the violations are quoted back to the
+# LLM). Rejected findings are dropped and counted — a rejected non-finding is
+# better than a persisted one.
+
+# World modes must never have the memory/clustering machinery as subject.
+_GATE_WORLD_MODES = frozenset({"discover", "patterns"})
+
+# Max violation bullets carried into the repair prompt (the finding count is
+# LLM-controlled, so the violation list is unbounded without this).
+_REPAIR_MAX_VIOLATIONS = 10
+
+# Machinery-subject markers (world modes: headline or action).
+# The memory-noun alternative must not false-positive on legitimate
+# operational findings about RAM/heap ("Memory usage spiked on the batch
+# worker"): fixed-width lookbehinds exclude hardware qualifiers and a
+# lookahead excludes resource-usage nouns, so only STORED-memory talk
+# ("multiple memories show...") counts as machinery-subject.
+# Two alternatives carry false-positive guards because the machinery words
+# double as legitimate infrastructure vocabulary:
+# - "memory": RAM/heap findings ("Memory usage spiked") are real operations
+#   subject matter — hardware qualifiers and resource nouns are excluded, so
+#   only STORED-memory talk ("multiple memories show...") counts.
+# - "cluster": compute clusters (Spark/Databricks/Kafka...) are real systems
+#   — named-technology qualifiers and capacity nouns are excluded, so only
+#   similarity-grouping talk ("Cluster 5", "re-cluster...") counts.
+# "cluster" detection is POSITIVE-SIGNAL, not an allowlist: an earlier
+# revision excluded a fixed set of technologies via lookbehinds
+# (spark/kafka/databricks/...), but legitimate infra phrasings are unbounded
+# ("application cluster", "staging cluster", "EKS cluster"...) and every miss
+# silently drops a valid finding. Instead, bare "cluster" only counts as
+# machinery when it co-occurs with clustering-analysis vocabulary; the
+# numbered ("Cluster 3" — _GATE_PROMPT_REF_RE), "re-cluster", "std=" and
+# "weight variance" cases are caught by their own checks. Trade-off: an
+# un-numbered, un-signalled machinery sentence ("this cluster is coherent")
+# relies on the prompt rules + repair loop rather than this regex.
+_GATE_META_RE = re.compile(
+    r"\bembeddings?\b|\bknowledge (base|graph|coverage|topolog)"
+    r"|\btaxonom|\bdedup|\bstd\s*=|weight variance|\bre-?cluster|\bthis (sample|analysis)\b"
+    r"|\b(similarity|embedding|semantic|record|memory) clusters?\b"
+    r"|\bclusters? of (records?|memor(y|ies)|episodes?|findings?|similar)\b"
+    r"|\b(singleton|bridge|missing|high.variance) clusters?\b"
+    r"|\bclusters? (formation|boundar|separation|overlap|topolog)"
+    # Hardware-memory exclusions: qualifier before the word (incl. capacity
+    # qualifiers: peak/available/free/used/total) OR resource noun/verb after
+    # it (incl. capacity movements: dropped/exceeded/critical/high). Residual
+    # known gap: a bare unqualified "Memory hit 90%" still flags — covered by
+    # the repair loop rather than growing this list unboundedly.
+    r"|(?<!out of )(?<!gpu )(?<!ram )(?<!heap )(?<!swap )(?<!system )(?<!shared )(?<!virtual )(?<!physical )"
+    r"(?<!peak )(?<!available )(?<!free )(?<!used )(?<!total )"
+    r"\bmemor(y|ies)\b(?!\s+(usage|leak|pressure|consumption|footprint|limit|spike|error|exhaust"
+    r"|utili[sz]ation|alloc|dropped|exceed|critical|high))",
+    re.IGNORECASE,
+)
+
+# Bookkeeping actions (world modes: the action must act on the world).
+# Two precision constraints, each pinned by tests:
+# - The verb may sit after a short hedge/subject prefix ("Analysts should
+#   record...", "Consider merging..."), so allow up to three FILLER words
+#   before it — a whitelist, not arbitrary words, lest real actions whose
+#   later words overlap these verbs get caught ("Fix the config writing
+#   logic" must pass).
+# - The verb alone is NOT enough: "Store the API credentials in the secrets
+#   manager", "Tag the PagerDuty incident as P1", "Merge the duplicate CRM
+#   vendor entries" are real operator actions. The verb must take a
+#   record-machinery OBJECT within a few words ("Record a postmortem
+#   memory...", "Consolidate these records..."). Exceptions: "re-cluster"
+#   (inherently machinery) and the "add a memory/metadata/tag/cluster" form,
+#   which already carries its object.
+_GATE_BOOKKEEPING_RE = re.compile(
+    r"^\s*((please|consider|agents?|analysts?|operators?|teams?|we|you|should|must|could|can|then|also)\s+){0,3}"
+    r"(?:(?:record(ing)?|tag(ging)?|stor(e|ing)|captur(e|ing)|annotat(e|ing)|merg(e|ing)|consolidat(e|ing)"
+    r"|writ(e|ing)|link(ing)?|supersed(e|ing)|deprecat(e|ing))\b"
+    r"(?:\s+[\w-]+){0,3}?\s+(memor(y|ies)|records?|findings?|insights?|clusters?|groups?)\b"
+    r"|re-?cluster(ing)?\b"
+    # "memor" needs its suffixes spelled out (as in _GATE_META_RE): the
+    # group-closing \b can never fire after the bare stem — "memory"/"memories"
+    # continue with word characters — so "Add a memory..." went uncaught.
+    r"|add (a |an )?(memor(y|ies)?|metadata|tag|cluster)\b)",
+    re.IGNORECASE,
+)
+
+# Prompt-local numbering (all modes): meaningless once persisted.
+# Deliberately narrow ("memory 5" / "cluster 3" only): "record"/"group"
+# false-positive on legitimate operational ids ("task group 4", "record #123"),
+# and the repair loop plus the prompt rules cover the residual phrasings.
+_GATE_PROMPT_REF_RE = re.compile(r"\b(memor(y|ies)|cluster(s|ing|ed)?)\s+#?\d", re.IGNORECASE)
+
+
+def _gate_findings(findings: list[dict], focus: str) -> tuple[list[dict], list[str]]:
+    """Split sanitized findings into (passed, violation_messages).
+
+    Hygiene modes (contradictions/failures/stale/divergence) legitimately have
+    the records as subject — only the prompt-local-numbering check applies.
+    World modes additionally reject machinery subjects and bookkeeping
+    actions.
+    """
+    passed: list[dict] = []
+    violations: list[str] = []
+    for f in findings:
+        headline = f.get("headline", "")
+        action = f.get("recommended_action", "")
+        text_fields = " | ".join(
+            str(f.get(k, "")) for k in ("headline", "what_happened", "why_it_matters", "recommended_action")
+        )
+        problems = []
+        if _GATE_PROMPT_REF_RE.search(text_fields):
+            problems.append(
+                "references prompt-local numbering (e.g. 'record 5') — name things by their real names"
+            )
+        if focus in _GATE_WORLD_MODES:
+            # All four fields, not just headline/action: machinery talk that
+            # hides in what_happened/why_it_matters ("the embedding separated
+            # them by workflow type") is the same defect.
+            if _GATE_META_RE.search(text_fields):
+                problems.append(
+                    "subject is the records/clustering machinery — report on the work the records describe"
+                )
+            if _GATE_BOOKKEEPING_RE.search(action):
+                problems.append(
+                    "recommended_action is record bookkeeping — it must act on systems or process"
+                )
+        if problems:
+            violations.append(f'"{headline[:80]}": ' + "; ".join(problems))
+        else:
+            passed.append(f)
+    return passed, violations
+
+
+_REPAIR_SUFFIX = """
+
+YOUR PREVIOUS ATTEMPT violated the rules for these findings:
+{violations}
+
+Return findings JSON containing ONLY corrected versions of the violating
+findings listed above — fix each so it complies with the RULES, or omit it
+entirely if no compliant version exists. Do NOT repeat findings that already
+complied, and do NOT introduce new findings. Same JSON shape, plus one extra
+field on each corrected finding: "repairs" — the ORIGINAL violating headline
+copied verbatim from the list above (this is a correlation key; corrected
+findings without a matching "repairs" value are discarded)."""
 
 
 # -- Persist -------------------------------------------------------------------
@@ -623,6 +827,7 @@ async def _persist_findings(
     focus: str,
     scope: str,
     findings: list[dict],
+    method: dict | None = None,
 ) -> list[str | None]:
     """Create insight-type memories for each finding.
 
@@ -732,19 +937,28 @@ async def _persist_findings(
     titles: list[str] = []
     items: list[BulkMemoryItem] = []
     for finding in findings:
-        title = str(finding.get("title", "Untitled insight"))[:80]
-        titles.append(title)
-        description = str(finding.get("description", ""))[:1000]
-        recommendation = str(finding.get("recommendation", ""))[:500]
+        headline = str(finding.get("headline") or finding.get("title") or "Untitled insight")[:80]
+        titles.append(headline)
+        what_happened = str(finding.get("what_happened") or finding.get("description") or "")[:1000]
+        why_it_matters = str(finding.get("why_it_matters") or "")[:300]
+        action = str(finding.get("recommended_action") or finding.get("recommendation") or "")[:500]
         confidence = max(0.0, min(1.0, float(finding.get("confidence", 0.5))))
         related_ids = finding.get("related_memory_ids", [])
 
-        content = f"[Insight/{finding.get('type', focus)}] {title}: {description}"
-        if recommendation:
-            content += f" Recommendation: {recommendation}"
+        # Clarity contract renderer: the headline leads (enrichment derives
+        # the memory ``title`` from it — ``BulkMemoryItem`` has no title
+        # field), followed by short labeled lines instead of the old run-on
+        # "[Insight/{type}] {title}: {description} Recommendation: ..."
+        # paragraph. Method/provenance lives in metadata, NOT in the text.
+        lines = [headline]
+        if what_happened:
+            lines.append(f"What happened: {what_happened}")
+        if why_it_matters:
+            lines.append(f"Why it matters: {why_it_matters}")
+        if action:
+            lines.append(f"Action: {action}")
+        content = "\n".join(lines)
 
-        # ``BulkMemoryItem`` has no ``title`` field — the title is encoded
-        # in ``content`` as "[Insight/{type}] {title}: {description}".
         items.append(
             BulkMemoryItem(
                 memory_type="insight",
@@ -755,8 +969,12 @@ async def _persist_findings(
                     "insight_scope": scope,
                     "insight_type": finding.get("type", focus),
                     "related_memory_ids": [str(rid) for rid in related_ids],
-                    "recommendation": recommendation,
+                    "headline": headline,
+                    "recommendation": action,
                     "confidence": confidence,
+                    # Method transparency: how this finding was produced —
+                    # kept out of the finding text, auditable here.
+                    "method": method or {"focus": focus, "scope": scope},
                 },
             )
         )
@@ -830,6 +1048,20 @@ def _to_float(val, default: float = 0.5) -> float:
         return default
 
 
+def _build_method(focus: str, scope: str, is_clustered: bool, synth: dict) -> dict:
+    """Run-level provenance stamped into each finding's ``metadata.method``.
+
+    Method transparency lives HERE (and in logs), never in the finding text —
+    the clarity contract keeps the insight sharp and the method auditable."""
+    return {
+        "focus": focus,
+        "scope": scope,
+        "memories_analyzed": synth.get("memories_analyzed", 0),
+        "clustered": is_clustered,
+        "gate_rejected": synth.get("gate_rejected", 0),
+    }
+
+
 # -- Public API ----------------------------------------------------------------
 
 
@@ -875,11 +1107,136 @@ async def synthesize_insights(
     prompt = prompt_template.format(memories=memories_text, count=count)
 
     analysis = await _run_llm_analysis(prompt, config)
+    sanitized, summary = _sanitize_findings(analysis, shown_ids, focus=focus, scope=scope)
 
+    # Sharpness gate + one self-repair retry: quote the violations back to
+    # the LLM once; findings that still violate after the retry are dropped.
+    passed, violations = _gate_findings(sanitized, focus)
+    gate_rejected = 0
+    if violations:
+        # Identity-based rescue tracking: violators are the sanitized
+        # findings that did NOT pass (same dict objects, so identity
+        # comparison is exact), and each violation message in ``violations``
+        # was appended in the same iteration order — zip-aligned below.
+        passed_ids = {id(f) for f in passed}
+        violators = [f for f in sanitized if id(f) not in passed_ids]
+        # FIFO queue per casefolded headline, NOT a flat dict: near-duplicate
+        # LLM headlines within one batch are likely, and a dict comprehension
+        # would silently collapse same-headline violators onto the last one —
+        # breaking echo correlation and the rescue accounting for exactly
+        # that case. With queues, each rescue echoing a shared headline
+        # consumes the next unfixed violator carrying it.
+        violators_by_headline: dict[str, list[dict]] = {}
+        for v in violators:
+            violators_by_headline.setdefault(v.get("headline", "").casefold(), []).append(v)
+        violation_msg_by_id = {id(v): msg for v, msg in zip(violators, violations, strict=True)}
+
+        # Repair-round trigger rate is the health metric for the clarity
+        # contract: the nightly lifecycle job runs discover for every tenant,
+        # so a high rate here means the prompts are priming violations (and
+        # every trigger is a second LLM call). One greppable line per
+        # invocation — watch its frequency after deploy.
+        logger.info(
+            "insights: gate flagged %d of %d findings; invoking repair round (focus=%s, scope=%s)",
+            len(violations),
+            len(sanitized),
+            focus,
+            scope,
+        )
+        # The LLM controls the finding count, so the violation list is
+        # unbounded — cap what the repair prompt carries. Violators beyond
+        # the cap simply can't be rescued (their headlines aren't in the
+        # prompt) and the identity-based accounting counts them rejected.
+        shown_violations = violations[:_REPAIR_MAX_VIOLATIONS]
+        if len(violations) > len(shown_violations):
+            logger.info(
+                "insights: repair prompt capped to %d of %d violations (focus=%s, scope=%s)",
+                len(shown_violations),
+                len(violations),
+                focus,
+                scope,
+            )
+        repair_prompt = prompt + _REPAIR_SUFFIX.format(
+            violations="\n".join(f"- {v}" for v in shown_violations)
+        )
+        try:
+            repaired = await _run_llm_analysis(repair_prompt, config)
+        except Exception:
+            logger.warning(
+                "insights: repair pass failed; keeping first-pass compliant findings", exc_info=True
+            )
+        else:
+            re_sanitized, re_summary = _sanitize_findings(repaired, shown_ids, focus=focus, scope=scope)
+            re_passed, _still_violating = _gate_findings(re_sanitized, focus)
+            # MERGE, never replace: findings that already passed the
+            # first-pass gate are kept unconditionally — an incomplete or
+            # malformed repair response can only fail to rescue violators,
+            # never lose compliant work. A repair-pass finding counts as a
+            # rescue ONLY if it ties back to a flagged violator: via its
+            # "repairs" echo key (the repair prompt requires the original
+            # violating headline verbatim) or, fallback, by keeping the
+            # violator's own headline while fixing the body. Anything else
+            # — inventions, echoes of kept findings — is dropped, so the
+            # repair cannot smuggle in findings the first pass never
+            # produced, and an invention can't mask an unrescued violator
+            # in the accounting.
+            kept_headlines = {f.get("headline", "").casefold() for f in passed}
+            rescued: list[dict] = []
+            fixed_violator_ids: set[int] = set()
+            for f in re_passed:
+                echo = str(f.pop("repairs", "") or "").casefold()
+                own = f.get("headline", "").casefold()
+                queue = violators_by_headline.get(echo) or violators_by_headline.get(own) or []
+                violator = next((v for v in queue if id(v) not in fixed_violator_ids), None)
+                if violator is None or own in kept_headlines:
+                    continue
+                fixed_violator_ids.add(id(violator))
+                rescued.append(f)
+                # Rescued findings join the dedup set so two rescues can't
+                # merge under one identical new headline.
+                kept_headlines.add(own)
+            passed = passed + rescued
+            # gate_rejected = original violators minus confirmed-fixed ones;
+            # the surviving messages are exactly the unfixed violators'.
+            violations = [violation_msg_by_id[id(v)] for v in violators if id(v) not in fixed_violator_ids]
+            summary = re_summary or summary
+        gate_rejected = len(violations)
+        if gate_rejected:
+            logger.info(
+                "insights: gate dropped %d findings after repair (focus=%s, scope=%s): %s",
+                gate_rejected,
+                focus,
+                scope,
+                " | ".join(violations)[:500],
+            )
+
+    return {
+        # A first-pass model that hallucinates the repair-only "repairs" key
+        # must not leak it to consumers/persist (rescued findings had theirs
+        # popped during correlation).
+        "findings": [{k: v for k, v in f.items() if k != "repairs"} for f in passed],
+        "summary": summary,
+        "memories_analyzed": count,
+        "gate_rejected": gate_rejected,
+    }
+
+
+def _sanitize_findings(
+    analysis: dict, shown_ids: set[str], *, focus: str, scope: str
+) -> tuple[list[dict], str]:
+    """Normalize an LLM response into finding dicts.
+
+    New schema (headline / what_happened / why_it_matters /
+    recommended_action) with fallbacks from the legacy keys (title /
+    description / recommendation), so a model that answers old-style still
+    works. Every finding also carries the legacy keys MIRRORED from the new
+    fields — downstream consumers (digest agents, dashboards) that read
+    ``title``/``description``/``recommendation`` keep working unchanged.
+    """
     findings = analysis.get("findings", [])
     if not isinstance(findings, list):
         findings = []
-    sanitized = []
+    sanitized: list[dict] = []
     total_dropped = 0
     findings_with_drops = 0
     for f in findings:
@@ -891,16 +1248,33 @@ async def synthesize_insights(
         if dropped > 0:
             total_dropped += dropped
             findings_with_drops += 1
-        sanitized.append(
-            {
-                "type": str(f.get("type", focus))[:50],
-                "title": str(f.get("title", "Untitled"))[:80],
-                "description": str(f.get("description", "")),
-                "confidence": max(0.0, min(1.0, _to_float(f.get("confidence", 0.5)))),
-                "related_memory_ids": kept_related,
-                "recommendation": str(f.get("recommendation", "")),
-            }
-        )
+        # Same length caps the persist path applies — the gate and the
+        # repair prompt must operate on the exact bounded text that
+        # ultimately gets persisted, not on a longer variant.
+        headline = str(f.get("headline") or f.get("title") or "Untitled")[:80]
+        what_happened = str(f.get("what_happened") or f.get("description") or "")[:1000]
+        why_it_matters = str(f.get("why_it_matters") or "")[:300]
+        action = str(f.get("recommended_action") or f.get("recommendation") or "")[:500]
+        item = {
+            "type": str(f.get("type", focus))[:50],
+            "headline": headline,
+            "what_happened": what_happened,
+            "why_it_matters": why_it_matters,
+            "recommended_action": action,
+            "confidence": max(0.0, min(1.0, _to_float(f.get("confidence", 0.5)))),
+            "related_memory_ids": kept_related,
+            # Legacy mirrors — see docstring.
+            "title": headline,
+            "description": " ".join(p for p in (what_happened, why_it_matters) if p),
+            "recommendation": action,
+        }
+        # Repair-pass correlation key: the repair prompt asks each corrected
+        # finding to echo the ORIGINAL violating headline verbatim so the
+        # merge can tie the rescue back to a flagged violator. Carried only
+        # when present; the merge block consumes (pops) it.
+        if f.get("repairs"):
+            item["repairs"] = str(f.get("repairs"))[:80]
+        sanitized.append(item)
     if total_dropped > 0:
         logger.info(
             "insights: dropped %d hallucinated related_memory_ids across %d findings (focus=%s, scope=%s)",
@@ -909,12 +1283,7 @@ async def synthesize_insights(
             focus,
             scope,
         )
-
-    return {
-        "findings": sanitized,
-        "summary": analysis.get("summary", ""),
-        "memories_analyzed": count,
-    }
+    return sanitized, analysis.get("summary", "")
 
 
 async def generate_insights(
@@ -987,6 +1356,7 @@ async def generate_insights(
             "findings": [],
             "summary": "No relevant memories found for this analysis.",
             "insight_memory_ids": [],
+            "gate_rejected": 0,
             "insights_ms": int((time.perf_counter() - t0) * 1000),
         }
 
@@ -1011,7 +1381,10 @@ async def generate_insights(
     # bulk-create and restore are each storage-committed independently — there
     # is no caller-side transaction to commit (``db`` is now None on the
     # storage-routed paths).
-    insight_ids = await _persist_findings(tenant_id, agent_id, fleet_id, focus, scope, findings)
+    method = _build_method(focus, scope, is_clustered, synth)
+    insight_ids = await _persist_findings(
+        tenant_id, agent_id, fleet_id, focus, scope, findings, method=method
+    )
 
     return {
         "focus": focus,
@@ -1020,5 +1393,6 @@ async def generate_insights(
         "findings": [{**f, "insight_memory_id": mid} for f, mid in zip(findings, insight_ids)],
         "summary": synth["summary"],
         "insight_memory_ids": [mid for mid in insight_ids if mid],
+        "gate_rejected": synth.get("gate_rejected", 0),
         "insights_ms": int((time.perf_counter() - t0) * 1000),
     }

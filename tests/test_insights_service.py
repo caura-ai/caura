@@ -258,8 +258,7 @@ class TestFormatClusters:
             },
         ]
         result, shown_ids = _format_clusters_for_analysis(clusters)
-        assert "Cluster 0" in result
-        assert "10 memories" in result
+        assert "A group of 10 related records" in result
         assert "agent-a" in result
         assert shown_ids == {"rep1"}
 
@@ -276,12 +275,344 @@ class TestFakeInsights:
         assert isinstance(result["findings"], list)
         assert len(result["findings"]) >= 1
         finding = result["findings"][0]
-        assert "type" in finding
-        assert "title" in finding
-        assert "description" in finding
+        # Clarity-contract schema (legacy title/description/recommendation
+        # mirrors are added by _sanitize_findings, not by the raw provider).
+        assert "headline" in finding
+        assert "what_happened" in finding
+        assert "why_it_matters" in finding
+        assert "recommended_action" in finding
         assert "confidence" in finding
         assert "related_memory_ids" in finding
-        assert "recommendation" in finding
+
+
+class TestSanitizeFindings:
+    """_sanitize_findings: new schema, legacy fallbacks, legacy mirrors."""
+
+    def test_new_schema_with_legacy_mirrors(self):
+        from core_api.services.insights_service import _sanitize_findings
+
+        findings, summary = _sanitize_findings(
+            {
+                "findings": [
+                    {
+                        "headline": "Backups fail on repo drift",
+                        "what_happened": "Backup exits 4 whenever main is ahead of origin.",
+                        "why_it_matters": "No workspace backup exists during drift windows.",
+                        "recommended_action": "Auto-push pending commits before the backup job runs.",
+                        "confidence": 0.9,
+                        "related_memory_ids": ["m1", "hallucinated"],
+                    }
+                ],
+                "summary": "s",
+            },
+            shown_ids={"m1"},
+            focus="patterns",
+            scope="all",
+        )
+        assert summary == "s"
+        f = findings[0]
+        assert f["headline"] == "Backups fail on repo drift"
+        assert f["related_memory_ids"] == ["m1"]  # hallucinated id dropped
+        # Legacy mirrors for downstream consumers.
+        assert f["title"] == f["headline"]
+        assert f["recommendation"] == f["recommended_action"]
+        assert (
+            "exits 4" in f["description"] and "No workspace backup" in f["description"]
+        )
+
+    def test_legacy_answer_accepted(self):
+        """A model that ignores the new schema and answers old-style still works."""
+        from core_api.services.insights_service import _sanitize_findings
+
+        findings, _ = _sanitize_findings(
+            {
+                "findings": [
+                    {
+                        "title": "Old-style title",
+                        "description": "Old-style description.",
+                        "recommendation": "Old-style action.",
+                        "confidence": 0.4,
+                        "related_memory_ids": [],
+                    }
+                ]
+            },
+            shown_ids=set(),
+            focus="patterns",
+            scope="all",
+        )
+        f = findings[0]
+        assert f["headline"] == "Old-style title"
+        assert f["what_happened"] == "Old-style description."
+        assert f["recommended_action"] == "Old-style action."
+
+
+class TestSharpnessGate:
+    """_gate_findings: machinery-subject and bookkeeping findings rejected."""
+
+    @staticmethod
+    def _finding(**kw):
+        base = {
+            "headline": "Health monitoring runs as two disconnected loops",
+            "what_happened": "Heartbeat and cleanup fire independently across 6 agents.",
+            "why_it_matters": "A disk-full event alerts twice with no shared cooldown.",
+            "recommended_action": "Unify triggers and cooldowns in the monitoring workflow.",
+        }
+        base.update(kw)
+        return base
+
+    def test_world_mode_rejects_machinery_subject(self):
+        from core_api.services.insights_service import _gate_findings
+
+        passed, violations = _gate_findings(
+            [self._finding(headline="Cluster 5 has high weight variance (std=0.22)")],
+            "discover",
+        )
+        assert passed == []
+        assert len(violations) == 1 and "machinery" in violations[0]
+
+    def test_world_mode_rejects_non_imperative_bookkeeping_action(self):
+        """The bookkeeping verb may hide behind a hedge/subject prefix —
+        'Analysts should record...', 'Consider merging...' — and must still
+        be caught; but real actions whose LATER words overlap the verbs
+        ('Fix the config writing logic') must pass."""
+        from core_api.services.insights_service import _gate_findings
+
+        for action in (
+            "Analysts should record a postmortem memory for each incident.",
+            "Consider merging these near-duplicate records into one.",
+            "We should tag every incident record going forward.",
+        ):
+            passed, violations = _gate_findings(
+                [self._finding(recommended_action=action)], "patterns"
+            )
+            assert passed == [], f"not caught: {action!r}"
+            assert "bookkeeping" in violations[0]
+
+        for action in (
+            "Fix the config writing logic in the deploy script.",
+            "Restart the service and record the outcome in the runbook.",
+        ):
+            passed, violations = _gate_findings(
+                [self._finding(recommended_action=action)], "patterns"
+            )
+            assert passed != [], f"false positive: {action!r} — {violations}"
+
+    def test_bookkeeping_verbs_require_machinery_object(self):
+        """A bookkeeping verb alone is not enough — 'Store the API
+        credentials...' is a real operator action. The verb must take a
+        record-machinery object within a few words."""
+        from core_api.services.insights_service import _gate_findings
+
+        for action in (
+            "Store the API credentials in the secrets manager.",
+            "Tag the PagerDuty incident as P1.",
+            "Merge the duplicate CRM vendor entries.",
+            "Write a runbook update for the on-call rotation.",
+            "Link the outage to the incident tracker.",
+            "Deprecate the legacy v1 endpoint.",
+        ):
+            passed, violations = _gate_findings(
+                [self._finding(recommended_action=action)], "patterns"
+            )
+            assert passed != [], f"false positive: {action!r} — {violations}"
+
+        for action in (
+            "Store these findings in a shared index.",
+            "Consolidate the duplicate records into one.",
+            "Merge overlapping insights across agents.",
+        ):
+            passed, violations = _gate_findings(
+                [self._finding(recommended_action=action)], "patterns"
+            )
+            assert passed == [], f"not caught: {action!r}"
+            assert "bookkeeping" in violations[0]
+
+    def test_infra_cluster_phrasings_are_not_meta(self):
+        """'cluster' is machinery only with clustering-analysis co-occurrence
+        — arbitrary infra clusters (not just an allowlist of technologies)
+        must pass."""
+        from core_api.services.insights_service import _gate_findings
+
+        for headline, body in (
+            (
+                "Application cluster restarts loop during deploys",
+                "The staging cluster restarted 9 times.",
+            ),
+            (
+                "EKS cluster autoscaling exhausted the node quota",
+                "The web cluster hit its pod limit.",
+            ),
+        ):
+            f = self._finding(headline=headline, what_happened=body)
+            passed, violations = _gate_findings([f], "discover")
+            assert passed == [f], f"false positive: {headline!r} — {violations}"
+
+        for machinery_headline in (
+            "The similarity clusters overlap heavily",
+            "Singleton cluster fragmentation persists",
+            "Clusters of records with no verification steps",
+        ):
+            f = self._finding(headline=machinery_headline)
+            passed, violations = _gate_findings([f], "discover")
+            assert passed == [], f"not caught: {machinery_headline!r}"
+
+    def test_world_mode_rejects_add_memory_actions(self):
+        """The 'add a memory' phrasing must be caught — the bare 'memor' stem
+        followed by \\b could never match it (regression pin)."""
+        from core_api.services.insights_service import _gate_findings
+
+        for action in (
+            "Add a memory for the follow-up.",
+            "Add a memory tag for this.",
+            "Add memories for each verification step.",
+        ):
+            passed, violations = _gate_findings(
+                [self._finding(recommended_action=action)], "patterns"
+            )
+            assert passed == [], f"not caught: {action!r}"
+            assert "bookkeeping" in violations[0]
+
+        # Legitimate world actions starting with "Add" must keep passing.
+        passed, violations = _gate_findings(
+            [
+                self._finding(
+                    recommended_action="Add an alert threshold for disk usage."
+                )
+            ],
+            "patterns",
+        )
+        assert passed != [], violations
+
+    def test_world_mode_rejects_bookkeeping_action(self):
+        from core_api.services.insights_service import _gate_findings
+
+        passed, violations = _gate_findings(
+            [
+                self._finding(
+                    recommended_action="Record a postmortem memory for each incident."
+                )
+            ],
+            "patterns",
+        )
+        assert passed == []
+        assert "bookkeeping" in violations[0]
+
+    def test_all_modes_reject_prompt_local_numbering(self):
+        from core_api.services.insights_service import _gate_findings
+
+        bad = self._finding(
+            what_happened="Memory 5 explicitly states the report was blocked."
+        )
+        for focus in ("discover", "contradictions"):
+            passed, violations = _gate_findings([bad], focus)
+            assert passed == []
+            assert "numbering" in violations[0]
+
+    def test_hygiene_mode_allows_memory_subject(self):
+        from core_api.services.insights_service import _gate_findings
+
+        f = self._finding(
+            headline="Gateway endpoint: old.example superseded by new.example",
+            what_happened="An older record still claims old.example; the corrected value is new.example.",
+            recommended_action="Trust new.example; stop relying on the April endpoint value.",
+        )
+        passed, violations = _gate_findings([f], "contradictions")
+        assert passed == [f]
+        assert violations == []
+
+    def test_world_mode_passes_clean_finding(self):
+        from core_api.services.insights_service import _gate_findings
+
+        f = self._finding()
+        passed, violations = _gate_findings([f], "discover")
+        assert passed == [f]
+        assert violations == []
+
+    def test_hardware_memory_findings_are_not_meta(self):
+        """RAM/heap talk is legitimate operations subject matter — only
+        STORED-memory talk counts as machinery-subject."""
+        from core_api.services.insights_service import _gate_findings
+
+        for headline, action in [
+            (
+                "Memory usage spiked on the batch worker",
+                "Raise the worker's memory limit to 4GB.",
+            ),
+            (
+                "Batch worker killed: out of memory during Spark merge",
+                "Cap partition size in the merge job.",
+            ),
+            (
+                "GPU memory exhaustion blocks the nightly training run",
+                "Reduce batch size on the trainer.",
+            ),
+            (
+                "Peak memory hit 90% during the nightly batch",
+                "Split the batch into two runs.",
+            ),
+            (
+                "Available memory dropped below threshold on ingest",
+                "Add headroom alerts on the ingest node.",
+            ),
+            (
+                "Worker memory exceeded the cgroup ceiling",
+                "Raise the cgroup ceiling to 8GB.",
+            ),
+        ]:
+            f = self._finding(headline=headline, recommended_action=action)
+            passed, violations = _gate_findings([f], "discover")
+            assert passed == [f], f"false positive on: {headline!r} — {violations}"
+
+    def test_stored_memory_talk_still_rejected(self):
+        from core_api.services.insights_service import _gate_findings
+
+        f = self._finding(headline="Several memories lack verification of outcomes")
+        passed, violations = _gate_findings([f], "discover")
+        assert passed == []
+        assert "machinery" in violations[0]
+
+    def test_machinery_talk_in_body_fields_rejected(self):
+        """A clean headline must not smuggle machinery talk through
+        what_happened/why_it_matters — the gate scans all four fields."""
+        from core_api.services.insights_service import _gate_findings
+
+        f = self._finding(
+            what_happened="The embedding separated these workflows by type rather than by team."
+        )
+        passed, violations = _gate_findings([f], "discover")
+        assert passed == []
+        assert "machinery" in violations[0]
+
+    def test_compute_cluster_findings_are_not_meta(self):
+        """Spark/Databricks/Kafka clusters are real systems — only
+        similarity-grouping talk counts as machinery."""
+        from core_api.services.insights_service import _gate_findings
+
+        f = self._finding(
+            headline="Spark cluster jobs failing on the nightly merge stage",
+            what_happened="The Databricks cluster ran out of capacity during the AppsFlyer merge on Jul 30.",
+            recommended_action="Raise the cluster capacity or split the merge job.",
+        )
+        passed, violations = _gate_findings([f], "discover")
+        assert passed == [f], violations
+
+    def test_operational_group_ids_are_not_prompt_refs(self):
+        """'task group 4' is a legitimate operational id — only 'memory N' /
+        'cluster N' count as prompt-local numbering."""
+        from core_api.services.insights_service import _gate_findings
+
+        f = self._finding(
+            what_happened="Task group 4 failed twice; record #123 was reprocessed."
+        )
+        passed, violations = _gate_findings([f], "discover")
+        assert passed == [f], violations
+
+    def test_cluster_numbering_still_rejected(self):
+        from core_api.services.insights_service import _gate_findings
+
+        f = self._finding(what_happened="Cluster 3 groups the incident-response work.")
+        passed, violations = _gate_findings([f], "discover")
+        assert passed == []
 
 
 class TestNumpyKmeans:
@@ -403,6 +734,45 @@ class TestFormatterDedupAnnotation:
         )
         assert "[repeats: 7x]" in text
         assert shown == {"r1", "r2"}
+
+    def test_cluster_scaffolding_is_gate_neutral(self):
+        """The rendered cluster scaffolding must not hand the model the very
+        tokens the sharpness gate rejects ("Cluster N", "std=", "memories") —
+        that primes violations and burns the repair round on every nightly
+        discover run. Representative titles/content are user data and exempt;
+        this fixture keeps them neutral so the check isolates OUR scaffolding."""
+        from core_api.services.insights_service import (
+            _GATE_META_RE,
+            _GATE_PROMPT_REF_RE,
+            _format_clusters_for_analysis,
+        )
+
+        text, _ = _format_clusters_for_analysis(
+            [
+                {
+                    "cluster_id": 3,
+                    "size": 41,
+                    "weight_mean": 0.62,
+                    "weight_std": 0.22,
+                    "agent_count": 2,
+                    "agents": ["a1", "a2"],
+                    "type_distribution": {"episode": 40, "fact": 1},
+                    "representatives": [
+                        {
+                            "id": "r1",
+                            "memory_type": "episode",
+                            "title": "Bastion tunnel opened",
+                            "content": "ssh session established",
+                            "dup_count": 12,
+                        }
+                    ],
+                }
+            ]
+        )
+        assert not _GATE_PROMPT_REF_RE.search(text), text
+        assert not _GATE_META_RE.search(text), text
+        assert "std=" not in text
+        assert "memories" not in text.casefold()
 
 
 class TestScopeFilters:
@@ -1068,5 +1438,496 @@ class TestHallucinatedIds:
             findings = result["findings"]
             assert len(findings) == 1
             assert findings[0]["related_memory_ids"] == [a_id]
+        finally:
+            await _cleanup_tenant(tenant_id)
+
+
+# ---------------------------------------------------------------------------
+# Clarity contract: content renderer, method metadata, gate + repair loop
+# ---------------------------------------------------------------------------
+
+
+def _clean_finding(**kw):
+    base = {
+        "headline": "Backups fail whenever main drifts ahead of origin",
+        "what_happened": "The workspace backup exits 4 while main is ~90 commits ahead.",
+        "why_it_matters": "No backup exists during drift windows.",
+        "recommended_action": "Auto-push pending commits before the backup job runs.",
+        "confidence": 0.8,
+        "related_memory_ids": [],
+    }
+    base.update(kw)
+    return base
+
+
+class TestClarityPersist:
+    @pytest.mark.asyncio
+    async def test_content_rendered_as_labeled_lines_with_method(self, monkeypatch):
+        """Persisted content = headline + labeled lines; no '[Insight/' scaffold;
+        method provenance in metadata, not in the text."""
+        tag = _uid()
+        tenant_id = f"test-tenant-{tag}"
+        try:
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=f"a-{tag}",
+                content=f"work happened [{tag}]",
+            )
+            await _stub_llm(monkeypatch, findings=[_clean_finding()])
+
+            from core_api.services.insights_service import generate_insights
+
+            result = await generate_insights(
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                agent_id=f"a-{tag}",
+            )
+            assert result["gate_rejected"] == 0
+            rows = await _insight_rows(tenant_id)
+            assert len(rows) == 1
+            async with get_session() as session:
+                content = (
+                    await session.execute(
+                        text(
+                            "SELECT content FROM memories WHERE id = CAST(:id AS uuid)"
+                        ),
+                        {"id": rows[0].id},
+                    )
+                ).scalar_one()
+            lines = content.split("\n")
+            assert lines[0] == "Backups fail whenever main drifts ahead of origin"
+            assert lines[1].startswith("What happened: ")
+            assert lines[2].startswith("Why it matters: ")
+            assert lines[3].startswith("Action: ")
+            assert "[Insight/" not in content
+            meta = rows[0].metadata
+            if isinstance(meta, str):
+                meta = _json.loads(meta)
+            assert meta["headline"] == lines[0]
+            assert meta["method"]["focus"] == "patterns"
+            assert meta["method"]["clustered"] is False
+            assert meta["method"]["memories_analyzed"] == 1
+        finally:
+            await _cleanup_tenant(tenant_id)
+
+    @pytest.mark.asyncio
+    async def test_result_findings_carry_legacy_mirrors(self, monkeypatch):
+        """REST/MCP consumers reading title/description/recommendation keep working."""
+        tag = _uid()
+        tenant_id = f"test-tenant-{tag}"
+        try:
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=f"a-{tag}",
+                content=f"work happened [{tag}]",
+            )
+            await _stub_llm(monkeypatch, findings=[_clean_finding()])
+
+            from core_api.services.insights_service import generate_insights
+
+            result = await generate_insights(
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                agent_id=f"a-{tag}",
+            )
+            f = result["findings"][0]
+            assert f["title"] == f["headline"]
+            assert f["recommendation"] == f["recommended_action"]
+            assert f["what_happened"] in f["description"]
+        finally:
+            await _cleanup_tenant(tenant_id)
+
+
+class TestGateRepairLoop:
+    @pytest.mark.asyncio
+    async def test_violating_finding_triggers_repair_and_uses_second_pass(
+        self, monkeypatch
+    ):
+        """First pass violates the contract → one repair call; its compliant
+        output is what gets persisted; gate_rejected counts what still failed."""
+        tag = _uid()
+        tenant_id = f"test-tenant-{tag}"
+        calls = []
+        from core_api.services import insights_service
+
+        async def fake_run(prompt, config):
+            calls.append(prompt)
+            if len(calls) == 1:
+                return {
+                    "findings": [
+                        _clean_finding(
+                            headline="Cluster 5 has high weight variance (std=0.22)",
+                            recommended_action="Re-cluster with a finer label set.",
+                        )
+                    ],
+                    "summary": "first",
+                }
+            return {
+                "findings": [
+                    {
+                        **_clean_finding(),
+                        # Correlation key required by the repair contract:
+                        # the original violating headline, verbatim.
+                        "repairs": "Cluster 5 has high weight variance (std=0.22)",
+                    }
+                ],
+                "summary": "repaired",
+            }
+
+        monkeypatch.setattr(insights_service, "_run_llm_analysis", fake_run)
+        try:
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=f"a-{tag}",
+                content=f"work happened [{tag}]",
+            )
+            from core_api.services.insights_service import generate_insights
+
+            result = await generate_insights(
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                agent_id=f"a-{tag}",
+            )
+            assert len(calls) == 2, (
+                "gate violation must trigger exactly one repair call"
+            )
+            assert "YOUR PREVIOUS ATTEMPT" in calls[1]
+            assert "Cluster 5 has high weight variance" in calls[1]
+            assert result["gate_rejected"] == 0
+            assert result["summary"] == "repaired"
+            assert [f["headline"] for f in result["findings"]] == [
+                "Backups fail whenever main drifts ahead of origin"
+            ]
+        finally:
+            await _cleanup_tenant(tenant_id)
+
+    @pytest.mark.asyncio
+    async def test_still_violating_after_repair_is_dropped_and_counted(
+        self, monkeypatch
+    ):
+        tag = _uid()
+        tenant_id = f"test-tenant-{tag}"
+        from core_api.services import insights_service
+
+        bad = _clean_finding(
+            headline="Cluster 5 has high weight variance (std=0.22)",
+            recommended_action="Re-cluster with a finer label set.",
+        )
+
+        async def fake_run(prompt, config):
+            return {"findings": [bad, _clean_finding()], "summary": "s"}
+
+        monkeypatch.setattr(insights_service, "_run_llm_analysis", fake_run)
+        try:
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=f"a-{tag}",
+                content=f"work happened [{tag}]",
+            )
+            from core_api.services.insights_service import generate_insights
+
+            result = await generate_insights(
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                agent_id=f"a-{tag}",
+            )
+            assert result["gate_rejected"] == 1
+            assert [f["headline"] for f in result["findings"]] == [
+                "Backups fail whenever main drifts ahead of origin"
+            ]
+        finally:
+            await _cleanup_tenant(tenant_id)
+
+    @pytest.mark.asyncio
+    async def test_compliant_findings_survive_sloppy_repair(self, monkeypatch):
+        """The repair merges, never replaces: findings that already passed the
+        first-pass gate are kept unconditionally, so an incomplete or empty
+        repair response can only fail to rescue violators — it can never lose
+        compliant work."""
+        tag = _uid()
+        tenant_id = f"test-tenant-{tag}"
+        from core_api.services import insights_service
+
+        bad = _clean_finding(
+            headline="Cluster 5 has high weight variance (std=0.22)",
+            recommended_action="Re-cluster with a finer label set.",
+        )
+
+        async def fake_run(prompt, config):
+            if "YOUR PREVIOUS ATTEMPT" in prompt:
+                # Sloppy repair: returns NOTHING instead of a corrected
+                # version of the violating finding.
+                return {"findings": [], "summary": "repaired"}
+            return {
+                "findings": [
+                    _clean_finding(),
+                    _clean_finding(
+                        headline="Portfolio brief missed its window twice this week"
+                    ),
+                    bad,
+                ],
+                "summary": "first",
+            }
+
+        monkeypatch.setattr(insights_service, "_run_llm_analysis", fake_run)
+        try:
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=f"a-{tag}",
+                content=f"work happened [{tag}]",
+            )
+            from core_api.services.insights_service import generate_insights
+
+            result = await generate_insights(
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                agent_id=f"a-{tag}",
+            )
+            # Both first-pass-compliant findings survive; only the violator
+            # is gone (and counted).
+            assert [f["headline"] for f in result["findings"]] == [
+                "Backups fail whenever main drifts ahead of origin",
+                "Portfolio brief missed its window twice this week",
+            ]
+            assert result["gate_rejected"] == 1
+        finally:
+            await _cleanup_tenant(tenant_id)
+
+    @pytest.mark.asyncio
+    async def test_repair_prompt_caps_violations(self, monkeypatch, caplog):
+        """The finding count is LLM-controlled — the repair prompt must carry
+        at most _REPAIR_MAX_VIOLATIONS violation bullets, and the overflow
+        must be logged. Uncapped violators simply aren't rescued and count
+        as rejected."""
+        import logging as _logging
+
+        tag = _uid()
+        tenant_id = f"test-tenant-{tag}"
+        from core_api.services import insights_service
+
+        bads = [
+            _clean_finding(
+                headline=f"Cluster {i} has high weight variance (std=0.2{i})",
+                recommended_action="Re-cluster with a finer label set.",
+            )
+            for i in range(12)
+        ]
+        captured: list[str] = []
+
+        async def fake_run(prompt, config):
+            if "YOUR PREVIOUS ATTEMPT" in prompt:
+                captured.append(prompt)
+                return {"findings": [], "summary": "repaired"}
+            return {"findings": bads, "summary": "first"}
+
+        monkeypatch.setattr(insights_service, "_run_llm_analysis", fake_run)
+        try:
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=f"a-{tag}",
+                content=f"work happened [{tag}]",
+            )
+            from core_api.services.insights_service import generate_insights
+
+            with caplog.at_level(
+                _logging.INFO, logger="core_api.services.insights_service"
+            ):
+                result = await generate_insights(
+                    tenant_id=tenant_id,
+                    focus="patterns",
+                    scope="agent",
+                    agent_id=f"a-{tag}",
+                )
+            assert len(captured) == 1
+            suffix = captured[0].split("YOUR PREVIOUS ATTEMPT", 1)[1]
+            bullet_count = sum(
+                1 for line in suffix.splitlines() if line.startswith("- ")
+            )
+            assert bullet_count == insights_service._REPAIR_MAX_VIOLATIONS
+            assert any(
+                "repair prompt capped to 10 of 12" in r.message for r in caplog.records
+            )
+            # Every violator dies (repair returned nothing) — all 12 counted.
+            assert result["gate_rejected"] == 12
+            assert result["findings"] == []
+        finally:
+            await _cleanup_tenant(tenant_id)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_headline_violators_rescued_independently(
+        self, monkeypatch
+    ):
+        """Two violators sharing a casefold-equal headline must each get
+        their own rescue slot — a headline-keyed dict would silently collapse
+        them onto one, breaking the echo correlation and the accounting."""
+        tag = _uid()
+        tenant_id = f"test-tenant-{tag}"
+        from core_api.services import insights_service
+
+        shared = "Cluster 5 has high weight variance (std=0.22)"
+        bad1 = _clean_finding(
+            headline=shared, recommended_action="Re-cluster with a finer label set."
+        )
+        bad2 = _clean_finding(
+            headline=shared, recommended_action="Re-cluster with coarser labels."
+        )
+
+        async def fake_run(prompt, config):
+            if "YOUR PREVIOUS ATTEMPT" in prompt:
+                return {
+                    "findings": [
+                        {
+                            **_clean_finding(
+                                headline="Nightly merge stalls on unverified handoffs"
+                            ),
+                            "repairs": shared,
+                        },
+                        {
+                            **_clean_finding(
+                                headline="Portfolio brief missed its window twice this week"
+                            ),
+                            "repairs": shared,
+                        },
+                    ],
+                    "summary": "repaired",
+                }
+            return {"findings": [bad1, bad2], "summary": "first"}
+
+        monkeypatch.setattr(insights_service, "_run_llm_analysis", fake_run)
+        try:
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=f"a-{tag}",
+                content=f"work happened [{tag}]",
+            )
+            from core_api.services.insights_service import generate_insights
+
+            result = await generate_insights(
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                agent_id=f"a-{tag}",
+            )
+            # BOTH violators independently rescued: two distinct corrected
+            # findings, zero rejected.
+            assert sorted(f["headline"] for f in result["findings"]) == [
+                "Nightly merge stalls on unverified handoffs",
+                "Portfolio brief missed its window twice this week",
+            ]
+            assert result["gate_rejected"] == 0
+        finally:
+            await _cleanup_tenant(tenant_id)
+
+    @pytest.mark.asyncio
+    async def test_repair_inventions_are_dropped_not_merged(self, monkeypatch):
+        """A repair-pass finding that can't be tied back to a flagged
+        violator (no valid "repairs" echo, new headline) is an invention —
+        it must be dropped, and the unrescued violator still counts as
+        rejected instead of being masked by the invention."""
+        tag = _uid()
+        tenant_id = f"test-tenant-{tag}"
+        from core_api.services import insights_service
+
+        bad = _clean_finding(
+            headline="Cluster 5 has high weight variance (std=0.22)",
+            recommended_action="Re-cluster with a finer label set.",
+        )
+
+        async def fake_run(prompt, config):
+            if "YOUR PREVIOUS ATTEMPT" in prompt:
+                # Compliant but unrelated to any flagged violator, and no
+                # "repairs" correlation key.
+                return {
+                    "findings": [
+                        _clean_finding(
+                            headline="Invented: onboarding flow drops half the signups"
+                        )
+                    ],
+                    "summary": "repaired",
+                }
+            return {"findings": [_clean_finding(), bad], "summary": "first"}
+
+        monkeypatch.setattr(insights_service, "_run_llm_analysis", fake_run)
+        try:
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=f"a-{tag}",
+                content=f"work happened [{tag}]",
+            )
+            from core_api.services.insights_service import generate_insights
+
+            result = await generate_insights(
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                agent_id=f"a-{tag}",
+            )
+            assert [f["headline"] for f in result["findings"]] == [
+                "Backups fail whenever main drifts ahead of origin"
+            ]
+            assert result["gate_rejected"] == 1
+        finally:
+            await _cleanup_tenant(tenant_id)
+
+    @pytest.mark.asyncio
+    async def test_repair_repeating_kept_findings_is_deduped(self, monkeypatch):
+        """A model that ignores the ONLY-the-violators instruction and echoes
+        a kept finding back must not produce duplicates."""
+        tag = _uid()
+        tenant_id = f"test-tenant-{tag}"
+        from core_api.services import insights_service
+
+        bad = _clean_finding(
+            headline="Cluster 5 has high weight variance (std=0.22)",
+            recommended_action="Re-cluster with a finer label set.",
+        )
+
+        async def fake_run(prompt, config):
+            if "YOUR PREVIOUS ATTEMPT" in prompt:
+                # Echoes the kept finding (headline case differs) alongside
+                # the genuinely rescued one (tied back via the "repairs" key).
+                return {
+                    "findings": [
+                        {
+                            **_clean_finding(
+                                headline="BACKUPS FAIL WHENEVER MAIN DRIFTS AHEAD OF ORIGIN"
+                            ),
+                            "repairs": "Cluster 5 has high weight variance (std=0.22)",
+                        },
+                        {
+                            **_clean_finding(
+                                headline="Nightly merge stalls on unverified handoffs"
+                            ),
+                            "repairs": "Cluster 5 has high weight variance (std=0.22)",
+                        },
+                    ],
+                    "summary": "repaired",
+                }
+            return {"findings": [_clean_finding(), bad], "summary": "first"}
+
+        monkeypatch.setattr(insights_service, "_run_llm_analysis", fake_run)
+        try:
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=f"a-{tag}",
+                content=f"work happened [{tag}]",
+            )
+            from core_api.services.insights_service import generate_insights
+
+            result = await generate_insights(
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                agent_id=f"a-{tag}",
+            )
+            assert [f["headline"] for f in result["findings"]] == [
+                "Backups fail whenever main drifts ahead of origin",
+                "Nightly merge stalls on unverified handoffs",
+            ]
         finally:
             await _cleanup_tenant(tenant_id)
