@@ -9,7 +9,7 @@ dependencies = [
     # instead of walking app.routes (0.137's include_router mounts a sub-app,
     # hiding prefixed paths from app.routes). The committed uv.lock pins the exact
     # version; this range only bounds future re-locks.
-    "fastapi>=0.140.0,<1",
+    "fastapi>=0.141.1,<1",
     "uvicorn[standard]>=0.51.0,<1",
     "sqlalchemy[asyncio]>=2.0,<3",
     # SQLAlchemy[asyncio] pulls in greenlet. greenlet 3.5.0 shipped wheels for
@@ -27,8 +27,8 @@ dependencies = [
     "alembic>=1.18.5,<2",
     "pydantic>=2.0,<3",
     "pydantic-settings>=2.14.2,<3",
-    "google-cloud-aiplatform>=1.162.0,<2",
-    "google-genai>=2.14.0",
+    "google-cloud-aiplatform>=1.163.0,<2",
+    "google-genai>=2.16.0",
     "openai",
     "python-dateutil>=2.8,<3",
     "httpx>=0.27,<1",
@@ -69,7 +69,7 @@ pubsub = ["google-cloud-pubsub>=2.23,<3"]
 # local images carry zero Datadog code. Build with `--extra datadog`
 # (Dockerfile: --build-arg DD_APM_ENABLED=true). Auto-instruments FastAPI /
 # SQLAlchemy / asyncpg / httpx / redis with no code changes.
-datadog = ["ddtrace>=4.11.1"]
+datadog = ["ddtrace>=4.12.2"]
 # Optional: multi-format document extraction for the /ingest/* endpoints.
 # Kreuzberg (~64MB, Elastic-2.0) is excluded from the default image to cut
 # cold-start pull + import time — the ingest endpoints return 501 without it
@@ -79,7 +79,7 @@ ingest = ["kreuzberg>=4.10.2,<5"]
 dev = [
     "core-api[test,pubsub,ingest]",
     "mypy>=2.3.0,<3.0",
-    "ruff>=0.16.0,<1.0",
+    "ruff>=0.16.1,<1.0",
     "types-croniter>=6.2.4.20260711",
 ]
 test = [
