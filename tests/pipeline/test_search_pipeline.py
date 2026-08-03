@@ -665,3 +665,93 @@ async def test_recall_returns_memory_with_pending_embedding(db, monkeypatch, use
         f"returned {len(results)} other row(s): "
         f"{[str(r.id) for r in results]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Bounds of the FTS-only result reservation (#687)
+# ---------------------------------------------------------------------------
+
+
+class _Row:
+    """Minimal stand-in for a scored row: the reservation reads has_embedding only."""
+
+    def __init__(self, rid, has_embedding):
+        self.id = rid
+        self.has_embedding = has_embedding
+
+
+def test_fts_only_reservation_is_bounded_and_only_fires_when_needed():
+    """The #687 reservation must be a floor of one, not a general reordering.
+
+    It exists so a row that FTS-matches while its embedding is still pending
+    stays reachable. It must not become a licence to displace good results, so
+    this pins the three boundaries: it promotes at most
+    FTS_ONLY_RESERVED_RESULTS, it stays out of the way when the head already
+    contains such a row, and it does nothing at all to an ordinary result set.
+    """
+    from core_api.constants import FTS_ONLY_RESERVED_RESULTS
+    from core_api.pipeline.steps.search.post_filter_results import _is_fts_only
+    from core_api.search_trim import trim_reserving_fts_only
+
+    def _trim(rows, top_k):
+        return trim_reserving_fts_only(rows, top_k, _is_fts_only)
+
+    # No FTS-only rows anywhere → identical to a plain head slice.
+    embedded = [_Row(i, True) for i in range(10)]
+    assert [r.id for r in _trim(embedded, 5)] == [0, 1, 2, 3, 4]
+
+    # An FTS-only row already inside the head → untouched, nothing promoted.
+    head_has_one = [_Row(0, True), _Row(1, False)] + [_Row(i, True) for i in range(2, 10)]
+    assert [r.id for r in _trim(head_has_one, 5)] == [0, 1, 2, 3, 4]
+
+    # FTS-only rows only beyond the cutoff → exactly the reserved count is
+    # promoted, displacing the same number from the tail of the head, and the
+    # result length is unchanged.
+    beyond = [_Row(i, True) for i in range(5)] + [_Row(100 + i, False) for i in range(4)]
+    out = _trim(beyond, 5)
+    assert len(out) == 5, "the reservation must not change how many rows are returned"
+    promoted = [r.id for r in out if not r.has_embedding]
+    assert len(promoted) == FTS_ONLY_RESERVED_RESULTS, (
+        f"promoted {len(promoted)} FTS-only rows, expected exactly "
+        f"FTS_ONLY_RESERVED_RESULTS={FTS_ONLY_RESERVED_RESULTS} — an unbounded "
+        f"promotion would let a bulk import of unembedded rows flood results"
+    )
+    # The strongest results survive; only the weakest are displaced.
+    assert [r.id for r in out][0] == 0
+
+    # Fewer rows than top_k → head slice semantics preserved.
+    assert len(_trim([_Row(0, True)], 5)) == 1
+
+    # The reservation must never consume the ENTIRE head. top_k=1 is a valid
+    # input (schemas.py: ge=1), and answering a "give me your single best match"
+    # query with only an embed-pending stub — in place of a real, high-scoring
+    # result — is a worse answer than not surfacing the stub at all. #687
+    # promises such a row is discoverable, not that it outranks the best match;
+    # storage's candidate reservation is what keeps that promise here.
+    best_then_stub = [_Row(0, True), _Row(100, False)]
+    assert [r.id for r in _trim(best_then_stub, 1)] == [0], (
+        "a top_k=1 caller must keep their true best match; promoting into the "
+        "only slot displaces it entirely rather than displacing the weakest"
+    )
+    # One slot above the reserved count is the first size that can promote.
+    assert [r.id for r in _trim(best_then_stub, FTS_ONLY_RESERVED_RESULTS + 1)] == [0, 100]
+
+
+def test_fts_only_reservation_constants_stay_in_step_across_services():
+    """core-api can only reserve result slots among rows storage sent it.
+
+    ``_FTS_ONLY_RESERVED_CANDIDATES`` (core-storage-api) is the only supply of
+    FTS-only candidates the result layer is *guaranteed* — the main branch
+    carries such rows just when they earn a slot on score. The two constants sit
+    in separately deployed packages and core-storage-api must not import
+    core-api, so nothing but this test stops them drifting apart.
+    """
+    from core_api.constants import FTS_ONLY_RESERVED_RESULTS
+    from core_storage_api.services.postgres_service import _FTS_ONLY_RESERVED_CANDIDATES
+
+    assert _FTS_ONLY_RESERVED_CANDIDATES >= FTS_ONLY_RESERVED_RESULTS, (
+        f"storage reserves {_FTS_ONLY_RESERVED_CANDIDATES} FTS-only candidate "
+        f"slots but core-api tries to reserve {FTS_ONLY_RESERVED_RESULTS} result "
+        f"slots — the surplus can only be filled incidentally, so the #687 "
+        f"discoverability guarantee silently weakens"
+    )

@@ -78,6 +78,7 @@ from core_api.schemas import (
     MemoryOut,
     MemoryUpdate,
 )
+from core_api.search_trim import trim_reserving_fts_only
 from core_api.services.entity_extraction_worker import process_entity_extraction
 from core_api.services.entity_tokens import extract_entity_tokens
 from core_api.services.governance_gate import (
@@ -3457,7 +3458,14 @@ async def _search_memories_legacy(
         or r.get("vec_sim") is None
         or float(r["vec_sim"]) >= _min_similarity
     ]
-    rows = rows[:_top_k]
+    # #687: the same reservation the pipeline post-filter applies — exempting
+    # FTS-only rows from the cosine gate above does not make them reachable,
+    # because they score on fts_score alone and a plain head slice drops them once
+    # enough embedded rows sit above. Shared with that path via
+    # `trim_reserving_fts_only` so the two cannot drift; rows here are dicts, so
+    # the predicate reads `has_embedding` with `.get` (matching the gate above)
+    # where the pipeline uses attribute access.
+    rows = trim_reserving_fts_only(rows, _top_k, lambda r: r.get("has_embedding") is False)
 
     # Build results from storage API response
     memory_ids = [row.get("id") for row in rows if row.get("id")]

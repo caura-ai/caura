@@ -235,6 +235,22 @@ def _entity_uf_union(parent: dict[UUID, UUID], rank: dict[UUID, int], a: UUID, b
         rank[ra] += 1
 
 
+# #687: how many candidate slots the scored search reserves for rows that
+# FTS-match but have no embedding yet. Deliberately small: the guarantee needed
+# is "discoverable", not "ranked highly", and the population is transient — rows
+# carry a NULL embedding only until the deferred backfill lands. Set to 0 to
+# restore the pre-#687 behaviour where such rows are cut by the candidate LIMIT.
+#
+# This also floors what the result layer can promote: core-api's
+# ``FTS_ONLY_RESERVED_RESULTS`` (currently 1) reserves result slots only among
+# rows that already reached it, and this branch is the only supply it is
+# guaranteed — the main branch carries FTS-only rows just when they earn a slot
+# on score. So keep this >= that constant; above it, the extra promotions are
+# satisfied only incidentally. core-storage-api must not import core-api, so the
+# coupling is documented here rather than enforced.
+_FTS_ONLY_RESERVED_CANDIDATES = 3
+
+
 # Cached at import time so the per-row column-name filter on the bulk
 # write hot path (100 items x ~25 columns) doesn't pay the cost of
 # walking ``Memory.__table__.columns`` and ``__mapper__.column_attrs``
@@ -1501,13 +1517,40 @@ class PostgresService:
             # PostFilterResults trims to the caller's top_k — so with A49 alone this
             # only *widens/relevance-selects the pool*, it does not reorder the final
             # result; the reorder is A50. Off (0) by default → unchanged behaviour.
-            scored_stmt = scored_stmt.order_by(similarity.desc(), Memory.created_at.desc()).limit(
+            main_stmt = scored_stmt.order_by(similarity.desc(), Memory.created_at.desc()).limit(
                 _candidate_pool_size
             )
         else:
-            scored_stmt = scored_stmt.order_by(score.desc(), Memory.created_at.desc()).limit(_top_k)
+            main_stmt = scored_stmt.order_by(score.desc(), Memory.created_at.desc()).limit(_top_k)
 
-        scored_cte = scored_stmt.cte("scored")
+        # #687: reserve candidate slots for FTS-only rows.
+        #
+        # CAURA-594 admits a NULL-embedding row when it FTS-matches, and CAURA-679
+        # scores it on ``fts_score`` alone so the blend's haircut can't bury it —
+        # both so a memory stays discoverable during the deferred-embed window.
+        # Neither helps it survive the LIMIT above: ``fts_score`` is
+        # ``ts_rank_cd/(1+ts_rank_cd)``, single digits of a percent for one term,
+        # while embedded rows near the query score far higher. Measured on prod
+        # (#687): embedded rows 0.35-0.39, the FTS-only row 0, a 10-row window —
+        # so the row was cut here, upstream of every exemption downstream of it.
+        #
+        # A small dedicated branch, ordered by FTS relevance and separately capped,
+        # guarantees such rows reach the caller without touching how anything else
+        # ranks: they enter the pool at their own true (low) score and the outer
+        # ORDER BY still places them last. Bounded twice over — the cap, and the
+        # fact that NULL-embedding rows exist only until the backfill lands.
+        if _FTS_ONLY_RESERVED_CANDIDATES > 0 and query and query.strip():
+            reserved_stmt = (
+                scored_stmt.where(and_(Memory.embedding.is_(None), _fts_guard))
+                .order_by(fts_score.desc(), Memory.created_at.desc())
+                .limit(_FTS_ONLY_RESERVED_CANDIDATES)
+            )
+            # Each operand is wrapped in its own subquery so its ORDER BY/LIMIT is
+            # applied BEFORE the union, not hoisted to the compound statement — the
+            # main branch must stay byte-identical to the un-reserved query.
+            scored_cte = select(main_stmt.subquery()).union(select(reserved_stmt.subquery())).cte("scored")
+        else:
+            scored_cte = main_stmt.cte("scored")
 
         # -- Outer query: JOIN Memory + LEFT JOIN entity links --
         stmt = (

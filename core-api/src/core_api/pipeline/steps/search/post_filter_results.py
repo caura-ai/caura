@@ -5,6 +5,7 @@ from __future__ import annotations
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
 from core_api.pipeline.steps.search.retrieval_types import RetrievalStrategy
+from core_api.search_trim import trim_reserving_fts_only
 
 
 class PostFilterResults:
@@ -37,6 +38,24 @@ class PostFilterResults:
         # Trim to the user-requested top_k (storage returned top_k * overfetch_factor)
         final_top_k = ctx.data.get("final_top_k")
         if final_top_k is not None:
-            filtered = filtered[:final_top_k]
+            filtered = trim_reserving_fts_only(filtered, final_top_k, _is_fts_only)
         ctx.data["filtered_rows"] = filtered
         return None
+
+
+def _is_fts_only(row) -> bool:
+    """True for a row storage admitted on FTS alone, with no embedding yet.
+
+    Same test as the cosine-gate exemption above, which has used this form since
+    CAURA-679 — kept identical so the gate and the reservation cannot disagree
+    about what "FTS-only" means.
+
+    ``row`` is a ``SimpleNamespace``, hence ``getattr``; the legacy path in
+    ``memory_service`` holds dicts and reads the same field with ``.get``. The
+    value is always a real ``bool``, never ``None``: storage computes it as
+    ``Memory.embedding.is_not(None)`` — a non-nullable SQL boolean — and
+    ``execute_scored_search`` carries it onto the namespace with a ``True``
+    default. So truthiness and ``is False`` cannot diverge on any reachable
+    input here.
+    """
+    return not getattr(row, "has_embedding", True)

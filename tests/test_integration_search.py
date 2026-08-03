@@ -479,17 +479,8 @@ async def _insert_memory_with_embedding(tenant_id, content, *, embedding, fleet_
     return mem
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "caura-memclaw#687: an FTS-matching NULL-embedding row is cut by the "
-        "candidate window before PostFilterResults' cosine-gate exemption can run. "
-        "Fixing it requires a ranking decision (normalise fts_score onto the cosine "
-        "scale, or reserve candidate/result slots for FTS-only rows) — strict=True so "
-        "this fails loudly once that lands and the marker must be removed."
-    ),
-)
-async def test_fts_only_row_survives_a_saturated_candidate_window(tenant_id):
+@pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
+async def test_fts_only_row_survives_a_saturated_candidate_window(tenant_id, monkeypatch, use_pipeline):
     """An FTS-matching row with no embedding must not be cut by the candidate window.
 
     The scored search fetches ``top_k * SEARCH_OVERFETCH_FACTOR`` candidates
@@ -511,7 +502,11 @@ async def test_fts_only_row_survives_a_saturated_candidate_window(tenant_id):
     subject row is the only FTS match. That isolates the window as the only
     thing that can exclude it.
     """
+    from core_api.services import memory_service
     from core_api.services.memory_service import search_memories
+
+    # Both implementations trim independently, so both need the reservation.
+    monkeypatch.setattr(memory_service, "_USE_PIPELINE_SEARCH", use_pipeline)
 
     top_k = 5
     window = top_k * SEARCH_OVERFETCH_FACTOR
