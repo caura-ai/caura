@@ -8,6 +8,7 @@ scoring blend, entity matching — end-to-end via the service layer.
 """
 
 import hashlib
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -18,6 +19,7 @@ from core_storage_api.services.postgres_service import get_session
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     FRESHNESS_DECAY_DAYS,
+    SEARCH_OVERFETCH_FACTOR,
 )
 from common.models.memory import Memory
 from common.embedding import fake_embedding
@@ -436,3 +438,106 @@ class TestConflictedExactMatchSurfaces:
         assert not any("vortex" in r.content for r in results), (
             "outdated exact-match should remain excluded"
         )
+
+
+# ---------------------------------------------------------------------------
+# FTS-only rows must survive a saturated candidate window (#687)
+# ---------------------------------------------------------------------------
+
+
+async def _insert_memory_with_embedding(tenant_id, content, *, embedding, fleet_id=None):
+    """Insert a row with a caller-chosen embedding (``None`` for FTS-only).
+
+    Separate from ``_insert_memory``, which always derives the embedding from
+    the content. Reproducing #687 needs both an embedding chosen to outrank
+    (competitors) and a genuinely absent one (the subject row).
+    """
+    sc = get_storage_client()
+    payload: dict = {
+        "tenant_id": tenant_id,
+        "fleet_id": fleet_id,
+        "agent_id": "test-agent",
+        "memory_type": "fact",
+        "content": content,
+        "weight": 0.5,
+        "embedding": embedding,
+        "content_hash": _hash(tenant_id, fleet_id, content),
+        "status": "active",
+        "recall_count": 0,
+        "visibility": "scope_team",
+    }
+    mem = await sc.create_memory(payload)
+    async with get_session() as session:
+        await session.execute(
+            text(
+                "UPDATE memories SET search_vector = to_tsvector('english', :content) "
+                "WHERE id = CAST(:id AS uuid)"
+            ),
+            {"content": content, "id": mem["id"]},
+        )
+        await session.commit()
+    return mem
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "caura-memclaw#687: an FTS-matching NULL-embedding row is cut by the "
+        "candidate window before PostFilterResults' cosine-gate exemption can run. "
+        "Fixing it requires a ranking decision (normalise fts_score onto the cosine "
+        "scale, or reserve candidate/result slots for FTS-only rows) — strict=True so "
+        "this fails loudly once that lands and the marker must be removed."
+    ),
+)
+async def test_fts_only_row_survives_a_saturated_candidate_window(tenant_id):
+    """An FTS-matching row with no embedding must not be cut by the candidate window.
+
+    The scored search fetches ``top_k * SEARCH_OVERFETCH_FACTOR`` candidates
+    ordered by score, and only afterwards does ``PostFilterResults`` exempt
+    NULL-embedding rows from the cosine gate (CAURA-679/CAURA-594 exist so such
+    rows stay discoverable during the deferred-embed window). That exemption is
+    unreachable once embedded rows fill the window: a NULL-embedding row scores
+    on ``fts_score`` alone — single digits of a percent for one term — while
+    embedded rows near the query score far higher, so the row is dropped in SQL
+    before any exemption runs.
+
+    This is #687 as measured on prod: 791 memories, embedded rows scoring
+    0.35-0.39, the FTS-only row reported at 0, and a 10-row window (top_k=5 x
+    factor 2). Existing tests miss it because they run in tenants of a handful
+    of rows, where a 10-candidate window excludes nothing.
+
+    The competitors here carry the *query's own* embedding, so they legitimately
+    outrank on cosine, and their content does not contain the token, so the
+    subject row is the only FTS match. That isolates the window as the only
+    thing that can exclude it.
+    """
+    from core_api.services.memory_service import search_memories
+
+    top_k = 5
+    window = top_k * SEARCH_OVERFETCH_FACTOR
+    token = f"zqxjvbn{uuid.uuid4().hex[:10]}"
+    query_embedding = fake_embedding(token)
+
+    # Saturate the window with rows that outrank on cosine and cannot FTS-match.
+    for i in range(window + 5):
+        await _insert_memory_with_embedding(
+            tenant_id,
+            f"unrelated filler row {i} about irrigation schedules and runoff {uuid.uuid4().hex[:6]}",
+            embedding=query_embedding,
+        )
+
+    subject = await _insert_memory_with_embedding(
+        tenant_id,
+        f"deferred-embedding subject row referencing {token}",
+        embedding=None,
+    )
+
+    results = await search_memories(tenant_id=tenant_id, query=token, top_k=top_k)
+
+    assert str(subject["id"]) in {str(r.id) for r in results}, (
+        f"FTS-only row cut by the candidate window (#687): it is the ONLY row whose "
+        f"content contains {token!r}, its search_vector FTS-matches, and it is exempt "
+        f"from the cosine gate — but {window} higher-cosine rows fill the "
+        f"top_k({top_k}) * SEARCH_OVERFETCH_FACTOR({SEARCH_OVERFETCH_FACTOR}) window "
+        f"first. search returned {len(results)} row(s), none of them the subject."
+    )
