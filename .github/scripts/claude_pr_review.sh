@@ -19,11 +19,11 @@
 #   EXTRA_PROMPT      repo context, prepended to the review prompt
 #   REVIEW_PROMPT     review instructions + output format
 # Optional env:
-#   MODEL             model id (default: claude-sonnet-4-6)
+#   MODEL             model id (default: claude-sonnet-5)
 #   MAX_BUDGET_USD    per-review spend ceiling, passed to --max-budget-usd (default 10.00)
 set -euo pipefail
 
-MODEL="${MODEL:-claude-sonnet-4-6}"
+MODEL="${MODEL:-claude-sonnet-5}"
 
 # A ceiling so one runaway review cannot bill without bound. The reviewer reads the repo
 # across turns to judge a diff, which is what makes it useful and also what makes an
