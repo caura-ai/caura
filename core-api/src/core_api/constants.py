@@ -22,6 +22,10 @@ from common.constants import (  # noqa: F401
     VECTOR_DIM,
 )
 
+# The embedding concurrency-gate timeout, which the bulk strong-embed budget
+# below must stay ordered above — see BULK_STRONG_EMBED_TIMEOUT_SECONDS.
+from common.embedding.constants import EMBEDDING_GATE_TIMEOUT_SECONDS
+
 # Re-export memory-vocabulary constants from common.enrichment (CAURA-595).
 # common is the source of truth so core-api and core-worker stay in sync.
 from common.enrichment.constants import (  # noqa: F401
@@ -34,6 +38,7 @@ from common.enrichment.constants import (  # noqa: F401
     SERVER_RESERVED_MEMORY_TYPES,
     MemoryType,
 )
+from common.env_utils import read_float_env
 
 # Re-export LLM provider constants from common.llm (CAURA-595).
 from common.llm.constants import (  # noqa: F401
@@ -702,6 +707,61 @@ BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS = 30.0
 # ``storage_bulk_timeout_seconds`` per-phase deadline can fire before the
 # umbrella ``bulk_request_timeout_seconds``.
 BULK_EMBEDDING_TIMEOUT_SECONDS = 30.0
+
+# Margin over the concurrency gate for the opportunistic embed's default budget,
+# and the floor that margin can't take it below.
+_STRONG_EMBED_GATE_MARGIN_SECONDS = 3.0
+_STRONG_EMBED_MIN_SECONDS = 8.0
+
+
+def _default_strong_embed_timeout(gate_seconds: float, required_seconds: float) -> float:
+    """Default budget for the opportunistic bulk embed.
+
+    Derived from the gate rather than fixed, so raising
+    ``EMBEDDING_GATE_TIMEOUT_SECONDS`` — an operator's env var — can never leave a
+    deployment unable to start. A fixed literal here would do exactly that: any
+    install that had already raised the gate past it would fail the startup
+    ordering check on upgrade, fixable only by a code change.
+
+    Must land STRICTLY between the two, since that is what the startup validator
+    enforces: ``gate < budget < required``. Clamping to ``required_seconds`` is not
+    enough — for a gate within the margin of the cap that clamp lands exactly ON
+    the cap, and the validator then refuses to start for an operator who only
+    raised the gate to a legitimate value below it. So when the full margin doesn't
+    fit, take the midpoint of the remaining room, which is strictly inside the
+    bound for any ``gate < required``.
+
+    A gate at or above the cap has no such room, and is incoherent on its own terms
+    — it would outlive the embed it gates. That returns ``required_seconds`` and
+    lets the validator say so rather than papering over it.
+    """
+    preferred = max(_STRONG_EMBED_MIN_SECONDS, gate_seconds + _STRONG_EMBED_GATE_MARGIN_SECONDS)
+    if preferred < required_seconds:
+        return preferred
+    if gate_seconds < required_seconds:
+        return (gate_seconds + required_seconds) / 2.0
+    return required_seconds
+
+
+# Cap on the *opportunistic* bulk embed — the one a ``write_mode="strong"`` item
+# triggers on a deployment that otherwise defers. Much tighter than the required
+# cap above, because this branch's documented fallback is "defer to the backfill
+# anyway": spending 30s to reach an outcome that was free is latency charged to
+# every other item in the batch, none of which asked for inline embedding.
+#
+# Must stay ABOVE ``EMBEDDING_GATE_TIMEOUT_SECONDS``, which is deliberately set
+# below callers' deadlines so a saturated concurrency gate surfaces as
+# attributable backpressure rather than an anonymous caller timeout. Drop below it
+# and every gate-saturated strong write is reported as a generic embed failure.
+#
+# The default is derived from that gate so the ordering holds however the operator
+# tunes it, and is env-overridable so a deployment that needs a specific value has
+# a config-only lever rather than a code change. ``_validate_timeout_ordering`` in
+# config.py still rejects an explicit override that conflicts with the gate.
+BULK_STRONG_EMBED_TIMEOUT_SECONDS = read_float_env(
+    "BULK_STRONG_EMBED_TIMEOUT_SECONDS",
+    _default_strong_embed_timeout(EMBEDDING_GATE_TIMEOUT_SECONDS, BULK_EMBEDDING_TIMEOUT_SECONDS),
+)
 
 # ── Lifecycle automation ──
 LIFECYCLE_INTERVAL_HOURS = 24  # run lifecycle cycle every N hours

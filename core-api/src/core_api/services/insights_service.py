@@ -911,17 +911,29 @@ async def _persist_findings(
     # write_mode behaviour change vs the pre-#29 path
     # -----------------------------------------------
     # The previous serial path passed ``write_mode="strong"`` on every
-    # ``MemoryCreate``. ``BulkMemoryItem`` carries no ``write_mode``
-    # field, and ``create_memories_bulk`` doesn't pick the strong vs fast
-    # pipeline per item — so the bulk path effectively drops the strong
-    # mode override. The only behavioural delta between the strong and
-    # fast pipelines is the inline ``CheckSemanticDuplicate`` step (see
-    # ``core_api/pipeline/compositions/write.py``); everything else
-    # (embed, enrich, exact-dedup, write, schedule background tasks) is
-    # identical. The post-write fire-and-forget tasks — entity extraction,
-    # async contradiction detection, deferred enrichment — are still
-    # scheduled per memory by the bulk path's ``ScheduleBackgroundTasks``-
-    # equivalent loop, so contradiction detection coverage is intact.
+    # ``MemoryCreate``. The items below set it again, so the inline-embed half of
+    # that is restored: a finding is semantically searchable the moment this
+    # persist returns rather than after the deferred backfill.
+    #
+    # It is only that half. ``BulkMemoryItem.write_mode`` governs the embedding
+    # and nothing else — the inline ``CheckSemanticDuplicate`` step (see
+    # ``core_api/pipeline/compositions/write.py``) has no bulk equivalent at any
+    # write_mode, so the strong pipeline's one other behavioural delta stays
+    # dropped here regardless. That is fine for insights, for the reason spelled
+    # out below; the point is that "strong" on this path is not the same promise
+    # as "strong" on the single-write path, and reading it as such would be wrong.
+    #
+    # Everything else (enrich, exact-dedup, write, schedule background tasks) was
+    # already identical between the two pipelines. The post-write
+    # fire-and-forget tasks — entity extraction, async contradiction detection,
+    # deferred enrichment — are still scheduled per memory by the bulk path's
+    # ``ScheduleBackgroundTasks``-equivalent loop, so contradiction detection
+    # coverage is intact.
+    #
+    # Cost: one batched embedding call per evolve cycle moves onto the request
+    # path, capped by ``BULK_STRONG_EMBED_TIMEOUT_SECONDS`` and falling back to
+    # the backfill if the provider fails, so the worst case is the latency this
+    # path had before rather than a failed persist.
     #
     # Why dropping inline semantic dedup is acceptable for insights
     # specifically: the supersede-priors block above ALREADY transitions
@@ -964,6 +976,13 @@ async def _persist_findings(
                 memory_type="insight",
                 content=content,
                 weight=confidence,
+                # Embed inline so a finding is semantically searchable as soon as
+                # this persist returns. An insight exists to be recalled, and the
+                # obvious next action after an evolve cycle is to search for what
+                # it produced — landing in the backfill window makes it look like
+                # nothing was written. See the write_mode note above for what this
+                # does and does not restore.
+                write_mode="strong",
                 metadata={
                     "insight_focus": focus,
                     "insight_scope": scope,
