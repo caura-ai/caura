@@ -1931,3 +1931,83 @@ class TestGateRepairLoop:
             ]
         finally:
             await _cleanup_tenant(tenant_id)
+
+
+class TestInsightsWriteMode:
+    """Insight findings are persisted with ``write_mode="strong"``.
+
+    An insight exists to be recalled, and the obvious next action after an evolve
+    cycle is to search for what it produced. Persisted at the deployment's default
+    write mode, a finding lands in the deferred-embed window and a semantic search
+    right after the cycle returns nothing — which reads as "no insights were
+    written". This pins the opt-in that avoids that.
+    """
+
+    @pytest.mark.asyncio
+    async def test_findings_are_persisted_with_strong_write_mode(self, monkeypatch):
+        from core_api.services import insights_service
+
+        tag = _uid()
+        tenant_id = f"test-tenant-{tag}"
+        agent_id = f"agent-{tag}"
+        try:
+            await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fleet_id=None,
+                memory_type="fact",
+                content=f"Fact [{tag}]",
+                visibility="scope_agent",
+            )
+            await _stub_llm(
+                monkeypatch,
+                findings=[
+                    {
+                        "type": "patterns",
+                        "title": "First",
+                        "description": "one",
+                        "confidence": 0.5,
+                        "related_memory_ids": [],
+                        "recommendation": "none",
+                    },
+                    {
+                        "type": "patterns",
+                        "title": "Second",
+                        "description": "two",
+                        "confidence": 0.6,
+                        "related_memory_ids": [],
+                        "recommendation": "none",
+                    },
+                ],
+            )
+
+            # ``_persist_findings`` imports create_memories_bulk inside the
+            # function, so patching the module attribute intercepts the real call.
+            import core_api.services.memory_service as ms_mod
+
+            seen: list = []
+            real_bulk = ms_mod.create_memories_bulk
+
+            async def capturing_bulk(data, *, bulk_attempt_id):
+                seen.extend(data.items)
+                return await real_bulk(data, bulk_attempt_id=bulk_attempt_id)
+
+            monkeypatch.setattr(ms_mod, "create_memories_bulk", capturing_bulk)
+
+            await insights_service.generate_insights(
+                tenant_id=tenant_id,
+                focus="patterns",
+                scope="agent",
+                fleet_id=None,
+                agent_id=agent_id,
+            )
+
+            assert seen, "expected _persist_findings to reach create_memories_bulk"
+            modes = [i.write_mode for i in seen]
+            assert modes == ["strong"] * len(seen), (
+                f"every insight finding must be persisted strong, got {modes} — "
+                "at the deployment default these land in the deferred-embed window "
+                "and a recall right after the evolve cycle finds nothing"
+            )
+        finally:
+            await _cleanup_tenant(tenant_id)
