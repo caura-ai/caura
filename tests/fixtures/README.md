@@ -10,10 +10,11 @@ Fixtures that lock the current MCP tool surface against silent regressions.
 
 ## Token-budget gate
 
-The `tools/list` MCP response must encode to ≤ **5000 cl100k tokens** (see
-`CEILING_TOKENS` in `test_mcp_token_budget.py`). Tool-surface tokens are
-paid on every agent call, so raise the ceiling only when a feature
-genuinely needs it.
+The `tools/list` MCP response must encode within `CEILING_TOKENS` in
+`test_mcp_token_budget.py` — **5200** cl100k tokens as of this writing; read the
+constant rather than trusting this number, and note the reason recorded beside it
+whenever it moves. Tool-surface tokens are paid on every agent call, so raise the
+ceiling only when a feature genuinely needs it.
 
 ## Reproducing
 
@@ -24,4 +25,10 @@ PYTHONPATH=core-api/src:core-storage-api/src:. python capture_baselines.py
 
 The capture script imports `core_api.mcp_server` (which registers every
 `@mcp.tool` as a side-effect) and dumps the in-process `mcp.list_tools()`
-plus the `/tool-descriptions` JSON shapes.
+plus the `/tool-descriptions` JSON shapes. It prints the resulting token count so
+a budget regression shows up locally instead of in CI.
+
+Regenerate whenever a `ToolSpec` description, a tool's parameter annotations, or
+the registry contents change. `plugin/tools.json` is a separate artifact with its
+own generator — `python scripts/export_tool_specs.py` — and
+`test_tools_export_in_sync.py` will fail until you run that too.

@@ -244,7 +244,22 @@ The write response carries an LLM-inferred `memory_type`, `title`, `summary`, `t
 }
 ```
 
-Embedding is asynchronous too, so a just-written memory may not surface in semantic `search` for a moment after the write returns (watch `metadata.embedding_pending`); the non-semantic `GET /memories` list shows it immediately.
+Embedding is asynchronous too, so a just-written memory may not surface in
+semantic `search` right after the write returns. The write response says so:
+`metadata.embedding_pending: true` means the row was stored without an embedding
+and a background backfill is scheduled. Until it lands the memory is already
+reachable by keyword and in the non-semantic `GET /memories` list — it just
+doesn't compete on semantic similarity yet. Budget ~15–20s in production; a
+slower backfill (staging, or a saturated worker) can take minutes, so treat the
+flag as the signal rather than assuming a fixed delay.
+
+If a caller has to search for what it just wrote, pass `write_mode: "strong"` on
+the write. That embeds inline — the response comes back with no
+`embedding_pending` and the memory is immediately searchable. The trade is an
+embedding provider call on the request path, which is precisely what fast mode's
+sub-2s p99 visibility target exists to avoid, so it's worth choosing per write
+rather than switching on globally. (A deployment configured to embed inline, the
+default for a local OSS install, never sets the flag at all.)
 
 ---
 

@@ -61,8 +61,19 @@ class MemoryCreate(BaseModel):
     visibility: str | None = Field(default=None, pattern=MEMORY_VISIBILITIES_PATTERN)
     # Extract-only mode: run enrichment + embedding but skip DB insert
     persist: bool = True
-    # Write-mode dial: "fast" (embed-only → background enrich), "strong" (full pipeline), "auto" (system picks)
-    write_mode: Literal["fast", "strong", "auto", "stm"] | None = None
+    write_mode: Literal["fast", "strong", "auto", "stm"] | None = Field(
+        default=None,
+        description=(
+            "Write-mode dial. 'fast' = embed-only, LLM enrichment deferred to the "
+            "background; 'strong' = full pipeline inline; 'auto' = the system picks. "
+            "'strong' also embeds inline regardless of the deployment's embedding "
+            "mode, which makes it the supported opt-out when a caller must search "
+            "for what it just wrote — see `MemoryOut.metadata.embedding_pending`. "
+            "It costs the embedding provider call on the request path, which is "
+            "exactly what fast mode's sub-2s p99 visibility SLA exists to avoid, so "
+            "it is a per-write choice rather than a default to flip."
+        ),
+    )
 
 
 class BulkMemoryItem(BaseModel):
@@ -256,6 +267,23 @@ class MemoryOut(BaseModel):
     weight: float
     source_uri: str | None
     run_id: str | None
+    # Two flags here tell a caller the write is not fully settled yet:
+    #
+    #   embedding_pending: true   — the row was stored without an embedding and a
+    #     background backfill is scheduled. Until it lands the memory is reachable
+    #     by keyword (FTS) and by the non-semantic `GET /memories` list, but it
+    #     does not compete on semantic similarity, so a `search` for a paraphrase
+    #     of it can come back empty. Observed time-to-searchable: ~15-20s on
+    #     production, and over 10 minutes on staging, whose backfill is slower —
+    #     so do not treat it as "a moment".
+    #   enrichment_pending: true  — title/memory_type/weight/status/ts_valid_* are
+    #     still the caller-supplied or default values; the LLM pass will PATCH them.
+    #
+    # Absent (or false) means that stage ran inline. `write_mode="strong"` embeds
+    # and enriches inline, so neither flag appears — that is the supported
+    # read-your-own-write opt-out, at the cost of the provider calls on the
+    # request path. A deployment running embedding inline (OSS local default)
+    # never sets embedding_pending, even in fast mode.
     metadata: dict | None
     created_at: datetime
     expires_at: datetime | None

@@ -754,9 +754,29 @@ async def memclaw_write(
     run_id: Annotated[str | None, Field(description="Run id (single only).")] = None,
     metadata: Annotated[dict | None, Field(description="Metadata (single only).")] = None,
     status: Annotated[str | None, Field(description="Status (single only).")] = None,
-    write_mode: Annotated[str | None, Field(description="fast|strong|auto (single only).")] = None,
+    write_mode: Annotated[
+        str | None,
+        Field(description="fast|strong|auto (single only). 'strong' embeds inline — searchable at once."),
+    ] = None,
 ) -> str:
-    """Single OR batch write. Exactly one of {content, items} is required."""
+    """Single OR batch write. Exactly one of {content, items} is required.
+
+    Read-your-own-write: when embedding is deferred (any deployment not running it
+    inline), the stored row carries ``metadata.embedding_pending=True`` and will
+    not match a *semantic* search until ``core-worker`` backfills it — measured
+    ~15-20s on production, and over 10 minutes on staging, whose backfill is
+    slower. It is reachable by keyword (FTS) and via ``memclaw_list`` throughout.
+
+    ``write_mode="strong"`` embeds and enriches inline regardless of deployment
+    mode, so the response carries no ``embedding_pending`` and the memory is
+    immediately searchable. The cost is the embedding provider call on the request
+    path, which is exactly what fast mode's sub-2s p99 visibility SLA exists to
+    avoid — a per-write choice, not a default to flip.
+
+    The agent-facing wording of this lives in the ToolSpec description
+    (``core_api/tools/memclaw_write.py``), which is the source of truth for
+    ``tools/list``; this docstring is not what agents read.
+    """
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
