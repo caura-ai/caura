@@ -6,6 +6,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Subsequent releases are produced by [release-please](https://github.com/googleapis/release-please-action)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [2.27.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.26.0...backend-v2.27.0) (2026-08-04)
+
+
+### Features
+
+* **insights:** clarity contract — findings about the work, not the machinery ([#698](https://github.com/caura-ai/caura-memclaw/issues/698)) ([6cc0f67](https://github.com/caura-ai/caura-memclaw/commit/6cc0f67452bd8797593195e530354bfd96524c32))
+* **insights:** filter input noise — opaque payloads, title-dedup, discover window ([#681](https://github.com/caura-ai/caura-memclaw/issues/681)) ([7b5bf64](https://github.com/caura-ai/caura-memclaw/commit/7b5bf64e2d622b6a07b2a17c5f98853ab290cb6f))
+* **interviewer-cli:** install/uninstall to schedule the cron in one command ([#674](https://github.com/caura-ai/caura-memclaw/issues/674)) ([9122f08](https://github.com/caura-ai/caura-memclaw/commit/9122f08183001854f4254477565c975de7d71a86))
+* **search:** org flag to disable query-time entity/graph retrieval ([#677](https://github.com/caura-ai/caura-memclaw/issues/677)) ([2b52546](https://github.com/caura-ai/caura-memclaw/commit/2b5254638c7aeefcd0d1064d0c98a5e1a65138c5))
+* **search:** pluggable reranking component (MiniLM cross-encoder), ships dark ([#669](https://github.com/caura-ai/caura-memclaw/issues/669)) ([e18dd95](https://github.com/caura-ai/caura-memclaw/commit/e18dd95ca1634119bd76791820a77703115beb71))
+* **search:** remote rerank provider (sidecar) + opt-in local build ([#680](https://github.com/caura-ai/caura-memclaw/issues/680)) ([72b453e](https://github.com/caura-ai/caura-memclaw/commit/72b453ec941a326d27993db7277388556be189bd))
+
+
+### Bug Fixes
+
+* **ci:** pin common/'s ruff contract and lint-gate it ([#685](https://github.com/caura-ai/caura-memclaw/issues/685)) ([abfabdb](https://github.com/caura-ai/caura-memclaw/commit/abfabdb373b3be5a01ec4916bcb0960b966db955))
+* **common:** converge common/ruff.toml with enterprise's stricter config ([#696](https://github.com/caura-ai/caura-memclaw/issues/696)) ([3518d4d](https://github.com/caura-ai/caura-memclaw/commit/3518d4d8d6aafa983e042e76104623c6bfd2eb73))
+* **insights:** declare numpy so discover keeps clustering ([#679](https://github.com/caura-ai/caura-memclaw/issues/679)) ([443fd0c](https://github.com/caura-ai/caura-memclaw/commit/443fd0cce2ee5eba3c99ec3476da682bf284784a))
+* **search:** keep FTS-only rows past the legacy cosine gate ([#687](https://github.com/caura-ai/caura-memclaw/issues/687)) ([#697](https://github.com/caura-ai/caura-memclaw/issues/697)) ([9d9003d](https://github.com/caura-ai/caura-memclaw/commit/9d9003dc1ca02197e95cb682ae542fb97c2af746))
+
+
+### Documentation
+
+* **ci:** document that the two claude-review entry points don't share gates ([#686](https://github.com/caura-ai/caura-memclaw/issues/686)) ([8d77b49](https://github.com/caura-ai/caura-memclaw/commit/8d77b49551e12764cd7210a745a4e1faeb432751))
+* **review:** record the measured membership values on the review gate ([#676](https://github.com/caura-ai/caura-memclaw/issues/676)) ([81fbbc6](https://github.com/caura-ai/caura-memclaw/commit/81fbbc6fb3d96546fbd3f3d710665ff8abd9eae7))
+
 ## [2.26.0](https://github.com/caura-ai/caura-memclaw/compare/backend-v2.25.0...backend-v2.26.0) (2026-07-29)
 
 
