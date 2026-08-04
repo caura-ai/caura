@@ -77,10 +77,34 @@ so you can reproduce the methodology against your own MemClaw instance:
 6. **Latency** — measure p50/p95 of `POST /api/v1/search` under your expected
    concurrency against a warm cache.
 
-> A turnkey harness isn't bundled in this repo yet — the datasets are large and
-> publicly hosted, and the runner is being prepared for open release. Until
-> then the steps above describe the exact methodology. Operator-scale guidance
-> and caveats live in [`docs/performance.md`](docs/performance.md).
+> The end-to-end accuracy/token harness isn't bundled yet — the datasets are
+> large and publicly hosted, and the runner is being prepared for open release.
+> Until then the steps above describe the exact methodology. Operator-scale
+> guidance and caveats live in [`docs/performance.md`](docs/performance.md).
+
+### Reranking, specifically
+
+One piece **is** bundled:
+[`scripts/benchmark_rerank_locomo.py`](scripts/benchmark_rerank_locomo.py)
+answers "does second-stage reranking order results better than first-stage
+similarity alone?" on LoCoMo. It scores the *same* candidate pool two ways —
+embedding cosine vs that pool reordered by a `/rerank` sidecar — against each
+question's `evidence` turns, so recall is identical by construction and the
+only variable is ordering. Reports nDCG@5/@10, MRR and P@5 with paired
+bootstrap confidence intervals and a sign test, overall and per LoCoMo
+category. Stdlib only, no cloud dependencies:
+
+```bash
+python scripts/benchmark_rerank_locomo.py \
+    --dataset locomo10.json \
+    --embed-url http://localhost:8080 \
+    --rerank-url http://localhost:8081
+```
+
+Note this isolates the reranker: the baseline is pure cosine, whereas the real
+first-stage also applies freshness decay, weight blending and recall boost. It
+answers "is the cross-encoder worth its latency", not "what is the end-to-end
+pipeline delta".
 
 ## How MemClaw compares
 
