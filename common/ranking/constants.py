@@ -67,3 +67,17 @@ RANK_RETRY_DELAY_S: float = float(os.environ.get("RANK_RETRY_DELAY_S", "0.5"))
 # Rows beyond this cap keep their first-stage order, appended after the
 # re-ranked head.
 RANK_CANDIDATE_LIMIT: int = int(os.environ.get("RANK_CANDIDATE_LIMIT", "50"))
+
+# Largest batch the ``remote`` sidecar accepts in ONE /rerank request. The
+# provider splits the candidate pool into chunks of this size and issues them
+# concurrently, so RANK_CANDIDATE_LIMIT is no longer bounded by what the sidecar
+# admits. The coupling moves rather than vanishes, though: the pool size now
+# sets FAN-OUT, ``ceil(RANK_CANDIDATE_LIMIT / this)`` concurrent requests per
+# search (2 at the defaults).
+#
+# Default 32 = TEI's own ``--max-client-batch-size`` default, so stock-vs-stock
+# works. Raise it to match a sidecar started with a larger cap and a full pool
+# goes over in one request again. Cohere-shaped endpoints admit far more per
+# call, so 32 is very conservative there — worth raising to at least
+# RANK_CANDIDATE_LIMIT if that is the backend.
+RANK_REMOTE_MAX_BATCH: int = int(os.environ.get("RANK_REMOTE_MAX_BATCH", "32"))

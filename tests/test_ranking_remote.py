@@ -9,6 +9,7 @@ TEI wet test still happens at sidecar-deploy time (see PR notes).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -28,9 +29,9 @@ def _cands(*contents):
     ]
 
 
-def _client_with(handler, base_url="http://sidecar:80"):
+def _client_with(handler, base_url="http://sidecar:80", max_batch=32):
     """Build a RemoteRanker whose httpx client uses a MockTransport handler."""
-    r = RemoteRanker(base_url=base_url, model="test-model")
+    r = RemoteRanker(base_url=base_url, model="test-model", max_batch=max_batch)
     r._client = httpx.AsyncClient(
         base_url=base_url, transport=httpx.MockTransport(handler)
     )
@@ -139,7 +140,7 @@ def _counting_handler(status, text="", json_body=None):
     return handler, calls
 
 
-async def _run_service(ranker, monkeypatch, attempts=3):
+async def _run_service(ranker, monkeypatch, attempts=3, candidates=None):
     """Drive get_ranking against `ranker` with a known retry budget."""
     # RANK_RETRY_ATTEMPTS defaults to 1 (no retry), which makes "permanent vs
     # transient" invisible — both would call once. Raise it so the difference
@@ -151,7 +152,9 @@ async def _run_service(ranker, monkeypatch, attempts=3):
         "common.ranking._service.get_rank_provider", lambda name, tc=None: ranker
     )
     return await get_ranking(
-        "q", _cands("a", "b"), SimpleNamespace(rank_provider="remote")
+        "q",
+        candidates if candidates is not None else _cands("a", "b"),
+        SimpleNamespace(rank_provider="remote"),
     )
 
 
@@ -412,4 +415,122 @@ async def test_200_with_non_json_body_is_permanent(monkeypatch):
     out = await _run_service(r, monkeypatch, attempts=3)
     assert out is None
     assert len(calls) == 1, "a wrong endpoint returns the same body on retry"
+    await r._client.aclose()
+
+
+# --- chunking the candidate pool across requests ---------------------------
+
+
+def _chunk_recorder(status=200, score_for=None):
+    """Async handler recording each request's texts and peak in-flight count."""
+    state = {"inflight": 0, "peak": 0, "batches": []}
+
+    async def handler(request):
+        body = json.loads(request.content)
+        state["batches"].append(body["texts"])
+        state["inflight"] += 1
+        state["peak"] = max(state["peak"], state["inflight"])
+        # Yield so a concurrent sibling can be observed in flight; a sequential
+        # implementation can never overlap here no matter how long we sleep.
+        await asyncio.sleep(0.02)
+        state["inflight"] -= 1
+        if status != 200:
+            return httpx.Response(status, text="nope")
+        n = len(body["texts"])
+        return httpx.Response(
+            200,
+            json=[
+                {"index": i, "score": (score_for(body["texts"][i]) if score_for else 1.0)}
+                for i in range(n)
+            ],
+        )
+
+    return handler, state
+
+
+@pytest.mark.asyncio
+async def test_pool_at_or_below_cap_stays_one_request():
+    handler, state = _chunk_recorder()
+    r = _client_with(handler, max_batch=32)
+    await r.rank("q", _cands(*[f"c{i}" for i in range(32)]))
+    assert len(state["batches"]) == 1, "exactly-at-cap must not split"
+    await r._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pool_above_cap_splits_and_preserves_input_order():
+    # Score = position, so a mis-merged result is immediately visible.
+    order = {f"c{i}": float(i) for i in range(50)}
+    handler, state = _chunk_recorder(score_for=lambda t: order[t])
+    r = _client_with(handler, max_batch=32)
+    scores = await r.rank("q", _cands(*[f"c{i}" for i in range(50)]))
+
+    assert len(state["batches"]) == 2
+    assert [len(b) for b in state["batches"]] in ([32, 18], [18, 32])
+    # every candidate sent exactly once, none duplicated or dropped
+    sent = [t for b in state["batches"] for t in b]
+    assert sorted(sent) == sorted(order)
+    # merged back onto INPUT order, not response or chunk order
+    assert scores == [float(i) for i in range(50)]
+    # ...and issued CONCURRENTLY. Sequential chunks would blow
+    # RANK_TIMEOUT_SECONDS, turning a batch-cap rejection into a silent timeout
+    # — same symptom, harder to diagnose.
+    assert state["peak"] >= 2, (
+        f"chunks ran sequentially (peak in-flight {state['peak']}) — "
+        "wall-clock would be the sum, not one chunk"
+    )
+    await r._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_one_failed_chunk_fails_the_whole_rank(monkeypatch):
+    """Partial failure must degrade, never return a partially-scored list.
+
+    Scoring the failed chunk 0.0 would bury real results at the bottom and
+    call it success — worse than not reranking.
+    """
+    calls = {"n": 0}
+
+    async def handler(request):
+        calls["n"] += 1
+        # first request in flight succeeds, the other 503s
+        if calls["n"] == 1:
+            texts = json.loads(request.content)["texts"]
+            return httpx.Response(
+                200, json=[{"index": i, "score": 1.0} for i in range(len(texts))]
+            )
+        return httpx.Response(503, text="unavailable")
+
+    r = _client_with(handler, max_batch=32)
+    with pytest.raises(httpx.HTTPStatusError):
+        await r.rank("q", _cands(*[f"c{i}" for i in range(50)]))
+    # and through the service layer a CHUNKED failure degrades rather than
+    # raising into search (the default 2-candidate pool would take the fast
+    # path and never exercise chunking at all)
+    out = await _run_service(
+        r, monkeypatch, attempts=1, candidates=_cands(*[f"c{i}" for i in range(50)])
+    )
+    assert out is None
+    await r._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_permanent_chunk_failure_wins_over_a_transient_sibling(monkeypatch):
+    """A 413 on one chunk must not be reported as a retryable failure.
+
+    Misreporting it transient would spend the retry budget re-earning the same
+    rejection.
+    """
+    async def handler(request):
+        texts = json.loads(request.content)["texts"]
+        await asyncio.sleep(0.01)
+        # The SHORT TAIL chunk (18 of 50) is the permanently-rejected one, so a
+        # naive `raise failures[0]` surfaces the transient 503 from chunk 0 and
+        # this test fails. Keying off size rather than call order is what makes
+        # the assertion actually guard the permanent-wins scan.
+        return httpx.Response(413 if len(texts) == 18 else 503, text="cap exceeded")
+
+    r = _client_with(handler, max_batch=32)
+    with pytest.raises(PermanentRankError, match="RANK_REMOTE_MAX_BATCH"):
+        await r.rank("q", _cands(*[f"c{i}" for i in range(50)]))
     await r._client.aclose()

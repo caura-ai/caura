@@ -21,12 +21,13 @@ order — the caller (RerankResults) owns the sort.
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import logging
 
 import httpx
 
-from common.ranking.constants import RANK_TIMEOUT_SECONDS
+from common.ranking.constants import RANK_REMOTE_MAX_BATCH, RANK_TIMEOUT_SECONDS
 from common.ranking.errors import PermanentRankError
 from common.ranking.protocols import RankCandidate
 
@@ -73,10 +74,16 @@ class RemoteRanker:
         api_key: str = "",
         model: str = "",
         timeout: float = RANK_TIMEOUT_SECONDS,
+        max_batch: int = RANK_REMOTE_MAX_BATCH,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._instance_id = next(_instance_seq)
+        # Guard a non-positive override: negative yields no chunks at all (and
+        # so no scores), 0 blows up the range step below. Coerced rather than
+        # rejected because no real deployment reaches it — but note 1 means one
+        # HTTP request per candidate.
+        self._max_batch = max(1, max_batch)
         headers = {}
         if api_key:
             # Bearer for Cohere / token-gated TEI; harmless for open TEI.
@@ -142,20 +149,27 @@ class RemoteRanker:
             f"Response: {resp.text[:_ERROR_BODY_LIMIT]}"
         )
         if resp.status_code == 413:
-            # By far the most common way to land here, and the fix is not
-            # guessable from "413": the pool we send is RANK_CANDIDATE_LIMIT
-            # (50 by default) but a TEI reranker admits only 32 per request
-            # unless --max-client-batch-size is raised.
+            # The fix is not guessable from "413". Note this is about
+            # RANK_REMOTE_MAX_BATCH, NOT RANK_CANDIDATE_LIMIT: since chunking,
+            # the pool size no longer determines the request size, so lowering
+            # the candidate limit is no longer the remedy.
             detail += (
-                " A 413 here usually means the sidecar's max client batch size "
-                "is below RANK_CANDIDATE_LIMIT — raise it (TEI: "
-                "--max-client-batch-size) or lower RANK_CANDIDATE_LIMIT."
+                f" A 413 here means RANK_REMOTE_MAX_BATCH ({self._max_batch}) "
+                "exceeds what this sidecar accepts per request — lower it, or "
+                "raise the sidecar's cap (TEI: --max-client-batch-size). "
+                "RANK_CANDIDATE_LIMIT is unrelated; the pool is already split "
+                "into requests of at most RANK_REMOTE_MAX_BATCH."
             )
         return detail
 
-    async def rank(self, query: str, candidates: list[RankCandidate]) -> list[float]:
-        if not candidates:
-            return []
+    async def _rank_chunk(
+        self, query: str, candidates: list[RankCandidate]
+    ) -> list[float]:
+        """Score ONE request's worth of candidates, in the order given.
+
+        Everything about the wire contract and failure classification lives
+        here; :meth:`rank` only decides how the pool is split across calls.
+        """
         body: dict = {"query": query, "texts": [c.content for c in candidates]}
         resp = await self._client.post("/rerank", json=body)
         if resp.is_client_error and resp.status_code not in _RETRYABLE_CLIENT_STATUSES:
@@ -209,3 +223,65 @@ class RemoteRanker:
                 score = item.get("relevance_score")
             scores[idx] = float(score)
         return scores
+
+    async def rank(self, query: str, candidates: list[RankCandidate]) -> list[float]:
+        """Score every candidate, splitting across requests if the pool is big.
+
+        Chunking is safe to do here — and invisible in the result — because a
+        cross-encoder scores each ``(query, text)`` pair INDEPENDENTLY, so a
+        candidate's score does not depend on what shares its batch. Splitting
+        therefore returns exactly what one large call would.
+
+        That property is load-bearing: it does NOT hold for a listwise reranker
+        that scores a set jointly. If one is ever put behind this provider,
+        chunking silently changes the ranking and this method needs revisiting.
+        """
+        if not candidates:
+            return []
+        # Fast path: a pool that fits in one request behaves exactly as it did
+        # before chunking existed — no gather, and the exception propagates with
+        # its own traceback rather than being captured and re-raised.
+        if len(candidates) <= self._max_batch:
+            return await self._rank_chunk(query, candidates)
+
+        chunks = [
+            candidates[i : i + self._max_batch]
+            for i in range(0, len(candidates), self._max_batch)
+        ]
+        # CONCURRENTLY, not in sequence. The service layer wraps this whole call
+        # in a single RANK_TIMEOUT_SECONDS deadline (0.5s by default) while one
+        # warm 50-candidate rerank already measures ~285ms, so two sequential
+        # chunks would blow it — turning a silent batch-cap rejection into a
+        # silent timeout, which is the same user-visible outcome and harder to
+        # diagnose.
+        #
+        # What this buys is removing CLIENT-side serialisation, not server-side
+        # compute: one sidecar replica still scores the same number of pairs, so
+        # budget against roughly the unchunked figure plus a round-trip, not N
+        # times it.
+        #
+        # return_exceptions=True so every chunk is awaited before we look at any
+        # of them: a bare gather propagates the first failure and leaves its
+        # siblings running unobserved.
+        results = await asyncio.gather(
+            *(self._rank_chunk(query, chunk) for chunk in chunks),
+            return_exceptions=True,
+        )
+
+        failures = [r for r in results if isinstance(r, BaseException)]
+        if failures:
+            # Fail the WHOLE rank: the alternative — scoring the failed chunk's
+            # candidates 0.0 — would bury real results at the bottom of the
+            # list and call it success, which is worse than not reranking at
+            # all.
+            #
+            # Surface a permanent failure over a transient one when both
+            # happened: a batch cap set too high is permanent no matter what
+            # unrelated blip another chunk hit, and misreporting it as
+            # transient would spend the retry budget re-earning the same 413.
+            raise next(
+                (f for f in failures if isinstance(f, PermanentRankError)),
+                failures[0],
+            )
+
+        return [score for chunk_scores in results for score in chunk_scores]
