@@ -4,8 +4,9 @@ Lazy-loads a sentence-transformers ``CrossEncoder`` under an
 ``asyncio.Lock`` and scores (query, content) pairs in a thread executor
 (``predict`` is sync CPU work). ``sentence-transformers`` is lazy-imported
 so it stays an optional dependency — if it is absent the load raises
-``ImportError``, which the service layer treats as a provider failure and
-degrades to first-stage order.
+``PermanentRankError``, so the service layer degrades to first-stage order
+immediately (no retry, since the dependency will still be missing) and reports
+it once at ERROR rather than per search.
 
 Viable only at small pools: MiniLM-L6 (22M) is ~50-150ms CPU at pool<=20
 (A50 latency spike); a large model (bge-base, 278M) is NOT CPU-viable
@@ -18,6 +19,7 @@ import asyncio
 import logging
 
 from common.ranking.constants import RANK_MAX_LENGTH, RANK_MODEL
+from common.ranking.errors import PermanentRankError
 from common.ranking.protocols import RankCandidate
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,14 @@ class LocalCrossEncoderRanker:
         return "local"
 
     @property
+    def dedup_scope(self) -> str:
+        """Namespace for permanent-fault log dedup — see ``PermanentRankError``.
+
+        Model-scoped to match the registry's per-``rank_model`` instance cache.
+        """
+        return f"local:{self._model_name}"
+
+    @property
     def model(self) -> str:
         return self._model_name
 
@@ -51,10 +61,16 @@ class LocalCrossEncoderRanker:
             try:
                 from sentence_transformers import CrossEncoder
             except ImportError:
-                raise ImportError(
+                # Permanent by construction: the dependency will still be
+                # missing on the next search, so retrying just spends the
+                # rerank deadline. The default image deliberately ships without
+                # torch, which makes this the most likely way to land here
+                # after flipping RANK_PROVIDER=local.
+                raise PermanentRankError(
                     "sentence-transformers is required for the local reranker "
                     "(RANK_PROVIDER=local). Install it with: "
-                    "pip install sentence-transformers"
+                    "pip install sentence-transformers",
+                    key=f"{self.dedup_scope}|missing-sentence-transformers",
                 ) from None
             logger.info("Loading local cross-encoder model: %s", self._model_name)
             loop = asyncio.get_running_loop()

@@ -12,6 +12,7 @@ Public entrypoint: :func:`common.ranking.get_ranking`.
 from __future__ import annotations
 
 from common.ranking._service import get_ranking
+from common.ranking.errors import PermanentRankError
 from common.ranking.protocols import RankCandidate, RankProvider
 
-__all__ = ["RankCandidate", "RankProvider", "get_ranking"]
+__all__ = ["PermanentRankError", "RankCandidate", "RankProvider", "get_ranking"]

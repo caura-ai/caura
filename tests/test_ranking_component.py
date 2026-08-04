@@ -92,3 +92,35 @@ async def test_get_ranking_length_contract_violation_degrades(monkeypatch):
     )
     cands = [_cand("a", "x", 0.5), _cand("b", "y", 0.5)]
     assert await get_ranking("q", cands, SimpleNamespace(rank_provider="bad")) is None
+
+
+@pytest.mark.asyncio
+async def test_local_provider_missing_dependency_is_permanent(monkeypatch, caplog):
+    """``RANK_PROVIDER=local`` without sentence-transformers is a config fault.
+
+    The default image ships without torch, so this is the likely outcome of
+    flipping the provider. It can never succeed on retry, so it must classify
+    as permanent rather than burn the retry budget at warning level.
+    """
+    import sys
+
+    from common.ranking.errors import PermanentRankError
+    from common.ranking.providers.local import LocalCrossEncoderRanker
+
+    # Force the optional import to fail even where the package is installed.
+    monkeypatch.setitem(sys.modules, "sentence_transformers", None)
+    ranker = LocalCrossEncoderRanker()
+    with pytest.raises(PermanentRankError, match="sentence-transformers is required"):
+        await ranker.rank("q", [_cand("a", "x", 0.5)])
+
+    # ...and the service degrades rather than raising, logging at ERROR once.
+    monkeypatch.setattr(
+        "common.ranking._service.get_rank_provider", lambda name, tc=None: ranker
+    )
+    monkeypatch.setattr("common.ranking._service._permanent_logged", set())
+    with caplog.at_level("ERROR"):
+        out = await get_ranking(
+            "q", [_cand("a", "x", 0.5)], SimpleNamespace(rank_provider="local")
+        )
+    assert out is None
+    assert any("not retrying" in rec.getMessage() for rec in caplog.records)

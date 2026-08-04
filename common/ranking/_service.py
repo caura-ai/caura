@@ -24,6 +24,7 @@ from common.ranking.constants import (
     RANK_RETRY_DELAY_S,
     RANK_TIMEOUT_SECONDS,
 )
+from common.ranking.errors import PermanentRankError
 from common.ranking.protocols import RankCandidate
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,52 @@ _stats = _RankStats()
 # One-shot misconfiguration log dedup, keyed on provider name — a bad
 # ``RANK_PROVIDER`` would otherwise log once per search.
 _misconfiguration_logged: set[str] = set()
+
+# Same log-once posture for permanent provider faults, keyed on
+# ``PermanentRankError.key`` (a stable backend+condition string, NOT the
+# message — that embeds a response body and varies per request). A permanent
+# fault recurs on every search by definition, so logging it in full each time
+# would make ERROR volume a function of traffic rather than of the fault.
+# ``_stats.record_failure()`` still fires every time, so the degraded
+# trip-wire keeps counting occurrences.
+#
+# Entries are cleared per BACKEND on that backend's next success, never
+# wholesale: one process serves many tenants and holds a rank provider per
+# ``(base_url, api_key, model)``, so a healthy tenant's success must not
+# re-arm — or suppress — a different tenant's broken sidecar. Clearing
+# globally would put ERROR volume right back on a traffic curve, this time
+# driven by unrelated tenants.
+_permanent_logged: set[str] = set()
+
+# Bound it. Each entry is one (backend, condition) pair, so the steady state is
+# tiny — but a provider whose scope is per-instance means a long-lived process
+# that rotates tenant rank config accumulates a dead entry per retired backend,
+# the same leak ``_registry.py`` caps its ranker cache at 32 to avoid. On
+# overflow we drop the whole set rather than track recency: the only cost is
+# that a still-broken backend may report once more than strictly needed, which
+# is the safe direction to fail.
+_PERMANENT_LOGGED_MAX = 256
+
+
+def _permanent_scope(provider: object) -> str:
+    """Dedup namespace for ``provider`` — see ``PermanentRankError.key``.
+
+    Falls back to the provider name for providers that don't declare a scope
+    (``noop``/``fake`` never raise permanently, and a third-party provider
+    without one still gets coarse per-name dedup rather than none).
+    """
+    scope = getattr(provider, "dedup_scope", None)
+    if scope:
+        return str(scope)
+    return str(getattr(provider, "provider_name", "unknown"))
+
+
+def _clear_permanent_for(provider: object) -> None:
+    """Re-arm the ERROR for one backend after it succeeds again."""
+    prefix = f"{_permanent_scope(provider)}|"
+    _permanent_logged.difference_update(
+        {key for key in _permanent_logged if key.startswith(prefix)}
+    )
 
 
 def _resolve_provider_name(tenant_config: object | None) -> str:
@@ -131,6 +178,11 @@ async def get_ranking(
                     f"ranker returned {len(scores)} scores for {len(candidates)} candidates"
                 )
             await _stats.record_success()
+            # Re-arm THIS backend's permanent-fault ERROR: if it was fixed and
+            # later regresses, the next fault reports in full rather than
+            # staying silent at DEBUG forever. Scoped, so a healthy tenant
+            # can't re-arm a still-broken one.
+            _clear_permanent_for(provider)
             return scores
         except TimeoutError:
             logger.warning(
@@ -139,6 +191,28 @@ async def get_ranking(
                 RANK_RETRY_ATTEMPTS,
                 RANK_TIMEOUT_SECONDS,
             )
+        # A configuration-class fault (see common/ranking/errors.py): it fails
+        # identically next attempt, so stop instead of spending the turn's
+        # latency to reach the same answer. ERROR, not warning, because the
+        # search still succeeds on first-stage order — this log line is the
+        # only symptom the fault has. Deduped per condition; see
+        # ``_permanent_logged``.
+        except PermanentRankError as exc:
+            await _stats.record_failure()
+            if exc.key in _permanent_logged:
+                logger.debug("Ranking permanently failing (already reported): %s", exc)
+            else:
+                if len(_permanent_logged) >= _PERMANENT_LOGGED_MAX:
+                    _permanent_logged.clear()
+                _permanent_logged.add(exc.key)
+                logger.error(
+                    "Ranking failed permanently, not retrying; keeping "
+                    "first-stage order. This recurs until the configuration "
+                    "changes; further occurrences log at DEBUG until the next "
+                    "success. %s",
+                    exc,
+                )
+            return None
         # Intentionally broad: any provider error degrades to first-stage.
         except Exception:
             logger.warning(
