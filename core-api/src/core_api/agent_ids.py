@@ -28,6 +28,19 @@ INSIGHTER_AGENT_ID = "memclaw-insighter"
 # route trust gate, so this is future-proofing for any gated re-route.
 INSIGHTER_TRUST_LEVEL = 3
 
+# Fallback identity for the memory minted from a document write, used ONLY when
+# the caller carries no agent identity at all (the REST ``POST /documents`` path
+# without a gateway-stamped ``X-Agent-ID``; the MCP path always has one). Same
+# reasoning as ``INSIGHTER_AGENT_ID``: a stable registerable service identity
+# rather than the anonymous default, and self-registered per tenant on first use
+# via ``get_or_create_agent``.
+#
+# Prefer the real doc writer's agent_id whenever there is one. Attribution is not
+# cosmetic here: ``memclaw_insights`` defaults to ``scope="agent"``, which filters
+# ``Memory.agent_id == agent_id``, so rows attributed to this service identity are
+# invisible to every real agent's default insights run.
+DOC_INDEXER_AGENT_ID = "memclaw-doc-indexer"
+
 # Bare ``"main"`` is the OpenClaw plugin's *unset* default agent_id: when an
 # operator never sets ``MEMCLAW_AGENT_ID`` every install collapses onto this one
 # shared identity (the eToro "firehose"). Unlike ``DEFAULT_AGENT_ID``

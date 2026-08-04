@@ -267,8 +267,10 @@ async def upsert_document(
     # back-compat. See core_api.services.doc_indexing for the contract.
     from core_api.services.doc_indexing import (
         InvalidDocIndexingError,
+        resolve_doc_memory,
         resolve_embed_source,
     )
+    from core_api.services.doc_memory import safe_sync_doc_memory
 
     try:
         source = resolve_embed_source(body.collection, body.data)
@@ -321,6 +323,28 @@ async def upsert_document(
         )
     if doc is None:
         raise HTTPException(status_code=500, detail="Document upsert returned no rows")
+    # Mint a memory carrying the document body so the BODY becomes reachable by
+    # meaning (only data["summary"] is embedded on the doc row, and
+    # ``memclaw_recall`` never returns documents). Both upsert branches above
+    # converge here, so this one call covers indexed and unindexed writes.
+    # Never raises: the doc is already committed and is the source of truth.
+    try:
+        doc_memory_spec = resolve_doc_memory(
+            body.collection, body.doc_id, body.data, updated_at=doc.get("updated_at")
+        )
+        if doc_memory_spec is not None:
+            await safe_sync_doc_memory(
+                doc_memory_spec,
+                tenant_id=body.tenant_id,
+                fleet_id=body.fleet_id,
+                agent_id=getattr(auth, "agent_id", None),
+            )
+    except Exception:
+        # Belt-and-braces over ``safe_sync_doc_memory``'s own non-raising
+        # contract. The document is committed; without this, a regression in the
+        # mint path would surface to the caller as a FAILED doc write, which is
+        # the one outcome this feature must never cause.
+        logger.exception("doc memory mint failed for %s/%s", body.collection, body.doc_id)
     await log_action(
         tenant_id=body.tenant_id,
         action="doc_upsert",

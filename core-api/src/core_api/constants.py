@@ -171,6 +171,37 @@ MAX_CONTENT_LENGTH = 10000
 CHUNKING_THRESHOLD_CHARS = 2000  # content above this triggers auto-chunking
 MAX_QUERY_LENGTH = 5000
 
+# ── Doc-derived memories ──
+# ``memclaw_doc(op="write")`` mints a memory carrying the document body so the
+# body becomes reachable by MEANING (recall / recall-brief read
+# ``memories.content`` directly). Docs themselves are only searchable via their
+# ``data["summary"]`` embedding, and ``memclaw_recall`` never returns documents.
+#
+# The memory content is the doc body VERBATIM, so the cutoff is simply the
+# memory schema ceiling: mint whenever the body fits in a memory at all.
+# Over-cutoff bodies are SKIPPED rather than truncated — a truncated body reads
+# as complete and would produce confidently wrong downstream conclusions.
+DOC_MEMORY_MAX_CHARS = MAX_CONTENT_LENGTH
+
+# NOTE: there is deliberately no ``DOC_MEMORY_TYPE``. Doc-derived memories pass
+# no ``memory_type`` at all, so the enrichment classifier assigns one per
+# document — a decision record becomes ``decision``, a runbook ``rule``, an
+# incident writeup ``episode``. Pinning every document to a single type would
+# throw that away. (And ``reference`` was never an option: it is not a
+# MemoryType, and the ``memories_memory_type_check`` CHECK constraint from
+# migration 013 would reject it.)
+
+# Provenance only — written to ``memories.source_uri`` as
+# ``memclaw-doc://<collection>/<doc_id>``. Nothing queries it yet (that would
+# need a storage-side filter + index); it exists so a later reconciliation
+# mechanism has a stable key to match a doc to the memories minted from it.
+DOC_MEMORY_URI_SCHEME = "memclaw-doc"
+
+assert DOC_MEMORY_MAX_CHARS <= MAX_CONTENT_LENGTH, (
+    "DOC_MEMORY_MAX_CHARS must not exceed MemoryCreate.content max_length "
+    f"({MAX_CONTENT_LENGTH}) — an over-cap spec would fail schema validation."
+)
+
 # ── Tool surface bookkeeping ──
 # Tool descriptions live inline in `core_api/tools/memclaw_*.py` spec
 # modules (the SoT). Nothing else should hold a copy.

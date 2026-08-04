@@ -1225,6 +1225,124 @@ async def test_skill_read_hides_non_active_when_flag_lookup_errors(
 
 
 # ---------------------------------------------------------------------------
+# Doc-derived memory (CAURA-704)
+#
+# ``op=write`` mints a memory carrying the document BODY, because the two stores
+# aren't cross-searched: only ``data["summary"]`` is embedded on the doc row and
+# ``memclaw_recall`` never returns documents. These tests pin that the MCP
+# surface mints per the shared rule and — critically — that a minting failure
+# never fails the document write.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def spy_doc_memory(monkeypatch):
+    """Spy on ``safe_sync_doc_memory``.
+
+    The handler imports it lazily inside the ``op=write`` branch, so patching the
+    defining module is what takes effect at call time.
+    """
+    from unittest.mock import AsyncMock
+
+    spy = AsyncMock(return_value="mem-1")
+    monkeypatch.setattr("core_api.services.doc_memory.safe_sync_doc_memory", spy)
+    return spy
+
+
+async def test_doc_write_mints_memory_for_body_bearing_doc(
+    mcp_env, monkeypatch, spy_doc_memory
+):
+    stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
+    out = await mcp_server.memclaw_doc(
+        op="write",
+        collection="runbooks",
+        doc_id="pg-tuning",
+        data={
+            "summary": "Postgres tuning runbook.",
+            "content": "# Vacuum\n\nRun nightly.",
+        },
+    )
+
+    assert parse_envelope(out)["ok"] is True
+    spy_doc_memory.assert_awaited_once()
+    spec = spy_doc_memory.call_args.args[0]
+    assert spec.content == "# Vacuum\n\nRun nightly."  # verbatim
+    assert spec.source_uri == "memclaw-doc://runbooks/pg-tuning"
+
+
+async def test_doc_write_mints_on_update_too(mcp_env, monkeypatch, spy_doc_memory):
+    """Every write mints — there is no create-vs-update branch. Rewrite
+    semantics come from the write pipeline's exact/near dedup instead."""
+    stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 42})
+    out = await mcp_server.memclaw_doc(
+        op="write",
+        collection="runbooks",
+        doc_id="pg-tuning",
+        data={"content": "changed body"},
+    )
+
+    assert parse_envelope(out)["action"] == "updated"
+    spy_doc_memory.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("collection", "data"),
+    [
+        ("customers", {"plan": "enterprise"}),  # no body
+        ("notes", {"content": ""}),  # empty body
+    ],
+)
+async def test_doc_write_skips_mint_per_shared_rule(
+    mcp_env, monkeypatch, spy_doc_memory, collection, data
+):
+    stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
+    out = await mcp_server.memclaw_doc(
+        op="write", collection=collection, doc_id="x", data=data
+    )
+
+    assert parse_envelope(out)["ok"] is True
+    spy_doc_memory.assert_not_awaited()
+
+
+async def test_doc_write_survives_a_raising_mint(mcp_env, monkeypatch, spy_doc_memory):
+    """The document has already committed and is the source of truth.
+
+    ``safe_sync_doc_memory`` is contractually non-raising, so this exercises the
+    call site's belt-and-braces guard: even if that contract is broken by a future
+    refactor, the doc write must still succeed rather than returning an error
+    envelope to the caller.
+    """
+    spy_doc_memory.side_effect = RuntimeError("memory subsystem down")
+    stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
+
+    out = await mcp_server.memclaw_doc(
+        op="write", collection="runbooks", doc_id="pg", data={"content": "body"}
+    )
+
+    spy_doc_memory.assert_awaited_once()
+    payload = parse_envelope(out)
+    assert payload["ok"] is True
+    assert payload["action"] == "created"
+
+
+async def test_doc_write_skips_mint_for_skills_collection(
+    mcp_env, monkeypatch, spy_doc_memory
+):
+    """Skills keep their staged -> active approval lifecycle: a recallable memory
+    would route around it."""
+    stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
+    out = await mcp_server.memclaw_doc(
+        op="write",
+        collection="skills",
+        doc_id="my-skill",
+        data={"summary": "A skill.", "content": "# Steps"},
+    )
+
+    assert parse_envelope(out)["ok"] is True
+    spy_doc_memory.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

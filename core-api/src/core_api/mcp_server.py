@@ -1638,6 +1638,12 @@ async def memclaw_doc(
                     return _with_latency(
                         _error_response("INVALID_ARGUMENTS", "op=write requires 'data'."), t0
                     )
+                # ``collection`` is guaranteed non-empty here by the op-level
+                # guard above (write is not in the {list_collections, search}
+                # exemption set), but that guard is too far away for the type
+                # checker to narrow through. Rebind so the derivation helpers
+                # below take a plain ``str``.
+                write_collection: str = collection or ""
                 # Skills slug rule — doc_id becomes a filesystem directory
                 # on the plugin side, so it must be filesystem-safe.
                 if collection == SKILLS_COLLECTION and not _SKILL_SLUG_RE.fullmatch(doc_id):
@@ -1787,11 +1793,13 @@ async def memclaw_doc(
                 # (doc won't appear in op=search).
                 from core_api.services.doc_indexing import (
                     InvalidDocIndexingError,
+                    resolve_doc_memory,
                     resolve_embed_source,
                 )
+                from core_api.services.doc_memory import safe_sync_doc_memory
 
                 try:
-                    source = resolve_embed_source(collection, data)
+                    source = resolve_embed_source(write_collection, data)
                 except InvalidDocIndexingError as exc:
                     return _with_latency(_error_response("INVALID_ARGUMENTS", str(exc)), t0)
                 embedding: list[float] | None = None
@@ -1836,6 +1844,31 @@ async def memclaw_doc(
                 # Storage returns ``{id, created_at, updated_at, xmax}``; ``xmax
                 # == 0`` ⇒ INSERT (new), else the on-conflict UPDATE fired.
                 is_new = int(row["xmax"]) == 0
+                # Mint a memory carrying the document body so the BODY becomes
+                # reachable by meaning (only ``data["summary"]`` is embedded on
+                # the doc row, and ``memclaw_recall`` never returns documents).
+                # Runs on every write, not just inserts — see
+                # ``services.doc_memory`` for why that isn't as duplicative as
+                # it sounds. Never raises: the doc is already committed and is
+                # the source of truth.
+                try:
+                    doc_memory_spec = resolve_doc_memory(
+                        write_collection, doc_id, data, updated_at=row.get("updated_at")
+                    )
+                    if doc_memory_spec is not None:
+                        await safe_sync_doc_memory(
+                            doc_memory_spec,
+                            tenant_id=tenant_id,
+                            fleet_id=fleet_id,
+                            agent_id=agent_id,
+                        )
+                except Exception:
+                    # Belt-and-braces over ``safe_sync_doc_memory``'s own
+                    # non-raising contract. The document is committed; without
+                    # this, a regression in the mint path would surface to the
+                    # caller as a FAILED doc write, which is the one outcome
+                    # this feature must never cause.
+                    logger.exception("doc memory mint failed for %s/%s", collection, doc_id)
                 return _with_latency(
                     json.dumps(
                         {
