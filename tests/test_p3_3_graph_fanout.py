@@ -9,11 +9,13 @@ from uuid import UUID
 
 import pytest
 
+from common.embedding import fake_embedding
 from core_api.constants import (
     GRAPH_HOP_BOOST,
     GRAPH_MAX_BOOSTED_MEMORIES,
     DEFAULT_SEARCH_TOP_K,
 )
+from core_api.services.memory_service import search_memories
 
 
 # ---------------------------------------------------------------------------
@@ -130,91 +132,94 @@ class TestCappedLinkProcessing:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def fanout_tenant():
+    """A tenant of this test's own, so no other test's rows can satisfy an assertion.
+
+    The shared ``tenant_id`` fixture is one constant for the whole session, and
+    ``fake_embedding`` is a bag-of-words hash, not a near-orthogonal one: an
+    unrelated committed row ("User prefers dark mode in the editor") measures
+    cosine 0.33 against a random token — over the 0.3 ``min_similarity`` gate. So
+    a unique query token alone does not isolate these tests; the tenant must.
+    """
+    return f"test-tenant-fanout-{uuid.uuid4().hex[:8]}"
+
+
 @pytest.mark.integration
 class TestGraphFanoutIntegration:
     """Verify fan-out cap works in the real search pipeline."""
 
-    async def _create_entity_with_memories(
-        self, db, tenant_id, fleet_id, entity_name, num_memories, embedding
-    ):
-        """Create an entity and link it to N memories."""
-        from common.models.entity import Entity, MemoryEntityLink
-        from common.models.memory import Memory
-        from sqlalchemy import text as sql_text
+    async def _create_entity_with_memories(self, sc, tenant_id, fleet_id, entity_name, num_memories):
+        """Create an entity and link it to N memories, committed so search sees them.
 
-        entity = Entity(
-            tenant_id=tenant_id,
-            entity_type="concept",
-            canonical_name=entity_name,
-            fleet_id=fleet_id,
+        Writes through ``sc``, not ``db`` — ``db`` rolls its transaction back at
+        teardown, so rows added there are never visible to the separate connection
+        ``search_memories`` runs on. That is why these tests carried an xfail
+        blaming "fake embeddings produce low similarity": the real cause was
+        storage returning 0 rows, and the reason they *xpassed* in a full run was
+        that ``len(results) >= 1`` was satisfied by other tests' committed
+        leftovers in the shared tenant.
+
+        Both ``entities.search_vector`` and ``memories.search_vector`` are filled
+        by triggers that live only in migration 001, so this needs a database
+        ``alembic upgrade head`` has run against — ``Base.metadata.create_all``
+        alone leaves them NULL and the entity would never match, silently skipping
+        the graph boost whose cap is what this class tests. CI migrates first.
+        """
+        entity = await sc.create_entity({
+            "tenant_id": tenant_id,
+            "entity_type": "concept",
+            "canonical_name": entity_name,
+            "fleet_id": fleet_id,
+        })
+        # Embed the entity name itself, and query by it, so cosine is 1.0 rather
+        # than an incidental value — the cap is what's under test, not the gate.
+        embedding = fake_embedding(entity_name)
+        created = await sc.create_memories([
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": "test-agent",
+                "memory_type": "fact",
+                "content": f"Memory {i} about {entity_name}",
+                "embedding": embedding,
+                "weight": 0.5,
+                "content_hash": f"hash-{entity_name}-{i}",
+                "status": "active",
+                "client_request_id": str(uuid.uuid4()),
+            }
+            for i in range(num_memories)
+        ])
+        memory_ids = [row["id"] for row in created]
+        assert all(memory_ids), "bulk insert did not return an id for every memory"
+        await sc.bulk_upsert_entity_links([
+            {"input_idx": i, "memory_id": mid, "entity_id": entity["id"], "role": "subject"}
+            for i, mid in enumerate(memory_ids)
+        ])
+        return memory_ids
+
+    async def test_small_fanout_all_boosted(self, sc, fanout_tenant, fleet_id):
+        """Below the cap, all linked memories are returned."""
+        entity_name = f"pythonprog{uuid.uuid4().hex[:8]}"
+        memory_ids = await self._create_entity_with_memories(
+            sc, fanout_tenant, fleet_id, entity_name, 5,
         )
-        db.add(entity)
-        await db.flush()
 
-        # Set search_vector for entity matching
-        await db.execute(sql_text(
-            "UPDATE entities SET search_vector = to_tsvector('english', :name) WHERE id = :id"
-        ), {"name": entity_name, "id": entity.id})
+        results = await search_memories(fanout_tenant, entity_name, fleet_ids=[fleet_id], top_k=10)
 
-        memories = []
-        for i in range(num_memories):
-            mem = Memory(
-                tenant_id=tenant_id,
-                fleet_id=fleet_id,
-                agent_id="test-agent",
-                memory_type="fact",
-                content=f"Memory {i} about {entity_name}",
-                embedding=embedding,
-                weight=0.5,
-                content_hash=f"hash-{entity_name}-{i}-{uuid.uuid4().hex[:8]}",
-                status="active",
-            )
-            db.add(mem)
-            await db.flush()
-            memories.append(mem)
+        # Assert on this test's own rows, not on a bare count.
+        assert {str(r.id) for r in results} == set(memory_ids)
 
-            db.add(MemoryEntityLink(
-                memory_id=mem.id,
-                entity_id=entity.id,
-                role="subject",
-            ))
-
-        await db.flush()
-        return entity, memories
-
-    @pytest.mark.xfail(reason="Fake embeddings produce low similarity — search returns empty. Works with real embeddings.")
-    async def test_small_fanout_all_boosted(self, db, tenant_id, fleet_id):
-        """Below the cap, all linked memories get their boost."""
-        from common.embedding import fake_embedding
-
-        emb = fake_embedding("python programming language")
-        entity, memories = await self._create_entity_with_memories(
-            db, tenant_id, fleet_id, "python programming", 5, emb,
-        )
-        await db.commit()
-
-        from core_api.services.memory_service import search_memories
-
-        results = await search_memories(tenant_id, "python programming", fleet_ids=[fleet_id], top_k=10,
-        )
-        # All 5 should be searchable (boosted or not)
-        assert len(results) >= 1
-
-    @pytest.mark.xfail(reason="Fake embeddings produce low similarity — search returns empty. Works with real embeddings.")
-    async def test_large_fanout_capped(self, db, tenant_id, fleet_id):
+    async def test_large_fanout_capped(self, sc, fanout_tenant, fleet_id):
         """A popular entity with many linked memories doesn't break search."""
-        from common.embedding import fake_embedding
-        from core_api.services.memory_service import search_memories
-
-        emb = fake_embedding("popular topic")
+        entity_name = f"populartopic{uuid.uuid4().hex[:8]}"
         num_memories = GRAPH_MAX_BOOSTED_MEMORIES + 30
-        entity, memories = await self._create_entity_with_memories(
-            db, tenant_id, fleet_id, "popular topic", num_memories, emb,
+        memory_ids = await self._create_entity_with_memories(
+            sc, fanout_tenant, fleet_id, entity_name, num_memories,
         )
-        await db.commit()
 
-        # Should complete without error and return at most `limit` results
-        results = await search_memories(tenant_id, "popular topic", fleet_ids=[fleet_id], top_k=10,
-        )
-        assert len(results) <= 10
-        assert len(results) >= 1
+        results = await search_memories(fanout_tenant, entity_name, fleet_ids=[fleet_id], top_k=10)
+
+        # top_k is honoured despite the fan-out, and every slot is one of ours.
+        assert len(results) == 10
+        assert {str(r.id) for r in results} <= set(memory_ids)

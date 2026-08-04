@@ -546,7 +546,6 @@ class TestBackwardCompatibility:
         await db.refresh(mem)
         assert mem.visibility == "scope_team"
 
-    @pytest.mark.xfail(reason="Fake embeddings produce low similarity — search returns empty. Works with real embeddings.")
     async def test_search_without_visibility_params_unchanged(
         self,
         db,

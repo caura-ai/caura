@@ -270,7 +270,15 @@ def storage_http(_patch_storage_client):
 
 @pytest.fixture
 def tenant_id():
-    """Unique tenant ID per test module."""
+    """The run's shared tenant ID — one constant for the whole session.
+
+    NOT unique per test or per module: ``TENANT_ID`` is evaluated once, when this
+    module is imported. Rows any test commits through ``sc`` therefore stay
+    visible to every later test under this id, so an assertion like
+    ``len(results) >= 1`` can be satisfied by another test's data. Where a test
+    needs real isolation, generate its own ``f"test-tenant-…-{uuid4().hex[:8]}"``
+    (keep the ``test-tenant-`` prefix — session teardown sweeps on it).
+    """
     return TENANT_ID
 
 
