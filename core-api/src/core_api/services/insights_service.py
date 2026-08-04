@@ -911,10 +911,10 @@ async def _persist_findings(
     # write_mode behaviour change vs the pre-#29 path
     # -----------------------------------------------
     # The previous serial path passed ``write_mode="strong"`` on every
-    # ``MemoryCreate``. ``BulkMemoryItem`` carries no ``write_mode``
-    # field, and ``create_memories_bulk`` doesn't pick the strong vs fast
-    # pipeline per item — so the bulk path effectively drops the strong
-    # mode override. The only behavioural delta between the strong and
+    # ``MemoryCreate``. ``BulkMemoryItem`` now carries a ``write_mode`` too, but
+    # it governs only whether the embedding runs inline, and these items don't
+    # set it — so the bulk path still drops the strong mode override in the sense
+    # that matters below. The only behavioural delta between the strong and
     # fast pipelines is the inline ``CheckSemanticDuplicate`` step (see
     # ``core_api/pipeline/compositions/write.py``); everything else
     # (embed, enrich, exact-dedup, write, schedule background tasks) is

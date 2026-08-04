@@ -293,6 +293,18 @@
               }
             ],
             "title": "Weight"
+          },
+          "write_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-item write mode. 'strong' embeds this item inline, so it is searchable as soon as the write is persisted rather than after the background backfill — at the cost of an embedding provider call on the request path. Any other value behaves as 'fast': the item follows the deployment's embedding mode. On a deployment that already embeds inline this has no effect, since every item is embedded inline anyway. Narrower than MemoryCreate.write_mode: on the bulk path 'strong' affects only the embedding — LLM enrichment defers either way — and the tenant's default_write_mode is not consulted, so only an explicit per-item opt-in embeds inline.",
+            "title": "Write Mode"
           }
         },
         "required": [

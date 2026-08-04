@@ -42,6 +42,7 @@ from core_api.constants import (
     BULK_EMBEDDING_TIMEOUT_SECONDS,
     BULK_ENRICHMENT_CONCURRENCY,
     BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS,
+    BULK_STRONG_EMBED_TIMEOUT_SECONDS,
     CHUNKING_THRESHOLD_CHARS,
     CLASSIFIER_DEPRECATED_MEMORY_TYPES,
     CRYSTALLIZER_SHORT_CONTENT_CHARS,
@@ -1191,16 +1192,53 @@ async def create_memories_bulk(
             valid_indices = [i for i in valid_indices if i not in governance_errors]
 
     embeddings: list = [None] * n
-    if valid_indices and settings.inline_embedding:
+    # Items embedded here keep their vector; the rest fall to the background
+    # ``reembed_batch`` below. ``write_mode="strong"`` opts an item in even when
+    # the deployment defers, so it is searchable the moment it persists rather
+    # than after the backfill. Only the embedding: enrichment defers regardless
+    # on this path, unlike single-write strong.
+    #
+    # Deliberately NOT via ``_resolve_write_mode``: that also consults
+    # ``tenant_config.default_write_mode`` and escalates ``_STRONG_TYPES``, which
+    # would put a provider call on the request path for callers who never asked —
+    # including the broker fan-in this endpoint is tuned for. Only an explicit
+    # per-item opt-in counts here.
+    if settings.inline_embedding:
+        embed_indices = valid_indices
+    else:
+        embed_indices = [i for i in valid_indices if items[i].write_mode == "strong"]
+
+    if embed_indices:
+        # An opportunistic embed gets a tighter deadline than a required one. The
+        # required path can justify 30s because the alternative is a 504; this one
+        # would spend it and then land on the deferred outcome it already accepted
+        # for free — latency charged to the whole batch for one item's opt-in.
+        embed_timeout = (
+            BULK_EMBEDDING_TIMEOUT_SECONDS if settings.inline_embedding else BULK_STRONG_EMBED_TIMEOUT_SECONDS
+        )
         try:
-            async with asyncio.timeout(BULK_EMBEDDING_TIMEOUT_SECONDS):
+            async with asyncio.timeout(embed_timeout):
                 valid_embeddings = await get_embeddings_batch(
-                    [items[i].content for i in valid_indices], tenant_config
+                    [items[i].content for i in embed_indices], tenant_config
                 )
-        except TimeoutError:
-            raise HTTPException(status_code=504, detail="Bulk embedding timed out")
-        for emb_pos, item_idx in enumerate(valid_indices):
-            embeddings[item_idx] = valid_embeddings[emb_pos]
+        except Exception as exc:
+            # Inline deployments: this is the only place a row gets its vector, so
+            # a failure fails the request rather than persisting vectorless rows.
+            if settings.inline_embedding:
+                if isinstance(exc, TimeoutError):
+                    raise HTTPException(status_code=504, detail="Bulk embedding timed out")
+                raise
+            # Deferred: falling through leaves ``embeddings[i] is None``, so the
+            # background re-embed picks these up. One item's opt-in must not fail a
+            # batch of items that never asked for inline embedding.
+            logger.warning(
+                "bulk inline embed for %d write_mode=strong item(s) failed; deferring to backfill",
+                len(embed_indices),
+                exc_info=True,
+            )
+        else:
+            for emb_pos, item_idx in enumerate(embed_indices):
+                embeddings[item_idx] = valid_embeddings[emb_pos]
 
     enrichments: list = [None] * n
     # CAURA-595: ``deployment_mode=deferred`` defers the LLM call to

@@ -109,6 +109,30 @@ class BulkMemoryItem(BaseModel):
     ts_valid_end: datetime | None = None
     reference_datetime: datetime | None = None
     status: str | None = Field(default=None)  # validated per-item (status_errors); see note above
+    # Per ITEM, not per batch, deliberately: callers that funnel through the bulk
+    # endpoint may coalesce writes from unrelated sources into one request (the
+    # broker's durable queue does exactly this), so one item asking for 'strong'
+    # must not force inline embedding on everything batched alongside it.
+    #
+    # Untyped ``str`` rather than a Literal, per this model's additive-tolerance
+    # policy above: a Literal would 422 the WHOLE batch over one item's unknown
+    # value (e.g. 'stm' copied from a single-write payload). Only 'strong' has an
+    # effect; every other value, known or not, behaves as 'fast'.
+    write_mode: str | None = Field(
+        default=None,
+        description=(
+            "Per-item write mode. 'strong' embeds this item inline, so it is "
+            "searchable as soon as the write is persisted rather than after the "
+            "background backfill — at the cost of an embedding provider call on "
+            "the request path. Any other value behaves as 'fast': the item follows "
+            "the deployment's embedding mode. On a deployment that already embeds "
+            "inline this has no effect, since every item is embedded inline anyway. "
+            "Narrower than MemoryCreate.write_mode: on the bulk path 'strong' "
+            "affects only the embedding — LLM enrichment defers either way — and "
+            "the tenant's default_write_mode is not consulted, so only an explicit "
+            "per-item opt-in embeds inline."
+        ),
+    )
 
 
 class BulkMemoryCreate(BaseModel):
@@ -279,11 +303,15 @@ class MemoryOut(BaseModel):
     #   enrichment_pending: true  — title/memory_type/weight/status/ts_valid_* are
     #     still the caller-supplied or default values; the LLM pass will PATCH them.
     #
-    # Absent (or false) means that stage ran inline. `write_mode="strong"` embeds
-    # and enriches inline, so neither flag appears — that is the supported
-    # read-your-own-write opt-out, at the cost of the provider calls on the
-    # request path. A deployment running embedding inline (OSS local default)
-    # never sets embedding_pending, even in fast mode.
+    # Absent (or false) means that stage ran inline. On the single-write path
+    # `write_mode="strong"` embeds and enriches inline, so neither flag appears —
+    # that is the supported read-your-own-write opt-out, at the cost of the
+    # provider calls on the request path. A deployment running embedding inline
+    # (OSS local default) never sets embedding_pending, even in fast mode.
+    #
+    # `BulkMemoryItem.write_mode` is narrower: there 'strong' governs the
+    # embedding only, enrichment defers either way, and the bulk path sets neither
+    # flag — so a bulk caller cannot read pendingness off its own write response.
     metadata: dict | None
     created_at: datetime
     expires_at: datetime | None

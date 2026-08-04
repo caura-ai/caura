@@ -357,9 +357,11 @@ class Settings(BaseSettings):
     def _validate_timeout_ordering(self) -> "Settings":
         # Local import avoids a circular: constants → common.constants,
         # but this file is imported by constants.py's dependents.
+        from common.embedding.constants import EMBEDDING_GATE_TIMEOUT_SECONDS
         from core_api.constants import (
             BULK_EMBEDDING_TIMEOUT_SECONDS,
             BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS,
+            BULK_STRONG_EMBED_TIMEOUT_SECONDS,
         )
 
         if self.request_timeout_seconds < BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS:
@@ -420,6 +422,39 @@ class Settings(BaseSettings):
                 f"bulk_request_timeout_seconds "
                 f"({self.bulk_request_timeout_seconds}s) so the storage-phase "
                 f"cap fires before the umbrella."
+            )
+        if EMBEDDING_GATE_TIMEOUT_SECONDS >= BULK_STRONG_EMBED_TIMEOUT_SECONDS:
+            # The opportunistic ``write_mode="strong"`` embed must be able to
+            # outwait the concurrency gate. The gate timeout sits deliberately
+            # below callers' deadlines so a saturated gate surfaces as
+            # attributable backpressure rather than an anonymous caller timeout;
+            # invert that and every gate-saturated strong write is reported as a
+            # generic embed failure instead. Checked here because the gate value
+            # is read from an env var at import, so the ordering is an operator's
+            # to break, not a constant's.
+            raise ValueError(
+                f"EMBEDDING_GATE_TIMEOUT_SECONDS ({EMBEDDING_GATE_TIMEOUT_SECONDS}s) must be < "
+                f"BULK_STRONG_EMBED_TIMEOUT_SECONDS ({BULK_STRONG_EMBED_TIMEOUT_SECONDS}s) so a "
+                "saturated embedding gate stays attributable on the opportunistic "
+                "bulk strong-embed path. Lower the gate timeout, or raise "
+                "BULK_STRONG_EMBED_TIMEOUT_SECONDS (keeping it under "
+                "BULK_EMBEDDING_TIMEOUT_SECONDS)."
+            )
+        if BULK_STRONG_EMBED_TIMEOUT_SECONDS >= BULK_EMBEDDING_TIMEOUT_SECONDS:
+            # The other half of the bound the message above already tells the
+            # operator to respect. The derived default clamps here, so only an
+            # explicit env override can reach this — and it must not, twice over:
+            # an opportunistic embed allowed to run as long as a required one stops
+            # being opportunistic and can hold a whole batch for that budget, for
+            # one item's opt-in; and the additive ordering check above assumes the
+            # embed phase never exceeds BULK_EMBEDDING_TIMEOUT_SECONDS, so letting
+            # it through would silently invalidate that proof rather than just
+            # degrade this path.
+            raise ValueError(
+                f"BULK_STRONG_EMBED_TIMEOUT_SECONDS ({BULK_STRONG_EMBED_TIMEOUT_SECONDS}s) must be < "
+                f"BULK_EMBEDDING_TIMEOUT_SECONDS ({BULK_EMBEDDING_TIMEOUT_SECONDS}s): the "
+                "opportunistic bulk strong-embed budget cannot exceed the required embed cap, "
+                "which the storage-phase ordering check above is proved against."
             )
         return self
 
