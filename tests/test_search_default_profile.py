@@ -135,3 +135,42 @@ async def test_precedence_empty_tenant_default_is_neutral():
     tc = ResolvedConfig({})  # no default_profile
     params = await _resolve(tenant_config=tc, agent_profile=None)
     assert params["min_similarity"] == MIN_SEARCH_SIMILARITY
+
+
+# ── fts_rank_scale (#687) ──
+
+
+def _profile(**kw) -> dict:
+    """The shape ``_validate_default_search_profile`` actually reads.
+
+    It takes the whole settings payload and digs out
+    ``search.default_profile``; handed a bare dict it finds nothing and returns
+    without validating, which is how a bounds test can pass while asserting
+    nothing.
+    """
+    return {"search": {"default_profile": dict(kw)}}
+
+
+def test_fts_rank_scale_is_tenant_overridable():
+    """It joins the other ranking knobs rather than being a hardcoded literal."""
+    _validate_default_search_profile(_profile(fts_rank_scale=3.0))
+    rc = ResolvedConfig({"search": {"default_profile": {"fts_rank_scale": 3.0}}})
+    assert rc.default_search_profile["fts_rank_scale"] == 3.0
+
+
+def test_fts_rank_scale_floor_is_one_not_zero():
+    """1.0 is the pre-#687 formula — the documented revert — and the floor.
+
+    Below 1.0 would weaken keyword relevance below where it has always been,
+    which nothing measured supports and no caller should reach by accident.
+    """
+    with pytest.raises(ValueError, match="fts_rank_scale"):
+        _validate_default_search_profile(_profile(fts_rank_scale=0.5))
+    _validate_default_search_profile(_profile(fts_rank_scale=1.0))  # the revert, allowed
+
+
+def test_fts_rank_scale_ceiling_matches_what_was_measured():
+    """The ceiling is the largest value the LoCoMo sweep covered; above is untested."""
+    _validate_default_search_profile(_profile(fts_rank_scale=20.0))
+    with pytest.raises(ValueError, match="fts_rank_scale"):
+        _validate_default_search_profile(_profile(fts_rank_scale=20.001))

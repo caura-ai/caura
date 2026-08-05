@@ -18,6 +18,7 @@ from core_storage_api.services.postgres_service import get_session
 
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
+    FTS_RANK_SCALE,
     FRESHNESS_DECAY_DAYS,
     SEARCH_OVERFETCH_FACTOR,
 )
@@ -535,4 +536,108 @@ async def test_fts_only_row_survives_a_saturated_candidate_window(tenant_id, mon
         f"from the cosine gate — but {window} higher-cosine rows fill the "
         f"top_k({top_k}) * SEARCH_OVERFETCH_FACTOR({SEARCH_OVERFETCH_FACTOR}) window "
         f"first. search returned {len(results)} row(s), none of them the subject."
+    )
+
+
+# ---------------------------------------------------------------------------
+# #687 part two: fts_score on the cosine scale
+# ---------------------------------------------------------------------------
+
+
+async def _rank_and_score(content: str, query: str, scale: float) -> tuple[float, float]:
+    """``(raw ts_rank_cd, fts_score)`` at a given scale, from real Postgres.
+
+    Reads both out of one statement with the production expression rather than
+    recomputing in Python — what ``ts_rank_cd`` feeds the saturating map is the
+    thing under test, so a Python reimplementation would test the wrong function.
+    Binds the scaled rank once via a subquery, mirroring how the production
+    expression reuses it rather than re-evaluating.
+    """
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT r, (:k * r) / (1 + :k * r) AS s FROM ("
+                    "  SELECT ts_rank_cd(to_tsvector('english', :c),"
+                    "                    plainto_tsquery('english', :q)) AS r"
+                    ") t"
+                ),
+                {"k": scale, "c": content, "q": query},
+            )
+        ).first()
+    return float(row[0]), float(row[1])
+
+
+@pytest.mark.integration
+async def test_fts_rank_scale_lifts_a_lexical_match_onto_the_cosine_scale():
+    """The scale must move fts_score into cosine's range, not just nudge it.
+
+    #687's first half (#700) made an unembedded FTS-matching row *reachable*. It
+    could not make a lexical match *rank* like one, because fts_score saturates a
+    weight-D ts_rank_cd of 0.1 to 0.0909 while cosine on the same corpus measures
+    0.35-0.39 — so the declared FTS_WEIGHT of 0.3 delivered an effective ~0.09.
+    """
+    content = "a memory that mentions zqxjvbn exactly once"
+
+    _, before = await _rank_and_score(content, "zqxjvbn", 1.0)
+    _, after = await _rank_and_score(content, "zqxjvbn", FTS_RANK_SCALE)
+
+    assert before == pytest.approx(0.0909, abs=0.005), (
+        f"the pre-#687 formula should saturate a single weight-D match to ~0.0909, got {before}"
+    )
+    # Cosine's measured strong-match range on this corpus is 0.35-0.39; landing
+    # inside it is the whole point, and is what makes the nominal FTS_WEIGHT real.
+    assert 0.30 <= after <= 0.45, (
+        f"at FTS_RANK_SCALE={FTS_RANK_SCALE} a modal match should land in cosine's "
+        f"0.35-0.39 range, got {after}"
+    )
+
+
+@pytest.mark.integration
+async def test_fts_rank_scale_of_one_reproduces_the_pre_687_formula():
+    """1.0 is the documented revert, so it must be exact, not merely close."""
+    raw, scaled = await _rank_and_score("another memory mentioning zqxjvbn", "zqxjvbn", 1.0)
+    assert scaled == pytest.approx(raw / (1.0 + raw), abs=1e-12)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
+async def test_rank_scale_reaches_the_sql_on_both_search_paths(tenant_id, monkeypatch, use_pipeline):
+    """The scale must arrive where the SQL reads it, on BOTH paths.
+
+    Three places can drop it, and each is invisible to the other two:
+
+      * ``resolve_search_profile`` builds the pipeline's ``search_params``;
+      * ``_search_memories_legacy`` builds its own, and sends the keys FLAT;
+      * the storage route rebuilds ``search_params`` from a flat-key ALLOWLIST
+        (``_SEARCH_PARAM_KEYS``) when no nested dict is present — so a key added
+        to both core-api builders but not to that allowlist still applies only to
+        the pipeline.
+
+    Asserting at the client boundary cannot see the third, because the nesting
+    happens server-side. So this spies on the storage service function that
+    actually reads the value into the SQL expression.
+    """
+    from core_storage_api.services import postgres_service as pg
+
+    from core_api.services import memory_service
+
+    monkeypatch.setattr(memory_service, "_USE_PIPELINE_SEARCH", use_pipeline)
+
+    seen: list = []
+    real = pg.PostgresService.memory_scored_search
+
+    async def _spy(self, *a, **kw):
+        sp = kw.get("search_params") or next((x for x in a if isinstance(x, dict)), None)
+        seen.append((sp or {}).get("fts_rank_scale"))
+        return await real(self, *a, **kw)
+
+    monkeypatch.setattr(pg.PostgresService, "memory_scored_search", _spy)
+    await memory_service.search_memories(tenant_id=tenant_id, query="anything at all", top_k=3)
+
+    path = "pipeline" if use_pipeline else "legacy"
+    assert seen, f"the {path} path never reached memory_scored_search"
+    assert seen[0] == FTS_RANK_SCALE, (
+        f"the {path} path did not deliver fts_rank_scale to the SQL; storage saw "
+        f"{seen[0]!r}, so it would fall back to 1.0 and keep the pre-#687 ranking"
     )

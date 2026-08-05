@@ -54,6 +54,7 @@ from core_api.constants import (
     FRESHNESS_FLOOR,
     FTS_BOOST_MAX_TOKENS,
     FTS_BOOST_SPECIFICITY_RATIO,
+    FTS_RANK_SCALE,
     FTS_WEIGHT,
     FTS_WEIGHT_BOOSTED,
     GRAPH_HOP_BOOST,
@@ -3410,6 +3411,7 @@ async def _search_memories_legacy(
     _recall_decay_window_days = sp.get("recall_decay_window_days", RECALL_DECAY_WINDOW_DAYS)
     _graph_max_hops = sp.get("graph_max_hops", GRAPH_MAX_HOPS)
     _similarity_blend = sp.get("similarity_blend", SIMILARITY_BLEND)
+    _fts_rank_scale = sp.get("fts_rank_scale", FTS_RANK_SCALE)
 
     # Temporal hint
     temporal_window = _extract_temporal_hint(query)
@@ -3456,6 +3458,7 @@ async def _search_memories_legacy(
         "top_k": _overfetch_top_k,
         "min_similarity": _min_similarity,
         "fts_weight": _fts_weight,
+        "fts_rank_scale": _fts_rank_scale,
         "freshness_floor": _freshness_floor,
         "freshness_decay_days": _freshness_decay_days,
         "recall_boost_enabled": recall_boost,

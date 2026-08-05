@@ -537,6 +537,33 @@ GRAPH_MAX_BOOSTED_MEMORIES = 50  # cap on memories receiving graph boost (preven
 ENTITY_LOOKUP_MAX_MATCHES = 20
 
 FTS_WEIGHT = 0.3  # blend: (1 - FTS_WEIGHT) * vector + FTS_WEIGHT * keyword
+# Scale applied to ts_rank_cd BEFORE the saturating map, putting fts_score on the
+# same scale as cosine so FTS_WEIGHT above bites in effect and not just in name
+# (#687). Division of labour: FTS_WEIGHT is the *preference* between the two
+# signals; this is the *unit conversion* that makes the preference meaningful.
+#
+# The input to the derivation: migration 001 builds ``search_vector`` as a bare
+# ``to_tsvector('english', content)`` with no ``setweight``, so every lexeme is
+# weight D = 0.1 and a modal single-occurrence match scores ts_rank_cd = 0.1 →
+# 0.0909, against measured cosine of 0.35-0.39. Re-derive if that trigger starts
+# weighting lexemes; changing FTS_WEIGHT alone does NOT require it.
+#
+# Why 6: derived, not tuned. k*0.1/(1+k*0.1) ≈ 0.37 lands a modal match in the
+# cosine range. Do not treat it as a free dial.
+#
+# Calibrated at the MODE, not across the distribution: ts_rank_cd's cover-density
+# penalty is not a constant factor, so a spread-out multi-term match still lands
+# well below the band. That residual is arguably right — spread terms are a worse
+# match — but it means "effective ≈ nominal weight" describes the typical query,
+# not a global property. A corpus of spread-term queries will measure lower; that
+# is not the scale being broken.
+#
+# Measured before shipping — see BENCHMARKS.md § First-stage retrieval, and note
+# there that the effect rises monotonically across the whole range swept, so the
+# benchmark does NOT locate an optimum. 6 is the derivation's answer, not the
+# sweep's. 1.0 reproduces the pre-#687 formula exactly; per-tenant override lives
+# at ``search.default_profile.fts_rank_scale``.
+FTS_RANK_SCALE = 6.0
 FTS_WEIGHT_BOOSTED = 0.6  # for short specific queries (1-3 proper nouns / identifiers)
 FTS_BOOST_MAX_TOKENS = 3  # queries with more meaningful tokens than this stay at FTS_WEIGHT
 FTS_BOOST_SPECIFICITY_RATIO = 0.4  # strict >; at N=2 this means >=1 specific token triggers boost

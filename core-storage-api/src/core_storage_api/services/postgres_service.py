@@ -1164,7 +1164,19 @@ class PostgresService:
 
         ts_query = func.plainto_tsquery("english", query)
         raw_keyword_rank = func.ts_rank_cd(Memory.search_vector, ts_query)
-        fts_score = (raw_keyword_rank / (1.0 + raw_keyword_rank)).label("fts_score")
+        # #687: scale the rank before saturating, so `fts_score` lands on the same
+        # scale as `vec_sim` and the blend below weights keyword relevance by
+        # `_fts_weight` in effect rather than only in name. The derivation and the
+        # tsvector fact it rests on live with the value, at
+        # ``core_api.constants.FTS_RANK_SCALE``.
+        #
+        # Defaults to 1.0 — the pre-#687 formula — when the key is absent, so a
+        # storage revision that rolls out ahead of core-api keeps today's ranking
+        # until core-api starts sending the scale. Deploys are not atomic across
+        # the two services, and the safe direction for the gap is "unchanged".
+        _fts_rank_scale = float(sp.get("fts_rank_scale", 1.0) or 1.0)
+        scaled_keyword_rank = _fts_rank_scale * raw_keyword_rank
+        fts_score = (scaled_keyword_rank / (1.0 + scaled_keyword_rank)).label("fts_score")
 
         # CAURA-679: NULL-embedding rows fall back to `fts_score` alone
         # rather than the `(1 - w) * 0 + w * fts_score` haircut that

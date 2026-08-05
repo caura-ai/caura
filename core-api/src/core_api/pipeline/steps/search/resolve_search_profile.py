@@ -6,6 +6,7 @@ from core_api.constants import (
     CANDIDATE_POOL_SIZE,
     FRESHNESS_DECAY_DAYS,
     FRESHNESS_FLOOR,
+    FTS_RANK_SCALE,
     GRAPH_MAX_HOPS,
     MIN_SEARCH_SIMILARITY,
     RECALL_BOOST_CAP,
@@ -60,6 +61,8 @@ class ResolveSearchProfile:
             ),
             "graph_max_hops": resolved_profile.get("graph_max_hops", GRAPH_MAX_HOPS),
             "similarity_blend": resolved_profile.get("similarity_blend", SIMILARITY_BLEND),
+            # #687: scale on ts_rank_cd before saturation; 1.0 = pre-#687 formula.
+            "fts_rank_scale": resolved_profile.get("fts_rank_scale", FTS_RANK_SCALE),
             # A49: 0 = off; >0 = storage selects a cosine-dominant candidate pool of this size.
             "candidate_pool_size": resolved_profile.get("candidate_pool_size", CANDIDATE_POOL_SIZE),
             # A50 unified: 0 = legacy multiplicative score; 1 = unified relevance-dominant formula.

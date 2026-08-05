@@ -10,7 +10,8 @@ What is under test is the blend in ``postgres_service._execute_scored_search``:
 
     similarity = (1 - fts_weight) * vec_sim + fts_weight * fts_score
 
-``fts_score`` today is ``ts_rank_cd / (1 + ts_rank_cd)``. Because
+Before #687 ``fts_score`` was ``ts_rank_cd / (1 + ts_rank_cd)`` — i.e. this
+harness's ``--k 1``. Production now scales by ``FTS_RANK_SCALE`` first. Because
 ``memories.search_vector`` is built by migration 001 as a bare
 ``to_tsvector('english', content)`` with no ``setweight``, every lexeme carries
 weight D = 0.1, so a typical single-occurrence match scores ~0.0909 while cosine
@@ -19,8 +20,8 @@ survive the difference in dynamic range. See
 ``HANDOFF-2026-08-04-fts-score-scale-normalisation.md``.
 
     corpus      one LoCoMo conversation's dialogue turns
-    baseline    blend using today's fts_score = r/(1+r)
-    treatment   blend using (k*r)/(1+k*r)  — --k scales before saturation
+    baseline    blend at --k 1, the pre-#687 fts_score = r/(1+r)
+    treatment   blend at --k, i.e. (k*r)/(1+k*r)  — production ships FTS_RANK_SCALE
     truth       the QA item's ``evidence`` turn ids (binary relevance)
     ranking     the WHOLE corpus, both arms — no fixed pool
 
@@ -58,6 +59,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Production values rather than hand-mirrored literals: the constant's own comment
+# says to re-derive it if the tsvector weighting changes, and a copied default here
+# would make that instruction silently unenforceable.
+from core_api.constants import FTS_RANK_SCALE, FTS_WEIGHT  # noqa: E402
 from _locomo_bench import (  # noqa: E402  (path shim above must run first)
     CATEGORIES,
     embed,
@@ -86,7 +91,7 @@ def _score(rels: list[float], n_relevant: int) -> dict[str, float]:
 
 
 def _saturate(raw: float, k: float) -> float:
-    """``(k*r)/(1+k*r)`` — today's formula is this with k = 1."""
+    """``(k*r)/(1+k*r)`` — the pre-#687 formula is this with k = 1."""
     scaled = k * raw
     return scaled / (1.0 + scaled)
 
@@ -247,16 +252,15 @@ def main() -> None:
     ap.add_argument(
         "--k",
         type=float,
-        default=6.0,
-        help="scale applied to ts_rank_cd before saturation. 1 = today's formula "
-        "(and asserts a zero delta). ~6 puts a single-term match near the cosine "
-        "range, making the effective FTS weight match the nominal one.",
+        default=FTS_RANK_SCALE,
+        help="scale applied to ts_rank_cd before saturation. 1 = the pre-#687 "
+        "formula (and asserts a zero delta). Defaults to what production ships.",
     )
     ap.add_argument(
         "--fts-weight",
         type=float,
-        default=0.3,
-        help="FTS_WEIGHT from core_api.constants (default matches production)",
+        default=FTS_WEIGHT,
+        help="the blend weight; defaults to core_api.constants.FTS_WEIGHT",
     )
     ap.add_argument("--limit-conversations", type=int, default=0, help="0 = all")
     ap.add_argument("--seed", type=int, default=1234)

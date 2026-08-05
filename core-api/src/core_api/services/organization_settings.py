@@ -1087,6 +1087,11 @@ _SEARCH_PROFILE_RULES: dict[str, tuple[type, tuple, object]] = {
     "top_k": (int, (1, 20), None),
     "min_similarity": (float, (0.1, 0.9), None),
     "fts_weight": (float, (0.0, 1.0), None),
+    # #687: scale on ts_rank_cd before saturation. Floor is 1.0, not 0 — that is
+    # the pre-#687 formula, so a tenant can revert but cannot weaken keyword
+    # relevance below where it has always been. Ceiling is the largest value the
+    # LoCoMo sweep actually measured; above it is untested territory.
+    "fts_rank_scale": (float, (1.0, 20.0), None),
     "freshness_floor": (float, (0.0, 1.0), None),
     "freshness_decay_days": (int, (7, 730), None),
     "recall_boost_cap": (float, (1.0, 3.0), None),

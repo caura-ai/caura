@@ -127,8 +127,13 @@ async def create_memories_bulk(request: Request) -> list[dict]:
 async def scored_search(request: Request) -> list[dict]:
     body: dict = await request.json()
     # Build search_params from top-level body keys (client sends them flat)
+    # An allowlist, so a scoring parameter the legacy path sends flat is DROPPED
+    # until it is named here — the pipeline sends a nested ``search_params`` and
+    # bypasses this entirely, so a parameter added only there silently applies to
+    # one of the two paths.
     _SEARCH_PARAM_KEYS = {
         "fts_weight",
+        "fts_rank_scale",
         "freshness_floor",
         "freshness_decay_days",
         "recall_boost_cap",

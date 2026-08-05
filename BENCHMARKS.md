@@ -117,8 +117,9 @@ invariant. It A/Bs the keyword half of
 similarity = (1 - FTS_WEIGHT) * vec_sim + FTS_WEIGHT * fts_score
 ```
 
-by rescaling `ts_rank_cd` before saturation (`--k`; `k=1` is today's
-`r/(1+r)` formula), ranking the *whole* corpus in both arms. Reports
+by rescaling `ts_rank_cd` before saturation (`--k`, defaulting to what
+production ships; `k=1` is the **pre-#687** `r/(1+r)` formula), ranking the
+*whole* corpus in both arms. Reports
 recall@5/@10/@20, nDCG@10 and MRR with the same paired bootstrap CI and sign
 test, overall, per category, and — separately — over just the queries where
 `plainto_tsquery` matched anything, since the rest are a mathematical no-op that
@@ -138,7 +139,9 @@ python scripts/benchmark_blend_locomo.py \
 ```
 
 `k=1` asserts a delta of exactly zero on every metric — a self-check that the
-harness isn't manufacturing differences the change cannot cause.
+harness isn't manufacturing differences the change cannot cause. Since #687 shipped
+`FTS_RANK_SCALE`, `k=1` is a *historical* arm: an A/B from it measures the delta
+since before that change, not a delta against what production runs today.
 
 Two limits worth knowing before quoting a number from it. Only ~17% of LoCoMo
 questions lexically match any turn (they are paraphrases), so the overall delta is
