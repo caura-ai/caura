@@ -145,6 +145,170 @@ async def test_embed_batch_respects_send_dimensions(
 
 
 # ---------------------------------------------------------------------------
+# embed_batch chunking — a request larger than the backend's cap is split
+# ---------------------------------------------------------------------------
+
+
+def _size_matched_create(create: AsyncMock) -> None:
+    """Make the mocked ``embeddings.create`` return one vector per input,
+    so a chunked call assembles a correctly-sized result."""
+
+    async def _respond(**kwargs):
+        texts = kwargs["input"]
+        return SimpleNamespace(
+            data=[
+                SimpleNamespace(index=i, embedding=[float(i)] * VECTOR_DIM)
+                for i in range(len(texts))
+            ]
+        )
+
+    create.side_effect = _respond
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_embed_batch_splits_requests_above_max_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch larger than ``max_batch`` is split, and no single request
+    exceeds the cap.
+
+    This is the regression test for the 30+ day production bug: a TEI
+    sidecar at its default ``--max-client-batch-size=32`` answered every
+    50-text bulk embed with ``413 batch size 50 > maximum allowed batch
+    size 32``. The failure was invisible because it cascaded into a
+    per-item fallback that produced correct embeddings.
+    """
+    provider, _, create = _patched_provider(monkeypatch, max_batch=32)
+    _size_matched_create(create)
+
+    # 50 is the incident's exact batch size (EMBEDDING_REEMBED_BATCH_SIZE).
+    result = await provider.embed_batch([f"t{i}" for i in range(50)])
+
+    assert len(result) == 50, "chunking must not drop or duplicate texts"
+    sent = [len(call.kwargs["input"]) for call in create.call_args_list]
+    assert sent == [32, 18], f"expected a 32+18 split, got {sent}"
+    assert max(sent) <= 32, "no request may exceed the backend's cap"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_embed_batch_at_or_below_cap_makes_one_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fast path is preserved exactly: a batch that fits sends one
+    request, so chunking costs nothing for the common case."""
+    provider, _, create = _patched_provider(monkeypatch, max_batch=32)
+    _size_matched_create(create)
+
+    result = await provider.embed_batch([f"t{i}" for i in range(32)])
+
+    assert len(result) == 32
+    assert create.await_count == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_embed_batch_preserves_input_order_across_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chunking must be invisible in the result.
+
+    Each chunk's response is indexed from 0, so concatenating without
+    care would interleave or reorder vectors relative to *texts*. The
+    contract callers rely on (``memory_service`` zips embeddings back
+    onto rows positionally) is that result[i] belongs to texts[i].
+    """
+    provider, _, create = _patched_provider(monkeypatch, max_batch=2)
+
+    async def _respond(**kwargs):
+        # Echo each input's own identity into its vector so a reorder is
+        # detectable rather than merely a length change.
+        return SimpleNamespace(
+            data=[
+                SimpleNamespace(index=i, embedding=[float(t)] * VECTOR_DIM)
+                for i, t in enumerate(kwargs["input"])
+            ]
+        )
+
+    create.side_effect = _respond
+
+    texts = [str(n) for n in range(7)]
+    result = await provider.embed_batch(texts)
+
+    assert [vec[0] for vec in result] == [float(n) for n in range(7)]
+    assert create.await_count == 4  # 2+2+2+1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_hosted_openai_is_not_chunked_at_the_self_hosted_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``base_url`` means hosted OpenAI, which accepts 2048 inputs.
+
+    The 32 default is a guess about an opaque self-hosted sidecar. Applying
+    it to hosted OpenAI would split one bulk write of ``BULK_MAX_ITEMS``
+    into 4 sequential round trips for nothing — chunking must cost nothing
+    where the backend takes the whole batch.
+    """
+    provider, _, create = _patched_provider(monkeypatch)  # no base_url
+    _size_matched_create(create)
+
+    result = await provider.embed_batch([f"t{i}" for i in range(100)])
+
+    assert len(result) == 100
+    assert create.await_count == 1, "hosted OpenAI must not be split at 32"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_self_hosted_base_url_is_chunked_at_the_conservative_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``base_url`` means a backend whose cap we cannot see, so the
+    conservative TEI-shaped default applies — the incident's config."""
+    provider, _, create = _patched_provider(monkeypatch, base_url="http://tei:80/v1")
+    _size_matched_create(create)
+
+    await provider.embed_batch([f"t{i}" for i in range(100)])
+
+    sent = [len(call.kwargs["input"]) for call in create.call_args_list]
+    assert sent == [32, 32, 32, 4], f"expected a 32-capped split, got {sent}"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", [0, -1])
+def test_openai_provider_init_rejects_non_positive_max_batch(
+    monkeypatch: pytest.MonkeyPatch, bad: int
+) -> None:
+    """A non-positive cap must fail at construction, not silently.
+
+    ``max_batch=-1`` makes ``range(0, n, -1)`` empty, so ``embed_batch``
+    would return ZERO embeddings for n texts with no error — and callers
+    zip the result onto rows positionally. ``max_batch=0`` raises deep in
+    the loop instead. Neither is acceptable at a distance from the cause.
+    """
+    with pytest.raises(ValueError, match="max_batch"):
+        _patched_provider(monkeypatch, max_batch=bad)
+
+
+@pytest.mark.unit
+def test_embed_batch_default_cap_matches_tei_default() -> None:
+    """The default must not exceed a stock TEI sidecar's own cap.
+
+    ``BULK_MAX_ITEMS`` (100) and ``EMBEDDING_REEMBED_BATCH_SIZE`` (50)
+    both exceed TEI's default of 32, so a default above 32 reintroduces
+    the incident for any deployment that does not pass
+    ``--max-client-batch-size`` — including the docker-compose
+    local-embedder stack.
+    """
+    from common.embedding.constants import EMBEDDING_REMOTE_MAX_BATCH
+
+    assert EMBEDDING_REMOTE_MAX_BATCH <= 32
+
+
+# ---------------------------------------------------------------------------
 # Option B — Matryoshka truncation + L2 renormalization
 # ---------------------------------------------------------------------------
 

@@ -9,8 +9,10 @@ import openai
 
 from common.constants import VECTOR_DIM
 from common.embedding.constants import (
+    EMBEDDING_HOSTED_MAX_BATCH,
     EMBEDDING_HTTPX_MAX_CONNECTIONS,
     EMBEDDING_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
+    EMBEDDING_REMOTE_MAX_BATCH,
     OPENAI_EMBEDDING_MODEL,
     OPENAI_REQUEST_TIMEOUT_SECONDS,
 )
@@ -35,12 +37,43 @@ class OpenAIEmbeddingProvider:
         send_dimensions: bool = True,
         query_instruction: str | None = None,
         truncate_to_dim: int | None = None,
+        max_batch: int | None = None,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._send_dimensions = send_dimensions
         self._query_instruction = query_instruction
         self._truncate_to_dim = truncate_to_dim
+        # Derived from the backend, because the right cap is a property of
+        # WHICH backend this is. ``base_url`` set means a self-hosted
+        # OpenAI-compatible server whose admission limit we cannot see, so
+        # assume TEI's conservative default; unset means hosted OpenAI,
+        # whose documented limit is 2048 and which gains nothing from being
+        # split. This is the same discriminator the registry already uses
+        # to decide ``send_dimensions``.
+        #
+        # Explicit ``max_batch`` overrides both — injectable so a test can
+        # exercise chunking without a 33-text fixture. The registry never
+        # passes it, so every real provider derives; that is also why it is
+        # not part of the registry's cache key.
+        if max_batch is None:
+            max_batch = (
+                EMBEDDING_REMOTE_MAX_BATCH if base_url else EMBEDDING_HOSTED_MAX_BATCH
+            )
+        # Same defence-in-depth argument as truncate_to_dim above, and the
+        # failure it prevents is worse. The env path is already safe
+        # (``read_int_env`` rejects non-positive), but direct construction
+        # is not, and a non-positive cap does NOT fail cleanly:
+        # ``max_batch=-1`` makes ``range(0, n, -1)`` empty, so embed_batch
+        # returns ZERO embeddings for n texts with no error at all — and
+        # callers zip the result onto rows positionally. Silent data loss.
+        # (``max_batch=0`` raises deep in the loop instead.) Fail here.
+        if max_batch < 1:
+            raise ValueError(
+                f"max_batch={max_batch} must be >= 1; it is the number of "
+                "texts sent per provider request."
+            )
+        self._max_batch = max_batch
         # Defence in depth: the registry's ``get_embedding_provider``
         # already validates this knob before constructing a provider,
         # but direct construction (a one-off script, a migration helper,
@@ -138,8 +171,8 @@ class OpenAIEmbeddingProvider:
         response = await self._client.embeddings.create(**kwargs)
         return self._postprocess(response.data[0].embedding)
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Generate embedding vectors for multiple texts in one call."""
+    async def _embed_batch_chunk(self, texts: list[str]) -> list[list[float]]:
+        """One request's worth of texts. Caller guarantees the size cap."""
         kwargs: dict = {"model": self._model, "input": texts}
         if self._send_dimensions:
             kwargs["dimensions"] = VECTOR_DIM
@@ -147,6 +180,44 @@ class OpenAIEmbeddingProvider:
         # OpenAI returns embeddings sorted by index
         sorted_data = sorted(response.data, key=lambda x: x.index)
         return [self._postprocess(item.embedding) for item in sorted_data]
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Embed multiple texts, splitting across requests if needed.
+
+        Chunking is invisible in the result because each text is embedded
+        INDEPENDENTLY — a vector does not depend on what shares its
+        request — so N chunks return exactly what one large call would, in
+        input order. (Contrast ``common/ranking``'s remote reranker, where
+        the same optimisation is only safe because a cross-encoder scores
+        pairs independently, and would break for a listwise model.)
+
+        See ``EMBEDDING_REMOTE_MAX_BATCH`` for why the cap exists: without
+        it, a bulk write of up to ``BULK_MAX_ITEMS`` texts is rejected
+        outright by a TEI sidecar at its default cap of 32, and the
+        failure hides in a per-item fallback that still produces correct
+        embeddings.
+
+        SEQUENTIAL, unlike the reranker's concurrent ``asyncio.gather``.
+        Two reasons, both about not undoing work this module already did:
+        ``_call_gated`` holds ONE ``EMBEDDING_MAX_CONCURRENCY`` slot for
+        this whole call, so fanning out inside it would multiply the real
+        provider concurrency by the chunk count and defeat a cap that
+        exists because of the 2026-07-27 connection-pool exhaustion. And
+        the budget is wide enough not to need it: bulk callers arm 30 s
+        (``BULK_EMBEDDING_TIMEOUT_SECONDS``) where the reranker had 0.5 s,
+        against four ~10 ms sidecar round trips for a 100-text write.
+        """
+        # A pool that fits one request behaves exactly as it did before
+        # chunking existed — no extra allocation, and the provider
+        # exception propagates with its own traceback.
+        if len(texts) <= self._max_batch:
+            return await self._embed_batch_chunk(texts)
+
+        embeddings: list[list[float]] = []
+        for start in range(0, len(texts), self._max_batch):
+            chunk = texts[start : start + self._max_batch]
+            embeddings.extend(await self._embed_batch_chunk(chunk))
+        return embeddings
 
     async def embed_query(
         self, text: str, instruction: str | None = None

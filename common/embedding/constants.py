@@ -142,3 +142,43 @@ EMBEDDING_MAX_CONCURRENCY: int = read_int_env("EMBEDDING_MAX_CONCURRENCY", 16)
 EMBEDDING_GATE_TIMEOUT_SECONDS: float = read_float_env(
     "EMBEDDING_GATE_TIMEOUT_SECONDS", 5.0
 )
+
+# Cap the texts sent in ONE provider request; larger inputs are split.
+#
+# This is admission control on the SERVER's side of the wire, mirrored on
+# ours. A self-hosted TEI sidecar defaults ``--max-client-batch-size`` to
+# 32 and answers anything larger with
+# ``413 batch size N > maximum allowed batch size 32`` — while our bulk
+# write path sends up to ``BULK_MAX_ITEMS`` (100) texts in one call and
+# the re-embed path sends ``EMBEDDING_REEMBED_BATCH_SIZE`` (50). Neither
+# chunked, so both were rejected outright.
+#
+# That ran unnoticed in production for 30+ days: the failure cascades into
+# a per-item fallback that produces CORRECT embeddings, so the only
+# symptoms were ~50x the requests and the sidecar's own 413 log. Raising
+# the server's cap fixes one deployment; capping here fixes every
+# deployment, including the docker-compose local-embedder stack, which
+# starts TEI without the flag.
+#
+# 32 to match TEI's own default — the safe assumption about a backend
+# whose cap we cannot see. This applies to SELF-HOSTED, OpenAI-compatible
+# backends, i.e. those reached via ``base_url``; see
+# ``EMBEDDING_HOSTED_MAX_BATCH`` for the hosted default and
+# ``OpenAIEmbeddingProvider`` for the dispatch.
+#
+# ``common/ranking`` reached the identical conclusion first, for the same
+# sidecar and the same 413 — see ``RANK_REMOTE_MAX_BATCH``.
+EMBEDDING_REMOTE_MAX_BATCH: int = read_int_env("EMBEDDING_REMOTE_MAX_BATCH", 32)
+
+# The same cap for HOSTED OpenAI — no ``base_url``, so we know the backend
+# and its documented limit: 2048 inputs per embeddings request.
+#
+# Split from the self-hosted value rather than sharing one number, because
+# 32 is a guess about an opaque sidecar and 2048 is a documented fact
+# about a known API. Collapsing them would silently turn one hosted bulk
+# write of BULK_MAX_ITEMS (100) into 4 sequential round trips for no
+# reason — chunking should cost nothing where the backend accepts the
+# whole batch. Still env-overridable so a hosted deployment that wants
+# smaller requests (rate-limit shaping, latency smoothing) has a
+# config-only lever.
+EMBEDDING_HOSTED_MAX_BATCH: int = read_int_env("EMBEDDING_HOSTED_MAX_BATCH", 2048)

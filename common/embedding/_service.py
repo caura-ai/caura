@@ -31,6 +31,10 @@ class _EmbeddingStats:
     Three consecutive failures fire a single ERROR log (per cycle) so a
     sustained provider outage shows up loudly without spamming once-per-
     request. Reset on the next success.
+
+    Bulk calls additionally keep their OWN streak, which only a bulk
+    success clears — see :meth:`record_failure` for the outage the shared
+    streak structurally cannot see.
     """
 
     def __init__(self) -> None:
@@ -38,27 +42,94 @@ class _EmbeddingStats:
         self.successes = 0
         self.last_failure_time = 0.0
         self.consecutive_failures = 0
+        self.consecutive_bulk_failures = 0
         self._lock = asyncio.Lock()
 
-    async def record_success(self) -> None:
+    @staticmethod
+    def _is_report_point(streak: int) -> bool:
+        """Report on first detection (3) then every 10th (13, 23, 33, …).
+
+        Loud enough to alert on a fresh outage, quiet enough not to spam
+        during a sustained one — a 10x reduction, NOT a fixed bound:
+        reports still grow linearly with a condition that recurs on every
+        request, so this caps the slope, not the total. The next success
+        resets the streak, so a later outage re-fires from 3.
+        """
+        return streak >= 3 and (streak - 3) % 10 == 0
+
+    async def record_success(self, *, bulk: bool = False) -> None:
+        """*bulk* additionally clears the bulk-only streak."""
         async with self._lock:
             self.successes += 1
             self.consecutive_failures = 0
+            if bulk:
+                self.consecutive_bulk_failures = 0
 
-    async def record_failure(self) -> None:
+    async def record_failure(self, *, bulk_batch_size: int | None = None) -> None:
+        """Count a failure and report at :meth:`_is_report_point`.
+
+        Passing *bulk_batch_size* marks this as a failed BULK call: it
+        advances a second streak that only a bulk success clears, and
+        reports it separately.
+
+        That second streak exists because the shared one cannot see a
+        bulk-only outage. Every path through this module shares one
+        process-wide ``_stats``, so a service that also serves search
+        traffic records a success per query embed, which resets
+        ``consecutive_failures`` and holds it under the threshold no
+        matter how many bulk calls fail in between. Not hypothetical:
+        prod TEI rejected 100% of bulk embeds for 30+ days on a
+        batch-size cap and "Embedding service degraded" never fired once,
+        because query embeds kept clearing the streak.
+
+        What the bulk report adds over the callers' own per-batch ERROR
+        (which already carries the provider's traceback) is the CONSECUTIVE
+        count: N failures with no bulk success in between distinguishes
+        "systematically broken" from "occasionally flaky", which a stream
+        of independent tracebacks cannot. It is not the per-occurrence
+        detector — the callers' ERROR is — so WARNING, not ERROR: by
+        contract this cascades into the per-item fallback, which usually
+        still persists correct embeddings. Degradation, not data loss.
+
+        *bulk_batch_size* is the size the CALLER asked for, which is not
+        necessarily the size of any single request — the provider splits
+        oversized requests to its own backend's cap. The message says so
+        rather than naming a number: this class is provider-agnostic (Fake
+        and Local never chunk; the OpenAI provider's cap is 32 self-hosted
+        but 2048 hosted), so quoting one constant here would be wrong for
+        most backends and would send an operator to re-tune a knob their
+        deployment does not use — the same misdirection in the opposite
+        direction. The size is still worth reporting: it identifies which
+        caller is affected (bulk write at 100 vs re-embed at 50) without
+        expanding a traceback.
+
+        LIMITATION worth knowing: the streak is process-wide and NOT keyed
+        on the provider, so in a multi-tenant process one tenant's healthy
+        bulk success clears a different tenant's broken backend — the same
+        masking, one level down. ``common/ranking``'s ``_permanent_scope``
+        is the per-backend answer; applying it here means keying all of
+        ``_stats``, which is a wider change than this. Do not read the
+        streak as per-backend.
+        """
         async with self._lock:
             self.failures += 1
             self.consecutive_failures += 1
             self.last_failure_time = time.monotonic()
-            # Fire on first detection (failure 3) and then every 10
-            # failures thereafter (13, 23, 33, …). Loud enough to alert
-            # on a fresh outage, quiet enough not to spam during a
-            # sustained provider degradation. The next success resets
-            # the counter, so a subsequent streak re-fires from 3.
-            if (
-                self.consecutive_failures >= 3
-                and (self.consecutive_failures - 3) % 10 == 0
-            ):
+            if bulk_batch_size is not None:
+                self.consecutive_bulk_failures += 1
+                if self._is_report_point(self.consecutive_bulk_failures):
+                    logger.warning(
+                        "Bulk embedding failing: %d consecutive bulk call(s) "
+                        "failed (requested batch=%d), cascading to the "
+                        "per-item fallback. Embeddings may still be correct; "
+                        "batching is not. The provider already splits a "
+                        "request to its own backend's cap, so a batch-size "
+                        "rejection is unlikely — look at auth, network, "
+                        "quota and the callers' timeouts.",
+                        self.consecutive_bulk_failures,
+                        bulk_batch_size,
+                    )
+            if self._is_report_point(self.consecutive_failures):
                 logger.error(
                     "Embedding service degraded: %d consecutive failures (total: %d/%d)",
                     self.consecutive_failures,
@@ -169,6 +240,14 @@ async def get_embeddings_batch(
     degraded-provider trip-wire fires consistently with the single-embed
     paths (``get_embedding`` / ``get_query_embedding``).
 
+    A failed ``embed_batch`` also advances a bulk-only failure streak that
+    single-embed successes cannot reset — see ``record_failure`` for why
+    that is needed and for the incident behind it.
+
+    Note this is the SERVICE layer: a request larger than the backend's
+    accepted batch is split inside the provider, which is the only layer
+    that knows its own cap, so *texts* has no length limit imposed here.
+
     Two error shapes are explicitly accounted for:
 
     1. ``ValueError`` from ``get_embedding_provider`` — env-var
@@ -176,10 +255,11 @@ async def get_embeddings_batch(
        ``SEND_DIMENSIONS`` mismatch). Used to propagate as an unhandled
        exception that bulk callers caught generically but bypassed
        ``_stats.record_failure``, so the trip-wire never fired under
-       sustained misconfig. Now records a failure and re-raises.
+       sustained misconfig. Now records a failure and re-raises. Counted
+       as a plain failure, NOT a bulk failure — the batch never ran.
     2. Any provider-side exception from ``embed_batch`` — auth, HTTP
-       client errors, Vertex quota, etc. Same record_failure + re-raise
-       contract as before.
+       client errors, provider quota, a batch-size cap. Re-raises as
+       before; now also counted as a bulk failure.
     """
     provider_name = _resolve_provider_name(tenant_config)
     # Provider construction and embed dispatch are wrapped in *separate*
@@ -205,14 +285,43 @@ async def get_embeddings_batch(
             "Bulk embedding: provider misconfiguration",
             exc_info=True,
         )
+        # Deliberately NOT record_bulk_failure: the bulk call never ran,
+        # so there is no batch to attribute a bulk-cap-style fault to, and
+        # this branch already logs unconditionally.
         await _stats.record_failure()
         raise
+    # ``BaseException``, not ``Exception``, and deliberately so. Every caller
+    # wraps this in its own deadline (``BULK_STRONG_EMBED_TIMEOUT_SECONDS`` is
+    # 8 s, ``BULK_EMBEDDING_TIMEOUT_SECONDS`` 30 s) using ``asyncio.timeout`` /
+    # ``wait_for``, and when one of those fires it CANCELS us — so what arrives
+    # here is ``CancelledError``, a ``BaseException``. Under ``except
+    # Exception`` the stats update was skipped for that entire class, which is
+    # the slow-provider outage the bulk streak exists to name: a single
+    # provider request may burn ``OPENAI_REQUEST_TIMEOUT_SECONDS`` (25 s), so
+    # the 8 s budget is already exceeded by ONE request, and chunking a
+    # ``BULK_MAX_ITEMS`` write into ceil(100/32) sequential requests puts the
+    # 30 s budget in reach too.
+    #
+    # Safe for real shutdown cancellation: the ``raise`` is unconditional, so
+    # the cancellation always propagates. ``record_failure`` acquires an
+    # uncontended ``asyncio.Lock`` — every critical section in
+    # ``_EmbeddingStats`` is await-free, so the acquire takes its fast path and
+    # never yields, and there is no suspension point at which a pending
+    # cancellation could be re-delivered. If one ever were, we would land back
+    # on today's behaviour (stat missed, cancellation still propagating), never
+    # worse.
+    #
+    # Accepted cost: a cancellation that is NOT a deadline — a client
+    # disconnect, process shutdown — also counts as a bulk failure. Bounded on
+    # both sides: three consecutive are needed to report, the next bulk success
+    # clears the streak, and on the shutdown path the counter dies with the
+    # process anyway.
     try:
         result = await _call_gated(lambda: provider.embed_batch(texts))
-    except Exception:
-        await _stats.record_failure()
+    except BaseException:
+        await _stats.record_failure(bulk_batch_size=len(texts))
         raise
-    await _stats.record_success()
+    await _stats.record_success(bulk=True)
     return result
 
 
