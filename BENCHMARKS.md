@@ -106,6 +106,48 @@ first-stage also applies freshness decay, weight blending and recall boost. It
 answers "is the cross-encoder worth its latency", not "what is the end-to-end
 pipeline delta".
 
+### First-stage retrieval, specifically
+
+[`scripts/benchmark_blend_locomo.py`](scripts/benchmark_blend_locomo.py) is the
+companion one stage earlier: it varies the **first-stage** score, so which turns
+are retrieved at all is what moves, and **recall** is the headline rather than an
+invariant. It A/Bs the keyword half of
+
+```
+similarity = (1 - FTS_WEIGHT) * vec_sim + FTS_WEIGHT * fts_score
+```
+
+by rescaling `ts_rank_cd` before saturation (`--k`; `k=1` is today's
+`r/(1+r)` formula), ranking the *whole* corpus in both arms. Reports
+recall@5/@10/@20, nDCG@10 and MRR with the same paired bootstrap CI and sign
+test, overall, per category, and — separately — over just the queries where
+`plainto_tsquery` matched anything, since the rest are a mathematical no-op that
+only dilutes the average.
+
+Unlike the rerank harness it needs a Postgres, because `ts_rank_cd` is the thing
+under test and reimplementing Postgres FTS in Python would measure something
+else. Any empty database works; it uses a `TEMP` table and never touches
+application tables.
+
+```bash
+python scripts/benchmark_blend_locomo.py \
+    --dataset locomo10.json \
+    --embed-url http://localhost:8080 \
+    --pg-dsn postgresql://memclaw:changeme@localhost:5433/memclaw \
+    --k 6
+```
+
+`k=1` asserts a delta of exactly zero on every metric — a self-check that the
+harness isn't manufacturing differences the change cannot cause.
+
+Two limits worth knowing before quoting a number from it. Only ~17% of LoCoMo
+questions lexically match any turn (they are paraphrases), so the overall delta is
+diluted by a large majority of queries the change cannot affect — read the
+`fts-matched-only` block for the effect on queries it applies to. And the measured
+effect rises monotonically with `k` across the range tested, so this benchmark can
+say whether more keyword weight helps on LoCoMo, but it does **not** locate an
+optimum; don't read the largest `k` as the best one.
+
 ## How MemClaw compares
 
 For a single chatbot, the public-benchmark leaders (MemClaw, Mem0, Zep) cluster

@@ -44,16 +44,12 @@ the point, but it is not the end-to-end pipeline delta.
 from __future__ import annotations
 
 import argparse
-import ast
-import collections
 import json
-import math
 import random
 import statistics
 import sys
 import time
-import urllib.error
-import urllib.request
+from pathlib import Path
 
 # LoCoMo's own category numbering. 5 is deliberately absent — see module docstring.
 #
@@ -69,39 +65,22 @@ import urllib.request
 #      lookup ("What did the charity race raise awareness for?")       -> single-hop
 #   5  every answer is literally None                                  -> adversarial
 # Re-check by sampling qa items per category value, not by consulting a summary.
-CATEGORIES = {1: "multi-hop", 2: "temporal", 3: "open-domain", 4: "single-hop"}
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _locomo_bench import (  # noqa: E402  (path shim above must run first)
+    _post,
+    embed,
+    load_locomo,
+    mrr,
+    ndcg,
+    paired_stats,
+    unit,
+)
+
 METRICS = ("ndcg@5", "ndcg@10", "mrr", "p@5")
 
 
 # --------------------------------------------------------------------------- io
-
-
-def _post(url: str, body: dict, api_key: str = "", timeout: float = 180.0) -> object:
-    headers = {"content-type": "application/json"}
-    if api_key:
-        headers["authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as exc:  # surface the service's own words
-        raise SystemExit(
-            f"{url} returned HTTP {exc.code}: {exc.read()[:400].decode(errors='replace')}"
-        ) from exc
-
-
-def embed(
-    texts: list[str], url: str, model: str, api_key: str, batch: int
-) -> list[list[float]]:
-    out: list[list[float]] = []
-    for i in range(0, len(texts), batch):
-        r = _post(
-            f"{url}/v1/embeddings",
-            {"model": model, "input": texts[i : i + batch]},
-            api_key,
-        )
-        out.extend(d["embedding"] for d in r["data"])
-    return out
 
 
 def rerank(query: str, texts: list[str], url: str, api_key: str) -> list[float]:
@@ -120,89 +99,14 @@ def rerank(query: str, texts: list[str], url: str, api_key: str) -> list[float]:
 # ---------------------------------------------------------------------- dataset
 
 
-def load_locomo(path: str) -> list[dict]:
-    """Flatten LoCoMo into {sample_id, docs[{id,text}], queries[{q,expected,cat}]}."""
-    with open(path) as fh:
-        raw = json.load(fh)
-    samples, skipped = [], collections.Counter()
-    for sample in raw:
-        turns = []
-        for value in sample["conversation"].values():
-            if not isinstance(value, list):
-                continue  # session_N_date_time and the speaker names
-            for t in value:
-                if isinstance(t, dict) and t.get("dia_id") and t.get("text"):
-                    # keep the speaker: who said it is part of what makes a turn
-                    # the right answer to "when did X do Y".
-                    turns.append(
-                        {
-                            "id": t["dia_id"],
-                            "text": f"{t.get('speaker', '?')}: {t['text']}",
-                        }
-                    )
-        ids = {t["id"] for t in turns}
-
-        queries = []
-        for qa in sample["qa"]:
-            try:
-                cat = int(qa.get("category"))
-            except (TypeError, ValueError):
-                cat = None
-            if cat not in CATEGORIES:
-                skipped[f"category-{cat}"] += 1
-                continue
-            evidence = qa.get("evidence")
-            if isinstance(evidence, str):
-                # the published file stores this as a str repr of a list
-                try:
-                    evidence = ast.literal_eval(evidence)
-                except (ValueError, SyntaxError):
-                    evidence = None
-            evidence = [e for e in (evidence or []) if e in ids]
-            if not evidence:
-                skipped["unresolvable-evidence"] += 1
-                continue
-            queries.append(
-                {"q": qa["question"], "expected": evidence, "cat": CATEGORIES[cat]}
-            )
-        samples.append(
-            {"sample_id": sample["sample_id"], "docs": turns, "queries": queries}
-        )
-
-    print(
-        f"loaded {len(samples)} conversations · "
-        f"{sum(len(s['docs']) for s in samples)} turns · "
-        f"{sum(len(s['queries']) for s in samples)} scorable questions"
-    )
-    if skipped:
-        print(f"  excluded: {dict(skipped)}")
-    return samples
-
-
 # ---------------------------------------------------------------------- metrics
-
-
-def _dcg(rels: list[float]) -> float:
-    return sum(r / math.log2(i + 2) for i, r in enumerate(rels))
-
-
-def _ndcg(rels: list[float], k: int, n_relevant: int) -> float:
-    ideal = _dcg([1.0] * min(n_relevant, k))
-    return _dcg(rels[:k]) / ideal if ideal else 0.0
-
-
-def _mrr(rels: list[float]) -> float:
-    for i, r in enumerate(rels):
-        if r:
-            return 1.0 / (i + 1)
-    return 0.0
 
 
 def _score(rels: list[float], n_relevant: int) -> dict[str, float]:
     return {
-        "ndcg@5": _ndcg(rels, 5, n_relevant),
-        "ndcg@10": _ndcg(rels, 10, n_relevant),
-        "mrr": _mrr(rels),
+        "ndcg@5": ndcg(rels, 5, n_relevant),
+        "ndcg@10": ndcg(rels, 10, n_relevant),
+        "mrr": mrr(rels),
         "p@5": sum(rels[:5]) / 5,
     }
 
@@ -212,11 +116,6 @@ def _cosine_ranked(qvec: list[float], dvecs: list[list[float]], pool: int) -> li
     return [i for _, i in sorted(sims, reverse=True)[:pool]]
 
 
-def _unit(v: list[float]) -> list[float]:
-    n = math.sqrt(sum(x * x for x in v))
-    return [x / n for x in v] if n else v
-
-
 # ------------------------------------------------------------------------- run
 
 
@@ -224,7 +123,7 @@ def run_conversation(conv: dict, args: argparse.Namespace) -> list[dict]:
     texts = [d["text"] for d in conv["docs"]]
     ids = [d["id"] for d in conv["docs"]]
     dvecs = [
-        _unit(v)
+        unit(v)
         for v in embed(
             texts,
             args.embed_url,
@@ -234,7 +133,7 @@ def run_conversation(conv: dict, args: argparse.Namespace) -> list[dict]:
         )
     ]
     qvecs = [
-        _unit(v)
+        unit(v)
         for v in embed(
             [q["q"] for q in conv["queries"]],
             args.embed_url,
@@ -300,39 +199,22 @@ def report(label: str, rows: list[dict], pool: int, seed: int) -> dict | None:
         deltas = [r["reranked"][m] - r["baseline"][m] for r in scored]
         base = statistics.fmean(r["baseline"][m] for r in scored)
         rr = statistics.fmean(r["reranked"][m] for r in scored)
-        # paired bootstrap over per-query deltas
-        boots = sorted(
-            statistics.fmean(
-                [deltas[rng.randrange(len(deltas))] for _ in range(len(deltas))]
-            )
-            for _ in range(4000)
-        )
-        lo, hi = boots[100], boots[3900]
-        better = sum(1 for d in deltas if d > 1e-9)
-        worse = sum(1 for d in deltas if d < -1e-9)
-        n = better + worse
-        # exact two-sided binomial sign test over non-tied queries
-        p = (
-            min(
-                1.0,
-                2 * sum(math.comb(n, i) for i in range(min(better, worse) + 1)) / 2**n,
-            )
-            if n
-            else 1.0
-        )
+        st = paired_stats(deltas, rng)
+        lo, hi = st["ci"]
         out[m] = {
             "baseline": base,
             "reranked": rr,
             "delta": rr - base,
             "ci": [lo, hi],
-            "better": better,
-            "worse": worse,
-            "sign_p": p,
+            "better": st["better"],
+            "worse": st["worse"],
+            "sign_p": st["sign_p"],
         }
-        mark = "" if lo <= 0 <= hi else "  *"
+        mark = "" if not st["significant"] else "  *"
         print(
             f"  {m:9s} {base:11.4f} {rr:9.4f} {rr - base:+9.4f} "
-            f"[{lo:+.4f},{hi:+.4f}] {better:>6d}/{worse}/{len(deltas) - n:<7d} {p:8.4f}{mark}"
+            f"[{lo:+.4f},{hi:+.4f}] {st['better']:>6d}/{st['worse']}/{st['ties']:<7d} "
+            f"{st['sign_p']:8.4f}{mark}"
         )
     print(
         f"  top-1 changed on {sum(1 for r in scored if r['top1_changed'])}/{len(scored)}"
