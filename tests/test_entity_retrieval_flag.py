@@ -313,7 +313,9 @@ async def test_legacy_path_flag_off_skips_entity_boost():
     assert results == []
     boost_mock.assert_not_called()
     # No hop-boost payload reaches storage on the disabled path.
-    assert sc.scored_search.call_args[0][0]["boosted_memory_ids"] is None
+    payload = sc.scored_search.call_args[0][0]
+    assert payload["boosted_memory_ids"] is None
+    assert payload["memory_boost_factor"] is None
 
 
 async def test_legacy_path_flag_on_runs_entity_boost():
@@ -338,7 +340,13 @@ async def test_legacy_path_flag_on_runs_entity_boost():
         await memory_service._search_memories_legacy("t1", _ENTITY_QUERY)
 
     boost_mock.assert_called_once()
-    assert sc.scored_search.call_args[0][0]["boosted_memory_ids"] == {str(mid): 1.3}
+    # Both halves, under their own keys. This previously asserted the factor MAP
+    # as the value of ``boosted_memory_ids`` — the shape the payload actually
+    # had, which is why asserting it here passed while the storage SQL, gating on
+    # ``boosted_memory_ids AND memory_boost_factor``, skipped the boost entirely.
+    payload = sc.scored_search.call_args[0][0]
+    assert payload["boosted_memory_ids"] == [str(mid)]
+    assert payload["memory_boost_factor"] == {str(mid): 1.3}
 
 
 # ---------------------------------------------------------------------------

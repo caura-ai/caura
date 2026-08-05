@@ -550,6 +550,37 @@ class TestMemories:
         resp = await client.get(f"{PREFIX}/memories/{fake_id}")
         assert resp.status_code == 404
 
+    async def test_scored_search_rejects_a_payload_without_nested_search_params(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        """Scoring knobs must arrive nested; flat top-level keys are not read.
+
+        The route used to rebuild ``search_params`` from top-level keys named in
+        a hardcoded allowlist — see the rationale on the route itself. A flat
+        payload must now fail LOUDLY at the edge rather than sail through with
+        every knob silently dropped.
+        """
+        flat = {
+            "tenant_id": tenant_id,
+            "embedding": [0.1] * VECTOR_DIM,
+            "query": "anything",
+            "top_k": 10,
+            # Flat, the way the allowlist used to accept it. Nothing reads it here.
+            "fts_weight": 0.5,
+        }
+        resp = await client.post(f"{PREFIX}/memories/scored-search", json=flat)
+        assert resp.status_code == 422, (
+            f"a flat-key payload must be rejected at the edge, got {resp.status_code}: {resp.text}"
+        )
+        assert "search_params" in resp.json()["detail"]
+
+        # Present-but-empty is the same malformed request: the scoring keys are
+        # read out of it one by one, so ``{}`` leaves every one of them missing.
+        resp_empty = await client.post(f"{PREFIX}/memories/scored-search", json={**flat, "search_params": {}})
+        assert resp_empty.status_code == 422, resp_empty.text
+
     async def test_scored_search_surfaces_null_embedding_via_fts(
         self,
         client: AsyncClient,

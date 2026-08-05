@@ -14,7 +14,7 @@ from common.events.lifecycle_purge_request import (
     MEMORY_RETENTION_MIN_DAYS,
 )
 from core_storage_api.observability import bind_timer, log_request
-from core_storage_api.routers._validation import _require
+from core_storage_api.routers._validation import _require, _require_dict
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import BulkValidationError, PostgresService
 
@@ -126,21 +126,26 @@ async def create_memories_bulk(request: Request) -> list[dict]:
 @router.post("/scored-search")
 async def scored_search(request: Request) -> list[dict]:
     body: dict = await request.json()
-    # Build search_params from top-level body keys (client sends them flat)
-    # An allowlist, so a scoring parameter the legacy path sends flat is DROPPED
-    # until it is named here — the pipeline sends a nested ``search_params`` and
-    # bypasses this entirely, so a parameter added only there silently applies to
-    # one of the two paths.
-    _SEARCH_PARAM_KEYS = {
-        "fts_weight",
-        "fts_rank_scale",
-        "freshness_floor",
-        "freshness_decay_days",
-        "recall_boost_cap",
-        "recall_decay_window_days",
-        "similarity_blend",
-    }
-    search_params = body.get("search_params") or {k: body[k] for k in _SEARCH_PARAM_KEYS if k in body}
+    # ``search_params`` arrives nested, from every caller. THE rationale for the
+    # whole change lives here, because the code it replaces lived here:
+    #
+    # This used to fall back to rebuilding the dict from top-level body keys
+    # named in a hardcoded allowlist, for callers that sent the scoring knobs
+    # flat. That allowlist was a third place every knob had to be registered —
+    # after the pipeline's builder and the legacy path's — and the only one no
+    # test could observe, because the nesting happens here, server-side, past
+    # the boundary a client-side assertion can see. Two ranking features
+    # (``candidate_pool_size``, ``score_formula``) shipped applying to the
+    # pipeline search path only as a result, which also meant the documented
+    # ``_USE_PIPELINE_SEARCH = False`` rollback lever silently reverted them.
+    # Both core-api builders send nested now, so the fallback is gone and the
+    # SQL reads what the caller actually sent.
+    #
+    # Fail-closed rather than defaulting: ``memory_scored_search`` reads six of
+    # these keys with INDEXED access, so a payload without them is a malformed
+    # request, and 4xx at the edge beats the KeyError 500 it would otherwise
+    # raise from inside the session.
+    search_params = _require_dict(body, "search_params")
 
     # Parse temporal_window from days (legacy) or seconds (pipeline path)
     temporal_window = None

@@ -18,8 +18,10 @@ from core_storage_api.services.postgres_service import get_session
 
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
+    CANDIDATE_POOL_SIZE,
     FTS_RANK_SCALE,
     FRESHNESS_DECAY_DAYS,
+    SCORE_FORMULA,
     SEARCH_OVERFETCH_FACTOR,
 )
 from common.models.memory import Memory
@@ -600,44 +602,142 @@ async def test_fts_rank_scale_of_one_reproduces_the_pre_687_formula():
     assert scaled == pytest.approx(raw / (1.0 + raw), abs=1e-12)
 
 
-@pytest.mark.integration
-@pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
-async def test_rank_scale_reaches_the_sql_on_both_search_paths(tenant_id, monkeypatch, use_pipeline):
-    """The scale must arrive where the SQL reads it, on BOTH paths.
+# The scoring knobs that fail SILENTLY. ``memory_scored_search`` reads these
+# three as ``sp.get(key, fallback)``, so one that never arrives degrades ranking
+# with no error anywhere; its other six scoring keys are read as ``sp[key]`` and
+# raise, which the route's ``search_params`` guard turns into a 422. Only the
+# quiet ones need a delivery test, and each is paired here with the constant it
+# falls back to plus a tuned value inside ``validate_search_profile``'s range.
+_SQL_SCORING_KEYS = (
+    ("fts_rank_scale", FTS_RANK_SCALE, 3.0),
+    ("candidate_pool_size", CANDIDATE_POOL_SIZE, 25),
+    ("score_formula", SCORE_FORMULA, 1),
+)
 
-    Three places can drop it, and each is invisible to the other two:
 
-      * ``resolve_search_profile`` builds the pipeline's ``search_params``;
-      * ``_search_memories_legacy`` builds its own, and sends the keys FLAT;
-      * the storage route rebuilds ``search_params`` from a flat-key ALLOWLIST
-        (``_SEARCH_PARAM_KEYS``) when no nested dict is present — so a key added
-        to both core-api builders but not to that allowlist still applies only to
-        the pipeline.
+async def _scored_search_call(monkeypatch, tenant_id, use_pipeline, *, search_profile=None, boost=None):
+    """Run one search; return the kwargs ``memory_scored_search`` received.
 
-    Asserting at the client boundary cannot see the third, because the nesting
-    happens server-side. So this spies on the storage service function that
-    actually reads the value into the SQL expression.
+    Spies on the storage *service* rather than the HTTP client because the
+    route decides server-side what the SQL finally reads; an assertion made at
+    the client boundary cannot see what that decision kept or dropped.
+
+    ``boost`` forces a non-empty entity-boost result. The two paths compute it
+    in different places — the legacy helper and the pipeline step — so both are
+    stubbed; whichever one the path under test uses is the one that matters, and
+    a stub that fails to take effect shows up as an empty boost at the assert.
     """
     from core_storage_api.services import postgres_service as pg
 
+    from core_api.pipeline.steps.search import parallel_embed_entity_boost as peb
     from core_api.services import memory_service
 
     monkeypatch.setattr(memory_service, "_USE_PIPELINE_SEARCH", use_pipeline)
 
-    seen: list = []
+    if boost is not None:
+        ids, factors = boost
+
+        async def _stub_boost(*a, **kw):
+            return ids, factors
+
+        monkeypatch.setattr(memory_service, "_entity_boost_pipeline", _stub_boost)
+
+        real_exec = peb.ParallelEmbedAndEntityBoost.execute
+
+        async def _exec(self, ctx):
+            result = await real_exec(self, ctx)
+            ctx.data["boosted_memory_ids"] = ids
+            ctx.data["memory_boost_factor"] = factors
+            return result
+
+        monkeypatch.setattr(peb.ParallelEmbedAndEntityBoost, "execute", _exec)
+
+    seen: list[dict] = []
     real = pg.PostgresService.memory_scored_search
 
     async def _spy(self, *a, **kw):
-        sp = kw.get("search_params") or next((x for x in a if isinstance(x, dict)), None)
-        seen.append((sp or {}).get("fts_rank_scale"))
+        seen.append(dict(kw))
         return await real(self, *a, **kw)
 
     monkeypatch.setattr(pg.PostgresService, "memory_scored_search", _spy)
-    await memory_service.search_memories(tenant_id=tenant_id, query="anything at all", top_k=3)
+    await memory_service.search_memories(
+        tenant_id=tenant_id,
+        query="anything at all",
+        top_k=3,
+        search_profile=search_profile,
+    )
 
     path = "pipeline" if use_pipeline else "legacy"
     assert seen, f"the {path} path never reached memory_scored_search"
-    assert seen[0] == FTS_RANK_SCALE, (
-        f"the {path} path did not deliver fts_rank_scale to the SQL; storage saw "
-        f"{seen[0]!r}, so it would fall back to 1.0 and keep the pre-#687 ranking"
+    return seen[0]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
+@pytest.mark.parametrize("tuned", [False, True], ids=["defaults", "tuned"])
+async def test_scoring_knobs_reach_the_sql_on_both_search_paths(
+    tenant_id, monkeypatch, use_pipeline, tuned
+):
+    """Every quiet scoring knob must arrive where the SQL reads it, on BOTH paths.
+
+    Two builders and one server-side decision can each drop a key, and each is
+    invisible to the other two:
+
+      * ``resolve_search_profile`` builds the pipeline's ``search_params``;
+      * ``_search_memories_legacy`` builds its own payload;
+      * the storage route decides what ``search_params`` the SQL finally sees.
+
+    Asserting at the client boundary cannot see the third, because the nesting
+    happens server-side — which is why this asserts against the dict the storage
+    service actually received. A key that never arrives leaves the SQL on its own
+    fallback, so the feature applies to one path only and the documented legacy
+    rollback lever reverts it as a side effect.
+
+    Both cases are needed. ``defaults`` pins the wiring, but two of these
+    constants are currently 0, so on its own it cannot tell a delivered value
+    from a builder that hardcoded the same number; ``tuned`` moves every knob off
+    its default and makes the value itself the assertion.
+    """
+    profile = {key: t for key, _, t in _SQL_SCORING_KEYS} if tuned else None
+    expected = profile or {key: const for key, const, _ in _SQL_SCORING_KEYS}
+
+    call = await _scored_search_call(monkeypatch, tenant_id, use_pipeline, search_profile=profile)
+    delivered = {k: (call.get("search_params") or {}).get(k) for k in expected}
+
+    path = "pipeline" if use_pipeline else "legacy"
+    assert delivered == expected, (
+        f"the {path} path did not deliver every scoring knob to the SQL; storage saw "
+        f"{delivered} instead of {expected}, so the SQL falls back to its own default "
+        f"and the feature applies to the other path only"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
+async def test_entity_boost_inputs_reach_the_sql_on_both_search_paths(
+    tenant_id, monkeypatch, use_pipeline
+):
+    """Both halves of the entity boost must arrive, on BOTH paths.
+
+    The SQL gates the entire entity-boost stack on ``boosted_memory_ids AND
+    memory_boost_factor`` — the ids alone buy nothing. The legacy path sent the
+    per-memory factors *under the ids key* and never sent the factors key, so
+    the guard saw a falsy factor map and skipped the whole stack: graph
+    expansion and hop boosts ran in core-api on every legacy search and were
+    then discarded at the storage boundary.
+
+    Same failure mode as the scoring knobs above — a ranking input that reaches
+    one search path only, so the documented legacy rollback lever quietly
+    changes ranking rather than reproducing it.
+    """
+    mid = uuid.uuid4()
+    call = await _scored_search_call(
+        monkeypatch, tenant_id, use_pipeline, boost=({mid}, {mid: 1.5})
+    )
+
+    path = "pipeline" if use_pipeline else "legacy"
+    assert call.get("boosted_memory_ids"), f"the {path} path delivered no boosted_memory_ids"
+    assert call.get("memory_boost_factor"), (
+        f"the {path} path delivered boosted_memory_ids but no memory_boost_factor, so the SQL's "
+        f"`if boosted_memory_ids and memory_boost_factor` guard skips the entity boost entirely"
     )

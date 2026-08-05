@@ -43,6 +43,7 @@ from core_api.constants import (
     BULK_ENRICHMENT_CONCURRENCY,
     BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS,
     BULK_STRONG_EMBED_TIMEOUT_SECONDS,
+    CANDIDATE_POOL_SIZE,
     CHUNKING_THRESHOLD_CHARS,
     CLASSIFIER_DEPRECATED_MEMORY_TYPES,
     CRYSTALLIZER_SHORT_CONTENT_CHARS,
@@ -67,6 +68,7 @@ from core_api.constants import (
     OPENAI_EMBEDDING_MODEL,
     RECALL_BOOST_CAP,
     RECALL_DECAY_WINDOW_DAYS,
+    SCORE_FORMULA,
     SEARCH_OVERFETCH_FACTOR,
     SIMILARITY_BLEND,
 )
@@ -101,6 +103,13 @@ logger = logging.getLogger(__name__)
 # rollback is needed, flip these to False and ship a hotfix — do NOT re-introduce
 # env-level configuration, since that caused prior silent divergence between
 # deployments and the default code path.
+#
+# A ``_USE_PIPELINE_SEARCH = False`` hotfix must be cut from a core-api at or
+# after the commit that moved the legacy search path onto nested
+# ``search_params``. Storage no longer accepts the flat scoring keys an older
+# core-api would send, so flipping the lever on a stale build 422s every search
+# instead of degrading it. Rolling storage back is not the fix — a storage
+# revision predating that commit reads nested params fine.
 _USE_PIPELINE_WRITE = True
 _USE_PIPELINE_SEARCH = True
 
@@ -3412,6 +3421,8 @@ async def _search_memories_legacy(
     _graph_max_hops = sp.get("graph_max_hops", GRAPH_MAX_HOPS)
     _similarity_blend = sp.get("similarity_blend", SIMILARITY_BLEND)
     _fts_rank_scale = sp.get("fts_rank_scale", FTS_RANK_SCALE)
+    _candidate_pool_size = sp.get("candidate_pool_size", CANDIDATE_POOL_SIZE)
+    _score_formula = sp.get("score_formula", SCORE_FORMULA)
 
     # Temporal hint
     temporal_window = _extract_temporal_hint(query)
@@ -3444,7 +3455,25 @@ async def _search_memories_legacy(
     # starving the final result set. Mirrors pipeline ExecuteScoredSearch behavior.
     _overfetch_top_k = _top_k * SEARCH_OVERFETCH_FACTOR
 
-    # Use scored_search storage API endpoint
+    # Use scored_search storage API endpoint.
+    #
+    # Scoring knobs go in a NESTED ``search_params``, exactly as the pipeline
+    # path sends them; they used to be sent flat and rebuilt server-side from an
+    # allowlist that dropped whatever it did not name. Full rationale sits with
+    # the deleted code, on the storage ``/scored-search`` route.
+    #
+    # ``top_k`` is deliberately NOT in this dict. Storage reads the SQL LIMIT as
+    # ``search_params.get("top_k", top_k)``, so a ``top_k`` here would shadow
+    # the overfetched body-level value below and narrow the candidate window to
+    # the caller's unmultiplied top_k — dropping the post-filter headroom that
+    # ``SEARCH_OVERFETCH_FACTOR`` exists to provide.
+    #
+    # This describes only THIS builder. The pipeline builder does not avoid it:
+    # ``resolve_search_profile`` puts the unmultiplied ``top_k`` in its
+    # ``search_params`` and ``ExecuteScoredSearch`` multiplies only its local
+    # copy, so on that path — the active one — the SQL LIMIT is the unmultiplied
+    # value and the overfetch is inert. Measured, not inferred; being fixed
+    # separately, because widening that pool changes ranking on every query.
     search_data = {
         "tenant_id": tenant_id,
         "embedding": embedding,
@@ -3456,17 +3485,28 @@ async def _search_memories_legacy(
         "status_filter": status_filter,
         "valid_at": valid_at.isoformat() if valid_at else None,
         "top_k": _overfetch_top_k,
+        # Core-api-local, NOT a scoring knob: the route never reads it, and the
+        # post-filter below applies it. Kept flat for that reason — a new knob
+        # belongs in ``search_params``, not beside this one.
         "min_similarity": _min_similarity,
-        "fts_weight": _fts_weight,
-        "fts_rank_scale": _fts_rank_scale,
-        "freshness_floor": _freshness_floor,
-        "freshness_decay_days": _freshness_decay_days,
+        "search_params": {
+            "fts_weight": _fts_weight,
+            "fts_rank_scale": _fts_rank_scale,
+            "freshness_floor": _freshness_floor,
+            "freshness_decay_days": _freshness_decay_days,
+            "recall_boost_cap": _recall_boost_cap,
+            "recall_decay_window_days": _recall_decay_window_days,
+            "similarity_blend": _similarity_blend,
+            "candidate_pool_size": _candidate_pool_size,
+            "score_formula": _score_formula,
+        },
         "recall_boost_enabled": recall_boost,
-        "recall_boost_cap": _recall_boost_cap,
-        "recall_decay_window_days": _recall_decay_window_days,
-        "similarity_blend": _similarity_blend,
         "temporal_window_days": temporal_window.days if temporal_window else None,
-        "boosted_memory_ids": {str(mid): factor for mid, factor in memory_boost_factor.items()}
+        # Both halves, under their own keys: the SQL gates the entire entity
+        # boost on ``boosted_memory_ids AND memory_boost_factor``, so they
+        # travel as a pair or the boost is skipped outright.
+        "boosted_memory_ids": [str(mid) for mid in boosted_memory_ids] if boosted_memory_ids else None,
+        "memory_boost_factor": {str(mid): factor for mid, factor in memory_boost_factor.items()}
         if memory_boost_factor
         else None,
     }
