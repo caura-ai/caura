@@ -55,6 +55,23 @@ def _author_headers(headers: dict, agent_id: str) -> dict:
     return {**headers, "X-Agent-ID": agent_id}
 
 
+def _ks_tenant() -> str:
+    """A tenant of this test's own.
+
+    Keystones are stored as ``documents`` rows and are NOT rolled back by the
+    per-test session — the API writes them through their own committed
+    transaction — so a shared tenant accumulates every keystone every run has
+    ever written. That matters here specifically because the listing is capped at
+    ``KEYSTONE_MAX_RESULTS`` (50) and ordered ``weight DESC, updated_at DESC``, so
+    a freshly-written rule is NOT guaranteed to appear once enough
+    higher-weight rules exist: a round-trip assertion starts failing, in isolation
+    too, and reads as a code regression rather than accumulated local state.
+
+    The ``test-tenant-`` prefix matters — the conftest teardown sweeps on it.
+    """
+    return f"test-tenant-ks-{_uid()}"
+
+
 async def _set_keystone(client, headers, tenant_id, **overrides):
     """POST a tenant-scope keystone with sensible defaults; overrides win."""
     payload = {
@@ -77,12 +94,15 @@ async def _set_keystone(client, headers, tenant_id, **overrides):
 
 async def test_list_keystones_empty(client):
     """GET returns an empty list for a tenant with no keystones — no 500."""
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     resp = await client.get(
         f"/api/v1/memclaw/keystones?tenant_id={tenant_id}", headers=headers
     )
     assert resp.status_code == 200
-    assert isinstance(resp.json(), list)
+    # Genuinely empty, now the tenant is this test's own. Asserting only
+    # ``isinstance(..., list)`` is what let a shared tenant accumulate 197 rules
+    # unnoticed while this test kept passing.
+    assert resp.json() == []
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +114,7 @@ async def test_set_rejected_when_agent_unknown(client):
     """Writing as an agent that doesn't exist must 403 — the trust check
     treats not_found as a hard reject, preventing prompt-injection-driven
     rule planting through unseeded identities."""
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
     resp = await _set_keystone(
         client,
@@ -109,7 +129,7 @@ async def test_set_rejected_for_default_trust_agent(client):
     """An agent registered at the default trust level (=1) must NOT be
     able to author a keystone. Keystones override user instructions
     across the tenant; the gate is trust ≥ 2 (elevated tier)."""
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
     agent_id = f"default-trust-{tag}"
     # Seed the agent via the auto-create-on-first-write path — leaves
@@ -138,7 +158,7 @@ async def test_set_rejected_for_default_trust_agent(client):
 
 async def test_set_allowed_for_trusted_agent(client):
     """A seeded agent promoted to trust_level=2 can author a keystone."""
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
     agent_id = f"author-{tag}"
     await _seed_trusted_agent(client, tenant_id, headers, agent_id, f"fleet-{tag}")
@@ -164,7 +184,7 @@ async def test_set_allowed_for_standalone_admin_without_agent_id(client):
     synthetic, unregistered ``rest-admin`` principal. The bypass is narrow:
     it only applies when no agent identity is asserted at all — the
     X-Agent-ID-bearing tests below still go through the full trust gate."""
-    tenant_id, headers = get_test_auth()  # bare standalone admin — NO X-Agent-ID
+    tenant_id, headers = get_test_auth(_ks_tenant())  # bare standalone admin — NO X-Agent-ID
     tag = _uid()
     resp = await _set_keystone(client, headers, tenant_id, doc_id=f"ks-{tag}", weight="high")
     assert resp.status_code == 200, resp.text
@@ -180,7 +200,7 @@ async def test_set_allowed_for_standalone_admin_without_agent_id(client):
 
 async def test_set_then_list_round_trip(client):
     """POSTed keystone shows up in GET for the same tenant."""
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
     agent_id = f"author-{tag}"
     fleet_id = f"fleet-{tag}"
@@ -201,6 +221,12 @@ async def test_set_then_list_round_trip(client):
         f"/api/v1/memclaw/keystones?tenant_id={tenant_id}", headers=headers
     )
     assert get_resp.status_code == 200
+    # The listing is capped and weight-ordered, so "my rule is missing" and "the
+    # listing was truncated" are different failures. Distinguish them, or the
+    # second presents as the first.
+    assert get_resp.headers.get("X-Truncated") != "true", (
+        "listing was truncated, so a missing rule proves nothing about the round trip"
+    )
     rules = get_resp.json()
     assert any(r["doc_id"] == doc_id for r in rules), rules
 
@@ -213,7 +239,7 @@ async def test_set_then_list_round_trip(client):
 async def test_set_invalid_scope_surfaces_as_422(client):
     """The storage validator owns scope/weight shape rules; the proxy
     must surface its 422 (not silently swallow or 500)."""
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
     agent_id = f"author-{tag}"
     await _seed_trusted_agent(client, tenant_id, headers, agent_id, f"fleet-{tag}")
@@ -245,7 +271,7 @@ async def test_set_invalid_scope_surfaces_as_422(client):
 
 
 async def test_delete_round_trip(client):
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
     agent_id = f"author-{tag}"
     await _seed_trusted_agent(client, tenant_id, headers, agent_id, f"fleet-{tag}")
@@ -276,7 +302,7 @@ async def test_delete_requires_trust(client):
     (so missing-rule yields 404 without revealing authz state to a
     probing caller); when the rule DOES exist, an unseeded ``ghost``
     agent is rejected with 403."""
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
     # Seed a tenant-scope rule via a trusted author so the row exists.
     admin = f"admin-{tag}"
@@ -326,7 +352,7 @@ async def test_set_agent_scope_self_unverified_rejected(client):
     through this path is rejected. To exercise the legitimate
     self-author tier in production, callers need a gateway-verified
     agent identity (an agent-scoped credential, kind=agent_key)."""
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
     agent_id = f"self-{tag}"
     fleet_id = f"fleet-{tag}"
@@ -369,7 +395,7 @@ async def test_xagent_id_mismatch_with_auth_rejected(client):
 
 async def test_set_agent_scope_other_at_trust_1_rejected(client):
     """A trust-1 agent cannot author scope=agent for someone else."""
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
     me = f"me-{tag}"
     other = f"other-{tag}"
@@ -391,7 +417,7 @@ async def test_set_agent_scope_other_at_trust_1_rejected(client):
 
 async def test_set_fleet_scope_at_trust_1_rejected(client):
     """scope=fleet stays at trust ≥ 2."""
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
     agent_id = f"author-{tag}"
     fleet_id = f"fleet-{tag}"
@@ -411,7 +437,7 @@ async def test_set_fleet_scope_at_trust_1_rejected(client):
 
 async def test_set_tenant_scope_at_trust_1_rejected(client):
     """scope=tenant stays at trust ≥ 2."""
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
     agent_id = f"author-{tag}"
     fleet_id = f"fleet-{tag}"
@@ -437,7 +463,7 @@ async def test_delete_own_agent_rule_unverified_rejected(client):
     (same anti-spoof) — seed via a trust-2 admin instead so the row
     exists for the deletion attempt to exercise the gate.
     """
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
     fleet_id = f"fleet-{tag}"
     admin = f"admin-{tag}"
@@ -475,7 +501,7 @@ async def test_overwrite_fleet_rule_as_self_agent_rejected(client):
     overwrite an existing scope=fleet rule by sending scope=agent +
     agent_id=<self> in the body. The effective floor takes the max of
     the new shape (1) and the stored shape (2), so the gate fires."""
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
     fleet_id = f"fleet-{tag}"
     # Trust-2 admin authors a fleet rule under doc_id ``ks-{tag}``.
@@ -512,7 +538,7 @@ async def test_overwrite_fleet_rule_as_self_agent_rejected(client):
 
 async def test_delete_fleet_rule_at_trust_1_rejected(client):
     """A trust-1 agent cannot delete a scope=fleet rule even within its fleet."""
-    tenant_id, headers = get_test_auth()
+    tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
     fleet_id = f"fleet-{tag}"
     # Trust-2 admin authors the fleet rule.

@@ -147,6 +147,14 @@ async def _setup_schema(_engine):
             "memories",
             "audit_log",
             "agent_activity_digests",
+            # Keystones and other docs live here. Written through the API's own
+            # committed transaction, so the per-test session rollback never
+            # reaches them — without this they survive every run. That is not
+            # only untidy: the keystone listing is capped at 50 and ordered by
+            # weight, so accumulated rules eventually push a freshly-written one
+            # out of the response and a round-trip test fails for reasons that
+            # look nothing like accumulated state.
+            "documents",
         ):
             try:
                 await conn.execute(
