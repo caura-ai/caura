@@ -28,6 +28,20 @@ class LocalEmbedding:
         return "local"
 
     @property
+    def dedup_scope(self) -> str:
+        """Namespace for per-backend failure stats — see ``_stats_by_scope``.
+
+        Model-scoped to match the registry's per-model instance cache; this
+        provider holds no credential or endpoint to distinguish beyond it.
+        """
+        return f"local:{self._model_name}"
+
+    @property
+    def backend_label(self) -> str:
+        """Human-facing identity for log lines — see the OpenAI provider."""
+        return f"local model={self._model_name}"
+
+    @property
     def model(self) -> str:
         return self._model_name
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 
 import httpx
@@ -16,6 +17,13 @@ from common.embedding.constants import (
     OPENAI_EMBEDDING_MODEL,
     OPENAI_REQUEST_TIMEOUT_SECONDS,
 )
+
+# Opaque per-instance identity for ``dedup_scope``. A counter beats deriving
+# the scope from the backend config twice over: no credential ever enters the
+# scope string (hashing one is a fast-hash-of-a-secret, which CodeQL rightly
+# flags), and the scope is a fixed shape that cannot collide. Same device, same
+# reasoning, as ``common/ranking/providers/remote.py``.
+_instance_seq = itertools.count()
 
 
 class OpenAIEmbeddingProvider:
@@ -74,6 +82,10 @@ class OpenAIEmbeddingProvider:
                 "texts sent per provider request."
             )
         self._max_batch = max_batch
+        self._instance_id = next(_instance_seq)
+        # Retained for ``backend_label`` only. Not a secret, unlike the key,
+        # and the single most actionable identifier for a self-hosted backend.
+        self._base_url = base_url
         # Defence in depth: the registry's ``get_embedding_provider``
         # already validates this knob before constructing a provider,
         # but direct construction (a one-off script, a migration helper,
@@ -116,6 +128,40 @@ class OpenAIEmbeddingProvider:
     @property
     def provider_name(self) -> str:
         return "openai"
+
+    @property
+    def dedup_scope(self) -> str:
+        """Namespace for per-backend failure stats — see ``_stats_by_scope``.
+
+        Per INSTANCE, standing in for per backend config: the registry caches
+        one provider per ``(api_key, model, base_url, send_dimensions,
+        query_instruction, truncate_to_dim)``, so live instances are distinct
+        backends. That covers what a name+model scope misses — two tenants on
+        the same model behind different keys, or two self-hosted sidecars both
+        serving ``bge-m3`` at different URLs — without putting any of those
+        values, least of all the credential, into the string.
+
+        The instance is a proxy for the config, not a permanent name for it:
+        the registry's cache is bounded, so a process cycling through more
+        backends than that can evict and rebuild the provider for the same
+        tuple, and the rebuilt one gets a fresh scope. A still-broken backend
+        then restarts its streak and re-reports. Deliberate, and the same
+        direction ``_STATS_SCOPE_MAX`` overflow errs in: say too much about a
+        real fault rather than too little.
+        """
+        return f"openai:{self._instance_id}"
+
+    @property
+    def backend_label(self) -> str:
+        """Human-facing identity for log lines — never the scope key.
+
+        ``dedup_scope`` is an opaque counter on purpose, which makes it a
+        correct key and a useless thing to read in an alert. This is the
+        other half of the same trade ``common/ranking`` makes: keep the
+        credential out of the key, and still put the URL in the message.
+        """
+        where = self._base_url or "hosted"
+        return f"openai model={self._model} at {where}"
 
     @property
     def model(self) -> str:

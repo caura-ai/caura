@@ -294,6 +294,35 @@ def test_openai_provider_init_rejects_non_positive_max_batch(
 
 
 @pytest.mark.unit
+def test_dedup_scope_distinguishes_backends_sharing_a_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two backends on the SAME model must not share a stats scope.
+
+    This is the case a ``provider_name`` + ``model`` scope gets wrong, and
+    it is the common one: two tenants on different `api_key`s, or two
+    self-hosted sidecars both serving ``bge-m3`` at different `base_url`s,
+    produce identical name and model. Collapsing them re-creates the
+    cross-tenant masking that per-backend stats exist to prevent.
+
+    Per-instance scoping is what makes this hold — the registry caches one
+    provider per full config tuple, so distinct live instances are distinct
+    backends.
+    """
+    a, _, _ = _patched_provider(monkeypatch, base_url="http://tei-a:80/v1")
+    b, _, _ = _patched_provider(monkeypatch, base_url="http://tei-b:80/v1")
+
+    assert a.model == b.model, "precondition: the model must be identical"
+    assert a.provider_name == b.provider_name
+    assert a.dedup_scope != b.dedup_scope, (
+        f"same model must not mean same scope: {a.dedup_scope}"
+    )
+    # And no secret or endpoint leaks into the key.
+    assert "sk-fake" not in a.dedup_scope
+    assert "tei-a" not in a.dedup_scope
+
+
+@pytest.mark.unit
 def test_embed_batch_default_cap_matches_tei_default() -> None:
     """The default must not exceed a stock TEI sidecar's own cap.
 

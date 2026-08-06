@@ -138,6 +138,21 @@ async def test_fake_provider_never_returns_none():
 # ---------------------------------------------------------------------------
 
 
+def _only_stats(service_mod):
+    """The one backend's stats a test exercised.
+
+    ``_stats_by_scope`` is keyed per backend now, and each test drives
+    exactly one, so asserting on the sole entry keeps the assertions as
+    direct as they were against the old process-wide object — while
+    failing loudly if a test ever touches two backends without meaning to.
+    """
+    assert len(service_mod._stats_by_scope) == 1, (
+        f"expected exactly one backend scope, got "
+        f"{sorted(service_mod._stats_by_scope)}"
+    )
+    return next(iter(service_mod._stats_by_scope.values()))
+
+
 def _reset_misconfig_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Wipe the module-level ``_misconfiguration_logged`` set so a test
     sees a fresh "first-failure" path. Module-scoped state — without
@@ -271,7 +286,7 @@ async def test_failure_stats_still_increment_under_misconfig_dedup(
 
     _reset_misconfig_dedup(monkeypatch)
     # Reset failure stats so this test owns the count.
-    monkeypatch.setattr(service_mod, "_stats", service_mod._EmbeddingStats())
+    monkeypatch.setattr(service_mod, "_stats_by_scope", {})
 
     def _explode(*_a, **_k):
         raise ValueError("dedupable misconfig")
@@ -283,33 +298,44 @@ async def test_failure_stats_still_increment_under_misconfig_dedup(
 
     # All four calls bumped failure stats even though only the first
     # one logged.
-    assert service_mod._stats.failures == 4
-    assert service_mod._stats.consecutive_failures == 4
+    assert _only_stats(service_mod).failures == 4
+    assert _only_stats(service_mod).consecutive_failures == 4
 
 
-def _bulk_provider(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point ``get_embeddings_batch`` at a provider whose bulk call always
-    fails and whose single-embed call always succeeds — the shape of a
-    provider-side batch-size cap that the per-item fallback rides out.
+def _bulk_provider(monkeypatch: pytest.MonkeyPatch):
+    """Point ``get_embeddings_batch`` at a provider whose bulk call fails and
+    whose single-embed call succeeds — the shape of a provider-side batch-size
+    cap that the per-item fallback rides out. Returns the instance.
 
-    Subclasses the real fake so the stand-in still satisfies the
-    ``EmbeddingProvider`` protocol (``provider_name`` / ``model``) rather
-    than being a shape that could not exist in production.
+    ONE instance, returned to every lookup, because that is what the registry
+    does: it caches a provider per backend config. Stats are keyed per backend
+    via ``dedup_scope``, so handing out fresh objects would spread one
+    backend's history across several scopes and quietly defeat the assertions.
+
+    Subclasses the real fake so the stand-in satisfies the
+    ``EmbeddingProvider`` protocol rather than being a shape that could not
+    exist in production.
     """
     import common.embedding._service as service_mod
     from common.embedding.providers.fake import FakeEmbeddingProvider
 
     class _CappedProvider(FakeEmbeddingProvider):
+        recovered = False
+
         async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            if self.recovered:
+                return [[0.0] for _ in texts]
             raise RuntimeError(
                 f"batch size {len(texts)} > maximum allowed batch size 32"
             )
 
-    monkeypatch.setattr(service_mod, "_stats", service_mod._EmbeddingStats())
+    provider = _CappedProvider()
+    monkeypatch.setattr(service_mod, "_stats_by_scope", {})
     monkeypatch.setattr(
         "common.embedding._service.get_embedding_provider",
-        lambda *_a, **_k: _CappedProvider(),
+        lambda *_a, **_k: provider,
     )
+    return provider
 
 
 @pytest.mark.unit
@@ -343,7 +369,7 @@ async def test_bulk_failure_reports_even_while_single_embeds_succeed(
             # what search traffic does to the shared streak.
             assert await get_embedding("q") is not None
 
-    assert service_mod._stats.consecutive_failures == 0, (
+    assert _only_stats(service_mod).consecutive_failures == 0, (
         "precondition: the interleaved successes must clear the shared "
         "streak, otherwise this test is not exercising the masking"
     )
@@ -359,6 +385,78 @@ async def test_bulk_failure_reports_even_while_single_embeds_succeed(
     # The batch size is the datum that names this class of bug outright.
     assert "batch=50" in matches[0].getMessage()
     assert matches[0].levelno == logging.WARNING
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_one_backend_success_does_not_clear_another_backends_streak(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Stats are per BACKEND, so a healthy tenant cannot mask a broken one.
+
+    One process holds an embedding provider per (api_key, model, base_url,
+    …) — the registry caches up to 32 — so a shared stats object meant a
+    healthy backend's success reset a broken backend's streak and the
+    broken one never reported. That is the same masking the bulk streak
+    exists to fix, one level up.
+
+    Here the broken backend fails three times while a healthy one succeeds
+    between every failure. Against a shared object the streak never
+    reaches 3 and nothing is logged.
+    """
+    import common.embedding._service as service_mod
+    from common.embedding import get_embeddings_batch
+    from common.embedding.providers.fake import FakeEmbeddingProvider
+
+    class _BrokenBackend(FakeEmbeddingProvider):
+        @property
+        def model(self) -> str:
+            return "broken-model"
+
+        async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            raise RuntimeError("this backend is down")
+
+    class _HealthyBackend(FakeEmbeddingProvider):
+        @property
+        def model(self) -> str:
+            return "healthy-model"
+
+    monkeypatch.setattr(service_mod, "_stats_by_scope", {})
+    providers = {"broken": _BrokenBackend(), "healthy": _HealthyBackend()}
+    current = {"which": "broken"}
+    monkeypatch.setattr(
+        "common.embedding._service.get_embedding_provider",
+        lambda *_a, **_k: providers[current["which"]],
+    )
+
+    with caplog.at_level(logging.WARNING, logger="common.embedding._service"):
+        for _ in range(3):
+            current["which"] = "broken"
+            with pytest.raises(RuntimeError):
+                await get_embeddings_batch(["a"] * 50)
+            # A different backend, healthy, between every failure.
+            current["which"] = "healthy"
+            assert len(await get_embeddings_batch(["a", "b"])) == 2
+
+    scopes = service_mod._stats_by_scope
+    assert len(scopes) == 2, f"expected two backend scopes, got {sorted(scopes)}"
+    broken = scopes["fake:broken-model"]
+    healthy = scopes["fake:healthy-model"]
+    assert broken.consecutive_bulk_failures == 3, (
+        "the broken backend's streak must survive another backend's successes"
+    )
+    assert healthy.consecutive_bulk_failures == 0
+
+    reports = [r for r in caplog.records if "Bulk embedding failing" in r.getMessage()]
+    assert reports, (
+        "the broken backend must still report despite the healthy one succeeding"
+    )
+    # Keying per backend is only half the job: the alert has to SAY which
+    # backend, or an operator holding up to _STATS_SCOPE_MAX of them cannot
+    # act on it.
+    assert "broken-model" in reports[0].getMessage(), reports[0].getMessage()
+    assert "healthy-model" not in reports[0].getMessage()
 
 
 @pytest.mark.unit
@@ -417,7 +515,7 @@ async def test_bulk_failure_counted_when_caller_deadline_cancels_us(
             await asyncio.sleep(60)
             raise AssertionError("unreachable")
 
-    monkeypatch.setattr(service_mod, "_stats", service_mod._EmbeddingStats())
+    monkeypatch.setattr(service_mod, "_stats_by_scope", {})
     monkeypatch.setattr(
         "common.embedding._service.get_embedding_provider",
         lambda *_a, **_k: _HangingProvider(),
@@ -427,10 +525,10 @@ async def test_bulk_failure_counted_when_caller_deadline_cancels_us(
         async with asyncio.timeout(0.05):
             await get_embeddings_batch(["a"] * 50)
 
-    assert service_mod._stats.consecutive_bulk_failures == 1, (
+    assert _only_stats(service_mod).consecutive_bulk_failures == 1, (
         "a deadline-cancelled bulk call must advance the bulk streak"
     )
-    assert service_mod._stats.failures == 1
+    assert _only_stats(service_mod).failures == 1
 
 
 @pytest.mark.unit
@@ -459,7 +557,7 @@ async def test_budget_makes_a_slow_provider_attributable(
             await asyncio.sleep(60)
             raise AssertionError("unreachable")
 
-    monkeypatch.setattr(service_mod, "_stats", service_mod._EmbeddingStats())
+    monkeypatch.setattr(service_mod, "_stats_by_scope", {})
     monkeypatch.setattr(service_mod, "EMBEDDING_BUDGET_MARGIN_S", 0.05)
     monkeypatch.setattr(
         "common.embedding._service.get_embedding_provider",
@@ -480,7 +578,7 @@ async def test_budget_makes_a_slow_provider_attributable(
         f"the embed layer's own cap must fire first; took {elapsed:.2f}s, "
         "which means the caller's 5s deadline was what stopped it"
     )
-    assert service_mod._stats.consecutive_bulk_failures == 1, (
+    assert _only_stats(service_mod).consecutive_bulk_failures == 1, (
         "the inner cap must still count as a bulk failure"
     )
 
@@ -499,14 +597,14 @@ async def test_no_budget_keeps_the_previous_unbounded_behaviour(
     from common.embedding import get_embeddings_batch
     from common.embedding.providers.fake import FakeEmbeddingProvider
 
-    monkeypatch.setattr(service_mod, "_stats", service_mod._EmbeddingStats())
+    monkeypatch.setattr(service_mod, "_stats_by_scope", {})
     monkeypatch.setattr(
         "common.embedding._service.get_embedding_provider",
         lambda *_a, **_k: FakeEmbeddingProvider(),
     )
 
     assert len(await get_embeddings_batch(["a", "b", "c"])) == 3
-    assert service_mod._stats.consecutive_bulk_failures == 0
+    assert _only_stats(service_mod).consecutive_bulk_failures == 0
 
 
 @pytest.mark.unit
@@ -519,19 +617,16 @@ async def test_bulk_success_rearms_the_bulk_report(
     import common.embedding._service as service_mod
     from common.embedding import get_embeddings_batch
 
-    _bulk_provider(monkeypatch)
+    provider = _bulk_provider(monkeypatch)
 
     for _ in range(3):
         with pytest.raises(RuntimeError):
             await get_embeddings_batch(["a"] * 50)
-    # Provider recovers.
-    class _HealthyProvider:
-        async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-            return [[0.0] for _ in texts]
-
-    monkeypatch.setattr(
-        "common.embedding._service.get_embedding_provider",
-        lambda *_a, **_k: _HealthyProvider(),
-    )
+    # The SAME backend recovers — recovery is the cached instance starting to
+    # answer again, not a new provider appearing. Flipping behaviour on the
+    # instance the registry already returned is what production does; swapping
+    # in a fresh object would key as a different backend and clear a streak
+    # that was never set.
+    provider.recovered = True
     assert len(await get_embeddings_batch(["a", "b"])) == 2
-    assert service_mod._stats.consecutive_bulk_failures == 0
+    assert _only_stats(service_mod).consecutive_bulk_failures == 0

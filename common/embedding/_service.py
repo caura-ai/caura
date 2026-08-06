@@ -38,7 +38,12 @@ class _EmbeddingStats:
     streak structurally cannot see.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, label: str = "unknown") -> None:
+        # Which backend these numbers belong to. Carried on the instance so
+        # every log line this object emits names its own backend — stats can
+        # be keyed perfectly and still be unactionable if the alert reads the
+        # same for all 256 of them.
+        self.label = label
         self.failures = 0
         self.successes = 0
         self.last_failure_time = 0.0
@@ -75,8 +80,8 @@ class _EmbeddingStats:
 
         That second streak exists because the shared one cannot see a
         bulk-only outage. Every path through this module shares one
-        process-wide ``_stats``, so a service that also serves search
-        traffic records a success per query embed, which resets
+        ``_EmbeddingStats`` PER BACKEND, so a service that also serves
+        search traffic records a success per query embed, which resets
         ``consecutive_failures`` and holds it under the threshold no
         matter how many bulk calls fail in between. Not hypothetical:
         prod TEI rejected 100% of bulk embeds for 30+ days on a
@@ -104,13 +109,10 @@ class _EmbeddingStats:
         caller is affected (bulk write at 100 vs re-embed at 50) without
         expanding a traceback.
 
-        LIMITATION worth knowing: the streak is process-wide and NOT keyed
-        on the provider, so in a multi-tenant process one tenant's healthy
-        bulk success clears a different tenant's broken backend — the same
-        masking, one level down. ``common/ranking``'s ``_permanent_scope``
-        is the per-backend answer; applying it here means keying all of
-        ``_stats``, which is a wider change than this. Do not read the
-        streak as per-backend.
+        Both streaks are per BACKEND — see ``_stats_by_scope``. An earlier
+        version of this class was process-wide, which meant one tenant's
+        healthy bulk success cleared a different tenant's broken backend:
+        the same masking this method exists to fix, one level up.
         """
         async with self._lock:
             self.failures += 1
@@ -120,26 +122,110 @@ class _EmbeddingStats:
                 self.consecutive_bulk_failures += 1
                 if self._is_report_point(self.consecutive_bulk_failures):
                     logger.warning(
-                        "Bulk embedding failing: %d consecutive bulk call(s) "
+                        "Bulk embedding failing [%s]: %d consecutive bulk "
+                        "call(s) "
                         "failed (requested batch=%d), cascading to the "
                         "per-item fallback. Embeddings may still be correct; "
                         "batching is not. The provider already splits a "
                         "request to its own backend's cap, so a batch-size "
                         "rejection is unlikely — look at auth, network, "
                         "quota and the callers' timeouts.",
+                        self.label,
                         self.consecutive_bulk_failures,
                         bulk_batch_size,
                     )
             if self._is_report_point(self.consecutive_failures):
                 logger.error(
-                    "Embedding service degraded: %d consecutive failures (total: %d/%d)",
+                    "Embedding service degraded [%s]: %d consecutive "
+                    "failures (total: %d/%d)",
+                    self.label,
                     self.consecutive_failures,
                     self.failures,
                     self.failures + self.successes,
                 )
 
 
-_stats = _EmbeddingStats()
+# Stats are keyed PER BACKEND, not one set per process.
+#
+# A single shared object was the masking bug one level up from the one the
+# bulk streak fixes. One process serves many tenants and holds an embedding
+# provider per (api_key, model, base_url, …) — ``_registry`` caches up to 32 of
+# them precisely because "the same api_key can host multiple simultaneous
+# providers, e.g. real OpenAI for one tenant and a local TEI sidecar". Against
+# one shared object, a healthy backend's success clears a broken backend's
+# streak and the broken one never reports.
+#
+# ``common/ranking`` reached this first for its log-once dedup — see
+# ``_permanent_scope`` and the note there on why clearing must be per backend
+# rather than wholesale.
+_stats_by_scope: dict[str, _EmbeddingStats] = {}
+
+# Bound it, same reasoning as ranking's ``_PERMANENT_LOGGED_MAX``: the steady
+# state is one entry per live backend, but a long-lived process that rotates
+# tenant config accumulates a dead entry per retired one. On overflow drop the
+# whole map rather than track recency — the only cost is that a still-broken
+# backend restarts its streak, which is the safe direction to fail.
+#
+# DELIBERATELY ABOVE ``_registry._OPENAI_CACHE_MAX`` (256), not equal to it.
+# Equal caps would mean a deployment running at the provider cache's own
+# ceiling wipes this map routinely — resetting streaks for backends that are
+# still live and possibly still broken, which is the one case the wipe should
+# not touch. At 2x, every cached backend fits with headroom, so the clear is
+# reached only under churn well past what the registry itself retains.
+_STATS_SCOPE_MAX = 512
+
+
+def _stats_scope(provider: object | None, provider_name: str) -> str:
+    """Which backend's stats a call belongs to.
+
+    Reads the provider's own ``dedup_scope``, exactly as
+    ``common/ranking``'s ``_permanent_scope`` does. That indirection is
+    load-bearing rather than stylistic: only the provider can identify its
+    own backend. A scope built out here from ``provider_name`` and ``model``
+    would name a CONFIG TYPE, not a backend — two tenants on the same model
+    behind different keys, or two self-hosted sidecars both serving
+    ``bge-m3`` at different URLs, would collide and mask each other, which is
+    the whole bug this keying exists to fix.
+
+    Falls back to the provider name for a third-party provider that declares
+    no scope: coarse per-name grouping is worse than per-backend but better
+    than one global bucket.
+
+    *provider* is ``None`` when construction failed outright (registry
+    misconfiguration). The resolved NAME is then the only identity available,
+    and every tenant misconfiguring the same provider sharing one streak is
+    right — the fault is the config, not a backend.
+    """
+    if provider is None:
+        return provider_name
+    scope = getattr(provider, "dedup_scope", None)
+    if scope:
+        return str(scope)
+    return str(getattr(provider, "provider_name", "") or provider_name)
+
+
+def _stats_label(provider: object | None, provider_name: str) -> str:
+    """Human-facing backend identity for the log lines.
+
+    Deliberately separate from :func:`_stats_scope`: the scope must be a
+    stable opaque key with no credential in it, which makes it useless to
+    read in an alert. The label is the readable half — model and endpoint,
+    never the key.
+    """
+    if provider is None:
+        return provider_name
+    return str(getattr(provider, "backend_label", "") or provider_name)
+
+
+def _stats_for(scope: str, label: str) -> _EmbeddingStats:
+    """The stats for one backend, created on first use."""
+    stats = _stats_by_scope.get(scope)
+    if stats is None:
+        if len(_stats_by_scope) >= _STATS_SCOPE_MAX:
+            _stats_by_scope.clear()
+        stats = _EmbeddingStats(label)
+        _stats_by_scope[scope] = stats
+    return stats
 
 # One-shot misconfiguration log dedup. The registry raises ``ValueError``
 # on env-var misconfig; ``_resolve_provider_or_degrade`` catches it,
@@ -306,9 +392,12 @@ async def get_embeddings_batch(
         )
         # Deliberately NOT record_bulk_failure: the bulk call never ran,
         # so there is no batch to attribute a bulk-cap-style fault to, and
-        # this branch already logs unconditionally.
-        await _stats.record_failure()
+        # this branch already logs unconditionally. Scoped by NAME — there is
+        # no provider object to take an identity from.
+        await _stats_for(_stats_scope(None, provider_name), _stats_label(None, provider_name)).record_failure()
         raise
+    scope = _stats_scope(provider, provider_name)
+    label = _stats_label(provider, provider_name)
     # ``BaseException``, not ``Exception``, and deliberately so. A caller that
     # passes no ``budget_s`` still enforces its deadline by CANCELLING us, so
     # what arrives here is ``CancelledError`` — a ``BaseException``. Under
@@ -345,15 +434,16 @@ async def get_embeddings_batch(
             async with asyncio.timeout(max(0.1, budget_s - EMBEDDING_BUDGET_MARGIN_S)):
                 result = await _call_gated(lambda: provider.embed_batch(texts))
     except BaseException:
-        await _stats.record_failure(bulk_batch_size=len(texts))
+        await _stats_for(scope, label).record_failure(bulk_batch_size=len(texts))
         raise
-    await _stats.record_success(bulk=True)
+    await _stats_for(scope, label).record_success(bulk=True)
     return result
 
 
 async def _run_with_retry(
     make_call: Callable[[], Awaitable[list[float]]],
     context: str,
+    stats: _EmbeddingStats,
 ) -> list[float] | None:
     """Execute *make_call* under the shared retry / stats / logging policy.
 
@@ -371,7 +461,7 @@ async def _run_with_retry(
     for attempt in range(1, EMBEDDING_RETRY_ATTEMPTS + 1):
         try:
             result = await _call_gated(make_call)
-            await _stats.record_success()
+            await stats.record_success()
             return result
         # Intentionally broad: must catch all provider-specific errors during retry.
         except Exception as exc:
@@ -389,7 +479,7 @@ async def _run_with_retry(
             )
             if attempt < EMBEDDING_RETRY_ATTEMPTS:
                 await asyncio.sleep(EMBEDDING_RETRY_DELAY_S * attempt)
-    await _stats.record_failure()
+    await stats.record_failure()
     logger.error(
         "%s failed after %d attempts, returning None",
         context,
@@ -433,7 +523,7 @@ async def _resolve_provider_or_degrade(
                 context,
                 exc_info=True,
             )
-        await _stats.record_failure()
+        await _stats_for(_stats_scope(None, provider_name), _stats_label(None, provider_name)).record_failure()
         return None
 
 
@@ -453,10 +543,18 @@ async def get_embedding(
     pass through an instruction-aware encoder (Qwen3-Embedding, e5-instruct,
     etc.), use :func:`get_query_embedding` instead.
     """
+    provider_name = _resolve_provider_name(tenant_config)
     provider = await _resolve_provider_or_degrade(tenant_config, "Embedding")
     if provider is None:
         return None
-    return await _run_with_retry(lambda: provider.embed(text), "Embedding")
+    return await _run_with_retry(
+        lambda: provider.embed(text),
+        "Embedding",
+        _stats_for(
+            _stats_scope(provider, provider_name),
+            _stats_label(provider, provider_name),
+        ),
+    )
 
 
 async def get_query_embedding(
@@ -480,6 +578,7 @@ async def get_query_embedding(
     same ``None`` is returned on a registry-level ``ValueError`` (env-var
     misconfiguration).
     """
+    provider_name = _resolve_provider_name(tenant_config)
     provider = await _resolve_provider_or_degrade(tenant_config, "Query embedding")
     if provider is None:
         return None
@@ -502,4 +601,11 @@ async def get_query_embedding(
             return await provider.embed_query(text, instruction)
         return await provider.embed(text)
 
-    return await _run_with_retry(_call, "Query embedding")
+    return await _run_with_retry(
+        _call,
+        "Query embedding",
+        _stats_for(
+            _stats_scope(provider, provider_name),
+            _stats_label(provider, provider_name),
+        ),
+    )
