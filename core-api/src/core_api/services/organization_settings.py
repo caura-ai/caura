@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from cachetools import TTLCache
 from croniter import CroniterBadCronError, croniter
 
+from common.constants import SEARCH_KNOBS
 from common.events.base import Event
 from common.events.factory import get_event_bus
 from common.events.lifecycle_purge_request import (
@@ -507,7 +508,7 @@ def _validate_default_search_profile(payload: dict) -> None:
     agent-tune path), an org-wide setting write should fail loudly so an
     operator gets a 422 rather than a value that was quietly clamped. Unknown
     keys, wrong types, and out-of-range values all raise. Keys and ranges are
-    the same source of truth as agent profiles (``_SEARCH_PROFILE_RULES``).
+    the same source of truth as agent profiles (``SEARCH_KNOBS``).
     """
     dp = payload.get("search", {}).get("default_profile")
     if dp is None:
@@ -515,11 +516,10 @@ def _validate_default_search_profile(payload: dict) -> None:
     if not isinstance(dp, dict):
         raise ValueError("search.default_profile must be an object")
     for key, value in dp.items():
-        if key not in _SEARCH_PROFILE_RULES:
-            raise ValueError(
-                f"search.default_profile: unknown key {key!r} (allowed: {sorted(_SEARCH_PROFILE_RULES)})"
-            )
-        expected_type, (lo, hi), _ = _SEARCH_PROFILE_RULES[key]
+        knob = SEARCH_KNOBS.get(key)
+        if knob is None:
+            raise ValueError(f"search.default_profile: unknown key {key!r} (allowed: {sorted(SEARCH_KNOBS)})")
+        expected_type, (lo, hi) = knob.value_type, knob.bounds
         # Accept an int where a float is expected (e.g. min_similarity=0 → 0.0),
         # but never a bool (bool is an int subclass and would slip through).
         if expected_type is float and isinstance(value, int) and not isinstance(value, bool):
@@ -1082,54 +1082,40 @@ class ResolvedConfig:
         return global_settings.security_audit_alert_score_drop_delta
 
 
-# Search profile validation
-_SEARCH_PROFILE_RULES: dict[str, tuple[type, tuple, object]] = {
-    "top_k": (int, (1, 20), None),
-    "min_similarity": (float, (0.1, 0.9), None),
-    "fts_weight": (float, (0.0, 1.0), None),
-    # #687: scale on ts_rank_cd before saturation. Floor is 1.0, not 0 — that is
-    # the pre-#687 formula, so a tenant can revert but cannot weaken keyword
-    # relevance below where it has always been. Ceiling is the largest value the
-    # LoCoMo sweep actually measured; above it is untested territory.
-    "fts_rank_scale": (float, (1.0, 20.0), None),
-    "freshness_floor": (float, (0.0, 1.0), None),
-    "freshness_decay_days": (int, (7, 730), None),
-    "recall_boost_cap": (float, (1.0, 3.0), None),
-    "recall_decay_window_days": (int, (7, 365), None),
-    "graph_max_hops": (int, (0, 5), None),
-    "similarity_blend": (float, (0.0, 1.0), None),
-    # A49: 0 = off (candidate pool by boosted score); >0 = cosine-dominant pool of this size.
-    "candidate_pool_size": (int, (0, 200), None),
-    # A50 unified: 0 = legacy multiplicative score; 1 = unified relevance-dominant formula.
-    "score_formula": (int, (0, 1), None),
-}
-
-
 def validate_search_profile(profile: dict) -> dict:
-    """Validate and sanitise a search_profile dict."""
+    """Validate and sanitise a search_profile dict against ``SEARCH_KNOBS``.
+
+    Lenient by design, unlike ``_validate_default_search_profile``: a known key
+    out of range is clamped and a known key of the wrong type is dropped, but an
+    UNKNOWN key is passed through untouched. That last one looks backwards — an
+    unknown key survives where a known-but-malformed one does not — and the
+    reason is persistence, not laxity. Both write ingresses are closed Pydantic
+    models, so an unknown key can only come from a row written by a DIFFERENT
+    build; dropping it here would make a rollback silently erase a tenant's
+    tuning for a knob this build has not heard of.
+    """
     if not profile:
         return {}
 
     cleaned: dict = {}
     for key, value in profile.items():
-        if key not in _SEARCH_PROFILE_RULES:
+        knob = SEARCH_KNOBS.get(key)
+        if knob is None:
             cleaned[key] = value
             continue
 
-        expected_type, (lo, hi), default = _SEARCH_PROFILE_RULES[key]
+        expected_type, (lo, hi) = knob.value_type, knob.bounds
 
         if expected_type is float and isinstance(value, int):
             value = float(value)
 
         if not isinstance(value, expected_type):
             logger.warning(
-                "search_profile key '%s' has wrong type %s (expected %s), using default",
+                "search_profile key '%s' has wrong type %s (expected %s), dropping key",
                 key,
                 type(value).__name__,
                 expected_type.__name__,
             )
-            if default is not None:
-                cleaned[key] = default
             continue
 
         if value < lo or value > hi:

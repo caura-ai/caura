@@ -945,59 +945,78 @@ async def test_only_sql_scoring_keys_cross_the_wire(tenant_id, monkeypatch, use_
     )
 
 
-def test_sql_scoring_param_keys_matches_what_storage_reads():
-    """The declared set must equal the keys ``memory_scored_search`` reads.
+# ``SQL_SCORING_PARAM_KEYS`` / ``SQL_SCORING_REQUIRED_KEYS`` no longer need their
+# own source-scan tests: both are derived from ``SEARCH_KNOBS``'s ``sql`` flags,
+# so pinning the flags against storage (below) pins the tuples with them.
 
-    Both services import the tuple, but nothing DERIVES storage's reads from it —
-    the SQL builder names each key inline, which is the readable way to write it.
-    So this compares the declaration against the source, and is what makes the
-    tuple a single registration point rather than a fourth list to keep in sync:
-    add a knob to the SQL without declaring it and this fails, naming it.
+
+async def test_resolve_search_profile_emits_every_declared_knob():
+    """``ResolveSearchProfile`` must resolve exactly the declared knob set.
+
+    The resolver still names each knob one by one, to attach a default the table
+    deliberately does not carry (see ``SEARCH_KNOBS``). This makes skipping one
+    loud.
+
+    The wire knobs are already covered — a declared-but-unresolved one fails
+    ``test_only_sql_scoring_keys_cross_the_wire`` on both paths. This adds the
+    three core-api-local knobs (``top_k``, ``min_similarity``,
+    ``graph_max_hops``), which never reach the wire at all. Dropping one of those
+    today does still break other tests, but as a KeyError from whichever step
+    reads it downstream; this is the one that fails with the key's name and the
+    reason. No DB — a bare context through a pure step.
     """
-    import ast
-    import inspect
-    import re
-    import textwrap
+    from common.constants import SEARCH_KNOBS
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.search.resolve_search_profile import ResolveSearchProfile
 
-    from core_storage_api.services.postgres_service import PostgresService
+    ctx = PipelineContext()
+    ctx.data.update({"query": "anything at all", "top_k": 5, "search_profile": None})
+    await ResolveSearchProfile().execute(ctx)
 
-    # Round-tripped through the AST rather than grepped raw: the storage source
-    # discusses these keys in prose as well as reading them, and a regex over the
-    # text counts a comment as a read. It scored ``top_k`` that way — a key #725
-    # deliberately STOPPED reading, still named in the comment saying so.
-    # ``ast.unparse`` drops comments, so what is left is only code.
-    code = ast.unparse(ast.parse(textwrap.dedent(inspect.getsource(PostgresService.memory_scored_search))))
-    read = set(re.findall(r"""sp(?:\[|\.get\()['"](\w+)['"]""", code))
-
-    assert read, "found no `sp` reads at all — the scan broke, it did not pass"
-    assert read == set(SQL_SCORING_PARAM_KEYS), (
-        f"SQL_SCORING_PARAM_KEYS is out of step with memory_scored_search; "
-        f"storage reads but core-api does not declare: {sorted(read - set(SQL_SCORING_PARAM_KEYS))}; "
-        f"core-api declares but storage never reads: {sorted(set(SQL_SCORING_PARAM_KEYS) - read)}"
+    emitted = set(ctx.data["search_params"])
+    assert emitted == set(SEARCH_KNOBS), (
+        f"ResolveSearchProfile is out of step with SEARCH_KNOBS; "
+        f"declared but not resolved: {sorted(set(SEARCH_KNOBS) - emitted)}; "
+        f"resolved but not declared: {sorted(emitted - set(SEARCH_KNOBS))}"
     )
 
 
-def test_required_scoring_keys_are_the_ones_storage_reads_positionally():
-    """``SQL_SCORING_REQUIRED_KEYS`` must be exactly the indexed reads.
+def test_sql_flags_match_how_storage_reads_each_knob():
+    """``sql`` / ``sql_required`` must match storage's actual reads.
 
-    The route rejects a payload missing these. Declare too many and a legitimate
-    caller gets a 422; too few and the omission returns to being a KeyError 500
-    from inside the session, which is the thing the guard exists to prevent.
+    The flags derive both wire tuples, so they are the single registration step
+    for a new scoring knob — which only holds while they describe what the SQL
+    really does. ``sql`` is any read; ``sql_required`` is the indexed subset,
+    where a missing key is a KeyError rather than a server-side default.
     """
     import ast
     import inspect
     import re
     import textwrap
 
-    from common.constants import SQL_SCORING_REQUIRED_KEYS
+    from common.constants import SQL_SCORING_PARAM_KEYS, SQL_SCORING_REQUIRED_KEYS
     from core_storage_api.services.postgres_service import PostgresService
 
+    # Round-tripped through the AST, not grepped: the storage source discusses
+    # these keys in prose as well as reading them, and a regex over raw text
+    # scores a comment as a read — it picked up ``top_k`` from the note saying
+    # #725 stopped reading it. ``ast.unparse`` drops comments.
     code = ast.unparse(ast.parse(textwrap.dedent(inspect.getsource(PostgresService.memory_scored_search))))
+    read = set(re.findall(r"""sp(?:\[|\.get\()['"](\w+)['"]""", code))
     indexed = set(re.findall(r"""sp\[['"](\w+)['"]\]""", code))
 
-    assert indexed, "found no indexed `sp[...]` reads — the scan broke, it did not pass"
-    assert indexed == set(SQL_SCORING_REQUIRED_KEYS), (
-        f"SQL_SCORING_REQUIRED_KEYS does not match storage's indexed reads; "
-        f"read positionally but not required: {sorted(indexed - set(SQL_SCORING_REQUIRED_KEYS))}; "
-        f"required but not read positionally: {sorted(set(SQL_SCORING_REQUIRED_KEYS) - indexed)}"
+    # Against the DERIVED tuples, which is the same assertion one step on: they
+    # are literally ``{k for k, v in SEARCH_KNOBS.items() if v.sql}``.
+    flagged, required = set(SQL_SCORING_PARAM_KEYS), set(SQL_SCORING_REQUIRED_KEYS)
+
+    assert read and indexed, "found no `sp` reads — the scan broke, it did not pass"
+    assert read == flagged, (
+        f"SEARCH_KNOBS `sql` flags disagree with storage; "
+        f"reads-but-not-flagged: {sorted(read - flagged)}; "
+        f"flagged-but-unread: {sorted(flagged - read)}"
+    )
+    assert indexed == required, (
+        f"SEARCH_KNOBS `sql_required` flags disagree with storage's indexed reads; "
+        f"indexed-but-not-required: {sorted(indexed - required)}; "
+        f"required-but-not-indexed: {sorted(required - indexed)}"
     )

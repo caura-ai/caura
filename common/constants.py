@@ -1,4 +1,13 @@
-"""DB-query constants shared between core-api and core-storage-api."""
+"""Constants shared between core-api and core-storage-api.
+
+Mostly DB-query values both services need to agree on. Also ``SEARCH_KNOBS``
+and the wire contract derived from it: storage reads only the derived key
+tuples, but the knob table is one declaration on purpose — splitting the
+bounds into core-api and the flags into here would put the knob NAME in two
+files, which is the drift it exists to remove.
+"""
+
+from typing import NamedTuple
 
 # ── Memory liveness ──
 # The statuses that mean "this memory is live". Broader than the literal
@@ -400,42 +409,74 @@ SINGLE_VALUE_PREDICATES: frozenset[str] = frozenset(
 LIFECYCLE_STALE_ARCHIVE_WEIGHT: float = 0.3
 
 
-# ── Scored-search wire contract (#723 / #725) ──
-# The scoring knobs core-api nests under ``search_params`` on the way to
-# core-storage-api's ``/memories/scored-search``, and that
-# ``PostgresService.memory_scored_search`` reads back out. One declaration for
-# both ends: core-api's two search-path builders project through it, so only
-# these keys cross, and storage requires the ones it reads positionally.
+# ── Search tuning knobs (#723 / #725 / #727) ──
+# The declaration of each search knob's type, accepted range, and whether it
+# crosses the wire to core-storage-api. Ranges and types drive validation on
+# both the agent-profile and tenant-default write paths; the ``sql`` flags
+# derive the wire contract below.
 #
-# It lives here, not beside core-api's default VALUES, because what drifts is
-# the key set against the SQL — a two-service concern — and this module is the
-# shared home for exactly that.
+# NOT yet the declaration the request SCHEMAS derive from: ``SearchProfileUpdate``
+# and the ``memclaw_tune`` MCP signature still enumerate their own subset (9 of
+# these 12 — the three A/B knobs are deliberately not agent-tunable) with their
+# own bounds, and those have already drifted: ``graph_max_hops`` is (0, 5) here
+# and ge=0/le=3 there.
 #
-# The set has been wrong in both directions. Keys the SQL needed went missing on
-# one path (``candidate_pool_size`` / ``score_formula``, #723). And keys the SQL
-# never reads travelled anyway, one of which — ``top_k`` — collided with a
-# same-named request parameter and silently became the candidate-window LIMIT,
-# defeating the overfetch on the active path (#725).
-SQL_SCORING_PARAM_KEYS: tuple[str, ...] = (
-    "fts_weight",
-    "freshness_floor",
-    "freshness_decay_days",
-    "recall_boost_cap",
-    "recall_decay_window_days",
-    "similarity_blend",
-    "candidate_pool_size",
-    "score_formula",
-    "fts_rank_scale",
-)
-# The subset read with INDEXED access in the SQL builder, i.e. no server-side
-# default: a payload missing any of these is malformed, and the route rejects it
-# rather than letting it surface as a KeyError 500 from inside the session. The
-# remainder are read with ``sp.get(key, default)`` and may be omitted.
-SQL_SCORING_REQUIRED_KEYS: tuple[str, ...] = (
-    "fts_weight",
-    "freshness_floor",
-    "freshness_decay_days",
-    "recall_boost_cap",
-    "recall_decay_window_days",
-    "similarity_blend",
-)
+# One table because the same knob used to be registered in four places — the
+# validation rules, both search-path builders, and the storage route's key list —
+# and every omission was silent in a different way. Keys the SQL needed went
+# missing on one path (``candidate_pool_size`` / ``score_formula``, #723). Keys
+# the SQL never reads travelled anyway, one of which — ``top_k`` — collided with
+# a same-named request parameter and became the candidate-window LIMIT, defeating
+# the overfetch on the active path (#725). And a knob absent from the rules was
+# accepted UNVALIDATED and UNCLAMPED on the agent path while the tenant-default
+# path rejected it as unknown.
+#
+# It lives here, not beside core-api's default VALUES, because what drifts is the
+# key set against storage's SQL — a two-service concern, which is this module's
+# subject. The defaults stay in ``core_api.constants``: those are core-api policy,
+# and three of them are not constants at all (``fts_weight`` is query-adaptive,
+# ``top_k`` and ``min_similarity`` fall back to the caller's request).
+
+
+class SearchKnob(NamedTuple):
+    """Type, bounds, and wire disposition for one search tuning knob."""
+
+    value_type: type
+    bounds: tuple[float, float]
+    # Crosses the wire in ``search_params``; storage reads it in the scoring SQL.
+    sql: bool = False
+    # Storage reads it with INDEXED access, i.e. no server-side default, so a
+    # payload omitting it is malformed and the route rejects it rather than
+    # letting it surface as a KeyError 500 from inside the session.
+    sql_required: bool = False
+
+
+SEARCH_KNOBS: dict[str, SearchKnob] = {
+    # ── core-api-local: resolved here, never sent to storage ──
+    "top_k": SearchKnob(int, (1, 20)),
+    "min_similarity": SearchKnob(float, (0.1, 0.9)),
+    "graph_max_hops": SearchKnob(int, (0, 5)),
+    # ── scoring knobs storage reads positionally ──
+    "fts_weight": SearchKnob(float, (0.0, 1.0), sql=True, sql_required=True),
+    "freshness_floor": SearchKnob(float, (0.0, 1.0), sql=True, sql_required=True),
+    "freshness_decay_days": SearchKnob(int, (7, 730), sql=True, sql_required=True),
+    "recall_boost_cap": SearchKnob(float, (1.0, 3.0), sql=True, sql_required=True),
+    "recall_decay_window_days": SearchKnob(int, (7, 365), sql=True, sql_required=True),
+    "similarity_blend": SearchKnob(float, (0.0, 1.0), sql=True, sql_required=True),
+    # ── scoring knobs with a server-side default, so optional on the wire ──
+    # #687: scale on ts_rank_cd before saturation. Floor is 1.0, not 0 — that is
+    # the pre-#687 formula, so a tenant can revert but cannot weaken keyword
+    # relevance below where it has always been. Ceiling is the largest value the
+    # LoCoMo sweep actually measured; above it is untested territory.
+    "fts_rank_scale": SearchKnob(float, (1.0, 20.0), sql=True),
+    # A49: 0 = off (candidate pool by boosted score); >0 = cosine-dominant pool of this size.
+    "candidate_pool_size": SearchKnob(int, (0, 200), sql=True),
+    # A50 unified: 0 = legacy multiplicative score; 1 = unified relevance-dominant formula.
+    "score_formula": SearchKnob(int, (0, 1), sql=True),
+}
+
+# The wire contract, derived. Core-api's two search-path builders project
+# ``search_params`` through the first; the storage route rejects a payload
+# missing any of the second.
+SQL_SCORING_PARAM_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.sql)
+SQL_SCORING_REQUIRED_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.sql_required)
