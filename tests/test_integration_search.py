@@ -642,7 +642,7 @@ def _spy_on_scored_search(monkeypatch) -> list[tuple[dict, list]]:
 
 
 async def _scored_search_call(
-    monkeypatch, tenant_id, use_pipeline, *, search_profile=None, boost=None, top_k=3
+    monkeypatch, tenant_id, use_pipeline, *, search_profile=None, boost=None, top_k=3, tenant_config=None
 ):
     """Run one search; return the kwargs ``memory_scored_search`` received.
 
@@ -680,6 +680,7 @@ async def _scored_search_call(
         query="anything at all",
         top_k=top_k,
         search_profile=search_profile,
+        tenant_config=tenant_config,
     )
 
     path = "pipeline" if use_pipeline else "legacy"
@@ -689,41 +690,57 @@ async def _scored_search_call(
 
 @pytest.mark.integration
 @pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
-@pytest.mark.parametrize("tuned", [False, True], ids=["defaults", "tuned"])
+@pytest.mark.parametrize(
+    "via", [None, "agent_profile", "tenant_default"], ids=["defaults", "agent", "tenant_default"]
+)
 async def test_scoring_knobs_reach_the_sql_on_both_search_paths(
-    tenant_id, monkeypatch, use_pipeline, tuned
+    tenant_id, monkeypatch, use_pipeline, via
 ):
     """Every quiet scoring knob must arrive where the SQL reads it, on BOTH paths.
 
-    Two builders and one server-side decision can each drop a key, and each is
-    invisible to the other two:
+    One builder per path and one server-side decision can each drop a key, and
+    each is invisible to the others:
 
-      * ``resolve_search_profile`` builds the pipeline's ``search_params``;
-      * ``_search_memories_legacy`` builds its own payload;
+      * ``resolve_search_params`` resolves the knobs for both paths;
+      * each path projects its own wire payload out of that;
       * the storage route decides what ``search_params`` the SQL finally sees.
 
-    Asserting at the client boundary cannot see the third, because the nesting
+    Asserting at the client boundary cannot see the last one, because the nesting
     happens server-side — which is why this asserts against the dict the storage
     service actually received. A key that never arrives leaves the SQL on its own
     fallback, so the feature applies to one path only and the documented legacy
-    rollback lever reverts it as a side effect.
+    rollback lever changes ranking as a side effect.
 
-    Both cases are needed. ``defaults`` pins the wiring, but two of these
-    constants are currently 0, so on its own it cannot tell a delivered value
-    from a builder that hardcoded the same number; ``tuned`` moves every knob off
-    its default and makes the value itself the assertion.
+    All three sources are needed. ``defaults`` pins the wiring, but two of these
+    constants are currently 0, so on its own it cannot tell a delivered value from
+    a builder that hardcoded the same number. ``agent`` moves every knob off its
+    default and makes the value itself the assertion. ``tenant_default`` sends the
+    same values down the A47 tenant-wide rung instead — which the legacy path
+    used to skip entirely, resolving its own ladder without the tenant merge, so
+    a tenant-wide default reached the pipeline path alone.
     """
-    profile = {key: t for key, _, t in _SQL_SCORING_KEYS} if tuned else None
-    expected = profile or {key: const for key, const, _ in _SQL_SCORING_KEYS}
+    from core_api.services.organization_settings import ResolvedConfig
 
-    call = await _scored_search_call(monkeypatch, tenant_id, use_pipeline, search_profile=profile)
+    tuned = {key: t for key, _, t in _SQL_SCORING_KEYS}
+    profile = tuned if via == "agent_profile" else None
+    tenant_config = (
+        ResolvedConfig({"search": {"default_profile": tuned}}) if via == "tenant_default" else None
+    )
+    expected = tuned if via else {key: const for key, const, _ in _SQL_SCORING_KEYS}
+
+    call = await _scored_search_call(
+        monkeypatch,
+        tenant_id,
+        use_pipeline,
+        search_profile=profile,
+        tenant_config=tenant_config,
+    )
     delivered = {k: (call.get("search_params") or {}).get(k) for k in expected}
 
     path = "pipeline" if use_pipeline else "legacy"
     assert delivered == expected, (
-        f"the {path} path did not deliver every scoring knob to the SQL; storage saw "
-        f"{delivered} instead of {expected}, so the SQL falls back to its own default "
-        f"and the feature applies to the other path only"
+        f"the {path} path did not deliver every scoring knob from {via or 'the constants'} "
+        f"to the SQL; storage saw {delivered} instead of {expected}"
     )
 
 
@@ -950,32 +967,25 @@ async def test_only_sql_scoring_keys_cross_the_wire(tenant_id, monkeypatch, use_
 # so pinning the flags against storage (below) pins the tuples with them.
 
 
-async def test_resolve_search_profile_emits_every_declared_knob():
-    """``ResolveSearchProfile`` must resolve exactly the declared knob set.
+def test_resolve_search_params_emits_every_declared_knob():
+    """The resolver must resolve exactly the declared knob set.
 
-    The resolver still names each knob one by one, to attach a default the table
-    deliberately does not carry (see ``SEARCH_KNOBS``). This makes skipping one
-    loud.
+    It names each knob one by one, to attach a default the table deliberately does
+    not carry (see ``SEARCH_KNOBS``). This makes skipping one loud.
 
-    The wire knobs are already covered — a declared-but-unresolved one fails
-    ``test_only_sql_scoring_keys_cross_the_wire`` on both paths. This adds the
-    three core-api-local knobs (``top_k``, ``min_similarity``,
-    ``graph_max_hops``), which never reach the wire at all. Dropping one of those
-    today does still break other tests, but as a KeyError from whichever step
-    reads it downstream; this is the one that fails with the key's name and the
-    reason. No DB — a bare context through a pure step.
+    Asserted against ``resolve_search_params`` rather than either search path
+    because there is now only one resolver — so this pins BOTH. The three
+    core-api-local knobs (``top_k``, ``min_similarity``, ``graph_max_hops``) are
+    the part no other test covers: they never reach the wire, so dropping one
+    surfaces elsewhere only as a KeyError from whichever step reads it
+    downstream. Here it fails with the key's name.
     """
     from common.constants import SEARCH_KNOBS
-    from core_api.pipeline.context import PipelineContext
-    from core_api.pipeline.steps.search.resolve_search_profile import ResolveSearchProfile
+    from core_api.services.memory_service import resolve_search_params
 
-    ctx = PipelineContext()
-    ctx.data.update({"query": "anything at all", "top_k": 5, "search_profile": None})
-    await ResolveSearchProfile().execute(ctx)
-
-    emitted = set(ctx.data["search_params"])
+    emitted = set(resolve_search_params(None, query="anything at all", top_k=5))
     assert emitted == set(SEARCH_KNOBS), (
-        f"ResolveSearchProfile is out of step with SEARCH_KNOBS; "
+        f"resolve_search_params is out of step with SEARCH_KNOBS; "
         f"declared but not resolved: {sorted(set(SEARCH_KNOBS) - emitted)}; "
         f"resolved but not declared: {sorted(emitted - set(SEARCH_KNOBS))}"
     )

@@ -95,6 +95,7 @@ from core_api.services.governance_gate import (
     pii_audit_detail,
 )
 from core_api.services.hooks import get_hooks
+from core_api.services.organization_settings import validate_search_profile
 from core_api.services.task_tracker import tracked_task
 
 logger = logging.getLogger(__name__)
@@ -2874,6 +2875,68 @@ def _adaptive_fts_weight(query: str) -> float:
     return FTS_WEIGHT
 
 
+def resolve_search_params(
+    search_profile: dict | None,
+    *,
+    query: str,
+    top_k: int,
+    tenant_config=None,
+) -> dict:
+    """Resolve every search knob for one query, for both search paths.
+
+    Precedence: per-agent profile → tenant-wide default (A47) → global constant.
+    A tuned agent knob wins, the tenant default fills the gaps, the constant is
+    the last word.
+
+    Shared because there were two copies of this ladder and only one merged the
+    tenant default, so a tenant-wide search default applied on the pipeline path
+    alone — including the per-tenant ``fts_rank_scale = 1.0`` revert documented
+    for #687.
+
+    Scoped to RESOLUTION, deliberately: this makes both paths resolve the same
+    knobs from the same sources, and does NOT make them deliver the same ranking.
+    ``ClassifyQuery`` writes per-strategy ``search_param_overrides`` that
+    ``ExecuteScoredSearch`` merges over the result — TEMPORAL and RECENT_CONTEXT
+    both force ``freshness_floor`` / ``freshness_decay_days`` — and that happens
+    on the pipeline path only. So on a query with a temporal hint the pipeline
+    overrides a tenant's freshness knobs where the legacy path honours them. The
+    two paths are not interchangeable; see the handoff for the full list.
+
+    Returns every knob in ``SEARCH_KNOBS``, which is what lets one test pin the
+    set for both paths at once. Callers take what they need: the wire payload is
+    a projection through ``SQL_SCORING_PARAM_KEYS``; ``top_k``,
+    ``min_similarity`` and ``graph_max_hops`` are core-api-local.
+
+    ``tenant_config`` is a ``ResolvedConfig`` on the primary search/recall paths
+    (routes resolve it before calling); ``None`` is tolerated so callers that
+    don't have one behave exactly as before A47.
+    """
+    resolved = validate_search_profile(search_profile) if search_profile else {}
+
+    if tenant_config is not None:
+        tenant_default = getattr(tenant_config, "default_search_profile", {}) or {}
+        if tenant_default:
+            resolved = {**tenant_default, **resolved}
+
+    return {
+        "top_k": resolved.get("top_k", top_k),
+        "min_similarity": resolved.get("min_similarity", MIN_SEARCH_SIMILARITY),
+        "graph_max_hops": resolved.get("graph_max_hops", GRAPH_MAX_HOPS),
+        # The one default that is not a constant: it adapts to the query unless
+        # tuned, so this is an ``in`` check rather than ``.get`` — a ``.get``
+        # default would run the tokenizer on every call, tuned or not.
+        "fts_weight": resolved["fts_weight"] if "fts_weight" in resolved else _adaptive_fts_weight(query),
+        "freshness_floor": resolved.get("freshness_floor", FRESHNESS_FLOOR),
+        "freshness_decay_days": resolved.get("freshness_decay_days", FRESHNESS_DECAY_DAYS),
+        "recall_boost_cap": resolved.get("recall_boost_cap", RECALL_BOOST_CAP),
+        "recall_decay_window_days": resolved.get("recall_decay_window_days", RECALL_DECAY_WINDOW_DAYS),
+        "similarity_blend": resolved.get("similarity_blend", SIMILARITY_BLEND),
+        "fts_rank_scale": resolved.get("fts_rank_scale", FTS_RANK_SCALE),
+        "candidate_pool_size": resolved.get("candidate_pool_size", CANDIDATE_POOL_SIZE),
+        "score_formula": resolved.get("score_formula", SCORE_FORMULA),
+    }
+
+
 def _normalize_query_for_cache(query: str) -> str:
     """Normalize query for cache key: lowercase, strip, collapse whitespace."""
     return re.sub(r"\s+", " ", query.strip().lower())
@@ -3424,22 +3487,10 @@ async def _search_memories_legacy(
     """Legacy search -- uses scored_search storage API endpoint."""
     sc = get_storage_client()
 
-    # Resolve per-agent search profile with fallback to constants
-    from core_api.services.organization_settings import validate_search_profile
-
-    sp = validate_search_profile(search_profile) if search_profile else {}
-    _top_k = sp.get("top_k", top_k)
-    _min_similarity = sp.get("min_similarity", MIN_SEARCH_SIMILARITY)
-    _fts_weight = sp["fts_weight"] if "fts_weight" in sp else _adaptive_fts_weight(query)
-    _freshness_floor = sp.get("freshness_floor", FRESHNESS_FLOOR)
-    _freshness_decay_days = sp.get("freshness_decay_days", FRESHNESS_DECAY_DAYS)
-    _recall_boost_cap = sp.get("recall_boost_cap", RECALL_BOOST_CAP)
-    _recall_decay_window_days = sp.get("recall_decay_window_days", RECALL_DECAY_WINDOW_DAYS)
-    _graph_max_hops = sp.get("graph_max_hops", GRAPH_MAX_HOPS)
-    _similarity_blend = sp.get("similarity_blend", SIMILARITY_BLEND)
-    _fts_rank_scale = sp.get("fts_rank_scale", FTS_RANK_SCALE)
-    _candidate_pool_size = sp.get("candidate_pool_size", CANDIDATE_POOL_SIZE)
-    _score_formula = sp.get("score_formula", SCORE_FORMULA)
+    # Same resolver the pipeline step uses — see ``resolve_search_params``.
+    sp = resolve_search_params(search_profile, query=query, top_k=top_k, tenant_config=tenant_config)
+    _top_k = sp["top_k"]
+    _min_similarity = sp["min_similarity"]
 
     # Temporal hint
     temporal_window = _extract_temporal_hint(query)
@@ -3449,7 +3500,7 @@ async def _search_memories_legacy(
     # deprecated legacy search honours the org switch exactly like the pipeline.
     emb_task = asyncio.ensure_future(_get_or_cache_embedding(query, tenant_id, tenant_config))
     ent_task = asyncio.ensure_future(
-        _entity_boost_pipeline(query, tenant_id, fleet_ids, graph_expand, _graph_max_hops)
+        _entity_boost_pipeline(query, tenant_id, fleet_ids, graph_expand, sp["graph_max_hops"])
         if entity_retrieval
         else _no_entity_boost()
     )
@@ -3479,22 +3530,6 @@ async def _search_memories_legacy(
     # allowlist that dropped whatever it did not name. Full rationale sits with
     # the deleted code, on the storage ``/scored-search`` route.
     #
-    # Ordered by ``SQL_SCORING_PARAM_KEYS``, the declaration the pipeline builder
-    # projects through too, so the two paths cannot drift about what crosses the
-    # wire. Indexed, not ``.get`` — this path resolves every knob a few lines
-    # above, so a key declared and not resolved here is a mistake worth a
-    # KeyError rather than a silent omission at the SQL.
-    _resolved_scoring = {
-        "fts_weight": _fts_weight,
-        "fts_rank_scale": _fts_rank_scale,
-        "freshness_floor": _freshness_floor,
-        "freshness_decay_days": _freshness_decay_days,
-        "recall_boost_cap": _recall_boost_cap,
-        "recall_decay_window_days": _recall_decay_window_days,
-        "similarity_blend": _similarity_blend,
-        "candidate_pool_size": _candidate_pool_size,
-        "score_formula": _score_formula,
-    }
     search_data = {
         "tenant_id": tenant_id,
         "embedding": embedding,
@@ -3510,7 +3545,10 @@ async def _search_memories_legacy(
         # post-filter below applies it. Kept flat for that reason — a new knob
         # belongs in ``search_params``, not beside this one.
         "min_similarity": _min_similarity,
-        "search_params": {k: _resolved_scoring[k] for k in SQL_SCORING_PARAM_KEYS},
+        # Indexed, unlike the pipeline's tolerant projection: the resolver above
+        # always returns every declared knob, so a missing one is a bug worth a
+        # KeyError rather than a silent omission at the SQL.
+        "search_params": {k: sp[k] for k in SQL_SCORING_PARAM_KEYS},
         "recall_boost_enabled": recall_boost,
         "temporal_window_days": temporal_window.days if temporal_window else None,
         # Both halves, under their own keys: the SQL gates the entire entity
