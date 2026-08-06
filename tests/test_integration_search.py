@@ -25,6 +25,7 @@ from core_api.constants import (
     MIN_SEARCH_SIMILARITY,
     SCORE_FORMULA,
     SEARCH_OVERFETCH_FACTOR,
+    SQL_SCORING_PARAM_KEYS,
 )
 from common.models.memory import Memory
 from common.embedding import fake_embedding
@@ -914,4 +915,89 @@ async def test_post_filter_does_not_starve_the_result_set(monkeypatch, use_pipel
     )
     assert {str(r.id) for r in results} <= qualifying, (
         f"the {path} path returned rows below MIN_SEARCH_SIMILARITY={MIN_SEARCH_SIMILARITY}"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
+async def test_only_sql_scoring_keys_cross_the_wire(tenant_id, monkeypatch, use_pipeline):
+    """Both paths must deliver EXACTLY the declared key set — no more, no less.
+
+    The per-key tests above pin that specific knobs arrive. This pins the set,
+    which is the assertion that catches the other direction: a core-api-local
+    field added to ``search_params`` and shipped to storage by accident. That is
+    not hypothetical — ``top_k`` did exactly that, and because storage read it as
+    the candidate-window LIMIT it silently defeated ``SEARCH_OVERFETCH_FACTOR``
+    on the active path (#725).
+
+    Equality, not containment, on purpose: containment would pass for every
+    surplus key, which is the failure mode being guarded.
+    """
+    call = await _scored_search_call(monkeypatch, tenant_id, use_pipeline)
+    delivered = set((call.get("search_params") or {}).keys())
+
+    path = "pipeline" if use_pipeline else "legacy"
+    assert delivered == set(SQL_SCORING_PARAM_KEYS), (
+        f"the {path} path's search_params does not match SQL_SCORING_PARAM_KEYS; "
+        f"surplus={sorted(delivered - set(SQL_SCORING_PARAM_KEYS))} "
+        f"missing={sorted(set(SQL_SCORING_PARAM_KEYS) - delivered)}. Surplus keys reach the SQL "
+        f"and can collide with a request parameter; missing keys leave the SQL on its own default"
+    )
+
+
+def test_sql_scoring_param_keys_matches_what_storage_reads():
+    """The declared set must equal the keys ``memory_scored_search`` reads.
+
+    Both services import the tuple, but nothing DERIVES storage's reads from it —
+    the SQL builder names each key inline, which is the readable way to write it.
+    So this compares the declaration against the source, and is what makes the
+    tuple a single registration point rather than a fourth list to keep in sync:
+    add a knob to the SQL without declaring it and this fails, naming it.
+    """
+    import ast
+    import inspect
+    import re
+    import textwrap
+
+    from core_storage_api.services.postgres_service import PostgresService
+
+    # Round-tripped through the AST rather than grepped raw: the storage source
+    # discusses these keys in prose as well as reading them, and a regex over the
+    # text counts a comment as a read. It scored ``top_k`` that way — a key #725
+    # deliberately STOPPED reading, still named in the comment saying so.
+    # ``ast.unparse`` drops comments, so what is left is only code.
+    code = ast.unparse(ast.parse(textwrap.dedent(inspect.getsource(PostgresService.memory_scored_search))))
+    read = set(re.findall(r"""sp(?:\[|\.get\()['"](\w+)['"]""", code))
+
+    assert read, "found no `sp` reads at all — the scan broke, it did not pass"
+    assert read == set(SQL_SCORING_PARAM_KEYS), (
+        f"SQL_SCORING_PARAM_KEYS is out of step with memory_scored_search; "
+        f"storage reads but core-api does not declare: {sorted(read - set(SQL_SCORING_PARAM_KEYS))}; "
+        f"core-api declares but storage never reads: {sorted(set(SQL_SCORING_PARAM_KEYS) - read)}"
+    )
+
+
+def test_required_scoring_keys_are_the_ones_storage_reads_positionally():
+    """``SQL_SCORING_REQUIRED_KEYS`` must be exactly the indexed reads.
+
+    The route rejects a payload missing these. Declare too many and a legitimate
+    caller gets a 422; too few and the omission returns to being a KeyError 500
+    from inside the session, which is the thing the guard exists to prevent.
+    """
+    import ast
+    import inspect
+    import re
+    import textwrap
+
+    from common.constants import SQL_SCORING_REQUIRED_KEYS
+    from core_storage_api.services.postgres_service import PostgresService
+
+    code = ast.unparse(ast.parse(textwrap.dedent(inspect.getsource(PostgresService.memory_scored_search))))
+    indexed = set(re.findall(r"""sp\[['"](\w+)['"]\]""", code))
+
+    assert indexed, "found no indexed `sp[...]` reads — the scan broke, it did not pass"
+    assert indexed == set(SQL_SCORING_REQUIRED_KEYS), (
+        f"SQL_SCORING_REQUIRED_KEYS does not match storage's indexed reads; "
+        f"read positionally but not required: {sorted(indexed - set(SQL_SCORING_REQUIRED_KEYS))}; "
+        f"required but not read positionally: {sorted(set(SQL_SCORING_REQUIRED_KEYS) - indexed)}"
     )

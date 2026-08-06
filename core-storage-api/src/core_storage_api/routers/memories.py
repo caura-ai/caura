@@ -9,6 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 
+from common.constants import SQL_SCORING_REQUIRED_KEYS
 from common.events.lifecycle_purge_request import (
     MEMORY_RETENTION_MAX_DAYS,
     MEMORY_RETENTION_MIN_DAYS,
@@ -141,11 +142,19 @@ async def scored_search(request: Request) -> list[dict]:
     # Both core-api builders send nested now, so the fallback is gone and the
     # SQL reads what the caller actually sent.
     #
-    # Fail-closed rather than defaulting: ``memory_scored_search`` reads six of
-    # these keys with INDEXED access, so a payload without them is a malformed
-    # request, and 4xx at the edge beats the KeyError 500 it would otherwise
-    # raise from inside the session.
+    # Fail-closed rather than defaulting: ``memory_scored_search`` reads
+    # ``SQL_SCORING_REQUIRED_KEYS`` with INDEXED access, so a payload without them
+    # is a malformed request, and 4xx at the edge beats the KeyError 500 it would
+    # otherwise raise from inside the session. #723 stated that and only checked
+    # the dict was non-empty; naming the keys is what actually enforces it, and
+    # the same shared tuple is what core-api's builders project through.
     search_params = _require_dict(body, "search_params")
+    missing = [k for k in SQL_SCORING_REQUIRED_KEYS if k not in search_params]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"search_params is missing required scoring keys: {', '.join(missing)}",
+        )
 
     # Parse temporal_window from days (legacy) or seconds (pipeline path)
     temporal_window = None

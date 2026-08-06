@@ -71,6 +71,7 @@ from core_api.constants import (
     SCORE_FORMULA,
     SEARCH_OVERFETCH_FACTOR,
     SIMILARITY_BLEND,
+    SQL_SCORING_PARAM_KEYS,
 )
 from core_api.schemas import (
     BulkItemResult,
@@ -3478,10 +3479,22 @@ async def _search_memories_legacy(
     # allowlist that dropped whatever it did not name. Full rationale sits with
     # the deleted code, on the storage ``/scored-search`` route.
     #
-    # ``top_k`` is NOT in this dict: it is the candidate-window LIMIT, not a
-    # scoring knob, and storage takes it from the body-level key below — the
-    # overfetched one. Neither builder nests a ``top_k`` now, and storage no
-    # longer reads one.
+    # Ordered by ``SQL_SCORING_PARAM_KEYS``, the declaration the pipeline builder
+    # projects through too, so the two paths cannot drift about what crosses the
+    # wire. Indexed, not ``.get`` — this path resolves every knob a few lines
+    # above, so a key declared and not resolved here is a mistake worth a
+    # KeyError rather than a silent omission at the SQL.
+    _resolved_scoring = {
+        "fts_weight": _fts_weight,
+        "fts_rank_scale": _fts_rank_scale,
+        "freshness_floor": _freshness_floor,
+        "freshness_decay_days": _freshness_decay_days,
+        "recall_boost_cap": _recall_boost_cap,
+        "recall_decay_window_days": _recall_decay_window_days,
+        "similarity_blend": _similarity_blend,
+        "candidate_pool_size": _candidate_pool_size,
+        "score_formula": _score_formula,
+    }
     search_data = {
         "tenant_id": tenant_id,
         "embedding": embedding,
@@ -3497,17 +3510,7 @@ async def _search_memories_legacy(
         # post-filter below applies it. Kept flat for that reason — a new knob
         # belongs in ``search_params``, not beside this one.
         "min_similarity": _min_similarity,
-        "search_params": {
-            "fts_weight": _fts_weight,
-            "fts_rank_scale": _fts_rank_scale,
-            "freshness_floor": _freshness_floor,
-            "freshness_decay_days": _freshness_decay_days,
-            "recall_boost_cap": _recall_boost_cap,
-            "recall_decay_window_days": _recall_decay_window_days,
-            "similarity_blend": _similarity_blend,
-            "candidate_pool_size": _candidate_pool_size,
-            "score_formula": _score_formula,
-        },
+        "search_params": {k: _resolved_scoring[k] for k in SQL_SCORING_PARAM_KEYS},
         "recall_boost_enabled": recall_boost,
         "temporal_window_days": temporal_window.days if temporal_window else None,
         # Both halves, under their own keys: the SQL gates the entire entity

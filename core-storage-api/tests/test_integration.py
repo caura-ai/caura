@@ -581,6 +581,41 @@ class TestMemories:
         resp_empty = await client.post(f"{PREFIX}/memories/scored-search", json={**flat, "search_params": {}})
         assert resp_empty.status_code == 422, resp_empty.text
 
+    async def test_scored_search_names_the_missing_required_scoring_keys(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        """A partial ``search_params`` is rejected, and the 422 says which keys.
+
+        The SQL builder reads ``SQL_SCORING_REQUIRED_KEYS`` positionally, so an
+        incomplete dict would otherwise raise a KeyError from inside the session
+        and surface as a 500 — a server fault for a malformed request. The
+        omission is named because the caller cannot see which of the six the SQL
+        wanted from a bare 422.
+        """
+        partial = {
+            "tenant_id": tenant_id,
+            "embedding": [0.1] * VECTOR_DIM,
+            "query": "anything",
+            "top_k": 10,
+            # Non-empty, so the dict guard passes; two required keys short.
+            "search_params": {
+                "fts_weight": 0.5,
+                "freshness_floor": 0.5,
+                "freshness_decay_days": 30.0,
+                "similarity_blend": 0.7,
+            },
+        }
+        resp = await client.post(f"{PREFIX}/memories/scored-search", json=partial)
+        assert resp.status_code == 422, (
+            f"a partial search_params must be rejected at the edge, got {resp.status_code}: {resp.text}"
+        )
+        detail = resp.json()["detail"]
+        assert "recall_boost_cap" in detail and "recall_decay_window_days" in detail, detail
+        # The keys that WERE supplied must not be reported missing.
+        assert "fts_weight" not in detail, detail
+
     async def test_scored_search_surfaces_null_embedding_via_fts(
         self,
         client: AsyncClient,

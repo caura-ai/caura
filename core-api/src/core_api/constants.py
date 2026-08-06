@@ -18,6 +18,7 @@ from common.constants import (  # noqa: F401
     SEMANTIC_DEDUP_CANDIDATE_LIMIT,
     SEMANTIC_DEDUP_THRESHOLD,
     SINGLE_VALUE_PREDICATES,
+    SQL_SCORING_PARAM_KEYS,
     TYPE_DECAY_DAYS,
     VECTOR_DIM,
 )
@@ -570,6 +571,10 @@ FTS_BOOST_SPECIFICITY_RATIO = 0.4  # strict >; at N=2 this means >=1 specific to
 SIMILARITY_BLEND = 0.85  # base_score = SIMILARITY_BLEND * similarity + (1 - SIMILARITY_BLEND) * weight (raised from 0.75 — LoCoMo sweep showed +13pp recall)
 SEARCH_OVERFETCH_FACTOR = 2  # fetch top_k * N candidates from storage, trim to top_k after min_similarity filter — gives post-filter headroom
 FTS_ONLY_RESERVED_RESULTS = 1  # #687: result slots held for rows that FTS-match but are not embedded yet (transient deferred-embed window); 0 restores the pre-#687 head-slice behaviour
+# ``SQL_SCORING_PARAM_KEYS`` — the set both search-path builders project through
+# before sending ``search_params`` — is re-exported from ``common.constants``
+# above, because storage reads the same set and the drift that matters is
+# set-against-SQL.
 # A26: recall_count is bumped for every RETURNED row, used or not (see
 # TrackRecalls + memory_increment_recall), and feeds recall_boost back into the
 # rank score — a self-reinforcing "returned → boosted → returned" loop with no

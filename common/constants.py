@@ -398,3 +398,44 @@ SINGLE_VALUE_PREDICATES: frozenset[str] = frozenset(
 # Diverging values would silently produce different archive footprints
 # across the two deployment modes.
 LIFECYCLE_STALE_ARCHIVE_WEIGHT: float = 0.3
+
+
+# ── Scored-search wire contract (#723 / #725) ──
+# The scoring knobs core-api nests under ``search_params`` on the way to
+# core-storage-api's ``/memories/scored-search``, and that
+# ``PostgresService.memory_scored_search`` reads back out. One declaration for
+# both ends: core-api's two search-path builders project through it, so only
+# these keys cross, and storage requires the ones it reads positionally.
+#
+# It lives here, not beside core-api's default VALUES, because what drifts is
+# the key set against the SQL — a two-service concern — and this module is the
+# shared home for exactly that.
+#
+# The set has been wrong in both directions. Keys the SQL needed went missing on
+# one path (``candidate_pool_size`` / ``score_formula``, #723). And keys the SQL
+# never reads travelled anyway, one of which — ``top_k`` — collided with a
+# same-named request parameter and silently became the candidate-window LIMIT,
+# defeating the overfetch on the active path (#725).
+SQL_SCORING_PARAM_KEYS: tuple[str, ...] = (
+    "fts_weight",
+    "freshness_floor",
+    "freshness_decay_days",
+    "recall_boost_cap",
+    "recall_decay_window_days",
+    "similarity_blend",
+    "candidate_pool_size",
+    "score_formula",
+    "fts_rank_scale",
+)
+# The subset read with INDEXED access in the SQL builder, i.e. no server-side
+# default: a payload missing any of these is malformed, and the route rejects it
+# rather than letting it surface as a KeyError 500 from inside the session. The
+# remainder are read with ``sp.get(key, default)`` and may be omitted.
+SQL_SCORING_REQUIRED_KEYS: tuple[str, ...] = (
+    "fts_weight",
+    "freshness_floor",
+    "freshness_decay_days",
+    "recall_boost_cap",
+    "recall_decay_window_days",
+    "similarity_blend",
+)
