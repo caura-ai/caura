@@ -1133,7 +1133,9 @@ class PostgresService:
         _recall_boost_cap = sp["recall_boost_cap"]
         _recall_decay_window_days = sp["recall_decay_window_days"]
         _similarity_blend = sp["similarity_blend"]
-        _top_k = sp.get("top_k", top_k)
+        # NB: no ``_top_k`` here. Unlike every local above, the candidate-window
+        # LIMIT is not resolved from ``search_params`` — see the ``else`` branch
+        # that applies it.
         # A49: 0 = off (candidate pool by boosted score, below); >0 = select the pool by
         # semantic relevance (``similarity``) at this size so boost-demoted-but-strong
         # matches survive the LIMIT into ranking/rerank. Arrives via search_params.
@@ -1533,7 +1535,18 @@ class PostgresService:
                 _candidate_pool_size
             )
         else:
-            main_stmt = scored_stmt.order_by(score.desc(), Memory.created_at.desc()).limit(_top_k)
+            # The LIMIT is the ``top_k`` PARAMETER, deliberately — never a
+            # ``top_k`` inside ``search_params``. It used to be
+            # ``sp.get("top_k", top_k)``, and core-api's pipeline builder put the
+            # caller's unmultiplied top_k in there while passing the overfetched
+            # value as the parameter, so this LIMIT was the unmultiplied one and
+            # SEARCH_OVERFETCH_FACTOR was inert on the active search path —
+            # measured at LIMIT 3 for top_k=3, factor=2, leaving PostFilterResults
+            # with no headroom to drop a sub-threshold row without starving the
+            # result set. Ignoring a nested one is also the skew-safe direction:
+            # an older core-api that still sends it gets the wider window it
+            # always meant to ask for.
+            main_stmt = scored_stmt.order_by(score.desc(), Memory.created_at.desc()).limit(top_k)
 
         # #687: reserve candidate slots for FTS-only rows.
         #

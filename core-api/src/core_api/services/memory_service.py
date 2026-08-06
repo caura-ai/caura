@@ -3478,18 +3478,10 @@ async def _search_memories_legacy(
     # allowlist that dropped whatever it did not name. Full rationale sits with
     # the deleted code, on the storage ``/scored-search`` route.
     #
-    # ``top_k`` is deliberately NOT in this dict. Storage reads the SQL LIMIT as
-    # ``search_params.get("top_k", top_k)``, so a ``top_k`` here would shadow
-    # the overfetched body-level value below and narrow the candidate window to
-    # the caller's unmultiplied top_k — dropping the post-filter headroom that
-    # ``SEARCH_OVERFETCH_FACTOR`` exists to provide.
-    #
-    # This describes only THIS builder. The pipeline builder does not avoid it:
-    # ``resolve_search_profile`` puts the unmultiplied ``top_k`` in its
-    # ``search_params`` and ``ExecuteScoredSearch`` multiplies only its local
-    # copy, so on that path — the active one — the SQL LIMIT is the unmultiplied
-    # value and the overfetch is inert. Measured, not inferred; being fixed
-    # separately, because widening that pool changes ranking on every query.
+    # ``top_k`` is NOT in this dict: it is the candidate-window LIMIT, not a
+    # scoring knob, and storage takes it from the body-level key below — the
+    # overfetched one. Neither builder nests a ``top_k`` now, and storage no
+    # longer reads one.
     search_data = {
         "tenant_id": tenant_id,
         "embedding": embedding,

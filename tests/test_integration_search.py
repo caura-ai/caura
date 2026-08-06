@@ -8,6 +8,7 @@ scoring blend, entity matching — end-to-end via the service layer.
 """
 
 import hashlib
+import math
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -21,6 +22,7 @@ from core_api.constants import (
     CANDIDATE_POOL_SIZE,
     FTS_RANK_SCALE,
     FRESHNESS_DECAY_DAYS,
+    MIN_SEARCH_SIMILARITY,
     SCORE_FORMULA,
     SEARCH_OVERFETCH_FACTOR,
 )
@@ -448,7 +450,7 @@ class TestConflictedExactMatchSurfaces:
 # ---------------------------------------------------------------------------
 
 
-async def _insert_memory_with_embedding(tenant_id, content, *, embedding, fleet_id=None):
+async def _insert_memory_with_embedding(tenant_id, content, *, embedding, fleet_id=None, weight=0.5):
     """Insert a row with a caller-chosen embedding (``None`` for FTS-only).
 
     Separate from ``_insert_memory``, which always derives the embedding from
@@ -462,7 +464,7 @@ async def _insert_memory_with_embedding(tenant_id, content, *, embedding, fleet_
         "agent_id": "test-agent",
         "memory_type": "fact",
         "content": content,
-        "weight": 0.5,
+        "weight": weight,
         "embedding": embedding,
         "content_hash": _hash(tenant_id, fleet_id, content),
         "status": "active",
@@ -615,20 +617,39 @@ _SQL_SCORING_KEYS = (
 )
 
 
-async def _scored_search_call(monkeypatch, tenant_id, use_pipeline, *, search_profile=None, boost=None):
-    """Run one search; return the kwargs ``memory_scored_search`` received.
+def _spy_on_scored_search(monkeypatch) -> list[tuple[dict, list]]:
+    """Install a pass-through spy on the storage service; returns its call log.
 
-    Spies on the storage *service* rather than the HTTP client because the
-    route decides server-side what the SQL finally reads; an assertion made at
-    the client boundary cannot see what that decision kept or dropped.
+    Spies on the storage *service* rather than the HTTP client because the route
+    decides server-side what the SQL finally reads — an assertion made at the
+    client boundary cannot see what that decision kept or dropped. Each entry is
+    ``(kwargs, returned_rows)``: the kwargs show what was asked for, the rows
+    show what the SQL's LIMIT actually produced.
+    """
+    from core_storage_api.services import postgres_service as pg
+
+    real = pg.PostgresService.memory_scored_search
+    calls: list[tuple[dict, list]] = []
+
+    async def _spy(self, *a, **kw):
+        rows = await real(self, *a, **kw)
+        calls.append((dict(kw), rows))
+        return rows
+
+    monkeypatch.setattr(pg.PostgresService, "memory_scored_search", _spy)
+    return calls
+
+
+async def _scored_search_call(
+    monkeypatch, tenant_id, use_pipeline, *, search_profile=None, boost=None, top_k=3
+):
+    """Run one search; return the kwargs ``memory_scored_search`` received.
 
     ``boost`` forces a non-empty entity-boost result. The two paths compute it
     in different places — the legacy helper and the pipeline step — so both are
     stubbed; whichever one the path under test uses is the one that matters, and
     a stub that fails to take effect shows up as an empty boost at the assert.
     """
-    from core_storage_api.services import postgres_service as pg
-
     from core_api.pipeline.steps.search import parallel_embed_entity_boost as peb
     from core_api.services import memory_service
 
@@ -652,24 +673,17 @@ async def _scored_search_call(monkeypatch, tenant_id, use_pipeline, *, search_pr
 
         monkeypatch.setattr(peb.ParallelEmbedAndEntityBoost, "execute", _exec)
 
-    seen: list[dict] = []
-    real = pg.PostgresService.memory_scored_search
-
-    async def _spy(self, *a, **kw):
-        seen.append(dict(kw))
-        return await real(self, *a, **kw)
-
-    monkeypatch.setattr(pg.PostgresService, "memory_scored_search", _spy)
+    calls = _spy_on_scored_search(monkeypatch)
     await memory_service.search_memories(
         tenant_id=tenant_id,
         query="anything at all",
-        top_k=3,
+        top_k=top_k,
         search_profile=search_profile,
     )
 
     path = "pipeline" if use_pipeline else "legacy"
-    assert seen, f"the {path} path never reached memory_scored_search"
-    return seen[0]
+    assert calls, f"the {path} path never reached memory_scored_search"
+    return calls[0][0]
 
 
 @pytest.mark.integration
@@ -740,4 +754,164 @@ async def test_entity_boost_inputs_reach_the_sql_on_both_search_paths(
     assert call.get("memory_boost_factor"), (
         f"the {path} path delivered boosted_memory_ids but no memory_boost_factor, so the SQL's "
         f"`if boosted_memory_ids and memory_boost_factor` guard skips the entity boost entirely"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The candidate window: SEARCH_OVERFETCH_FACTOR must reach the SQL LIMIT
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
+async def test_overfetched_top_k_is_what_storage_receives(tenant_id, monkeypatch, use_pipeline):
+    """The overfetched limit must reach storage, and nothing may shadow it.
+
+    Storage takes the candidate-window LIMIT from the ``top_k`` request
+    parameter. A ``top_k`` inside ``search_params`` used to override it, and the
+    pipeline builder put the caller's *unmultiplied* ``top_k`` there while
+    sending the overfetched value as the parameter — so the overfetch never
+    reached the SQL and ``PostFilterResults`` ran with no headroom at all.
+
+    Asserting the parameter alone is not enough: it was always correct. The
+    shadowing key is the thing to pin.
+    """
+    caller_top_k = 3
+    call = await _scored_search_call(monkeypatch, tenant_id, use_pipeline, top_k=caller_top_k)
+
+    path = "pipeline" if use_pipeline else "legacy"
+    assert call.get("top_k") == caller_top_k * SEARCH_OVERFETCH_FACTOR, (
+        f"the {path} path sent top_k={call.get('top_k')!r} to storage, expected the "
+        f"overfetched {caller_top_k * SEARCH_OVERFETCH_FACTOR}"
+    )
+    assert "top_k" not in (call.get("search_params") or {}), (
+        f"the {path} path put top_k inside search_params, where it shadows the overfetched "
+        f"request parameter and becomes the SQL LIMIT instead"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
+async def test_candidate_window_is_actually_overfetched_in_sql(monkeypatch, use_pipeline):
+    """Storage must return a full overfetched window, not the caller's top_k.
+
+    The delivery test above pins the payload; this pins the SQL. It counts the
+    rows ``memory_scored_search`` actually returned, which is the LIMIT the CTE
+    applied — the only place the shadowing was observable, and the reason
+    ``PostFilterResults`` silently had no headroom to drop a low-vec_sim row
+    without starving the result set.
+
+    Uses its OWN tenant: the shared session tenant accumulates rows from every
+    other test, which would satisfy a count assertion for the wrong reason.
+    """
+    from core_api.services import memory_service
+
+    monkeypatch.setattr(memory_service, "_USE_PIPELINE_SEARCH", use_pipeline)
+
+    isolated = f"test-tenant-overfetch-{uuid.uuid4().hex[:8]}"
+    caller_top_k = 3
+    window = caller_top_k * SEARCH_OVERFETCH_FACTOR
+    token = f"zqxjvbn{uuid.uuid4().hex[:10]}"
+    query_embedding = fake_embedding(token)
+
+    # Comfortably more candidates than the window, all embedded so the #700
+    # FTS-only reserved branch (NULL embedding + FTS match) contributes nothing.
+    for i in range(window + 4):
+        await _insert_memory_with_embedding(
+            isolated, f"candidate row {i} about {token}", embedding=query_embedding
+        )
+
+    calls = _spy_on_scored_search(monkeypatch)
+    await memory_service.search_memories(tenant_id=isolated, query=token, top_k=caller_top_k)
+
+    path = "pipeline" if use_pipeline else "legacy"
+    assert calls, f"the {path} path never reached memory_scored_search"
+    distinct = len({str(r.Memory.id) for r in calls[0][1]})
+    assert distinct == window, (
+        f"the {path} path's SQL LIMIT was {distinct}, expected the overfetched {window} "
+        f"(top_k={caller_top_k} x SEARCH_OVERFETCH_FACTOR={SEARCH_OVERFETCH_FACTOR}); "
+        f"{window + 4} candidates exist, so a smaller count is the LIMIT, not the corpus"
+    )
+
+
+def _embedding_at_cosine(target: float, query_embedding: list[float], seed: str) -> list[float]:
+    """A unit vector at exactly ``target`` cosine to ``query_embedding``.
+
+    Gram-Schmidt against the query gives an orthonormal basis {q, r_orth}, so
+    ``target*q + sqrt(1-target^2)*r_orth`` has the cosine asked for. Constructed
+    rather than sampled because the point of the test below is a row sitting a
+    known distance either side of ``MIN_SEARCH_SIMILARITY``.
+    """
+
+    def _unit(v):
+        n = math.sqrt(sum(x * x for x in v)) or 1.0
+        return [x / n for x in v]
+
+    q = _unit(query_embedding)
+    r = fake_embedding(seed)
+    dot = sum(a * b for a, b in zip(r, q, strict=False))
+    r_orth = _unit([ri - dot * qi for ri, qi in zip(r, q, strict=False)])
+    a, b = target, math.sqrt(max(0.0, 1.0 - target * target))
+    return _unit([a * qi + b * ri for qi, ri in zip(q, r_orth, strict=False)])
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
+async def test_post_filter_does_not_starve_the_result_set(monkeypatch, use_pipeline):
+    """Dropping low-cosine rows must not cost the caller results it should have.
+
+    This is what the overfetch is FOR, stated as the user-visible outcome. The
+    candidate window is ordered by ``score``, which blends ``weight`` into
+    ``similarity`` — so rows below the cosine floor can legitimately occupy the
+    whole window on score while being discarded a moment later by the
+    ``min_similarity`` post-filter. Without headroom the caller gets nothing;
+    with it, the qualifying rows behind them backfill.
+
+    Constructed so the arithmetic is not marginal: 3 rows at cosine 0.28 (under
+    the 0.3 floor) with weight 1.0 outrank 4 rows at cosine 0.45 with weight
+    0.0, on either adaptive ``fts_weight``. At top_k=3 the unwidened window is
+    exactly the 3 junk rows.
+    """
+    from core_api.services import memory_service
+
+    monkeypatch.setattr(memory_service, "_USE_PIPELINE_SEARCH", use_pipeline)
+
+    isolated = f"test-tenant-starve-{uuid.uuid4().hex[:8]}"
+    top_k = 3
+    token = f"zqxjvbn{uuid.uuid4().hex[:10]}"
+    q = fake_embedding(token)
+    assert MIN_SEARCH_SIMILARITY == 0.3, (
+        f"this test's 0.28/0.45 cosines straddle a 0.3 floor; MIN_SEARCH_SIMILARITY is "
+        f"{MIN_SEARCH_SIMILARITY}, so the construction no longer means what it says"
+    )
+
+    # Content deliberately free of the query token: no FTS match, so the blend
+    # reduces to the cosine term and the ordering is the constructed one.
+    for i in range(top_k):
+        await _insert_memory_with_embedding(
+            isolated,
+            f"high weight low cosine row {i} concerning irrigation schedules",
+            embedding=_embedding_at_cosine(0.28, q, f"{token}_junk_{i}"),
+            weight=1.0,
+        )
+    qualifying = set()
+    for i in range(top_k + 1):
+        mem = await _insert_memory_with_embedding(
+            isolated,
+            f"low weight high cosine row {i} concerning irrigation schedules",
+            embedding=_embedding_at_cosine(0.45, q, f"{token}_good_{i}"),
+            weight=0.0,
+        )
+        qualifying.add(str(mem["id"]))
+
+    results = await memory_service.search_memories(tenant_id=isolated, query=token, top_k=top_k)
+
+    path = "pipeline" if use_pipeline else "legacy"
+    assert len(results) == top_k, (
+        f"the {path} path returned {len(results)} of {top_k} requested; {len(qualifying)} rows "
+        f"clear the cosine floor, but the candidate window held only the {top_k} sub-floor rows "
+        f"that outrank them on score, and the post-filter then dropped every one"
+    )
+    assert {str(r.id) for r in results} <= qualifying, (
+        f"the {path} path returned rows below MIN_SEARCH_SIMILARITY={MIN_SEARCH_SIMILARITY}"
     )

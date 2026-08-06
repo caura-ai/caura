@@ -62,11 +62,32 @@ class ExecuteScoredSearch:
             top_k = top_k * SEARCH_OVERFETCH_FACTOR
 
         # Build the request payload for the storage client.
+        #
+        # ``top_k`` is stripped: it is the candidate-window LIMIT, not a scoring
+        # knob, and it travels as its own request parameter below. It stays in
+        # ``ctx.data["search_params"]`` because ClassifyQuery and the
+        # ``_ALLOWED_OVERRIDES`` merge above both read it — this is a projection
+        # at the boundary, not a removal at the source.
+        #
+        # Storage ignores a nested ``top_k`` now, so this strip is not what makes
+        # the LIMIT correct; it is here so the payload says what we mean. Removing
+        # only this one key does NOT make the dict scoring-knobs-only, though:
+        # ``min_similarity`` and ``graph_max_hops`` are core-api-local too and
+        # still ride along (storage reads neither). Projecting an explicit
+        # allowlist shared with the legacy builder is the generalisation, and is
+        # deliberately left out of this change.
+        #
+        # The diagnostic branch's widening to 50 was defeated by the same
+        # shadowing and is restored here — but note that mode is half-wired:
+        # ``SearchRequest.diagnostic`` is never read by a route and nothing writes
+        # ``diagnostic_results``, so no caller reaches it. Whoever reconnects it
+        # should know the branch skips ``final_top_k``, so PostFilterResults does
+        # not trim and TrackRecalls would bump ``recall_count`` for all 50 rows.
         search_data: dict = {
             "tenant_id": data["tenant_id"],
             "query": data["query"],
             "embedding": embedding,
-            "search_params": sp,
+            "search_params": {k: v for k, v in sp.items() if k != "top_k"},
             "top_k": top_k,
             "recall_boost_enabled": recall_boost_enabled,
         }
