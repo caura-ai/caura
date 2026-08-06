@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 
 from common.embedding._registry import get_embedding_provider
 from common.embedding.constants import (
+    EMBEDDING_BUDGET_MARGIN_S,
     EMBEDDING_GATE_TIMEOUT_SECONDS,
     EMBEDDING_MAX_CONCURRENCY,
     EMBEDDING_RETRY_ATTEMPTS,
@@ -227,7 +228,10 @@ def _resolve_provider_name(tenant_config: object | None) -> str:
 
 
 async def get_embeddings_batch(
-    texts: list[str], tenant_config: object | None = None
+    texts: list[str],
+    tenant_config: object | None = None,
+    *,
+    budget_s: float | None = None,
 ) -> list[list[float]]:
     """Generate embeddings for multiple texts in a single API call.
 
@@ -247,6 +251,21 @@ async def get_embeddings_batch(
     Note this is the SERVICE layer: a request larger than the backend's
     accepted batch is split inside the provider, which is the only layer
     that knows its own cap, so *texts* has no length limit imposed here.
+
+    *budget_s* is the caller's OWN deadline, and passing it is what keeps a
+    slow backend attributable. Callers enforce their budgets by cancelling
+    us, and a cancellation says only "time ran out" — not which layer ate
+    it. Given the budget, this bounds the provider call at
+    ``budget_s - EMBEDDING_BUDGET_MARGIN_S`` so the inner cap fires first
+    and raises ``TimeoutError`` from HERE, naming the embed as the thing
+    that overran. Without it the provider is free to sit for
+    ``OPENAI_REQUEST_TIMEOUT_SECONDS`` (25 s), which already exceeds the 8 s
+    ``BULK_STRONG_EMBED_TIMEOUT_SECONDS`` outright — that budget could never
+    be the one to fire. Same principle the concurrency gate applies; see
+    ``EMBEDDING_GATE_TIMEOUT_SECONDS``.
+
+    Omitting it keeps the previous behaviour, which is right for callers
+    that have no deadline of their own to be under.
 
     Two error shapes are explicitly accounted for:
 
@@ -290,17 +309,16 @@ async def get_embeddings_batch(
         # this branch already logs unconditionally.
         await _stats.record_failure()
         raise
-    # ``BaseException``, not ``Exception``, and deliberately so. Every caller
-    # wraps this in its own deadline (``BULK_STRONG_EMBED_TIMEOUT_SECONDS`` is
-    # 8 s, ``BULK_EMBEDDING_TIMEOUT_SECONDS`` 30 s) using ``asyncio.timeout`` /
-    # ``wait_for``, and when one of those fires it CANCELS us — so what arrives
-    # here is ``CancelledError``, a ``BaseException``. Under ``except
-    # Exception`` the stats update was skipped for that entire class, which is
-    # the slow-provider outage the bulk streak exists to name: a single
-    # provider request may burn ``OPENAI_REQUEST_TIMEOUT_SECONDS`` (25 s), so
-    # the 8 s budget is already exceeded by ONE request, and chunking a
-    # ``BULK_MAX_ITEMS`` write into ceil(100/32) sequential requests puts the
-    # 30 s budget in reach too.
+    # ``BaseException``, not ``Exception``, and deliberately so. A caller that
+    # passes no ``budget_s`` still enforces its deadline by CANCELLING us, so
+    # what arrives here is ``CancelledError`` — a ``BaseException``. Under
+    # ``except Exception`` the stats update was skipped for that entire class,
+    # which is the slow-provider outage the bulk streak exists to name.
+    #
+    # ``budget_s`` narrows that window rather than closing it: the inner cap
+    # below turns the common case into a local ``TimeoutError``, but a caller
+    # can still cancel us for its own reasons, and the margin can still be
+    # overshot by a single syscall. The broad catch stays.
     #
     # Safe for real shutdown cancellation: the ``raise`` is unconditional, so
     # the cancellation always propagates. ``record_failure`` acquires an
@@ -317,7 +335,15 @@ async def get_embeddings_batch(
     # clears the streak, and on the shutdown path the counter dies with the
     # process anyway.
     try:
-        result = await _call_gated(lambda: provider.embed_batch(texts))
+        if budget_s is None:
+            result = await _call_gated(lambda: provider.embed_batch(texts))
+        else:
+            # Floored rather than skipped: a budget at or under the margin is
+            # a misconfiguration, and the honest response is to fail fast HERE
+            # with an attributable TimeoutError instead of silently reverting
+            # to the unbounded path the margin exists to replace.
+            async with asyncio.timeout(max(0.1, budget_s - EMBEDDING_BUDGET_MARGIN_S)):
+                result = await _call_gated(lambda: provider.embed_batch(texts))
     except BaseException:
         await _stats.record_failure(bulk_batch_size=len(texts))
         raise

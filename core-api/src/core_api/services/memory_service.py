@@ -1227,9 +1227,17 @@ async def create_memories_bulk(
             BULK_EMBEDDING_TIMEOUT_SECONDS if settings.inline_embedding else BULK_STRONG_EMBED_TIMEOUT_SECONDS
         )
         try:
+            # ``budget_s`` as well as the outer ``asyncio.timeout``: the inner
+            # cap is sized just under this budget so the embed layer fails
+            # first and says so, while this stays the backstop. Without it a
+            # slow provider surfaces here as a bare cancellation that names
+            # nothing — and at the strong-embed budget of 8s it always would,
+            # since one provider request may run 25s.
             async with asyncio.timeout(embed_timeout):
                 valid_embeddings = await get_embeddings_batch(
-                    [items[i].content for i in embed_indices], tenant_config
+                    [items[i].content for i in embed_indices],
+                    tenant_config,
+                    budget_s=embed_timeout,
                 )
         except Exception as exc:
             # Inline deployments: this is the only place a row gets its vector, so
@@ -2073,12 +2081,20 @@ async def _reembed_memories_bulk(
         tenant_config = None
 
     try:
-        # 30s cap matches the hot-path bulk embed in create_memories_bulk;
-        # an unbounded provider call in a background task would pin a
-        # Cloud Run worker thread if Vertex / OpenAI hangs.
+        # Cap matches the hot-path bulk embed in create_memories_bulk — now by
+        # construction rather than by two matching literals, because these two
+        # uses MUST stay equal: budget_s makes the embed layer cap itself just
+        # under this and raise an attributable TimeoutError, and that ordering
+        # breaks silently if one copy is retuned and the other is not. An
+        # unbounded provider call in a background task would pin a Cloud Run
+        # worker thread if the provider hangs.
         embeddings = await asyncio.wait_for(
-            get_embeddings_batch([content for _, content in items], tenant_config),
-            timeout=30.0,
+            get_embeddings_batch(
+                [content for _, content in items],
+                tenant_config,
+                budget_s=BULK_EMBEDDING_TIMEOUT_SECONDS,
+            ),
+            timeout=BULK_EMBEDDING_TIMEOUT_SECONDS,
         )
     except Exception:
         # Broad on purpose: any provider failure — auth, HTTP client

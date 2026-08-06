@@ -7,7 +7,9 @@ Unit tests validate:
   - Fake provider never returns None (no retry needed)
 """
 
+import asyncio
 import logging
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -406,8 +408,6 @@ async def test_bulk_failure_counted_when_caller_deadline_cancels_us(
     exists to name: one provider request may burn
     ``OPENAI_REQUEST_TIMEOUT_SECONDS`` (25s), already past the 8s budget.
     """
-    import asyncio
-
     import common.embedding._service as service_mod
     from common.embedding import get_embeddings_batch
     from common.embedding.providers.fake import FakeEmbeddingProvider
@@ -431,6 +431,82 @@ async def test_bulk_failure_counted_when_caller_deadline_cancels_us(
         "a deadline-cancelled bulk call must advance the bulk streak"
     )
     assert service_mod._stats.failures == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_budget_makes_a_slow_provider_attributable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``budget_s``, the embed layer fails FIRST and names itself.
+
+    The caller's deadline enforces itself by cancelling us, and a
+    ``CancelledError`` says only "time ran out" — not which layer ate it.
+    Passing the budget caps the provider call just under it, so what the
+    caller sees is a ``TimeoutError`` raised from inside the embed layer.
+
+    This is the ordering that was structurally impossible before: one
+    provider request may run ``OPENAI_REQUEST_TIMEOUT_SECONDS`` (25s),
+    which already exceeds ``BULK_STRONG_EMBED_TIMEOUT_SECONDS`` (8s), so
+    that budget could never be the cap that fired.
+    """
+    import common.embedding._service as service_mod
+    from common.embedding import get_embeddings_batch
+    from common.embedding.providers.fake import FakeEmbeddingProvider
+
+    class _SlowProvider(FakeEmbeddingProvider):
+        async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            await asyncio.sleep(60)
+            raise AssertionError("unreachable")
+
+    monkeypatch.setattr(service_mod, "_stats", service_mod._EmbeddingStats())
+    monkeypatch.setattr(service_mod, "EMBEDDING_BUDGET_MARGIN_S", 0.05)
+    monkeypatch.setattr(
+        "common.embedding._service.get_embedding_provider",
+        lambda *_a, **_k: _SlowProvider(),
+    )
+
+    # Both caps raise TimeoutError, so the exception type cannot tell them
+    # apart — WHEN it fires is the only discriminator. The outer deadline is
+    # 25x the inner one, and the assertion below is what actually fails if
+    # the inner cap is removed.
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(5):
+            await get_embeddings_batch(["a"] * 50, budget_s=0.2)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1, (
+        f"the embed layer's own cap must fire first; took {elapsed:.2f}s, "
+        "which means the caller's 5s deadline was what stopped it"
+    )
+    assert service_mod._stats.consecutive_bulk_failures == 1, (
+        "the inner cap must still count as a bulk failure"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_no_budget_keeps_the_previous_unbounded_behaviour(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Omitting ``budget_s`` must not impose a cap of its own.
+
+    Two call sites embed auto-chunk children with no deadline to sit
+    under; they have to keep working exactly as before.
+    """
+    import common.embedding._service as service_mod
+    from common.embedding import get_embeddings_batch
+    from common.embedding.providers.fake import FakeEmbeddingProvider
+
+    monkeypatch.setattr(service_mod, "_stats", service_mod._EmbeddingStats())
+    monkeypatch.setattr(
+        "common.embedding._service.get_embedding_provider",
+        lambda *_a, **_k: FakeEmbeddingProvider(),
+    )
+
+    assert len(await get_embeddings_batch(["a", "b", "c"])) == 3
+    assert service_mod._stats.consecutive_bulk_failures == 0
 
 
 @pytest.mark.unit

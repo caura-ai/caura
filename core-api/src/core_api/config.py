@@ -357,7 +357,10 @@ class Settings(BaseSettings):
     def _validate_timeout_ordering(self) -> "Settings":
         # Local import avoids a circular: constants → common.constants,
         # but this file is imported by constants.py's dependents.
-        from common.embedding.constants import EMBEDDING_GATE_TIMEOUT_SECONDS
+        from common.embedding.constants import (
+            EMBEDDING_BUDGET_MARGIN_S,
+            EMBEDDING_GATE_TIMEOUT_SECONDS,
+        )
         from core_api.constants import (
             BULK_EMBEDDING_TIMEOUT_SECONDS,
             BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS,
@@ -439,6 +442,29 @@ class Settings(BaseSettings):
                 "bulk strong-embed path. Lower the gate timeout, or raise "
                 "BULK_STRONG_EMBED_TIMEOUT_SECONDS (keeping it under "
                 "BULK_EMBEDDING_TIMEOUT_SECONDS)."
+            )
+        if BULK_STRONG_EMBED_TIMEOUT_SECONDS - EMBEDDING_BUDGET_MARGIN_S <= EMBEDDING_GATE_TIMEOUT_SECONDS:
+            # The gate check above is necessary but no longer sufficient. The
+            # embed layer now caps the provider call at
+            # ``budget_s - EMBEDDING_BUDGET_MARGIN_S`` — a bound that sits
+            # INSIDE the window the gate's own timeout lives in — so a margin
+            # large enough to pull that cap under the gate timeout means the
+            # budget cap always fires first and a gate-saturation event is
+            # reported as a generic "embed exceeded its budget" instead of the
+            # gate's dedicated warning. That inverts precisely the attribution
+            # the check above exists to guarantee, and it would do so silently.
+            #
+            # Both operands are env-overridable, so like the gate ordering this
+            # is an operator's to break rather than a constant's. Defaults leave
+            # real room: 8 - 1 = 7 > 5.
+            raise ValueError(
+                f"BULK_STRONG_EMBED_TIMEOUT_SECONDS ({BULK_STRONG_EMBED_TIMEOUT_SECONDS}s) minus "
+                f"EMBEDDING_BUDGET_MARGIN_S ({EMBEDDING_BUDGET_MARGIN_S}s) must be > "
+                f"EMBEDDING_GATE_TIMEOUT_SECONDS ({EMBEDDING_GATE_TIMEOUT_SECONDS}s), so a "
+                "saturated embedding gate still reports itself rather than being "
+                "pre-empted by the embed budget cap. Lower EMBEDDING_BUDGET_MARGIN_S, "
+                "lower the gate timeout, or raise BULK_STRONG_EMBED_TIMEOUT_SECONDS "
+                "(keeping it under BULK_EMBEDDING_TIMEOUT_SECONDS)."
             )
         if BULK_STRONG_EMBED_TIMEOUT_SECONDS >= BULK_EMBEDDING_TIMEOUT_SECONDS:
             # The other half of the bound the message above already tells the

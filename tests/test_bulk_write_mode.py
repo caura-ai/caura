@@ -250,6 +250,53 @@ def test_startup_rejects_an_override_that_conflicts_with_the_gate(monkeypatch):
 
 
 @pytest.mark.unit
+def test_budget_margin_leaves_the_gate_room_to_report_itself():
+    """The gate ordering above is necessary but not sufficient on its own.
+
+    The embed layer caps the provider call at
+    ``budget_s - EMBEDDING_BUDGET_MARGIN_S``, a bound that sits INSIDE the
+    window the gate's own timeout lives in. So "gate < budget" can hold while
+    the effective cap still lands under the gate.
+    """
+    from common.embedding.constants import (
+        EMBEDDING_BUDGET_MARGIN_S,
+        EMBEDDING_GATE_TIMEOUT_SECONDS,
+    )
+
+    assert (
+        BULK_STRONG_EMBED_TIMEOUT_SECONDS - EMBEDDING_BUDGET_MARGIN_S
+        > EMBEDDING_GATE_TIMEOUT_SECONDS
+    )
+
+
+@pytest.mark.unit
+def test_startup_rejects_a_margin_that_pre_empts_the_gate(monkeypatch):
+    """A margin wide enough to swallow the gate must not start.
+
+    Set it past the headroom and the budget cap always fires first, so a
+    gate-saturation event is reported as a generic "embed exceeded its
+    budget" and the gate's dedicated warning never runs — silently
+    inverting the attribution the gate ordering exists to guarantee.
+
+    Note the gate ordering check alone does NOT catch this: it still passes
+    here, because ``EMBEDDING_GATE_TIMEOUT_SECONDS`` is untouched and remains
+    below ``BULK_STRONG_EMBED_TIMEOUT_SECONDS``. That is the whole reason
+    this is a separate check.
+    """
+    import core_api.config as config_mod
+    from common.embedding.constants import EMBEDDING_GATE_TIMEOUT_SECONDS
+
+    # Just past the headroom: budget - margin lands exactly ON the gate,
+    # which the validator rejects (it requires strictly greater).
+    margin = BULK_STRONG_EMBED_TIMEOUT_SECONDS - EMBEDDING_GATE_TIMEOUT_SECONDS
+    monkeypatch.setattr(
+        "common.embedding.constants.EMBEDDING_BUDGET_MARGIN_S", margin
+    )
+    with pytest.raises(ValueError, match="EMBEDDING_BUDGET_MARGIN_S"):
+        config_mod.Settings()
+
+
+@pytest.mark.unit
 def test_startup_rejects_an_override_above_the_required_embed_cap(monkeypatch):
     """Both ends of the bound are enforced, not just the one the gate can break.
 

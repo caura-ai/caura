@@ -143,6 +143,24 @@ EMBEDDING_GATE_TIMEOUT_SECONDS: float = read_float_env(
     "EMBEDDING_GATE_TIMEOUT_SECONDS", 5.0
 )
 
+# How far under a caller's own deadline this module aims to fail.
+#
+# Callers enforce their budgets by CANCELLING us (``asyncio.timeout`` /
+# ``wait_for``), and a cancellation carries no attribution — it says the
+# deadline passed, not which layer ate it. The module already applies this
+# principle to the concurrency gate (see EMBEDDING_GATE_TIMEOUT_SECONDS:
+# "deliberately BELOW the callers' deadlines ... so the gate could attribute
+# the failure"), but the provider call itself was left unbounded, so a slow
+# backend surfaced as the caller's anonymous timeout.
+#
+# One margin, subtracted from whatever budget the caller passes, so the
+# ordering holds however an operator retunes the budgets rather than being
+# re-derived per call site. 1 s because the budgets it sits under are 8 s and
+# 30 s, and because the thing being raced is a network round trip whose
+# measured p95 against a loaded sidecar is ~0.4 s — a margin of that order is
+# generous without meaningfully shortening the useful budget.
+EMBEDDING_BUDGET_MARGIN_S: float = read_float_env("EMBEDDING_BUDGET_MARGIN_S", 1.0)
+
 # Cap the texts sent in ONE provider request; larger inputs are split.
 #
 # This is admission control on the SERVER's side of the wire, mirrored on
