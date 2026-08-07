@@ -174,3 +174,56 @@ def test_fts_rank_scale_ceiling_matches_what_was_measured():
     _validate_default_search_profile(_profile(fts_rank_scale=20.0))
     with pytest.raises(ValueError, match="fts_rank_scale"):
         _validate_default_search_profile(_profile(fts_rank_scale=20.001))
+
+
+# ── agent-facing ingress vs the knob table ──
+
+
+def test_agent_tunable_bounds_match_the_knob_table():
+    """``SearchProfileUpdate``'s bounds must equal ``SEARCH_KNOBS``'.
+
+    The request model still writes its own ``ge``/``le`` per field rather than
+    deriving them, and it drifted: ``graph_max_hops`` was capped at 3 here while
+    the table allowed 5, so a tenant-wide default could hold a depth no agent
+    profile could ever set. Resolved to 3 on 2026-08-07 — the ingress value, not
+    the widest of the three, because depth drives graph-expansion cost.
+
+    Asserts the bounds rather than merely the names, since matching names with
+    different limits is exactly the failure that hid for months.
+    """
+    from common.constants import SEARCH_KNOBS
+    from core_api.schemas import SearchProfileUpdate
+
+    checked = 0
+    for name, field in SearchProfileUpdate.model_fields.items():
+        assert name in SEARCH_KNOBS, (
+            f"SearchProfileUpdate exposes {name!r}, which is not a declared search knob"
+        )
+        lo = next((m.ge for m in field.metadata if hasattr(m, "ge")), None)
+        hi = next((m.le for m in field.metadata if hasattr(m, "le")), None)
+        assert (lo, hi) == SEARCH_KNOBS[name].bounds, (
+            f"{name}: SearchProfileUpdate allows {(lo, hi)} but SEARCH_KNOBS declares "
+            f"{SEARCH_KNOBS[name].bounds} — the tenant-default path and the agent path would "
+            f"accept different values for the same knob"
+        )
+        checked += 1
+
+    assert checked == 9, f"expected 9 agent-tunable knobs, checked {checked}"
+
+
+def test_the_three_ab_knobs_are_not_agent_tunable():
+    """``fts_rank_scale`` / ``candidate_pool_size`` / ``score_formula`` stay off the ingress.
+
+    They are the A/B knobs — held at their global defaults until the offline
+    comparison validates them, and flipped per TENANT via ``default_profile``,
+    not per agent. The 9-of-12 split is deliberate; this records which three and
+    why, so a future reader does not "fix" the omission.
+    """
+    from common.constants import SEARCH_KNOBS
+    from core_api.schemas import SearchProfileUpdate
+
+    assert set(SEARCH_KNOBS) - set(SearchProfileUpdate.model_fields) == {
+        "fts_rank_scale",
+        "candidate_pool_size",
+        "score_formula",
+    }

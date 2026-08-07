@@ -418,8 +418,10 @@ LIFECYCLE_STALE_ARCHIVE_WEIGHT: float = 0.3
 # NOT yet the declaration the request SCHEMAS derive from: ``SearchProfileUpdate``
 # and the ``memclaw_tune`` MCP signature still enumerate their own subset (9 of
 # these 12 — the three A/B knobs are deliberately not agent-tunable) with their
-# own bounds, and those have already drifted: ``graph_max_hops`` is (0, 5) here
-# and ge=0/le=3 there.
+# own bounds. Those bounds now AGREE with this table, and
+# ``test_agent_tunable_bounds_match_the_knob_table`` fails if they drift again —
+# but they are still written out by hand in three places. Deriving them from
+# here is the remaining step.
 #
 # One table because the same knob used to be registered in four places — the
 # validation rules, both search-path builders, and the storage route's key list —
@@ -455,7 +457,12 @@ SEARCH_KNOBS: dict[str, SearchKnob] = {
     # ── core-api-local: resolved here, never sent to storage ──
     "top_k": SearchKnob(int, (1, 20)),
     "min_similarity": SearchKnob(float, (0.1, 0.9)),
-    "graph_max_hops": SearchKnob(int, (0, 5)),
+    # Ceiling 3, matching the agent-facing ingress (``SearchProfileUpdate`` and
+    # the ``memclaw_tune`` MCP signature). It read 5 here until 2026-08-07 while
+    # both of those said 3, so a tenant-wide default could hold a depth no agent
+    # profile could ever set. Depth drives graph expansion cost, so 3 is the
+    # deliberate ceiling rather than the widest of the three.
+    "graph_max_hops": SearchKnob(int, (0, 3)),
     # ── scoring knobs storage reads positionally ──
     "fts_weight": SearchKnob(float, (0.0, 1.0), sql=True, sql_required=True),
     "freshness_floor": SearchKnob(float, (0.0, 1.0), sql=True, sql_required=True),
