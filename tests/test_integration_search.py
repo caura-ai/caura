@@ -81,17 +81,11 @@ async def _insert_memory(
 
     mem = await sc.create_memory(payload)
 
-    # Populate search_vector for FTS scoring (normally done by app/trigger),
-    # committed via the storage write session so the storage-routed search path
-    # sees it (the rolled-back ``db`` fixture would be invisible to it).
+    # ``search_vector`` is NOT written here. 001's trigger populates it on INSERT,
+    # and since 034 it indexes the title too — a hand-rolled
+    # ``to_tsvector(content)`` would overwrite that with a title-less vector and
+    # quietly un-test the change. Let the trigger own it.
     async with get_session() as session:
-        await session.execute(
-            text(
-                "UPDATE memories SET search_vector = to_tsvector('english', :content) "
-                "WHERE id = CAST(:id AS uuid)"
-            ),
-            {"content": content, "id": mem["id"]},
-        )
         # Override created_at if provided (server_default set it on create).
         if created_at:
             await session.execute(
@@ -343,16 +337,8 @@ class TestSearchPipelineEndToEnd:
             }
             if deleted:
                 payload["deleted_at"] = datetime.now(timezone.utc).isoformat()
-            mem = await sc.create_memory(payload)
-            async with get_session() as session:
-                await session.execute(
-                    text(
-                        "UPDATE memories SET search_vector = to_tsvector('english', :content) "
-                        "WHERE id = CAST(:id AS uuid)"
-                    ),
-                    {"content": content, "id": mem["id"]},
-                )
-            return mem
+            # search_vector comes from the trigger (title-inclusive since 034).
+            return await sc.create_memory(payload)
 
         deleted_mem = await _seed(
             "kubernetes pod restart troubleshooting guide", deleted=True
@@ -472,17 +458,8 @@ async def _insert_memory_with_embedding(tenant_id, content, *, embedding, fleet_
         "recall_count": 0,
         "visibility": "scope_team",
     }
-    mem = await sc.create_memory(payload)
-    async with get_session() as session:
-        await session.execute(
-            text(
-                "UPDATE memories SET search_vector = to_tsvector('english', :content) "
-                "WHERE id = CAST(:id AS uuid)"
-            ),
-            {"content": content, "id": mem["id"]},
-        )
-        await session.commit()
-    return mem
+    # search_vector comes from the trigger (title-inclusive since 034).
+    return await sc.create_memory(payload)
 
 
 @pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
@@ -549,7 +526,9 @@ async def test_fts_only_row_survives_a_saturated_candidate_window(tenant_id, mon
 # ---------------------------------------------------------------------------
 
 
-async def _rank_and_score(content: str, query: str, scale: float) -> tuple[float, float]:
+async def _rank_and_score(
+    content: str, query: str, scale: float, *, title: str = ""
+) -> tuple[float, float]:
     """``(raw ts_rank_cd, fts_score)`` at a given scale, from real Postgres.
 
     Reads both out of one statement with the production expression rather than
@@ -563,11 +542,11 @@ async def _rank_and_score(content: str, query: str, scale: float) -> tuple[float
             await session.execute(
                 text(
                     "SELECT r, (:k * r) / (1 + :k * r) AS s FROM ("
-                    "  SELECT ts_rank_cd(to_tsvector('english', :c),"
+                    "  SELECT ts_rank_cd(to_tsvector('english', :t || ' ' || :c),"
                     "                    plainto_tsquery('english', :q)) AS r"
                     ") t"
                 ),
-                {"k": scale, "c": content, "q": query},
+                {"k": scale, "c": content, "q": query, "t": title},
             )
         ).first()
     return float(row[0]), float(row[1])
@@ -1029,4 +1008,139 @@ def test_sql_flags_match_how_storage_reads_each_knob():
         f"SEARCH_KNOBS `sql_required` flags disagree with storage's indexed reads; "
         f"indexed-but-not-required: {sorted(indexed - required)}; "
         f"required-but-not-indexed: {sorted(required - indexed)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 034: title in the tsvector, at the same weight as content
+# ---------------------------------------------------------------------------
+
+
+async def _insert_titled(tenant_id, title, content):
+    """Insert with a title, letting 001/034's trigger build the vector."""
+    sc = get_storage_client()
+    return await sc.create_memory({
+        "tenant_id": tenant_id,
+        "fleet_id": None,
+        "agent_id": "test-agent",
+        "memory_type": "fact",
+        "title": title,
+        "content": content,
+        "weight": 0.5,
+        "embedding": fake_embedding(content),
+        "content_hash": _hash(tenant_id, None, content),
+        "status": "active",
+        "recall_count": 0,
+        "visibility": "scope_team",
+    })
+
+
+async def _stored_rank(memory_id, query) -> float:
+    """``ts_rank_cd`` against the row's REAL stored vector, as the SQL reads it."""
+    async with get_session() as session:
+        return float(
+            (
+                await session.execute(
+                    text(
+                        "SELECT ts_rank_cd(search_vector, plainto_tsquery('english', :q)) "
+                        "FROM memories WHERE id = CAST(:id AS uuid)"
+                    ),
+                    {"q": query, "id": memory_id},
+                )
+            ).scalar()
+        )
+
+
+@pytest.mark.integration
+async def test_title_text_is_searchable_at_all():
+    """A memory must be findable by words appearing ONLY in its title.
+
+    This is the point of 034, and it is missing recall rather than a ranking
+    preference: 001 built ``search_vector`` from content alone, so the title the
+    enrichment writes on every enriched memory could never be matched. Measured
+    before the migration, a title-only term scored exactly 0.0 — the row was
+    unreachable, not ranked low.
+    """
+    isolated = f"test-tenant-title-{uuid.uuid4().hex[:8]}"
+    token = f"zqxjvbn{uuid.uuid4().hex[:10]}"
+    mem = await _insert_titled(
+        isolated,
+        title=f"quarterly {token} planning",
+        content="unrelated body text about irrigation schedules and runoff",
+    )
+
+    assert await _stored_rank(mem["id"], token) > 0.0, (
+        "a term present only in the title scored 0.0 — the title is not in the tsvector, "
+        "so the memory cannot be reached by FTS on its own title"
+    )
+
+
+@pytest.mark.integration
+async def test_a_title_match_scores_the_same_as_a_content_match():
+    """One weight throughout — this is what keeps 034 a pure searchability fix.
+
+    The alternative was ``setweight`` title-A / content-B, which multiplies every
+    content rank by 4 and forces ``FTS_RANK_SCALE`` to be re-derived, and which
+    moves the modal enriched row (titles summarise content, so most rows match
+    both fields) from 0.375 to ~0.70. Preferring a title hit over a content hit
+    is a relevance claim, and the corpus that would test it does not exist here —
+    LoCoMo is dialogue turns with no titles. So: equal weight, and this test is
+    what says so.
+    """
+    isolated = f"test-tenant-eqweight-{uuid.uuid4().hex[:8]}"
+    t_token = f"zqxjvbn{uuid.uuid4().hex[:10]}"
+    c_token = f"zqxjvbn{uuid.uuid4().hex[:10]}"
+
+    in_title = await _insert_titled(isolated, title=f"heading {t_token} here", content="plain body")
+    in_content = await _insert_titled(isolated, title="plain heading", content=f"body {c_token} here")
+
+    assert await _stored_rank(in_title["id"], t_token) == pytest.approx(
+        await _stored_rank(in_content["id"], c_token)
+    ), "a title match and a content match must rank identically — 034 sets no field preference"
+
+
+@pytest.mark.integration
+async def test_content_only_scoring_is_untouched_by_034():
+    """A content-only match must score exactly what it scored before 034.
+
+    This is why ``FTS_RANK_SCALE`` stays 6.0 and no bound or default moves
+    anywhere in the stack. Both fields are tokenised together at the same weight,
+    so adding the title contributes lexemes without rescaling the existing ones —
+    a modal single-term content match is 0.1 raw and 0.375 scored, before and
+    after. If someone reaches for ``setweight`` later, this fails.
+    """
+    content = "a memory that mentions zqxjvbn exactly once"
+
+    raw, scored = await _rank_and_score(content, "zqxjvbn", FTS_RANK_SCALE, title="an unrelated heading")
+
+    assert raw == pytest.approx(0.1, abs=1e-6), (
+        f"a modal single-term content match should stay at the weight-D rank 0.1, got {raw} — "
+        f"a weighting change would rescale it and invalidate FTS_RANK_SCALE={FTS_RANK_SCALE}"
+    )
+    assert scored == pytest.approx(0.375, abs=0.001), f"expected the unchanged 0.375, got {scored}"
+
+
+@pytest.mark.integration
+async def test_editing_only_the_title_reindexes_the_row():
+    """The trigger must fire on a title-only UPDATE, not just on content.
+
+    001 declared ``BEFORE INSERT OR UPDATE OF content``. With the title in the
+    vector that is a stale-index bug in waiting, and not a rare one: the
+    async-enrich path writes the title after the row already exists, so those
+    words would never become searchable. 034 widens it to ``OF content, title``.
+    """
+    isolated = f"test-tenant-retitle-{uuid.uuid4().hex[:8]}"
+    token = f"zqxjvbn{uuid.uuid4().hex[:10]}"
+    mem = await _insert_titled(isolated, title="placeholder", content="body about irrigation")
+
+    async with get_session() as session:
+        await session.execute(
+            text("UPDATE memories SET title = :t WHERE id = CAST(:id AS uuid)"),
+            {"t": f"revised {token} heading", "id": mem["id"]},
+        )
+        await session.commit()
+
+    assert await _stored_rank(mem["id"], token) > 0.0, (
+        "a title-only UPDATE left search_vector stale — the trigger's UPDATE OF list "
+        "does not include title"
     )
