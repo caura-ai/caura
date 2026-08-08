@@ -929,3 +929,49 @@ class TestMigration022Sentinel:
         assert "- '_migrated_by'" in downgrade_section, (
             "Downgrade must drop _migrated_by after using it"
         )
+
+
+class TestBackfill034MatchesMigration:
+    """The out-of-band backfill must write what migration 034's trigger writes.
+
+    034 keeps only DDL — the backfill lives in ``scripts/`` because running it in
+    the alembic startup hook blocked the staging deploy on 2026-08-08. That split
+    buys deploy safety and costs a second copy of the tsvector expression, and a
+    silent divergence between them is invisible until a search misses: the script
+    would rewrite rows to a vector the trigger would never produce, and the next
+    write of that row would flip it back.
+    """
+
+    def _migration_expr(self, builder: str) -> str:
+        import importlib.util
+        import pathlib
+
+        f = pathlib.Path(
+            "core-storage-api/src/core_storage_api/database/migrations/versions/"
+            "034_memories_search_vector_title_weighting.py"
+        )
+        spec = importlib.util.spec_from_file_location(f.stem, f)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return getattr(mod, builder)("m.")
+
+    @pytest.mark.parametrize(
+        "const,builder",
+        [("_VECTOR", "_vector"), ("_CONTENT_ONLY", "_content_only")],
+    )
+    def test_script_expressions_match_the_migration(self, const, builder):
+        """Both directions: ``--revert`` must undo exactly what the forward pass did."""
+        import re
+
+        src = pathlib.Path("scripts/backfill_034_search_vector.py").read_text()
+        m = re.search(rf'^{const} = "(.+)"$', src, re.M)
+        assert m, f"backfill_034_search_vector.py no longer defines {const} on one line"
+
+        expected = self._migration_expr(builder)
+        assert m.group(1) == expected, (
+            f"the backfill script and migration 034 disagree on {const}:\n"
+            f"  script:    {m.group(1)}\n"
+            f"  migration: {expected}\n"
+            f"They must be byte-identical, or the script writes vectors the trigger never would."
+        )
