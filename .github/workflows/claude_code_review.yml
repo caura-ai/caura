@@ -1,378 +1,80 @@
-# Claude Code Review
+# Claude Code Review — this repo's caller for the org's shared review pipeline.
 #
-# Runs automatically when a PR is opened/reopened by a public member of
-# the ``caura-ai`` organization. Commenting "@claude" on the PR triggers a
-# review too (also restricted to org members) — that is how you re-review
-# after a push, AND the only way to review a draft. See "TWO ENTRY POINTS"
-# below, because the two paths do not enforce the same conditions.
+# Replaces a 297-line local copy of the pipeline. Everything that was here is now in
+# caura-ai/.github: the skip rules, the org-membership gate, the reviewer scripts, the prompt.
+# What stays is what is genuinely per-repo — the triggers, which GitHub does not let a reusable
+# workflow declare, and the repo blurb below.
 #
-# Why org-only: this workflow consumes ``ANTHROPIC_API_KEY`` and burns
-# real budget per review. ``pull_request`` events from forks don't
-# receive secrets anyway (GitHub strips them); restricting to org
-# members makes the policy explicit and stops fork PRs from triggering
-# silent-failure runs.
-#
-# TWO ENTRY POINTS, AND THEY DO NOT SHARE GATES. This is the single most
-# surprising thing about this workflow, so read it before adding a check.
-#
-#   ``pull_request``  -> pre-checks -> claude-review
-#   ``issue_comment`` -> claude-retrigger          (pre-checks never runs)
-#
-# ``pre-checks`` is gated on ``if: github.event_name == 'pull_request'``,
-# and ``claude-retrigger`` has no ``needs: pre-checks``. So on a comment
-# event ``pre-checks`` does not run at all, and EVERY condition it owns is
-# absent from that path. Today that is all six of them: org membership of
-# the PR author, synchronize-event skip, draft skip, bot skip, the
-# ``MAX_FILES`` cap, and the tests/docs/config-only skip.
-#
-# Consequences worth knowing:
-#
-#   * A DRAFT PR GETS NO REVIEW ON OPEN. ``pre-checks`` reports
-#     ``reason=draft PR`` and ``claude-review`` is skipped. Commenting
-#     "@claude" on that same draft DOES produce a full review, because the
-#     retrigger path never consults the draft check. So the effective
-#     policy is "drafts get opt-in review, not automatic review" — which is
-#     deliberate (drafts are unfinished; each review costs real budget), and
-#     is the intended way to request one. It is not discoverable from the
-#     skip message, which is why it is written down here.
-#   * The ``MAX_FILES`` cap is likewise bypassed on the comment path, so an
-#     "@claude" comment can review a PR of any size. Left as-is on purpose:
-#     it is a useful escape hatch for a large but genuinely reviewable PR.
-#     If that ever needs to change, change it deliberately — a member may
-#     be relying on it.
-#   * Membership IS still enforced on the comment path, but it validates the
-#     COMMENTER (``claude-retrigger``'s job-level ``author_association``
-#     gate plus its step-level re-check), not the PR author. A member
-#     vouching for someone else's PR is therefore a supported flow.
-#
-# MAINTAINER NOTE: adding a condition to ``pre-checks`` applies it to the
-# ``pull_request`` path ONLY. If a new gate should hold universally, it has
-# to be duplicated into ``claude-retrigger`` or lifted somewhere both jobs
-# consult. See issue #683 for the history.
-#
-# OPERATIONAL REQUIREMENT: every member who wants their pull requests
-# reviewed must set their caura-ai org membership to **Public**
-# (Organization -> People -> their row -> Public). Nobody can set it on
-# their behalf. A member whose membership is private is skipped exactly
-# like a stranger — silently, behind a green check. This is not a
-# preference; it is what the gate below can actually see.
-#
-# Membership is checked at runtime against ``orgs/caura-ai/members/{user}``.
-# That endpoint answers for its CALLER, and ``GITHUB_TOKEN`` sees only
-# PUBLIC members: 204 for a public member, 404 for a private member and
-# for a non-member alike.
-#
-# Why not the payload's ``author_association``, which needs no API call:
-# it does not report org membership for a private member on a
-# ``pull_request`` event. Observed values here, all for the same private
-# member of this org:
-#
-#   github.event.pull_request.author_association  ->  CONTRIBUTOR
-#   github.event.comment.author_association       ->  MEMBER
-#   GET /repos/{repo}/pulls/{n} .author_association -> MEMBER
-#
-# Three things follow. The two payloads DISAGREE, which is why an
-# ``@claude`` retrigger worked for private members while the on-open
-# review did not. ``CONTRIBUTOR`` is unusable as a gate on a public repo,
-# since anyone with a merged commit earns it. And the REST value is
-# computed for whoever asks — a personal token reports ``MEMBER`` where
-# CI sees ``CONTRIBUTOR`` — so it must NOT be used to check this gate's
-# behaviour. Verify against a real workflow run, not a local ``gh`` call.
+# The local copy needed nothing bespoke to migrate: its max-files (30), its CLI pin (2.1.159) and
+# its source-file filter were all byte-identical to the shared defaults, and its REVIEW_PROMPT was
+# an older copy of the shared template. Inheriting the shared one is therefore an upgrade, not a
+# compromise — the copy here still carried a "Fix All Prompts" section that was removed upstream
+# in v1.3.0 because it duplicated every per-issue prompt.
 
 name: Claude Code Review
 
 on:
   pull_request:
     branches: [main, dev]
-    types: [opened, reopened, synchronize]
+    # `closed` is new, and it feeds claude-capture ONLY (merged pull requests). The shared
+    # pre-checks job excludes it, which is what stops a merge triggering a fresh review.
+    types: [opened, reopened, synchronize, closed]
   issue_comment:
     types: [created]
+  # Manual backfill for claude-capture on a pull request that merged before capture existed.
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Merged PR number to capture declined findings from"
+        required: true
+        type: string
 
 permissions:
   contents: read
   pull-requests: write
   issues: write
-
-env:
-  EXTRA_PROMPT: "This is a FastAPI + PostgreSQL (pgvector) backend with a TypeScript OpenClaw plugin. Uses requirements.txt (not uv/pyproject.toml). Tests are in tests/ directory."
-  REVIEW_PROMPT: |
-    Do NOT review files under tests/ or test_* files. Focus only on source code.
-
-    Review this PR for real issues only — not style preferences.
-
-    ## Format
-
-    For each issue:
-
-    ### Issue Title
-    **Severity**: Critical/High/Medium/Low
-    **File**: `path/to/file.py:line-range`
-    **Problem**: One sentence.
-
-    <details>
-    <summary>🤖 Claude Code Prompt</summary>
-
-    ```
-    [Self-contained prompt with exact file paths, line numbers, what to change and why]
-    ```
-
-    </details>
-
-    ---
-
-    ## Sections
-    1. **Summary**: 2-3 sentences
-    2. **Critical/High Issues**: Must fix before merge
-    3. **Medium/Low Issues**: Should fix, not blocking
-    4. **Suggestions**: Nice-to-have
-    Skip empty sections.
-
-    ## 🚀 Fix All Prompts
-    At the end, add one "Fix All" code block per severity level that has issues (🔴 Critical, 🟠 High, 🟡 Medium/Low, 🟢 Suggestions). Each block combines all prompts from that level.
+  # REQUIRED OF EVERY CALLER, and it must be granted here even though this repo does not run the
+  # Gemini reviewer. GitHub validates a reusable workflow's whole permissions graph at load time,
+  # statically, regardless of any callee job's `if:` — so a callee job requesting id-token: write
+  # that the caller withheld makes GitHub refuse to load the ENTIRE workflow. That is a
+  # startup_failure which takes the Claude review down too. Harmless to grant: nothing here
+  # requests the token, and mode=gemini-review is refused outright on a public repository.
+  id-token: write
 
 jobs:
-  pre-checks:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    outputs:
-      skip: ${{ steps.decide.outputs.skip }}
-      reason: ${{ steps.decide.outputs.reason }}
-    steps:
-      - name: Evaluate skip conditions
-        id: decide
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MAX_FILES: "30"
-          PR_ACTION: ${{ github.event.action }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_ACTOR: ${{ github.actor }}
-          ORG: caura-ai
-        run: |
-          PR_NUMBER=${{ github.event.pull_request.number }}
-          REPO=${{ github.repository }}
-
-          # 1. Org membership gate — checked at runtime, not via the
-          # payload's ``author_association``, which on a ``pull_request``
-          # event reports ``CONTRIBUTOR`` for a private org member and so
-          # cannot distinguish one from any past contributor. The values
-          # are measured and recorded in the file header; read them before
-          # changing this, and note that a local ``gh`` call reports a
-          # DIFFERENT value than CI sees. The ``orgs/{org}/members/{user}``
-          # endpoint returns 204 for public members and 404 for private
-          # members and non-members alike. We distinguish
-          # 404 (skip with the membership reason) from other failures
-          # (rate-limit, network, bad token — skip but log a warning so
-          # operators can tell a real "non-member" from a transient
-          # API hiccup).
-          MEMBERSHIP_STATUS=$(gh api "orgs/${ORG}/members/${PR_ACTOR}" \
-            -i 2>&1 | grep -m1 -E '^HTTP/' | awk '{print $2}')
-          if [[ "$MEMBERSHIP_STATUS" == "204" ]]; then
-            : # member — proceed
-          elif [[ "$MEMBERSHIP_STATUS" == "404" ]]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "reason=PR author '${PR_ACTOR}' is not a public member of the '${ORG}' org" >> "$GITHUB_OUTPUT"
-            exit 0
-          else
-            echo "::warning::Org membership API returned HTTP ${MEMBERSHIP_STATUS:-?} for '${PR_ACTOR}' — skipping review as a precaution"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "reason=Org membership API returned unexpected status ${MEMBERSHIP_STATUS:-?} for '${PR_ACTOR}'" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # 2. Skip synchronize events (push to PR branch) — use @claude to re-trigger
-          if [[ "$PR_ACTION" == "synchronize" ]]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "reason=push to PR branch (synchronize) — comment @claude to re-trigger" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # 3. Skip draft PRs
-          if [[ "$PR_DRAFT" == "true" ]]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "reason=draft PR" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # 4. Skip bot PRs
-          if [[ "$PR_ACTOR" == "dependabot[bot]" || "$PR_ACTOR" == "renovate[bot]" ]]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "reason=bot PR ($PR_ACTOR)" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # 5. Too many changed files
-          FILE_COUNT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" --jq 'length')
-          if [[ "$FILE_COUNT" -gt "$MAX_FILES" ]]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "reason=PR has ${FILE_COUNT} files (limit: ${MAX_FILES})" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # 6. Only test/config/docs files changed — no source to review
-          SRC_FILES=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
-            --jq '[.[] | select(.filename | (startswith("tests/") or startswith("test_") or test("^(Dockerfile|helm/|docs/|.*\\.(md|toml|lock|ya?ml)$)")) | not)] | length')
-          if [[ "$SRC_FILES" -eq 0 ]]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "reason=no source files to review (only tests/docs/config)" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-          echo "reason=" >> "$GITHUB_OUTPUT"
-
-      - name: Log skip reason
-        if: steps.decide.outputs.skip == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REASON: ${{ steps.decide.outputs.reason }}
-        run: |
-          echo "::notice::Skipping Claude review — $REASON"
-          PR_NUMBER=${{ github.event.pull_request.number }}
-          REPO=${{ github.repository }}
-          gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-            -f body="**Claude Code Review** — skipped: ${REASON}" 2>/dev/null || true
-
-  # Runs on PR opened/reopened — reviews the diff via the shared script.
-  # Gated on org membership transitively through ``pre-checks``: when
-  # ``pre-checks`` skips a non-member PR, ``needs.pre-checks.result``
-  # is ``'skipped'`` (not ``'success'``), so the ``== 'success'`` clause
-  # below already short-circuits this job. Don't re-check
-  # ``author_association`` here — keeping the gate in one place avoids
-  # the two conditions drifting out of sync.
-  claude-review:
-    needs: pre-checks
+  claude-code-review:
+    # An `on: issue_comment` workflow is dispatched for every comment in the repo. Without this
+    # gate the caller job succeeds even when every callee job skips, leaving a green
+    # "Claude Code Review" check sitting on unrelated issues.
+    #
+    # It deliberately does NOT test for `@claude`. That filter did not disappear in the
+    # migration, it moved: the callee's claude-retrigger job carries
+    # `contains(github.event.comment.body, '@claude')`, and /remember and @gemini are gated the
+    # same way on their own jobs. Naming the commands here too would duplicate the callee's
+    # triggers in every caller, which is the drift the shared pipeline exists to remove.
+    #
+    # A comment with no command therefore costs nothing: every callee job evaluates its `if:` to
+    # false and skips, skipped jobs allocate no runner, and this caller job has no steps of its
+    # own — it is a bare `uses:`, so nothing is checked out and no CLI is installed.
     if: >-
-      github.event_name == 'pull_request'
-      && needs.pre-checks.result == 'success'
-      && needs.pre-checks.outputs.skip != 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: write
-    steps:
-      # Checks out the PR merge ref, so the review runs THIS PR's version of the
-      # review script (lets a workflow/script change self-test on its own PR).
-      # Secrets are withheld from fork-PR runs and pre-checks gate the rest.
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-
-      - name: Install Claude CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.159 # pinned: reproducible reviews; bump deliberately
-
-      # Same script as the @claude retrigger job below — feed the real diff to
-      # `claude --print`. Replaces the claude-code-action agent, which never
-      # received the diff (it tried `gh`, hit the headless permission wall) and
-      # produced an empty result that got stamped "No issues found".
-      - name: Review PR diff
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          EXTRA_PROMPT: ${{ env.EXTRA_PROMPT }}
-          REVIEW_PROMPT: ${{ env.REVIEW_PROMPT }}
-        run: bash .github/scripts/claude_pr_review.sh
-
-  # Runs on @claude comment — only for public org members (MEMBER or OWNER).
-  claude-retrigger:
-    # Hardening: gate at the job level on author_association so the runner never
-    # even starts for a non-member's @claude comment. The step-level "Check
-    # commenter is org member" below still re-validates and sets the
-    # ``authorized`` output for defense-in-depth — both read the same
-    # ``author_association`` field, so the two conditions cannot disagree.
-    if: >-
-      github.event_name == 'issue_comment'
-      && contains(github.event.comment.body, '@claude')
-      && contains(fromJSON('["MEMBER", "OWNER"]'), github.event.comment.author_association)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: write
-    steps:
-      - name: Check commenter is org member
-        id: auth
-        env:
-          AUTHOR_ASSOC: ${{ github.event.comment.author_association }}
-          COMMENTER: ${{ github.event.comment.user.login }}
-        run: |
-          # ``author_association`` is set by GitHub on the event payload
-          # and reflects the commenter's relationship to the repo's
-          # owner organization. ``MEMBER`` = org member, ``OWNER`` = org
-          # owner.
-          #
-          # On an ``issue_comment`` payload this DOES resolve for a private
-          # org member — observed reporting ``MEMBER`` for a member whose
-          # org membership was private — which is why this path kept
-          # working while the on-open review was skipping everyone. Do not
-          # "align" the two gates by moving pre-checks onto this field: on a
-          # ``pull_request`` payload the same person reports ``CONTRIBUTOR``.
-          # See the header comment for the measured values.
-          #
-          # ``COLLABORATOR`` (non-org members granted direct repo write
-          # access via Settings → Collaborators) is INTENTIONALLY
-          # excluded — the policy is "members of our org only", which
-          # is stricter than the previous ``write``/``admin`` permission
-          # check. If a future operator wants to widen this, do it
-          # explicitly; do not "fix" it back as a presumed bug.
-          case "$AUTHOR_ASSOC" in
-            MEMBER|OWNER)
-              echo "authorized=true" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "authorized=false" >> "$GITHUB_OUTPUT"
-              echo "::notice::@claude triggered by ${COMMENTER} (author_association: ${AUTHOR_ASSOC}) — skipping, org membership required"
-              ;;
-          esac
-
-      - name: Get PR details
-        if: steps.auth.outputs.authorized == 'true'
-        id: pr
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          PR_NUMBER=${{ github.event.issue.number }}
-          REPO=${{ github.repository }}
-
-          # Verify this is a PR comment, not an issue comment
-          HTTP_CODE=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.number' 2>/dev/null) || {
-            echo "Not a PR comment, skipping"
-            echo "is_pr=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          }
-
-          echo "is_pr=true" >> "$GITHUB_OUTPUT"
-          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-
-      # Check out the BASE repo's default branch — deliberately NOT the PR/fork
-      # code. This job runs on ``issue_comment``, which (unlike fork
-      # ``pull_request`` events) DOES receive repo secrets (ANTHROPIC_API_KEY, a
-      # write GH_TOKEN). The review script below is fetched from trusted base
-      # code and pulls the PR diff via the GitHub API, so a malicious fork can
-      # never get its code executed with our secrets. This also fixes the old
-      # failure: the previous ``ref: <head_ref>`` pointed at the fork's branch,
-      # which doesn't exist in the base repo, so checkout exited 1 (.github#111).
-      - name: Checkout base repo (trusted review script)
-        if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-
-      - name: Install Claude CLI
-        if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
-        run: npm install -g @anthropic-ai/claude-code@2.1.159 # pinned: reproducible reviews; bump deliberately
-
-      # Same script as the on-open claude-review job above.
-      - name: Review PR diff
-        if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
-          EXTRA_PROMPT: ${{ env.EXTRA_PROMPT }}
-          REVIEW_PROMPT: ${{ env.REVIEW_PROMPT }}
-        run: bash .github/scripts/claude_pr_review.sh
+      github.event_name != 'issue_comment'
+      || github.event.issue.pull_request != null
+    uses: caura-ai/.github/.github/workflows/claude-code-review.yml@v1
+    with:
+      extra-prompt: >-
+        This is a FastAPI + PostgreSQL (pgvector) backend with a TypeScript OpenClaw plugin.
+        Uses requirements.txt (not uv/pyproject.toml). Tests are in the tests/ directory.
+      pr-number: ${{ inputs.pr_number || '' }}
+      # Nothing else is set on purpose. max-files, the source-file filter and the CLI pin all
+      # match the shared defaults already, and author-gate's `auto` derives from repository
+      # visibility — this repo is PUBLIC, so the gate is ON and pull requests from anyone who is
+      # not a public member of the org are skipped, exactly as the local copy did.
+      #
+      # NOTE the operational cost of that gate, which bit this repo before: GITHUB_TOKEN resolves
+      # only PUBLIC org members, so a member whose membership is private is skipped silently
+      # behind a green check. Every reviewer here has to set their org membership to Public.
+    secrets:
+      anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+      # Optional. Absent, it resolves to '' and review-memory recall and capture become silent
+      # no-ops, leaving the review byte-for-byte unchanged.
+      memclaw-agents-key: ${{ secrets.MEMCLAW_AGENTS_KEY }}
