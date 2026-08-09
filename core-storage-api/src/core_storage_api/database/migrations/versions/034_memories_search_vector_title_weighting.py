@@ -51,8 +51,10 @@ byte-identical vector. Not done here: converting needs DROP + ADD COLUMN, a full
 table rewrite under ACCESS EXCLUSIVE plus a GIN rebuild, strictly worse than this
 migration. The moment for it is a future migration already rewriting ``memories``.
 
-BACKFILL IS OUT OF BAND — ``scripts/backfill_034_search_vector.py``, run once
-after deploy. It is NOT in this migration, and that is not a style preference:
+BACKFILL IS OUT OF BAND —
+``python -m core_storage_api.scripts.backfill_034_search_vector``, run once after
+deploy. It ships INSIDE the image (the repo's top-level ``scripts/`` is not copied
+by the Dockerfile, so a Cloud Run job could not reach it there). It is NOT in this migration, and that is not a style preference:
 
 An earlier version of 034 backfilled here, in committed batches, and it took
 staging down's deploy path on 2026-08-08. Every instance boots, blocks on the
@@ -71,8 +73,8 @@ belong in one-off scripts. What is left here is instant.
 
 ``downgrade()`` is symmetric and equally data-free: it restores the content-only
 trigger and rewrites nothing. Reverting rows is the same volume of work as the
-forward pass and would reintroduce the same startup-probe failure. Run
-``scripts/backfill_034_search_vector.py --revert`` after downgrading if the split
+forward pass and would reintroduce the same startup-probe failure. Run the module
+with ``--revert`` after downgrading if the split
 matters — until then, rows the forward backfill already rebuilt keep matching on
 title terms while rows written after the downgrade do not.
 

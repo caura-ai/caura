@@ -964,7 +964,7 @@ class TestBackfill034MatchesMigration:
         """Both directions: ``--revert`` must undo exactly what the forward pass did."""
         import re
 
-        src = pathlib.Path("scripts/backfill_034_search_vector.py").read_text()
+        src = pathlib.Path("core-storage-api/src/core_storage_api/scripts/backfill_034_search_vector.py").read_text()
         m = re.search(rf'^{const} = "(.+)"$', src, re.M)
         assert m, f"backfill_034_search_vector.py no longer defines {const} on one line"
 
