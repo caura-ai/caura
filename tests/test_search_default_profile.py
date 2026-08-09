@@ -179,36 +179,65 @@ def test_fts_rank_scale_ceiling_matches_what_was_measured():
 # ── agent-facing ingress vs the knob table ──
 
 
-def test_agent_tunable_bounds_match_the_knob_table():
-    """``SearchProfileUpdate``'s bounds must equal ``SEARCH_KNOBS``'.
+def test_search_profile_update_is_derived_from_the_knob_table():
+    """The request model must expose exactly the agent-tunable knobs, with their bounds.
 
-    The request model still writes its own ``ge``/``le`` per field rather than
-    deriving them, and it drifted: ``graph_max_hops`` was capped at 3 here while
-    the table allowed 5, so a tenant-wide default could hold a depth no agent
-    profile could ever set. Resolved to 3 on 2026-08-07 — the ingress value, not
-    the widest of the three, because depth drives graph-expansion cost.
-
-    Asserts the bounds rather than merely the names, since matching names with
-    different limits is exactly the failure that hid for months.
+    It is now built by ``create_model`` over ``SEARCH_KNOBS``, so this cannot
+    drift the way it did before (#730: ``graph_max_hops`` was capped at 3 here
+    while the table allowed 5). Kept as a cheap check that the derivation still
+    produces a usable model — a botched comprehension would yield a model with
+    the wrong field set or no constraints at all, which nothing else would catch.
     """
-    from common.constants import SEARCH_KNOBS
+    from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
     from core_api.schemas import SearchProfileUpdate
 
-    checked = 0
+    assert set(SearchProfileUpdate.model_fields) == set(AGENT_TUNABLE_KEYS)
     for name, field in SearchProfileUpdate.model_fields.items():
-        assert name in SEARCH_KNOBS, (
-            f"SearchProfileUpdate exposes {name!r}, which is not a declared search knob"
-        )
         lo = next((m.ge for m in field.metadata if hasattr(m, "ge")), None)
         hi = next((m.le for m in field.metadata if hasattr(m, "le")), None)
-        assert (lo, hi) == SEARCH_KNOBS[name].bounds, (
-            f"{name}: SearchProfileUpdate allows {(lo, hi)} but SEARCH_KNOBS declares "
-            f"{SEARCH_KNOBS[name].bounds} — the tenant-default path and the agent path would "
-            f"accept different values for the same knob"
+        assert (lo, hi) == SEARCH_KNOBS[name].bounds, f"{name}: {(lo, hi)} != {SEARCH_KNOBS[name].bounds}"
+
+
+def test_memclaw_tune_signature_matches_the_knob_table():
+    """The MCP tool is the LAST hand-written copy of this surface — pin it.
+
+    ``memclaw_tune`` declares its knobs as named parameters, which a reusable
+    model cannot express: the signature IS the tool schema that ships to clients
+    in ``plugin/tools.json``. So it stays hand-written, and this is what stops it
+    drifting from the table the way ``SearchProfileUpdate`` did.
+
+    Also checks the human-readable ranges in each parameter's description, since
+    those are what an agent actually reads before choosing a value — a bound that
+    moves in the table while the description still advertises the old one is a
+    silently wrong instruction, not just stale prose.
+    """
+    import inspect
+    import re
+
+    from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
+    from core_api.mcp_server import memclaw_tune
+
+    params = [p for p in inspect.signature(memclaw_tune).parameters if p != "agent_id"]
+    assert set(params) == set(AGENT_TUNABLE_KEYS), (
+        f"memclaw_tune exposes {sorted(set(params) ^ set(AGENT_TUNABLE_KEYS))} "
+        f"differently from the knob table"
+    )
+
+    hints = inspect.get_annotations(memclaw_tune, eval_str=True)
+    checked = 0
+    for name in params:
+        meta = getattr(hints[name], "__metadata__", ())
+        desc = next((getattr(m, "description", "") for m in meta), "") or ""
+        # Only parameters whose description IS a range, e.g. "1-20." or "0.1-0.9.".
+        m = re.fullmatch(r"(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\.?", desc.strip())
+        if not m:
+            continue
+        lo, hi = SEARCH_KNOBS[name].bounds
+        assert (float(m.group(1)), float(m.group(2))) == (float(lo), float(hi)), (
+            f"memclaw_tune documents {name} as {desc!r} but the knob table says {(lo, hi)}"
         )
         checked += 1
-
-    assert checked == 9, f"expected 9 agent-tunable knobs, checked {checked}"
+    assert checked >= 6, f"only {checked} descriptions parsed as ranges — the format changed"
 
 
 def test_the_three_ab_knobs_are_not_agent_tunable():

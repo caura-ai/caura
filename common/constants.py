@@ -451,25 +451,30 @@ class SearchKnob(NamedTuple):
     # payload omitting it is malformed and the route rejects it rather than
     # letting it surface as a KeyError 500 from inside the session.
     sql_required: bool = False
+    # Exposed on the agent-facing tuning surface (``SearchProfileUpdate``, and the
+    # ``memclaw_tune`` MCP tool). False for the A/B knobs, which are held at their
+    # global defaults until the offline comparison validates them and are flipped
+    # per TENANT via ``search.default_profile``, not per agent.
+    agent_tunable: bool = False
 
 
 SEARCH_KNOBS: dict[str, SearchKnob] = {
     # ── core-api-local: resolved here, never sent to storage ──
-    "top_k": SearchKnob(int, (1, 20)),
-    "min_similarity": SearchKnob(float, (0.1, 0.9)),
+    "top_k": SearchKnob(int, (1, 20), agent_tunable=True),
+    "min_similarity": SearchKnob(float, (0.1, 0.9), agent_tunable=True),
     # Ceiling 3, matching the agent-facing ingress (``SearchProfileUpdate`` and
     # the ``memclaw_tune`` MCP signature). It read 5 here until 2026-08-07 while
     # both of those said 3, so a tenant-wide default could hold a depth no agent
     # profile could ever set. Depth drives graph expansion cost, so 3 is the
     # deliberate ceiling rather than the widest of the three.
-    "graph_max_hops": SearchKnob(int, (0, 3)),
+    "graph_max_hops": SearchKnob(int, (0, 3), agent_tunable=True),
     # ── scoring knobs storage reads positionally ──
-    "fts_weight": SearchKnob(float, (0.0, 1.0), sql=True, sql_required=True),
-    "freshness_floor": SearchKnob(float, (0.0, 1.0), sql=True, sql_required=True),
-    "freshness_decay_days": SearchKnob(int, (7, 730), sql=True, sql_required=True),
-    "recall_boost_cap": SearchKnob(float, (1.0, 3.0), sql=True, sql_required=True),
-    "recall_decay_window_days": SearchKnob(int, (7, 365), sql=True, sql_required=True),
-    "similarity_blend": SearchKnob(float, (0.0, 1.0), sql=True, sql_required=True),
+    "fts_weight": SearchKnob(float, (0.0, 1.0), sql=True, sql_required=True, agent_tunable=True),
+    "freshness_floor": SearchKnob(float, (0.0, 1.0), sql=True, sql_required=True, agent_tunable=True),
+    "freshness_decay_days": SearchKnob(int, (7, 730), sql=True, sql_required=True, agent_tunable=True),
+    "recall_boost_cap": SearchKnob(float, (1.0, 3.0), sql=True, sql_required=True, agent_tunable=True),
+    "recall_decay_window_days": SearchKnob(int, (7, 365), sql=True, sql_required=True, agent_tunable=True),
+    "similarity_blend": SearchKnob(float, (0.0, 1.0), sql=True, sql_required=True, agent_tunable=True),
     # ── scoring knobs with a server-side default, so optional on the wire ──
     # #687: scale on ts_rank_cd before saturation. Floor is 1.0, not 0 — that is
     # the pre-#687 formula, so a tenant can revert but cannot weaken keyword
@@ -487,3 +492,6 @@ SEARCH_KNOBS: dict[str, SearchKnob] = {
 # missing any of the second.
 SQL_SCORING_PARAM_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.sql)
 SQL_SCORING_REQUIRED_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.sql_required)
+# The agent-facing tuning surface, derived the same way: ``SearchProfileUpdate``
+# and the ``memclaw_tune`` MCP tool expose exactly these.
+AGENT_TUNABLE_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.agent_tunable)

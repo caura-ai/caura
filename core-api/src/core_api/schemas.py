@@ -1,9 +1,10 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, create_model, model_validator
 
+from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
 from core_api.constants import (
     BULK_MAX_ITEMS,
     DEFAULT_MEMORY_TYPE,
@@ -537,18 +538,32 @@ class AgentTrustUpdate(BaseModel):
     fleet_id: str | None = None
 
 
-class SearchProfileUpdate(BaseModel):
-    """Per-agent search tuning knobs. All fields optional — only override what you set."""
+# Derived from ``SEARCH_KNOBS`` rather than written out. The fields and their
+# bounds were hand-maintained here, in the MCP ``memclaw_tune`` signature and in
+# the knob table, and they had already drifted: ``graph_max_hops`` was capped at 3
+# here while the table allowed 5, so a tenant-wide default could hold a depth no
+# agent profile could set (#730). One declaration removes the class of drift
+# rather than testing for it.
+#
+# ``agent_tunable`` is what selects the nine; the three A/B knobs
+# (``fts_rank_scale``, ``candidate_pool_size``, ``score_formula``) stay off this
+# surface deliberately — they are tenant-level A/B levers, not per-agent tuning.
+# ``dict[str, Any]`` explicitly: ``create_model``'s overloads take
+# ``**field_definitions: Any | tuple[Any, Any]``, and mypy will not match a
+# comprehension it infers as ``dict[Any, tuple[Any, None]]`` against them.
+_PROFILE_FIELDS: dict[str, Any] = {
+    name: (
+        SEARCH_KNOBS[name].value_type | None,
+        Field(default=None, ge=SEARCH_KNOBS[name].bounds[0], le=SEARCH_KNOBS[name].bounds[1]),
+    )
+    for name in AGENT_TUNABLE_KEYS
+}
 
-    top_k: int | None = Field(default=None, ge=1, le=20)
-    min_similarity: float | None = Field(default=None, ge=0.1, le=0.9)
-    fts_weight: float | None = Field(default=None, ge=0.0, le=1.0)
-    freshness_floor: float | None = Field(default=None, ge=0.0, le=1.0)
-    freshness_decay_days: int | None = Field(default=None, ge=7, le=730)
-    recall_boost_cap: float | None = Field(default=None, ge=1.0, le=3.0)
-    recall_decay_window_days: int | None = Field(default=None, ge=7, le=365)
-    graph_max_hops: int | None = Field(default=None, ge=0, le=3)
-    similarity_blend: float | None = Field(default=None, ge=0.0, le=1.0)
+SearchProfileUpdate = create_model(
+    "SearchProfileUpdate",
+    __doc__="Per-agent search tuning knobs. All fields optional — only override what you set.",
+    **_PROFILE_FIELDS,
+)
 
 
 # --- Background Task ---
