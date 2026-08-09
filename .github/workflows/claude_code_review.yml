@@ -98,7 +98,9 @@ name: Claude Code Review
 on:
   pull_request:
     branches: [main, dev]
-    types: [opened, reopened, synchronize]
+    # `closed` feeds claude-capture ONLY (merged PRs). pre-checks excludes it, which is
+    # what stops a merge triggering a fresh review.
+    types: [opened, reopened, synchronize, closed]
   issue_comment:
     types: [created]
 
@@ -151,7 +153,7 @@ env:
 
 jobs:
   pre-checks:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
     runs-on: ubuntu-latest
     outputs:
       skip: ${{ steps.decide.outputs.skip }}
@@ -314,6 +316,11 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           EXTRA_PROMPT: ${{ env.EXTRA_PROMPT }}
           REVIEW_PROMPT: ${{ env.REVIEW_PROMPT }}
+          # Learned guidance from the shared code-review fleet. Resolves to '' where the secret
+          # is unreadable — which is TODAY, because the org secret is `private` visibility and
+          # this repo is public — and recall is then a silent no-op leaving the review
+          # byte-for-byte unchanged. Adding a repo-level secret turns it on with no code change.
+          MEMCLAW_AGENTS_KEY: ${{ secrets.MEMCLAW_AGENTS_KEY }}
         run: bash .github/scripts/claude_pr_review.sh
 
   # Runs on @claude comment — only for public org members (MEMBER or OWNER).
@@ -417,4 +424,51 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           EXTRA_PROMPT: ${{ env.EXTRA_PROMPT }}
           REVIEW_PROMPT: ${{ env.REVIEW_PROMPT }}
+          # Learned guidance from the shared code-review fleet. Resolves to '' where the secret
+          # is unreadable — which is TODAY, because the org secret is `private` visibility and
+          # this repo is public — and recall is then a silent no-op leaving the review
+          # byte-for-byte unchanged. Adding a repo-level secret turns it on with no code change.
+          MEMCLAW_AGENTS_KEY: ${{ secrets.MEMCLAW_AGENTS_KEY }}
         run: bash .github/scripts/claude_pr_review.sh
+
+  # Runs on MERGE, and only on merge: extracts findings a maintainer DECLINED into the shared
+  # code-review fleet so future reviews stop re-raising them. The write half of the loop; recall
+  # in claude_pr_review.sh is the read half.
+  #
+  # `merged == true` rather than just `closed`: a pull request closed WITHOUT merging carries no
+  # accepted judgement, and capturing declines from an abandoned branch would teach the reviewer
+  # from a decision nobody stood behind.
+  #
+  # Dark and silent without MEMCLAW_AGENTS_KEY, which is the state on the day this lands — the
+  # org secret is `private` visibility and this repo is public, so it reads as ''. The job still
+  # runs and exits 0 having logged that it was dark, which is the diagnosable outcome.
+  claude-capture:
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.action == 'closed'
+      && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # Read-only: this job reads a comment thread and writes to MemClaw, never to the PR.
+      issues: read
+      # Needed IN ADDITION to issues:read — listing comments on an issue that is actually a pull
+      # request 403s without it.
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code@2.1.159 # pinned: keep in step with the review job
+
+      - name: Capture declined review findings
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MEMCLAW_AGENTS_KEY: ${{ secrets.MEMCLAW_AGENTS_KEY }}
+        run: bash .github/scripts/claude_pr_capture.sh
