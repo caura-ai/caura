@@ -12,6 +12,21 @@
 # The uv services share ONE multi-directory entry for the same reason: four separate
 # entries emitted four near-identical group PRs every week.
 # Mirrors the caura-memclaw-enterprise grouping strategy.
+#
+# NO entry here sets `versioning-strategy`, and that applies to all of them:
+#   * `increase-if-necessary` is IGNORED for `uv` — verified against a live run on
+#     2026-08-10 (#740, reverted), which still raised floors for releases the ranges
+#     already allowed. GitHub documents `uv` as supporting it, so this is a
+#     dependabot-core gap; re-verify before believing it is fixed.
+#   * On an entry with NO committed lock — the `pip` entry below — it is worse than
+#     inert: dependabot-core skips the manifest edit when the new version already
+#     satisfies the range and no lockfile exists, leaving nothing to change, so those
+#     updates stop being reported at all.
+#   * `lockfile-only` IS honoured, but it drops any update needing a manifest change.
+#     Most specs in the uv services are capped, so a real major outside a cap would
+#     vanish silently. This repo is public and those `>=` floors are part of the
+#     contract with OSS consumers, so a raised floor is not purely churn here.
+# Net effect: constraint-widening PRs are a known, accepted cost in this repo.
 
 version: 2
 
@@ -47,29 +62,7 @@ updates:
       - "/core-storage-api"
       - "/core-worker"
       - "/core-operations"
-    # Only touch a requirement in pyproject.toml when the new version actually
-    # falls outside it. The default (`increase`) raises the floor on every
-    # release even when the existing range already permits the new version, and
-    # each of those produced its own ungroupable PR: eight were open at once,
-    # e.g. `uvicorn[standard] >=0.51.0,<1` widened to `>=0.52.0,<1` — for a
-    # version the old range already allowed. The uv.lock in each of these four
-    # directories was already being updated correctly; the manifest edit on top
-    # of it was pure churn.
-    #
-    # Grouping cannot absorb them: `update-types` classifies the semver bump of
-    # a resolved version, and a floor-raise on an already-satisfied range has no
-    # such classification. That is why uv-minor-patch groups the lock updates
-    # into one PR while these arrived individually.
-    #
-    # This works HERE because these specs are capped (22 of 30 in core-api carry
-    # an upper bound), so "not necessary" is a meaningful state and a genuine
-    # case still files — uvicorn 1.0 against `<1` needs the manifest changed and
-    # will get a PR. Do NOT copy this to the `pip` entry above or to caura-ops:
-    # their requirements are open-ended `>=X`, nothing is ever outside them, and
-    # the setting would silence Python updates entirely rather than de-duplicate
-    # them. Those need a committed lock instead (caura-ops did that on
-    # 2026-08-09).
-    versioning-strategy: increase-if-necessary
+    # Deliberately no `versioning-strategy` — see the header before adding one.
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
