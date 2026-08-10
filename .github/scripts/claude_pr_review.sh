@@ -227,8 +227,27 @@ if [ "${#REVIEW}" -gt "$MAX_BODY" ]; then
 _[Review truncated — exceeded GitHub's comment size limit.]_"
 fi
 
+# WHICH REVIEWER WROTE THIS, said before the review rather than only after it. Mirrors the shared
+# pipeline (caura-ai/.github#34, released in v1.5.1) so a verdict reads the same wherever it was
+# posted — which is the point of mirroring it at all: someone comparing a review here against one
+# on a repo that runs the shared pipeline should not have to work out that the formats differ.
+#
+# A blockquote, not a heading: a verdict opens with its own `## Summary` or `### Issue Title`, and
+# a second heading above those would compete with the review's structure instead of labelling it.
+#
+# Hardcoded rather than read from an AGENT_LABEL variable, unlike upstream. This copy runs ONE
+# reviewer and is deliberately standalone, so a variable with a single possible value would be
+# indirection without a second caller — the same reasoning that inlined recall here.
+#
+# Deliberately NOT the string "Reviewed by \`" — claude_pr_capture.sh greps exactly that to decide
+# whether a pull request was reviewed at all, and the footer below is what it is meant to find. A
+# header carrying the same phrase would still match, but it would make that gate depend on which
+# of the two lines survived thread truncation, and capture keeps the TAIL.
+#
 # Footer surfaces per-review spend on the PR itself, not just the job log.
-post "${REVIEW}
+post "> 🤖 Review by **Claude Code**
+
+${REVIEW}
 
 ---
 *Reviewed by \`${MODEL}\` · cost \$${COST:-unknown}*"
