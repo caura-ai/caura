@@ -206,7 +206,7 @@ class TestBatchANNIntegration:
         return [v / norm for v in noisy]
 
     @pytest.mark.asyncio
-    async def test_finds_near_duplicates(self, db, tenant_id, fleet_id):
+    async def test_finds_near_duplicates(self, tenant_id, fleet_id):
         """Batch ANN should find near-duplicate pairs above threshold."""
         from core_api.services.crystallizer_service import _check_near_duplicates
 
@@ -225,7 +225,7 @@ class TestBatchANNIntegration:
         assert result["pairs"][0]["similarity"] >= CRYSTALLIZER_DEDUP_THRESHOLD
 
     @pytest.mark.asyncio
-    async def test_skips_already_checked(self, db, tenant_id, fleet_id):
+    async def test_skips_already_checked(self, tenant_id, fleet_id):
         """Memories with last_dedup_checked_at set should be skipped."""
         from core_api.services.crystallizer_service import _check_near_duplicates
 
@@ -251,7 +251,7 @@ class TestBatchANNIntegration:
         assert result["count"] == 0, "Already-checked memories should be skipped"
 
     @pytest.mark.asyncio
-    async def test_updates_dedup_timestamp(self, db, tenant_id, fleet_id):
+    async def test_updates_dedup_timestamp(self, tenant_id, fleet_id):
         """After processing, memories should have last_dedup_checked_at set."""
         from core_api.clients.storage_client import get_storage_client
         from core_api.services.crystallizer_service import _check_near_duplicates
@@ -269,7 +269,7 @@ class TestBatchANNIntegration:
         )
 
     @pytest.mark.asyncio
-    async def test_no_false_positives_different_topics(self, db, tenant_id, fleet_id):
+    async def test_no_false_positives_different_topics(self, tenant_id, fleet_id):
         """Unrelated memories should not appear as near-duplicates."""
         from core_api.services.crystallizer_service import _check_near_duplicates
 

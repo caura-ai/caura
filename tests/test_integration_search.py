@@ -135,7 +135,7 @@ async def _link_memory_entity(memory_id, entity_id, role="mentioned"):
 class TestSearchPipelineEndToEnd:
     """Full search_memories pipeline with all P0 fixes applied."""
 
-    async def test_basic_search_returns_results(self, db, tenant_id):
+    async def test_basic_search_returns_results(self, tenant_id):
         """Baseline: search returns stored memories sorted by relevance."""
         await _insert_memory(tenant_id, "Python is a programming language", weight=0.7
         )
@@ -148,7 +148,7 @@ class TestSearchPipelineEndToEnd:
         # The Python memory should rank higher
         assert "Python" in results[0].content
 
-    async def test_freshness_prefers_recent_events(self, db, tenant_id):
+    async def test_freshness_prefers_recent_events(self, tenant_id):
         """P0-2: memory about recent event ranks higher than old memory about same topic."""
         now = datetime.now(timezone.utc)
 
@@ -173,7 +173,7 @@ class TestSearchPipelineEndToEnd:
         # The one with recent ts_valid_start should rank higher
         assert "critical patch" in results[0].content
 
-    async def test_expired_memory_ranked_lower(self, db, tenant_id):
+    async def test_expired_memory_ranked_lower(self, tenant_id):
         """P0-2: expired memory (ts_valid_end in past) gets freshness floor."""
         now = datetime.now(timezone.utc)
 
@@ -195,7 +195,7 @@ class TestSearchPipelineEndToEnd:
         # Valid memory should rank above expired one
         assert "this Friday" in results[0].content
 
-    async def test_recall_boost_decays_over_time(self, db, tenant_id):
+    async def test_recall_boost_decays_over_time(self, tenant_id):
         """P0-3: frequently recalled but stale memory doesn't dominate."""
         now = datetime.now(timezone.utc)
 
@@ -221,7 +221,7 @@ class TestSearchPipelineEndToEnd:
         # Memory B (recently recalled) should not be dominated by A (stale popular)
         # Both are relevant — the key is A's 50 recalls don't give it unfair advantage
 
-    async def test_similarity_beats_weight(self, db, tenant_id):
+    async def test_similarity_beats_weight(self, tenant_id):
         """P0-4: highly similar + low weight ranks above moderately similar + high weight."""
         # Use very different content to get clearly different similarity scores
         await _insert_memory(            tenant_id,
@@ -240,7 +240,7 @@ class TestSearchPipelineEndToEnd:
         # The highly similar kafka memory should rank first despite low weight
         assert "kafka" in results[0].content
 
-    async def test_entity_boost_with_stopword_filtering(self, db, tenant_id):
+    async def test_entity_boost_with_stopword_filtering(self, tenant_id):
         """P0-1 + entity boost: stopwords don't pollute entity matching."""
         # Create entity
         entity = await _insert_entity(tenant_id, "kafka cluster")
@@ -264,7 +264,7 @@ class TestSearchPipelineEndToEnd:
         assert len(results) >= 1
         assert "kafka" in results[0].content
 
-    async def test_search_with_all_fixes_combined(self, db, tenant_id):
+    async def test_search_with_all_fixes_combined(self, tenant_id):
         """Smoke test: all four P0 fixes working together."""
         now = datetime.now(timezone.utc)
 
@@ -371,7 +371,7 @@ class TestConflictedExactMatchSurfaces:
     query; ``outdated`` (a definitive retraction) stays excluded.
     """
 
-    async def test_conflicted_exact_match_is_surfaced(self, db, tenant_id):
+    async def test_conflicted_exact_match_is_surfaced(self, tenant_id):
         # Distinctive token "zylqx" appears only in the conflicted gold, so the
         # query FTS-matches the gold and nothing else.
         await _insert_memory(            tenant_id,
@@ -394,7 +394,7 @@ class TestConflictedExactMatchSurfaces:
             "conflicted exact-match gold was excluded from results"
         )
 
-    async def test_conflicted_non_match_still_excluded(self, db, tenant_id):
+    async def test_conflicted_non_match_still_excluded(self, tenant_id):
         # A conflicted row that does NOT lexically match the query stays hidden
         # (carve-out is scoped to exact matches, not all conflicted rows).
         await _insert_memory(            tenant_id,
@@ -415,7 +415,7 @@ class TestConflictedExactMatchSurfaces:
             "conflicted non-matching row should remain excluded"
         )
 
-    async def test_outdated_exact_match_still_excluded(self, db, tenant_id):
+    async def test_outdated_exact_match_still_excluded(self, tenant_id):
         # ``outdated`` is a definitive retraction — it stays excluded even on an
         # exact lexical match (only ``conflicted`` gets the carve-out).
         await _insert_memory(            tenant_id,

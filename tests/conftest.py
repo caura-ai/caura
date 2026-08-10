@@ -161,7 +161,12 @@ async def _setup_schema(_engine):
                     text(f"DELETE FROM {table} WHERE tenant_id LIKE 'test-tenant-%'")
                 )
             except Exception:
-                pass  # Best-effort cleanup; per-test rollback is the primary isolation
+                # Best-effort, and it is the PRIMARY isolation for anything
+                # written through the service layer — not a backstop behind the
+                # ``db`` fixture's rollback. Most tests here write via ``sc``,
+                # which commits on its own connections, so that rollback never
+                # sees those rows and this sweep is what removes them.
+                pass
         # memory_entity_links doesn't have tenant_id — clean via memory join
         try:
             await conn.execute(
@@ -360,9 +365,11 @@ from tests._mcp_test_helpers import mcp_env, parse_envelope, strip_latency  # no
 def _reset_hooks():
     """Ensure hooks are wired for integration tests.
 
-    In production, hooks are configured at app startup (lifespan).  Tests that
-    use the ``db`` fixture bypass the app lifespan, so we wire hooks here to
-    guarantee audit logging behaves identically to the running server.
+    In production, hooks are configured at app startup (lifespan). Tests that
+    exercise the services directly bypass that lifespan, so we wire hooks here
+    to guarantee audit logging behaves identically to the running server. This
+    is autouse because that covers nearly every test in this tree, not only the
+    ones holding a ``db`` session.
     """
     from core_api.services.audit_service import log_action
     from core_api.services.hooks import ServiceHooks, configure_hooks, reset_hooks

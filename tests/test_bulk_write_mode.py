@@ -79,7 +79,7 @@ def deferring_deployment(monkeypatch):
 
 
 @pytest.mark.integration
-async def test_strong_item_embeds_inline_when_deployment_defers(db, _engine, deferring_deployment):
+async def test_strong_item_embeds_inline_when_deployment_defers(_engine, deferring_deployment):
     rows = await _write(_item("Strong write embeds on the request path.", write_mode="strong"))
 
     assert await _embedded(_engine, rows[0].id), (
@@ -89,7 +89,7 @@ async def test_strong_item_embeds_inline_when_deployment_defers(db, _engine, def
 
 
 @pytest.mark.integration
-async def test_omitted_write_mode_still_defers(db, _engine, deferring_deployment):
+async def test_omitted_write_mode_still_defers(_engine, deferring_deployment):
     """Control: without the opt-in, nothing about the deferred path changes."""
     rows = await _write(_item("Ordinary write keeps deferring."))
 
@@ -97,7 +97,7 @@ async def test_omitted_write_mode_still_defers(db, _engine, deferring_deployment
 
 
 @pytest.mark.integration
-async def test_mixed_batch_embeds_only_the_strong_item(db, _engine, deferring_deployment):
+async def test_mixed_batch_embeds_only_the_strong_item(_engine, deferring_deployment):
     """The per-item guarantee: one item's opt-in does not leak onto its neighbours."""
     rows = await _write(
         _item("Deferred neighbour one."),
@@ -112,7 +112,7 @@ async def test_mixed_batch_embeds_only_the_strong_item(db, _engine, deferring_de
 
 
 @pytest.mark.integration
-async def test_unknown_write_mode_behaves_as_fast(db, _engine, deferring_deployment):
+async def test_unknown_write_mode_behaves_as_fast(_engine, deferring_deployment):
     """An unrecognised value must degrade, not 422 the whole batch.
 
     ``BulkMemoryItem`` deliberately avoids schema constraints that reject every
@@ -128,7 +128,7 @@ async def test_unknown_write_mode_behaves_as_fast(db, _engine, deferring_deploym
 
 
 @pytest.mark.integration
-async def test_inline_deployment_embeds_everything_regardless(db, _engine):
+async def test_inline_deployment_embeds_everything_regardless(_engine):
     """On a deployment that embeds inline, ``write_mode`` changes nothing."""
     assert settings.inline_embedding, "local default is expected to embed inline"
     rows = await _write(_item("No opt-in here."), _item("Opted in.", write_mode="strong"))
@@ -137,7 +137,7 @@ async def test_inline_deployment_embeds_everything_regardless(db, _engine):
 
 
 @pytest.mark.integration
-async def test_strong_embed_failure_does_not_fail_the_batch(db, _engine, deferring_deployment):
+async def test_strong_embed_failure_does_not_fail_the_batch(_engine, deferring_deployment):
     """A failed opt-in embed falls back to the backfill instead of 5xx-ing.
 
     These rows were going to defer anyway, so one item's opportunistic inline
@@ -157,7 +157,7 @@ async def test_strong_embed_failure_does_not_fail_the_batch(db, _engine, deferri
 
 
 @pytest.mark.integration
-async def test_inline_deployment_still_fails_loudly_on_embed_error(db):
+async def test_inline_deployment_still_fails_loudly_on_embed_error():
     """The pre-existing contract for inline deployments is unchanged.
 
     There the embed is not opportunistic — it is how every row gets its vector —

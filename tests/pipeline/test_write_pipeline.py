@@ -306,7 +306,7 @@ async def test_merge_enrichment_leaves_non_deprecated_caller_type_intact():
 
 
 @pytest.mark.asyncio
-async def test_pipeline_path_creates_memory(db):
+async def test_pipeline_path_creates_memory():
     """Pipeline path creates a memory and returns valid MemoryOut."""
     from core_api.services import memory_service
 
@@ -329,7 +329,7 @@ async def test_pipeline_path_creates_memory(db):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_emits_memory_write_latency_log(db, caplog):
+async def test_pipeline_emits_memory_write_latency_log(caplog):
     """CAURA-682 Phase 1: write pipeline emits ``memory_write_latency``
     structured log with per-phase timings + tenant_id at INFO level.
 
@@ -393,7 +393,7 @@ async def test_pipeline_emits_memory_write_latency_log(db, caplog):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_emits_latency_log_on_pipeline_failure(db, caplog):
+async def test_pipeline_emits_latency_log_on_pipeline_failure(caplog):
     """CAURA-682 Phase 1: timeouts (the actual noisy-neighbor failure mode)
     must also produce a ``memory_write_latency`` log with ``success=False``
     and whatever partial timings landed before the exception.
@@ -451,7 +451,7 @@ async def test_pipeline_emits_latency_log_on_pipeline_failure(db, caplog):
 
 
 @pytest.mark.asyncio
-async def test_legacy_path_creates_memory(db):
+async def test_legacy_path_creates_memory():
     """Legacy path creates a memory and returns valid MemoryOut (baseline)."""
     from core_api.services import memory_service
 
@@ -500,7 +500,7 @@ async def test_pipeline_extract_only(db):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_hash_dedup(db):
+async def test_pipeline_hash_dedup():
     """Pipeline path raises 409 on duplicate content_hash."""
     from fastapi import HTTPException
     from core_api.services import memory_service
@@ -524,7 +524,7 @@ async def test_pipeline_hash_dedup(db):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_quality_gate(db):
+async def test_pipeline_quality_gate():
     """Pipeline path rejects short content with 422."""
     from fastapi import HTTPException
     from core_api.services import memory_service
@@ -543,7 +543,7 @@ async def test_pipeline_quality_gate(db):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_equivalence(db):
+async def test_pipeline_equivalence():
     """Pipeline and legacy paths produce equivalent MemoryOut fields."""
     from core_api.services import memory_service
     from core_api.services.memory_service import (
@@ -776,7 +776,7 @@ async def test_schedule_background_tasks_strong_mode_fires_entity_and_contradict
 
 
 @pytest.mark.asyncio
-async def test_fast_mode_creates_memory_with_pending_enrichment(db):
+async def test_fast_mode_creates_memory_with_pending_enrichment():
     """Fast mode creates memory with enrichment_pending=True and write_mode=fast."""
     from core_api.services import memory_service
 
@@ -801,7 +801,7 @@ async def test_fast_mode_creates_memory_with_pending_enrichment(db):
 
 
 @pytest.mark.asyncio
-async def test_strong_mode_creates_memory_same_as_today(db):
+async def test_strong_mode_creates_memory_same_as_today():
     """Strong mode produces same result as today's pipeline (full enrichment inline)."""
     from core_api.services import memory_service
 
@@ -826,7 +826,7 @@ async def test_strong_mode_creates_memory_same_as_today(db):
 
 
 @pytest.mark.asyncio
-async def test_auto_mode_decision_type_routes_to_strong(db):
+async def test_auto_mode_decision_type_routes_to_strong():
     """Auto mode with memory_type=decision routes to strong path."""
     from core_api.services import memory_service
 

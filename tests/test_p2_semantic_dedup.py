@@ -24,12 +24,17 @@ import hashlib
 import random
 import statistics
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import delete, func, select
 
+from common.embedding import fake_embedding
+from common.models.memory import Memory
 from core_api.constants import (
     CONTRADICTION_SIMILARITY_THRESHOLD,
     CRYSTALLIZER_DEDUP_THRESHOLD,
@@ -37,7 +42,8 @@ from core_api.constants import (
     SEMANTIC_DEDUP_THRESHOLD,
     VECTOR_DIM,
 )
-from common.embedding import fake_embedding
+from core_api.services.memory_service import _find_semantic_duplicate
+from core_storage_api.services import postgres_service as ps
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +96,6 @@ class TestFindSemanticDuplicateMocked:
 
     async def test_returns_none_when_no_match(self):
         from unittest.mock import patch
-        from core_api.services.memory_service import _find_semantic_duplicate
 
         mock_sc = AsyncMock()
         mock_sc.find_semantic_duplicate = AsyncMock(return_value=None)
@@ -102,7 +107,6 @@ class TestFindSemanticDuplicateMocked:
 
     async def test_returns_memory_when_match_found(self):
         from unittest.mock import patch
-        from core_api.services.memory_service import _find_semantic_duplicate
 
         mock_memory = {"id": str(uuid4()), "content": "test"}
         mock_sc = AsyncMock()
@@ -116,7 +120,6 @@ class TestFindSemanticDuplicateMocked:
     async def test_passes_fleet_id_filter(self):
         """Verify that fleet_id is passed to storage client."""
         from unittest.mock import patch
-        from core_api.services.memory_service import _find_semantic_duplicate
 
         mock_sc = AsyncMock()
         mock_sc.find_semantic_duplicate = AsyncMock(return_value=None)
@@ -131,7 +134,6 @@ class TestFindSemanticDuplicateMocked:
     async def test_passes_exclude_id(self):
         """Verify that exclude_id is passed to storage client."""
         from unittest.mock import patch
-        from core_api.services.memory_service import _find_semantic_duplicate
 
         mock_sc = AsyncMock()
         mock_sc.find_semantic_duplicate = AsyncMock(return_value=None)
@@ -206,7 +208,7 @@ class TestSemanticDedupIntegration:
     """End-to-end semantic dedup with real DB."""
 
     async def _insert_memory(
-        self, db, tenant_id, content, *,
+        self, tenant_id, content, *,
         embedding=None, fleet_id=None, status="active",
         agent_id="test-agent", memory_type="fact", deleted_at=None,
     ):
@@ -232,12 +234,10 @@ class TestSemanticDedupIntegration:
 
     # -- Regression: exact duplicate still caught --
 
-    async def test_exact_duplicate_still_rejected(self, db, tenant_id):
+    async def test_exact_duplicate_still_rejected(self, tenant_id):
         """Hash-based exact dedup must still work (regression)."""
-        from core_api.services.memory_service import _find_semantic_duplicate
-
         content = "Alice prefers dark mode"
-        await self._insert_memory(db, tenant_id, content)
+        await self._insert_memory(tenant_id, content)
 
         # Exact same embedding should be found
         emb = fake_embedding(content)
@@ -246,12 +246,10 @@ class TestSemanticDedupIntegration:
 
     # -- Near-duplicate caught --
 
-    async def test_near_duplicate_caught(self, db, tenant_id):
+    async def test_near_duplicate_caught(self, tenant_id):
         """Insert memory, then try close embedding with different content → found."""
-        from core_api.services.memory_service import _find_semantic_duplicate
-
         base_content = "The quarterly report shows 15% revenue growth"
-        await self._insert_memory(db, tenant_id, base_content)
+        await self._insert_memory(tenant_id, base_content)
 
         # Close embedding (noise-perturbed) should still be caught
         emb = close_embedding(base_content)
@@ -260,11 +258,9 @@ class TestSemanticDedupIntegration:
 
     # -- Below-threshold passes --
 
-    async def test_below_threshold_passes(self, db, tenant_id):
+    async def test_below_threshold_passes(self, tenant_id):
         """Completely different content should not be flagged."""
-        from core_api.services.memory_service import _find_semantic_duplicate
-
-        await self._insert_memory(db, tenant_id, "Alice prefers dark mode")
+        await self._insert_memory(tenant_id, "Alice prefers dark mode")
 
         emb = fake_embedding("The server is running on port 8080")
         dup = await _find_semantic_duplicate(tenant_id, None, emb)
@@ -272,14 +268,12 @@ class TestSemanticDedupIntegration:
 
     # -- Fleet isolation --
 
-    async def test_different_fleet_not_blocked(self, db, tenant_id):
+    async def test_different_fleet_not_blocked(self, tenant_id):
         """Same embedding in fleet-a should not block fleet-b."""
-        from core_api.services.memory_service import _find_semantic_duplicate
-
         content = "Bob likes tea"
         emb = fake_embedding(content)
 
-        await self._insert_memory(db, tenant_id, content, fleet_id="fleet-a")
+        await self._insert_memory(tenant_id, content, fleet_id="fleet-a")
 
         # Search in fleet-b should find nothing
         dup = await _find_semantic_duplicate(tenant_id, "fleet-b", emb)
@@ -287,13 +281,11 @@ class TestSemanticDedupIntegration:
 
     # -- Deleted memory doesn't block --
 
-    async def test_deleted_memory_doesnt_block(self, db, tenant_id):
+    async def test_deleted_memory_doesnt_block(self, tenant_id):
         """Soft-deleted memory should not be considered a duplicate."""
-        from core_api.services.memory_service import _find_semantic_duplicate
-
         content = "Important meeting tomorrow"
         await self._insert_memory(
-            db, tenant_id, content,
+            tenant_id, content,
             deleted_at=datetime.now(timezone.utc),
         )
 
@@ -303,12 +295,10 @@ class TestSemanticDedupIntegration:
 
     # -- Archived memory doesn't block --
 
-    async def test_archived_memory_doesnt_block(self, db, tenant_id):
+    async def test_archived_memory_doesnt_block(self, tenant_id):
         """Archived status is not in (active, confirmed, pending) → ignored."""
-        from core_api.services.memory_service import _find_semantic_duplicate
-
         content = "Old project plan from last year"
-        await self._insert_memory(db, tenant_id, content, status="archived")
+        await self._insert_memory(tenant_id, content, status="archived")
 
         emb = fake_embedding(content)
         dup = await _find_semantic_duplicate(tenant_id, None, emb)
@@ -316,12 +306,10 @@ class TestSemanticDedupIntegration:
 
     # -- 409 response includes memory ID --
 
-    async def test_409_includes_memory_id(self, db, tenant_id):
+    async def test_409_includes_memory_id(self, tenant_id):
         """The returned duplicate should have a valid UUID."""
-        from core_api.services.memory_service import _find_semantic_duplicate
-
         content = "Deployment scheduled for Friday"
-        mem = await self._insert_memory(db, tenant_id, content)
+        mem = await self._insert_memory(tenant_id, content)
 
         emb = fake_embedding(content)
         dup = await _find_semantic_duplicate(tenant_id, None, emb)
@@ -330,16 +318,14 @@ class TestSemanticDedupIntegration:
 
     # -- Update path: near-duplicate of another → blocked --
 
-    async def test_update_near_duplicate_blocked(self, db, tenant_id):
+    async def test_update_near_duplicate_blocked(self, tenant_id):
         """Updating content to match another memory should be caught."""
-        from core_api.services.memory_service import _find_semantic_duplicate
-
         existing_content = "API latency is under 50ms"
-        await self._insert_memory(db, tenant_id, existing_content)
+        await self._insert_memory(tenant_id, existing_content)
 
         # Second memory being "updated" to similar content
         updating_mem = await self._insert_memory(
-            db, tenant_id, "Something completely different",
+            tenant_id, "Something completely different",
         )
 
         emb = fake_embedding(existing_content)
@@ -349,12 +335,10 @@ class TestSemanticDedupIntegration:
 
     # -- Update path: own content doesn't false-positive --
 
-    async def test_update_own_content_not_blocked(self, db, tenant_id):
+    async def test_update_own_content_not_blocked(self, tenant_id):
         """Minor edit to own content should not false-positive (exclude_id)."""
-        from core_api.services.memory_service import _find_semantic_duplicate
-
         content = "Database migration completed successfully"
-        mem = await self._insert_memory(db, tenant_id, content)
+        mem = await self._insert_memory(tenant_id, content)
 
         # Same embedding but excluding self
         emb = fake_embedding(content)
@@ -367,75 +351,111 @@ class TestSemanticDedupIntegration:
 # Benchmark tests
 # ---------------------------------------------------------------------------
 
-@pytest.mark.benchmark
-class TestSemanticDedupBenchmarks:
-    """Measure _find_semantic_duplicate query latency."""
+_BENCH_ITERATIONS = 20
 
-    async def _seed_memories(self, db, tenant_id, count):
-        """Insert N memories with unique content and embeddings."""
-        from common.models.memory import Memory
 
+@asynccontextmanager
+async def _committed_corpus(count: int) -> AsyncIterator[str]:
+    """Yield a fresh tenant holding exactly ``count`` committed memories.
+
+    Committed, because the query under test reaches Postgres through the service
+    layer on its own session — rows sitting in an uncommitted transaction (what
+    the ``db`` fixture gives you) are invisible to it.
+
+    Its own tenant, because the ``tenant_id`` fixture is the run's SHARED tenant
+    (see its docstring): its row count is a running total of whatever every
+    other test left behind, not ``count``.
+
+    Both effects are silent, which is why the caller asserts the corpus size
+    instead of assuming it.
+
+    Keeps the ``test-tenant-`` prefix so session teardown sweeps the rows even
+    if the explicit cleanup below does not run.
+    """
+    tenant = f"test-tenant-dedupbench-{uuid4().hex[:8]}"
+    async with ps.get_session() as session:
         for i in range(count):
             content = f"Benchmark memory number {i} with unique content {uuid4().hex}"
-            emb = fake_embedding(content)
-            ch = _content_hash(tenant_id, None, content)
-            db.add(Memory(
-                tenant_id=tenant_id,
-                fleet_id=None,
-                agent_id="bench-agent",
-                memory_type="fact",
-                content=content,
-                weight=0.5,
-                embedding=emb,
-                content_hash=ch,
-                status="active",
-            ))
-        await db.flush()
+            session.add(
+                Memory(
+                    tenant_id=tenant,
+                    fleet_id=None,
+                    agent_id="bench-agent",
+                    memory_type="fact",
+                    content=content,
+                    weight=0.5,
+                    embedding=fake_embedding(content),
+                    content_hash=_content_hash(tenant, None, content),
+                    status="active",
+                )
+            )
+    try:
+        yield tenant
+    finally:
+        async with ps.get_session() as session:
+            await session.execute(delete(Memory).where(Memory.tenant_id == tenant))
 
-    async def test_latency_100_memories(self, db, tenant_id):
-        """Query latency with 100 memories should be < 10ms mean."""
-        from core_api.services.memory_service import _find_semantic_duplicate
 
-        await self._seed_memories(db, tenant_id, 100)
+async def _visible_count(tenant: str) -> int:
+    """Rows visible to the same session accessor the query under test uses.
 
-        emb = fake_embedding("A completely new memory for benchmark")
-        times = []
-        for _ in range(20):
-            t0 = time.perf_counter()
-            await _find_semantic_duplicate(tenant_id, None, emb)
-            times.append((time.perf_counter() - t0) * 1000)
+    ``get_session``, not ``get_read_session``: ``memory_find_semantic_duplicate``
+    runs in the writer session, and in tests both factories happen to be bound
+    to the one engine — so reading through the reader would agree only by
+    accident, and would stop being evidence the day a replica is configured.
+    """
+    async with ps.get_session() as session:
+        return (
+            await session.execute(
+                select(func.count())
+                .select_from(Memory)
+                .where(Memory.tenant_id == tenant, Memory.deleted_at.is_(None))
+            )
+        ).scalar_one()
 
-        mean_ms = statistics.mean(times)
-        p50_ms = statistics.median(times)
-        p99_ms = sorted(times)[int(len(times) * 0.99)]
+
+async def _measure(tenant: str) -> tuple[float, float, float]:
+    """``(mean, median, max)`` ms over ``_BENCH_ITERATIONS`` dedup lookups.
+
+    ``max``, not "p99": at 20 samples the 99th-percentile index is the last
+    element, so calling it p99 dressed up the slowest single run as a tail
+    statistic.
+    """
+    emb = fake_embedding("A completely new memory for benchmark")
+    times = []
+    for _ in range(_BENCH_ITERATIONS):
+        t0 = time.perf_counter()
+        await _find_semantic_duplicate(tenant, None, emb)
+        times.append((time.perf_counter() - t0) * 1000)
+    return statistics.mean(times), statistics.median(times), max(times)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize(
+    ("count", "budget_ms"),
+    [(100, 10), (1000, 50)],
+    ids=["100_memories", "1000_memories"],
+)
+async def test_semantic_dedup_query_latency(count: int, budget_ms: float) -> None:
+    """Dedup query latency against a corpus of the stated size.
+
+    The corpus assertion is load-bearing, not a sanity check: an empty table
+    comfortably meets both budgets, so a corpus the query cannot see would pass
+    silently while measuring nothing.
+    """
+    async with _committed_corpus(count) as tenant:
+        visible = await _visible_count(tenant)
+        assert visible == count, (
+            f"benchmark corpus is not visible to the query under test: expected "
+            f"{count} rows under {tenant}, the query's own session sees {visible}. "
+            f"Measuring latency now would report the wrong corpus size."
+        )
+
+        mean_ms, median_ms, max_ms = await _measure(tenant)
 
         print(f"\n{'─' * 60}")
-        print("SEMANTIC DEDUP QUERY (100 memories, 20 iterations)")
-        print(f"  mean={mean_ms:.2f}ms  p50={p50_ms:.2f}ms  p99={p99_ms:.2f}ms")
+        print(f"SEMANTIC DEDUP QUERY ({count} memories, {_BENCH_ITERATIONS} iterations)")
+        print(f"  mean={mean_ms:.2f}ms  median={median_ms:.2f}ms  max={max_ms:.2f}ms")
         print(f"{'─' * 60}")
 
-        assert mean_ms < 10, f"Too slow with 100 memories: {mean_ms:.1f}ms"
-
-    async def test_latency_1000_memories(self, db, tenant_id):
-        """Query latency with 1000 memories should be < 50ms mean."""
-        from core_api.services.memory_service import _find_semantic_duplicate
-
-        await self._seed_memories(db, tenant_id, 1000)
-
-        emb = fake_embedding("A completely new memory for benchmark")
-        times = []
-        for _ in range(20):
-            t0 = time.perf_counter()
-            await _find_semantic_duplicate(tenant_id, None, emb)
-            times.append((time.perf_counter() - t0) * 1000)
-
-        mean_ms = statistics.mean(times)
-        p50_ms = statistics.median(times)
-        p99_ms = sorted(times)[int(len(times) * 0.99)]
-
-        print(f"\n{'─' * 60}")
-        print("SEMANTIC DEDUP QUERY (1000 memories, 20 iterations)")
-        print(f"  mean={mean_ms:.2f}ms  p50={p50_ms:.2f}ms  p99={p99_ms:.2f}ms")
-        print(f"{'─' * 60}")
-
-        assert mean_ms < 50, f"Too slow with 1000 memories: {mean_ms:.1f}ms"
+        assert mean_ms < budget_ms, f"Too slow with {count} memories: {mean_ms:.1f}ms"

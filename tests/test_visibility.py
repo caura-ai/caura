@@ -234,7 +234,6 @@ class TestVisibilityFiltering:
 
     async def test_private_invisible_to_other_agents(
         self,
-        db,
         sc,
         tenant_id,
         fleet_id,
@@ -260,7 +259,6 @@ class TestVisibilityFiltering:
 
     async def test_private_visible_to_owner(
         self,
-        db,
         sc,
         tenant_id,
         fleet_id,
@@ -286,7 +284,6 @@ class TestVisibilityFiltering:
 
     async def test_fleet_visible_in_same_fleet(
         self,
-        db,
         sc,
         tenant_id,
         fleet_id,
@@ -311,7 +308,6 @@ class TestVisibilityFiltering:
 
     async def test_fleet_invisible_in_other_fleet(
         self,
-        db,
         sc,
         tenant_id,
     ):
@@ -335,7 +331,6 @@ class TestVisibilityFiltering:
 
     async def test_tenant_visible_across_fleets(
         self,
-        db,
         sc,
         tenant_id,
     ):
@@ -359,7 +354,6 @@ class TestVisibilityFiltering:
 
     async def test_tenant_visible_in_tenant_wide_search(
         self,
-        db,
         sc,
         tenant_id,
     ):
@@ -382,7 +376,6 @@ class TestVisibilityFiltering:
 
     async def test_multi_fleet_search(
         self,
-        db,
         sc,
         tenant_id,
     ):
@@ -415,7 +408,6 @@ class TestVisibilityFiltering:
 
     async def test_multi_fleet_excludes_other_fleets(
         self,
-        db,
         sc,
         tenant_id,
     ):
@@ -474,7 +466,6 @@ class TestVisibilityFiltering:
 
     async def test_admin_sees_team_and_org_not_agent_scoped(
         self,
-        db,
         sc,
         tenant_id,
         fleet_id,
@@ -548,7 +539,6 @@ class TestBackwardCompatibility:
 
     async def test_search_without_visibility_params_unchanged(
         self,
-        db,
         sc,
         tenant_id,
         fleet_id,
@@ -610,7 +600,6 @@ class TestDedupWithVisibility:
 
     async def test_dedup_within_same_visibility(
         self,
-        db,
         tenant_id,
         fleet_id,
         agent_id,
@@ -646,7 +635,6 @@ class TestDedupWithVisibility:
     )
     async def test_no_cross_visibility_dedup(
         self,
-        db,
         tenant_id,
         fleet_id,
         agent_id,

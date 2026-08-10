@@ -218,7 +218,7 @@ class TestEntityResolutionIntegration:
     """End-to-end entity resolution against a real database."""
 
     async def _insert_entity(
-        self, db, tenant_id, fleet_id, entity_type, canonical_name, name_embedding=None
+        self, tenant_id, fleet_id, entity_type, canonical_name, name_embedding=None
     ):
         """Helper: insert entity via upsert_entity."""
         from core_api.schemas import EntityUpsert
@@ -235,46 +235,46 @@ class TestEntityResolutionIntegration:
         )
 
     @pytest.mark.asyncio
-    async def test_exact_match_same_entity(self, db, tenant_id, fleet_id):
+    async def test_exact_match_same_entity(self, tenant_id, fleet_id):
         """Insert 'john smith' twice → same entity."""
         emb = fake_embedding("john smith")
         e1 = await self._insert_entity(
-            db, tenant_id, fleet_id, "person", "john smith", emb
+            tenant_id, fleet_id, "person", "john smith", emb
         )
         e2 = await self._insert_entity(
-            db, tenant_id, fleet_id, "person", "john smith", emb
+            tenant_id, fleet_id, "person", "john smith", emb
         )
         assert e1.id == e2.id
 
     @pytest.mark.asyncio
-    async def test_fuzzy_match_similar_name(self, db, tenant_id, fleet_id):
+    async def test_fuzzy_match_similar_name(self, tenant_id, fleet_id):
         """Insert 'john smith', then 'jon smith' with close embedding → same entity."""
         emb1 = fake_embedding("john smith")
         e1 = await self._insert_entity(
-            db, tenant_id, fleet_id, "person", "john smith", emb1
+            tenant_id, fleet_id, "person", "john smith", emb1
         )
 
         # Close embedding simulates what a real model would give for a name variant
         emb2 = close_embedding("john smith", noise=0.001)
         e2 = await self._insert_entity(
-            db, tenant_id, fleet_id, "person", "jon smith", emb2
+            tenant_id, fleet_id, "person", "jon smith", emb2
         )
         assert e1.id == e2.id
 
     @pytest.mark.asyncio
-    async def test_type_guard_prevents_merge(self, db, tenant_id, fleet_id):
+    async def test_type_guard_prevents_merge(self, tenant_id, fleet_id):
         """'john smith' (person) and 'john smith' (technology) → different entities."""
         emb = fake_embedding("john smith")
         e1 = await self._insert_entity(
-            db, tenant_id, fleet_id, "person", "john smith", emb
+            tenant_id, fleet_id, "person", "john smith", emb
         )
         e2 = await self._insert_entity(
-            db, tenant_id, fleet_id, "technology", "john smith", emb
+            tenant_id, fleet_id, "technology", "john smith", emb
         )
         assert e1.id != e2.id
 
     @pytest.mark.asyncio
-    async def test_canonical_name_preserves_first_seen(self, db, tenant_id, fleet_id):
+    async def test_canonical_name_preserves_first_seen(self, tenant_id, fleet_id):
         """A5a: insert 'john smith', then 'dr. john smith' → merged via fuzzy
         match; canonical stays as 'john smith' (first-seen wins). The
         previous behaviour promoted the longer name as canonical, which
@@ -283,12 +283,12 @@ class TestEntityResolutionIntegration:
         and remains searchable."""
         emb1 = fake_embedding("john smith")
         e1 = await self._insert_entity(
-            db, tenant_id, fleet_id, "person", "john smith", emb1
+            tenant_id, fleet_id, "person", "john smith", emb1
         )
 
         emb2 = close_embedding("john smith", noise=0.001)
         e2 = await self._insert_entity(
-            db, tenant_id, fleet_id, "person", "dr. john smith", emb2
+            tenant_id, fleet_id, "person", "dr. john smith", emb2
         )
 
         assert e1.id == e2.id
@@ -298,16 +298,16 @@ class TestEntityResolutionIntegration:
         assert "dr. john smith" in aliases
 
     @pytest.mark.asyncio
-    async def test_distant_names_not_merged(self, db, tenant_id, fleet_id):
+    async def test_distant_names_not_merged(self, tenant_id, fleet_id):
         """'alice smith' and 'bob smith' → different entities."""
         emb1 = fake_embedding("alice smith")
         e1 = await self._insert_entity(
-            db, tenant_id, fleet_id, "person", "alice smith", emb1
+            tenant_id, fleet_id, "person", "alice smith", emb1
         )
 
         emb2 = distant_embedding()
         e2 = await self._insert_entity(
-            db, tenant_id, fleet_id, "person", "bob smith", emb2
+            tenant_id, fleet_id, "person", "bob smith", emb2
         )
         assert e1.id != e2.id
 
@@ -318,15 +318,15 @@ class TestEntityResolutionIntegration:
 
         emb1 = fake_embedding("john smith")
         e1 = await self._insert_entity(
-            db, tenant_id, fleet_id, "person", "john smith", emb1
+            tenant_id, fleet_id, "person", "john smith", emb1
         )
 
         emb2 = close_embedding("john smith", noise=0.001)
-        await self._insert_entity(db, tenant_id, fleet_id, "person", "jon smith", emb2)
+        await self._insert_entity(tenant_id, fleet_id, "person", "jon smith", emb2)
 
         emb3 = close_embedding("john smith", noise=0.0005)
         await self._insert_entity(
-            db, tenant_id, fleet_id, "person", "dr. john smith", emb3
+            tenant_id, fleet_id, "person", "dr. john smith", emb3
         )
 
         # Read entity directly to check aliases

@@ -259,7 +259,7 @@ async def _outcome_memories(tenant_id):
 
 
 @pytest.mark.asyncio
-async def test_evolve_success_increases_weight(db, sc):
+async def test_evolve_success_increases_weight(sc):
     """Report success on a memory → weight increases by SUCCESS_DELTA."""
     from core_api.constants import EVOLVE_SUCCESS_DELTA
 
@@ -281,7 +281,7 @@ async def test_evolve_success_increases_weight(db, sc):
 
 
 @pytest.mark.asyncio
-async def test_evolve_failure_decreases_weight(db, sc):
+async def test_evolve_failure_decreases_weight(sc):
     """Report failure on a memory → weight decreases by FAILURE_DELTA."""
     from core_api.constants import EVOLVE_FAILURE_DELTA
 
@@ -302,7 +302,7 @@ async def test_evolve_failure_decreases_weight(db, sc):
 
 
 @pytest.mark.asyncio
-async def test_evolve_partial_slight_increase(db, sc):
+async def test_evolve_partial_slight_increase(sc):
     """Report partial on a memory → weight increases by PARTIAL_DELTA."""
     from core_api.constants import EVOLVE_PARTIAL_DELTA
 
@@ -322,7 +322,7 @@ async def test_evolve_partial_slight_increase(db, sc):
 
 
 @pytest.mark.asyncio
-async def test_evolve_weight_floor(db, sc):
+async def test_evolve_weight_floor(sc):
     """Weight never goes below EVOLVE_WEIGHT_FLOOR."""
     from core_api.constants import EVOLVE_WEIGHT_FLOOR
 
@@ -340,7 +340,7 @@ async def test_evolve_weight_floor(db, sc):
 
 
 @pytest.mark.asyncio
-async def test_evolve_weight_cap(db, sc):
+async def test_evolve_weight_cap(sc):
     """Weight never goes above EVOLVE_WEIGHT_CAP."""
     from core_api.constants import EVOLVE_WEIGHT_CAP
 
@@ -358,7 +358,7 @@ async def test_evolve_weight_cap(db, sc):
 
 
 @pytest.mark.asyncio
-async def test_evolve_nonexistent_memory_skipped(db):
+async def test_evolve_nonexistent_memory_skipped():
     """Non-existent memory UUID is skipped gracefully."""
     tag = _uid()
     tenant_id = f"test-tenant-{tag}"
@@ -372,7 +372,7 @@ async def test_evolve_nonexistent_memory_skipped(db):
 
 
 @pytest.mark.asyncio
-async def test_evolve_invalid_uuid_skipped(db):
+async def test_evolve_invalid_uuid_skipped():
     """Invalid UUID string is skipped gracefully."""
     tag = _uid()
     tenant_id = f"test-tenant-{tag}"
@@ -385,7 +385,7 @@ async def test_evolve_invalid_uuid_skipped(db):
 
 
 @pytest.mark.asyncio
-async def test_evolve_truncates_related_ids_above_cap(db, caplog):
+async def test_evolve_truncates_related_ids_above_cap(caplog):
     """related_ids longer than EVOLVE_MAX_RELATED_IDS are truncated with a warning."""
     import logging
 
