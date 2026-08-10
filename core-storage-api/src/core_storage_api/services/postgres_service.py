@@ -251,6 +251,47 @@ def _entity_uf_union(parent: dict[UUID, UUID], rank: dict[UUID, int], a: UUID, b
 _FTS_ONLY_RESERVED_CANDIDATES = 3
 
 
+def _saturate_rank(scaled_rank: Any) -> Any:
+    """Map a scaled ``ts_rank_cd`` onto ``[0, 1)``, naming the rank ONCE.
+
+    ``x / (1 + x)`` is the obvious way to write this and is what shipped until
+    now. It is also a performance bug: ``x`` is not a bound value but the
+    ``ts_rank_cd(search_vector, plainto_tsquery(...))`` expression itself, and
+    SQLAlchemy inlines an expression at every site that names it, so writing it
+    twice makes Postgres evaluate the ranking function twice. The
+    algebraically identical
+
+        x / (1 + x)  ==  1 - 1/(1 + x)
+
+    names ``x`` once, halving the renders contributed by this factor.
+
+    WHAT THIS DOES AND DOES NOT BUY. Compiling the real ``memory_scored_search``
+    statement, ``ts_rank_cd(`` goes from **18 renders to 9** (and
+    ``plainto_tsquery(`` 27 -> 18). NOT to 1: ``similarity`` names ``fts_score``
+    in both branches of its CASE, ``score`` inlines ``similarity``, and both are
+    output columns of the scored CTE — so four live references remain, times the
+    UNION'd reserved branch. Getting to 1 means projecting ``similarity`` and
+    ``vec_sim`` once in an inner derived table and computing ``score`` over
+    that; it also needs a real optimisation barrier, because with references
+    still live Postgres flattens a plain subquery and re-substitutes. That is a
+    separate change to the hot path, with its own plan-shape review.
+
+    Measured in isolation on a 31,446-memory corpus with genuine multi-term
+    matches (scoring 2 renders vs 1, ordered and limited): **32-39% faster**
+    across queries matching 1,875-11,505 rows — 92.0ms -> 56.4ms at 11,505,
+    medians of 7 runs. Read that as the gain on the FTS scoring component
+    alone; the full search also pays six pgvector distance computations per
+    row, so end-to-end it is smaller.
+
+    NOT bit-identical, and the difference is real but negligible: the two forms
+    disagree by at most one ULP (measured max ``|a - b|`` = 5.55e-17 over every
+    matching row of that corpus). That is ~4 orders of magnitude below the
+    tightest tolerance anything here asserts (1e-12) and far below any score
+    gap that could reorder results.
+    """
+    return 1.0 - 1.0 / (1.0 + scaled_rank)
+
+
 # Cached at import time so the per-row column-name filter on the bulk
 # write hot path (100 items x ~25 columns) doesn't pay the cost of
 # walking ``Memory.__table__.columns`` and ``__mapper__.column_attrs``
@@ -1178,7 +1219,7 @@ class PostgresService:
         # the two services, and the safe direction for the gap is "unchanged".
         _fts_rank_scale = float(sp.get("fts_rank_scale", 1.0) or 1.0)
         scaled_keyword_rank = _fts_rank_scale * raw_keyword_rank
-        fts_score = (scaled_keyword_rank / (1.0 + scaled_keyword_rank)).label("fts_score")
+        fts_score = _saturate_rank(scaled_keyword_rank).label("fts_score")
 
         # CAURA-679: NULL-embedding rows fall back to `fts_score` alone
         # rather than the `(1 - w) * 0 + w * fts_score` haircut that

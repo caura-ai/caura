@@ -534,14 +534,15 @@ async def _rank_and_score(
     Reads both out of one statement with the production expression rather than
     recomputing in Python — what ``ts_rank_cd`` feeds the saturating map is the
     thing under test, so a Python reimplementation would test the wrong function.
-    Binds the scaled rank once via a subquery, mirroring how the production
-    expression reuses it rather than re-evaluating.
+    The saturating half is kept in step with ``saturate_rank``'s single-render
+    form; the subquery is what keeps ``ts_rank_cd`` itself to one evaluation
+    here, since this helper needs the raw rank as a separate column.
     """
     async with get_session() as session:
         row = (
             await session.execute(
                 text(
-                    "SELECT r, (:k * r) / (1 + :k * r) AS s FROM ("
+                    "SELECT r, 1 - 1 / (1 + :k * r) AS s FROM ("
                     "  SELECT ts_rank_cd(to_tsvector('english', :t || ' ' || :c),"
                     "                    plainto_tsquery('english', :q)) AS r"
                     ") t"
