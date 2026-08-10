@@ -13,6 +13,11 @@
 # entries emitted four near-identical group PRs every week.
 # Mirrors the caura-memclaw-enterprise grouping strategy.
 #
+# No auto-merge workflow here. The minor/patch carve-out was revoked 2026-08-09, and the
+# `*-minor-patch` group names below no longer feed one — every Dependabot PR merges by hand
+# under the normal review gate. The sibling repos' `dependabot-automerge.yml` now only FLAGS
+# a PR as CI-verified; do not port it back here without a new explicit decision.
+#
 # NO entry here sets `versioning-strategy`, and that applies to all of them:
 #   * `increase-if-necessary` is IGNORED for `uv` — verified against a live run on
 #     2026-08-10 (#740, reverted), which still raised floors for releases the ranges
