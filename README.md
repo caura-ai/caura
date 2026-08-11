@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2Fcaura-ai%2Fcaura-memclaw.svg)](https://mcptoplist.com/server/glama%2Fcaura-ai%2Fcaura-memclaw)
+
 <p align="center">
   <img src="static/images/memCLAW_logo_dark.png" alt="MemClaw" width="420" />
 </p>
