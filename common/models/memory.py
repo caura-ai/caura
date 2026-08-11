@@ -106,6 +106,17 @@ class Memory(Base):
         ),
         Index("ix_memories_valid_range", "ts_valid_start", "ts_valid_end"),
         Index("ix_memories_subject_entity", "subject_entity_id"),
+        # For DELETEs, not reads — grep will find no query using it. This is the
+        # referencing side of a SET NULL self-FK, which PostgreSQL enforces once
+        # per deleted parent row. Partial because the RI check only ever looks
+        # for a non-NULL match, and almost every row here is NULL (232 kB -> 16 kB).
+        # Created CONCURRENTLY in migration 035, which carries the measurements;
+        # declared here so reflection / autogen round-trip against the live schema.
+        Index(
+            "ix_memories_supersedes_id",
+            "supersedes_id",
+            postgresql_where=text("supersedes_id IS NOT NULL"),
+        ),
         Index("ix_memories_recall_count", "recall_count"),
         Index("ix_memories_tenant_fleet", "tenant_id", "fleet_id"),
         # Backs the cursor-paginated list path (``list_by_filters`` +

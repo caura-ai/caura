@@ -664,7 +664,7 @@ class TestMigrationChain:
     def test_single_head(self):
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"034"}, f"Expected single head '034', got {sorted(heads)}"
+        assert heads == {"035"}, f"Expected single head '035', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -694,6 +694,8 @@ class TestMigrationChain:
         assert chain.get("033") == "032", "033 must follow 032"
         # 034: title into memories.search_vector, weighted A over content B
         assert chain.get("034") == "033", "034 must follow 033"
+        # 035: index the FK columns referencing memories.id (bulk-delete cost)
+        assert chain.get("035") == "034", "035 must follow 034"
 
     def test_no_plain_create_index_on_large_tables(self):
         """Indexes on large, pre-existing tables MUST be built ``CONCURRENTLY``
@@ -749,6 +751,50 @@ class TestMigrationChain:
             "storage-writer boots on 2026-06-16). Use CREATE INDEX CONCURRENTLY in "
             "an op.get_context().autocommit_block() — see migration 007 / 026. "
             f"Violations: {'; '.join(violations)}"
+        )
+
+    def test_every_fk_referencing_column_is_index_leading(self):
+        """Every FK's referencing column(s) must be usable as an index prefix.
+
+        PostgreSQL enforces a foreign key from the REFERENCING side once per
+        deleted parent row, so an unindexed referencing column turns each delete
+        into a full scan of that table — across ALL tenants, since the scan is
+        not tenant-scoped. Migration 035 landed after this cost 15.3 s of a
+        15.5 s bulk delete (98.7%) on one unindexed self-FK.
+
+        Declaration-level check, so it catches a new FK added without an index
+        at PR time. It cannot catch an index declared here but never migrated —
+        the CONCURRENTLY guard above and the chain tests cover the migration
+        side.
+        """
+        import common.models  # noqa: F401 — registers every mapper on Base
+        from common.models.base import Base
+
+        def prefixes(table):
+            """Column lists some btree on ``table`` can serve as a prefix of."""
+            out = []
+            if len(table.primary_key.columns):
+                out.append([c.name for c in table.primary_key.columns])
+            for ix in table.indexes:
+                # getattr for expression indexes (e.g. func.coalesce): a SQL
+                # expression must not be mistaken for a column of that name.
+                out.append([getattr(e, "name", None) for e in ix.expressions])
+            return out
+
+        missing = []
+        for table in Base.metadata.sorted_tables:
+            available = prefixes(table)
+            for fk in table.foreign_key_constraints:
+                cols = [c.name for c in fk.columns]
+                if not any(p[: len(cols)] == cols for p in available):
+                    target = next(iter(fk.elements)).target_fullname
+                    missing.append(f"{table.name}({', '.join(cols)}) -> {target}")
+        assert not missing, (
+            "Foreign key(s) whose referencing column is not the leading column of "
+            "any index. Deleting a referenced row will scan the whole referencing "
+            "table once per deleted row — see migration 035 for the measured cost. "
+            "Add an Index(...) here and a CONCURRENTLY index in a migration: "
+            f"{'; '.join(missing)}"
         )
 
 
