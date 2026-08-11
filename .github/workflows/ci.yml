@@ -74,10 +74,13 @@ jobs:
           echo "$VIRTUAL_ENV/bin" >> $GITHUB_PATH
 
       # --- Broker↔cloud API-versioning gate (Gate C / Phase 1, deliverables A+B) ---
-      # core-api/openapi.broker.json is the FROZEN v1 contract for the four
-      # broker-facing gateway endpoints (POST /api/v1/memories/bulk,
-      # POST /api/v1/search, GET /api/v1/health, GET /api/v1/version) that
-      # memclawd calls against Caura cloud. It is a subset of the full ~91-path
+      # core-api/openapi.broker.json is the FROZEN v1 contract for the
+      # broker-facing gateway operations that memclawd calls against Caura
+      # cloud. The authoritative list is BROKER_OPERATIONS in
+      # core-api/scripts/gen_broker_openapi.py — deliberately not duplicated
+      # here, because this comment listed four endpoints while the broker had
+      # grown to eight, and a list in a comment is exactly what goes stale.
+      # It is a subset of the full ~91-path
       # OpenAPI surface, with info normalized to the frozen contract version so
       # it changes ONLY when a broker endpoint's shape changes. Regenerate with
       # `python core-api/scripts/gen_broker_openapi.py` and commit the result;

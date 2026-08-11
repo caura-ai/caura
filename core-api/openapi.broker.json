@@ -757,6 +757,231 @@
         "title": "MemoryType",
         "type": "string"
       },
+      "MemoryUpdate": {
+        "properties": {
+          "content": {
+            "anyOf": [
+              {
+                "maxLength": 10000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          },
+          "entity_links": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/EntityLinkIn"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Links"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "memory_type": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MemoryType"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Memory type. Auto-classified by LLM if omitted. Valid values: fact, episode, decision, preference, task, intention, plan, commitment, action, cancellation."
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          },
+          "metadata_mode": {
+            "anyOf": [
+              {
+                "pattern": "^(merge|replace)$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How to apply ``metadata``: ``merge`` (default when omitted or ``null``) does a top-level JSONB ``||`` merge, preserving keys not present in the patch; ``replace`` overwrites the column wholesale.",
+            "title": "Metadata Mode"
+          },
+          "object_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Value"
+          },
+          "predicate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Predicate"
+          },
+          "source_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Uri"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "pattern": "^(active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted)$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "subject_entity_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Entity Id"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "ts_valid_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ts Valid End"
+          },
+          "ts_valid_start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ts Valid Start"
+          },
+          "visibility": {
+            "anyOf": [
+              {
+                "pattern": "^(scope_agent|scope_team|scope_org)$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visibility"
+          },
+          "weight": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight"
+          }
+        },
+        "title": "MemoryUpdate",
+        "type": "object"
+      },
+      "PaginatedMemoryResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "PaginatedMemoryResponse",
+        "type": "object"
+      },
       "SearchRequest": {
         "properties": {
           "diagnostic": {
@@ -981,6 +1206,283 @@
         ]
       }
     },
+    "/api/v1/memories": {
+      "get": {
+        "description": "List memories with filtering, sorting, and pagination.\n\n**Visibility scoping:** When ``agent_id`` is provided, the caller can see\ntheir own ``scope_agent`` memories plus all ``scope_team``/``scope_org``\nmemories. When ``agent_id`` is omitted, ``scope_agent`` memories are hidden\n(safe default). This means memory types like ``insight`` that are typically\ncreated with agent-scoped visibility will only appear when ``agent_id`` is\npassed.\n\n**Pagination:** Both cursor-based and offset-based pagination are supported.\nCursor pagination (via ``cursor``) is recommended for large datasets and only\nworks with ``sort=created_at&order=desc``. Offset pagination works with any\nsort order.",
+        "operationId": "list_memories_api_v1_memories_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenant_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tenant Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fleet_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fleet Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agent Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "memory_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Memory Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exclude_memory_types",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Exclude Memory Types"
+            }
+          },
+          {
+            "in": "query",
+            "name": "created_after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Created After"
+            }
+          },
+          {
+            "in": "query",
+            "name": "created_before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Created Before"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "visibility",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Visibility"
+            }
+          },
+          {
+            "in": "query",
+            "name": "run_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Run Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "created_at",
+              "pattern": "^(created_at|weight|memory_type|agent_id|status|recall_count|fleet_id|tenant_id|expires_at|deleted_at)$",
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "default": "desc",
+              "pattern": "^(asc|desc)$",
+              "title": "Order",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items per page, 1-500. A value above 500 is rejected with 422 (not silently clamped); page via `cursor`/`offset` for more.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Items per page, 1-500. A value above 500 is rejected with 422 (not silently clamped); page via `cursor`/`offset` for more.",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_deleted",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Deleted",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedMemoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Memories",
+        "tags": [
+          "Memory"
+        ]
+      }
+    },
     "/api/v1/memories/bulk": {
       "post": {
         "description": "Write up to 100 memories with per-attempt idempotency (CAURA-602).\n\nRequired header ``X-Bulk-Attempt-Id`` identifies the *attempt*. A\nretry of the same logical batch reuses the same value; storage's\nper-item unique constraint then converts each row into either\n``created`` or ``duplicate_attempt`` deterministically. The route\nreturns:\n\n- ``200`` when every item resolved as ``created``,\n  ``duplicate_attempt``, or ``duplicate_content``.\n- ``207 Multi-Status`` when at least one item has ``status=\"error\"``\n  (validation, enrichment timeout, missing storage id) AND at least\n  one item succeeded — partial outcomes are explicit, never inferred\n  from a 5xx with side effects.\n- ``200`` when every item is an error too — the request was processed\n  successfully; per-item ``status`` carries the rejection. We\n  deliberately don't reuse 422 here because FastAPI already emits\n  422 for request-body Pydantic validation, and clients that branch\n  on status code alone shouldn't have to disambiguate \"request was\n  malformed\" from \"request parsed and every item was rejected on\n  merit.\"\n- ``504`` when the bulk-only budget burns before storage commits;\n  the response carries no per-item state, so a retry with the same\n  attempt id is the recovery path.\n\nThe pre-existing ``Idempotency-Key`` header still controls\n*response*-level replay; ``X-Bulk-Attempt-Id`` is a separate\ncontract operating one layer down. Both are honoured: the header\ncache short-circuits when the receipt is final, the per-row\nconstraint resolves the slow path when the receipt is missing or\npending.",
@@ -1067,6 +1569,227 @@
           }
         ],
         "summary": "Write Memories Bulk",
+        "tags": [
+          "Memory"
+        ]
+      }
+    },
+    "/api/v1/memories/{memory_id}": {
+      "delete": {
+        "operationId": "delete_memory_api_v1_memories__memory_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Memory Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agent Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Delete Memory",
+        "tags": [
+          "Memory"
+        ]
+      },
+      "get": {
+        "description": "Get a single memory with full details including embedding and entity links.",
+        "operationId": "get_memory_api_v1_memories__memory_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Memory Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Memory",
+        "tags": [
+          "Memory"
+        ]
+      },
+      "patch": {
+        "description": "Update a memory. Only provide fields you want to change.\n\nIf content changes, embedding and entity extraction are re-run automatically.\n\nConcurrency contract (intentional, not a bug):\n\n- Each top-level column is **last-write-wins**. Two concurrent PATCHes that\n  set the same column (e.g. ``title``) will both return 200 and the row\n  will hold whichever update commits second. There is no compare-and-swap\n  and no optimistic-lock token — callers that need that must coordinate\n  externally or use ``If-Match`` semantics layered on top.\n- ``metadata`` defaults to a **JSONB top-level merge** (``||``): keys not\n  present in the patch are preserved, keys present in both patches resolve\n  last-write-wins per key. Pass ``metadata_mode: \"replace\"`` for a full\n  overwrite. Two concurrent PATCHes that each set a distinct metadata key\n  will therefore leave **both keys present** on the row — that is the\n  defined behaviour, not a partial-merge anomaly.",
+        "operationId": "update_memory_endpoint_api_v1_memories__memory_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Memory Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agent Id"
+            }
+          },
+          {
+            "description": "C7: alias for the body field of the same name. Body wins on conflict. When supplied as a query param without a matching ``metadata`` field in the body, returns 422 (same contract as the body-side validator). Provided so SDK callers that thread the toggle through a URL query don't silently get the default merge behaviour.",
+            "in": "query",
+            "name": "metadata_mode",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^(merge|replace)$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "C7: alias for the body field of the same name. Body wins on conflict. When supplied as a query param without a matching ``metadata`` field in the body, returns 422 (same contract as the body-side validator). Provided so SDK callers that thread the toggle through a URL query don't silently get the default merge behaviour.",
+              "title": "Metadata Mode"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Update Memory Endpoint",
         "tags": [
           "Memory"
         ]
