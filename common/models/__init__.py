@@ -13,6 +13,8 @@ from common.models.fleet import FleetCommand, FleetNode
 from common.models.idempotency import IdempotencyResponse
 from common.models.lifecycle_audit import LifecycleAudit
 from common.models.memory import Memory
+from common.models.memory_conflict import MemoryConflict
+from common.models.memory_derivation import MemoryDerivation
 from common.models.skill_factory import ForgeRejectedFingerprint, SessionTrace
 
 __all__ = [
@@ -33,6 +35,8 @@ __all__ = [
     "IdempotencyResponse",
     "LifecycleAudit",
     "Memory",
+    "MemoryConflict",
+    "MemoryDerivation",
     "MemoryEntityLink",
     "Relation",
     "SessionTrace",

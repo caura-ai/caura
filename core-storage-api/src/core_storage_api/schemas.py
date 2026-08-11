@@ -85,6 +85,11 @@ MEMORY_FIELDS: list[str] = [
     "last_recalled_at",
     "last_dedup_checked_at",
     "supersedes_id",
+    # Unified contradiction model (A55) — system-populated (never agent-supplied);
+    # surfaced on read so recall/get/list expose the classification signals.
+    "confidence",
+    "is_inferred",
+    "scope",
 ]
 
 # Same as MEMORY_FIELDS minus the two large columns (a 1536-dim ``embedding``

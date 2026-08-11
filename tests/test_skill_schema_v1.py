@@ -664,7 +664,7 @@ class TestMigrationChain:
     def test_single_head(self):
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"035"}, f"Expected single head '035', got {sorted(heads)}"
+        assert heads == {"036"}, f"Expected single head '036', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -696,6 +696,8 @@ class TestMigrationChain:
         assert chain.get("034") == "033", "034 must follow 033"
         # 035: index the FK columns referencing memories.id (bulk-delete cost)
         assert chain.get("035") == "034", "035 must follow 034"
+        # 036: unified contradiction model (A55) — conflict/derivation tables + columns
+        assert chain.get("036") == "035", "036 must follow 035"
 
     def test_no_plain_create_index_on_large_tables(self):
         """Indexes on large, pre-existing tables MUST be built ``CONCURRENTLY``

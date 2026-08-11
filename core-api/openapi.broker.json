@@ -457,6 +457,17 @@
             "title": "Agent Id",
             "type": "string"
           },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
           "content": {
             "title": "Content",
             "type": "string"
@@ -501,6 +512,11 @@
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "is_inferred": {
+            "default": false,
+            "title": "Is Inferred",
+            "type": "boolean"
           },
           "last_recalled_at": {
             "anyOf": [
@@ -567,6 +583,18 @@
               }
             ],
             "title": "Run Id"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
           },
           "similarity": {
             "anyOf": [

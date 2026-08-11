@@ -18,6 +18,8 @@ if _alembic_cfg.config_file_name is not None:
 
 # Import all models so Base.metadata is populated (required for --autogenerate)
 from common.models.memory import Memory  # noqa: F401
+from common.models.memory_conflict import MemoryConflict  # noqa: F401
+from common.models.memory_derivation import MemoryDerivation  # noqa: F401
 from common.models.entity import Entity, MemoryEntityLink, Relation  # noqa: F401
 from common.models.audit import AuditLog  # noqa: F401
 from common.models.agent import Agent  # noqa: F401

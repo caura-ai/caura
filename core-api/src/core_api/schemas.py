@@ -335,6 +335,13 @@ class MemoryOut(BaseModel):
     # Contradiction tracking
     supersedes_id: UUID | None = None
     superseded_by: list["ContradictionInfo"] | None = None
+    # Unified contradiction model (A55) — system-populated, read-only on the API.
+    # confidence: confidence in this memory's claim (None = unknown/legacy).
+    # is_inferred: True when the system materialised this memory by inference.
+    # scope: structured validity qualifiers (role/task/location).
+    confidence: float | None = None
+    is_inferred: bool = False
+    scope: dict | None = None
     # Usage info (populated on write responses)
     usage: UsageSummary | None = None
 

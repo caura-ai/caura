@@ -2,7 +2,17 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, Text, func, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -81,6 +91,21 @@ class Memory(Base):
     supersedes_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("memories.id", ondelete="SET NULL"),
+    )
+
+    # Unified contradiction model (A55) — see benchmark/A55-schema-design.md.
+    # ``confidence``: confidence in this memory's CLAIM (extraction + assertion),
+    # NULL = unknown/legacy. Guards invariant 5 — weak evidence must not delete
+    # strong. ``is_inferred``: True when the system materialised this memory by
+    # inference (not directly stated), so it never silently overrides an explicit
+    # fact; lineage lives in ``memory_derivations``. ``scope``: structured validity
+    # qualifiers (role/task/location); two memories conflict only if scopes overlap.
+    confidence: Mapped[float | None] = mapped_column(Float)
+    is_inferred: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), nullable=False
+    )
+    scope: Mapped[dict | None] = mapped_column(
+        JSONB, server_default=text("'{}'::jsonb"), nullable=False
     )
 
     __table_args__ = (

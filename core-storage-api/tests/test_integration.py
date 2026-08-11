@@ -146,6 +146,49 @@ class TestMemories:
         assert resp2.status_code == 200
         assert resp2.json()["id"] == memory_id
 
+    async def test_a55_contradiction_fields_round_trip(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """A55 unified-contradiction fields (confidence / is_inferred / scope)
+        persist on write and surface on read via ``MEMORY_FIELDS`` serialization.
+
+        These are system-populated (not agent-supplied in production), but the
+        storage write whitelist is derived from the ORM columns, so a payload
+        carrying them round-trips — which is what read serialization must expose.
+        """
+        payload = {
+            **_memory_payload(tenant_id, fleet_id),
+            "confidence": 0.9,
+            "is_inferred": True,
+            "scope": {"role": "engineer", "location": "us"},
+        }
+        created = (await client.post(f"{PREFIX}/memories", json=payload)).json()
+        assert created["confidence"] == 0.9
+        assert created["is_inferred"] is True
+        assert created["scope"] == {"role": "engineer", "location": "us"}
+
+        fetched = (await client.get(f"{PREFIX}/memories/{created['id']}")).json()
+        assert fetched["confidence"] == 0.9
+        assert fetched["is_inferred"] is True
+        assert fetched["scope"] == {"role": "engineer", "location": "us"}
+
+    async def test_a55_contradiction_fields_default_on_legacy_write(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """A write that omits the A55 fields gets the server defaults on read:
+        ``confidence`` NULL, ``is_inferred`` false, ``scope`` ``{}``."""
+        created = (await client.post(f"{PREFIX}/memories", json=_memory_payload(tenant_id, fleet_id))).json()
+        fetched = (await client.get(f"{PREFIX}/memories/{created['id']}")).json()
+        assert fetched["confidence"] is None
+        assert fetched["is_inferred"] is False
+        assert fetched["scope"] == {}
+
     async def test_update_status_via_patch(
         self,
         client: AsyncClient,

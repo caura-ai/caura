@@ -567,6 +567,18 @@ class TestSqliteBackend:
         assert await backend.get("t2", mid) is None
 
     @pytest.mark.asyncio
+    async def test_a55_fields_present_with_defaults(self, backend):
+        """A55 contradiction fields exist on the SQLite backend read surface
+        with their defaults (confidence NULL, is_inferred 0/false, scope {}),
+        and ``scope`` is JSON-decoded to a dict — parity with Postgres."""
+        mid = await backend.store("t1", "a55 sqlite parity")
+        row = await backend.get("t1", mid)
+        assert row is not None
+        assert row["confidence"] is None
+        assert not row["is_inferred"]
+        assert row["scope"] == {}
+
+    @pytest.mark.asyncio
     async def test_update(self, backend):
         mid = await backend.store("t1", "original")
         await backend.update("t1", mid, {"title": "updated-title"})
