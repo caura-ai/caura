@@ -300,6 +300,61 @@ async def test_merge_enrichment_leaves_non_deprecated_caller_type_intact():
     assert ctx.data["memory_fields"]["memory_type"] == "episode"
 
 
+@pytest.mark.asyncio
+async def test_pipeline_failed_result_surfaces_http_500_not_unbound_local(caplog):
+    """A step that fails WITHOUT raising must surface as a clean 500.
+
+    Distinct from ``test_pipeline_emits_latency_log_on_pipeline_failure``,
+    which covers the path where ``Pipeline.run`` *raises*. When a step
+    raises a plain (non-``HTTPException``) error the runner catches it,
+    records ``FAILED`` and RETURNS — so ``pipeline.run`` completes
+    normally and ``if result.failed`` is the branch that fires instead.
+    That branch was unreachable: an inline ``from fastapi import
+    HTTPException`` deeper in the function made the name function-local,
+    so constructing the exception raised ``UnboundLocalError``. Both
+    symptoms are asserted — the caller got an opaque ``UnboundLocalError``
+    instead of the 500, and because the error fired while evaluating the
+    right-hand side, ``_exc`` stayed ``None`` and the latency log recorded
+    ``success=True`` for a write that had in fact failed.
+    """
+    import logging
+
+    from fastapi import HTTPException
+
+    from core_api.pipeline.runner import Pipeline, PipelineResult
+    from core_api.services.memory_service import _create_memory_pipeline
+
+    async def _failed_result(self, ctx):
+        return PipelineResult(pipeline_name="write", failed=True)
+
+    tenant_config = type(
+        "Cfg", (), {"auto_chunk_enabled": False, "default_write_mode": "fast"}
+    )()
+
+    with (
+        caplog.at_level(logging.INFO, logger="core_api.services.memory_service"),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            AsyncMock(return_value=tenant_config),
+        ),
+        patch.object(Pipeline, "run", _failed_result),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await _create_memory_pipeline(_make_input())
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Memory write pipeline failed unexpectedly"
+
+    latency_records = [
+        r for r in caplog.records if r.getMessage() == "memory_write_latency"
+    ]
+    assert len(latency_records) == 1, (
+        f"expected exactly one memory_write_latency log, got {len(latency_records)}"
+    )
+    # The regression that made failed writes invisible on dashboards.
+    assert latency_records[0].success is False
+
+
 # ---------------------------------------------------------------------------
 # Integration tests (require PostgreSQL)
 # ---------------------------------------------------------------------------

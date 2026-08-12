@@ -287,8 +287,6 @@ async def _create_memory_pipeline(data: MemoryCreate) -> MemoryOut:
         from core_api.config import settings as _stm_settings
 
         if not _stm_settings.use_stm:
-            from fastapi import HTTPException
-
             raise HTTPException(
                 status_code=422,
                 detail="STM is not enabled. Set USE_STM=true to enable short-term memory.",
