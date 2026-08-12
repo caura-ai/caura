@@ -25,10 +25,10 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from core_api import consumer
 
 from common.events.base import Event
 from common.events.topics import Topics
-from core_api import consumer
 
 pytestmark = pytest.mark.asyncio
 
@@ -61,11 +61,15 @@ def mock_storage_client(monkeypatch):
 
 @pytest.fixture
 def mock_detect(monkeypatch):
-    """Patch ``core_api.consumer.detect_contradictions_async`` (the
-    consumer's bound reference, not the source module's). Same
-    reasoning as ``mock_storage_client``."""
+    """Patch the detector entry the consumer reaches through the A55 engine
+    seam. The consumer now calls ``run_contradiction_detection(..., trigger=
+    Trigger.EMBED)``; with the engine flag OFF (default) that synchronously
+    invokes ``contradiction_detector.detect_contradictions_async`` with the same
+    args, so patching the source symbol keeps every assertion below unchanged."""
     fn = AsyncMock(return_value=None)
-    monkeypatch.setattr("core_api.consumer.detect_contradictions_async", fn)
+    monkeypatch.setattr(
+        "core_api.services.contradiction_detector.detect_contradictions_async", fn
+    )
     return fn
 
 

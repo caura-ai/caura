@@ -97,18 +97,20 @@ class ScheduleBackgroundTasks:
             # ``not settings.inline_embedding``. Each cell of the matrix
             # gets exactly one Path A trigger that way.
             if embedding is not None:
-                from core_api.services.contradiction_detector import (
-                    detect_contradictions_async,
+                from core_api.services.contradiction import (
+                    Trigger,
+                    run_contradiction_detection,
                 )
 
                 track_task(
                     tracked_task(
-                        detect_contradictions_async(
+                        run_contradiction_detection(
                             memory_id,
                             data.tenant_id,
                             data.fleet_id,
-                            data.content,
-                            embedding,
+                            trigger=Trigger.WRITE,
+                            content=data.content,
+                            embedding=embedding,
                         ),
                         "contradiction_detection",
                         memory_id,
@@ -225,18 +227,20 @@ class ScheduleBackgroundTasks:
             )
         else:
             # Contradiction detection (post-commit async)
-            from core_api.services.contradiction_detector import (
-                detect_contradictions_async,
+            from core_api.services.contradiction import (
+                Trigger,
+                run_contradiction_detection,
             )
 
             track_task(
                 tracked_task(
-                    detect_contradictions_async(
+                    run_contradiction_detection(
                         memory_id,
                         data.tenant_id,
                         data.fleet_id,
-                        data.content,
-                        embedding,
+                        trigger=Trigger.WRITE,
+                        content=data.content,
+                        embedding=embedding,
                     ),
                     "contradiction_detection",
                     memory_id,

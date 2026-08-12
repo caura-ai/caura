@@ -1029,16 +1029,17 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
         )
     else:
         # P1-1: Contradiction detection moved to post-commit async
-        from core_api.services.contradiction_detector import detect_contradictions_async
+        from core_api.services.contradiction import Trigger, run_contradiction_detection
 
         track_task(
             tracked_task(
-                detect_contradictions_async(
+                run_contradiction_detection(
                     memory_id,
                     data.tenant_id,
                     data.fleet_id,
-                    data.content,
-                    embedding,
+                    trigger=Trigger.WRITE,
+                    content=data.content,
+                    embedding=embedding,
                 ),
                 "contradiction_detection",
                 memory_id,
@@ -1682,7 +1683,7 @@ async def create_memories_bulk(
         # ``duplicate_attempt`` rows skip these — the original attempt
         # already enqueued them (and re-running would double-bill the
         # LLM provider for entity extraction + enrichment).
-        from core_api.services.contradiction_detector import detect_contradictions_async
+        from core_api.services.contradiction import Trigger, run_contradiction_detection
 
         # CAURA-595: per-row enrich publishes when deployment_mode is deferred.
         defer_enrich_publish = (
@@ -1735,12 +1736,13 @@ async def create_memories_bulk(
             else:
                 track_task(
                     tracked_task(
-                        detect_contradictions_async(
+                        run_contradiction_detection(
                             mem_id,
                             data.tenant_id,
                             data.fleet_id,
-                            items[orig_idx].content,
-                            embeddings[orig_idx],
+                            trigger=Trigger.BULK,
+                            content=items[orig_idx].content,
+                            embedding=embeddings[orig_idx],
                         ),
                         "contradiction_detection",
                         mem_id,
@@ -2012,16 +2014,17 @@ async def _reembed_memory(
         # queue BOTH _reembed and _enrich_memory_background, so enrich
         # can beat us to the row regardless of the deploy mode.
         if mem.get("embedding") is not None:
-            from core_api.services.contradiction_detector import detect_contradictions_async
+            from core_api.services.contradiction import Trigger, run_contradiction_detection
 
             track_task(
                 tracked_task(
-                    detect_contradictions_async(
+                    run_contradiction_detection(
                         memory_id,
                         tenant_id,
                         mem.get("fleet_id"),
-                        content,
-                        mem.get("embedding"),
+                        trigger=Trigger.REEMBED,
+                        content=content,
+                        embedding=mem.get("embedding"),
                     ),
                     "contradiction_detection_post_reembed",
                     memory_id,
@@ -2038,16 +2041,17 @@ async def _reembed_memory(
     # Contradiction coverage: the write path only fires contradiction
     # detection when an embedding is present at write-time. Deferred items
     # would silently skip it unless we fire it here.
-    from core_api.services.contradiction_detector import detect_contradictions_async
+    from core_api.services.contradiction import Trigger, run_contradiction_detection
 
     track_task(
         tracked_task(
-            detect_contradictions_async(
+            run_contradiction_detection(
                 memory_id,
                 tenant_id,
                 mem.get("fleet_id"),
-                content,
-                embedding,
+                trigger=Trigger.REEMBED,
+                content=content,
+                embedding=embedding,
             ),
             "contradiction_detection_post_reembed",
             memory_id,
@@ -2067,7 +2071,7 @@ async def _reembed_memories_bulk(
     falls back to ``_reembed_memory`` so a partial batch doesn't leave
     some rows without embeddings forever.
     """
-    from core_api.services.contradiction_detector import detect_contradictions_async
+    from core_api.services.contradiction import Trigger, run_contradiction_detection
     from core_api.services.organization_settings import resolve_config
 
     if not items:
@@ -2207,12 +2211,13 @@ async def _reembed_memories_bulk(
         if mem.get("embedding") is not None:
             track_task(
                 tracked_task(
-                    detect_contradictions_async(
+                    run_contradiction_detection(
                         memory_id,
                         tenant_id,
                         mem.get("fleet_id"),
-                        content,
-                        mem.get("embedding"),
+                        trigger=Trigger.REEMBED,
+                        content=content,
+                        embedding=mem.get("embedding"),
                     ),
                     "contradiction_detection_post_reembed",
                     memory_id,
@@ -2245,12 +2250,13 @@ async def _reembed_memories_bulk(
             continue
         track_task(
             tracked_task(
-                detect_contradictions_async(
+                run_contradiction_detection(
                     memory_id,
                     tenant_id,
                     mem.get("fleet_id"),
-                    content,
-                    embedding,
+                    trigger=Trigger.REEMBED,
+                    content=content,
+                    embedding=embedding,
                 ),
                 "contradiction_detection_post_reembed",
                 memory_id,
@@ -2765,16 +2771,17 @@ async def update_memory(
                 )
             )
         # P1-2: Re-check contradictions after content update
-        from core_api.services.contradiction_detector import detect_contradictions_async
+        from core_api.services.contradiction import Trigger, run_contradiction_detection
 
         track_task(
             tracked_task(
-                detect_contradictions_async(
+                run_contradiction_detection(
                     memory_id,
                     tenant_id,
                     updated.get("fleet_id"),
-                    updated.get("content"),
-                    new_embedding,
+                    trigger=Trigger.UPDATE,
+                    content=updated.get("content"),
+                    embedding=new_embedding,
                 ),
                 "contradiction_detection",
                 memory_id,

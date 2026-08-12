@@ -37,7 +37,7 @@ from common.events.memory_enriched import MemoryEnriched
 from common.events.org_settings_changed_event import OrgSettingsChangedEvent
 from common.events.topics import Topics
 from core_api.clients.storage_client import get_storage_client
-from core_api.services.contradiction_detector import detect_contradictions_async
+from core_api.services.contradiction import Trigger, run_contradiction_detection
 from core_api.services.governance_remediation import remediate_after_enrichment
 from core_api.services.organization_settings import invalidate_cache, resolve_config
 
@@ -129,12 +129,13 @@ async def handle_memory_enriched(event: Event) -> None:
     # Pass the already-fetched row through so the detector skips a
     # redundant ``sc.get_memory`` (it still re-checks ``deleted_at``
     # for the soft-delete-during-detection race).
-    await detect_contradictions_async(
+    await run_contradiction_detection(
         payload.memory_id,
         payload.tenant_id,
         fleet_id,
-        payload.content,
-        embedding,
+        trigger=Trigger.EMBED,
+        content=payload.content,
+        embedding=embedding,
         new_memory=memory,
     )
 
@@ -211,12 +212,13 @@ async def handle_memory_embedded(event: Event) -> None:
 
     fleet_id = memory.get("fleet_id")
 
-    await detect_contradictions_async(
+    await run_contradiction_detection(
         payload.memory_id,
         payload.tenant_id,
         fleet_id,
-        payload.content,
-        embedding,
+        trigger=Trigger.EMBED,
+        content=payload.content,
+        embedding=embedding,
         new_memory=memory,
     )
 

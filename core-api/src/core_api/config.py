@@ -291,6 +291,12 @@ class Settings(BaseSettings):
     log_file: str = ""
     # Default False: standalone=True bypasses tenant auth, so it must be an explicit opt-in.
     is_standalone: bool = False
+    # A55 contradiction-engine seam. False (default) => legacy detector call
+    # sites (today's behaviour, unchanged). True => route contradiction
+    # detection through ContradictionEngine.evaluate_async. Phase 1 the two
+    # paths are behaviourally identical (the engine delegates to the same
+    # detector); the flag exists so the old arch can be retired later.
+    contradiction_engine_enabled: bool = False
     crystallizer_enabled: bool = True
     crystallizer_stale_days: int = 180
     crystallizer_dedup_sample_size: int = 1000
