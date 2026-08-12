@@ -494,8 +494,11 @@ async def test_fallback_to_base_judge_when_candidate_set_exceeds_cap():
     cands = [_make_candidate(cid, subject_entity_id=None) for cid in cand_ids]
     sc = _sc(new_mem, cands, {})
 
-    base_judge = AsyncMock(return_value=(False, 0.95))
-    entity_aware_judge = AsyncMock(return_value=(True, 0.95))
+    # A61 — the multi-candidate fan-out is now ONE batched base call, not
+    # N per-candidate calls. Raw judgments (one per candidate) run through
+    # ``_judge_contradiction`` in the caller.
+    base_batch = AsyncMock(return_value=[{"contradicts": False} for _ in cands])
+    entity_aware_batch = AsyncMock(return_value=[{"contradicts": False} for _ in cands])
 
     with (
         patch(
@@ -503,12 +506,12 @@ async def test_fallback_to_base_judge_when_candidate_set_exceeds_cap():
             return_value=sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
-            base_judge,
+            "core_api.services.contradiction_detector._llm_contradiction_check_batch",
+            base_batch,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
-            entity_aware_judge,
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check_batch",
+            entity_aware_batch,
         ),
         patch(
             "core_api.services.contradiction_detector.resolve_config",
@@ -524,10 +527,10 @@ async def test_fallback_to_base_judge_when_candidate_set_exceeds_cap():
     ):
         await detect_contradictions_by_entities_async(new_id, "t1", "f1")
 
-    # Above the cap: fetch must not run; base judge runs N times.
+    # Above the cap: fetch must not run; base judge runs once (batched).
     sc.get_entity_links_for_memories.assert_not_called()
-    assert base_judge.call_count == len(cands)
-    entity_aware_judge.assert_not_called()
+    base_batch.assert_awaited_once()
+    entity_aware_batch.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -571,8 +574,10 @@ async def test_a1_17_matched_candidates_do_not_count_toward_cap():
         links[c["id"]] = [{"entity_id": "ent:shared", "role": "subject"}]
     sc = _sc(new_mem, cands, links)
 
-    base_judge = AsyncMock(return_value=(False, 0.95))
-    entity_aware_judge = AsyncMock(return_value=(False, 0.95))
+    # A61 — all candidates are entity-aware, so the fan-out collapses to
+    # ONE batched entity-aware call (not N).
+    base_batch = AsyncMock(return_value=[{"contradicts": False} for _ in cands])
+    entity_aware_batch = AsyncMock(return_value=[{"contradicts": False} for _ in cands])
 
     with (
         patch(
@@ -580,12 +585,12 @@ async def test_a1_17_matched_candidates_do_not_count_toward_cap():
             return_value=sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
-            base_judge,
+            "core_api.services.contradiction_detector._llm_contradiction_check_batch",
+            base_batch,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
-            entity_aware_judge,
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check_batch",
+            entity_aware_batch,
         ),
         patch(
             "core_api.services.contradiction_detector.resolve_config",
@@ -611,10 +616,13 @@ async def test_a1_17_matched_candidates_do_not_count_toward_cap():
         f"expected {len(cands) + 1} fetch calls (1 new_mem + {len(cands)} cands); "
         f"got {sc.get_entity_links_for_memories.call_count}"
     )
-    # All candidates have non-empty entity context → entity-aware
-    # judge runs on every one. Base judge never runs.
-    assert entity_aware_judge.call_count == len(cands)
-    base_judge.assert_not_called()
+    # All candidates have non-empty entity context → ONE batched
+    # entity-aware call covers them all. Base judge never runs.
+    entity_aware_batch.assert_awaited_once()
+    assert len(entity_aware_batch.call_args.args[2]) == len(cands), (
+        "the batched entity-aware call must cover every candidate"
+    )
+    base_batch.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -655,8 +663,10 @@ async def test_detection_fetch_skipped_when_total_exceeds_detection_cap():
     assert len(cands) > _ENTITY_LINKS_DETECTION_FETCH_MAX_CANDIDATES
 
     sc = _sc(new_mem, cands, {})
-    base_judge = AsyncMock(return_value=(False, 0.95))
-    entity_aware_judge = AsyncMock(return_value=(False, 0.95))
+    # A61 — fetch skipped (over cap) → all candidates base kind → ONE
+    # batched base call.
+    base_batch = AsyncMock(return_value=[{"contradicts": False} for _ in cands])
+    entity_aware_batch = AsyncMock(return_value=[{"contradicts": False} for _ in cands])
 
     with (
         patch(
@@ -664,12 +674,12 @@ async def test_detection_fetch_skipped_when_total_exceeds_detection_cap():
             return_value=sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
-            base_judge,
+            "core_api.services.contradiction_detector._llm_contradiction_check_batch",
+            base_batch,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
-            entity_aware_judge,
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check_batch",
+            entity_aware_batch,
         ),
         patch(
             "core_api.services.contradiction_detector.resolve_config",
@@ -687,10 +697,89 @@ async def test_detection_fetch_skipped_when_total_exceeds_detection_cap():
 
     # Total over cap → fetch must not run.
     sc.get_entity_links_for_memories.assert_not_called()
-    # Fall-back: base judge runs on every candidate; entity-aware
+    # Fall-back: ONE batched base call covers every candidate; entity-aware
     # never invoked.
-    assert base_judge.call_count == len(cands)
-    entity_aware_judge.assert_not_called()
+    base_batch.assert_awaited_once()
+    assert len(base_batch.call_args.args[1]) == len(cands)
+    entity_aware_batch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# A61 — batched entity-aware judge (cost fix) still applies the effect
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a61_multi_candidate_entity_aware_batches_once_and_flags():
+    """A61 — three entity-aware candidates against one new memory make ONE
+    batched entity-aware call (not three), and a contradicting verdict still
+    marks the older row conflicted. Mirrors the Path A ``test_detect_multi_
+    candidate_calls_batch_once`` guard for Path C."""
+    from core_api.services.contradiction_detector import (
+        detect_contradictions_by_entities_async,
+    )
+
+    new_id = uuid4()
+    new_mem = _make_new_memory(
+        new_id, subject_entity_id=None, content="Priya lives in Haifa."
+    )
+    cand_ids = [uuid4() for _ in range(3)]
+    cands = [
+        _make_candidate(
+            cid, subject_entity_id=None, content=f"Priya lives in city {i}."
+        )
+        for i, cid in enumerate(cand_ids)
+    ]
+    links = {str(new_id): [{"entity_id": "ent:priya", "role": "subject"}]}
+    for c in cands:
+        links[c["id"]] = [{"entity_id": "ent:priya", "role": "subject"}]
+    sc = _sc(new_mem, cands, links)
+
+    # Batched entity-aware judge: all three contradict.
+    entity_aware_batch = AsyncMock(
+        return_value=[
+            {"same_subject": True, "non_conflict_reason": "none", "contradicts": True}
+            for _ in cands
+        ]
+    )
+    base_batch = AsyncMock(return_value=[{"contradicts": False} for _ in cands])
+
+    with (
+        patch(
+            "core_api.services.contradiction_detector.get_storage_client",
+            return_value=sc,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check_batch",
+            entity_aware_batch,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._llm_contradiction_check_batch",
+            base_batch,
+        ),
+        patch(
+            "core_api.services.contradiction_detector.resolve_config",
+            new_callable=AsyncMock,
+            return_value=None,
+            create=True,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+    ):
+        await detect_contradictions_by_entities_async(new_id, "t1", "f1")
+
+    # ONE batched entity-aware call covers all three candidates.
+    entity_aware_batch.assert_awaited_once()
+    assert len(entity_aware_batch.call_args.args[2]) == 3
+    base_batch.assert_not_called()
+    # Effect applied: at least one candidate marked conflicted.
+    statuses = [c.args for c in sc.update_memory_status.call_args_list]
+    assert any(len(s) > 1 and s[1] == "conflicted" for s in statuses), (
+        f"expected a conflicted status write; got {statuses}"
+    )
 
 
 # ---------------------------------------------------------------------------

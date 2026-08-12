@@ -490,7 +490,9 @@ async def test_forward_preflight_caps_fallthrough_set_at_max():
     cand_ids = [uuid4() for _ in range(_ENTITY_LINKS_PREFLIGHT_MAX_CANDIDATES + 5)]
     cands = [_make_candidate(cid, subject_entity_id=None) for cid in cand_ids]
     sc = _sc_for_forward_path(new_mem, cands, {})
-    judge = AsyncMock(return_value=(False, 0.95))
+    # A61 — the fan-out is now ONE batched base call, not N per-candidate
+    # calls. Cap exceeded → fetch skipped → all candidates base kind.
+    judge_batch = AsyncMock(return_value=[{"contradicts": False} for _ in cands])
 
     with (
         patch(
@@ -498,8 +500,8 @@ async def test_forward_preflight_caps_fallthrough_set_at_max():
             return_value=sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
-            judge,
+            "core_api.services.contradiction_detector._llm_contradiction_check_batch",
+            judge_batch,
         ),
         patch(
             "core_api.services.contradiction_detector.resolve_config",
@@ -517,7 +519,9 @@ async def test_forward_preflight_caps_fallthrough_set_at_max():
 
     # The fan-out fetch must NOT run when the set exceeds the cap.
     sc.get_entity_links_for_memories.assert_not_called()
-    # Fail-open: judge still runs on each candidate.
-    assert judge.call_count == len(cands), (
-        f"expected {len(cands)} judge calls (fail-open), got {judge.call_count}"
+    # Fail-open: ONE batched base call still covers every candidate.
+    judge_batch.assert_awaited_once()
+    assert len(judge_batch.call_args.args[1]) == len(cands), (
+        f"expected the batched base call to cover {len(cands)} candidates, "
+        f"got {len(judge_batch.call_args.args[1])}"
     )

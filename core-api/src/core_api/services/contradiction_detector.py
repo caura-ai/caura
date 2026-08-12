@@ -1462,6 +1462,136 @@ async def _llm_entity_aware_contradiction_check(
     )
 
 
+# A61 — batched entity-aware judge. Path C's forward-detection loop
+# previously fanned out one ``_llm_entity_aware_contradiction_check`` call
+# per candidate (mirroring the Path A semantic fan-out that #770 batched).
+# For a high-fanout subject (a popular entity referenced by many memories)
+# that is up to ``_ENTITY_LINKS_DETECTION_FETCH_MAX_CANDIDATES`` LLM calls
+# per newly-written memory. This variant judges the whole entity-aware
+# group in ONE ``complete_json`` call, carrying each candidate's OWN
+# resolved entity context so the authoritative same-subject grounding is
+# preserved per candidate.
+BATCH_ENTITY_AWARE_CONTRADICTION_PROMPT = """\
+You are a contradiction detector for a business memory system, running
+the second-pass judgement AFTER entity resolution has already linked every
+statement to its canonical entities.
+
+A NEW statement is compared against several EXISTING candidate statements.
+Judge EACH candidate INDEPENDENTLY against the NEW statement — one
+candidate's verdict must NOT influence another's.
+
+CRITICAL: the RESOLVED ENTITIES blocks are AUTHORITATIVE. The subject of
+each statement has ALREADY been resolved to a specific entity row
+(identified by ``entity_id``) by upstream entity extraction. Do NOT re-do
+that resolution from raw text; use the resolved entities as ground truth
+and decide whether the two statements' CLAIMS about those entities are
+mutually exclusive.
+  * Same subject-role ``entity_id`` on both sides -> same_subject MUST be
+    true (surface qualifiers like "from X", "at Y", possessives, employer /
+    team / location prefixes are extra context about the ONE subject, NOT
+    evidence of different subjects).
+  * Different subject-role ``entity_id`` -> same_subject MUST be false
+    regardless of surface-name similarity (set
+    non_conflict_reason="same_name_distinct_subject" when the canonical
+    names happen to match).
+  * ``entity_id`` starting with "<none-" on either side, or a side missing
+    a subject-role entity -> same_subject=false.
+
+NEW statement: {new_content}
+RESOLVED ENTITIES for the NEW statement:
+{new_entities}
+
+Candidate statements (judge each, by index):
+{candidates_block}
+
+For EACH candidate index decide, applying the rules in order:
+1. same_subject (bool): decided MECHANICALLY by comparing subject-role
+   ``entity_id`` values per the CRITICAL rules above.
+2. non_conflict_reason (exactly one): "none"; "temporal_supersession"
+   (sequential lifecycle states of the same subject, both true in order);
+   "list_valued_predicate" (multi-valued predicate or two different
+   attributes that both hold); "refinement" (one more specific than the
+   other); "scope_mismatch" (same subject, different implicit qualifiers;
+   both hold); "same_name_distinct_subject" (surface names match, resolved
+   entities differ); "conditional_unrealized" (one is hypothetical /
+   irrealis); "event_restatement" (same event restated).
+3. contradicts (bool): true ONLY when same_subject is true AND
+   non_conflict_reason is "none" AND the two assert mutually exclusive
+   states in the same time frame. Corrections / updates about the same
+   subject ARE contradictions.
+4. relationship (exactly one): "exact_value"; "negation"; "entailed";
+   "constraint"; "probabilistic"; "scope_apparent"; "refinement".
+5. diagnosis (exactly one): "correction"; "temporal_change";
+   "scope_difference"; "entity_mismatch"; "write_error"; "unresolved".
+
+Reply with ONLY a JSON object mapping each candidate index (as a STRING)
+to its judgment, no prose, no markdown fences:
+{{"0": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true, "relationship": "exact_value", "diagnosis": "temporal_change"}}, "1": {{...}}}}
+"""
+
+
+async def _llm_entity_aware_contradiction_check_batch(
+    new_content: str,
+    new_entities: list[dict],
+    candidates: list[dict],
+    tenant_config=None,
+) -> list[dict]:
+    """Entity-aware variant of ``_llm_contradiction_check_batch`` (A61 Path C).
+
+    Judge ALL ``candidates`` against ``new_content`` + ``new_entities`` in ONE
+    ``complete_json`` call. Each candidate dict MUST carry ``content`` and its
+    OWN resolved ``entities`` list (the caller assembles these from the
+    per-candidate context fetch). Returns one raw judgment dict per candidate,
+    aligned to input order; a missing / malformed entry defaults to a safe
+    non-contradiction (``{"contradicts": False}``). The caller runs each raw
+    through ``_judge_contradiction`` so the safety gates are identical to the
+    per-candidate entity-aware path.
+    """
+    provider_name = (
+        tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
+    )
+    candidates_block = "\n".join(
+        f"[{i}] {c.get('content', '')[:500]}\n    RESOLVED ENTITIES: "
+        f"{_format_entity_context(c.get('entities', []))}"
+        for i, c in enumerate(candidates)
+    )
+    prompt = BATCH_ENTITY_AWARE_CONTRADICTION_PROMPT.format(
+        new_content=new_content[:500],
+        new_entities=_format_entity_context(new_entities),
+        candidates_block=candidates_block,
+    )
+
+    def _align(obj: object) -> list[dict]:
+        by_index = obj if isinstance(obj, dict) else {}
+        out: list[dict] = []
+        for i in range(len(candidates)):
+            entry = by_index.get(str(i))
+            if entry is None:
+                entry = by_index.get(i)  # tolerate int keys
+            out.append(entry if isinstance(entry, dict) else {"contradicts": False})
+        return out
+
+    async def _do_check(llm) -> list[dict]:
+        raw = await llm.complete_json(prompt)
+        return _align(raw)
+
+    return await call_with_fallback(
+        primary_provider_name=provider_name,
+        call_fn=_do_check,
+        fake_fn=lambda: [
+            {
+                "same_subject": True,
+                "contradicts": _fake_contradiction_check(new_content, c.get("content", "")),
+            }
+            for c in candidates
+        ],
+        tenant_config=tenant_config,
+        service_label="contradiction-entity-aware_batch",
+        model_attr="entity_extraction_model",
+        timeout=15.0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # A4 #13 — Retraction phase: re-judge a Path A verdict with full entity
 # context and undo it via the A4 #10 storage primitive when the re-judge
@@ -2009,31 +2139,13 @@ async def detect_contradictions_by_entities_async(
         # entity_links yet — e.g. entity-extraction hasn't completed
         # for the candidate at the time Path C runs).
         new_content = new_memory.get("content", "")
-        tasks = []
         # CAURA-132 diag — record which judge was selected for each
         # candidate so the post-hoc analysis can correlate
         # judge_kind → verdict.
         judge_kinds: list[str] = []
         for c in candidates:
             cand_ctx = contexts.get(str(c.get("id")), []) if contexts_fetched else []
-            if contexts_fetched and new_ctx and cand_ctx:
-                judge_kinds.append("entity_aware")
-                tasks.append(
-                    asyncio.wait_for(
-                        _llm_entity_aware_contradiction_check(
-                            new_content, c.get("content", ""), new_ctx, cand_ctx, tenant_config
-                        ),
-                        timeout=10.0,
-                    )
-                )
-            else:
-                judge_kinds.append("base")
-                tasks.append(
-                    asyncio.wait_for(
-                        _llm_contradiction_check(new_content, c.get("content", ""), tenant_config),
-                        timeout=10.0,
-                    )
-                )
+            judge_kinds.append("entity_aware" if (contexts_fetched and new_ctx and cand_ctx) else "base")
         logger.info(
             "PATH_C_DETECTION judge_selection memory=%s candidates=%d entity_aware=%d base=%d",
             memory_id,
@@ -2041,7 +2153,70 @@ async def detect_contradictions_by_entities_async(
             judge_kinds.count("entity_aware"),
             judge_kinds.count("base"),
         )
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # A61 — batch the per-candidate judge fan-out. Path C's forward
+        # detection previously issued ONE LLM call per candidate (up to
+        # ``_ENTITY_LINKS_DETECTION_FETCH_MAX_CANDIDATES``); for a popular
+        # subject that is the same per-write cost blow-up #770 fixed on the
+        # Path A semantic path. We now collapse the fan-out into at most TWO
+        # LLM calls — one batched entity-aware call for the candidates whose
+        # context is populated on both sides, one batched base call for the
+        # rest — while keeping the exact judge-selection semantics above.
+        #
+        # A single candidate keeps the direct per-candidate call (mirrors the
+        # Path A ``len == 1`` special case; leaves the large single-candidate
+        # test corpus untouched). ``results`` stays aligned to ``candidates``
+        # and preserves the ``(verdict, confidence)`` / ``Exception`` shape the
+        # downstream loop already handles — a whole-batch failure defaults its
+        # group to ``Exception`` so those candidates are skipped, never
+        # fabricated.
+        results: list = [None] * len(candidates)
+        if len(candidates) == 1:
+            c = candidates[0]
+            try:
+                if judge_kinds[0] == "entity_aware":
+                    cand_ctx = contexts.get(str(c.get("id")), [])
+                    results[0] = await asyncio.wait_for(
+                        _llm_entity_aware_contradiction_check(
+                            new_content, c.get("content", ""), new_ctx, cand_ctx, tenant_config
+                        ),
+                        timeout=10.0,
+                    )
+                else:
+                    results[0] = await asyncio.wait_for(
+                        _llm_contradiction_check(new_content, c.get("content", ""), tenant_config),
+                        timeout=10.0,
+                    )
+            except Exception as e:  # mirror gather(return_exceptions=True)
+                results[0] = e
+        else:
+            ea_idx = [i for i, k in enumerate(judge_kinds) if k == "entity_aware"]
+            base_idx = [i for i, k in enumerate(judge_kinds) if k == "base"]
+            if ea_idx:
+                ea_cands = [
+                    {
+                        "content": candidates[i].get("content", ""),
+                        "entities": contexts.get(str(candidates[i].get("id")), []),
+                    }
+                    for i in ea_idx
+                ]
+                try:
+                    ea_raws = await _llm_entity_aware_contradiction_check_batch(
+                        new_content, new_ctx, ea_cands, tenant_config
+                    )
+                    for j, i in enumerate(ea_idx):
+                        results[i] = _judge_contradiction(ea_raws[j])
+                except Exception as e:
+                    for i in ea_idx:
+                        results[i] = e
+            if base_idx:
+                base_cands = [candidates[i] for i in base_idx]
+                try:
+                    base_raws = await _llm_contradiction_check_batch(new_content, base_cands, tenant_config)
+                    for j, i in enumerate(base_idx):
+                        results[i] = _judge_contradiction(base_raws[j])
+                except Exception as e:
+                    for i in base_idx:
+                        results[i] = e
         found = False
         # CAURA-125 — state-corruption guard; mirrors the RDF and
         # semantic paths in ``_detect()``.
