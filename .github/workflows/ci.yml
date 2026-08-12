@@ -67,10 +67,17 @@ jobs:
         run: uv python install ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
+        # core-operations is installed for its own ruff/mypy/pytest steps
+        # below. Before it was listed here those steps passed only because
+        # core-api's dependency list happens to be a superset of
+        # core-operations' runtime deps — an undeclared coupling that would
+        # have broken confusingly the first time core-operations grew a
+        # dependency core-api lacks. Resolution cost of adding it: one extra
+        # package (119 vs 118).
         run: |
           uv venv .venv
           source .venv/bin/activate
-          uv pip install -e core-storage-api/[dev] -e core-api/[dev]
+          uv pip install -e core-storage-api/[dev] -e core-api/[dev] -e core-operations/[dev]
           echo "$VIRTUAL_ENV/bin" >> $GITHUB_PATH
 
       # --- Broker↔cloud API-versioning gate (Gate C / Phase 1, deliverables A+B) ---
@@ -149,6 +156,13 @@ jobs:
         # because the config is byte-identical across both repos (#696).
         run: uv run ruff check common/
 
+      - name: Run Ruff linter (core-operations)
+        # Paired with the test step below: an unlinted tree drifts, and this one
+        # was both unlinted and unrun. core-operations/pyproject.toml declares
+        # its own line-length = 110, matching core-api and core-storage-api
+        # rather than common/'s 88, so the format check below is safe to gate.
+        run: uv run ruff check core-operations/src/ core-operations/tests/
+
       - name: Run Ruff formatter check (core-api)
         run: uv run ruff format --check core-api/src/
 
@@ -157,6 +171,9 @@ jobs:
 
       - name: Run Ruff formatter check (core-storage-api tests)
         run: uv run ruff format --check core-storage-api/tests/
+
+      - name: Run Ruff formatter check (core-operations)
+        run: uv run ruff format --check core-operations/src/ core-operations/tests/
 
       - name: Run Ruff formatter check (vendored common/ files at ruff defaults)
         # This list mirrors the policy=identical entries of caura-memclaw-enterprise's
@@ -196,6 +213,12 @@ jobs:
 
       - name: Run mypy (core-storage-api)
         run: cd core-storage-api && uv run mypy src/
+
+      - name: Run mypy (core-operations)
+        # core-operations/pyproject.toml carries a full [tool.mypy] block and
+        # mypy as a dev dep, same as its two siblings above; only the CI step
+        # was missing.
+        run: cd core-operations && uv run mypy src/
 
       - name: Enable pgvector extension
         run: PGPASSWORD=changeme psql -h localhost -U memclaw -d memclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
@@ -265,6 +288,38 @@ jobs:
           ENTITY_EXTRACTION_PROVIDER: none
           USE_LLM_FOR_MEMORY_CREATION: "false"
 
+      - name: Run core-operations tests
+        # This tree was unrun for as long as it was unlinted — the same blind
+        # spot the core-storage-api ruff step above describes, and both halves
+        # close here. It covers the cron-scheduling surface: wall-clock
+        # alignment, per-job *_run_at_hour threading, the fanout POST paths and
+        # the scheduler's failure/hot-loop guards.
+        #
+        # No env needed, deliberately. core-operations/pytest.ini sets its own
+        # ``pythonpath = src ..`` (src for core_operations, .. for common) and
+        # pytest resolves that file as the configfile for this path, so it does
+        # NOT inherit the root pytest.ini. Adding PYTHONPATH here would be
+        # inert. These tests touch no database either — the Postgres service is
+        # already up for the steps above, but nothing here uses it, so the step
+        # costs well under a second.
+        #
+        # ``--cov-config`` is load-bearing, not decoration. core-operations
+        # declares ``[tool.coverage.report] fail_under = 50``, but coverage
+        # discovers config relative to the CWD and there is no root
+        # pyproject.toml — so running from the repo root without this flag
+        # collects coverage while silently ignoring the floor. With it, the run
+        # prints "Required test coverage of 50.0% reached" and fails below it.
+        # Currently ~80%.
+        run: |
+          uv run pytest core-operations/tests/ -v --tb=short \
+            --cov=core-operations/src/core_operations \
+            --cov-config=core-operations/pyproject.toml \
+            --cov-report=term-missing
+        env:
+          # Keep this run's data file separate from the root suite's, which
+          # uploads coverage.xml to Codecov.
+          COVERAGE_FILE: .coverage.core-operations
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
         with:
@@ -272,9 +327,13 @@ jobs:
           fail_ci_if_error: false
 
       - name: Build packages
+        # core-operations included now that CI installs, lints, type-checks and
+        # tests it — a broken pyproject/build-backend would otherwise surface
+        # only in its Docker build.
         run: |
           cd core-api && uv build && cd ..
-          cd core-storage-api && uv build
+          cd core-storage-api && uv build && cd ..
+          cd core-operations && uv build
 
   image-version:
     # Guards the /api/v1/version surface end-to-end: builds the actual
