@@ -16,7 +16,7 @@ from pathlib import Path
 
 from common.events.topics import Topics
 from scripts.gen_events_manifest import (
-    _MEMORY_DIRECT,
+    _DIRECT_SUBSCRIBES,
     MANIFEST_PATH,
     _serialize,
     build_manifest,
@@ -27,7 +27,14 @@ _CONSUMER_FILES = {
     "core-api": _REPO_ROOT / "core-api" / "src" / "core_api" / "consumer.py",
     "core-worker": _REPO_ROOT / "core-worker" / "src" / "core_worker" / "consumer.py",
 }
-_MEMORY_SUBSCRIBE_RE = re.compile(r"bus\.subscribe\(\s*Topics\.Memory\.([A-Z_]+)")
+# Matches Memory AND Lifecycle families. It was Memory-only, which is how a
+# directly-registered LIFECYCLE subscribe slipped past this guard: lifecycle
+# topics normally arrive via a helper the generator invokes dynamically, so the
+# combination "lifecycle topic + direct subscribe" fell in the seam between the
+# two mechanisms and matched neither.
+_DIRECT_SUBSCRIBE_RE = re.compile(
+    r"bus\.subscribe\(\s*Topics\.(Memory|Lifecycle)\.([A-Z_]+)"
+)
 
 
 def test_events_manifest_is_in_sync() -> None:
@@ -57,22 +64,29 @@ def test_events_manifest_is_well_formed() -> None:
         )
 
 
-def test_memory_direct_matches_consumer_files() -> None:
-    """Close the _MEMORY_DIRECT blind spot.
+def test_direct_subscribes_match_consumer_files() -> None:
+    """Close the _DIRECT_SUBSCRIBES blind spot.
 
-    Memory-pipeline subscribes are hand-listed in the generator (the worker
+    Directly-registered subscribes are hand-listed in the generator (the worker
     package isn't importable in OSS CI), so the drift test alone can't tell when
     that list falls out of sync with the actual ``register_consumers()``. Grep
-    each consumer file for its ``bus.subscribe(Topics.Memory.*)`` calls and
-    assert they match _MEMORY_DIRECT — a new subscribe added without updating the
-    list now fails here instead of silently shipping an incomplete manifest.
+    each consumer file for its ``bus.subscribe(Topics.<family>.*)`` calls and
+    assert they match _DIRECT_SUBSCRIBES — a new subscribe added without updating
+    the list fails here instead of silently shipping an incomplete manifest.
+
+    Covers Lifecycle as well as Memory. While it matched Memory only, a lifecycle
+    topic registered directly in a consumer satisfied neither mechanism: not the
+    generator's dynamic helper capture, and not this guard. The manifest is what
+    the enterprise ``check_pubsub_provisioning.py`` reads, so an omission there
+    means a consumed topic can ship with no Terraform subscription — the failure
+    that took staging down when ``insights-requested`` shipped unprovisioned.
     """
     for service, path in _CONSUMER_FILES.items():
-        names = _MEMORY_SUBSCRIBE_RE.findall(path.read_text(encoding="utf-8"))
-        found = sorted(str(getattr(Topics.Memory, name)) for name in names)
-        expected = sorted(_MEMORY_DIRECT[service])
+        pairs = _DIRECT_SUBSCRIBE_RE.findall(path.read_text(encoding="utf-8"))
+        found = sorted(str(getattr(getattr(Topics, family), name)) for family, name in pairs)
+        expected = sorted(_DIRECT_SUBSCRIBES[service])
         assert found == expected, (
-            f"{service}: _MEMORY_DIRECT in scripts/gen_events_manifest.py is out of sync "
-            f"with {path.relative_to(_REPO_ROOT)}. Found {found}, expected {expected}. "
-            "Update _MEMORY_DIRECT to match the bus.subscribe(Topics.Memory.*) calls."
+            f"{service}: _DIRECT_SUBSCRIBES in scripts/gen_events_manifest.py is out of "
+            f"sync with {path.relative_to(_REPO_ROOT)}. Found {found}, expected {expected}. "
+            "Update _DIRECT_SUBSCRIBES to match the bus.subscribe(Topics.*) calls."
         )

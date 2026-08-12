@@ -12,6 +12,7 @@
     "core-worker": [
       "memclaw.lifecycle.archive-expired-requested",
       "memclaw.lifecycle.archive-stale-requested",
+      "memclaw.lifecycle.embed-backfill-requested",
       "memclaw.lifecycle.purge-soft-deleted-requested",
       "memclaw.memory.embed-requested",
       "memclaw.memory.enrich-requested"
