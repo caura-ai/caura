@@ -1914,22 +1914,33 @@ async def _schedule_enrich_or_inline(
     those columns on every redelivery.
     """
     if settings.inline_enrichment:
-        # NOTE: ``agent_provided_fields`` and ``reference_datetime``
-        # are intentionally NOT forwarded to ``_enrich_memory_background``.
-        # The inline path pre-dates these concepts and uses an
-        # equivalent gate by reading the row's current value vs the
-        # schema default (``if mem.get("memory_type") == "fact" and
-        # enrichment.memory_type:`` etc., see the body of
-        # ``_enrich_memory_background``). When the agent set
-        # ``memory_type="rule"`` the column already reads ``"rule"``
-        # not ``"fact"``, and the inline gate skips.
+        # CAURA-716: ``agent_provided_fields`` IS now forwarded here.
         #
-        # The two paths converge on the same agent-wins outcome via
-        # different mechanisms; unifying them on
-        # ``agent_provided_fields`` is a reasonable cleanup but out of
-        # scope for CAURA-595 — there's no observable behavioural
-        # delta between the gates today.
-        await _enrich_memory_background(memory_id, content, tenant_id, fleet_id, agent_id)
+        # It previously was not, on the reasoning that the inline path's
+        # value-vs-schema-default comparison was an equivalent gate — "when the
+        # agent set ``memory_type="rule"`` the column already reads ``"rule"``
+        # not ``"fact"``, and the inline gate skips" — and therefore that there
+        # was "no observable behavioural delta between the gates".
+        #
+        # There is one, and it is silent: the comparison cannot distinguish
+        # "caller pinned this to the default" from "caller said nothing". A
+        # write passing ``memory_type="fact", status="active"`` landed as
+        # ``fact``/``active`` and was rewritten to ``decision``/``confirmed``
+        # by this background task seconds later. ``fact`` and ``active`` are the
+        # schema defaults precisely because they are the neutral choices, which
+        # is exactly why a caller pins them.
+        #
+        # ``reference_datetime`` is still not forwarded — the inline path
+        # resolves relative dates against the enrichment call's own clock, and
+        # that is a separate concern.
+        await _enrich_memory_background(
+            memory_id,
+            content,
+            tenant_id,
+            fleet_id,
+            agent_id,
+            agent_provided_fields=agent_provided_fields,
+        )
     else:
         await publish_memory_enrich_request(
             memory_id=memory_id,
@@ -2284,11 +2295,31 @@ async def _enrich_memory_background(
     tenant_id: str,
     fleet_id: str | None,
     agent_id: str,
+    *,
+    agent_provided_fields: list[str] | None = None,
 ) -> None:
     """Background task: run LLM enrichment on a fast-path memory, then patch the row.
 
     After enrichment completes, fires entity extraction and contradiction detection
     as sub-tasks.
+
+    ``agent_provided_fields`` names the enrichment columns the caller set
+    EXPLICITLY at write time (computed by ``_agent_provided_enrichment_fields``
+    from ``model_fields_set``); those are left untouched. It is the same list
+    the deferred/worker path already receives via
+    ``publish_memory_enrich_request``.
+
+    CAURA-716: this parameter previously did not exist, and the inline path
+    instead inferred caller intent by comparing the row's current value against
+    the schema default (``mem["memory_type"] == "fact"``, ``mem["status"] ==
+    "active"``, ``mem["weight"] == 0.5``). That heuristic silently loses any
+    value a caller pins TO its own default — and ``fact`` / ``active`` are
+    defaults precisely because they are the sensible neutral choices, so they
+    are exactly what a caller pins. Passing ``memory_type="fact",
+    status="active"`` produced a row that read ``fact``/``active`` at insert and
+    ``decision``/``confirmed`` seconds later. The default-comparison is retained
+    as a fallback for callers that pass no list (``None``), so behaviour is
+    unchanged for them.
     """
     from core_api.services.memory_enrichment import enrich_memory
     from core_api.services.organization_settings import resolve_config
@@ -2318,11 +2349,26 @@ async def _enrich_memory_background(
         if mem is None or mem.get("deleted_at") is not None:
             return
 
-        # Build update patch
+        # Build update patch.
+        #
+        # CAURA-716: ``_agent_pinned`` is the authoritative "the caller set this
+        # explicitly" test when the caller supplied a list. The
+        # ``value == default`` comparisons that follow it are the legacy
+        # fallback, used only when no list was passed (``agent_provided_fields
+        # is None``) — see this function's docstring for why the comparison
+        # alone is not sufficient.
+        pinned = set(agent_provided_fields or ())
+
+        def _agent_pinned(field: str, legacy_default_matches: bool) -> bool:
+            """True when the caller owns ``field`` and enrichment must not touch it."""
+            if agent_provided_fields is not None:
+                return field in pinned
+            return not legacy_default_matches
+
         patch: dict = {}
-        if mem.get("memory_type") == "fact" and enrichment.memory_type:
+        if not _agent_pinned("memory_type", mem.get("memory_type") == "fact") and enrichment.memory_type:
             patch["memory_type"] = enrichment.memory_type
-        if mem.get("weight") == 0.5 and enrichment.weight is not None:
+        if not _agent_pinned("weight", mem.get("weight") == 0.5) and enrichment.weight is not None:
             patch["weight"] = enrichment.weight
         if enrichment.title:
             patch["title"] = enrichment.title
@@ -2345,13 +2391,18 @@ async def _enrich_memory_background(
             # Persisted for debugging / auditability only; no longer used
             # to shape the embedding (see CAURA-222).
             meta["retrieval_hint"] = enrichment.retrieval_hint
-        # Temporal resolution
-        if mem.get("ts_valid_start") is None and enrichment.ts_valid_start:
+        # Temporal resolution. ``None`` is not a settable value, so the legacy
+        # is-None check cannot suffer the pin-to-default problem — but route it
+        # through the same gate so all five override fields behave uniformly.
+        if (
+            not _agent_pinned("ts_valid_start", mem.get("ts_valid_start") is None)
+            and enrichment.ts_valid_start
+        ):
             patch["ts_valid_start"] = enrichment.ts_valid_start
-        if mem.get("ts_valid_end") is None and enrichment.ts_valid_end:
+        if not _agent_pinned("ts_valid_end", mem.get("ts_valid_end") is None) and enrichment.ts_valid_end:
             patch["ts_valid_end"] = enrichment.ts_valid_end
-        # Status: only upgrade from default "active"
-        if mem.get("status") == "active" and enrichment.status:
+        # Status: enrichment may set it only when the caller did not.
+        if not _agent_pinned("status", mem.get("status") == "active") and enrichment.status:
             patch["status"] = enrichment.status
 
         meta.pop("enrichment_pending", None)
