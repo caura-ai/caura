@@ -253,6 +253,40 @@ jobs:
           ENTITY_EXTRACTION_PROVIDER: none
           USE_LLM_FOR_MEMORY_CREATION: "false"
 
+      - name: Enforce coverage floors (per package)
+        # The step above collects coverage but enforced no floor. Both packages
+        # declare ``[tool.coverage.report] fail_under = 50``, and coverage
+        # discovers config relative to the CWD — with no root pyproject.toml,
+        # running pytest from the repo root meant neither floor was ever read.
+        # Measured at the time of writing: core-api 83%, core-storage-api 67%.
+        #
+        # Enforced PER PACKAGE rather than on the combined total, because the
+        # blend is dominated by core-api (15,156 statements against 5,558) and
+        # would mask a collapse in the smaller one: core-storage-api falling to
+        # 30% still leaves a combined ~69%, comfortably over a 50% blended
+        # floor. Two declarations mean two floors.
+        #
+        # ``--rcfile`` points at each package's own pyproject so the number
+        # lives in exactly one place; hardcoding 50 here would let the workflow
+        # drift from the declaration it is meant to enforce. Reuses the data
+        # file the pytest run just wrote, so the suite is not run twice.
+        #
+        # Both reports run unconditionally, via ``|| status=1`` rather than
+        # back-to-back commands: GitHub runs a multi-line ``run`` under
+        # ``bash -e``, so a core-api breach would abort the step and a
+        # simultaneous core-storage-api breach would stay invisible until the
+        # first was fixed. Exiting once at the end keeps the step failing on
+        # either breach while always reporting both.
+        run: |
+          status=0
+          uv run coverage report \
+            --rcfile=core-api/pyproject.toml \
+            --include="core-api/src/core_api/*" || status=1
+          uv run coverage report \
+            --rcfile=core-storage-api/pyproject.toml \
+            --include="core-storage-api/src/core_storage_api/*" || status=1
+          exit "$status"
+
       - name: Create the storage-suite database
         # Its own database, NOT the one `tests/` uses. The two suites provision
         # differently — `tests/` conftest calls Base.metadata.create_all, the
