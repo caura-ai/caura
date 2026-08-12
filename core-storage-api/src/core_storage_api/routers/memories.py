@@ -968,6 +968,37 @@ _DEDUP_REVIEW_FIELDS = [
 ]
 
 
+_MEMORY_CONFLICT_FIELDS = [
+    "id",
+    "tenant_id",
+    "fleet_id",
+    "new_memory_id",
+    "old_memory_id",
+    "relationship",
+    "relationship_confidence",
+    "diagnosis",
+    "diagnosis_confidence",
+    "evidence_strength",
+    "action",
+    "audit_reason",
+    "created_by",
+    "created_at",
+    "metadata_",
+]
+
+
+@router.post("/conflicts")
+async def record_memory_conflict(request: Request) -> dict:
+    """A55 — persist a memory_conflicts classification record (additive; the
+    memory-row status/supersedes effect is applied separately)."""
+    body: dict = await request.json()
+    try:
+        row = await _svc.memory_conflict_record(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return orm_to_dict(row, _MEMORY_CONFLICT_FIELDS)
+
+
 @router.post("/dedup-reviews")
 async def enqueue_dedup_review(request: Request) -> dict:
     body: dict = await request.json()

@@ -189,6 +189,64 @@ class TestMemories:
         assert fetched["is_inferred"] is False
         assert fetched["scope"] == {}
 
+    async def test_a55_memory_conflict_record_round_trip(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """A55 — POST /memories/conflicts inserts a classification record
+        (relationship/diagnosis/evidence/action + confidences + audit + metadata)
+        referencing two real memories."""
+        a = (await client.post(f"{PREFIX}/memories", json=_memory_payload(tenant_id, fleet_id))).json()
+        b = (await client.post(f"{PREFIX}/memories", json=_memory_payload(tenant_id, fleet_id))).json()
+        payload = {
+            "tenant_id": tenant_id,
+            "fleet_id": fleet_id,
+            "new_memory_id": a["id"],
+            "old_memory_id": b["id"],
+            "relationship": "exact_value",
+            "relationship_confidence": 0.9,
+            "diagnosis": "temporal_change",
+            "diagnosis_confidence": 0.8,
+            "evidence_strength": "explicit",
+            "action": "supersede",
+            "audit_reason": "exact_value/temporal_change -> supersede",
+            "created_by": "test",
+            "metadata": {"k": "v"},
+        }
+        resp = await client.post(f"{PREFIX}/memories/conflicts", json=payload)
+        assert resp.status_code == 200, resp.text
+        row = resp.json()
+        assert row["relationship"] == "exact_value"
+        assert row["diagnosis"] == "temporal_change"
+        assert row["evidence_strength"] == "explicit"
+        assert row["action"] == "supersede"
+        assert row["new_memory_id"] == a["id"]
+        assert row["old_memory_id"] == b["id"]
+        assert row["relationship_confidence"] == 0.9
+        assert row["metadata_"] == {"k": "v"}
+
+    async def test_a55_memory_conflict_rejects_bad_relationship(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """A bad enum value is a 400 (validated) rather than a 500 CHECK violation."""
+        a = (await client.post(f"{PREFIX}/memories", json=_memory_payload(tenant_id, fleet_id))).json()
+        b = (await client.post(f"{PREFIX}/memories", json=_memory_payload(tenant_id, fleet_id))).json()
+        resp = await client.post(
+            f"{PREFIX}/memories/conflicts",
+            json={
+                "tenant_id": tenant_id,
+                "new_memory_id": a["id"],
+                "old_memory_id": b["id"],
+                "relationship": "bogus",
+            },
+        )
+        assert resp.status_code == 400
+
     async def test_update_status_via_patch(
         self,
         client: AsyncClient,

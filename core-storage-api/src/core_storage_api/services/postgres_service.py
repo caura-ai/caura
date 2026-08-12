@@ -74,6 +74,7 @@ from common.models import (
     IdempotencyResponse,
     LifecycleAudit,
     Memory,
+    MemoryConflict,
     MemoryEntityLink,
     Relation,
 )
@@ -1049,6 +1050,63 @@ class PostgresService:
                     else None
                 ),
                 decision_band=band,
+            )
+            session.add(row)
+            await session.flush()
+            return row
+
+    async def memory_conflict_record(self, payload: dict) -> MemoryConflict:
+        """Insert an A55 ``memory_conflicts`` classification record.
+
+        Required: ``tenant_id``, ``new_memory_id``, ``old_memory_id``,
+        ``relationship``. Optional: ``fleet_id``, ``relationship_confidence``,
+        ``diagnosis``, ``diagnosis_confidence``, ``evidence_strength``,
+        ``action``, ``audit_reason``, ``created_by``, ``metadata``.
+
+        Enum-like fields are validated against the model vocab so a bad value is a
+        400 (ValueError) rather than a DB CHECK violation at flush. This records
+        the classification only — the memory-row effect (``status`` /
+        ``supersedes_id``) is applied separately and is unchanged.
+        """
+        from common.models.memory_conflict import (
+            ACTIONS,
+            DIAGNOSES,
+            EVIDENCE_STRENGTHS,
+            RELATIONSHIPS,
+        )
+
+        relationship = payload.get("relationship")
+        if relationship not in RELATIONSHIPS:
+            raise ValueError(f"unknown relationship: {relationship!r}")
+        diagnosis = payload.get("diagnosis")
+        if diagnosis is not None and diagnosis not in DIAGNOSES:
+            raise ValueError(f"unknown diagnosis: {diagnosis!r}")
+        evidence = payload.get("evidence_strength")
+        if evidence is not None and evidence not in EVIDENCE_STRENGTHS:
+            raise ValueError(f"unknown evidence_strength: {evidence!r}")
+        action = payload.get("action")
+        if action is not None and action not in ACTIONS:
+            raise ValueError(f"unknown action: {action!r}")
+
+        def _conf(key: str) -> float | None:
+            v = payload.get(key)
+            return float(v) if v is not None else None
+
+        async with get_session() as session:
+            row = MemoryConflict(
+                tenant_id=payload["tenant_id"],
+                fleet_id=payload.get("fleet_id"),
+                new_memory_id=UUID(str(payload["new_memory_id"])),
+                old_memory_id=UUID(str(payload["old_memory_id"])),
+                relationship=relationship,
+                relationship_confidence=_conf("relationship_confidence"),
+                diagnosis=diagnosis,
+                diagnosis_confidence=_conf("diagnosis_confidence"),
+                evidence_strength=evidence,
+                action=action,
+                audit_reason=payload.get("audit_reason"),
+                created_by=payload.get("created_by"),
+                metadata_=payload.get("metadata"),
             )
             session.add(row)
             await session.flush()

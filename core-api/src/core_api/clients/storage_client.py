@@ -638,6 +638,12 @@ class CoreStorageClient:
         queue's failure modes."""
         return await self._post("/memories/dedup-reviews", payload, read=False)  # type: ignore[return-value]
 
+    async def record_memory_conflict(self, payload: dict) -> dict:
+        """A55 — persist a ``memory_conflicts`` classification record. Additive:
+        the memory-row status/supersedes effect is applied separately, so this
+        never changes retrieval behaviour."""
+        return await self._post("/memories/conflicts", payload, read=False)  # type: ignore[return-value]
+
     async def list_dedup_reviews(self, params: dict) -> list[dict]:
         """List reviews for a tenant, default ``status='pending'``."""
         return await self._get(  # type: ignore[return-value]
