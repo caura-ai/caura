@@ -280,6 +280,9 @@ async def _detect(
     """
     sc = get_storage_client()
     contradictions: list[ContradictionInfo] = []
+    # A55 1d — (candidate_row, kind, confidence) pairs to persist as
+    # memory_conflicts records after the effect is applied (flag-gated below).
+    _record_pairs: list[tuple[dict, str, float | None]] = []
 
     memory_id = new_memory.get("id")
     subject_entity_id = new_memory.get("subject_entity_id")
@@ -412,6 +415,7 @@ async def _detect(
                     direction=direction,
                 )
             )
+            _record_pairs.append((old, "rdf", None))
             logger.info(
                 "RDF contradiction: memory %s outdated by %s "
                 "(subject=%s predicate=%s old_value=%s new_value=%s direction=%s)",
@@ -577,6 +581,7 @@ async def _detect(
                             direction=direction,
                         )
                     )
+                    _record_pairs.append((candidate, "semantic", _confidence))
                     logger.info(
                         "Semantic contradiction: memory %s conflicted by %s direction=%s",
                         older_id,
@@ -596,6 +601,22 @@ async def _detect(
                         memory_id,
                         sem_result["skipped"],
                     )
+
+    # A55 1d — additionally persist a memory_conflicts classification record for
+    # each confirmed conflict. Flag-gated (default off); never touches the
+    # status/supersedes effect above, so retrieval behaviour is unchanged.
+    if _record_pairs and settings.contradiction_write_conflict_record:
+        from core_api.services.contradiction.resolver import (
+            record_detected_conflicts,
+        )
+
+        await record_detected_conflicts(
+            new_memory,
+            _record_pairs,
+            tenant_id=tenant_id,
+            fleet_id=new_memory.get("fleet_id"),
+            tenant_config=tenant_config,
+        )
 
     return contradictions
 

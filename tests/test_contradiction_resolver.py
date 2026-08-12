@@ -112,3 +112,44 @@ async def test_storage_failure_is_swallowed():
     with patch.object(rv, "get_storage_client", return_value=sc):
         rec = await rv.record_conflict(new, old, tenant_id="t1", fleet_id="f1")
     assert rec is None  # best-effort; never raises
+
+
+@pytest.mark.asyncio
+async def test_record_conflict_from_verdict_supersede():
+    """Detector-confirmed conflict (no second LLM) -> exact_value / temporal_change
+    / supersede, aligned with the detector's supersede effect."""
+    sc = _mock_storage()
+    with patch.object(rv, "get_storage_client", return_value=sc):
+        await rv.record_conflict_from_verdict(
+            _mem("n"), _mem("c"), tenant_id="t", fleet_id="f", confidence=0.7
+        )
+    p = sc.record_memory_conflict.await_args.args[0]
+    assert p["relationship"] == "exact_value"
+    assert p["diagnosis"] == "temporal_change"
+    assert p["action"] == "supersede"
+    assert p["relationship_confidence"] == 0.7
+
+
+@pytest.mark.asyncio
+async def test_record_detected_conflicts_dispatches_by_kind():
+    calls = []
+
+    async def fake_rc(nm, cand, **kw):
+        calls.append(("rc", cand["id"]))
+        return {}
+
+    async def fake_fv(nm, cand, **kw):
+        calls.append(("fv", cand["id"], kw.get("confidence")))
+        return {}
+
+    with (
+        patch.object(rv, "record_conflict", new=fake_rc),
+        patch.object(rv, "record_conflict_from_verdict", new=fake_fv),
+    ):
+        await rv.record_detected_conflicts(
+            _mem("n"),
+            [(_mem("c1"), "rdf", None), (_mem("c2"), "semantic", 0.8)],
+            tenant_id="t",
+            fleet_id="f",
+        )
+    assert calls == [("rc", "c1"), ("fv", "c2", 0.8)]

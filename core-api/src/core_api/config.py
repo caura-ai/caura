@@ -297,6 +297,11 @@ class Settings(BaseSettings):
     # paths are behaviourally identical (the engine delegates to the same
     # detector); the flag exists so the old arch can be retired later.
     contradiction_engine_enabled: bool = False
+    # A55 1d — when True, the detector additionally writes a memory_conflicts
+    # classification record for each confirmed conflict (via the resolver).
+    # Additive: it never changes the status/supersedes effect, so retrieval is
+    # unaffected. Default False; enable to start populating conflict records.
+    contradiction_write_conflict_record: bool = False
     crystallizer_enabled: bool = True
     crystallizer_stale_days: int = 180
     crystallizer_dedup_sample_size: int = 1000

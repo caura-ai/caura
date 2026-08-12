@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 
 from core_api.clients.storage_client import get_storage_client
-from core_api.services.contradiction.diagnosis import classify
+from core_api.services.contradiction.diagnosis import ClassifyResult, classify
 from core_api.services.contradiction.resolution import resolve
 
 logger = logging.getLogger(__name__)
@@ -41,10 +41,17 @@ async def record_conflict(
     tenant_id: str,
     fleet_id: str | None,
     tenant_config=None,
+    result: ClassifyResult | None = None,
 ) -> dict | None:
     """Classify + resolve a candidate pair and persist the ``memory_conflicts``
-    record. Best-effort: returns None (logged) if the write fails."""
-    result = await classify(new_memory, candidate, tenant_config=tenant_config)
+    record. Best-effort: returns None (logged) if the write fails.
+
+    ``result`` lets a caller that already classified the pair skip the (possibly
+    LLM-backed) ``classify()`` — used by ``record_conflict_from_verdict`` to avoid
+    a second LLM call on the detector's semantic path.
+    """
+    if result is None:
+        result = await classify(new_memory, candidate, tenant_config=tenant_config)
 
     # Invariant input: weak (inferred) evidence must not overturn explicit facts.
     is_inferred = bool(new_memory.get("is_inferred") or candidate.get("is_inferred"))
@@ -82,3 +89,50 @@ async def record_conflict(
             exc_info=True,
         )
         return None
+
+
+async def record_conflict_from_verdict(
+    new_memory: dict,
+    candidate: dict,
+    *,
+    tenant_id: str,
+    fleet_id: str | None,
+    confidence: float | None = None,
+) -> dict | None:
+    """Record a conflict the detector already CONFIRMED (semantic / Path C)
+    WITHOUT a second LLM call. The detector's effect is a supersede, so the
+    record is aligned to it: exact_value / temporal_change / supersede. Richer
+    L1/L2 classification of confirmed conflicts is a follow-up."""
+    conf = confidence if confidence is not None else 0.5
+    result = ClassifyResult("exact_value", conf, "temporal_change", conf)
+    return await record_conflict(new_memory, candidate, tenant_id=tenant_id, fleet_id=fleet_id, result=result)
+
+
+async def record_detected_conflicts(
+    new_memory: dict,
+    pairs: list[tuple[dict, str, float | None]],
+    *,
+    tenant_id: str,
+    fleet_id: str | None,
+    tenant_config=None,
+) -> None:
+    """Write a memory_conflicts record for each ``(candidate, kind, confidence)``
+    the detector confirmed. ``rdf`` pairs classify deterministically (no LLM);
+    ``semantic`` / Path-C pairs reuse the detector's verdict (no second LLM)."""
+    for candidate, kind, confidence in pairs:
+        if kind == "rdf":
+            await record_conflict(
+                new_memory,
+                candidate,
+                tenant_id=tenant_id,
+                fleet_id=fleet_id,
+                tenant_config=tenant_config,
+            )
+        else:
+            await record_conflict_from_verdict(
+                new_memory,
+                candidate,
+                tenant_id=tenant_id,
+                fleet_id=fleet_id,
+                confidence=confidence,
+            )
