@@ -196,3 +196,23 @@ async def test_insights_tick_hits_correct_path(monkeypatch: pytest.MonkeyPatch):
         await tasks.run_insights_tick()
 
     assert stub.calls[0][0].endswith("/admin/lifecycle/fanout/insights")
+
+
+@pytest.mark.asyncio
+async def test_embed_backfill_tick_posts_to_fanout(monkeypatch: pytest.MonkeyPatch):
+    """The sweep goes through the same per-org fanout as every other tick.
+
+    One message per org, not one giant call: the storage endpoint behind the
+    sweep refuses un-scoped requests, and per-org phasing bounds blast radius.
+    """
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    response = _StubResponse(200, {"action": "embed-backfill", "published": 7, "failed": 0})
+    async with _patch_client(monkeypatch, response=response) as stub:
+        await tasks.run_embed_backfill_tick()
+
+    assert len(stub.calls) == 1
+    url, headers = stub.calls[0]
+    assert url == "http://core-api/api/v1/admin/lifecycle/fanout/embed-backfill"
+    assert headers == {"X-API-Key": "admin-key-xyz"}

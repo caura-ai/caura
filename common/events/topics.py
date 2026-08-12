@@ -67,6 +67,12 @@ class Lifecycle(enum.StrEnum):
     CRYSTALLIZE_REQUESTED = "memclaw.lifecycle.crystallize-requested"
     ENTITY_LINK_REQUESTED = "memclaw.lifecycle.entity-link-requested"
     INSIGHTS_REQUESTED = "memclaw.lifecycle.insights-requested"
+    # Periodic sweep that re-embeds rows whose embedding is still NULL.
+    # Subscriber is core-worker, which owns ``core_worker.backfill`` — the
+    # only place that pages ``/memories/null-embedding-ids`` and republishes
+    # EMBED_REQUESTED per row. One message per org; the per-org page loop
+    # runs in the consumer, so it is not bounded by an HTTP request budget.
+    EMBED_BACKFILL_REQUESTED = "memclaw.lifecycle.embed-backfill-requested"
     # Skill Factory SF-007: Forge resident publishes one of these per
     # scheduled distillation run. Stub handler in Phase 0 (just logs);
     # real handler arrives in Phase 1 with the cluster fingerprint and

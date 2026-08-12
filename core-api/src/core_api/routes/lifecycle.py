@@ -32,7 +32,10 @@ from common.events import (
     publish_insights_request,
     publish_purge_soft_deleted_request,
 )
-from common.events.lifecycle_publishers import publish_forge_distill_request
+from common.events.lifecycle_publishers import (
+    publish_embed_backfill_request,
+    publish_forge_distill_request,
+)
 from common.events.lifecycle_purge_request import (
     MEMORY_RETENTION_MAX_DAYS,
     MEMORY_RETENTION_MIN_DAYS,
@@ -61,6 +64,21 @@ _ACTION_PUBLISHERS: dict[str, _PublisherFn] = {
     # Periodic discovery insights. Consumer also lives in core-api and
     # short-circuits via the activity gate + opt-in org flag.
     "insights": publish_insights_request,
+    # Periodic NULL-embedding re-embed sweep. Consumer is core-worker (it
+    # owns ``core_worker.backfill``); it republishes one EMBED_REQUESTED per
+    # row rather than embedding inline, so the work paces through the normal
+    # consumer path instead of competing with live writes at full rate.
+    #
+    # PROVISION THE TOPIC BEFORE TRIGGERING THIS. ``memclaw.lifecycle.
+    # embed-backfill-requested`` is Terraform-provisioned, and
+    # ``PubSubEventBus.publish`` deliberately does not block on the publish
+    # future, so a "topic not found" surfaces only in the SDK's background
+    # thread. Triggering either route before infra lands therefore returns 200
+    # with an ``audit_id`` whose row sits at ``pending`` forever, with no error
+    # to read. ``embed_backfill_enabled`` gates the core-operations cron but
+    # cannot gate this route — it is a core-operations setting — so the order
+    # is: provision topic + subscription + DLQ, then flip the flag.
+    "embed-backfill": publish_embed_backfill_request,
     # Skill Factory cron tick. Consumer also lives in core-api;
     # short-circuits via the ``org_settings.skills_factory.enabled``
     # tenant filter in ``_list_tenants_for_action`` — non-opted-in

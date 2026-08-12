@@ -54,6 +54,7 @@ from common.embedding import get_platform_embedding
 from common.enrichment import EnrichmentResult, enrich_memory
 from common.events.base import Event
 from common.events.factory import get_event_bus
+from common.events.lifecycle_archive_request import LifecycleArchiveRequest
 from common.events.memory_embed_request import MemoryEmbedRequest
 from common.events.memory_embedded_publisher import publish_memory_embedded
 from common.events.memory_enrich_request import MemoryEnrichRequest
@@ -63,12 +64,16 @@ from common.events.suppression_handlers import (
     register_suppression_consumer,
 )
 from common.events.topics import Topics
+from core_worker.backfill import run_embedding_backfill
 from core_worker.clients.storage_client import (
     find_embedding_by_content_hash,
+    get_storage_client,
+    update_lifecycle_audit_row,
     update_memory_embedding,
     update_memory_enrichment,
     upsert_tenant_suppression,
 )
+from core_worker.config import settings
 from core_worker.per_tenant_concurrency import per_tenant_storage_slot
 
 logger = logging.getLogger(__name__)
@@ -613,6 +618,154 @@ class _SuppressionAdapter(SuppressionStorageAdapter):
         )
 
 
+async def handle_embed_backfill_request(event: Event) -> None:
+    """Re-embed one org's NULL-embedding rows.
+
+    Registered here rather than through ``common.events.lifecycle_handlers``
+    because the work lives in ``core_worker.backfill`` and core-api — which
+    implements the same lifecycle adapter protocol — cannot run it. Routing it
+    through the shared adapter would have meant adding a method core-api could
+    only raise on.
+
+    The sweep publishes one ``EMBED_REQUESTED`` per NULL row rather than
+    embedding inline, so the actual provider calls flow through the normal
+    consumer path and inherit its per-tenant concurrency, retry and DLQ
+    wiring. It is idempotent: a redelivery re-queries and sees only rows still
+    NULL, because the consumer's writes flip them non-NULL.
+
+    Note what this sweep CANNOT repair, so nobody mistakes it for complete
+    coverage: ``update_memory`` on a content change leaves the PREVIOUS
+    content's vector in place (``memory_service.py`` ~:2597) — non-NULL, so
+    invisible here. Those rows are mis-embedded rather than unembedded and
+    need their own fix. The auto-chunk parent and atomic-fact fan-out paths
+    do land as NULL, so this does catch them.
+
+    It also cannot be scoped to a fleet, and refuses rather than silently
+    widening — see the ``fleet_id`` guard below.
+    """
+    try:
+        request = LifecycleArchiveRequest.model_validate(event.payload)
+    except ValidationError:
+        # Ack-drop rather than raise: a malformed payload is permanent, and
+        # nacking would redeliver it until the DLQ takes it. Matches
+        # handle_embed_request's poison-message guard.
+        logger.exception(
+            "dropping malformed embed-backfill payload",
+            extra={
+                "event_type": event.event_type,
+                "event_id": str(event.event_id),
+                "dropped": True,
+            },
+        )
+        return
+
+    if request.fleet_id is not None:
+        # Refuse rather than over-sweep. `fleet_id` is a real field on the
+        # shared payload and the manual trigger route forwards it, but nothing
+        # on this path can honour it: `run_embedding_backfill` takes no fleet
+        # parameter and `GET /memories/null-embedding-ids` filters by tenant
+        # only. Proceeding would re-embed the whole org for an operator who
+        # asked for one fleet — silently exceeding the requested blast radius
+        # on a path that generates writes. Fail loudly instead; the scheduled
+        # fanout never sets fleet_id, so this only affects deliberate manual
+        # triggers.
+        message = "embed-backfill cannot be scoped to a fleet: the sweep filters by tenant only"
+        logger.error(
+            message,
+            extra={"org_id": request.org_id, "fleet_id": request.fleet_id},
+        )
+        await update_lifecycle_audit_row(
+            get_storage_client(),
+            request.audit_id,
+            status="failure",
+            error_message=message,
+        )
+        return
+
+    # Mark the row in_progress before the sweep, as the shared ``_run_action``
+    # does. A per-org sweep can run for a while, and without this an operator
+    # inspecting the row mid-run cannot tell "actively sweeping" from "message
+    # not picked up yet" — both read as the fanout's initial ``pending``.
+    #
+    # Best-effort, matching ``_run_action``: bookkeeping must not decide whether
+    # the work happens. Letting this raise would nack before the sweep even
+    # started, skipping an op the operator asked for because a status write
+    # failed — and the sweep is idempotent, so doing it with a stale row is
+    # strictly better than not doing it.
+    try:
+        await update_lifecycle_audit_row(
+            get_storage_client(),
+            request.audit_id,
+            status="in_progress",
+        )
+    except Exception:
+        logger.warning(
+            "embed-backfill audit in_progress update failed; continuing",
+            exc_info=True,
+            extra={"org_id": request.org_id, "audit_id": request.audit_id},
+        )
+
+    try:
+        report = await run_embedding_backfill(
+            tenant_id=request.org_id,
+            max_inflight=settings.embed_backfill_max_inflight,
+        )
+    except Exception as exc:
+        # Finalise the audit row before re-raising. The fanout pre-creates it
+        # as ``pending`` specifically so a row that never advances reads as a
+        # publish failure — leaving it pending on a CONSUMER failure would
+        # make every failed sweep indistinguishable from a message that was
+        # never delivered.
+        #
+        # ``failure``, not ``failed``: core-storage-api's PATCH
+        # /lifecycle-audit/{id} validates against
+        # ``_VALID_STATUSES = {"in_progress", "success", "failure"}`` and 422s
+        # on anything else. Matches the shared ``_run_action``.
+        #
+        # Guarded, because an unguarded PATCH here would REPLACE ``exc`` with
+        # its own exception on any storage blip — losing the real cause and
+        # still leaving the row unfinalised. The original failure is the one
+        # worth propagating, so a bookkeeping failure only gets logged.
+        try:
+            await update_lifecycle_audit_row(
+                get_storage_client(),
+                request.audit_id,
+                status="failure",
+                error_message=str(exc)[:500],
+            )
+        except Exception:
+            logger.exception(
+                "embed-backfill sweep failed AND its audit row could not be finalised",
+                extra={"org_id": request.org_id, "audit_id": request.audit_id},
+            )
+        raise
+
+    # The count nobody could get before: "how many rows were unembedded" was
+    # only answerable by querying AlloyDB directly, because the coverage
+    # endpoint is internal-ingress and no metric carried it.
+    await update_lifecycle_audit_row(
+        get_storage_client(),
+        request.audit_id,
+        status="success",
+        stats={
+            "scanned": report.scanned,
+            "published": report.published,
+            "skipped_missing": report.skipped_missing,
+        },
+    )
+    logger.info(
+        "embed-backfill sweep processed",
+        extra={
+            "org_id": request.org_id,
+            "triggered_by": request.triggered_by,
+            "scanned": report.scanned,
+            "published": report.published,
+            "skipped_missing": report.skipped_missing,
+            "elapsed_s": round(report.elapsed_s, 1),
+        },
+    )
+
+
 def register_consumers() -> None:
     """Wire the consumers into the event bus.
 
@@ -624,6 +777,7 @@ def register_consumers() -> None:
     bus = get_event_bus()
     bus.subscribe(Topics.Memory.EMBED_REQUESTED, handle_embed_request)
     bus.subscribe(Topics.Memory.ENRICH_REQUESTED, handle_enrich_request)
+    bus.subscribe(Topics.Lifecycle.EMBED_BACKFILL_REQUESTED, handle_embed_backfill_request)
     # CAURA-694: register the org-suppression mirror handler. Subscribing
     # here keeps the registration order single-file rather than scattered
     # across multiple ``register_*`` entry points.

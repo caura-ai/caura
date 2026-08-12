@@ -77,3 +77,38 @@ def test_config_rejects_out_of_range_hour(field):
         Settings(**{field: 24})
     with pytest.raises(ValidationError, match=r"0\.\.23"):
         Settings(**{field: -1})
+
+
+def test_embed_backfill_not_registered_when_disabled(monkeypatch):
+    """Default off: the Pub/Sub topic is Terraform-provisioned, so firing
+    before infra lands would just error nightly. Registering conditionally
+    (rather than no-opping inside the tick) also keeps ``is_healthy``
+    meaningful — there is no runtime slot that could look dead."""
+    monkeypatch.setattr(app.settings, "embed_backfill_enabled", False)
+    fresh = Scheduler()
+    monkeypatch.setattr(app, "scheduler", fresh)
+
+    app._register_scheduled_tasks()
+
+    assert "embed-backfill" not in {t.name for t in fresh._tasks}
+    assert fresh.task_count == len(_EXPECTED_JOBS)
+
+
+def test_embed_backfill_registered_aligned_off_the_congested_hour(monkeypatch):
+    """When enabled it is wall-clock aligned and NOT in the 02:00 slot.
+
+    Every other lifecycle tick defaults to 02:00, which is congested enough
+    that the nightly cross-link call hits the 120s request ceiling — and this
+    sweep feeds the same embedding backend those ticks compete for.
+    """
+    monkeypatch.setattr(app.settings, "embed_backfill_enabled", True)
+    fresh = Scheduler()
+    monkeypatch.setattr(app, "scheduler", fresh)
+
+    app._register_scheduled_tasks()
+
+    task = next(t for t in fresh._tasks if t.name == "embed-backfill")
+    assert task.delay_provider is not None, "must not fire an immediate boot tick"
+    assert 0 < task.delay_provider() <= 24 * 3600
+    assert app.settings.embed_backfill_run_at_hour == 4
+    assert app.settings.embed_backfill_run_at_hour != app.settings.lifecycle_pipeline_run_at_hour

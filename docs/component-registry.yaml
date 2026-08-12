@@ -46,6 +46,9 @@ cron_ticks:
   - name: lifecycle-insights
     cadence: daily (configurable UTC hour, default 02:00)
     module: core_operations.app
+  - name: embed-backfill
+    cadence: daily (configurable UTC hour, default 04:00) — registers only when embed_backfill_enabled
+    module: core_operations.app
   - name: agent-digest
     cadence: daily (configurable UTC hour)
     module: core_operations.app
@@ -68,7 +71,7 @@ event_topic_families:
   - name: Org
     topics: 2   # suppression-changed, settings-changed
   - name: Lifecycle
-    topics: 7   # archive-expired/-stale/purge/crystallize/entity-link/insights/forge-distill (all -requested)
+    topics: 8   # archive-expired/-stale/purge/crystallize/entity-link/insights/embed-backfill/forge-distill (all -requested)
 
 # Components that are NOT driven by core-operations' scheduler and need an
 # operator-provided external schedule.

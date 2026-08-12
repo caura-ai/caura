@@ -101,6 +101,16 @@ async def run_entity_link_tick() -> None:
     await _fire_fanout("entity-link")
 
 
+async def run_embed_backfill_tick() -> None:
+    """Re-embed rows whose embedding is still NULL, one message per org.
+
+    The only periodic self-healing path for memories that never got an
+    embedding scheduled — normal writes already republish EMBED_REQUESTED
+    themselves, so this exists for the rows that fell through entirely.
+    """
+    await _fire_fanout("embed-backfill")
+
+
 async def run_insights_tick() -> None:
     """Trigger insights discovery per active org. Same shape as the
     crystallize / entity-link ticks — POST the fanout endpoint and

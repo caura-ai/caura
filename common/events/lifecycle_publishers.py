@@ -109,6 +109,33 @@ async def publish_crystallize_request(
     )
 
 
+async def publish_embed_backfill_request(
+    *,
+    audit_id: int,
+    org_id: str,
+    triggered_by: str,
+    fleet_id: str | None = None,
+) -> None:
+    """Trigger a NULL-embedding re-embed sweep for one org.
+
+    Reuses the archive payload — the action carries no per-message data
+    beyond the shared base. The consumer (core-worker) pages
+    ``/memories/null-embedding-ids`` for the org and republishes one
+    ``EMBED_REQUESTED`` per row, so the actual embedding work flows through
+    the same consumer, retry and DLQ path as a normal deferred write rather
+    than being done inline here.
+    """
+    await _publish(
+        Topics.Lifecycle.EMBED_BACKFILL_REQUESTED,
+        LifecycleArchiveRequest(
+            audit_id=audit_id,
+            org_id=org_id,
+            triggered_by=triggered_by,
+            fleet_id=fleet_id,
+        ),
+    )
+
+
 async def publish_entity_link_request(
     *,
     audit_id: int,
