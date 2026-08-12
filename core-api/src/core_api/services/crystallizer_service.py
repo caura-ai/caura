@@ -149,11 +149,16 @@ async def run_crystallization(
         usage = {"error": True}
         checks_failed += 1
 
-    # --- Remediate missing embeddings ---
-    try:
-        await _remediate_missing_embeddings(tenant_id, fleet_id)
-    except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError):
-        logger.exception("Embedding remediation failed for tenant %s (non-blocking)", tenant_id)
+    # Remediating missing embeddings is deliberately NOT done here. Repair
+    # lives in ``core_worker.backfill``, which pages
+    # ``GET /memories/null-embedding-ids`` and publishes one
+    # ``EMBED_REQUESTED`` per row, inheriting the consumer's per-tenant
+    # concurrency, retry and DLQ wiring. Embedding inline inside a
+    # crystallization run would instead draw from the process-wide embedding
+    # gate that write traffic already oversubscribes, so a hygiene report
+    # could stall the write path it is reporting on. This run's job is to
+    # SURFACE the count (``_check_missing_embeddings``); acting on it is
+    # ``python -m core_worker.cli backfill-embeddings --tenant-id X``.
 
     # --- Issues ---
     issues: list[dict] = []
@@ -217,49 +222,6 @@ async def run_crystallization(
         crystallization.get("new_memories", 0),
     )
     return report_id
-
-
-# ---------------------------------------------------------------------------
-# Embedding remediation
-# ---------------------------------------------------------------------------
-
-
-async def _remediate_missing_embeddings(
-    tenant_id: str,
-    fleet_id: str | None,
-) -> None:
-    """Re-embed memories that have NULL embeddings (e.g. from earlier failures)."""
-    from common.embedding import get_embedding
-
-    sc = get_storage_client()
-    # Use the lifecycle_candidates endpoint which provides missing-embedding data
-    candidates = await sc.get_lifecycle_candidates(tenant_id)
-    missing = candidates.get("missing_embeddings", [])
-    if not missing:
-        return
-
-    patched = 0
-    for item in missing:
-        mem_id = item.get("id")
-        content = item.get("content", "")
-        embedding = await get_embedding(content)
-        if embedding is None:
-            continue
-        # Count only writes that actually landed: update_embedding returns
-        # None when the row didn't match (404), so a no-op never inflates
-        # the remediated tally. (Candidates are tenant-scoped, so a mismatch
-        # shouldn't occur here — this just keeps the counter honest.)
-        if await sc.update_embedding(str(mem_id), tenant_id, embedding) is not None:
-            patched += 1
-
-    if patched:
-        logger.info(
-            "Remediated %d/%d missing embeddings for tenant=%s fleet=%s",
-            patched,
-            len(missing),
-            tenant_id,
-            fleet_id,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -599,36 +561,52 @@ async def _check_expired_still_active(
     tenant_id: str,
     fleet_id: str | None,
 ) -> dict:
-    """Memories past their validity window but still marked active."""
+    """Memories past their validity window but still marked active.
+
+    ``/lifecycle-candidates`` returns each list as bare UUID **strings**, not
+    row dicts, so these are used directly. Calling ``.get("id")`` on them
+    raised ``AttributeError`` for any tenant that had even one expired
+    memory, which ``run_crystallization`` swallowed into
+    ``{"error": True}`` — so the check reported an error precisely when it
+    had something to report, and nothing at all when it didn't.
+    """
     sc = get_storage_client()
     candidates = await sc.get_lifecycle_candidates(tenant_id)
     expired = candidates.get("expired_still_active", [])
-    ids = [str(r.get("id")) for r in expired]
-    return {"count": len(expired), "affected_ids": ids[:MAX_AFFECTED_IDS]}
+    return {"count": len(expired), "affected_ids": [str(r) for r in expired][:MAX_AFFECTED_IDS]}
 
 
 async def _check_stale_memories(
     tenant_id: str,
     fleet_id: str | None,
 ) -> dict:
-    """Old memories never recalled and with low weight."""
+    """Old memories never recalled and with low weight.
+
+    The endpoint's key is ``stale_low_weight``; this read ``stale_memories``,
+    which it has never returned, so the check reported zero for every tenant.
+    Values are bare UUID strings — see ``_check_expired_still_active``.
+    """
     sc = get_storage_client()
     candidates = await sc.get_lifecycle_candidates(tenant_id)
-    stale = candidates.get("stale_memories", [])
-    ids = [str(r.get("id")) for r in stale]
-    return {"count": len(stale), "affected_ids": ids[:MAX_AFFECTED_IDS]}
+    stale = candidates.get("stale_low_weight", [])
+    return {"count": len(stale), "affected_ids": [str(r) for r in stale][:MAX_AFFECTED_IDS]}
 
 
 async def _check_short_content(
     tenant_id: str,
     fleet_id: str | None,
 ) -> dict:
-    """Memories with very short content (likely low value)."""
+    """Memories with very short content (likely low value).
+
+    The endpoint had no ``short_content`` key until now, so this reported zero
+    for every tenant — and would have raised on ``r.get("id")`` the moment it
+    didn't, since the values are bare UUID strings. See
+    ``_check_expired_still_active``.
+    """
     sc = get_storage_client()
     candidates = await sc.get_lifecycle_candidates(tenant_id)
     short = candidates.get("short_content", [])
-    ids = [str(r.get("id")) for r in short]
-    return {"count": len(short), "affected_ids": ids[:MAX_AFFECTED_IDS]}
+    return {"count": len(short), "affected_ids": [str(r) for r in short][:MAX_AFFECTED_IDS]}
 
 
 async def _check_broken_entity_links(

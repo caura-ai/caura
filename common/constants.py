@@ -408,6 +408,14 @@ SINGLE_VALUE_PREDICATES: frozenset[str] = frozenset(
 # across the two deployment modes.
 LIFECYCLE_STALE_ARCHIVE_WEIGHT: float = 0.3
 
+# Minimum content length for a memory to be considered worth keeping. Two
+# services must agree on it: core-api rejects shorter writes at the quality
+# gate, and core-storage-api uses the same bound when listing existing rows
+# that fall below it for the crystallizer's short-content hygiene check. A
+# divergence would let the hygiene report flag rows the write path would have
+# accepted, or miss rows it would have rejected.
+CRYSTALLIZER_SHORT_CONTENT_CHARS: int = 10
+
 
 # ── Search tuning knobs (#723 / #725 / #727) ──
 # The declaration of each search knob's type, accepted range, and whether it
