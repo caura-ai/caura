@@ -19,7 +19,6 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
-
 from core_api.constants import VECTOR_DIM
 from core_api.services.contradiction_detector import _detect
 
@@ -134,8 +133,17 @@ async def test_semantic_path_collapses_to_one_batch_call():
             return_value=mock_sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
-            AsyncMock(return_value=(True, 0.9)),  # both verdicts: contradict
+            "core_api.services.contradiction_detector._llm_contradiction_check_batch",
+            AsyncMock(
+                return_value=[
+                    {
+                        "same_subject": True,
+                        "contradicts": True,
+                        "non_conflict_reason": "none",
+                    }
+                    for _ in cands
+                ]
+            ),  # A61 batched judge — both candidates contradict
         ),
     ):
         await _detect(new, [0.1] * VECTOR_DIM)
@@ -221,8 +229,9 @@ async def test_semantic_path_no_verdicts_skips_batch_call():
 
 
 async def test_semantic_path_skips_exception_candidate_still_batches():
-    """One LLM call raises, one returns verdict=True. The exception
-    candidate is skipped; the successful one still ends up in the batch."""
+    """A61: the batched judge returns one non-contradicting (or defaulted)
+    candidate and one contradicting one. The non-verdict candidate is skipped;
+    the contradicting one still ends up in the status batch."""
     new_id = str(uuid4())
     new = _make_new(mid=new_id)
     new["subject_entity_id"] = None
@@ -234,10 +243,13 @@ async def test_semantic_path_skips_exception_candidate_still_batches():
         _make_cand(cid=str(uuid4()), object_value="ok"),
     ]
 
-    async def _judge(new_content, old_content, _cfg):
-        if "explode" in old_content:
-            raise TimeoutError("simulated llm timeout")
-        return (True, 0.9)
+    # First candidate: malformed/defaulted (skipped); second: contradict.
+    batch = AsyncMock(
+        return_value=[
+            {"contradicts": False},
+            {"same_subject": True, "contradicts": True, "non_conflict_reason": "none"},
+        ]
+    )
 
     mock_sc = AsyncMock()
     mock_sc.find_rdf_conflicts = AsyncMock(return_value=[])
@@ -251,8 +263,8 @@ async def test_semantic_path_skips_exception_candidate_still_batches():
             return_value=mock_sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._llm_contradiction_check",
-            side_effect=_judge,
+            "core_api.services.contradiction_detector._llm_contradiction_check_batch",
+            batch,
         ),
     ):
         await _detect(new, [0.1] * VECTOR_DIM)

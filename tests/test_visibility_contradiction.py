@@ -7,14 +7,13 @@ Tests:
 4. Supersession first-match-only behavior
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
-
 from core_api.constants import VECTOR_DIM
-from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
+from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 # ---------------------------------------------------------------------------
 # 1. Auto-chunk child visibility inheritance
@@ -341,10 +340,17 @@ class TestSupersessionFirstMatchOnly:
                 return_value=mock_sc,
             ),
             patch(
-                "core_api.services.contradiction_detector._llm_contradiction_check",
+                "core_api.services.contradiction_detector._llm_contradiction_check_batch",
                 new_callable=AsyncMock,
-                # A4 #12 — judge returns (verdict, confidence) tuple.
-                return_value=(True, 0.90),
+                # A61 — batched judge; both candidates contradict.
+                return_value=[
+                    {
+                        "same_subject": True,
+                        "contradicts": True,
+                        "non_conflict_reason": "none",
+                    }
+                ]
+                * 2,
             ),
         ):
             embedding = [0.1] * VECTOR_DIM

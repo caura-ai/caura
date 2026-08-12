@@ -475,15 +475,19 @@ async def _detect(
             len(candidates) if candidates else 0,
         )
         if candidates:
-            # Fire all LLM checks concurrently instead of serially
-            tasks = [
-                asyncio.wait_for(
-                    _llm_contradiction_check(content, c.get("content", ""), tenant_config),
-                    timeout=10.0,
+            # A61 — batch the LLM judge. A single candidate keeps the direct
+            # per-candidate call; multiple candidates (the prod cost driver, up
+            # to 20) are judged in ONE batched call instead of N. Both feed the
+            # SAME _judge_contradiction gates below. ``judged`` is
+            # (verdict, confidence, raw|None).
+            if len(candidates) == 1:
+                _v, _c = await _llm_contradiction_check(
+                    content, candidates[0].get("content", ""), tenant_config
                 )
-                for c in candidates
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+                judged: list[tuple[bool, float, dict | None]] = [(_v, _c, None)]
+            else:
+                raws = await _llm_contradiction_check_batch(content, candidates, tenant_config)
+                judged = [(*_judge_contradiction(raw), raw) for raw in raws]
 
             # CAURA-125 — state-corruption guard, same rationale as the
             # RDF path above.
@@ -497,19 +501,7 @@ async def _detect(
             # ``updates`` is empty. Keyed by ``memory_id`` — see
             # ``_merge_status_update`` for the dedupe rationale.
             updates: dict[str, dict] = {}
-            for candidate, result in zip(candidates, results):
-                if isinstance(result, Exception):
-                    logger.warning(
-                        "Contradiction check failed for candidate %s: %s",
-                        candidate.get("id"),
-                        result,
-                    )
-                    continue
-                # A4 #12 — judge now returns (verdict, confidence).
-                # Path A continues to gate only on verdict at this site;
-                # A4 #13 will introduce confidence-weighted vetoes on
-                # Path C's else-branch.
-                verdict, _confidence = result  # type: ignore[misc]
+            for candidate, (verdict, _confidence, _raw) in zip(candidates, judged):
                 # CAURA-132 diag — Path A semantic per-candidate verdict.
                 logger.info(
                     "PATH_A_SEMANTIC verdict memory=%s candidate=%s verdict=%s confidence=%.2f",
@@ -1034,6 +1026,114 @@ async def _llm_contradiction_check(
         service_label="contradiction",
         model_attr="entity_extraction_model",
         timeout=10.0,
+    )
+
+
+# A61 — batched contradiction judge. The semantic path used to fire one
+# ``_llm_contradiction_check`` (one ``complete_json``) PER candidate, up to the
+# candidate cap (20). This judges ALL candidates against the new statement in a
+# single call (~Nx fewer LLM calls, the prod cost driver). The per-candidate raw
+# output is fed through the SAME ``_judge_contradiction`` gates by the caller, so
+# verdict semantics — Gate 1 (cross-subject), Gate 2 (non_conflict_reason),
+# ``_pick_older`` direction — are unchanged. It also emits ``relationship`` /
+# ``diagnosis`` per candidate so a downstream conflict-record write (A55 engine
+# path) can reuse it with no second LLM call.
+BATCH_CONTRADICTION_PROMPT = """\
+You are a contradiction detector for a business memory system.
+
+A NEW statement is compared against several EXISTING candidate statements.
+Judge EACH candidate INDEPENDENTLY against the NEW statement — one candidate's
+verdict must NOT influence another's.
+
+Two statements contradict ONLY IF they make incompatible claims about the SAME
+real-world subject. Different subjects -> NOT a contradiction, even if the
+predicates look opposite.
+
+NEW statement:
+{new_content}
+
+Candidate statements (judge each, by index):
+{candidates_block}
+
+For EACH candidate index decide, applying the rules in order:
+1. same_subject (bool): true ONLY when the candidate and the NEW statement refer
+   to the SAME real-world entity (exact name / known alias / role+name in
+   context / unambiguously resolved pronoun). false for two people sharing a
+   name, different companies/products/projects/teams, or any uncertainty.
+2. non_conflict_reason (exactly one): "none"; "temporal_supersession"
+   (sequential lifecycle states of the same subject, both true in order);
+   "list_valued_predicate" (a multi-valued predicate or two different attributes
+   that both hold); "refinement" (one is a more specific version of the other);
+   "scope_mismatch" (same subject under different implicit qualifiers — time
+   window / whole vs part / context; both hold); "same_name_distinct_subject"
+   (same surface name, plausibly different instances); "conditional_unrealized"
+   (one is hypothetical/irrealis); "event_restatement" (same event restated).
+3. contradicts (bool): true ONLY when same_subject is true AND
+   non_conflict_reason is "none" AND the two assert mutually exclusive states in
+   the same time frame. Updates / corrections about the same subject ARE
+   contradictions ("X lives in Tel Aviv" vs "X lives in Haifa").
+4. relationship (exactly one): "exact_value" (same attribute, different single
+   value); "negation" (asserts P vs not-P); "entailed" (one implies or restates
+   the other); "constraint" (multi-valued predicate, both hold); "probabilistic"
+   (hedged/uncertain); "scope_apparent" (same attribute, different implicit
+   qualifiers); "refinement" (one more specific).
+5. diagnosis (exactly one): "correction" (old was wrong); "temporal_change"
+   (state changed over time); "scope_difference"; "entity_mismatch" (actually
+   different entities); "write_error"; "unresolved".
+
+Reply with ONLY a JSON object mapping each candidate index (as a STRING) to its
+judgment, no prose, no markdown fences:
+{{"0": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true, "relationship": "exact_value", "diagnosis": "temporal_change"}}, "1": {{...}}}}
+"""
+
+
+async def _llm_contradiction_check_batch(
+    new_content: str,
+    candidates: list[dict],
+    tenant_config=None,
+) -> list[dict]:
+    """Judge ALL ``candidates`` against ``new_content`` in ONE ``complete_json``
+    call (A61). Returns one raw judgment dict per candidate, aligned to input
+    order; a missing / malformed entry defaults to a safe non-contradiction
+    (``{"contradicts": False}``) so a partial response never fabricates or drops
+    a contradiction. The caller runs each raw through ``_judge_contradiction``,
+    so the safety gates are identical to the per-candidate path."""
+    provider_name = (
+        tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
+    )
+    candidates_block = "\n".join(f"[{i}] {c.get('content', '')[:500]}" for i, c in enumerate(candidates))
+    prompt = BATCH_CONTRADICTION_PROMPT.format(
+        new_content=new_content[:500], candidates_block=candidates_block
+    )
+
+    def _align(obj: object) -> list[dict]:
+        by_index = obj if isinstance(obj, dict) else {}
+        out: list[dict] = []
+        for i in range(len(candidates)):
+            entry = by_index.get(str(i))
+            if entry is None:
+                entry = by_index.get(i)  # tolerate int keys
+            out.append(entry if isinstance(entry, dict) else {"contradicts": False})
+        return out
+
+    async def _do_check(llm) -> list[dict]:
+        raw = await llm.complete_json(prompt)
+        return _align(raw)
+
+    return await call_with_fallback(
+        primary_provider_name=provider_name,
+        call_fn=_do_check,
+        fake_fn=lambda: [
+            {
+                "same_subject": True,
+                "contradicts": _fake_contradiction_check(new_content, c.get("content", "")),
+            }
+            for c in candidates
+        ],
+        tenant_config=tenant_config,
+        service_label="contradiction_batch",
+        model_attr="entity_extraction_model",
+        timeout=15.0,
     )
 
 
