@@ -371,3 +371,77 @@ class TestCrystallizeCluster:
         assert result[0]["memory_type"] == "fact"
         assert result[1]["memory_type"] == "fact"  # INVALID -> fact
         assert result[2]["weight"] == 1.0  # 5.0 clamped to 1.0
+
+
+class TestMissingEmbeddingsCheck:
+    """``_check_missing_embeddings`` must read the keys the endpoint returns.
+
+    It previously read ``missing_count`` / ``missing_ids``, neither of which
+    ``GET /memories/embedding-coverage`` has ever returned, so both ``.get()``
+    calls fell through to their defaults and every tenant reported
+    ``count: 0`` — a silent all-clear while prod was logging "Storing memory
+    without embedding; deferred backfill scheduled" hundreds of times a day.
+    """
+
+    #: Exactly what the storage endpoint returns — see
+    #: core-storage-api/src/core_storage_api/routers/memories.py::get_embedding_coverage.
+    COVERAGE_RESPONSE = {
+        "total_active": 10,
+        "missing_embeddings": 4,
+        "coverage_pct": 60.0,
+    }
+
+    @pytest.mark.asyncio
+    async def test_reports_missing_embeddings_count(self):
+        """4 missing out of 10 is reported as 4, not 0."""
+        from unittest.mock import AsyncMock, patch
+
+        from core_api.services.crystallizer_service import _check_missing_embeddings
+
+        sc = AsyncMock()
+        sc.get_embedding_coverage.return_value = dict(self.COVERAGE_RESPONSE)
+        with patch(
+            "core_api.services.crystallizer_service.get_storage_client",
+            return_value=sc,
+        ):
+            result = await _check_missing_embeddings("tenant-1", None)
+
+        assert result["count"] == 4
+
+    @pytest.mark.asyncio
+    async def test_clean_tenant_reports_zero(self):
+        """Full coverage still reports zero — guards against inverting the read."""
+        from unittest.mock import AsyncMock, patch
+
+        from core_api.services.crystallizer_service import _check_missing_embeddings
+
+        sc = AsyncMock()
+        sc.get_embedding_coverage.return_value = {
+            "total_active": 10,
+            "missing_embeddings": 0,
+            "coverage_pct": 100.0,
+        }
+        with patch(
+            "core_api.services.crystallizer_service.get_storage_client",
+            return_value=sc,
+        ):
+            result = await _check_missing_embeddings("tenant-1", None)
+
+        assert result["count"] == 0
+
+    def test_endpoint_contract_is_pinned(self):
+        """The endpoint's response keys, asserted against the endpoint itself.
+
+        The bug was a silent key mismatch across a service boundary, so pin the
+        contract here: if the endpoint's keys change, this fails rather than the
+        check quietly returning 0 again.
+        """
+        import inspect
+
+        from core_storage_api.routers.memories import get_embedding_coverage
+
+        source = inspect.getsource(get_embedding_coverage)
+        for key in self.COVERAGE_RESPONSE:
+            assert f'"{key}"' in source, f"endpoint no longer returns {key!r}"
+        assert '"missing_count"' not in source
+        assert '"missing_ids"' not in source

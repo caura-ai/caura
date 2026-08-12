@@ -575,12 +575,24 @@ async def _check_missing_embeddings(
     tenant_id: str,
     fleet_id: str | None,
 ) -> dict:
-    """Memories with no embedding vector."""
+    """Memories with no embedding vector.
+
+    ``GET /memories/embedding-coverage`` returns exactly three keys —
+    ``total_active``, ``missing_embeddings``, ``coverage_pct`` — so this reads
+    ``missing_embeddings``. It previously read ``missing_count`` and
+    ``missing_ids``, neither of which the endpoint has ever returned, so both
+    ``.get()`` calls fell through to their defaults and the check reported
+    ``count: 0`` for every tenant no matter how many rows were unembedded.
+
+    No ``affected_ids`` is returned because the endpoint exposes only counts,
+    not ids. ``_generate_issues`` defaults the field to ``[]``, so the finding
+    keeps the same shape as its siblings. Populating it would mean extending
+    the storage endpoint to select ids as well — worth doing only if something
+    starts consuming them.
+    """
     sc = get_storage_client()
     coverage = await sc.get_embedding_coverage(tenant_id, fleet_id)
-    missing_count = coverage.get("missing_count", 0)
-    missing_ids = coverage.get("missing_ids", [])
-    return {"count": missing_count, "affected_ids": [str(i) for i in missing_ids][:MAX_AFFECTED_IDS]}
+    return {"count": coverage.get("missing_embeddings", 0)}
 
 
 async def _check_expired_still_active(
