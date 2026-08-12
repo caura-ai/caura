@@ -96,6 +96,27 @@ EMBEDDING_HTTPX_MAX_KEEPALIVE_CONNECTIONS: int = clamp_keepalive(
     max_keepalive_var="EMBEDDING_HTTPX_MAX_KEEPALIVE_CONNECTIONS",
 )
 
+# Per-phase connect timeout, mirroring ``OPENAI_HTTPX_CONNECT_TIMEOUT_SECONDS``
+# on the LLM side. Passing a bare float to ``AsyncOpenAI(timeout=...)`` looks
+# like it sets the whole budget but leaves httpx's DEFAULT 5 s connect phase in
+# place. On Cloud Run with a VPC connector in ``all-traffic`` egress mode every
+# outbound call intermittently exceeds 5 s, which surfaces as
+# ``httpcore.ConnectTimeout`` well inside the nominal request budget. The LLM
+# client took this fix; the embedding client kept the bare float, so the same
+# trickle continued here — visible as the staging
+# "pubsub handler raised; nacking for redelivery" loop, where the worker's
+# embed call is the only handler that can propagate. Only connect/pool get the
+# headroom; the read phase stays governed by ``OPENAI_REQUEST_TIMEOUT_SECONDS``.
+EMBEDDING_HTTPX_CONNECT_TIMEOUT_SECONDS: float = read_float_env(
+    "EMBEDDING_HTTPX_CONNECT_TIMEOUT_SECONDS", 15.0
+)
+# None ⇒ the pool phase tracks the request budget, preserving the bare-float
+# behaviour this replaces for every existing configuration. Set the env var
+# only to decouple them (e.g. fail fast under pool pressure).
+EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS: float | None = read_float_env(
+    "EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS", None
+)
+
 
 # ── Client-side concurrency cap (backpressure) ───────────────────────
 #

@@ -11,8 +11,10 @@ import openai
 from common.constants import VECTOR_DIM
 from common.embedding.constants import (
     EMBEDDING_HOSTED_MAX_BATCH,
+    EMBEDDING_HTTPX_CONNECT_TIMEOUT_SECONDS,
     EMBEDDING_HTTPX_MAX_CONNECTIONS,
     EMBEDDING_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
+    EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS,
     EMBEDDING_REMOTE_MAX_BATCH,
     OPENAI_EMBEDDING_MODEL,
     OPENAI_REQUEST_TIMEOUT_SECONDS,
@@ -113,7 +115,20 @@ class OpenAIEmbeddingProvider:
         # tenants' embed calls at the pool layer.
         client_kwargs: dict = {
             "api_key": api_key,
-            "timeout": OPENAI_REQUEST_TIMEOUT_SECONDS,
+            "timeout": httpx.Timeout(
+                connect=EMBEDDING_HTTPX_CONNECT_TIMEOUT_SECONDS,
+                # read AND write keep the full request budget — the bare float
+                # this replaces set every phase to it.
+                read=OPENAI_REQUEST_TIMEOUT_SECONDS,
+                write=OPENAI_REQUEST_TIMEOUT_SECONDS,
+                # Pool tracks the request budget unless explicitly decoupled,
+                # preserving the previous behaviour for every configuration.
+                pool=(
+                    EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS
+                    if EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS is not None
+                    else OPENAI_REQUEST_TIMEOUT_SECONDS
+                ),
+            ),
             "http_client": httpx.AsyncClient(
                 limits=httpx.Limits(
                     max_connections=EMBEDDING_HTTPX_MAX_CONNECTIONS,
