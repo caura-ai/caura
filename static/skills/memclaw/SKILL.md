@@ -4,11 +4,11 @@ description: The agent's persistent long-term memory — the only knowledge that
 user-invocable: false
 ---
 
-# MemClaw Skill
+# Caura Skill
 
-MemClaw is your long-term memory. Anything you learn that you don't write here
+Caura is your long-term memory. Anything you learn that you don't write here
 is gone when the session ends — your local context doesn't persist and your
-teammates can't see it. So treat MemClaw as the default home for every
+teammates can't see it. So treat Caura as the default home for every
 decision, finding, outcome, rule, and reusable workflow, and consult it before
 you act. It's shared across the fleet under access control: what you write can
 make the next agent smarter, and what you recall is what the fleet already
@@ -112,7 +112,7 @@ visible to the fleet because it went in at `scope_team`.
 Never paste secrets — API keys, tokens, credentials — into memory `content`.
 The PII scan is a safety net, not permission; keep them out entirely.
 
-**Some memories may be written for you.** If your runtime has the MemClaw
+**Some memories may be written for you.** If your runtime has the Caura
 Interviewer enabled, a scheduled server-side job reads your durable work trail
 (the transcript your harness already keeps) and synthesizes typed memories from
 it — episodes, decisions, outcomes — after the fact. You don't invoke it and
@@ -343,4 +343,4 @@ parameter list.
 this file to `~/.claude/skills/memclaw/SKILL.md` (Claude Code) or
 `~/.agents/skills/memclaw/SKILL.md` (Codex). Per-workspace override: place a copy
 under `.claude/skills/memclaw/` or `.agents/skills/memclaw/`. OpenClaw fleets use
-the variant shipped with the MemClaw plugin.*
+the variant shipped with the Caura plugin.*

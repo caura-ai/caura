@@ -115,7 +115,7 @@ decision.
 To make skill use *reliable* rather than probabilistic, a skill must be
 installed into the harness's own startup surface (its skill registry /
 filesystem / system-prompt) so it's present before the model thinks —
-which is necessarily per-harness and can't be done from the MemClaw
+which is necessarily per-harness and can't be done from the Caura
 side alone.
 
 So the tiers are:
@@ -126,7 +126,7 @@ So the tiers are:
   integrate deeply (writing `<harness>/skills/<slug>/SKILL.md` so the
   skill is present before the model thinks). Guarantees presence;
   requires a harness-specific adapter. **OpenClaw is the first such
-  harness** (the MemClaw plugin reconciles the catalog to disk every
+  harness** (the Caura plugin reconciles the catalog to disk every
   heartbeat).
 
 They're complementary: MCP-direct is the floor that works everywhere;
@@ -179,7 +179,7 @@ arrays are deduped *across* targets. The summary also carries a
 (`{ dir, mode, installed, added, removed, collisions, protected }`) — so
 an operator can see exactly *which* dir a skill landed in or collided in.
 For the default single-target case it's one entry mirroring the top-level
-arrays. A `registeredDirs[]` array lists the target dirs MemClaw has
+arrays. A `registeredDirs[]` array lists the target dirs Caura has
 ensured are on OpenClaw's skill load path this tick (the `register: true`
 opt-in below); it's empty unless a target opts in.
 
@@ -190,9 +190,9 @@ By default the reconciler manages one **`owned`** dir — the plugin's own
 catalog is pruned. Operators can add extra target dirs via the
 `MEMCLAW_SKILL_TARGETS` env var (JSON array of `{ dir, mode, register? }`):
 
-- **`owned`** — fully MemClaw-managed (destructive prune). Use only for
-  dirs MemClaw exclusively controls.
-- **`additive`** — a **shared/foreign** dir. MemClaw writes its active
+- **`owned`** — fully Caura-managed (destructive prune). Use only for
+  dirs Caura exclusively controls.
+- **`additive`** — a **shared/foreign** dir. Caura writes its active
   skills there but **only ever touches entries it wrote**, tracked by a
   per-skill `.memclaw-owned` marker file:
   - a slug already occupied by an *unowned* skill is a **collision** —
@@ -202,7 +202,7 @@ catalog is pruned. Operators can add extra target dirs via the
   - only marker-bearing entries are updated/pruned.
 
 This makes the "empty catalog / wrong tenant wipes the dir" hazard apply
-only to `owned` dirs — `additive` dirs lose only MemClaw's own entries,
+only to `owned` dirs — `additive` dirs lose only Caura's own entries,
 never the client's.
 
 #### Reaching agents: `register`

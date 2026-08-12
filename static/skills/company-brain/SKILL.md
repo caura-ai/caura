@@ -1,6 +1,6 @@
 ---
 name: company-brain
-description: How an agent should operate as one mind inside a shared Company Brain built on MemClaw — recall before acting, obey fleet keystones, reuse and publish skills, and report outcomes so every task compounds across the whole organization. Use this whenever you work as part of a MemClaw-connected team or fleet and your work should build on, and feed back into, what the organization already knows; it sets the operating posture. For the mechanics of individual memclaw_* tools, see the companion "memclaw" skill.
+description: How an agent should operate as one mind inside a shared Company Brain built on Caura — recall before acting, obey fleet keystones, reuse and publish skills, and report outcomes so every task compounds across the whole organization. Use this whenever you work as part of a Caura-connected team or fleet and your work should build on, and feed back into, what the organization already knows; it sets the operating posture. For the mechanics of individual memclaw_* tools, see the companion "memclaw" skill.
 user-invocable: false
 ---
 
@@ -59,6 +59,6 @@ you found it." Five habits make that real.
 
 ---
 
-*Posture layer for the MemClaw Company Brain. Pair it with the `memclaw` skill,
-which carries the tool mechanics. Built on the MemClaw protocol (Apache 2.0) —
+*Posture layer for the Caura Company Brain. Pair it with the `memclaw` skill,
+which carries the tool mechanics. Built on the Caura protocol (Apache 2.0) —
 see [memclaw.net](https://memclaw.net).*

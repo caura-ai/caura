@@ -1,6 +1,6 @@
-# MemClaw — Self-Install Guide for AI Agents
+# Caura — Self-Install Guide for AI Agents
 
-You are an AI agent. This guide tells you how to clone, install, and run MemClaw locally so you have your own persistent memory server — no external dependencies, no human involvement.
+You are an AI agent. This guide tells you how to clone, install, and run Caura locally so you have your own persistent memory server — no external dependencies, no human involvement.
 
 ## Prerequisites
 
@@ -17,7 +17,7 @@ You need these on your machine:
 git clone https://github.com/caura-ai/caura-memclaw.git
 cd caura-memclaw
 
-# 2. Start everything (PostgreSQL + pgvector, Redis, MemClaw API)
+# 2. Start everything (PostgreSQL + pgvector, Redis, Caura API)
 docker compose up -d
 
 # 3. Wait for healthy (usually ~15 seconds)
@@ -79,7 +79,7 @@ curl http://localhost:8000/api/v1/health
 # Expected: {"status":"ok","storage":"connected","redis":"connected","event_bus":"ok"}
 ```
 
-MemClaw is running at `http://localhost:8000`.
+Caura is running at `http://localhost:8000`.
 
 ## Pick an Auth Mode
 
@@ -150,7 +150,7 @@ curl -sf -H "X-API-Key: $MEMCLAW_KEY" "$MEMCLAW_URL/api/v1/install-plugin?fleet_
 openclaw gateway restart    # or: systemctl --user restart openclaw-gateway
 ```
 
-This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims the exclusive memory slot (disabling `memory-core`), and configures `openclaw.json` to allowlist the agent-facing tools. The plugin calls the local MemClaw API over HTTP — same tools as MCP.
+This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims the exclusive memory slot (disabling `memory-core`), and configures `openclaw.json` to allowlist the agent-facing tools. The plugin calls the local Caura API over HTTP — same tools as MCP.
 
 **MCP vs Plugin — which to use:**
 
@@ -180,7 +180,7 @@ curl -X POST "$MEMCLAW_URL/api/v1/search" \
 curl -X POST "$MEMCLAW_URL/api/v1/memories" \
   -H "X-API-Key: $KEY" \
   -H "Content-Type: application/json" \
-  -d '{"tenant_id": "default", "agent_id": "self", "content": "I installed MemClaw locally and it works."}'
+  -d '{"tenant_id": "default", "agent_id": "self", "content": "I installed Caura locally and it works."}'
 
 # Verify it was stored
 curl "$MEMCLAW_URL/api/v1/memories?tenant_id=default" \
@@ -227,7 +227,7 @@ Then restart the server (`docker compose restart app` or re-run uvicorn).
 
 ## What You Now Have
 
-- A local MemClaw server with full API + MCP
+- A local Caura server with full API + MCP
 - A single-tenant standalone setup (or admin-keyed multi-tenant, depending on which path you picked)
 - 12 tools ready to use (memory ops + document store + Karpathy Loop + stats + keystone governance; skill sharing rides on `memclaw_doc collection=skills`)
 - PostgreSQL with pgvector for semantic search

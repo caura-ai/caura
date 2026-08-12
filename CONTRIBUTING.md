@@ -1,4 +1,4 @@
-# Contributing to MemClaw
+# Contributing to Caura
 
 Thanks for your interest in contributing! This document covers how to get set
 up, the expected workflow, and how we review changes.

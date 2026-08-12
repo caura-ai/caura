@@ -5,18 +5,18 @@ user-invocable: false
 metadata: {"openclaw": {"requires": {"config": ["plugins.entries.memclaw.enabled"]}}}
 ---
 
-# MemClaw Skill
+# Caura Skill
 
-MemClaw is your long-term memory. Anything you learn that you don't write here
+Caura is your long-term memory. Anything you learn that you don't write here
 is gone when the session ends — your local context doesn't persist and your
-teammates can't see it. So treat MemClaw as the default home for every
+teammates can't see it. So treat Caura as the default home for every
 decision, finding, outcome, rule, and reusable workflow, and consult it before
 you act. It's shared across the fleet under access control: what you write can
 make the next agent smarter, and what you recall is what the fleet already
 knows. Using it is the job, not an optional extra.
 
 **The plugin runs a baseline loop for you — the tools are still yours.** On this
-runtime the MemClaw plugin handles the automatic layer: it injects the mandatory
+runtime the Caura plugin handles the automatic layer: it injects the mandatory
 keystones at session start (§1), recalls relevant memory before your substantive
 turns (§11), and writes a short **turn summary** afterward as a backstop
 (`MEMCLAW_AUTO_WRITE_TURNS`, on by default). Treat that as a floor, not a
@@ -129,7 +129,7 @@ visible to the fleet because it went in at `scope_team`.
 Never paste secrets — API keys, tokens, credentials — into memory `content`.
 The PII scan is a safety net, not permission; keep them out entirely.
 
-**Some memories may be written for you.** If your tenant has the MemClaw
+**Some memories may be written for you.** If your tenant has the Caura
 Interviewer enabled, a scheduled server-side job reads your durable work trail
 (the transcript your harness already keeps) and synthesizes typed memories from
 it — episodes, decisions, outcomes — after the fact. You don't invoke it and
@@ -221,9 +221,9 @@ A few habits keep recall trustworthy and sharp:
   transition the stale one. Two live opposing beliefs degrade every future
   recall for everyone.
 
-## 8 · MemClaw vs your workspace files
+## 8 · Caura vs your workspace files
 
-MemClaw is the only place for cross-session, cross-agent knowledge. A
+Caura is the only place for cross-session, cross-agent knowledge. A
 file-based scratchpad in your workspace (e.g. `MEMORY.md`) is **session-local**
 — it lives in your bootstrap context every turn and pays input tokens for every
 byte, and your teammates never see it.
@@ -231,11 +231,11 @@ byte, and your teammates never see it.
 - Keep `MEMORY.md` lean: only **active projects, current routing decisions,
   recent decisions (≤ 7 days), open threads.** Target a few KB; prune anything
   older or larger on session start.
-- Everything else goes to MemClaw via `memclaw_write` (history, finished work,
+- Everything else goes to Caura via `memclaw_write` (history, finished work,
   lessons), `memclaw_doc` collections (reference data with a natural key), or
   entities (people / projects / services).
-- Never copy MemClaw recall results into `MEMORY.md` — they're already
-  retrievable. Never substitute a local file for a MemClaw write.
+- Never copy Caura recall results into `MEMORY.md` — they're already
+  retrievable. Never substitute a local file for a Caura write.
 
 ## 9 · Capture cadence (L1 / L2 / L3)
 
@@ -391,7 +391,7 @@ for, and the behaviors that aren't visible in a parameter list.
 - Guessing `agent_id` / `fleet_id`, or inventing UUIDs.
 - Deleting when you should supersede.
 - Writing org-wide (`scope_org`) anything that isn't genuinely org-relevant.
-- Substituting `MEMORY.md` / local files for a MemClaw write.
+- Substituting `MEMORY.md` / local files for a Caura write.
 - Silently dropping a denied call — surface the error so the orchestrator can decide.
 
 ### Constraints & errors
@@ -403,7 +403,7 @@ for, and the behaviors that aren't visible in a parameter list.
 
 ---
 
-*This skill ships with the MemClaw plugin at its install path; it is visible to
+*This skill ships with the Caura plugin at its install path; it is visible to
 every agent on a node that has the plugin enabled
 (`plugins.entries.memclaw.enabled`). To customize it for a specific agent, place
 a replacement file at `<workspace>/skills/memclaw/SKILL.md` — it takes

@@ -1,4 +1,4 @@
-# MemClaw — OpenClaw Integration Guide
+# Caura — OpenClaw Integration Guide
 
 ---
 
@@ -7,25 +7,25 @@
 
 ## 1. Overview
 
-MemClaw is a shared memory layer for OpenClaw agents. It runs as a separate API service that agents access through an OpenClaw plugin or any MCP client.
+Caura is a shared memory layer for OpenClaw agents. It runs as a separate API service that agents access through an OpenClaw plugin or any MCP client.
 
 ### Architecture
 
 ```
-MCP Client      → Streamable HTTP  → MemClaw API (/mcp) → Postgres + pgvector
-OpenClaw Agent  → tool call        → MemClaw Plugin → HTTP → MemClaw API → Postgres + pgvector
-Plugin          → heartbeat (60s)  → MemClaw API ← commands (response)
-Browser (UI)    → HTTP             → MemClaw API → Postgres + pgvector
+MCP Client      → Streamable HTTP  → Caura API (/mcp) → Postgres + pgvector
+OpenClaw Agent  → tool call        → Caura Plugin → HTTP → Caura API → Postgres + pgvector
+Plugin          → heartbeat (60s)  → Caura API ← commands (response)
+Browser (UI)    → HTTP             → Caura API → Postgres + pgvector
 ```
 
 ### Components
 
 | Component | Where it runs | What it does |
 |---|---|---|
-| MemClaw API | Any host (Docker, VM, cloud run, local) | FastAPI service — memories, entities, search, enrichment |
+| Caura API | Any host (Docker, VM, cloud run, local) | FastAPI service — memories, entities, search, enrichment |
 | MCP Server | Same process (`/mcp`) | Streamable HTTP endpoint for any MCP client |
 | Postgres + pgvector | Anywhere (Docker, VM, managed) | Vector + relational store |
-| MemClaw Plugin | OpenClaw gateway VM | Thin adapter forwarding tool calls to the API |
+| Caura Plugin | OpenClaw gateway VM | Thin adapter forwarding tool calls to the API |
 | Web UI | Served at `/ui` | Manage, Prism (with Graph button), Playground, Fleet, MCP Test, Ingest, Admin Dashboard |
 
 ### Tools available to agents
@@ -56,7 +56,7 @@ Tool descriptions are derived from the tool registry (`core-api/src/core_api/too
 
 ## 2. MCP Integration (Claude Desktop, Claude Code, Cursor, etc.)
 
-MemClaw includes a built-in MCP server at `/mcp` using Streamable HTTP transport. Any MCP-compatible client connects with just a URL and an API key — no plugin install, no local server.
+Caura includes a built-in MCP server at `/mcp` using Streamable HTTP transport. Any MCP-compatible client connects with just a URL and an API key — no plugin install, no local server.
 
 ### Setup
 
@@ -153,7 +153,7 @@ MCP uses the same tenant-scoped API keys as the REST API. The `X-API-Key` header
 
 ### Example usage
 
-Once configured, the MCP client handles tool discovery. Agents can use MemClaw tools naturally:
+Once configured, the MCP client handles tool discovery. Agents can use Caura tools naturally:
 
 > "Search my memories for anything about the Postgres migration"
 > -> calls `memclaw_recall` with query "Postgres migration"
@@ -190,7 +190,7 @@ The plugin is a TypeScript package in the `plugin/` directory of this repo. It c
 |---|---|---|
 | OpenClaw runtime | **`v2026.3.22`** | First release with `registerContextEngine` + `assemble({prompt, …})`. Older runtimes fall back to the legacy `before_prompt_build` path with reduced functionality. |
 | Node.js | `v18+` | Required to build and run the plugin. |
-| MemClaw backend (this repo's `core-api`) | `v2.4.0` | Backend exposes `/plugin-manifest` for upgrade-path resilience. Plugins on `< v2.4.0` fall back to a hardcoded file list (still works against current backends). |
+| Caura backend (this repo's `core-api`) | `v2.4.0` | Backend exposes `/plugin-manifest` for upgrade-path resilience. Plugins on `< v2.4.0` fall back to a hardcoded file list (still works against current backends). |
 
 The plugin's install script does a soft preflight on `openclaw --version` and prints a warning when the local runtime is older than the recommended minimum. It does NOT hard-fail — operators sometimes run patched older builds, and the plugin still loads partially below the minimum. Upgrade OpenClaw when convenient.
 
@@ -220,7 +220,7 @@ scp -r plugin/dist plugin/package.json plugin/openclaw.plugin.json \
 Add to `~/.openclaw/plugins/memclaw/.env`:
 
 ```bash
-MEMCLAW_API_URL=https://your-memclaw-instance.example.com   # your MemClaw API
+MEMCLAW_API_URL=https://your-memclaw-instance.example.com   # your Caura API
 MEMCLAW_API_KEY=mc_your_key_here                             # tenant-scoped API key
 MEMCLAW_FLEET_ID=fleet-001                                   # identifies this fleet
 MEMCLAW_NODE_NAME=my-gateway                                 # friendly name shown in Fleet page
@@ -296,7 +296,7 @@ The plugin registers 11 tools (the MCP surface minus the MCP-only `memclaw_keyst
 
 - **ContextEngine** — 7 lifecycle hooks: `bootstrap` (smoke test), `ingest` (message buffering + persistence), `assemble` (token-budget-aware recall injection), `compact` (persist summaries), `afterTurn` (auto-write turn summaries), `prepareSubagentSpawn`, `onSubagentEnded`
 - **Memory runtime** — API-backed `search()` and `get()` replacing file-based `memory-core`
-- **Heartbeat** — every 60 seconds, POSTs node status (agents, tools, OS, IP, plugin version, setup_status) to `/api/v1/fleet/heartbeat`. MemClaw responds with any pending commands
+- **Heartbeat** — every 60 seconds, POSTs node status (agents, tools, OS, IP, plugin version, setup_status) to `/api/v1/fleet/heartbeat`. Caura responds with any pending commands
 - **Commands** — the plugin processes HMAC-verified commands from the heartbeat response:
   - `deploy` — fetch all source files to memory, backup originals, write + build, rollback on failure
   - `educate` — write prompts to agent HEARTBEAT.md files + write SKILL.md, TOOLS.md, AGENTS.md to workspaces
@@ -325,7 +325,7 @@ The **Agent Education Status** section in Plugin Manager shows green checkmarks 
 
 ## 4. Agent Trust Levels
 
-MemClaw enforces a 4-tier trust system for agents. Agents are auto-registered on their first `memclaw_write` call at trust level 1.
+Caura enforces a 4-tier trust system for agents. Agents are auto-registered on their first `memclaw_write` call at trust level 1.
 
 | Level | Name | Permissions |
 |---|---|---|
@@ -371,7 +371,7 @@ The Manage page (`/ui/tenant-admin.html`) is the tabbed tenant admin dashboard, 
 Add this to your agent's system prompt (or use Agent Education to let agents self-configure):
 
 ```
-You have access to MemClaw, a shared memory system used by all agents.
+You have access to Caura, a shared memory system used by all agents.
 
 BEFORE starting any task:
 - Use memclaw_recall for semantic + keyword search with graph expansion

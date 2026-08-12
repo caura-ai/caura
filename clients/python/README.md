@@ -1,9 +1,9 @@
 # memclaw-client
 
-Official Python client for [MemClaw](https://memclaw.net) — governed shared
+Official Python client for [Caura](https://memclaw.net) — governed shared
 memory for AI agent fleets (multi-agent, multi-tenant, MCP-native).
 
-A thin wrapper over the MemClaw REST API. Point it at a managed
+A thin wrapper over the Caura REST API. Point it at a managed
 (`https://memclaw.net`) or self-hosted (`http://localhost:8000`) deployment.
 
 ## Install
@@ -15,9 +15,9 @@ pip install memclaw-client
 ## Quickstart
 
 ```python
-from memclaw_client import MemClaw
+from memclaw_client import Caura
 
-mc = MemClaw("mc_xxx", tenant_id="my-team", agent_id="my-agent")
+mc = Caura("mc_xxx", tenant_id="my-team", agent_id="my-agent")
 
 # Write a memory — enriched server-side with type, title, tags, importance.
 mc.write("Q3 revenue target is $4M, set on 2026-04-15.")
@@ -33,7 +33,7 @@ print(mc.recall("Q3 revenue target").summary)
 Self-hosted? Pass `base_url`:
 
 ```python
-mc = MemClaw("standalone", tenant_id="default", base_url="http://localhost:8000")
+mc = Caura("standalone", tenant_id="default", base_url="http://localhost:8000")
 ```
 
 ## API
@@ -45,23 +45,23 @@ mc = MemClaw("standalone", tenant_id="default", base_url="http://localhost:8000"
 | `recall(query, top_k=5, ...)` | `POST /api/v1/recall` | `RecallResult` |
 | `health()` | `GET /api/v1/health` | `dict` |
 
-The client is a context manager (`with MemClaw(...) as mc:`) and raises
-`AuthError` (401/403), `NotFoundError` (404), or `MemClawAPIError` on failures.
+The client is a context manager (`with Caura(...) as mc:`) and raises
+`AuthError` (401/403), `NotFoundError` (404), or `CauraAPIError` on failures.
 Every result also exposes the full API payload on `.raw`.
 
 For credentials, scopes, and the full API surface, see the
-[MemClaw docs](https://memclaw.net/docs). Production fleets should use
+[Caura docs](https://memclaw.net/docs). Production fleets should use
 [per-agent keys](https://memclaw.net/docs/integrations/per-agent-keys).
 
 ## memclaw-interviewer — Claude Code + Cursor adapter
 
 Installing this package also provides the `memclaw-interviewer` CLI: the
-MemClaw Interviewer's disk-parser adapter for Claude Code and Cursor
+Caura Interviewer's disk-parser adapter for Claude Code and Cursor
 workstations. It reads agent session transcripts **read-only** — Claude
 Code's `~/.claude/projects/…/*.jsonl` or Cursor's
 `~/.cursor/projects/…/agent-transcripts/…/*.jsonl` — tracks a per-file
 cursor via the server's forward-only watermark documents (no local state),
-and submits event windows to `POST /api/v1/interview/submit`, where MemClaw
+and submits event windows to `POST /api/v1/interview/submit`, where Caura
 synthesizes them into typed memories. Requires the tenant to have
 `interviewer.enabled = true`.
 

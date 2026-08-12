@@ -10,7 +10,7 @@ Operator-grade companion to the public benchmarks write-up. The blog answers *"i
 | Token savings vs full context | **96.6%** | **98.2%** | — |
 | Latency | — | — | **23 ms p50 · 27 ms p95** (warm) |
 
-LoCoMo and LongMemEval are the two most-cited public agent-memory benchmarks. Both measure one agent, one user, one long conversation — the single-chatbot shape. Accuracy across the leading systems (MemClaw, Mem0, Zep) clusters in a narrow band.
+LoCoMo and LongMemEval are the two most-cited public agent-memory benchmarks. Both measure one agent, one user, one long conversation — the single-chatbot shape. Accuracy across the leading systems (Caura, Mem0, Zep) clusters in a narrow band.
 
 **Source:** [Fast, Token-Efficient, and Built for Fleets](https://memclaw.net/blog/memclaw-benchmarks) (2026-04-19).
 
@@ -39,15 +39,15 @@ Single-agent benchmarks can't ask:
 - Is a memory written by the sales fleet visible — or correctly invisible — to an agent in support?
 - Does cross-tenant data ever leak when the recall query is ambiguous?
 
-These are the questions that decide whether a memory system is deployable inside a company. MemClaw was designed around them — scoped memory (agent / fleet / cross-fleet), per-agent trust tiers, PII quarantine before cross-fleet exposure, full audit log, the `memclaw_evolve` → `memclaw_insights` outcome-propagation loop. **None of this moves a recall@k number. All of it moves whether you can deploy.**
+These are the questions that decide whether a memory system is deployable inside a company. Caura was designed around them — scoped memory (agent / fleet / cross-fleet), per-agent trust tiers, PII quarantine before cross-fleet exposure, full audit log, the `memclaw_evolve` → `memclaw_insights` outcome-propagation loop. **None of this moves a recall@k number. All of it moves whether you can deploy.**
 
 The field needs a benchmark for the fleet-shaped problem. We're working toward one. If you're thinking about this too, the [Discord](https://discord.com/invite/aNfpgfpj) is open.
 
-## How MemClaw compares
+## How Caura compares
 
-For a single chatbot, the public-benchmark leaders (MemClaw, Mem0, Zep) cluster in a narrow accuracy band — the choice usually comes down to stack fit, latency, and token budget.
+For a single chatbot, the public-benchmark leaders (Caura, Mem0, Zep) cluster in a narrow accuracy band — the choice usually comes down to stack fit, latency, and token budget.
 
-MemClaw differentiates on the dimensions a single-agent benchmark can't see:
+Caura differentiates on the dimensions a single-agent benchmark can't see:
 
 | Dimension | Why it matters at fleet scale |
 |---|---|

@@ -1,6 +1,6 @@
 # API Surface Ownership Charter
 
-MemClaw exposes three callable surfaces — REST, MCP, and the OpenClaw plugin.
+Caura exposes three callable surfaces — REST, MCP, and the OpenClaw plugin.
 They are intentionally **not symmetric**. Each serves a different audience and
 operates under different assumptions. This document records who owns what and
 when to add or move an operation.

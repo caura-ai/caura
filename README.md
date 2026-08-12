@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="static/images/memCLAW_logo_dark.png" alt="MemClaw" width="420" />
+  <img src="static/images/memCLAW_logo_dark.png" alt="Caura" width="420" />
 </p>
 
 <h3 align="center">Fleet memory for AI agents &mdash; governed, shared, self-improving.</h3>
@@ -32,22 +32,22 @@ Tool names (<code>memclaw_*</code>), packages, env vars and URLs keep working un
 
 Caura — known until now as MemClaw — is open-source memory for **multi-tenant, multi-agent** AI fleets. Your agents store what they learn, find what the fleet knows, and get smarter with every interaction — learning from each other instead of repeating mistakes.
 
-Agents write plain text. MemClaw turns it into searchable, governed, self-improving memory.
+Agents write plain text. Caura turns it into searchable, governed, self-improving memory.
 
 **One loop, three pillars: write, recall, compound** — every interaction makes the next one smarter.
 
-**Built for fleets, not single agents.** Public agent-memory benchmarks (LoCoMo, LongMemEval) measure one agent, one user, one long conversation — the single-chatbot shape. The deployment shape we see in production is the opposite: dozens or thousands of agents working on behalf of a company, sharing what they learn under governance. MemClaw is architected around that shape from day one — scoped memory, cross-agent outcome propagation, fleet-wide trust tiers — and competes on the axes that compound with agent count: latency, token efficiency, and governance. See [Performance](#performance) for the numbers, or read the [benchmarks write-up](https://memclaw.net/blog/memclaw-benchmarks).
+**Built for fleets, not single agents.** Public agent-memory benchmarks (LoCoMo, LongMemEval) measure one agent, one user, one long conversation — the single-chatbot shape. The deployment shape we see in production is the opposite: dozens or thousands of agents working on behalf of a company, sharing what they learn under governance. Caura is architected around that shape from day one — scoped memory, cross-agent outcome propagation, fleet-wide trust tiers — and competes on the axes that compound with agent count: latency, token efficiency, and governance. See [Performance](#performance) for the numbers, or read the [benchmarks write-up](https://memclaw.net/blog/memclaw-benchmarks).
 
 > **In production at eToro (NASDAQ: ETOR):** 300+ AI agents on one governed
 > memory — 26,500+ memories, 1,372 shared skills, 23 ms p50 search.
 > [Architecture deep-dive →](https://memclaw.net/blog/etoro-company-brain/)
 
 <p align="center">
-  <img src="static/images/memclaw-concept.png" alt="MemClaw — Fleet Memory that Compounds" width="700" />
+  <img src="static/images/memclaw-concept.png" alt="Caura — Fleet Memory that Compounds" width="700" />
 </p>
 
 <p align="center">
-  <img src="static/images/memclaw-demo.gif" alt="MemClaw demo — write, recall, and governed cross-fleet memory in action" width="700" />
+  <img src="static/images/memclaw-demo.gif" alt="Caura demo — write, recall, and governed cross-fleet memory in action" width="700" />
 </p>
 
 ---
@@ -56,7 +56,7 @@ Agents write plain text. MemClaw turns it into searchable, governed, self-improv
 
 ### Try it locally — no API key, no signup
 
-The fastest way to see MemClaw work. Standalone mode runs single-tenant with auth bypassed — write and recall a memory in four commands. (It boots with dummy embeddings so there's nothing to configure; add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
+The fastest way to see Caura work. Standalone mode runs single-tenant with auth bypassed — write and recall a memory in four commands. (It boots with dummy embeddings so there's nothing to configure; add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
 
 ```bash
 git clone https://github.com/caura-ai/caura-memclaw.git
@@ -87,7 +87,7 @@ Three paths — pick the one that matches your setup:
 |---|---|---|
 | **Managed platform** | Quickest. We host the DB + scaling. | ~2 min |
 | **Self-hosted (Docker)** | Privacy / on-prem / air-gapped. | ~5 min |
-| **OpenClaw plugin** | You already run an OpenClaw fleet — install MemClaw as a plugin against any of the above. | ~3 min |
+| **OpenClaw plugin** | You already run an OpenClaw fleet — install Caura as a plugin against any of the above. | ~3 min |
 
 ### Managed Platform
 
@@ -266,7 +266,7 @@ default for a local OSS install, never sets the flag at all.)
 
 ---
 
-⭐ **If MemClaw just worked for you,
+⭐ **If Caura just worked for you,
 [star the repo](https://github.com/caura-ai/caura-memclaw/stargazers)** —
 it's how other fleet builders find us, and it shapes how much time we can
 invest in the OSS edition.
@@ -321,10 +321,10 @@ python scripts/smoke_test.py --url http://localhost:8000 --api-key <admin-key>
 
 ### OpenClaw Plugin
 
-Already running an OpenClaw fleet? Install MemClaw as a plugin against either the managed platform or your self-hosted stack:
+Already running an OpenClaw fleet? Install Caura as a plugin against either the managed platform or your self-hosted stack:
 
 ```bash
-# Point at whichever URL hosts your MemClaw API
+# Point at whichever URL hosts your Caura API
 export MEMCLAW_URL=https://memclaw.net          # managed
 # or:  export MEMCLAW_URL=http://localhost:8000  # self-hosted
 export MEMCLAW_KEY=your-key                      # `standalone` works in self-hosted standalone mode
@@ -341,16 +341,16 @@ The plugin claims the OpenClaw `memory` slot (replacing `memory-core`) and expos
 
 ### Python client
 
-Talk to any MemClaw deployment (managed or self-hosted) from Python:
+Talk to any Caura deployment (managed or self-hosted) from Python:
 
 ```bash
 pip install memclaw-client
 ```
 
 ```python
-from memclaw_client import MemClaw
+from memclaw_client import Caura
 
-mc = MemClaw("mc_xxx", tenant_id="my-team", agent_id="my-agent")
+mc = Caura("mc_xxx", tenant_id="my-team", agent_id="my-agent")
 mc.write("Q3 revenue target is $4M, set on 2026-04-15.")
 print(mc.recall("Q3 revenue target").summary)
 ```
@@ -366,9 +366,9 @@ npm install @caura/memclaw-client
 ```
 
 ```ts
-import { MemClaw } from "@caura/memclaw-client";
+import { Caura } from "@caura/memclaw-client";
 
-const mc = new MemClaw("mc_xxx", { tenantId: "my-team", agentId: "my-agent" });
+const mc = new Caura("mc_xxx", { tenantId: "my-team", agentId: "my-agent" });
 await mc.write("Q3 revenue target is $4M, set on 2026-04-15.");
 console.log((await mc.recall("Q3 revenue target")).summary);
 ```
@@ -408,13 +408,13 @@ See [`clients/typescript/`](clients/typescript/) for the full client.
 
 ---
 
-## How MemClaw compares
+## How Caura compares
 
 Accuracy benchmarks cluster the leading tools in a narrow band (see
 [Performance](#performance)). Where the field actually diverges is
 fleet capability and governance:
 
-| Capability | MemClaw | Mem0 | Zep | Letta |
+| Capability | Caura | Mem0 | Zep | Letta |
 |---|---|---|---|---|
 | Multi-fleet support | ✅ | ❌ | ❌ | ❌ |
 | Agent trust tiers + keystone policies | ✅ | ❌ | ❌ | ❌ |
@@ -427,7 +427,7 @@ fleet capability and governance:
 | MCP-native | ✅ | ✅ | ✅ | ⚠️ |
 | OSS license | Apache 2.0 | Apache 2.0 | Apache 2.0 | Apache 2.0 |
 
-Mem0, Zep, and Letta are solid projects for single-agent memory. MemClaw's
+Mem0, Zep, and Letta are solid projects for single-agent memory. Caura's
 lane is **governed memory across agent fleets** — multiple agents, teams,
 and vendors on one auditable memory plane. Comparison reflects our reading
 of public docs as of June 2026 — corrections welcome via issue or PR.
@@ -444,7 +444,7 @@ Benchmarked against the two most-cited public agent-memory benchmarks. Full resu
 | Token savings vs full context | **96.6%** | **98.2%** | — |
 | Latency | — | — | **23 ms p50 · 27 ms p95** |
 
-Accuracy sits inside the leading cluster across the field (Mem0, Zep, MemClaw — scores cluster in a narrow band). The axes we push hardest are latency and token efficiency, because those are the ones that compound as agent count grows — a few hundred ms of search latency disappears behind one LLM call, but bills millions of times a day across a fleet.
+Accuracy sits inside the leading cluster across the field (Mem0, Zep, Caura — scores cluster in a narrow band). The axes we push hardest are latency and token efficiency, because those are the ones that compound as agent count grows — a few hundred ms of search latency disappears behind one LLM call, but bills millions of times a day across a fleet.
 
 > Single-agent benchmarks can't measure cross-agent recall, outcome propagation between agents, fleet-scoped visibility, or governance-aware retrieval. Those are the questions that decide whether a memory system is *deployable* inside a company. See [`docs/performance.md`](docs/performance.md#what-these-benchmarks-cant-measure).
 
@@ -454,7 +454,7 @@ Source: [Fast, Token-Efficient, and Built for Fleets](https://memclaw.net/blog/m
 
 ## MCP (Model Context Protocol)
 
-Add MemClaw to any MCP client with one config block.
+Add Caura to any MCP client with one config block.
 
 **Self-hosted** (localhost):
 
@@ -548,7 +548,7 @@ active-only delivery contract + plugin reconcile targets),
 and [`docs/skills-inbox-api.md`](docs/skills-inbox-api.md) (the operator REST
 API for the Skills Inbox).
 The full operator/developer guide lives in the
-[MemClaw docs → Skill Factory](https://memclaw.net/docs/skill-factory).
+[Caura docs → Skill Factory](https://memclaw.net/docs/skill-factory).
 
 ### The Interviewer
 
@@ -561,7 +561,7 @@ It never re-runs the agent — it works only from the real trail, which grounds
 it in actual activity. (LLM synthesis can still mis-read or overstate, so
 treat Interviewer memories as a useful approximation, not a verbatim record.)
 
-It's a third way memories enter MemClaw, alongside realtime writes and
+It's a third way memories enter Caura, alongside realtime writes and
 ingestion. Like Skill Factory it's **opt-in per tenant and off by default** —
 inert until you set `interviewer.enabled = true` in the tenant's org
 settings.
@@ -591,13 +591,13 @@ settings.
 Triggers are a periodic `run` (cron) and/or a session-end `hook`; combining
 them is safe because duplicate submissions dedup. Full setup, per-harness
 wiring, and the protocol are in the
-[MemClaw docs → Interviewer](https://memclaw.net/docs/interviewer).
+[Caura docs → Interviewer](https://memclaw.net/docs/interviewer).
 
-### The MemClaw Broker
+### The Caura Broker
 
-The **MemClaw Broker** is a local daemon (`memclawd`, driven by the `memclaw`
+The **Caura Broker** is a local daemon (`memclawd`, driven by the `memclaw`
 CLI) that runs on a developer's machine and connects coding agents — Claude
-Code, Codex, Cursor, Gemini — to MemClaw. Its job is to be the trust boundary
+Code, Codex, Cursor, Gemini — to Caura. Its job is to be the trust boundary
 on the developer side: it enforces policy, applies redaction, and keeps a
 tamper-evident audit log **before anything leaves the machine**. The Broker
 runs in **personal mode** out of the box; installs that join a **Broker
@@ -615,15 +615,15 @@ breaking-change gates in CI (in this repo the baseline is generated by
 [#620](https://github.com/caura-ai/caura-memclaw/pull/620)), so a
 contract-breaking change fails the build rather than breaking installed
 Brokers. Operations — install, fleet join, policy — are documented at
-[MemClaw docs → Broker Fleet](https://memclaw.net/docs/broker-fleet).
+[Caura docs → Broker Fleet](https://memclaw.net/docs/broker-fleet).
 
 ### Install the skill (Claude Code & Codex)
 
-Install MemClaw's usage guide as a **skill** so your agent knows *when* and
+Install Caura's usage guide as a **skill** so your agent knows *when* and
 *how* to use the 12 tools — the memory/doc mental model, the three rules
 (recall, write, supersede), trust levels, common patterns, and
 anti-patterns. The skill is loaded on-demand (not per-turn), so it costs
-nothing until the agent reaches for MemClaw.
+nothing until the agent reaches for Caura.
 
 > **Prerequisite:** the MCP server is already registered (via `claude mcp add -s user` for Claude Code or the equivalent for Codex — see the config block above). Confirm with `claude mcp list` — you should see `memclaw: ... ✓ Connected`.
 
@@ -694,7 +694,7 @@ installs `memclaw` only.
 
 ## Deployment
 
-The recommended way to run MemClaw is via Docker Compose (see [Quick Start](#quick-start)). This gives you a production-ready PostgreSQL + pgvector + Redis + API stack with a single command.
+The recommended way to run Caura is via Docker Compose (see [Quick Start](#quick-start)). This gives you a production-ready PostgreSQL + pgvector + Redis + API stack with a single command.
 
 ### Published container images
 
@@ -723,7 +723,7 @@ uvicorn core_api.app:app --host 0.0.0.0 --port 8000 --workers 2
 
 ### Deployment topologies
 
-MemClaw ships with two operational modes for the storage layer. **Single-node (default)** is what you get from Docker Compose, `pip install`, or any fresh deploy — one `core-storage-api` instance serves both reads and writes. This is the right choice for any deployment that isn't seeing sustained 100+ writes/sec.
+Caura ships with two operational modes for the storage layer. **Single-node (default)** is what you get from Docker Compose, `pip install`, or any fresh deploy — one `core-storage-api` instance serves both reads and writes. This is the right choice for any deployment that isn't seeing sustained 100+ writes/sec.
 
 The **reader/writer split** is an opt-in topology for high-write-rate deploys that want to scale reads independently of writes — e.g. by pointing read traffic at a Postgres streaming replica. Enabling it means running two `core-storage-api` services with different roles and pointing `core-api` at both:
 
@@ -1064,7 +1064,7 @@ memclaw/
 │       ├── tools.ts               # Tool implementations
 │       ├── agent-auth.ts          # Per-agent credentials (agent-scoped mc_ keys)
 │       ├── context-engine.ts      # Auto-read/write lifecycle
-│       ├── heartbeat.ts           # 60s heartbeat → MemClaw API
+│       ├── heartbeat.ts           # 60s heartbeat → Caura API
 │       └── educate.ts             # Agent education delivery
 │
 ├── common/                        # Shared SQLAlchemy ORM models and constants
@@ -1100,7 +1100,7 @@ python scripts/latency_test.py --url http://localhost:8000 --api-key <admin-key>
 
 ## Public API & Stability
 
-MemClaw v1.x follows [SemVer 2.0.0](https://semver.org/spec/v2.0.0.html). The surfaces below are stable; everything else is internal and may change in any release.
+Caura v1.x follows [SemVer 2.0.0](https://semver.org/spec/v2.0.0.html). The surfaces below are stable; everything else is internal and may change in any release.
 
 ### Stable surfaces
 
@@ -1204,10 +1204,10 @@ Reviewers will block merges to `dev` that touch a stable surface without these m
 
 ## Telemetry and error tracking
 
-MemClaw supports optional [Sentry](https://sentry.io) integration for error tracking and performance monitoring:
+Caura supports optional [Sentry](https://sentry.io) integration for error tracking and performance monitoring:
 
 - **Opt-in only** — set the `SENTRY_DSN` environment variable to enable. No errors are reported unless you explicitly configure a DSN.
-- **No usage analytics** — MemClaw does not collect usage statistics, feature flags, or behavioral data.
+- **No usage analytics** — Caura does not collect usage statistics, feature flags, or behavioral data.
 - **No phone-home** — the application makes zero outbound calls unless you configure a Sentry DSN or an LLM/embedding provider.
 
 ---
@@ -1227,7 +1227,7 @@ application-level limiting in `core-api/src/core_api/middleware/rate_limit.py`.
 
 ## Telemetry
 
-MemClaw **does not phone home** by default. No usage data, analytics, or tracking of any kind.
+Caura **does not phone home** by default. No usage data, analytics, or tracking of any kind.
 
 If you set the `SENTRY_DSN` environment variable, [Sentry](https://sentry.io) error tracking
 is enabled — crash reports and performance traces are sent to your configured Sentry project.
@@ -1242,28 +1242,28 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines,
 
 ## FAQ
 
-**What is MemClaw?**
-MemClaw is open-source governed shared memory for AI agent fleets:
+**What is Caura?**
+Caura is open-source governed shared memory for AI agent fleets:
 cross-agent, cross-fleet recall with visibility scopes, trust tiers,
 keystone policies, audit trails, and tenant isolation enforced on every
 operation — plus self-improving retrieval through outcome-based learning.
 
-**How is MemClaw different from a vector database?**
-MemClaw uses pgvector under the hood but is not a vector DB wrapper. On top
+**How is Caura different from a vector database?**
+Caura uses pgvector under the hood but is not a vector DB wrapper. On top
 of hybrid search it adds fleet orchestration, per-agent retrieval tuning,
 contradiction detection, an 8-status lifecycle, an auto-extracted knowledge
 graph, LLM enrichment on every write, row-level tenant isolation, and audit
 trails on every operation.
 
-**How is MemClaw different from Mem0 or Zep?**
+**How is Caura different from Mem0 or Zep?**
 Mem0 and Zep focus on memory for individual agents; accuracy benchmarks
-cluster all three tools in a narrow band. MemClaw is built for *fleets*:
+cluster all three tools in a narrow band. Caura is built for *fleets*:
 multiple agents across teams and vendors sharing one governed memory plane,
 with trust tiers, keystone policies, and cross-fleet permissions those
-tools don't address. See [How MemClaw compares](#how-memclaw-compares).
+tools don't address. See [How Caura compares](#how-memclaw-compares).
 
-**Does MemClaw work with Claude Desktop, Claude Code, Cursor, or Windsurf?**
-Yes — MemClaw is MCP-native. Paste a JSON config with a URL and API key
+**Does Caura work with Claude Desktop, Claude Code, Cursor, or Windsurf?**
+Yes — Caura is MCP-native. Paste a JSON config with a URL and API key
 into any MCP client and 12 tools appear immediately.
 
 **Can agents from different vendors share memory?**
@@ -1271,14 +1271,14 @@ Yes — that's the point. An Anthropic agent recalls what an OpenAI agent
 wrote, under the same governance rules — with trust tiers and visibility
 scopes deciding what crosses fleet boundaries.
 
-**Is MemClaw really free?**
+**Is Caura really free?**
 The full engine — storage, 12 MCP tools, plugin, audit trail — is Apache
 2.0. Run it yourself forever. The managed platform at
 [memclaw.net](https://memclaw.net) adds hosting, scaling, and enterprise
 governance for teams that don't want to operate infrastructure.
 
-**Who runs MemClaw in production?**
-eToro (NASDAQ: ETOR) runs 300+ agents on MemClaw — 26,500+ memories, 1,372
+**Who runs Caura in production?**
+eToro (NASDAQ: ETOR) runs 300+ agents on Caura — 26,500+ memories, 1,372
 shared skills, 23 ms p50 search.
 [Case study →](https://memclaw.net/blog/etoro-company-brain/)
 
@@ -1286,7 +1286,7 @@ shared skills, 23 ms p50 search.
 
 ## License
 
-MemClaw is licensed under the [Apache License, Version 2.0](LICENSE).
+Caura is licensed under the [Apache License, Version 2.0](LICENSE).
 
 See [NOTICE](NOTICE) for copyright and third-party attributions.
 
