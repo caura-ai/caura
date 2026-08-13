@@ -4,7 +4,7 @@ name: Publish memclaw-client to PyPI
 #
 # One-time setup by a maintainer:
 #   1. Create the PyPI project `memclaw-client`.
-#   2. On PyPI, add a Trusted Publisher: repo `caura-ai/caura-memclaw`,
+#   2. On PyPI, add a Trusted Publisher: repo `caura-ai/caura`,
 #      workflow `publish-python-client.yml`, environment `pypi`.
 #   3. Create a GitHub environment named `pypi`.
 #

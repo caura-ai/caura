@@ -14,7 +14,7 @@ You need these on your machine:
 
 ```bash
 # 1. Clone
-git clone https://github.com/caura-ai/caura-memclaw.git
+git clone https://github.com/caura-ai/caura.git
 cd caura-memclaw
 
 # 2. Start everything (PostgreSQL + pgvector, Redis, Caura API)
@@ -36,7 +36,7 @@ You need a PostgreSQL 16+ instance with pgvector extension installed.
 
 ```bash
 # 1. Clone
-git clone https://github.com/caura-ai/caura-memclaw.git
+git clone https://github.com/caura-ai/caura.git
 cd caura-memclaw
 
 # 2. Create virtual environment

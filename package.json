@@ -13,7 +13,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/caura-ai/caura-memclaw.git"
+    "url": "git+https://github.com/caura-ai/caura.git"
   },
   "keywords": [
     "memory",
@@ -33,9 +33,9 @@
   "license": "Apache-2.0",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/caura-ai/caura-memclaw/issues"
+    "url": "https://github.com/caura-ai/caura/issues"
   },
-  "homepage": "https://github.com/caura-ai/caura-memclaw#readme",
+  "homepage": "https://github.com/caura-ai/caura#readme",
   "devDependencies": {
     "@playwright/test": "^1.61.1"
   }

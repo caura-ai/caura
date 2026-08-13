@@ -1,7 +1,7 @@
 name: notify-enterprise-staging
 
 # Cross-repo trigger: every push to ``main`` fires a
-# ``repository_dispatch`` event at caura-ai/caura-memclaw-enterprise so
+# ``repository_dispatch`` event at caura-ai/caura-enterprise so
 # that repo's ``deploy-to-staging.yml`` orchestrator picks up the new
 # OSS commit and deploys to staging without a manual escape hatch
 # (no-op enterprise PR or ``workflow_dispatch``).
@@ -12,7 +12,7 @@ name: notify-enterprise-staging
 # CAURA-683.
 #
 # Auth: ``ENTERPRISE_DEPLOY_TOKEN`` is a fine-grained PAT scoped to
-# caura-ai/caura-memclaw-enterprise with ``Contents: write`` (required
+# caura-ai/caura-enterprise with ``Contents: write`` (required
 # for the ``/dispatches`` endpoint) + ``Metadata: read``. NOT the
 # default ``GITHUB_TOKEN`` — that token's scope is bounded to the
 # repository it ran in, so it cannot dispatch to a sibling repo.
@@ -114,7 +114,7 @@ jobs:
             if gh api \
               --method POST \
               -H "Accept: application/vnd.github+json" \
-              /repos/caura-ai/caura-memclaw-enterprise/dispatches \
+              /repos/caura-ai/caura-enterprise/dispatches \
               -f event_type=oss-main-pushed \
               -f client_payload[oss_ref]="$OSS_REF" \
               -f client_payload[triggered_by]="$TRIGGERED_BY" \

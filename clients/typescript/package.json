@@ -31,11 +31,11 @@
   "homepage": "https://memclaw.net",
   "repository": {
     "type": "git",
-    "url": "https://github.com/caura-ai/caura-memclaw.git",
+    "url": "https://github.com/caura-ai/caura.git",
     "directory": "clients/typescript"
   },
   "bugs": {
-    "url": "https://github.com/caura-ai/caura-memclaw/issues"
+    "url": "https://github.com/caura-ai/caura/issues"
   },
   "scripts": {
     "build": "tsc",

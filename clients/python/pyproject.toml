@@ -50,8 +50,8 @@ dev = ["pytest>=8", "ruff>=0.15.4,<0.16"]
 [project.urls]
 Homepage = "https://memclaw.net"
 Documentation = "https://memclaw.net/docs"
-Repository = "https://github.com/caura-ai/caura-memclaw"
-Issues = "https://github.com/caura-ai/caura-memclaw/issues"
+Repository = "https://github.com/caura-ai/caura"
+Issues = "https://github.com/caura-ai/caura/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

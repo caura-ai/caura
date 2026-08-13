@@ -199,7 +199,7 @@ The plugin's install script does a soft preflight on `openclaw --version` and pr
 On a machine with `node` (v18+) and `npm`:
 
 ```bash
-git clone https://github.com/caura-ai/caura-memclaw.git
+git clone https://github.com/caura-ai/caura.git
 cd caura-memclaw/plugin
 npm install
 npm run build            # emits plugin/dist/

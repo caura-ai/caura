@@ -25,7 +25,7 @@ up, the expected workflow, and how we review changes.
 ### Clone and set up a venv
 
 ```bash
-git clone https://github.com/caura-ai/caura-memclaw.git
+git clone https://github.com/caura-ai/caura.git
 cd caura-memclaw
 uv venv .venv
 source .venv/bin/activate

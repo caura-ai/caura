@@ -8,7 +8,7 @@ body:
       value: |
         Thanks for taking the time to file a bug report. Please fill in every section — incomplete reports are slower to triage.
 
-        For security vulnerabilities, **do not open a public issue** — report via [GitHub Security Advisories](https://github.com/caura-ai/caura-memclaw/security/advisories/new).
+        For security vulnerabilities, **do not open a public issue** — report via [GitHub Security Advisories](https://github.com/caura-ai/caura/security/advisories/new).
   - type: input
     id: version
     attributes:

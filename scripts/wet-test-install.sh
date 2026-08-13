@@ -22,7 +22,7 @@ set -euo pipefail
 
 # ── Defaults ──
 BRANCH="main"
-REPO="git@github.com:caura-ai/caura-memclaw.git"
+REPO="git@github.com:caura-ai/caura.git"
 PLUGIN_DIR="$HOME/.openclaw/plugins/memclaw"
 MEMCLAW_API_URL=""
 MEMCLAW_API_KEY=""

@@ -6,9 +6,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        For open-ended brainstorming or "have you considered…" questions, prefer [Discussions](https://github.com/caura-ai/caura-memclaw/discussions). Use this form when you have a concrete proposal.
+        For open-ended brainstorming or "have you considered…" questions, prefer [Discussions](https://github.com/caura-ai/caura/discussions). Use this form when you have a concrete proposal.
 
-        Before submitting, check the [Public API & Stability](https://github.com/caura-ai/caura-memclaw/blob/main/README.md#public-api--stability) section to understand which surfaces are SemVer-bound vs. internal.
+        Before submitting, check the [Public API & Stability](https://github.com/caura-ai/caura/blob/main/README.md#public-api--stability) section to understand which surfaces are SemVer-bound vs. internal.
   - type: textarea
     id: problem
     attributes:
