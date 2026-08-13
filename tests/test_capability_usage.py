@@ -190,7 +190,7 @@ async def test_mcp_call_tool_records_capability_and_op(monkeypatch):
     # Authenticated tenant in the MCP context var the wrapper reads.
     monkeypatch.setattr(mcp_server, "_get_tenant", lambda: "t-mcp")
 
-    server = mcp_server._InstrumentedFastMCP(name="test")
+    server = mcp_server._InstrumentedMCPServer(name="test")
 
     @server.tool(name="memclaw_doc")
     async def doc_tool(op: str) -> str:
@@ -214,7 +214,7 @@ async def test_mcp_call_tool_records_error_on_raise(monkeypatch):
     monkeypatch.setattr(mcp_server, "record_usage", lambda **kw: calls.append(kw))
     monkeypatch.setattr(mcp_server, "_get_tenant", lambda: "t-mcp")
 
-    server = mcp_server._InstrumentedFastMCP(name="test")
+    server = mcp_server._InstrumentedMCPServer(name="test")
 
     @server.tool(name="memclaw_write")
     async def boom() -> str:

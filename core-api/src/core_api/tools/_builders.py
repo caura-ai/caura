@@ -1,6 +1,6 @@
 """Helpers that derive other surfaces from a `ToolSpec`.
 
-- `mcp_register(mcp, spec)` — register the spec's handler with FastMCP.
+- `mcp_register(mcp, spec)` — register the spec's handler with the MCPServer.
 - `to_descriptor_json(spec)` — full-spec JSON for `/tool-descriptions` (new shape).
 - `extract_param_descriptors(handler)` — introspect handler signature → param list.
 
@@ -20,7 +20,7 @@ from ._types import ToolSpec
 
 
 def mcp_register(mcp, spec: ToolSpec) -> None:
-    """Register `spec.handler` with the FastMCP instance, using `spec.description`.
+    """Register `spec.handler` with the MCPServer instance, using `spec.description`.
 
     No-op when `spec.handler is None` (Phase 1 of the refactor — handlers
     still live in `mcp_server.py`'s `@mcp.tool` decorators).
@@ -28,7 +28,7 @@ def mcp_register(mcp, spec: ToolSpec) -> None:
     Handlers are annotated `-> str` but their error paths return
     `CallToolResult` via `_as_error_result` to preserve the unified
     error-envelope clients parse from `content[0].text`. With structured
-    output enabled, FastMCP would auto-generate a `{result: str}` schema
+    output enabled, the SDK would auto-generate a `{result: str}` schema
     from the `-> str` annotation and reject the `CallToolResult` at
     validation time, so disable it here.
     """

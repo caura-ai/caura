@@ -8,7 +8,7 @@ the rest of the unit suite invokes handler coroutines directly (e.g.
 validation. The bug lived there: when a tool registered with
 ``structured_output`` enabled returned a ``CallToolResult`` on its error
 path, ``convert_result`` called ``output_model.model_validate(
-result.structuredContent)`` against the ``None`` default and raised
+result.structured_content)`` against the ``None`` default and raised
 ``"1 validation error for <tool>Output ... input_value=None"`` — masking
 the legitimate error envelope.
 
@@ -105,7 +105,7 @@ async def test_no_tool_has_structured_output_schema():
     returns at ``convert_result`` time.
     """
     tools = await mcp_server.mcp.list_tools()
-    offenders = [t.name for t in tools if t.outputSchema is not None]
+    offenders = [t.name for t in tools if t.output_schema is not None]
     assert not offenders, (
         f"Tools with an output schema present: {offenders}. The unified "
         f"error-envelope contract requires `structured_output=False` on "

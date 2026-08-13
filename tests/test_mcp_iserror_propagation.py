@@ -1,6 +1,6 @@
 """CAURA-000 FRICTION-REPORT-V3 B2: MCP error envelopes must reach
 the client as ``CallToolResult(isError=True)`` so clients doing
-``if not result.isError: succeed()`` don't silently treat
+``if not result.is_error: succeed()`` don't silently treat
 FORBIDDEN / INVALID_ARGUMENTS / NOT_FOUND as success.
 
 These tests bypass the FastMCP transport and exercise the tool
@@ -66,11 +66,11 @@ def test_pre_baked_auth_errors_are_call_tool_results():
     from mcp.types import CallToolResult
 
     assert isinstance(mcp_server._AUTH_ERROR, CallToolResult)
-    assert mcp_server._AUTH_ERROR.isError is True
+    assert mcp_server._AUTH_ERROR.is_error is True
     assert parse_envelope(mcp_server._AUTH_ERROR)["error"]["code"] == "UNAUTHORIZED"
 
     assert isinstance(mcp_server._ADMIN_ERROR, CallToolResult)
-    assert mcp_server._ADMIN_ERROR.isError is True
+    assert mcp_server._ADMIN_ERROR.is_error is True
     assert parse_envelope(mcp_server._ADMIN_ERROR)["error"]["code"] == "FORBIDDEN"
 
 

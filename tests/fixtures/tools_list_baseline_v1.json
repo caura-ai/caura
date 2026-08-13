@@ -140,11 +140,11 @@
       "title": "memclaw_docArguments",
       "type": "object"
     },
+    "execution": null,
     "outputSchema": null,
     "icons": null,
     "annotations": null,
-    "meta": null,
-    "execution": null
+    "_meta": null
   },
   {
     "name": "memclaw_entity_get",
@@ -164,11 +164,11 @@
       "title": "memclaw_entity_getArguments",
       "type": "object"
     },
+    "execution": null,
     "outputSchema": null,
     "icons": null,
     "annotations": null,
-    "meta": null,
-    "execution": null
+    "_meta": null
   },
   {
     "name": "memclaw_evolve",
@@ -235,11 +235,11 @@
       "title": "memclaw_evolveArguments",
       "type": "object"
     },
+    "execution": null,
     "outputSchema": null,
     "icons": null,
     "annotations": null,
-    "meta": null,
-    "execution": null
+    "_meta": null
   },
   {
     "name": "memclaw_insights",
@@ -284,11 +284,11 @@
       "title": "memclaw_insightsArguments",
       "type": "object"
     },
+    "execution": null,
     "outputSchema": null,
     "icons": null,
     "annotations": null,
-    "meta": null,
-    "execution": null
+    "_meta": null
   },
   {
     "name": "memclaw_keystones",
@@ -319,11 +319,11 @@
       "title": "memclaw_keystonesArguments",
       "type": "object"
     },
+    "execution": null,
     "outputSchema": null,
     "icons": null,
     "annotations": null,
-    "meta": null,
-    "execution": null
+    "_meta": null
   },
   {
     "name": "memclaw_keystones_set",
@@ -440,11 +440,11 @@
       "title": "memclaw_keystones_setArguments",
       "type": "object"
     },
+    "execution": null,
     "outputSchema": null,
     "icons": null,
     "annotations": null,
-    "meta": null,
-    "execution": null
+    "_meta": null
   },
   {
     "name": "memclaw_list",
@@ -609,11 +609,11 @@
       "title": "memclaw_listArguments",
       "type": "object"
     },
+    "execution": null,
     "outputSchema": null,
     "icons": null,
     "annotations": null,
-    "meta": null,
-    "execution": null
+    "_meta": null
   },
   {
     "name": "memclaw_manage",
@@ -753,11 +753,11 @@
       "title": "memclaw_manageArguments",
       "type": "object"
     },
+    "execution": null,
     "outputSchema": null,
     "icons": null,
     "annotations": null,
-    "meta": null,
-    "execution": null
+    "_meta": null
   },
   {
     "name": "memclaw_recall",
@@ -850,11 +850,11 @@
       "title": "memclaw_recallArguments",
       "type": "object"
     },
+    "execution": null,
     "outputSchema": null,
     "icons": null,
     "annotations": null,
-    "meta": null,
-    "execution": null
+    "_meta": null
   },
   {
     "name": "memclaw_stats",
@@ -923,11 +923,11 @@
       "title": "memclaw_statsArguments",
       "type": "object"
     },
+    "execution": null,
     "outputSchema": null,
     "icons": null,
     "annotations": null,
-    "meta": null,
-    "execution": null
+    "_meta": null
   },
   {
     "name": "memclaw_tune",
@@ -1062,11 +1062,11 @@
       "title": "memclaw_tuneArguments",
       "type": "object"
     },
+    "execution": null,
     "outputSchema": null,
     "icons": null,
     "annotations": null,
-    "meta": null,
-    "execution": null
+    "_meta": null
   },
   {
     "name": "memclaw_write",
@@ -1232,10 +1232,10 @@
       "title": "memclaw_writeArguments",
       "type": "object"
     },
+    "execution": null,
     "outputSchema": null,
     "icons": null,
     "annotations": null,
-    "meta": null,
-    "execution": null
+    "_meta": null
   }
 ]

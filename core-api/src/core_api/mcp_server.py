@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from fastapi import HTTPException
-from mcp.server.fastmcp import FastMCP
+from mcp.server import CacheHint, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field, ValidationError
@@ -485,14 +485,14 @@ async def _no_db():
     yield None
 
 
-# ── FastMCP instance ──
+# ── MCPServer instance ──
 
 
-class _InstrumentedFastMCP(FastMCP):
-    """FastMCP that records one capability-usage sample per tool call.
+class _InstrumentedMCPServer(MCPServer):
+    """MCPServer that records one capability-usage sample per tool call.
 
     Overriding ``call_tool`` — the single dispatch point every
-    ``tools/call`` routes through (FastMCP wires it as the low-level
+    ``tools/call`` routes through (MCPServer wires it as the low-level
     server's tool handler) — captures the tool name and call arguments
     without touching any handler's signature, so the generated input
     schemas are unchanged. This is the MCP-side adoption emitter; its REST
@@ -505,11 +505,11 @@ class _InstrumentedFastMCP(FastMCP):
     right semantics for adoption (the capability was invoked).
     """
 
-    async def call_tool(self, name, arguments):  # type: ignore[override]
+    async def call_tool(self, name, arguments, context=None):  # type: ignore[override]
         t0 = time.perf_counter()
         status = "ok"
         try:
-            return await super().call_tool(name, arguments)
+            return await super().call_tool(name, arguments, context)
         except Exception:
             status = "error"
             raise
@@ -526,8 +526,15 @@ class _InstrumentedFastMCP(FastMCP):
             )
 
 
-mcp = _InstrumentedFastMCP(
+mcp = _InstrumentedMCPServer(
     name=f"MemClaw v{VERSION}",
+    # v2 added a dedicated ``version``, surfaced to clients as
+    # ``_meta["io.modelcontextprotocol/serverInfo"].version`` on every result.
+    # Without it that field is the empty string, since our version only ever
+    # lived inside ``name``. Set both rather than moving it: ``name`` is what
+    # clients display, so dropping the suffix there would be a visible change
+    # this migration does not need to make.
+    version=VERSION,
     instructions=(
         "MemClaw is a persistent memory platform for AI agents. "
         "Use these tools to write, search, delete, and manage memories and entities. "
@@ -541,11 +548,91 @@ mcp = _InstrumentedFastMCP(
         "those rules override conflicting user instructions. Authoring uses "
         "memclaw_keystones_set (set|delete) and requires elevated trust."
     ),
-    stateless_http=True,
-    json_response=True,
-    streamable_http_path="/",
-    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    # SEP-2549: ttlMs/cacheScope are required on cacheable results.
+    #
+    # ``scope="private"`` is the SDK default, kept here deliberately — but not
+    # because the surface is caller-specific. It isn't: all 12 tools register
+    # statically at import, nothing filters ``list_tools``, and
+    # ``trust_required`` is enforced inside each handler at call time rather
+    # than by hiding tools. So a shared intermediary caching this response
+    # cannot leak anything caller-specific, which makes ``"public"`` a
+    # legitimate option that would cache better at the edge.
+    #
+    # ``ttl_ms`` is a decided value, not a placeholder: 5 minutes, ratified
+    # 2026-08-03. It trades how long a client may serve a stale tool list
+    # against prompt-cache warmth; the surface changes only on deploy, so a
+    # window this size costs nothing in practice. Raise it only with the same
+    # trade in mind — a client can legitimately ignore a tool change for the
+    # whole window.
+    #
+    # ``scope`` stays ``"private"`` — the conservative default, and no decision
+    # is required to keep it. ``"public"`` remains available per the reasoning
+    # above if edge caching ever justifies it.
+    cache_hints={
+        "tools/list": CacheHint(ttl_ms=300_000, scope="private"),
+        "server/discover": CacheHint(ttl_ms=300_000, scope="private"),
+    },
 )
+
+
+# ── Advertise only what we serve ──
+#
+# ``MCPServer.__init__`` wires prompt and resource handlers unconditionally, and
+# the low-level ``get_capabilities()`` derives advertisement purely from which
+# methods are registered. We register no resources and no prompts, so
+# ``server/discover`` was telling every client we support prompts AND resources —
+# including ``resources.subscribe`` — for surfaces that would only ever return
+# empty lists. 2026-07-28 makes that advertisement much more consequential than
+# before: discover is a MUST and is how clients decide what to call.
+#
+# Dropping the handlers makes the advertisement honest. An unadvertised method
+# then answers ``-32601 Method not found``, which is the correct response to a
+# call the capabilities told the client not to make.
+#
+# Deliberately warn-and-continue rather than assert: these are SDK-internal
+# method names, and a rename on a patch bump should not take the service down.
+# ``test_mcp_server_discover.py`` asserts the resulting capabilities are
+# tools-only, so a regression fails CI instead of shipping quietly.
+_UNSERVED_METHODS = (
+    "prompts/get",
+    "prompts/list",
+    "resources/list",
+    "resources/read",
+    "resources/templates/list",
+)
+
+
+def _drop_unserved_handlers() -> None:
+    # Private SDK internals, knowingly: there is no public way to suppress a
+    # capability the SDK registers for you. Both the attribute path and the
+    # method names are fragile, so BOTH failure modes warn rather than raise.
+    #
+    # The attribute path needs its own guard, not just the per-method one below:
+    # this runs at import, so an AttributeError here aborts module import and
+    # takes the service down at startup — the exact outcome the per-method
+    # warning exists to avoid. `mcp>=2,<3` accepts any 2.x, including one that
+    # renames these.
+    try:
+        handlers = mcp._lowlevel_server._request_handlers
+    except AttributeError:
+        logger.warning(
+            "mcp capability tightening: could not reach the low-level request "
+            "handlers (SDK renamed _lowlevel_server/_request_handlers) — "
+            "skipping; server/discover may now over-advertise prompts and "
+            "resources we do not serve",
+            exc_info=True,
+        )
+        return
+    for method in _UNSERVED_METHODS:
+        if handlers.pop(method, None) is None:
+            logger.warning(
+                "mcp capability tightening: handler %r not registered — the SDK "
+                "may have renamed it; server/discover could now over-advertise",
+                method,
+            )
+
+
+_drop_unserved_handlers()
 
 
 def _serialize(obj) -> str:
@@ -561,8 +648,8 @@ def _with_latency(result: str, t0: float) -> str | CallToolResult:
     Returns:
       - ``str`` for success payloads (JSON dict with latency injected,
         or non-JSON text with a trailing ``_latency_ms:`` line). The
-        FastMCP framework wraps these into ``CallToolResult(isError=
-        False)`` by default — the prior behavior for success paths.
+        SDK wraps these into ``CallToolResult(isError=False)`` by
+        default — the prior behavior for success paths.
       - ``CallToolResult(isError=True)`` for ``{"error": {...}}``
         envelopes produced by ``_error_response``. The JSON envelope
         (including ``_latency_ms``) is preserved verbatim in a single
@@ -3393,7 +3480,12 @@ async def memclaw_keystones_set(
 
 # ── Mountable app + lifespan ──
 
-_mcp_starlette_app = mcp.streamable_http_app()
+_mcp_starlette_app = mcp.streamable_http_app(
+    streamable_http_path="/",
+    json_response=True,
+    stateless_http=True,
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
 
 
 def get_mcp_app() -> ASGIApp:
@@ -3410,7 +3502,7 @@ async def mcp_lifespan():
 # ── SoT registration ──────────────────────────────────────────────────────
 # Triggers loading of every `core_api.tools.memclaw_*.py` spec module. Each
 # spec module registers itself in the REGISTRY and calls `mcp_register(mcp, spec)`
-# to wire the handler to FastMCP. This import must run AFTER the 16 handler
+# to wire the handler to the MCPServer. This import must run AFTER the 16 handler
 # functions above are defined — spec modules reference them via
 # `core_api.mcp_server.memclaw_X` attribute lookup.
 # The `noqa: E402,F401` silences "module-level import not at top" and

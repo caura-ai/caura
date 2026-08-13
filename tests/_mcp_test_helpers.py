@@ -82,7 +82,7 @@ def is_error_envelope(result: Any) -> bool:
     """
     from mcp.types import CallToolResult
 
-    return isinstance(result, CallToolResult) and result.isError is True
+    return isinstance(result, CallToolResult) and result.is_error is True
 
 
 def stub_storage_client(monkeypatch, **method_returns):

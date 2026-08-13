@@ -57,7 +57,11 @@ async def test_v1_baseline_matches_live_registry():
     tools = await mcp_server.mcp.list_tools()
     live = []
     for t in tools:
-        d = t.model_dump(mode="json") if hasattr(t, "model_dump") else dict(t.__dict__)
+        # ``by_alias=True`` is what the SDK serializes onto the wire. Without it
+        # this asserted on the model's Python field names, which silently became
+        # snake_case in mcp 2.x — the guard would fail on an internal rename
+        # while a genuine wire change slipped through.
+        d = t.model_dump(mode="json", by_alias=True) if hasattr(t, "model_dump") else dict(t.__dict__)
         live.append(d)
     live.sort(key=lambda x: x["name"])
 

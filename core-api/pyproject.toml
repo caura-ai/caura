@@ -32,7 +32,7 @@ dependencies = [
     "openai",
     "python-dateutil>=2.8,<3",
     "httpx>=0.27,<1",
-    "mcp>=1.28.1,<2",
+    "mcp>=2,<3",
     "argon2-cffi>=23.1",
     "cryptography>=42.0",
     "python-jose[cryptography]>=3.3",

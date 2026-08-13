@@ -701,7 +701,7 @@ if _os.getenv("TESTING") == "1":
 
     app.include_router(testing_router, prefix="/api/v1")
 
-# Mount at /mcp; FastMCP's internal Route("/") handles the canonical /mcp/.
+# Mount at /mcp; the SDK app's internal Route("/") handles the canonical /mcp/.
 # Bare /mcp (no trailing slash) doesn't match Mount's regex, so the parent
 # router would issue a 307 — streaming MCP clients (e.g. Anthropic's
 # remote-MCP integration) hang on the initialize handshake when a redirect

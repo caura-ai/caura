@@ -72,7 +72,7 @@ async def test_mcp_tools_list_content_matches_baseline():
     tools = await mcp_server.mcp.list_tools()
     actual = []
     for t in tools:
-        d = t.model_dump(mode="json") if hasattr(t, "model_dump") else dict(t.__dict__)
+        d = t.model_dump(mode="json", by_alias=True) if hasattr(t, "model_dump") else dict(t.__dict__)
         actual.append(d)
     actual.sort(key=lambda x: x["name"])
 
