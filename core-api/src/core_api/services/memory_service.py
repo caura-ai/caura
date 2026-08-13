@@ -2645,8 +2645,19 @@ async def update_memory(
     patch: dict = {}
     if content_changed:
         patch["content"] = data.content
-        if new_embedding is not None:
-            patch["embedding"] = new_embedding
+        # Write the embedding unconditionally — including None. ``get_embedding``
+        # returns None only on failure (exhausted retries, or a degraded /
+        # misconfigured provider), and its contract is that callers "persist rows
+        # with ``embedding=NULL`` and let the async-embed worker backfill".
+        #
+        # Guarding this on ``is not None`` omitted the key instead, which left the
+        # PREVIOUS content's vector on a row whose content had just changed. That
+        # is wrong twice over: the row is silently mis-embedded (recall ranks it
+        # against text it no longer holds, with no error anywhere), and because
+        # the column is non-NULL neither the async-embed worker nor the nightly
+        # NULL-embedding sweep can ever see it — so it stays wrong forever. NULL
+        # is the honest state and the one the existing repair paths look for.
+        patch["embedding"] = new_embedding
         patch["content_hash"] = _content_hash(tenant_id, mem.get("fleet_id"), data.content)
         # P1-2: Clear stale contradiction/supersession state on content change
         if mem.get("supersedes_id") is not None:
