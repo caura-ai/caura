@@ -20,6 +20,12 @@ from core_operations.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Per-tenant embedding-coverage lines emitted per tick. The deployment-wide
+# total is always logged; this bounds only the per-tenant detail, which is
+# ordered worst-first so the cap drops the tenants nobody would act on. Sized
+# so one tick stays a readable handful of lines rather than one per tenant.
+_COVERAGE_TENANT_LOG_CAP = 20
+
 
 async def _fire_fanout(action: str) -> None:
     """POST ``/admin/lifecycle/fanout/<action>``. A non-2xx response
@@ -109,6 +115,86 @@ async def run_embed_backfill_tick() -> None:
     themselves, so this exists for the rows that fell through entirely.
     """
     await _fire_fanout("embed-backfill")
+
+
+async def run_embedding_coverage_tick() -> None:
+    """Log embedding coverage per tenant so the backlog is observable.
+
+    Reads ``GET /admin/lifecycle/embedding-coverage`` on core-api and emits one
+    structured line per tenant plus a deployment-wide total. This is the whole
+    point of the tick: there is no metrics client anywhere in the stack —
+    observability is structlog into Datadog logs — so a periodic log line IS
+    the metric, and without it the count is invisible outside a manual AlloyDB
+    session.
+
+    Read-only and idempotent, so the cadence is a free choice; hourly gives a
+    curve with enough resolution to see whether the nightly sweep actually
+    drains the backlog, which a daily sample taken near the sweep cannot.
+
+    Per-tenant lines are capped: a deployment with thousands of tenants would
+    otherwise turn one tick into thousands of log lines. The total is always
+    emitted, and the per-tenant detail is worst-first, so the cap drops the
+    tenants nobody would act on. The cap is logged when it bites — a silent
+    truncation would read as "only these tenants have gaps".
+    """
+    url = f"{settings.core_api_url.rstrip('/')}/api/v1/admin/lifecycle/embedding-coverage"
+    headers: dict[str, str] = {}
+    if settings.core_api_admin_api_key:
+        headers["X-API-Key"] = settings.core_api_admin_api_key
+    else:
+        logger.warning(
+            "core-operations: CORE_API_ADMIN_API_KEY unset; embedding-coverage sample will be unauthorised",
+        )
+
+    timeout = httpx.Timeout(settings.storage_http_timeout_s)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            resp = await client.get(url, headers=headers)
+        except httpx.HTTPError:
+            logger.exception("embedding-coverage GET failed", extra={"url": url})
+            return
+    if resp.status_code >= 400:
+        logger.error(
+            "embedding-coverage returned non-2xx; will retry next tick",
+            extra={"status_code": resp.status_code, "body": resp.text[:500]},
+        )
+        return
+    try:
+        coverage = resp.json()
+    except ValueError:
+        logger.error(
+            "embedding-coverage returned non-JSON; will retry next tick",
+            extra={"body": resp.text[:200]},
+        )
+        return
+
+    tenants = coverage.get("tenants") or []
+    logger.info(
+        "embedding coverage total",
+        extra={
+            "total_active": coverage.get("total_active"),
+            "missing_embeddings": coverage.get("missing_embeddings"),
+            "tenants_with_missing": coverage.get("tenants_with_missing"),
+            "tenant_count": len(tenants),
+        },
+    )
+    reported = [t for t in tenants if t.get("missing_embeddings")][:_COVERAGE_TENANT_LOG_CAP]
+    for tenant in reported:
+        logger.info(
+            "embedding coverage tenant",
+            extra={
+                "tenant_id": tenant.get("tenant_id"),
+                "total_active": tenant.get("total_active"),
+                "missing_embeddings": tenant.get("missing_embeddings"),
+                "coverage_pct": tenant.get("coverage_pct"),
+            },
+        )
+    with_missing = coverage.get("tenants_with_missing") or 0
+    if with_missing > len(reported):
+        logger.info(
+            "embedding coverage per-tenant lines truncated",
+            extra={"reported": len(reported), "tenants_with_missing": with_missing},
+        )
 
 
 async def run_insights_tick() -> None:

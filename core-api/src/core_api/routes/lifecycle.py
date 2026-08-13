@@ -236,6 +236,42 @@ async def fanout_lifecycle_action(
     return {"action": action, "published": published, "failed": failed}
 
 
+@router.get("/admin/lifecycle/embedding-coverage")
+async def embedding_coverage_all_tenants(
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict:
+    """How many live memories are still unembedded, per tenant.
+
+    This is the standing answer to "is the embed-backfill sweep keeping up",
+    and it lives here because that sweep is what acts on the number. Before
+    this, the count existed only inside the VPC: both storage services are
+    internal-ingress, no metric carried it, and reading it meant an AlloyDB
+    Auth Proxy session and a hand-written COUNT — so in practice nobody
+    measured it, including while turning the sweep on.
+
+    Admin-only, and cross-tenant, which is the whole point: an operator asking
+    this question is asking it about the deployment, not about one tenant.
+    ``enforce_admin`` is what keeps the aggregate off a tenant credential — the
+    admin key resolves to ``tenant_id=None``, so there is no tenant scope to
+    fall back on and a missing gate would expose every tenant's row counts.
+    Counts and tenant ids only; no memory content.
+
+    A GET beside the ``POST /admin/lifecycle/{action}`` catch-all below: the
+    methods differ, so the path-param route cannot shadow this one.
+    """
+    auth.enforce_admin()
+    coverage = await get_storage_client().get_embedding_coverage_all()
+    logger.info(
+        "embedding coverage sampled",
+        extra={
+            "total_active": coverage.get("total_active"),
+            "missing_embeddings": coverage.get("missing_embeddings"),
+            "tenants_with_missing": coverage.get("tenants_with_missing"),
+        },
+    )
+    return coverage
+
+
 @router.post("/admin/lifecycle/{action}")
 async def trigger_lifecycle_action(
     action: str,

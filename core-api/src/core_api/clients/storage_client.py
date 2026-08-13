@@ -852,6 +852,14 @@ class CoreStorageClient:
             params["fleet_id"] = fleet_id
         return await self._get("/memories/embedding-coverage", **params) or {}
 
+    async def get_embedding_coverage_all(self) -> dict:
+        """Embedding coverage for every tenant (operator view, one query).
+
+        No ``tenant_id``: this is the cross-tenant aggregate, so callers must
+        gate it on the admin key. Counts only.
+        """
+        return await self._get("/memories/embedding-coverage-all") or {}
+
     async def get_type_distribution(
         self,
         tenant_id: str,

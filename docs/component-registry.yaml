@@ -58,6 +58,9 @@ cron_ticks:
   - name: interviewer-schedule
     cadence: hourly (top of UTC hour)
     module: core_operations.app
+  - name: embedding-coverage
+    cadence: hourly (top of UTC hour) — read-only sample; logs unembedded row counts per tenant
+    module: core_operations.app
 
 # The str-enum families in common/events/topics.py. Topic strings follow
 # ``memclaw.<domain>.<verb>``.

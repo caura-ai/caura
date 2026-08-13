@@ -2460,6 +2460,60 @@ class PostgresService:
             result = await session.execute(stmt)
             return result.scalar() or 0
 
+    async def memory_embedding_coverage_by_tenant(self) -> list[dict]:
+        """Embedding coverage for EVERY tenant, in one pass.
+
+        The per-tenant pair above answers "how is this tenant doing"; this
+        answers "where are the unembedded rows", which is the question an
+        operator actually has and previously could only reach by opening an
+        AlloyDB Auth Proxy session and running the count by hand — both storage
+        services are internal-ingress, and no metric carried the number.
+
+        Deliberately ONE statement with a FILTER'd count rather than a loop over
+        ``memory_count_missing_embeddings`` per tenant: the loop is N round-trips
+        against the same pool that serves live traffic, and it cannot produce a
+        consistent snapshot — tenants counted early and late see different
+        states, so the totals need not add up.
+
+        Same population predicate as the per-tenant pair (``LIVE_MEMORY_STATUSES``,
+        not soft-deleted). Keep the three in sync: a divergence here is what makes
+        the aggregate disagree with ``/embedding-coverage`` for the same tenant and
+        sends someone hunting a phantom bug.
+
+        Returns rows worst-first so the head of the list is the actionable part.
+        Counts only — no memory content crosses this boundary.
+        """
+        missing = func.count().filter(Memory.embedding.is_(None))
+        async with get_read_session() as session:
+            stmt = (
+                select(
+                    Memory.tenant_id,
+                    func.count().label("total_active"),
+                    missing.label("missing_embeddings"),
+                )
+                .select_from(Memory)
+                .where(
+                    Memory.status.in_(LIVE_MEMORY_STATUSES),
+                    Memory.deleted_at.is_(None),
+                )
+                .group_by(Memory.tenant_id)
+                .order_by(missing.desc())
+            )
+            rows = (await session.execute(stmt)).all()
+        return [
+            {
+                "tenant_id": row.tenant_id,
+                "total_active": int(row.total_active or 0),
+                "missing_embeddings": int(row.missing_embeddings or 0),
+                "coverage_pct": (
+                    round((row.total_active - row.missing_embeddings) / row.total_active * 100, 1)
+                    if row.total_active
+                    else 0.0
+                ),
+            }
+            for row in rows
+        ]
+
     async def memory_entity_coverage_count(
         self,
         tenant_id: str,

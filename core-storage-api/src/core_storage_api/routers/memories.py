@@ -772,6 +772,27 @@ async def get_embedding_coverage(
     }
 
 
+@router.get("/embedding-coverage-all")
+async def get_embedding_coverage_all() -> dict:
+    """Embedding coverage for every tenant — the operator-facing view.
+
+    Cross-tenant by design, which is why it takes no ``tenant_id`` and why the
+    only caller is core-api's admin route (admin key, ``is_admin``). Counts and
+    tenant ids only; no memory content crosses this boundary.
+
+    Declared ABOVE the ``/{memory_id}`` routes on purpose — FastAPI matches in
+    declaration order, so registering it later would let the path-param route
+    swallow "embedding-coverage-all" and answer 422 on a bad UUID.
+    """
+    rows = await _svc.memory_embedding_coverage_by_tenant()
+    return {
+        "tenants": rows,
+        "total_active": sum(r["total_active"] for r in rows),
+        "missing_embeddings": sum(r["missing_embeddings"] for r in rows),
+        "tenants_with_missing": sum(1 for r in rows if r["missing_embeddings"]),
+    }
+
+
 @router.get("/type-distribution")
 async def get_type_distribution(
     tenant_id: str,

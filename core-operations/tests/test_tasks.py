@@ -54,6 +54,16 @@ class _StubAsyncClient:
         assert self._response is not None
         return self._response
 
+    async def get(self, url: str, *, headers: dict | None = None) -> _StubResponse:
+        # Same contract as ``post`` — read-only ticks (embedding-coverage) GET.
+        # ``raise_on_post`` covers both verbs; the field name predates the first
+        # GET caller and renaming it would churn every existing test.
+        self.calls.append((url, headers))
+        if self._raise is not None:
+            raise self._raise
+        assert self._response is not None
+        return self._response
+
 
 @asynccontextmanager
 async def _patch_client(
@@ -216,3 +226,123 @@ async def test_embed_backfill_tick_posts_to_fanout(monkeypatch: pytest.MonkeyPat
     url, headers = stub.calls[0]
     assert url == "http://core-api/api/v1/admin/lifecycle/fanout/embed-backfill"
     assert headers == {"X-API-Key": "admin-key-xyz"}
+
+
+# ---------------------------------------------------------------------------
+# embedding-coverage tick — the log lines ARE the metric, so assert on them
+# ---------------------------------------------------------------------------
+
+
+def _coverage_body(tenants: list[dict]) -> dict:
+    return {
+        "tenants": tenants,
+        "total_active": sum(t["total_active"] for t in tenants),
+        "missing_embeddings": sum(t["missing_embeddings"] for t in tenants),
+        "tenants_with_missing": sum(1 for t in tenants if t["missing_embeddings"]),
+    }
+
+
+def _records(caplog, message: str) -> list:
+    return [r for r in caplog.records if r.getMessage() == message]
+
+
+@pytest.mark.asyncio
+async def test_embedding_coverage_tick_gets_admin_route_and_logs(monkeypatch, caplog):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    body = _coverage_body(
+        [
+            {"tenant_id": "t-bad", "total_active": 100, "missing_embeddings": 40, "coverage_pct": 60.0},
+            {"tenant_id": "t-ok", "total_active": 50, "missing_embeddings": 0, "coverage_pct": 100.0},
+        ]
+    )
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)) as stub:
+        await tasks.run_embedding_coverage_tick()
+
+    assert len(stub.calls) == 1
+    url, headers = stub.calls[0]
+    assert url == "http://core-api/api/v1/admin/lifecycle/embedding-coverage"
+    assert headers == {"X-API-Key": "admin-key-xyz"}
+
+    total = _records(caplog, "embedding coverage total")
+    assert len(total) == 1
+    assert total[0].total_active == 150
+    assert total[0].missing_embeddings == 40
+    assert total[0].tenants_with_missing == 1
+
+    # Only the tenant that actually has a gap is worth a line.
+    per_tenant = _records(caplog, "embedding coverage tenant")
+    assert [r.tenant_id for r in per_tenant] == ["t-bad"]
+    assert per_tenant[0].missing_embeddings == 40
+
+
+@pytest.mark.asyncio
+async def test_embedding_coverage_tick_caps_per_tenant_lines_and_says_so(monkeypatch, caplog):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    over = tasks._COVERAGE_TENANT_LOG_CAP + 5
+    body = _coverage_body(
+        [
+            {
+                "tenant_id": f"t-{i}",
+                "total_active": 10,
+                "missing_embeddings": 1,
+                "coverage_pct": 90.0,
+            }
+            for i in range(over)
+        ]
+    )
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)):
+        await tasks.run_embedding_coverage_tick()
+
+    per_tenant = _records(caplog, "embedding coverage tenant")
+    assert len(per_tenant) == tasks._COVERAGE_TENANT_LOG_CAP
+
+    # The cap must announce itself — a silent truncation would read as
+    # "only these tenants have gaps".
+    truncated = _records(caplog, "embedding coverage per-tenant lines truncated")
+    assert len(truncated) == 1
+    assert truncated[0].reported == tasks._COVERAGE_TENANT_LOG_CAP
+    assert truncated[0].tenants_with_missing == over
+
+    # The deployment-wide total is never truncated.
+    assert _records(caplog, "embedding coverage total")[0].missing_embeddings == over
+
+
+@pytest.mark.asyncio
+async def test_embedding_coverage_tick_swallows_non_2xx(monkeypatch, caplog):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    async with _patch_client(monkeypatch, response=_StubResponse(503, "upstream down")):
+        await tasks.run_embedding_coverage_tick()
+
+    assert _records(caplog, "embedding coverage total") == []
+    assert len(_records(caplog, "embedding-coverage returned non-2xx; will retry next tick")) == 1
+
+
+@pytest.mark.asyncio
+async def test_embedding_coverage_tick_swallows_network_error(monkeypatch):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    async with _patch_client(monkeypatch, raise_on_post=httpx.ConnectError("offline")):
+        await tasks.run_embedding_coverage_tick()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_embedding_coverage_tick_swallows_non_json(monkeypatch, caplog):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    async with _patch_client(monkeypatch, response=_StubResponse(200, "<html>nope</html>")):
+        await tasks.run_embedding_coverage_tick()
+
+    assert _records(caplog, "embedding coverage total") == []
+    assert len(_records(caplog, "embedding-coverage returned non-JSON; will retry next tick")) == 1

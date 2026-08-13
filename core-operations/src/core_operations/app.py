@@ -14,14 +14,16 @@ Lifespan ordering:
    as a no-op; OSS standalone deployments should not deploy this image
    at all, but the flag is a defensive short-circuit.
 3. Otherwise: register cron jobs via ``scheduler.register(...)`` and call
-   ``scheduler.start()``. Nine jobs are registered unconditionally: six daily
+   ``scheduler.start()``. Ten jobs are registered unconditionally: six daily
    lifecycle ticks (``lifecycle-archive-expired``, ``lifecycle-archive-stale``,
    ``lifecycle-purge-soft-deleted``, ``lifecycle-crystallize``,
    ``lifecycle-entity-link``, ``lifecycle-insights``), each wall-clock
    aligned to its configurable UTC hour; ``agent-digest`` (daily) and
    ``agent-digest-weekly`` (weekly) for per-agent activity digests; and
    ``interviewer-schedule`` (hourly, top of hour) which queues Interviewer
-   work — per-tenant settings gate actual command creation. A tenth,
+   work — per-tenant settings gate actual command creation; and
+   ``embedding-coverage`` (hourly, top of hour), a read-only sample that logs
+   how many live memories are still unembedded. An eleventh,
    ``embed-backfill``, registers only when ``embed_backfill_enabled`` is set,
    because its Pub/Sub topic is Terraform-provisioned and firing into an
    unprovisioned topic would just error every night.
@@ -70,6 +72,7 @@ from core_operations.tasks import (
     run_archive_stale_tick,
     run_crystallize_tick,
     run_embed_backfill_tick,
+    run_embedding_coverage_tick,
     run_entity_link_tick,
     run_insights_tick,
     run_interviewer_schedule_tick,
@@ -163,6 +166,17 @@ def _register_scheduled_tasks() -> None:
         "interviewer-schedule",
         3600,
         run_interviewer_schedule_tick,
+        delay_provider=lambda: seconds_until_next_utc_top_of_hour(),
+    )
+    # Read-only coverage sample. Registered unconditionally and NOT gated on
+    # ``embed_backfill_enabled``: the count is most valuable precisely when the
+    # sweep is off, since that is when nothing is draining the backlog. Hourly
+    # so the curve shows whether the nightly sweep actually drains it — a daily
+    # sample taken near the sweep cannot distinguish "drained" from "never grew".
+    scheduler.register(
+        "embedding-coverage",
+        3600,
+        run_embedding_coverage_tick,
         delay_provider=lambda: seconds_until_next_utc_top_of_hour(),
     )
 

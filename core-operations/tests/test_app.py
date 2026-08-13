@@ -27,6 +27,10 @@ _EXPECTED_JOBS = {
     "agent-digest",
     "agent-digest-weekly",
     "interviewer-schedule",
+    # Read-only hourly sample of how many live memories are still unembedded.
+    # Registered unconditionally, unlike ``embed-backfill``: the count matters
+    # most when the sweep is OFF, since nothing is draining the backlog then.
+    "embedding-coverage",
 }
 
 
