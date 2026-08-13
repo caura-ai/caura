@@ -1,4 +1,4 @@
-"""Guard: nothing in this tree may request the ``db`` fixture and not use it.
+"""Guards on the two fixtures that decide whether a test is really isolated.
 
 ``db`` (see ``conftest.db``) is a per-test session inside a transaction that is
 rolled back at teardown. Requesting it reads as "this test is transactionally
@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import ast
 import pathlib
+
+from tests import conftest
 
 FIXTURE = "db"
 TESTS_ROOT = pathlib.Path(__file__).parent
@@ -96,4 +98,38 @@ def test_no_test_requests_the_db_fixture_without_using_it() -> None:
         f"tests do not have, since service-layer writes commit on their own "
         f"connections. If one truly needs the open transaction as a side effect, "
         f"add it to SIDE_EFFECT_ONLY with a reason:\n  " + "\n  ".join(offenders)
+    )
+
+
+# ---------------------------------------------------------------------------
+# The other half of the same problem: rows that survive because the TENANT is
+# shared. The ``db``-fixture guards above stop a test from *claiming* isolation
+# it lacks; these stop the tenant id from silently handing one test's committed
+# rows to the next.
+# ---------------------------------------------------------------------------
+
+
+# The fixture's underlying function — the guards assert on what one CALL returns, so
+# they call it directly rather than comparing ids across two test invocations. That
+# alternative needs module-level state, which would be per-worker if this suite ever
+# runs parallel, letting both cases pass vacuously.
+_mint_tenant_id = conftest.tenant_id.__wrapped__
+
+
+def test_tenant_id_fixture_mints_a_fresh_id_per_call() -> None:
+    first, second = _mint_tenant_id(), _mint_tenant_id()
+    assert first != second, (
+        f"the `tenant_id` fixture returned {first!r} twice, so every test sharing "
+        "it also shares committed rows: service-layer writes commit on their own "
+        "connections and nothing removes them until the session-end sweep, which "
+        "lets one test satisfy another's `len(results) >= 1`. Mint a fresh id "
+        "per call."
+    )
+
+
+def test_tenant_id_fixture_keeps_the_swept_prefix() -> None:
+    minted = _mint_tenant_id()
+    assert minted.startswith("test-tenant-"), (
+        f"tenant_id {minted!r} would not be matched by the session-end sweep in "
+        "conftest._setup_schema, so its rows would outlive the run"
     )

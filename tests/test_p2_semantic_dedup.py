@@ -362,9 +362,10 @@ async def _committed_corpus(count: int) -> AsyncIterator[str]:
     layer on its own session — rows sitting in an uncommitted transaction (what
     the ``db`` fixture gives you) are invisible to it.
 
-    Its own tenant, because the ``tenant_id`` fixture is the run's SHARED tenant
-    (see its docstring): its row count is a running total of whatever every
-    other test left behind, not ``count``.
+    Its own tenant, so the slice is labelled and its row count is exactly
+    ``count``. The ``tenant_id`` fixture is per-test now, so that is no longer
+    what isolates this corpus — but the explicit ``DELETE`` below still earns its
+    keep, since nothing else clears these rows before session end.
 
     Both effects are silent, which is why the caller asserts the corpus size
     instead of assuming it.

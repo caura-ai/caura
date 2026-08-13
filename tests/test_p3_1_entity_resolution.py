@@ -207,12 +207,6 @@ class TestAliasTracking:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def tenant_id():
-    """Per-test unique tenant_id for isolation (overrides session-level fixture)."""
-    return f"test-tenant-{uuid4().hex[:8]}"
-
-
 @pytest.mark.integration
 class TestEntityResolutionIntegration:
     """End-to-end entity resolution against a real database."""

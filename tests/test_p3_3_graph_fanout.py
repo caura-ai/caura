@@ -134,13 +134,15 @@ class TestCappedLinkProcessing:
 
 @pytest.fixture
 def fanout_tenant():
-    """A tenant of this test's own, so no other test's rows can satisfy an assertion.
+    """A labelled tenant of this test's own, so no other test's rows can satisfy an
+    assertion.
 
-    The shared ``tenant_id`` fixture is one constant for the whole session, and
     ``fake_embedding`` is a bag-of-words hash, not a near-orthogonal one: an
     unrelated committed row ("User prefers dark mode in the editor") measures
     cosine 0.33 against a random token — over the 0.3 ``min_similarity`` gate. So
-    a unique query token alone does not isolate these tests; the tenant must.
+    a unique query token alone does not isolate these tests; the tenant must. The
+    ``tenant_id`` fixture is now per-test too, so this adds only the ``fanout``
+    label; it is kept because that label is what makes a leaked row identifiable.
     """
     return f"test-tenant-fanout-{uuid.uuid4().hex[:8]}"
 

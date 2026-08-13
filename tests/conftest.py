@@ -68,6 +68,11 @@ TEST_DB_URL = os.environ.get(
     "postgresql+asyncpg://memclaw:changeme@127.0.0.1:5432/memclaw",
 )
 
+# NOT what the ``tenant_id`` fixture returns — that mints a fresh id per test. This
+# is one id per RUN, kept for the modules whose module-level seed helpers need a
+# tenant without taking a fixture argument. None of them relies on cross-test
+# sharing, so they could each mint their own; threading a tenant through those
+# helpers is the follow-up that would let this go away.
 TENANT_ID = f"test-tenant-{uuid.uuid4().hex[:8]}"
 FLEET_ID = "test-fleet"
 AGENT_ID = "test-agent"
@@ -94,7 +99,7 @@ def get_admin_headers() -> dict:
 
 
 def uid() -> str:
-    """Short unique suffix to avoid duplicate-content 409s across test runs."""
+    """Short unique suffix — for distinct content (409s) and distinct tenant ids."""
     return uuid.uuid4().hex[:8]
 
 
@@ -146,6 +151,13 @@ async def _setup_schema(_engine):
             "entities",
             "memories",
             "audit_log",
+            # One genesis row per tenant (``_audit_chain_one_tenant``), so a
+            # per-test tenant leaves one per test rather than one per run. It was
+            # never swept: a local DB had 9,186 ``test-tenant-`` rows here from
+            # earlier runs. Other tenant-scoped tables (recall_event,
+            # memory_conflicts, dedup_reviews, agents, session_traces) leak the
+            # same way but per-write, so they are a separate cleanup.
+            "audit_chain_head",
             "agent_activity_digests",
             # Keystones and other docs live here. Written through the API's own
             # committed transaction, so the per-test session rollback never
@@ -161,11 +173,13 @@ async def _setup_schema(_engine):
                     text(f"DELETE FROM {table} WHERE tenant_id LIKE 'test-tenant-%'")
                 )
             except Exception:
-                # Best-effort, and it is the PRIMARY isolation for anything
-                # written through the service layer — not a backstop behind the
-                # ``db`` fixture's rollback. Most tests here write via ``sc``,
-                # which commits on its own connections, so that rollback never
-                # sees those rows and this sweep is what removes them.
+                # Best-effort, and the ONLY thing that ever removes rows written
+                # through the service layer — not a backstop behind the ``db``
+                # fixture's rollback. Most tests here write via ``sc``, which
+                # commits on its own connections, so that rollback never sees
+                # those rows. Per-test isolation comes from the unique
+                # ``tenant_id``; this sweep is end-of-run cleanup, so the table
+                # doesn't grow without bound.
                 pass
         # memory_entity_links doesn't have tenant_id — clean via memory join
         try:
@@ -283,16 +297,16 @@ def storage_http(_patch_storage_client):
 
 @pytest.fixture
 def tenant_id():
-    """The run's shared tenant ID — one constant for the whole session.
+    """A tenant ID unique to THIS test.
 
-    NOT unique per test or per module: ``TENANT_ID`` is evaluated once, when this
-    module is imported. Rows any test commits through ``sc`` therefore stay
-    visible to every later test under this id, so an assertion like
-    ``len(results) >= 1`` can be satisfied by another test's data. Where a test
-    needs real isolation, generate its own ``f"test-tenant-…-{uuid4().hex[:8]}"``
-    (keep the ``test-tenant-`` prefix — session teardown sweeps on it).
+    It used to be one constant for the whole run, which let any test's committed
+    rows satisfy a later test's ``len(results) >= 1`` — passing for the wrong
+    reason, or failing only when the run order changed. Nothing removes those rows
+    mid-run; see the sweep in ``_setup_schema`` for why.
+
+    Keep the ``test-tenant-`` prefix: that sweep matches on it.
     """
-    return TENANT_ID
+    return f"test-tenant-{uid()}"
 
 
 @pytest.fixture

@@ -316,10 +316,11 @@ class TestSearchPipelineEndToEnd:
         from core_api.services.memory_service import search_memories
 
         sc = get_storage_client()
-        # Seed helpers now commit through the storage write session (the rolled-back
-        # ``db`` fixture is invisible to the storage read path), so sibling tests'
-        # rows persist under the shared TENANT_ID. This test asserts an EXACT result
-        # set, so isolate it on its own tenant to avoid top-K pollution.
+        # Seed helpers commit through the storage write session (the rolled-back
+        # ``db`` fixture is invisible to the storage read path), so their rows
+        # outlive the test. The ``tenant_id`` fixture is per-test now, so this
+        # suffix is no longer what isolates the case — it only labels the slice,
+        # which this test wants because it asserts an EXACT result set.
         tenant_id = f"{tenant_id}-softdel"
 
         async def _seed(content: str, *, deleted: bool) -> dict:
