@@ -246,7 +246,7 @@ async def lifespan(app):
     # imported AFTER that call (slowapi / mcp_server below, uvicorn by the
     # server) — so the import-time pass no-ops for them (it logs a "rerouting
     # was a no-op" warning) and their records never reach the JSON/GCP handler.
-    # Most consequentially, FastMCP's "Error executing tool ..." tool-error
+    # Most consequentially, the MCP SDK's "Error executing tool ..." tool-error
     # lines were invisible in prod logs. The re-route is idempotent, so this
     # post-import re-run from the ASGI lifespan startup safely routes them.
     reroute_third_party_loggers()
@@ -1067,7 +1067,7 @@ if _os.getenv("TESTING") == "1":
 
     app.include_router(testing_router, prefix="/api/v1")
 
-# Mount at /mcp; FastMCP's internal Route("/") handles the canonical /mcp/.
+# Mount at /mcp; the SDK app's internal Route("/") handles the canonical /mcp/.
 # Bare /mcp (no trailing slash) doesn't match Mount's regex, so the parent
 # router would issue a 307 — streaming MCP clients (e.g. Anthropic's
 # remote-MCP integration) hang on the initialize handshake when a redirect

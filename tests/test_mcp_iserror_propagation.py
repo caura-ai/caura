@@ -1,9 +1,9 @@
 """CAURA-000 FRICTION-REPORT-V3 B2: MCP error envelopes must reach
 the client as ``CallToolResult(isError=True)`` so clients doing
-``if not result.isError: succeed()`` don't silently treat
+``if not result.is_error: succeed()`` don't silently treat
 FORBIDDEN / INVALID_ARGUMENTS / NOT_FOUND as success.
 
-These tests bypass the FastMCP transport and exercise the tool
+These tests bypass the MCP transport and exercise the tool
 functions directly — the same surface the rest of the unit-test
 suite uses. We check both:
 
@@ -66,11 +66,11 @@ def test_pre_baked_auth_errors_are_call_tool_results():
     from mcp.types import CallToolResult
 
     assert isinstance(mcp_server._AUTH_ERROR, CallToolResult)
-    assert mcp_server._AUTH_ERROR.isError is True
+    assert mcp_server._AUTH_ERROR.is_error is True
     assert parse_envelope(mcp_server._AUTH_ERROR)["error"]["code"] == "UNAUTHORIZED"
 
     assert isinstance(mcp_server._ADMIN_ERROR, CallToolResult)
-    assert mcp_server._ADMIN_ERROR.isError is True
+    assert mcp_server._ADMIN_ERROR.is_error is True
     assert parse_envelope(mcp_server._ADMIN_ERROR)["error"]["code"] == "FORBIDDEN"
 
 
@@ -79,7 +79,7 @@ async def test_success_path_unchanged(mcp_env, monkeypatch):
     """Sanity check: success-path responses are still plain strings —
     we only flip ``isError`` for ``{"error": ...}`` envelopes. A
     success return going through ``_with_latency`` stays a JSON string
-    (which FastMCP then wraps with ``isError=False``)."""
+    (which MCPServer then wraps with ``isError=False``)."""
     from unittest.mock import MagicMock
 
     def _mock_result(rows):

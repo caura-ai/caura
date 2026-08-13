@@ -6,7 +6,7 @@ Three guarantees, each load-bearing forever:
    never reappear in the listing (dual-listing doubles the client's
    tool-schema token budget, which is why the alias lives at dispatch).
 2. Every listed tool is callable under its pre-rename name —
-   the ``_InstrumentedFastMCP.call_tool`` shim translates before
+   the ``_InstrumentedMCPServer.call_tool`` shim translates before
    dispatch, so saved prompts, keystone rules, and published tutorials
    written against the old names keep working.
 3. The set of alias-covered tools is derived from the LIVE registry, not
@@ -15,16 +15,16 @@ Three guarantees, each load-bearing forever:
 
 The calls go through ``mcp.call_tool`` — the same dispatch point JSON-RPC
 ``tools/call`` uses. Because handlers check auth in their bodies (after
-FastMCP's argument validation), per-tool coverage asserts *equivalence*:
+MCPServer's argument validation), per-tool coverage asserts *equivalence*:
 whatever the canonical name produces for a given call (an envelope, a
 validation ToolError), the legacy name must produce the same — no
-per-tool argument fixtures needed, and never FastMCP's "Unknown tool".
+per-tool argument fixtures needed, and never the SDK's "Unknown tool".
 """
 
 from __future__ import annotations
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from core_api import mcp_server
 from tests._mcp_test_helpers import as_text, parse_envelope
@@ -82,7 +82,7 @@ async def test_every_tool_dispatches_under_its_legacy_name():
         legacy_kind, legacy_detail = await _outcome(legacy)
         assert "unknown tool" not in legacy_detail.lower(), (
             f"legacy alias {legacy!r} did not reach the {name!r} handler — "
-            "the permanent rename shim in _InstrumentedFastMCP.call_tool "
+            "the permanent rename shim in _InstrumentedMCPServer.call_tool "
             "is broken, and every pre-rename saved prompt breaks with it"
         )
         assert (legacy_kind, legacy_detail) == (canonical_kind, canonical_detail), (

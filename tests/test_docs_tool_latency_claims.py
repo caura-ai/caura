@@ -35,7 +35,7 @@ async def test_insights_still_has_no_cheap_mode():
     """
     tools = await mcp_server.mcp.list_tools()
     insights = next(t for t in tools if t.name == "caura_insights")
-    params = set((insights.inputSchema.get("properties") or {}).keys())
+    params = set((insights.input_schema.get("properties") or {}).keys())
 
     assert not params & {"depth", "quick", "mode"}, (
         "caura_insights gained a cheap-mode parameter. Update the Tool latency "

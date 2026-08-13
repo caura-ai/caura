@@ -17,7 +17,7 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_mcp_mount_registered():
-    # Mount at /mcp handles canonical /mcp/* via FastMCP's internal Route("/").
+    # Mount at /mcp handles canonical /mcp/* via the SDK's internal Route("/").
     from starlette.routing import Mount
 
     from core_api.app import app

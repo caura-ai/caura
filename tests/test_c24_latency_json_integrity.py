@@ -58,7 +58,7 @@ def test_error_envelope_still_promoted_to_iserror():
     payload = json.dumps({"error": {"code": "FORBIDDEN", "message": "no"}})
     out = _with_latency(payload, _t0())
     assert isinstance(out, CallToolResult)
-    assert out.isError is True
+    assert out.is_error is True
     body = json.loads(out.content[0].text)
     assert body["error"]["code"] == "FORBIDDEN"
     assert "_latency_ms" in body

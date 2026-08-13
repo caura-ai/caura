@@ -42,7 +42,7 @@ def as_text(result: Any) -> str:
     REPORT-V3) handlers returned strings for both success and error;
     post-B2 the error path returns a ``CallToolResult``. ``mcp.call_tool``
     callers may also see a bare ``Sequence[ContentBlock]`` when the handler
-    returned a string that FastMCP wrapped into text content. This helper
+    returned a string that the MCP SDK wrapped into text content. This helper
     bridges all three so the substring-check idiom keeps working.
     """
     from mcp.types import CallToolResult, TextContent
@@ -81,7 +81,7 @@ def is_error_envelope(result: Any) -> bool:
     """
     from mcp.types import CallToolResult
 
-    return isinstance(result, CallToolResult) and result.isError is True
+    return isinstance(result, CallToolResult) and result.is_error is True
 
 
 def stub_storage_client(monkeypatch, **method_returns):
