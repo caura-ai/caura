@@ -348,6 +348,66 @@ class MemoryOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# Kept to ONE line, because a model docstring becomes the schema's public
+# ``description`` in ``openapi.broker.json`` — maintainer rationale belongs here, in a
+# comment, not in the frozen contract. Three things about this model are load-bearing:
+#
+# FIELD ORDER IS THE CONTRACT. FastAPI serialises in model-field order, not dict
+# order, and this endpoint has always emitted these 29 keys in this order. Reordering
+# them changes the response bytes for every caller;
+# ``tests/test_memory_get_serialization_contract.py`` pins it.
+#
+# THE TIMESTAMPS ARE ``str``, NOT ``datetime``, ON PURPOSE. They arrive as ISO strings
+# — the route reads them out of core-storage-api's JSON and passes them through — and
+# ``datetime`` would not merely annotate, it re-serialises: pydantic v2 renders
+# ``2026-08-13T18:52:48.040997+00:00`` as ``...040997Z``. Measured, not assumed. That
+# is a wire change on a live endpoint, not a side effect to take on while adding a
+# schema. The fleet is already inconsistent here: ``MemoryOut`` (the POST/PATCH model)
+# types them as ``datetime`` and emits the ``Z`` form for the same row. Aligning the
+# two is an API decision with its own migration story; ``str`` documents what ships.
+#
+# NULLABILITY MIRRORS THE TABLE, plus the two computed fields that are ``None`` for an
+# un-embedded row. A field marked required here that is NULL in practice turns a 200
+# into a 500 via ``ResponseValidationError``, so this errs toward optional wherever the
+# column is nullable.
+class MemoryDetailResponse(BaseModel):
+    """Full detail for one memory: row fields, entity links, embedding stats."""
+
+    id: str
+    tenant_id: str
+    fleet_id: str | None = None
+    agent_id: str
+    agent_display_name: str | None = None
+    memory_type: str
+    title: str | None = None
+    content: str
+    weight: float | None = None
+    source_uri: str | None = None
+    run_id: str | None = None
+    # Exposed as ``metadata``; storage serialises the JSONB column as ``metadata_``
+    # and the route renames it on the way out.
+    metadata: dict | None = None
+    content_hash: str | None = None
+    created_at: str | None = None
+    expires_at: str | None = None
+    deleted_at: str | None = None
+    subject_entity_id: str | None = None
+    predicate: str | None = None
+    object_value: str | None = None
+    ts_valid_start: str | None = None
+    ts_valid_end: str | None = None
+    status: str
+    visibility: str
+    recall_count: int
+    last_recalled_at: str | None = None
+    supersedes_id: str | None = None
+    entity_links: list[dict] = []
+    # Both None unless the row has a non-empty embedding: the raw pgvector never
+    # crosses the wire, only a first-20 preview and the server-computed stats.
+    embedding_preview: list[float] | None = None
+    embedding_stats: dict | None = None
+
+
 class ContradictionInfo(BaseModel):
     """Summary of a contradiction detected on write.
 

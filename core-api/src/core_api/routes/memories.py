@@ -48,6 +48,7 @@ from core_api.schemas import (
     IngestCommitRequest,
     IngestRequest,
     MemoryCreate,
+    MemoryDetailResponse,
     MemoryOut,
     MemoryUpdate,
     PaginatedMemoryResponse,
@@ -516,15 +517,19 @@ async def bulk_delete_by_ids(
     return {"deleted": deleted}
 
 
-@router.get("/memories/{memory_id}")
+# Returns a plain dict, NOT a ``JSONResponse`` — deliberately, and the docstring
+# below stays a single line because it becomes the operation's public OpenAPI
+# description. FastAPI skips response validation entirely for a handler that returns
+# a ``Response`` object, so pairing one with ``response_model`` documents a shape
+# nothing enforces; that is worse than untyped, and is why this route sat in
+# ``tests/test_broker_contract._UNTYPED_200`` until the dict return landed.
+@router.get("/memories/{memory_id}", response_model=MemoryDetailResponse)
 async def get_memory(
     memory_id: UUID,
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Get a single memory with full details including embedding and entity links."""
-    from fastapi.responses import JSONResponse
-
     auth.enforce_readable_tenant(tenant_id)
 
     t_start = time.perf_counter()
@@ -578,41 +583,39 @@ async def get_memory(
                 },
             )
 
-    return JSONResponse(
-        {
-            "id": memory["id"],
-            "tenant_id": memory["tenant_id"],
-            "fleet_id": memory["fleet_id"],
-            "agent_id": memory["agent_id"],
-            "agent_display_name": memory.get("agent_display_name"),
-            "memory_type": memory["memory_type"],
-            "title": memory["title"],
-            "content": memory["content"],
-            "weight": float(memory["weight"]) if memory["weight"] is not None else None,
-            "source_uri": memory["source_uri"],
-            "run_id": memory["run_id"],
-            # Storage serialises the JSONB column under ``metadata_``; the API
-            # response exposes it as ``metadata``.
-            "metadata": memory.get("metadata_"),
-            "content_hash": memory["content_hash"],
-            "created_at": memory["created_at"],
-            "expires_at": memory["expires_at"],
-            "deleted_at": memory["deleted_at"],
-            "subject_entity_id": memory["subject_entity_id"],
-            "predicate": memory["predicate"],
-            "object_value": memory["object_value"],
-            "ts_valid_start": memory["ts_valid_start"],
-            "ts_valid_end": memory["ts_valid_end"],
-            "status": memory["status"],
-            "visibility": memory["visibility"],
-            "recall_count": memory["recall_count"],
-            "last_recalled_at": memory["last_recalled_at"],
-            "supersedes_id": memory["supersedes_id"],
-            "entity_links": detail["entity_links"],
-            "embedding_preview": detail["embedding_preview"],
-            "embedding_stats": detail["embedding_stats"],
-        }
-    )
+    return {
+        "id": memory["id"],
+        "tenant_id": memory["tenant_id"],
+        "fleet_id": memory["fleet_id"],
+        "agent_id": memory["agent_id"],
+        "agent_display_name": memory.get("agent_display_name"),
+        "memory_type": memory["memory_type"],
+        "title": memory["title"],
+        "content": memory["content"],
+        "weight": float(memory["weight"]) if memory["weight"] is not None else None,
+        "source_uri": memory["source_uri"],
+        "run_id": memory["run_id"],
+        # Storage serialises the JSONB column under ``metadata_``; the API
+        # response exposes it as ``metadata``.
+        "metadata": memory.get("metadata_"),
+        "content_hash": memory["content_hash"],
+        "created_at": memory["created_at"],
+        "expires_at": memory["expires_at"],
+        "deleted_at": memory["deleted_at"],
+        "subject_entity_id": memory["subject_entity_id"],
+        "predicate": memory["predicate"],
+        "object_value": memory["object_value"],
+        "ts_valid_start": memory["ts_valid_start"],
+        "ts_valid_end": memory["ts_valid_end"],
+        "status": memory["status"],
+        "visibility": memory["visibility"],
+        "recall_count": memory["recall_count"],
+        "last_recalled_at": memory["last_recalled_at"],
+        "supersedes_id": memory["supersedes_id"],
+        "entity_links": detail["entity_links"],
+        "embedding_preview": detail["embedding_preview"],
+        "embedding_stats": detail["embedding_stats"],
+    }
 
 
 @router.get("/memories/{memory_id}/contradictions")

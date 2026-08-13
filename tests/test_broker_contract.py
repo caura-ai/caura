@@ -30,17 +30,15 @@ _METHODS = ("get", "post", "patch", "delete", "put")
 #
 #   GET /health, GET /version   — liveness/handshake payloads with no
 #       response_model on the route; trivial, stable shapes.
-#   GET /memories/{memory_id}   — the route hand-builds a ~20-field
-#       ``JSONResponse``. Attaching a ``response_model`` would document a shape
-#       FastAPI does NOT enforce (it skips validation when the handler returns a
-#       Response object), which is worse than untyped: the contract would then
-#       assert a guarantee the code does not make. Typing it properly means
-#       refactoring the handler to return a model, which changes serialization
-#       on a live endpoint and belongs in its own change.
+#
+# ``GET /memories/{memory_id}`` was listed here until its handler stopped returning
+# a ``JSONResponse`` (FastAPI skips response validation for a Response object, so a
+# ``response_model`` alongside one documents a guarantee the code does not make).
+# It now returns a dict against ``MemoryDetailResponse`` and is genuinely typed —
+# and the assertion below FAILS on a stale entry, which is what removed it.
 _UNTYPED_200 = {
     ("get", "/api/v1/health"),
     ("get", "/api/v1/version"),
-    ("get", "/api/v1/memories/{memory_id}"),
 }
 
 
