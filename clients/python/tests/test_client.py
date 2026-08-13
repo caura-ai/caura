@@ -14,6 +14,7 @@ from memclaw_client import (
     Memory,
     NotFoundError,
     RecallResult,
+    __version__,
 )
 
 
@@ -57,7 +58,9 @@ def test_search_returns_list():
         body = json.loads(request.content)
         assert body["query"] == "q"
         assert body["top_k"] == 3
-        return httpx.Response(200, json={"items": [{"id": "m1", "content": "a"}, {"id": "m2", "content": "b"}]})
+        return httpx.Response(
+            200, json={"items": [{"id": "m1", "content": "a"}, {"id": "m2", "content": "b"}]}
+        )
 
     results = make_client(handler).search("q", top_k=3)
     assert [m.id for m in results] == ["m1", "m2"]
@@ -96,7 +99,9 @@ def test_search_raises_on_non_dict_body():
 def test_recall_returns_summary():
     def handler(request):
         assert request.url.path == "/api/v1/recall"
-        return httpx.Response(200, json={"summary": "S", "supporting_memories": [{"id": "m1", "content": "a"}]})
+        return httpx.Response(
+            200, json={"summary": "S", "supporting_memories": [{"id": "m1", "content": "a"}]}
+        )
 
     result = make_client(handler).recall("q")
     assert isinstance(result, RecallResult)
@@ -151,3 +156,28 @@ def test_requires_api_key_and_tenant():
         MemClaw("", tenant_id="t")
     with pytest.raises(ValueError):
         MemClaw("k", tenant_id="")
+
+
+def test_user_agent_header_is_sent():
+    seen = {}
+
+    def handler(request):
+        seen["user_agent"] = request.headers.get("User-Agent")
+        return httpx.Response(200, json={"status": "ok"})
+
+    make_client(handler).health()
+    assert seen["user_agent"] == f"memclaw-client-python/{__version__}"
+    assert seen["user_agent"].startswith("memclaw-client-python/")
+
+
+def test_version_falls_back_when_package_not_installed(monkeypatch):
+    from importlib.metadata import PackageNotFoundError
+
+    from memclaw_client import _version
+
+    def _raise(_name):
+        raise PackageNotFoundError
+
+    monkeypatch.setattr(_version, "_pkg_version", _raise)
+    assert _version._detect_version() == _version.FALLBACK_VERSION
+    assert _version._detect_version() == "0.0.0+dev"
