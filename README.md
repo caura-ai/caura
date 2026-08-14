@@ -346,9 +346,9 @@ pip install memclaw-client
 ```
 
 ```python
-from memclaw_client import Caura
+from memclaw_client import MemClaw
 
-mc = Caura("mc_xxx", tenant_id="my-team", agent_id="my-agent")
+mc = MemClaw("mc_xxx", tenant_id="my-team", agent_id="my-agent")
 mc.write("Q3 revenue target is $4M, set on 2026-04-15.")
 print(mc.recall("Q3 revenue target").summary)
 ```
@@ -364,9 +364,9 @@ npm install @caura/memclaw-client
 ```
 
 ```ts
-import { Caura } from "@caura/memclaw-client";
+import { MemClaw } from "@caura/memclaw-client";
 
-const mc = new Caura("mc_xxx", { tenantId: "my-team", agentId: "my-agent" });
+const mc = new MemClaw("mc_xxx", { tenantId: "my-team", agentId: "my-agent" });
 await mc.write("Q3 revenue target is $4M, set on 2026-04-15.");
 console.log((await mc.recall("Q3 revenue target")).summary);
 ```
