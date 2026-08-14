@@ -43,7 +43,7 @@ Agents write plain text. Caura turns it into searchable, governed, self-improvin
 > [Architecture deep-dive →](https://memclaw.net/blog/etoro-company-brain/)
 
 <p align="center">
-  <img src="static/images/memclaw-concept.png" alt="Caura — Fleet Memory that Compounds" width="700" />
+  <img src="static/images/caura-concept.png" alt="Caura — Fleet Memory that Compounds" width="700" />
 </p>
 
 <p align="center">
