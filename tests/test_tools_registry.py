@@ -58,7 +58,7 @@ def test_all_specs_have_memclaw_prefix():
     from core_api.tools import REGISTRY
 
     for name in REGISTRY:
-        assert name.startswith("memclaw_"), f"Spec name '{name}' lacks memclaw_ prefix"
+        assert name.startswith("caura_"), f"Spec name '{name}' lacks caura_ prefix"
 
 
 def test_all_trust_values_in_0_3():

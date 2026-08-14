@@ -38,15 +38,23 @@ async def _listed_tool_names() -> list[str]:
 
 async def _outcome(name: str) -> tuple[str, str]:
     """Call ``name`` with empty args; return a comparable (kind, detail)."""
+    # Normalize BOTH spellings out of the message so canonical/legacy
+    # outcomes compare equal. The shim translates before dispatch, so
+    # error text mentions the canonical name under either spelling; what
+    # matters is the error class (validation vs unknown-tool), not which
+    # spelling was used.
+    suffix = name.removeprefix("caura_").removeprefix("memclaw_")
+
+    def _normalize(text: str) -> str:
+        return text.replace(f"caura_{suffix}", "<tool>").replace(
+            f"memclaw_{suffix}", "<tool>"
+        )
+
     try:
         result = await mcp_server.mcp.call_tool(name, {})
     except ToolError as exc:
-        # Normalize the tool name out of the message so canonical/legacy
-        # outcomes compare equal; what matters is the error class
-        # (validation vs unknown-tool), not which spelling was used.
-        detail = str(exc).replace(name, "<tool>")
-        return ("tool_error", detail)
-    return ("result", as_text(result))
+        return ("tool_error", _normalize(str(exc)))
+    return ("result", _normalize(as_text(result)))
 
 
 @pytest.mark.asyncio
