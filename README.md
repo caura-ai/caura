@@ -34,7 +34,7 @@ Agents write plain text. Caura turns it into searchable, governed, self-improvin
 
 **One loop, three pillars: write, recall, compound** — every interaction makes the next one smarter.
 
-**Built for fleets, not single agents.** Public agent-memory benchmarks (LoCoMo, LongMemEval) measure one agent, one user, one long conversation — the single-chatbot shape. The deployment shape we see in production is the opposite: dozens or thousands of agents working on behalf of a company, sharing what they learn under governance. Caura is architected around that shape from day one — scoped memory, cross-agent outcome propagation, fleet-wide trust tiers — and competes on the axes that compound with agent count: latency, token efficiency, and governance. See [Performance](#performance) for the numbers, or read the [benchmarks write-up](https://memclaw.net/blog/memclaw-benchmarks).
+**Built for fleets, not single agents.** Public agent-memory benchmarks (LoCoMo, LongMemEval) measure one agent, one user, one long conversation — the single-chatbot shape. The deployment shape we see in production is the opposite: dozens or thousands of agents working on behalf of a company, sharing what they learn under governance. Caura is architected around that shape from day one — scoped memory, cross-agent outcome propagation, fleet-wide trust tiers — and competes on the axes that compound with agent count: latency, token efficiency, and governance. See [Performance](#performance) for the numbers, or read the [benchmarks write-up](https://caura.ai/blog/caura-benchmarks).
 
 > **In production at eToro (NASDAQ: ETOR):** 300+ AI agents on one governed
 > memory — 26,500+ memories, 1,372 shared skills, 23 ms p50 search.
@@ -446,7 +446,7 @@ Accuracy sits inside the leading cluster across the field (Mem0, Zep, Caura — 
 
 > Single-agent benchmarks can't measure cross-agent recall, outcome propagation between agents, fleet-scoped visibility, or governance-aware retrieval. Those are the questions that decide whether a memory system is *deployable* inside a company. See [`docs/performance.md`](docs/performance.md#what-these-benchmarks-cant-measure).
 
-Source: [Fast, Token-Efficient, and Built for Fleets](https://memclaw.net/blog/memclaw-benchmarks) (2026-04-19).
+Source: [Fast, Token-Efficient, and Built for Fleets](https://caura.ai/blog/caura-benchmarks) (2026-04-19).
 
 ---
 
