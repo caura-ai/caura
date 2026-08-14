@@ -48,7 +48,7 @@ for _k, _v in _TEST_DEFAULTS.items():
 # itself (e.g. test_rate_limit's auth-gated burst test, which gets all
 # 401s instead of the expected 200/429 mix). Unset rather than
 # setdefault — setdefault doesn't override an existing env value.
-for _leaky in ("MEMCLAW_API_KEY", "MEMCLAW_KEY"):
+for _leaky in ("MEMCLAW_API_KEY", "MEMCLAW_KEY", "CAURA_API_KEY", "CAURA_KEY"):
     os.environ.pop(_leaky, None)
 
 # ruff: noqa: E402 — these imports MUST stay below the env defaults above;

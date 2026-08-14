@@ -236,7 +236,7 @@ if [ -z "$NOTES" ]; then
   exit 0
 fi
 
-MEMCLAW_URL="${MEMCLAW_API_URL:-https://memclaw.net}"
+CAURA_URL="${MEMCLAW_API_URL:-https://caura.ai}"
 CR_FLEET="${CODE_REVIEW_FLEET_ID:-code-review}"
 SAVED=0
 while IFS= read -r NOTE; do
@@ -258,7 +258,7 @@ while IFS= read -r NOTE; do
     echo "::warning::could not build the write request for a note — skipping it"
     continue
   }
-  RESP=$(curl -sS --max-time 20 "${MEMCLAW_URL%/}/mcp" \
+  RESP=$(curl -sS --max-time 20 "${CAURA_URL%/}/mcp" \
     -H "X-API-Key: ${MEMCLAW_AGENTS_KEY}" \
     -H "Content-Type: application/json" -H "Accept: application/json" \
     -d "$REQ") || { echo "::warning::MemClaw unreachable — note dropped"; continue; }

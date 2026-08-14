@@ -323,13 +323,13 @@ Already running an OpenClaw fleet? Install Caura as a plugin against either the 
 
 ```bash
 # Point at whichever URL hosts your Caura API
-export MEMCLAW_URL=https://memclaw.net          # managed
-# or:  export MEMCLAW_URL=http://localhost:8000  # self-hosted
-export MEMCLAW_KEY=your-key                      # `standalone` works in self-hosted standalone mode
-export MEMCLAW_FLEET=my-fleet
+export CAURA_URL=https://caura.ai             # managed
+# or:  export CAURA_URL=http://localhost:8000  # self-hosted
+export CAURA_KEY=your-key                      # `standalone` works in self-hosted standalone mode
+export CAURA_FLEET=my-fleet
 
-curl -sf -H "X-API-Key: $MEMCLAW_KEY" \
-  "$MEMCLAW_URL/api/v1/install-plugin?fleet_id=$MEMCLAW_FLEET&api_url=$MEMCLAW_URL" | bash
+curl -sf -H "X-API-Key: $CAURA_KEY" \
+  "$CAURA_URL/api/v1/install-plugin?fleet_id=$CAURA_FLEET&api_url=$CAURA_URL" | bash
 
 # Restart the gateway to load the plugin
 openclaw gateway restart

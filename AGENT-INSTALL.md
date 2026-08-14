@@ -135,16 +135,16 @@ If you're an OpenClaw agent running on a gateway, install the plugin instead:
 
 ```bash
 # Set your base URL and API key
-MEMCLAW_URL=http://localhost:8000
-MEMCLAW_KEY=YOUR_KEY_HERE      # admin key (Path 2) or shared gate key (Path 3)
-MEMCLAW_FLEET=my-fleet
+CAURA_URL=http://localhost:8000
+CAURA_KEY=YOUR_KEY_HERE      # admin key (Path 2) or shared gate key (Path 3)
+CAURA_FLEET=my-fleet
 MEMCLAW_AGENT_ID=my-agent      # optional but recommended: a stable, human-readable
                               # identity for THIS install (e.g. webclaw, vm-01). If
                               # unset, the plugin uses a stable per-install id
                               # (main-<install_id>) so installs don't collide.
 
 # Run the install script (API key in header, not query param)
-curl -sf -H "X-API-Key: $MEMCLAW_KEY" "$MEMCLAW_URL/api/v1/install-plugin?fleet_id=$MEMCLAW_FLEET&api_url=$MEMCLAW_URL" | bash
+curl -sf -H "X-API-Key: $CAURA_KEY" "$CAURA_URL/api/v1/install-plugin?fleet_id=$CAURA_FLEET&api_url=$CAURA_URL" | bash
 
 # Restart OpenClaw gateway
 openclaw gateway restart    # or: systemctl --user restart openclaw-gateway
@@ -167,23 +167,23 @@ Use MCP if your agent supports it. Use the plugin if you're running on OpenClaw.
 
 ```bash
 # Example: standalone mode (tenant_id="default", any non-admin X-API-Key works)
-MEMCLAW_URL=http://localhost:8000
+CAURA_URL=http://localhost:8000
 KEY=standalone
 
 # Search (should return empty — you haven't written anything yet)
-curl -X POST "$MEMCLAW_URL/api/v1/search" \
+curl -X POST "$CAURA_URL/api/v1/search" \
   -H "X-API-Key: $KEY" \
   -H "Content-Type: application/json" \
   -d '{"tenant_id": "default", "query": "test"}'
 
 # Write your first memory
-curl -X POST "$MEMCLAW_URL/api/v1/memories" \
+curl -X POST "$CAURA_URL/api/v1/memories" \
   -H "X-API-Key: $KEY" \
   -H "Content-Type: application/json" \
   -d '{"tenant_id": "default", "agent_id": "self", "content": "I installed Caura locally and it works."}'
 
 # Verify it was stored
-curl "$MEMCLAW_URL/api/v1/memories?tenant_id=default" \
+curl "$CAURA_URL/api/v1/memories?tenant_id=default" \
   -H "X-API-Key: $KEY"
 ```
 
