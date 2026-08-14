@@ -30,7 +30,7 @@
 #   GH_TOKEN          token with issues:read and pull-requests:read
 # Optional env:
 #   MEMCLAW_AGENTS_KEY   internal-agents tenant key (empty => dark no-op)
-#   MEMCLAW_API_URL      default https://memclaw.net
+#   MEMCLAW_API_URL      default https://caura.ai
 #   CODE_REVIEW_FLEET_ID default code-review
 #   MODEL                default claude-sonnet-5
 #   MAX_BUDGET_USD       per-invocation ceiling (default 2.00)
@@ -236,7 +236,7 @@ if [ -z "$NOTES" ]; then
   exit 0
 fi
 
-MEMCLAW_URL="${MEMCLAW_API_URL:-https://memclaw.net}"
+CAURA_URL="${MEMCLAW_API_URL:-https://caura.ai}"
 CR_FLEET="${CODE_REVIEW_FLEET_ID:-code-review}"
 SAVED=0
 while IFS= read -r NOTE; do
@@ -258,7 +258,7 @@ while IFS= read -r NOTE; do
     echo "::warning::could not build the write request for a note — skipping it"
     continue
   }
-  RESP=$(curl -sS --max-time 20 "${MEMCLAW_URL%/}/mcp" \
+  RESP=$(curl -sS --max-time 20 "${CAURA_URL%/}/mcp" \
     -H "X-API-Key: ${MEMCLAW_AGENTS_KEY}" \
     -H "Content-Type: application/json" -H "Accept: application/json" \
     -d "$REQ") || { echo "::warning::MemClaw unreachable — note dropped"; continue; }

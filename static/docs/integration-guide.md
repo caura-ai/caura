@@ -65,7 +65,7 @@ Add this to your MCP client configuration:
 ```json
 {
   "mcpServers": {
-    "memclaw": {
+    "caura": {
       "url": "https://your-memclaw-instance.example.com/mcp",
       "headers": {
         "X-API-Key": "mc_your_api_key_here"
@@ -81,7 +81,7 @@ Add this to your MCP client configuration:
 |---|---|
 | Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
-| Claude Code | `~/.claude.json` (user scope) — preferred; register via `claude mcp add --scope user --transport http memclaw https://your-memclaw-instance.example.com/mcp --header "X-API-Key: mc_your_key"` |
+| Claude Code | `~/.claude.json` (user scope) — preferred; register via `claude mcp add --scope user --transport http caura https://your-memclaw-instance.example.com/mcp --header "X-API-Key: mc_your_key"` |
 | Cursor | Settings -> MCP Servers -> Add Server (type: `sse`, URL: `https://your-memclaw-instance.example.com/mcp`) |
 
 > The Claude Code MCP-server registry lives in `~/.claude.json` — NOT `~/.claude/settings.json`. The latter's schema rejects an `mcpServers` block. Prefer the `claude mcp add` CLI over hand-editing so the correct file is written.

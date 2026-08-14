@@ -48,8 +48,8 @@ memclaw-interviewer = "memclaw_client.interviewer.cli:main"
 dev = ["pytest>=8", "ruff>=0.15.4,<0.16"]
 
 [project.urls]
-Homepage = "https://memclaw.net"
-Documentation = "https://memclaw.net/docs"
+Homepage = "https://caura.ai"
+Documentation = "https://caura.ai/docs"
 Repository = "https://github.com/caura-ai/caura"
 Issues = "https://github.com/caura-ai/caura/issues"
 

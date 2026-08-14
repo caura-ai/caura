@@ -61,4 +61,4 @@ you found it." Five habits make that real.
 
 *Posture layer for the Caura Company Brain. Pair it with the `memclaw` skill,
 which carries the tool mechanics. Built on the Caura protocol (Apache 2.0) —
-see [memclaw.net](https://memclaw.net).*
+see [caura.ai](https://caura.ai).*

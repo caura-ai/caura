@@ -73,7 +73,7 @@ recall_review_guidance() {
   local diff="$1"
   GUIDANCE_SECTION=""
   [ -n "${MEMCLAW_AGENTS_KEY:-}" ] || return 0
-  local memclaw_url="${MEMCLAW_API_URL:-https://memclaw.net}"
+  local memclaw_url="${MEMCLAW_API_URL:-https://caura.ai}"
   local fleet="${CODE_REVIEW_FLEET_ID:-code-review}"
   # Query built from the changed paths so recall is relevant to THIS diff. The sanitiser keeps
   # only path characters, so a crafted filename cannot inject into the query, and caps length.

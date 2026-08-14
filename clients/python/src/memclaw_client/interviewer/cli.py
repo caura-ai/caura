@@ -41,7 +41,7 @@ from .machine import machine_id_short
 from .parser import count_lines
 from .runner import RunConfig, node_id_for, read_watermark, run_all
 
-DEFAULT_BASE_URL = "https://memclaw.net"
+DEFAULT_BASE_URL = "https://caura.ai"
 
 
 def _default_agent_id() -> str:

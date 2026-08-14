@@ -1,10 +1,10 @@
 # memclaw-client
 
-Official Python client for [Caura](https://memclaw.net) — governed shared
+Official Python client for [Caura](https://caura.ai) — governed shared
 memory for AI agent fleets (multi-agent, multi-tenant, MCP-native).
 
 A thin wrapper over the Caura REST API. Point it at a managed
-(`https://memclaw.net`) or self-hosted (`http://localhost:8000`) deployment.
+(`https://caura.ai`) or self-hosted (`http://localhost:8000`) deployment.
 
 ## Install
 
@@ -50,8 +50,8 @@ The client is a context manager (`with Caura(...) as mc:`) and raises
 Every result also exposes the full API payload on `.raw`.
 
 For credentials, scopes, and the full API surface, see the
-[Caura docs](https://memclaw.net/docs). Production fleets should use
-[per-agent keys](https://memclaw.net/docs/integrations/per-agent-keys).
+[Caura docs](https://caura.ai/docs). Production fleets should use
+[per-agent keys](https://caura.ai/docs/integrations/per-agent-keys).
 
 ## memclaw-interviewer — Claude Code + Cursor adapter
 
