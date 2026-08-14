@@ -2,8 +2,8 @@
 
 <h3 align="center">Fleet memory for AI agents &mdash; governed, shared, self-improving.</h3>
 
-<p align="center"><strong>MemClaw is becoming Caura</strong> &mdash; same product, one name.<br />
-Tool names (<code>memclaw_*</code>), packages, env vars and URLs keep working unchanged.</p>
+<p align="center"><strong>MemClaw is now Caura</strong> &mdash; same product, one name.<br />
+Tools are <code>caura_*</code>; the old <code>memclaw_*</code> names, packages, env vars and URLs keep working unchanged.</p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License" /></a>
@@ -28,7 +28,7 @@ Tool names (<code>memclaw_*</code>), packages, env vars and URLs keep working un
 
 ## Caura (formerly MemClaw) — the shared governed memory layer for AI agent fleets
 
-Caura — known until now as MemClaw — is open-source memory for **multi-tenant, multi-agent** AI fleets. Your agents store what they learn, find what the fleet knows, and get smarter with every interaction — learning from each other instead of repeating mistakes.
+Caura — formerly MemClaw — is open-source memory for **multi-tenant, multi-agent** AI fleets. Your agents store what they learn, find what the fleet knows, and get smarter with every interaction — learning from each other instead of repeating mistakes.
 
 Agents write plain text. Caura turns it into searchable, governed, self-improving memory.
 
