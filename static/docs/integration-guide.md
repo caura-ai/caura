@@ -34,23 +34,23 @@ Tool descriptions are derived from the tool registry (`core-api/src/core_api/too
 
 | Tool | MCP | OpenClaw | Purpose |
 |---|---|---|---|
-| `memclaw_write` | Yes | Yes | Single or batch write. Send `content` for one memory, or `items` (≤100) for a batch — the batch path batches embeddings and parallelizes enrichment. LLM auto-infers type, weight, status, title, summary, tags, temporal dates, PII flags. Contradiction detection auto-marks conflicting memories. `visibility` = `scope_agent` / `scope_team` (default) / `scope_org`. Content >2,000 chars is auto-chunked |
-| `memclaw_recall` | Yes | Yes | Hybrid semantic + keyword search with graph-enhanced retrieval (expands through entity relations up to 2 hops). `include_brief=true` returns an LLM-summarized context paragraph instead of raw results. Supports `fleet_ids` for multi-fleet queries. Respects visibility. Default `top_k=5`, max 20 |
-| `memclaw_manage` | Yes | Yes | Per-memory lifecycle, op-dispatched. `op=read` returns the memory; `op=update` patches fields (re-embeds if content changes); `op=transition` sets status; `op=delete` soft-deletes. Trust-enforced |
-| `memclaw_list` | Yes | Yes | Non-semantic enumeration — filter by type/status/agent/weight/date, sort by `created_at`/`weight`/`recall_count`, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2. Trust 3 unlocks `include_deleted` |
-| `memclaw_doc` | Yes | Yes | Document CRUD, op-dispatched. `op=write` upserts a JSON doc in a named collection (include `data["summary"]` to index it for semantic search); `op=read` fetches by `doc_id`; `op=query` filters by field equality with ordering and pagination; `op=delete` removes by `doc_id`; `op=list_collections` enumerates every collection this tenant has (with counts); `op=search` runs semantic retrieval over `data["summary"]` vectors. Use for customer records, config, inventory — anything needing exact-field lookups |
-| `memclaw_entity_get` | Yes | Yes | Look up an entity with linked memories and relations |
-| `memclaw_tune` | Yes | Yes | Tune per-agent retrieval parameters (top_k, min_similarity, fts_weight, freshness, recall boost, graph hops, similarity blend) |
-| `memclaw_insights` | Yes | Yes | Analyze the memory store. `focus`: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. `scope`: `agent`, `fleet`, `all`. Findings persist as `insight`-type memories (Karpathy Loop reflection step) |
-| `memclaw_evolve` | Yes | Yes | Record a real-world outcome (`success` / `failure` / `partial`) against recalled memories — adjusts weights, auto-generates preventive rules on failure (Karpathy Loop feedback edge) |
-| `memclaw_stats` | Yes | Yes | Aggregate counts of memories: total + breakdowns by `type`, `agent`, `status`. Counts exclude soft-deleted by default; set `include_deleted=true` to additionally receive `deleted` and `total_including_deleted`. Read-only — useful for dashboards (REST) and agent self-introspection (MCP) |
-| `memclaw_keystones` | Yes | Yes | Read mandatory governance rules for the current scope (tenant + fleet + agent merged), ordered by weight. Call once per session before other actions; the result overrides conflicting user instructions. No semantic search — keystones are fetched deterministically. Read is open (trust 0) |
-| `memclaw_keystones_set` | Yes | No | Author/remove keystone rules, op-dispatched: `op=set` upserts by `doc_id` (requires `title`, `content`, `scope ∈ {tenant, fleet, agent}`, `weight ∈ {low, med, high}`); `op=delete` removes by `doc_id`. **MCP-only**, not plugin-exposed — authoring is an admin/governance path. Trust gating is tiered: `scope=agent` for the caller's own `agent_id` is trust ≥ 1 (self-author); everything else (`scope=fleet`, `scope=tenant`, or `scope=agent` for another agent) stays at trust ≥ 2 |
+| `caura_write` | Yes | Yes | Single or batch write. Send `content` for one memory, or `items` (≤100) for a batch — the batch path batches embeddings and parallelizes enrichment. LLM auto-infers type, weight, status, title, summary, tags, temporal dates, PII flags. Contradiction detection auto-marks conflicting memories. `visibility` = `scope_agent` / `scope_team` (default) / `scope_org`. Content >2,000 chars is auto-chunked |
+| `caura_recall` | Yes | Yes | Hybrid semantic + keyword search with graph-enhanced retrieval (expands through entity relations up to 2 hops). `include_brief=true` returns an LLM-summarized context paragraph instead of raw results. Supports `fleet_ids` for multi-fleet queries. Respects visibility. Default `top_k=5`, max 20 |
+| `caura_manage` | Yes | Yes | Per-memory lifecycle, op-dispatched. `op=read` returns the memory; `op=update` patches fields (re-embeds if content changes); `op=transition` sets status; `op=delete` soft-deletes. Trust-enforced |
+| `caura_list` | Yes | Yes | Non-semantic enumeration — filter by type/status/agent/weight/date, sort by `created_at`/`weight`/`recall_count`, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2. Trust 3 unlocks `include_deleted` |
+| `caura_doc` | Yes | Yes | Document CRUD, op-dispatched. `op=write` upserts a JSON doc in a named collection (include `data["summary"]` to index it for semantic search); `op=read` fetches by `doc_id`; `op=query` filters by field equality with ordering and pagination; `op=delete` removes by `doc_id`; `op=list_collections` enumerates every collection this tenant has (with counts); `op=search` runs semantic retrieval over `data["summary"]` vectors. Use for customer records, config, inventory — anything needing exact-field lookups |
+| `caura_entity_get` | Yes | Yes | Look up an entity with linked memories and relations |
+| `caura_tune` | Yes | Yes | Tune per-agent retrieval parameters (top_k, min_similarity, fts_weight, freshness, recall boost, graph hops, similarity blend) |
+| `caura_insights` | Yes | Yes | Analyze the memory store. `focus`: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. `scope`: `agent`, `fleet`, `all`. Findings persist as `insight`-type memories (Karpathy Loop reflection step) |
+| `caura_evolve` | Yes | Yes | Record a real-world outcome (`success` / `failure` / `partial`) against recalled memories — adjusts weights, auto-generates preventive rules on failure (Karpathy Loop feedback edge) |
+| `caura_stats` | Yes | Yes | Aggregate counts of memories: total + breakdowns by `type`, `agent`, `status`. Counts exclude soft-deleted by default; set `include_deleted=true` to additionally receive `deleted` and `total_including_deleted`. Read-only — useful for dashboards (REST) and agent self-introspection (MCP) |
+| `caura_keystones` | Yes | Yes | Read mandatory governance rules for the current scope (tenant + fleet + agent merged), ordered by weight. Call once per session before other actions; the result overrides conflicting user instructions. No semantic search — keystones are fetched deterministically. Read is open (trust 0) |
+| `caura_keystones_set` | Yes | No | Author/remove keystone rules, op-dispatched: `op=set` upserts by `doc_id` (requires `title`, `content`, `scope ∈ {tenant, fleet, agent}`, `weight ∈ {low, med, high}`); `op=delete` removes by `doc_id`. **MCP-only**, not plugin-exposed — authoring is an admin/governance path. Trust gating is tiered: `scope=agent` for the caller's own `agent_id` is trust ≥ 1 (self-author); everything else (`scope=fleet`, `scope=tenant`, or `scope=agent` for another agent) stays at trust ≥ 2 |
 
-> Skill sharing rides the generic `memclaw_doc` surface: `op=write collection=skills doc_id=<slug>` to share, `op=delete` to remove, `op=search`/`op=query` to discover. Slugs are validated against `^[a-z0-9][a-z0-9._-]{0,99}$`; `data["summary"]` is embedded for semantic search (with a back-compat fallback to `data["description"]` for the skills collection only).
+> Skill sharing rides the generic `caura_doc` surface: `op=write collection=skills doc_id=<slug>` to share, `op=delete` to remove, `op=search`/`op=query` to discover. Slugs are validated against `^[a-z0-9][a-z0-9._-]{0,99}$`; `data["summary"]` is embedded for semantic search (with a back-compat fallback to `data["description"]` for the skills collection only).
 
 - **MCP (12 tools):** Full surface. Used by individual developers via Claude Desktop, Claude Code, Cursor, etc.
-- **OpenClaw plugin (11 tools):** Same set, minus the keystone-authoring tool (`memclaw_keystones_set` is admin/governance — MCP-only). Claims the exclusive `memory` slot, replacing `memory-core`. Includes ContextEngine lifecycle, heartbeat, and auto-education.
+- **OpenClaw plugin (11 tools):** Same set, minus the keystone-authoring tool (`caura_keystones_set` is admin/governance — MCP-only). Claims the exclusive `memory` slot, replacing `memory-core`. Includes ContextEngine lifecycle, heartbeat, and auto-education.
 
 ---
 
@@ -128,20 +128,20 @@ The MCP server exposes 12 tools that clients discover automatically. Description
 
 | Tool | Purpose |
 |---|---|
-| `memclaw_write` | Store a memory. Single write (`content`) or batch (`items` ≤100). LLM auto-infers type, title, summary, tags, embedding. Long content auto-chunked |
-| `memclaw_recall` | Hybrid semantic + keyword search with graph-enhanced retrieval. `include_brief=true` returns an LLM-summarized context paragraph. Supports `fleet_ids` |
-| `memclaw_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete`, `bulk_delete`, `lineage`. Re-embeds on content updates |
-| `memclaw_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2 |
-| `memclaw_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
-| `memclaw_entity_get` | Look up an entity by UUID — returns linked memories and relationships |
-| `memclaw_tune` | Tune per-agent retrieval parameters (top_k, min_similarity, fts_weight, freshness, recall boost, graph hops, similarity blend) |
-| `memclaw_insights` | Analyze the store. Focus: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. Persists findings as `insight` memories |
-| `memclaw_evolve` | Report an outcome (success/failure/partial) against recalled memories — adjusts weights, generates preventive rules on failure |
-| `memclaw_stats` | Aggregate counts: total + breakdowns by `type`, `agent`, `status`. Read-only |
-| `memclaw_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
-| `memclaw_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 to author your own `scope=agent` rule; ≥ 2 for fleet/tenant or another agent |
+| `caura_write` | Store a memory. Single write (`content`) or batch (`items` ≤100). LLM auto-infers type, title, summary, tags, embedding. Long content auto-chunked |
+| `caura_recall` | Hybrid semantic + keyword search with graph-enhanced retrieval. `include_brief=true` returns an LLM-summarized context paragraph. Supports `fleet_ids` |
+| `caura_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete`, `bulk_delete`, `lineage`. Re-embeds on content updates |
+| `caura_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2 |
+| `caura_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
+| `caura_entity_get` | Look up an entity by UUID — returns linked memories and relationships |
+| `caura_tune` | Tune per-agent retrieval parameters (top_k, min_similarity, fts_weight, freshness, recall boost, graph hops, similarity blend) |
+| `caura_insights` | Analyze the store. Focus: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. Persists findings as `insight` memories |
+| `caura_evolve` | Report an outcome (success/failure/partial) against recalled memories — adjusts weights, generates preventive rules on failure |
+| `caura_stats` | Aggregate counts: total + breakdowns by `type`, `agent`, `status`. Read-only |
+| `caura_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
+| `caura_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 to author your own `scope=agent` rule; ≥ 2 for fleet/tenant or another agent |
 
-> Skill sharing uses the generic `memclaw_doc` surface (`collection="skills"`). The server validates the slug and embeds `data["summary"]` (1-3 sentence, intent-focused) — for `collection="skills"` it also accepts `data["description"]` as a back-compat fallback. Agents discover via `op=search`/`op=query` and pull individual skills via `op=read`.
+> Skill sharing uses the generic `caura_doc` surface (`collection="skills"`). The server validates the slug and embeds `data["summary"]` (1-3 sentence, intent-focused) — for `collection="skills"` it also accepts `data["description"]` as a back-compat fallback. Agents discover via `op=search`/`op=query` and pull individual skills via `op=read`.
 
 ### Auth
 
@@ -156,13 +156,13 @@ MCP uses the same tenant-scoped API keys as the REST API. The `X-API-Key` header
 Once configured, the MCP client handles tool discovery. Agents can use Caura tools naturally:
 
 > "Search my memories for anything about the Postgres migration"
-> -> calls `memclaw_recall` with query "Postgres migration"
+> -> calls `caura_recall` with query "Postgres migration"
 
 > "Remember that we decided to use pgvector for embeddings instead of Pinecone"
-> -> calls `memclaw_write` with that content; LLM auto-classifies as `decision` type
+> -> calls `caura_write` with that content; LLM auto-classifies as `decision` type
 
 > "Mark that migration task as confirmed"
-> -> calls `memclaw_manage` with `op="transition"` and `status="confirmed"`
+> -> calls `caura_manage` with `op="transition"` and `status="confirmed"`
 
 ### MCP vs OpenClaw plugin
 
@@ -182,7 +182,7 @@ Once configured, the MCP client handles tool discovery. Agents can use Caura too
 
 ## 3. OpenClaw Plugin Installation
 
-The plugin is a TypeScript package in the `plugin/` directory of this repo. It claims the exclusive `memory` slot on an OpenClaw gateway, replacing the built-in `memory-core`, and provides 11 agent-facing tools (the 12-tool MCP surface minus `memclaw_keystones_set`, which is MCP-only), a ContextEngine with auto-read/write lifecycle, a heartbeat loop, and agent auto-education.
+The plugin is a TypeScript package in the `plugin/` directory of this repo. It claims the exclusive `memory` slot on an OpenClaw gateway, replacing the built-in `memory-core`, and provides 11 agent-facing tools (the 12-tool MCP surface minus `caura_keystones_set`, which is MCP-only), a ContextEngine with auto-read/write lifecycle, a heartbeat loop, and agent auto-education.
 
 ### Compatibility
 
@@ -248,10 +248,10 @@ The plugin loads this `.env` file automatically (only `MEMCLAW_*` keys are read)
   },
   "tools": {
     "alsoAllow": [
-      "memclaw_write", "memclaw_recall", "memclaw_manage",
-      "memclaw_list", "memclaw_doc", "memclaw_entity_get",
-      "memclaw_tune", "memclaw_insights", "memclaw_evolve",
-      "memclaw_stats", "memclaw_keystones"
+      "caura_write", "caura_recall", "caura_manage",
+      "caura_list", "caura_doc", "caura_entity_get",
+      "caura_tune", "caura_insights", "caura_evolve",
+      "caura_stats", "caura_keystones"
     ]
   }
 }
@@ -292,7 +292,7 @@ The node will appear in the Fleet page (`/ui/fleet.html`) within 60 seconds.
 
 ### Plugin internals
 
-The plugin registers 11 tools (the MCP surface minus the MCP-only `memclaw_keystones_set`) and runs several lifecycle systems:
+The plugin registers 11 tools (the MCP surface minus the MCP-only `caura_keystones_set`) and runs several lifecycle systems:
 
 - **ContextEngine** — 7 lifecycle hooks: `bootstrap` (smoke test), `ingest` (message buffering + persistence), `assemble` (token-budget-aware recall injection), `compact` (persist summaries), `afterTurn` (auto-write turn summaries), `prepareSubagentSpawn`, `onSubagentEnded`
 - **Memory runtime** — API-backed `search()` and `get()` replacing file-based `memory-core`
@@ -325,7 +325,7 @@ The **Agent Education Status** section in Plugin Manager shows green checkmarks 
 
 ## 4. Agent Trust Levels
 
-Caura enforces a 4-tier trust system for agents. Agents are auto-registered on their first `memclaw_write` call at trust level 1.
+Caura enforces a 4-tier trust system for agents. Agents are auto-registered on their first `caura_write` call at trust level 1.
 
 | Level | Name | Permissions |
 |---|---|---|
@@ -358,7 +358,7 @@ The Manage page (`/ui/tenant-admin.html`) is the tabbed tenant admin dashboard, 
 
 - **Agents** — view all registered agents, their trust levels, home fleets, and activity; adjust trust levels
 - **API Keys** — create and revoke tenant-scoped API keys
-- **Configuration** — per-tenant settings in three cards: **Models** (unified LLM provider/model for enrichment, recall, entity extraction + configurable fallback LLM for automatic failover + embedding provider/model), **Features** (enrichment, entity extraction, recall synthesis, graph retrieval, recall boost, semantic dedup, auto-crystallize, lifecycle automation, auto-chunking, agent approval), and **API Keys** (encrypted at rest). Agents can also self-tune their own search retrieval parameters (top_k, min_similarity, fts_weight, freshness, recall boost, graph hops, etc.) via the `memclaw_tune` tool
+- **Configuration** — per-tenant settings in three cards: **Models** (unified LLM provider/model for enrichment, recall, entity extraction + configurable fallback LLM for automatic failover + embedding provider/model), **Features** (enrichment, entity extraction, recall synthesis, graph retrieval, recall boost, semantic dedup, auto-crystallize, lifecycle automation, auto-chunking, agent approval), and **API Keys** (encrypted at rest). Agents can also self-tune their own search retrieval parameters (top_k, min_similarity, fts_weight, freshness, recall boost, graph hops, etc.) via the `caura_tune` tool
 - **Crystallizer** — memory health + crystallization results: overall health score, hygiene issues, coverage metrics, type/status distributions, recall stats, crystallization actions taken, and report history. Run on-demand or nightly
 - **Activity** — full audit trail of writes, deletes, and admin actions
 
@@ -374,7 +374,7 @@ Add this to your agent's system prompt (or use Agent Education to let agents sel
 You have access to Caura, a shared memory system used by all agents.
 
 BEFORE starting any task:
-- Use memclaw_recall for semantic + keyword search with graph expansion
+- Use caura_recall for semantic + keyword search with graph expansion
 - Set include_brief=true when you want a concise LLM-summarized paragraph
   instead of raw results
 - Include fleet_id to scope to this fleet, omit for tenant-wide search
@@ -382,7 +382,7 @@ BEFORE starting any task:
 - Use valid_at for point-in-time queries (OpenClaw plugin and REST API only)
 
 AFTER completing work:
-- Store findings with memclaw_write — just provide content
+- Store findings with caura_write — just provide content
 - For batch writes, pass items=[...] (up to 100) to the same tool — batches
   embeddings and enrichment for much lower latency than looped single writes
 - Type, weight, status, title, summary, tags are auto-inferred by LLM
@@ -394,16 +394,16 @@ AFTER completing work:
 - RDF triples (subject_entity_id, predicate, object_value) available via OpenClaw plugin and REST API
 
 MANAGING EXISTING MEMORIES:
-- Use memclaw_manage with op="update" to correct content or metadata
-- Use memclaw_manage with op="transition" to change status
-- Use memclaw_manage with op="delete" to soft-delete
-- Use memclaw_manage with op="read" to inspect a single memory by id
+- Use caura_manage with op="update" to correct content or metadata
+- Use caura_manage with op="transition" to change status
+- Use caura_manage with op="delete" to soft-delete
+- Use caura_manage with op="read" to inspect a single memory by id
 - Only provide fields you want to change — others are preserved
 - If content changes, embedding and entities are re-extracted automatically
 - You can only modify your own memories unless you have admin trust level
 
 STATUS LIFECYCLE:
-- Use memclaw_manage op="transition" when things change
+- Use caura_manage op="transition" when things change
 - confirmed (done), cancelled (abandoned), outdated (superseded)
 - Search status="pending" for unresolved items
 
@@ -418,13 +418,13 @@ ENTITIES & GRAPH:
 - Fuzzy entity matching: "OpenAI" and "Open AI" are auto-merged (cosine similarity ≥ 0.85)
 - Recall automatically expands through entity relations (up to 2 hops)
   Example: searching "Project Atlas" also finds memories about people who work on Atlas
-- Use memclaw_entity_get for direct relationship and linked memory inspection
+- Use caura_entity_get for direct relationship and linked memory inspection
 
 OUTCOME REPORTING (Karpathy Loop):
-- After acting on recalled memories, report what happened with memclaw_evolve
+- After acting on recalled memories, report what happened with caura_evolve
 - outcome_type: "success" / "failure" / "partial"; pass related_ids=[...]
 - Successful recalls get reinforced; failures generate preventive rules
-- Use memclaw_insights periodically to surface contradictions, stale
+- Use caura_insights periodically to surface contradictions, stale
   knowledge, cross-agent divergence, and emerging patterns
 ```
 
@@ -438,7 +438,7 @@ OUTCOME REPORTING (Karpathy Loop):
 
 ```json
 {
-  "tool": "memclaw_write",
+  "tool": "caura_write",
   "parameters": {
     "content": "Customer X uses PostgreSQL 16 in production on GKE. They process 2M transactions/day.",
     "source_uri": "crm://customer-x/infrastructure",
@@ -453,7 +453,7 @@ LLM enrichment auto-classifies as `fact`, weight `0.9`, title "Customer X: Postg
 
 ```json
 {
-  "tool": "memclaw_recall",
+  "tool": "caura_recall",
   "parameters": {
     "query": "which customers use PostgreSQL and what is their scale?",
     "memory_type": "fact"
@@ -467,7 +467,7 @@ Returns the researcher's finding. Graph-enhanced retrieval expands through entit
 
 ```json
 {
-  "tool": "memclaw_write",
+  "tool": "caura_write",
   "parameters": {
     "content": "Customer X should be migrated to managed Postgres in Phase 2 due to high transaction volume."
   }
@@ -478,7 +478,7 @@ Returns the researcher's finding. Graph-enhanced retrieval expands through entit
 
 ```json
 {
-  "tool": "memclaw_recall",
+  "tool": "caura_recall",
   "parameters": {
     "query": "Customer X database setup and migration plans"
   }
@@ -489,11 +489,11 @@ Returns both the fact and the decision — full context without agents needing t
 
 ### Example: Batch write (after processing a document)
 
-**Scenario:** Agent has extracted several findings and stores them all at once via the batch form of `memclaw_write`.
+**Scenario:** Agent has extracted several findings and stores them all at once via the batch form of `caura_write`.
 
 ```json
 {
-  "tool": "memclaw_write",
+  "tool": "caura_write",
   "parameters": {
     "items": [
       {"content": "Customer A uses PostgreSQL 16 in production on GKE"},
@@ -511,7 +511,7 @@ Returns per-item results with `created`/`duplicate`/`error` status for each item
 
 ```json
 {
-  "tool": "memclaw_entity_get",
+  "tool": "caura_entity_get",
   "parameters": {
     "entity_id": "c5d5ee20-78a4-4dd0-b9ca-6a41809a6ca5"
   }
@@ -539,7 +539,7 @@ Returns entity attributes, all linked memories, and outgoing relations (e.g., Cu
 **Agent writes contradicting memory:**
 ```json
 {
-  "tool": "memclaw_write",
+  "tool": "caura_write",
   "parameters": {
     "content": "Sarah Chen moved to Berlin, Germany",
     "subject_entity_id": "e663...",
@@ -589,8 +589,8 @@ Auto-classified by LLM on every write. Agents can override with `memory_type`.
 | `action` | Steps in progress | `active` | "Started the migration script" |
 | `outcome` | Results of work | `confirmed` | "Migration: 2M rows in 47 min, zero errors" |
 | `cancellation` | Cancelled items | `active` | "Cancelled FalkorDB eval" |
-| `rule` | Preventive guardrails | `active` | "Never deploy schema changes on Fridays" (often auto-generated by `memclaw_evolve` after a failure) |
-| `insight` | Analytical findings | `active` | "5 memories contradict each other about customer X's region" (auto-generated by `memclaw_insights`) |
+| `rule` | Preventive guardrails | `active` | "Never deploy schema changes on Fridays" (often auto-generated by `caura_evolve` after a failure) |
+| `insight` | Analytical findings | `active` | "5 memories contradict each other about customer X's region" (auto-generated by `caura_insights`) |
 
 ### Memory status lifecycle
 
@@ -598,12 +598,12 @@ Auto-classified by LLM on every write. Agents can override with `memory_type`.
 |---|---|---|
 | `active` | Current and valid (default) | LLM default for most types |
 | `pending` | Not yet confirmed | LLM default for tasks, plans, commitments |
-| `confirmed` | Verified or completed | Agent via `memclaw_manage` op=`transition` or LLM for outcomes |
-| `cancelled` | Explicitly cancelled | Agent via `memclaw_manage` op=`transition` |
+| `confirmed` | Verified or completed | Agent via `caura_manage` op=`transition` or LLM for outcomes |
+| `cancelled` | Explicitly cancelled | Agent via `caura_manage` op=`transition` |
 | `outdated` | Superseded by newer info | Auto-set by contradiction detection (RDF conflict) or lifecycle automation (past `ts_valid_end`) |
 | `conflicted` | Contradicts another memory | Auto-set by contradiction detection (semantic); needs review |
-| `archived` | Preserved but no longer current | Agent via `memclaw_manage` op=`transition` or lifecycle automation (stale, low-weight, never-recalled) |
-| `deleted` | Soft-deleted | Set on `memclaw_manage` op=`delete` or DELETE API call |
+| `archived` | Preserved but no longer current | Agent via `caura_manage` op=`transition` or lifecycle automation (stale, low-weight, never-recalled) |
+| `deleted` | Soft-deleted | Set on `caura_manage` op=`delete` or DELETE API call |
 
 ### RDF triples
 
@@ -661,7 +661,7 @@ Togglable per tenant via `lifecycle_automation_enabled` setting.
 
 ### Batch Write
 
-Available as the batch form of the `memclaw_write` tool (MCP + OpenClaw plugin, pass `items=[...]`) and the `POST /api/v1/memories/bulk` REST endpoint. Writes up to 100 memories in a single request. Optimized for throughput:
+Available as the batch form of the `caura_write` tool (MCP + OpenClaw plugin, pass `items=[...]`) and the `POST /api/v1/memories/bulk` REST endpoint. Writes up to 100 memories in a single request. Optimized for throughput:
 
 - **Batch embeddings** — single API call for all texts instead of N calls
 - **Parallel enrichment** — LLM enrichment runs concurrently (bounded at 10)
@@ -698,7 +698,7 @@ Response:
 }
 ```
 
-Each item in `items` supports the same fields as a single-`content` write (memory_type, weight, status, source_uri, entity_links, RDF triples, temporal bounds). `tenant_id`, `fleet_id`, and `agent_id` are set once at the top level. When calling `memclaw_write`, pass exactly one of `content` (single) or `items` (batch).
+Each item in `items` supports the same fields as a single-`content` write (memory_type, weight, status, source_uri, entity_links, RDF triples, temporal bounds). `tenant_id`, `fleet_id`, and `agent_id` are set once at the top level. When calling `caura_write`, pass exactly one of `content` (single) or `items` (batch).
 
 Duplicates (exact content hash match against DB or within the batch) are reported as `"status": "duplicate"` with `duplicate_of` pointing to the existing memory ID. All enrichment, entity extraction, and contradiction detection run the same as single writes.
 

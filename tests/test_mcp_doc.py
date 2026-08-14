@@ -1,4 +1,4 @@
-"""Unit tests for ``memclaw_doc`` (op: write | read | query | delete).
+"""Unit tests for ``caura_doc`` (op: write | read | query | delete).
 
 Covers:
 - Unknown op → ``INVALID_ARGUMENTS`` envelope.
@@ -7,7 +7,7 @@ Covers:
 - ``op=read`` not-found → "Not found:" text.
 - ``op=delete`` not-found → structured error envelope.
 
-Fix 2 Phase 4 routed ``memclaw_doc`` through the core-storage-api HTTP
+Fix 2 Phase 4 routed ``caura_doc`` through the core-storage-api HTTP
 client (``get_storage_client()``), so these tests stub the storage client
 (``stub_storage_client``) and assert on the new dict-shaped payloads /
 single-positional-dict call args, rather than the old ``document_repo.*``
@@ -49,7 +49,7 @@ def _search_hit(
 
 
 async def test_doc_invalid_op_errors(mcp_env):
-    out = await mcp_server.memclaw_doc(op="oops", collection="c")
+    out = await mcp_server.caura_doc(op="oops", collection="c")
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INVALID_ARGUMENTS"
     assert payload["error"]["details"]["expected_ops"] == [
@@ -63,19 +63,19 @@ async def test_doc_invalid_op_errors(mcp_env):
 
 
 async def test_doc_write_missing_doc_id(mcp_env):
-    out = await mcp_server.memclaw_doc(op="write", collection="c", data={"k": 1})
+    out = await mcp_server.caura_doc(op="write", collection="c", data={"k": 1})
     assert "op=write requires 'doc_id'" in strip_latency(out)
 
 
 async def test_doc_write_missing_data(mcp_env):
-    out = await mcp_server.memclaw_doc(op="write", collection="c", doc_id="x")
+    out = await mcp_server.caura_doc(op="write", collection="c", doc_id="x")
     assert "op=write requires 'data'" in strip_latency(out)
 
 
 async def test_doc_write_happy_path_new(mcp_env, monkeypatch):
     """xmax=0 means a brand-new row was inserted."""
     stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write", collection="customers", doc_id="acme", data={"plan": "enterprise"}
     )
     payload = parse_envelope(out)
@@ -89,7 +89,7 @@ async def test_doc_write_happy_path_new(mcp_env, monkeypatch):
 async def test_doc_write_happy_path_updated(mcp_env, monkeypatch):
     """xmax!=0 means an existing row was updated."""
     stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 42})
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write", collection="customers", doc_id="acme", data={"plan": "pro"}
     )
     payload = parse_envelope(out)
@@ -97,13 +97,13 @@ async def test_doc_write_happy_path_updated(mcp_env, monkeypatch):
 
 
 async def test_doc_read_missing_doc_id(mcp_env):
-    out = await mcp_server.memclaw_doc(op="read", collection="customers")
+    out = await mcp_server.caura_doc(op="read", collection="customers")
     assert "op=read requires 'doc_id'" in strip_latency(out)
 
 
 async def test_doc_read_not_found(mcp_env, monkeypatch):
     stub_storage_client(monkeypatch, get_document=None)
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="read", collection="customers", doc_id="ghost"
     )
     assert "Not found: customers/ghost" in strip_latency(out)
@@ -111,7 +111,7 @@ async def test_doc_read_not_found(mcp_env, monkeypatch):
 
 async def test_doc_read_happy_path(mcp_env, monkeypatch):
     stub_storage_client(monkeypatch, get_document=_doc("acme"))
-    out = await mcp_server.memclaw_doc(op="read", collection="customers", doc_id="acme")
+    out = await mcp_server.caura_doc(op="read", collection="customers", doc_id="acme")
     payload = parse_envelope(out)
     assert payload["doc_id"] == "acme"
     assert payload["data"] == {"plan": "business"}
@@ -120,7 +120,7 @@ async def test_doc_read_happy_path(mcp_env, monkeypatch):
 async def test_doc_query_happy_path(mcp_env, monkeypatch):
     rows = [_doc("acme"), _doc("initech")]
     stub_storage_client(monkeypatch, query_documents=rows)
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="query", collection="customers", where={"plan": "business"}
     )
     payload = parse_envelope(out)
@@ -131,12 +131,12 @@ async def test_doc_query_happy_path(mcp_env, monkeypatch):
 
 async def test_doc_query_where_defaults_to_empty_dict(mcp_env, monkeypatch):
     sc = stub_storage_client(monkeypatch, query_documents=[])
-    await mcp_server.memclaw_doc(op="query", collection="customers")
+    await mcp_server.caura_doc(op="query", collection="customers")
     assert sc.query_documents.await_args.args[0]["where"] == {}
 
 
 async def test_doc_delete_missing_doc_id(mcp_env):
-    out = await mcp_server.memclaw_doc(op="delete", collection="customers")
+    out = await mcp_server.caura_doc(op="delete", collection="customers")
     assert "op=delete requires 'doc_id'" in strip_latency(out)
 
 
@@ -144,7 +144,7 @@ async def test_doc_delete_not_found_envelope(mcp_env, monkeypatch):
     """A storage delete that matched nothing returns False → the handler
     emits a ``{"error": "…"}`` JSON blob."""
     sc = stub_storage_client(monkeypatch, delete_document=False)
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="delete", collection="customers", doc_id="ghost"
     )
     payload = parse_envelope(out)
@@ -155,7 +155,7 @@ async def test_doc_delete_not_found_envelope(mcp_env, monkeypatch):
 
 async def test_doc_delete_happy_path(mcp_env, monkeypatch):
     sc = stub_storage_client(monkeypatch, delete_document=True)
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="delete", collection="customers", doc_id="acme"
     )
     payload = parse_envelope(out)
@@ -167,7 +167,7 @@ async def test_doc_delete_happy_path(mcp_env, monkeypatch):
 
 async def test_doc_auth_failure_shortcircuits(monkeypatch):
     monkeypatch.setattr(mcp_server, "_check_auth", lambda: mcp_server._AUTH_ERROR)
-    out = await mcp_server.memclaw_doc(op="read", collection="c", doc_id="d")
+    out = await mcp_server.caura_doc(op="read", collection="c", doc_id="d")
     assert out == mcp_server._AUTH_ERROR
 
 
@@ -188,7 +188,7 @@ async def test_doc_list_collections_happy_path(mcp_env, monkeypatch):
             ]
         },
     )
-    out = await mcp_server.memclaw_doc(op="list_collections")
+    out = await mcp_server.caura_doc(op="list_collections")
     payload = parse_envelope(out)
     assert payload["count"] == 3
     assert payload["collections"] == [
@@ -201,7 +201,7 @@ async def test_doc_list_collections_happy_path(mcp_env, monkeypatch):
 async def test_doc_list_collections_empty_tenant(mcp_env, monkeypatch):
     """Empty tenant returns an empty list, not an error."""
     stub_storage_client(monkeypatch, list_document_collections={"collections": []})
-    out = await mcp_server.memclaw_doc(op="list_collections")
+    out = await mcp_server.caura_doc(op="list_collections")
     payload = parse_envelope(out)
     assert payload["collections"] == []
     assert payload["count"] == 0
@@ -212,7 +212,7 @@ async def test_doc_list_collections_does_not_require_collection(mcp_env, monkeyp
     whole point is to discover collection names when you don't know them yet.
     """
     stub_storage_client(monkeypatch, list_document_collections={"collections": []})
-    out = await mcp_server.memclaw_doc(op="list_collections")
+    out = await mcp_server.caura_doc(op="list_collections")
     payload = parse_envelope(out)
     assert "error" not in payload
 
@@ -223,7 +223,7 @@ async def test_doc_list_collections_passes_fleet_id_filter(mcp_env, monkeypatch)
         monkeypatch,
         list_document_collections={"collections": [{"name": "customers", "count": 1}]},
     )
-    await mcp_server.memclaw_doc(op="list_collections", fleet_id="caura-rnd-fleet")
+    await mcp_server.caura_doc(op="list_collections", fleet_id="caura-rnd-fleet")
     assert (
         sc.list_document_collections.await_args.kwargs["fleet_id"] == "caura-rnd-fleet"
     )
@@ -232,17 +232,17 @@ async def test_doc_list_collections_passes_fleet_id_filter(mcp_env, monkeypatch)
 async def test_doc_write_requires_collection(mcp_env):
     """With `collection` now optional in the signature (to accommodate
     list_collections), the other ops must still enforce it explicitly."""
-    out = await mcp_server.memclaw_doc(op="write", doc_id="x", data={"k": 1})
+    out = await mcp_server.caura_doc(op="write", doc_id="x", data={"k": 1})
     assert "op=write requires 'collection'" in strip_latency(out)
 
 
 async def test_doc_read_requires_collection(mcp_env):
-    out = await mcp_server.memclaw_doc(op="read", doc_id="x")
+    out = await mcp_server.caura_doc(op="read", doc_id="x")
     assert "op=read requires 'collection'" in strip_latency(out)
 
 
 async def test_doc_query_requires_collection(mcp_env):
-    out = await mcp_server.memclaw_doc(op="query")
+    out = await mcp_server.caura_doc(op="query")
     assert "op=query requires 'collection'" in strip_latency(out)
 
 
@@ -263,7 +263,7 @@ async def test_doc_write_summary_embeds_and_forwards(mcp_env, monkeypatch):
     sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
     monkeypatch.setattr("common.embedding.get_embedding", fake_embed)
 
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="onboarding_guides",
         doc_id="claude-code-setup",
@@ -294,7 +294,7 @@ async def test_doc_write_no_summary_stores_unindexed(mcp_env, monkeypatch):
     stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
     monkeypatch.setattr("common.embedding.get_embedding", should_not_embed)
 
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="customers",
         doc_id="acme",
@@ -309,12 +309,12 @@ async def test_doc_write_no_summary_stores_unindexed(mcp_env, monkeypatch):
 async def test_doc_write_omitted_fleet_resolves_home_fleet(mcp_env, monkeypatch):
     """op=write resolves an omitted fleet_id to the agent's home fleet, so a
     published doc/skill row isn't stranded at fleet_id=NULL (mirrors
-    memclaw_write; this is the path the 'publish a skill' flow uses)."""
+    caura_write; this is the path the 'publish a skill' flow uses)."""
     sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
     enforce = mcp_env["service"]("enforce_fleet_write")
     enforce.return_value = {"agent_id": "a1", "fleet_id": "home-f", "trust_level": 1}
 
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="customers",
         doc_id="acme",
@@ -334,7 +334,7 @@ async def test_doc_write_explicit_fleet_id_not_overridden(mcp_env, monkeypatch):
     enforce = mcp_env["service"]("enforce_fleet_write")
     enforce.return_value = {"agent_id": "a1", "fleet_id": "home-f", "trust_level": 3}
 
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="customers",
         doc_id="acme",
@@ -352,7 +352,7 @@ async def test_doc_write_summary_empty_string_is_rejected(mcp_env, monkeypatch):
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.0] * VECTOR_DIM)
     )
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="c",
         doc_id="d",
@@ -365,7 +365,7 @@ async def test_doc_write_embedding_provider_failure_aborts(mcp_env, monkeypatch)
     """If the embedding provider returns None, the write is aborted —
     better than silently persisting the doc without an index."""
     monkeypatch.setattr("common.embedding.get_embedding", _async_return(None))
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="c",
         doc_id="d",
@@ -388,7 +388,7 @@ async def test_doc_search_without_collection_spans_all(mcp_env, monkeypatch):
     )
     sc = stub_storage_client(monkeypatch, search_documents_vector=[])
 
-    out = await mcp_server.memclaw_doc(op="search", query="onboarding")
+    out = await mcp_server.caura_doc(op="search", query="onboarding")
     payload = parse_envelope(out)
     # No 422 — broad search is a legitimate call
     assert "error" not in payload
@@ -408,7 +408,7 @@ async def test_doc_search_broad_results_include_per_row_collection(
         _search_hit("guide-1", 0.6, collection="onboarding_guides"),
     ]
     stub_storage_client(monkeypatch, search_documents_vector=hits)
-    out = await mcp_server.memclaw_doc(op="search", query="signup flow")
+    out = await mcp_server.caura_doc(op="search", query="signup flow")
     payload = parse_envelope(out)
     assert payload["collection"] is None
     assert payload["results"][0]["collection"] == "customers"
@@ -416,13 +416,13 @@ async def test_doc_search_broad_results_include_per_row_collection(
 
 
 async def test_doc_search_requires_query(mcp_env):
-    out = await mcp_server.memclaw_doc(op="search", collection="c")
+    out = await mcp_server.caura_doc(op="search", collection="c")
     assert "op=search requires a non-empty 'query'" in strip_latency(out)
 
 
 async def test_doc_search_empty_query_rejected(mcp_env):
     """Whitespace-only query is as useless as no query."""
-    out = await mcp_server.memclaw_doc(op="search", collection="c", query="   ")
+    out = await mcp_server.caura_doc(op="search", collection="c", query="   ")
     assert "op=search requires a non-empty 'query'" in strip_latency(out)
 
 
@@ -433,7 +433,7 @@ async def test_doc_search_happy_path(mcp_env, monkeypatch):
     )
     hits = [_search_hit("acme", 0.92), _search_hit("initech", 0.81)]
     stub_storage_client(monkeypatch, search_documents_vector=hits)
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="search",
         collection="customers",
         query="payment plans",
@@ -452,7 +452,7 @@ async def test_doc_search_empty_results(mcp_env, monkeypatch):
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
     stub_storage_client(monkeypatch, search_documents_vector=[])
-    out = await mcp_server.memclaw_doc(op="search", collection="c", query="anything")
+    out = await mcp_server.caura_doc(op="search", collection="c", query="anything")
     payload = parse_envelope(out)
     assert payload["count"] == 0
     assert payload["results"] == []
@@ -465,14 +465,14 @@ async def test_doc_search_top_k_capped_at_50(mcp_env, monkeypatch):
     )
     sc = stub_storage_client(monkeypatch, search_documents_vector=[])
 
-    await mcp_server.memclaw_doc(op="search", collection="c", query="q", top_k=9999)
+    await mcp_server.caura_doc(op="search", collection="c", query="q", top_k=9999)
     assert sc.search_documents_vector.await_args.args[0]["top_k"] == 50
 
 
 async def test_doc_search_embedding_provider_failure_aborts(mcp_env, monkeypatch):
     """Provider failure → no search attempt, caller sees a clear error."""
     monkeypatch.setattr("common.embedding.get_embedding", _async_return(None))
-    out = await mcp_server.memclaw_doc(op="search", collection="c", query="anything")
+    out = await mcp_server.caura_doc(op="search", collection="c", query="anything")
     assert "embedding provider returned no vector" in strip_latency(out).lower()
 
 
@@ -502,7 +502,7 @@ async def test_doc_list_collections_passes_readable_tenants(mcp_env, monkeypatch
         mcp_server, "_get_readable_tenants", lambda: ["home", "sibling"]
     )
     sc = stub_storage_client(monkeypatch, list_document_collections={"collections": []})
-    await mcp_server.memclaw_doc(op="list_collections")
+    await mcp_server.caura_doc(op="list_collections")
     assert sc.list_document_collections.await_args.kwargs["readable_tenant_ids"] == [
         "home",
         "sibling",
@@ -515,7 +515,7 @@ async def test_doc_list_collections_single_tenant_passes_none(mcp_env, monkeypat
     (so the storage single-tenant fast path runs)."""
     monkeypatch.setattr(mcp_server, "_get_readable_tenants", lambda: [])
     sc = stub_storage_client(monkeypatch, list_document_collections={"collections": []})
-    await mcp_server.memclaw_doc(op="list_collections")
+    await mcp_server.caura_doc(op="list_collections")
     assert sc.list_document_collections.await_args.kwargs["readable_tenant_ids"] is None
 
 
@@ -527,7 +527,7 @@ async def test_doc_read_passes_readable_tenants(mcp_env, monkeypatch):
         mcp_server, "_get_readable_tenants", lambda: ["home", "sibling"]
     )
     sc = stub_storage_client(monkeypatch, get_document=_doc())
-    await mcp_server.memclaw_doc(op="read", collection="customers", doc_id="acme")
+    await mcp_server.caura_doc(op="read", collection="customers", doc_id="acme")
     assert sc.get_document.await_args.kwargs["readable_tenant_ids"] == [
         "home",
         "sibling",
@@ -540,7 +540,7 @@ async def test_doc_query_passes_readable_tenants(mcp_env, monkeypatch):
         mcp_server, "_get_readable_tenants", lambda: ["home", "sibling"]
     )
     sc = stub_storage_client(monkeypatch, query_documents=[])
-    await mcp_server.memclaw_doc(op="query", collection="customers", where={"k": 1})
+    await mcp_server.caura_doc(op="query", collection="customers", where={"k": 1})
     assert sc.query_documents.await_args.args[0]["readable_tenant_ids"] == [
         "home",
         "sibling",
@@ -559,7 +559,7 @@ async def test_doc_search_passes_readable_tenants(mcp_env, monkeypatch):
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
     sc = stub_storage_client(monkeypatch, search_documents_vector=[])
-    await mcp_server.memclaw_doc(op="search", query="hello")
+    await mcp_server.caura_doc(op="search", query="hello")
     assert sc.search_documents_vector.await_args.args[0]["readable_tenant_ids"] == [
         "home",
         "sibling",
@@ -569,7 +569,7 @@ async def test_doc_search_passes_readable_tenants(mcp_env, monkeypatch):
 # ---------------------------------------------------------------------------
 # Active-only skill discovery (MCP-direct delivery)
 #
-# The agent-facing memclaw_doc surface must expose only ``status='active'``
+# The agent-facing caura_doc surface must expose only ``status='active'``
 # skills to opted-in tenants — candidate / staged / quarantined skills are
 # in-flight or blocked and must not surface. Gated on
 # ``skills_factory.enabled``: a non-opted-in tenant's reads are unchanged.
@@ -650,7 +650,7 @@ async def test_skill_read_hides_non_active_when_flag_on(mcp_env, monkeypatch):
     stub_storage_client(
         monkeypatch, get_document=_skill_doc("forge/x", status="staged")
     )
-    out = await mcp_server.memclaw_doc(op="read", collection="skills", doc_id="forge/x")
+    out = await mcp_server.caura_doc(op="read", collection="skills", doc_id="forge/x")
     # Non-active skill → same "Not found" as a missing doc (no existence leak).
     assert "Not found: skills/forge/x" in strip_latency(out)
 
@@ -660,7 +660,7 @@ async def test_skill_read_returns_active_when_flag_on(mcp_env, monkeypatch):
     stub_storage_client(
         monkeypatch, get_document=_skill_doc("forge/x", status="active")
     )
-    out = await mcp_server.memclaw_doc(op="read", collection="skills", doc_id="forge/x")
+    out = await mcp_server.caura_doc(op="read", collection="skills", doc_id="forge/x")
     payload = parse_envelope(out)
     assert payload["doc_id"] == "forge/x"
     assert payload["data"]["status"] == "active"
@@ -673,7 +673,7 @@ async def test_skill_read_no_filter_when_flag_off(mcp_env, monkeypatch):
     stub_storage_client(
         monkeypatch, get_document=_skill_doc("forge/x", status="staged")
     )
-    out = await mcp_server.memclaw_doc(op="read", collection="skills", doc_id="forge/x")
+    out = await mcp_server.caura_doc(op="read", collection="skills", doc_id="forge/x")
     payload = parse_envelope(out)
     assert payload["doc_id"] == "forge/x"
 
@@ -689,7 +689,7 @@ async def test_skill_query_rejects_explicit_non_active_status_when_flag_on(
     # queried 'staged'). Points them to the Inbox API.
     _patch_flag(monkeypatch, True)
     sc = stub_storage_client(monkeypatch, query_documents=[])
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="query", collection="skills", where={"status": "staged"}
     )
     payload = parse_envelope(out)
@@ -706,7 +706,7 @@ async def test_skill_query_scopes_to_active_when_no_status_when_flag_on(
     # sees live skills.
     _patch_flag(monkeypatch, True)
     sc = stub_storage_client(monkeypatch, query_documents=[])
-    await mcp_server.memclaw_doc(
+    await mcp_server.caura_doc(
         op="query", collection="skills", where={"domain": "ops"}
     )
     sent = sc.query_documents.await_args.args[0]
@@ -717,7 +717,7 @@ async def test_skill_query_scopes_to_active_when_no_status_when_flag_on(
 async def test_skill_query_no_filter_when_flag_off(mcp_env, monkeypatch):
     _patch_flag(monkeypatch, False)
     sc = stub_storage_client(monkeypatch, query_documents=[])
-    await mcp_server.memclaw_doc(
+    await mcp_server.caura_doc(
         op="query", collection="skills", where={"status": "staged"}
     )
     # Genuinely not opted in → caller's where passes through untouched
@@ -737,7 +737,7 @@ async def test_skill_query_explicit_status_fails_closed_on_settings_error(
 
     monkeypatch.setattr(mcp_server, "_skills_factory_flag", _boom)
     sc = stub_storage_client(monkeypatch, query_documents=[])
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="query", collection="skills", where={"status": "staged"}
     )
     payload = parse_envelope(out)
@@ -750,7 +750,7 @@ async def test_non_skills_query_unaffected_by_flag(mcp_env, monkeypatch):
     # get a status filter injected even when the flag is on.
     _patch_flag(monkeypatch, True)
     sc = stub_storage_client(monkeypatch, query_documents=[])
-    await mcp_server.memclaw_doc(
+    await mcp_server.caura_doc(
         op="query", collection="customers", where={"plan": "biz"}
     )
     assert "status" not in sc.query_documents.await_args.args[0]["where"]
@@ -767,7 +767,7 @@ async def test_skill_search_scoped_passes_active_status_when_flag_on(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
     sc = stub_storage_client(monkeypatch, search_documents_vector=[])
-    await mcp_server.memclaw_doc(
+    await mcp_server.caura_doc(
         op="search", collection="skills", query="deploy eu-west"
     )
     assert sc.search_documents_vector.await_args.args[0]["status"] == "active"
@@ -779,7 +779,7 @@ async def test_skill_search_scoped_no_status_when_flag_off(mcp_env, monkeypatch)
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
     sc = stub_storage_client(monkeypatch, search_documents_vector=[])
-    await mcp_server.memclaw_doc(
+    await mcp_server.caura_doc(
         op="search", collection="skills", query="deploy eu-west"
     )
     assert sc.search_documents_vector.await_args.args[0]["status"] is None
@@ -799,7 +799,7 @@ async def test_skill_search_broad_drops_non_active_when_flag_on(mcp_env, monkeyp
         _skill_hit("forge/staged", status="staged", similarity=0.7),  # DROPPED
     ]
     stub_storage_client(monkeypatch, search_documents_vector=hits)
-    out = await mcp_server.memclaw_doc(op="search", query="anything")
+    out = await mcp_server.caura_doc(op="search", query="anything")
     payload = parse_envelope(out)
     returned = {(r["collection"], r["doc_id"]) for r in payload["results"]}
     assert ("customers", "acme") in returned
@@ -814,7 +814,7 @@ async def test_skill_search_broad_no_filter_when_flag_off(mcp_env, monkeypatch):
     )
     hits = [_skill_hit("forge/staged", status="staged", similarity=0.7)]
     stub_storage_client(monkeypatch, search_documents_vector=hits)
-    out = await mcp_server.memclaw_doc(op="search", query="anything")
+    out = await mcp_server.caura_doc(op="search", query="anything")
     payload = parse_envelope(out)
     # Flag off → no broad post-filter; the staged skill surfaces as before.
     assert payload["results"][0]["doc_id"] == "forge/staged"
@@ -836,7 +836,7 @@ async def test_skill_write_rejects_caller_active_status_when_flag_on(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
     sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="skills",
         doc_id="forge-x",
@@ -861,7 +861,7 @@ async def test_skill_write_rejects_forge_source_when_flag_on(mcp_env, monkeypatc
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
     sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="skills",
         doc_id="forge-x",
@@ -883,7 +883,7 @@ async def test_skill_write_defaults_to_staged_when_flag_on(mcp_env, monkeypatch)
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
     sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="skills",
         doc_id="forge-x",
@@ -913,7 +913,7 @@ async def test_skill_write_tolerates_misconfigured_byte_caps(mcp_env, monkeypatc
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
     stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="skills",
         doc_id="forge-x",
@@ -932,7 +932,7 @@ async def test_skill_write_fails_closed_on_settings_error(mcp_env, monkeypatch):
 
     monkeypatch.setattr(mcp_server, "get_settings_for_display", _boom)
     sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write", collection="skills", doc_id="forge-x", data=_valid_skill_data()
     )
     payload = parse_envelope(out)
@@ -958,7 +958,7 @@ async def test_skill_update_write_fails_closed_on_live_doc_fetch_error(
     # The live-doc fetch (get_document) raises; the upsert must never run.
     sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
     sc.get_document.side_effect = _boom_get_document
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="skills",
         doc_id="forge-x",
@@ -981,7 +981,7 @@ async def test_skill_write_status_allowed_when_flag_off(mcp_env, monkeypatch):
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
     sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="skills",
         doc_id="forge-x",
@@ -1006,7 +1006,7 @@ async def test_skill_delete_hides_non_active_when_flag_on(mcp_env, monkeypatch):
     stub_storage_client(
         monkeypatch, delete_document=False
     )  # status guard matched nothing
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="delete", collection="skills", doc_id="forge/x"
     )
     payload = parse_envelope(out)  # must be valid JSON
@@ -1018,7 +1018,7 @@ async def test_skill_delete_allows_active_when_flag_on(mcp_env, monkeypatch):
     # deleted, storage returns True.
     _patch_flag(monkeypatch, True)
     stub_storage_client(monkeypatch, delete_document=True)
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="delete", collection="skills", doc_id="forge/x"
     )
     payload = parse_envelope(out)
@@ -1035,7 +1035,7 @@ async def test_skill_delete_fails_closed_on_settings_error(mcp_env, monkeypatch)
 
     monkeypatch.setattr(mcp_server, "_skills_factory_flag", _boom)
     sc = stub_storage_client(monkeypatch, delete_document=True)
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="delete", collection="skills", doc_id="forge/x"
     )
     payload = parse_envelope(out)
@@ -1063,7 +1063,7 @@ async def test_skill_read_hides_cross_tenant_non_active_even_when_caller_off(
         monkeypatch,
         get_document=_skill_doc("forge/x", status="staged", tenant_id="sibling"),
     )
-    out = await mcp_server.memclaw_doc(op="read", collection="skills", doc_id="forge/x")
+    out = await mcp_server.caura_doc(op="read", collection="skills", doc_id="forge/x")
     assert "Not found: skills/forge/x" in strip_latency(out)
 
 
@@ -1085,7 +1085,7 @@ async def test_skill_query_drops_cross_tenant_non_active_when_caller_off(
         _skill_doc("sib/active", status="active", tenant_id="sibling"),  # kept: active
     ]
     stub_storage_client(monkeypatch, query_documents=rows)
-    out = await mcp_server.memclaw_doc(op="query", collection="skills")
+    out = await mcp_server.caura_doc(op="query", collection="skills")
     payload = parse_envelope(out)
     ids = {r["doc_id"] for r in payload["results"]}
     assert "sib/staged" not in ids  # cross-tenant non-active leaked → blocked
@@ -1111,7 +1111,7 @@ async def test_skill_search_drops_cross_tenant_non_active_when_caller_off(
     ]
     stub_storage_client(monkeypatch, search_documents_vector=hits)
     # Broad search (collection=None) over the readable set.
-    out = await mcp_server.memclaw_doc(op="search", query="deploy")
+    out = await mcp_server.caura_doc(op="search", query="deploy")
     payload = parse_envelope(out)
     ids = {r["doc_id"] for r in payload["results"]}
     assert "sib/staged" not in ids  # cross-tenant non-active dropped
@@ -1136,7 +1136,7 @@ async def test_list_collections_skill_count_active_only_when_flag_on(
         },
         document_count_in_collection=3,  # only 3 of the 9 skills are active
     )
-    out = await mcp_server.memclaw_doc(op="list_collections")
+    out = await mcp_server.caura_doc(op="list_collections")
     payload = parse_envelope(out)
     counts = {c["name"]: c["count"] for c in payload["collections"]}
     assert counts["skills"] == 3  # corrected to active-only
@@ -1151,7 +1151,7 @@ async def test_list_collections_skill_count_unchanged_when_flag_off(
         monkeypatch,
         list_document_collections={"collections": [{"name": "skills", "count": 9}]},
     )
-    out = await mcp_server.memclaw_doc(op="list_collections")
+    out = await mcp_server.caura_doc(op="list_collections")
     payload = parse_envelope(out)
     counts = {c["name"]: c["count"] for c in payload["collections"]}
     assert counts["skills"] == 9  # legacy: full count, no recount
@@ -1169,7 +1169,7 @@ async def test_skill_write_rejects_case_variant_status_key_when_flag_on(
     _patch_flag(monkeypatch, True)
     _patch_sf_settings(monkeypatch)
     sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="skills",
         doc_id="forge-x",
@@ -1220,7 +1220,7 @@ async def test_skill_read_hides_non_active_when_flag_lookup_errors(
     stub_storage_client(
         monkeypatch, get_document=_skill_doc("forge/x", status="staged")
     )
-    out = await mcp_server.memclaw_doc(op="read", collection="skills", doc_id="forge/x")
+    out = await mcp_server.caura_doc(op="read", collection="skills", doc_id="forge/x")
     assert "Not found: skills/forge/x" in strip_latency(out)
 
 
@@ -1229,7 +1229,7 @@ async def test_skill_read_hides_non_active_when_flag_lookup_errors(
 #
 # ``op=write`` mints a memory carrying the document BODY, because the two stores
 # aren't cross-searched: only ``data["summary"]`` is embedded on the doc row and
-# ``memclaw_recall`` never returns documents. These tests pin that the MCP
+# ``caura_recall`` never returns documents. These tests pin that the MCP
 # surface mints per the shared rule and — critically — that a minting failure
 # never fails the document write.
 # ---------------------------------------------------------------------------
@@ -1253,7 +1253,7 @@ async def test_doc_write_mints_memory_for_body_bearing_doc(
     mcp_env, monkeypatch, spy_doc_memory
 ):
     stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="runbooks",
         doc_id="pg-tuning",
@@ -1274,7 +1274,7 @@ async def test_doc_write_mints_on_update_too(mcp_env, monkeypatch, spy_doc_memor
     """Every write mints — there is no create-vs-update branch. Rewrite
     semantics come from the write pipeline's exact/near dedup instead."""
     stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 42})
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="runbooks",
         doc_id="pg-tuning",
@@ -1296,7 +1296,7 @@ async def test_doc_write_skips_mint_per_shared_rule(
     mcp_env, monkeypatch, spy_doc_memory, collection, data
 ):
     stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write", collection=collection, doc_id="x", data=data
     )
 
@@ -1315,7 +1315,7 @@ async def test_doc_write_survives_a_raising_mint(mcp_env, monkeypatch, spy_doc_m
     spy_doc_memory.side_effect = RuntimeError("memory subsystem down")
     stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
 
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write", collection="runbooks", doc_id="pg", data={"content": "body"}
     )
 
@@ -1331,7 +1331,7 @@ async def test_doc_write_skips_mint_for_skills_collection(
     """Skills keep their staged -> active approval lifecycle: a recallable memory
     would route around it."""
     stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="skills",
         doc_id="my-skill",

@@ -27,16 +27,16 @@ when to add or move an operation.
 | Doc CRUD | REST + MCP | Universal. |
 | Doc semantic search | MCP **and** REST | Was MCP-only; REST endpoint added so non-MCP clients can use vector search on documents. |
 | Doc list-collections | MCP **and** REST | Was MCP-only; REST endpoint added for parity with list use cases. |
-| Bulk delete | REST + MCP (`memclaw_manage op=bulk_delete`) | Admin sometimes; agents cleaning up after themselves sometimes. |
-| Memory lineage walk | REST + MCP (`memclaw_manage op=lineage`) | Agents reviewing their own writes need to trace supersession chains. |
-| Knowledge graph / `/graph` | REST only | Aggregation surface for UIs and analytics tools. Agents that need entity context use `memclaw_entity_get` (single entity) and `memclaw_recall` (with entity_links in results). |
-| Memory stats | REST + MCP (`memclaw_stats`) | Aggregate counts (total + breakdown by type, agent, status; opt-in `include_deleted=true` adds `deleted` and `total_including_deleted`) — useful for admin/dashboard usage on REST and for agent self-introspection on MCP. Read-only aggregations don't need a use-case gate. |
-| Skill sharing | REST (`/documents` + `/documents/search` on `collection="skills"`) + MCP (`memclaw_doc op=write\|read\|query\|delete\|search collection=skills`) | Skill sharing rides the generic document surface. Slugs (`doc_id`) are constrained to `^[a-z0-9][a-z0-9._-]{0,99}$` (filesystem-safe), and skills writes require `data["summary"]` (with back-compat fallback to `data["description"]`) so the catalog is semantic-searchable without ceremony. The dedicated `memclaw_share_skill`/`memclaw_unshare_skill` tools and `/skills/*` REST routes were dropped 2026-05; fleet auto-install (push to every node) is restored by Phase A's plugin-side reconciler. Trust ≥ 1 (inherited from `memclaw_doc`). |
-| Keystones (mandatory rules) | REST (`/memclaw/keystones`) + MCP (`memclaw_keystones` read, `memclaw_keystones_set` set\|delete) | Governance policies that agents MUST obey — fetched deterministically (no semantic search) and injected into every session by the OpenClaw plugin. Storage lives in the system-managed `_keystones` collection on `documents`; the dedicated surface exists so the read tool stays discoverable in MCP `instructions` and the write surface can be trust-gated separately. Reads are open. Writes are tiered: a freshly-registered (trust ≥ 1) agent can author its own `scope=agent` rule — self-authored autonomy — but `scope=fleet`, `scope=tenant`, and cross-agent `scope=agent` stay at trust ≥ 2 so a default-trust agent (or a prompt-injected one) can't plant a tenant-wide rule. |
+| Bulk delete | REST + MCP (`caura_manage op=bulk_delete`) | Admin sometimes; agents cleaning up after themselves sometimes. |
+| Memory lineage walk | REST + MCP (`caura_manage op=lineage`) | Agents reviewing their own writes need to trace supersession chains. |
+| Knowledge graph / `/graph` | REST only | Aggregation surface for UIs and analytics tools. Agents that need entity context use `caura_entity_get` (single entity) and `caura_recall` (with entity_links in results). |
+| Memory stats | REST + MCP (`caura_stats`) | Aggregate counts (total + breakdown by type, agent, status; opt-in `include_deleted=true` adds `deleted` and `total_including_deleted`) — useful for admin/dashboard usage on REST and for agent self-introspection on MCP. Read-only aggregations don't need a use-case gate. |
+| Skill sharing | REST (`/documents` + `/documents/search` on `collection="skills"`) + MCP (`caura_doc op=write\|read\|query\|delete\|search collection=skills`) | Skill sharing rides the generic document surface. Slugs (`doc_id`) are constrained to `^[a-z0-9][a-z0-9._-]{0,99}$` (filesystem-safe), and skills writes require `data["summary"]` (with back-compat fallback to `data["description"]`) so the catalog is semantic-searchable without ceremony. The dedicated `memclaw_share_skill`/`memclaw_unshare_skill` tools and `/skills/*` REST routes were dropped 2026-05; fleet auto-install (push to every node) is restored by Phase A's plugin-side reconciler. Trust ≥ 1 (inherited from `caura_doc`). |
+| Keystones (mandatory rules) | REST (`/memclaw/keystones`) + MCP (`caura_keystones` read, `caura_keystones_set` set\|delete) | Governance policies that agents MUST obey — fetched deterministically (no semantic search) and injected into every session by the OpenClaw plugin. Storage lives in the system-managed `_keystones` collection on `documents`; the dedicated surface exists so the read tool stays discoverable in MCP `instructions` and the write surface can be trust-gated separately. Reads are open. Writes are tiered: a freshly-registered (trust ≥ 1) agent can author its own `scope=agent` rule — self-authored autonomy — but `scope=fleet`, `scope=tenant`, and cross-agent `scope=agent` stay at trust ≥ 2 so a default-trust agent (or a prompt-injected one) can't plant a tenant-wide rule. |
 | Tenant settings | REST only | Settings are a tenant-administrator concern; not safe for arbitrary agents to flip global config. |
 | Redistribute (mass reassign) | REST only | Destructive bulk op requires `trust_level >= 3`. Admin operation, not agent-driven. |
 | Ingest preview/commit | REST only (revisit per use case) | Pipeline workflow; expose to MCP only if "agent crawls a URL and writes memories" becomes a real use case. |
-| Contradictions / lineage at `/memories/{id}/contradictions` | REST + MCP (`memclaw_manage op=lineage`) | UI gets the rich endpoint; agents get the focused tool. |
+| Contradictions / lineage at `/memories/{id}/contradictions` | REST + MCP (`caura_manage op=lineage`) | UI gets the rich endpoint; agents get the focused tool. |
 | Heartbeat / fleet readiness | REST receives, plugin produces | Plugin is the natural producer (it knows the local node state). REST is the receiver. MCP doesn't need this — agents don't report their own runtime state. |
 | Agent registration | OpenClaw plugin | Local-runtime concern. |
 
@@ -49,11 +49,11 @@ aggregation/introspection:
 1. **Read-only aggregations** (counts, summaries, listings of caller-visible
    state) don't need a blocking use case — they're cheap, safe, and useful for
    any agent that wants to introspect the store. Add freely; trust gate at
-   the same level as `memclaw_list` (≥ 1 for own scope, ≥ 2 for cross-agent).
+   the same level as `caura_list` (≥ 1 for own scope, ≥ 2 for cross-agent).
 2. For everything else: is there an agent that **today** is blocked from
    doing useful work because this operation only exists on REST?
-3. If yes, does it fit naturally into an existing tool (`memclaw_manage`,
-   `memclaw_doc`, etc.) as another `op=...`? Prefer extending an existing
+3. If yes, does it fit naturally into an existing tool (`caura_manage`,
+   `caura_doc`, etc.) as another `op=...`? Prefer extending an existing
    tool over adding a new top-level surface.
 4. If a new tool is genuinely warranted, it must include: a clear description,
    trust-level enforcement consistent with the REST counterpart, and a wet
@@ -81,7 +81,7 @@ independently of ownership decisions:
   must special-case. Pick one canonical shape and align both surfaces.
 - **Response shape drift on `recall`**: REST `/recall` returns
   `{query, summary, memory_count, memories, recall_ms}`; MCP
-  `memclaw_recall(include_brief=true)` returns
+  `caura_recall(include_brief=true)` returns
   `{results, brief: <REST-recall-response>}`. Same conceptual operation,
   different payloads. Pick one and align.
 - **Tenant resolution**: REST takes `body.tenant_id`; MCP infers from auth

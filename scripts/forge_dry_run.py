@@ -237,7 +237,7 @@ async def _wire_poison_checker(db, tenant_id: str, fleet_id: str | None):
 
 async def _wire_candidate_writer(db):
     """Persist a Forge-generated candidate via the SF-002
-    ``memclaw_doc`` write path so all 7 adjustments + Sentinel scan
+    ``caura_doc`` write path so all 7 adjustments + Sentinel scan
     + audit fire as they would for an external write."""
     # We use the underlying storage client directly here because the
     # Forge worker is internal (not an HTTP caller); the SF-002

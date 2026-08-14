@@ -287,7 +287,7 @@ async def test_rest_bulk_accepts_when_every_item_allowed(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# MCP single-write surface — memclaw_write(content=…)
+# MCP single-write surface — caura_write(content=…)
 # ---------------------------------------------------------------------------
 
 
@@ -298,7 +298,7 @@ async def test_mcp_single_rejects_reserved_type(mcp_env, reserved_type):
     create_mock = mcp_env["service"]("create_memory")
     create_mock.return_value = _OutStub("should-not-be-used")
 
-    out = await mcp_server.memclaw_write(
+    out = await mcp_server.caura_write(
         content=f"agent {reserved_type} attempt", memory_type=reserved_type
     )
     payload = parse_envelope(out)
@@ -312,7 +312,7 @@ async def test_mcp_single_accepts_allowed_type(mcp_env):
     """Allowed types fall through and reach ``create_memory``."""
     mcp_env["service"]("create_memory").return_value = _OutStub("m-fact-mcp")
 
-    out = await mcp_server.memclaw_write(content="a fact for MCP", memory_type="fact")
+    out = await mcp_server.caura_write(content="a fact for MCP", memory_type="fact")
     payload = parse_envelope(out)
     assert payload.get("id") == "m-fact-mcp"
     mcp_env["service_mocks"]["create_memory"].assert_awaited_once()
@@ -320,13 +320,13 @@ async def test_mcp_single_accepts_allowed_type(mcp_env):
 
 @pytest.mark.parametrize("reserved_type", RESERVED_TYPES)
 async def test_mcp_update_rejects_reserved_type(mcp_env, reserved_type):
-    """CAURA-702: ``memclaw_manage(op='update')`` rejects each reserved type at
+    """CAURA-702: ``caura_manage(op='update')`` rejects each reserved type at
     the boundary and never reaches ``update_memory`` — the update path was the
     remaining unguarded write surface."""
     update_mock = mcp_env["service"]("update_memory")
     update_mock.return_value = _OutStub("should-not-be-used")
 
-    out = await mcp_server.memclaw_manage(
+    out = await mcp_server.caura_manage(
         op="update", memory_id=str(uuid4()), memory_type=reserved_type
     )
     payload = parse_envelope(out)
@@ -336,7 +336,7 @@ async def test_mcp_update_rejects_reserved_type(mcp_env, reserved_type):
 
 
 # ---------------------------------------------------------------------------
-# MCP batch-write surface — memclaw_write(items=[…])
+# MCP batch-write surface — caura_write(items=[…])
 # ---------------------------------------------------------------------------
 
 
@@ -346,7 +346,7 @@ async def test_mcp_batch_rejects_reserved_item_and_names_index(mcp_env):
     bulk_mock = mcp_env["service"]("create_memories_bulk")
     bulk_mock.return_value = _OutStub("should-not-be-used")
 
-    out = await mcp_server.memclaw_write(
+    out = await mcp_server.caura_write(
         items=[
             {"content": "ok one"},
             {"content": "server rule attempt", "memory_type": "rule"},
@@ -367,7 +367,7 @@ async def test_mcp_batch_accepts_when_all_items_allowed(mcp_env):
     the service payload as-is."""
     mcp_env["service"]("create_memories_bulk").return_value = _OutStub("batch-ok")
 
-    out = await mcp_server.memclaw_write(
+    out = await mcp_server.caura_write(
         items=[
             {"content": "ok one", "memory_type": "fact"},
             {"content": "ok two", "memory_type": "semantic"},

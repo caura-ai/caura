@@ -1,7 +1,7 @@
-"""ToolSpec for memclaw_doc — structured-document CRUD (op-dispatched).
+"""ToolSpec for caura_doc — structured-document CRUD (op-dispatched).
 
-Replaces the 4 prior `memclaw_doc_*` tools. Documents are NOT for
-unstructured knowledge — use ``memclaw_write`` for memories.
+Replaces the 4 prior `caura_doc_*` tools. Documents are NOT for
+unstructured knowledge — use ``caura_write`` for memories.
 """
 
 from core_api import mcp_server
@@ -20,13 +20,13 @@ _DESCRIPTION = (
     "search runs semantic retrieval over data['summary'] vectors — "
     "pass collection to scope to one (narrow strategy), or omit collection to "
     "span every collection in the tenant (broad strategy). "
-    "Use for structured records (customers, config). For memories use memclaw_write."
+    "Use for structured records (customers, config). For memories use caura_write."
 )
 
 _SPEC = ToolSpec(
-    name="memclaw_doc",
+    name="caura_doc",
     description=_DESCRIPTION,
-    handler=mcp_server.memclaw_doc,
+    handler=mcp_server.caura_doc,
     plugin_exposed=True,
     trust_required=0,
     ops=(

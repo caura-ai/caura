@@ -3794,7 +3794,7 @@ class PostgresService:
         ``created_after`` / ``created_before`` bound the aggregation to a
         half-open ``[after, before)`` window — used by the daily/weekly report
         (GET /api/v1/reports) for "what each agent did in the period". Both
-        optional; omitting them aggregates all-time (the MCP ``memclaw_stats``
+        optional; omitting them aggregates all-time (the MCP ``caura_stats``
         behaviour, unchanged).
 
         Ports core-api ``services.memory_stats.compute_memory_stats`` verbatim —
@@ -3805,7 +3805,7 @@ class PostgresService:
         and same ``include_deleted`` CTE. Read-only (reader replica).
 
         ``include_scope_agent`` (default False keeps the historical MCP
-        ``memclaw_stats`` behaviour) opts into counting agent-private
+        ``caura_stats`` behaviour) opts into counting agent-private
         (``scope_agent``) rows in the no-``agent_id`` team/org aggregate. This is
         a pure COUNT — no memory content is returned — so private rows can be
         tallied without leaking their contents; the report uses it so

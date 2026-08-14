@@ -22,7 +22,7 @@ describe("tool-specs loader", () => {
     assert.ok(TOOL_SPECS.length > 0);
     for (const spec of TOOL_SPECS) {
       assert.equal(typeof spec.name, "string");
-      assert.ok(spec.name.startsWith("memclaw_"), `spec name ${spec.name}`);
+      assert.ok(spec.name.startsWith("caura_"), `spec name ${spec.name}`);
       assert.equal(typeof spec.description, "string");
       assert.ok(spec.description.length > 0, `${spec.name}: empty description`);
       assert.equal(typeof spec.plugin_exposed, "boolean");
@@ -40,8 +40,8 @@ describe("tool-specs loader", () => {
   });
 
   test("getSpec returns matching entry for known tool", () => {
-    const spec = getSpec("memclaw_recall");
-    assert.equal(spec.name, "memclaw_recall");
+    const spec = getSpec("caura_recall");
+    assert.equal(spec.name, "caura_recall");
     assert.equal(spec.plugin_exposed, true);
   });
 });
@@ -49,21 +49,21 @@ describe("tool-specs loader", () => {
 describe("MEMCLAW_TOOLS surface", () => {
   test("is the expected list of plugin tools", () => {
     assert.deepEqual([...MEMCLAW_TOOLS], [
-      "memclaw_recall",
-      "memclaw_write",
-      "memclaw_manage",
-      "memclaw_doc",
-      "memclaw_list",
-      "memclaw_entity_get",
-      "memclaw_tune",
-      "memclaw_insights",
-      "memclaw_evolve",
-      "memclaw_stats",
-      // ``memclaw_keystones`` (read) is plugin-exposed so agents can
+      "caura_recall",
+      "caura_write",
+      "caura_manage",
+      "caura_doc",
+      "caura_list",
+      "caura_entity_get",
+      "caura_tune",
+      "caura_insights",
+      "caura_evolve",
+      "caura_stats",
+      // ``caura_keystones`` (read) is plugin-exposed so agents can
       // re-fetch governance rules mid-session; the ContextEngine also
       // injects them automatically at session start. The companion
-      // write tool ``memclaw_keystones_set`` is MCP-only (admin path).
-      "memclaw_keystones",
+      // write tool ``caura_keystones_set`` is MCP-only (admin path).
+      "caura_keystones",
     ]);
   });
 
@@ -104,7 +104,7 @@ describe("createToolFromSpec factory", () => {
     for (const name of MEMCLAW_TOOLS) {
       const tool = createToolFromSpec(name);
       assert.equal(tool.name, name);
-      assert.ok(tool.label.startsWith("MemClaw "), `${name}: label`);
+      assert.ok(tool.label.startsWith("Caura "), `${name}: label`);
       assert.ok(tool.description.length > 0, `${name}: description`);
       assert.ok(
         typeof tool.parameters === "object" && tool.parameters !== null,
@@ -122,13 +122,13 @@ describe("createToolFromSpec factory", () => {
   });
 
   test("op-dispatched tools declare op + required path params", () => {
-    const manage = createToolFromSpec("memclaw_manage").parameters as any;
+    const manage = createToolFromSpec("caura_manage").parameters as any;
     assert.deepEqual(manage.required, ["op", "memory_id"]);
     assert.deepEqual(manage.properties.op.enum, [
       "read", "update", "transition", "delete",
     ]);
 
-    const doc = createToolFromSpec("memclaw_doc").parameters as any;
+    const doc = createToolFromSpec("caura_doc").parameters as any;
     // ``collection`` is required for write/read/query/delete but optional
     // for search (omit → search across all collections) and list_collections,
     // so the schema gates only ``op``; the server enforces collection
@@ -139,16 +139,16 @@ describe("createToolFromSpec factory", () => {
     ]);
   });
 
-  test("memclaw_write requires only agent_id (content/items are mutually exclusive)", () => {
-    const write = createToolFromSpec("memclaw_write").parameters as any;
+  test("caura_write requires only agent_id (content/items are mutually exclusive)", () => {
+    const write = createToolFromSpec("caura_write").parameters as any;
     assert.deepEqual(write.required, ["agent_id"]);
     assert.ok(write.properties.content);
     assert.ok(write.properties.items);
     assert.equal(write.properties.items.maxItems, 100);
   });
 
-  test("memclaw_list has no required params (trust gate handled server-side)", () => {
-    const list = createToolFromSpec("memclaw_list").parameters as any;
+  test("caura_list has no required params (trust gate handled server-side)", () => {
+    const list = createToolFromSpec("caura_list").parameters as any;
     assert.deepEqual(list.required, []);
     assert.ok(list.properties.cursor);
     assert.ok(list.properties.include_deleted);
@@ -180,8 +180,8 @@ describe("createToolFromSpec factory", () => {
     // `getToolDescription` reads from the shared cache in env.ts. On a
     // fresh import (no /tool-descriptions fetch yet), the fallback should
     // be the description baked into tools.json.
-    const spec = getSpec("memclaw_recall");
-    const tool = createToolFromSpec("memclaw_recall");
+    const spec = getSpec("caura_recall");
+    const tool = createToolFromSpec("caura_recall");
     assert.equal(tool.description, spec.description);
   });
 });
@@ -191,7 +191,7 @@ describe("drift checks across tool surface artefacts", () => {
   // it MUST name every plugin-exposed tool. Per-tool *signatures* are
   // deferred to the live MCP schemas + injected TOOLS.md, so this gate
   // asserts presence by name (not a signature card). Without it, adding a
-  // tool (e.g. memclaw_stats in #64) silently leaves SKILL.md a version
+  // tool (e.g. caura_stats in #64) silently leaves SKILL.md a version
   // behind and agents see the wrong tool surface.
   test("SKILL.md names every tool in MEMCLAW_TOOLS", () => {
     const skillPath = join(
@@ -359,16 +359,16 @@ describe("drift checks across tool surface artefacts", () => {
 });
 
 describe("labelFor naming conversion", () => {
-  test("memclaw_doc → MemClaw Doc, memclaw_entity_get → MemClaw Entity Get", () => {
-    assert.equal(createToolFromSpec("memclaw_doc").label, "MemClaw Doc");
+  test("caura_doc → MemClaw Doc, caura_entity_get → MemClaw Entity Get", () => {
+    assert.equal(createToolFromSpec("caura_doc").label, "Caura Doc");
     assert.equal(
-      createToolFromSpec("memclaw_entity_get").label,
-      "MemClaw Entity Get",
+      createToolFromSpec("caura_entity_get").label,
+      "Caura Entity Get",
     );
-    assert.equal(createToolFromSpec("memclaw_list").label, "MemClaw List");
+    assert.equal(createToolFromSpec("caura_list").label, "Caura List");
     assert.equal(
-      createToolFromSpec("memclaw_manage").label,
-      "MemClaw Manage",
+      createToolFromSpec("caura_manage").label,
+      "Caura Manage",
     );
   });
 });

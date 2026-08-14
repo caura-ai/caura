@@ -424,7 +424,7 @@ CRYSTALLIZER_SHORT_CONTENT_CHARS: int = 10
 # derive the wire contract below.
 #
 # NOT yet the declaration the request SCHEMAS derive from: ``SearchProfileUpdate``
-# and the ``memclaw_tune`` MCP signature still enumerate their own subset (9 of
+# and the ``caura_tune`` MCP signature still enumerate their own subset (9 of
 # these 12 — the three A/B knobs are deliberately not agent-tunable) with their
 # own bounds. Those bounds now AGREE with this table, and
 # ``test_agent_tunable_bounds_match_the_knob_table`` fails if they drift again —
@@ -460,7 +460,7 @@ class SearchKnob(NamedTuple):
     # letting it surface as a KeyError 500 from inside the session.
     sql_required: bool = False
     # Exposed on the agent-facing tuning surface (``SearchProfileUpdate``, and the
-    # ``memclaw_tune`` MCP tool). False for the A/B knobs, which are held at their
+    # ``caura_tune`` MCP tool). False for the A/B knobs, which are held at their
     # global defaults until the offline comparison validates them and are flipped
     # per TENANT via ``search.default_profile``, not per agent.
     agent_tunable: bool = False
@@ -471,7 +471,7 @@ SEARCH_KNOBS: dict[str, SearchKnob] = {
     "top_k": SearchKnob(int, (1, 20), agent_tunable=True),
     "min_similarity": SearchKnob(float, (0.1, 0.9), agent_tunable=True),
     # Ceiling 3, matching the agent-facing ingress (``SearchProfileUpdate`` and
-    # the ``memclaw_tune`` MCP signature). It read 5 here until 2026-08-07 while
+    # the ``caura_tune`` MCP signature). It read 5 here until 2026-08-07 while
     # both of those said 3, so a tenant-wide default could hold a depth no agent
     # profile could ever set. Depth drives graph expansion cost, so 3 is the
     # deliberate ceiling rather than the widest of the three.
@@ -501,5 +501,5 @@ SEARCH_KNOBS: dict[str, SearchKnob] = {
 SQL_SCORING_PARAM_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.sql)
 SQL_SCORING_REQUIRED_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.sql_required)
 # The agent-facing tuning surface, derived the same way: ``SearchProfileUpdate``
-# and the ``memclaw_tune`` MCP tool expose exactly these.
+# and the ``caura_tune`` MCP tool expose exactly these.
 AGENT_TUNABLE_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.agent_tunable)

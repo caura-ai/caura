@@ -80,7 +80,7 @@ If `agent_id` is `null` or doesn't match what you provisioned, your credential i
 - The credential was revoked or rotated.
 - A proxy in front of memclaw is stripping the `X-API-Key` header.
 
-> **Latency expectation:** `POST /search` returns 23 ms p50 / 27 ms p95 warm on our reference benchmarks. Recall (`memclaw_recall` / `POST /recall`) sits in the same band — it wraps search plus a small scoring step. See [`performance.md`](performance.md) for the full numbers and methodology.
+> **Latency expectation:** `POST /search` returns 23 ms p50 / 27 ms p95 warm on our reference benchmarks. Recall (`caura_recall` / `POST /recall`) sits in the same band — it wraps search plus a small scoring step. See [`performance.md`](performance.md) for the full numbers and methodology.
 
 ---
 
@@ -117,7 +117,7 @@ async def main():
             print([t.name for t in tools.tools])
 
             result = await session.call_tool(
-                "memclaw_write",
+                "caura_write",
                 {"content": "First memory from the Python harness."},
             )
             print(result)
@@ -258,5 +258,5 @@ Cross-agent writes of identical content no longer collide — each agent gets it
 - `GET /api/v1/whoami` — identity probe.
 - `GET /api/v1/agents/{id}?tenant_id=...` — agent detail.
 - `PATCH /api/v1/agents/{id}/trust?tenant_id=...` — change trust level.
-- `POST /api/v1/memories` — REST write (mirrors `memclaw_write` over MCP).
+- `POST /api/v1/memories` — REST write (mirrors `caura_write` over MCP).
 - `mcp://…/mcp/` — streamable-http MCP endpoint.

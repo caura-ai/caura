@@ -112,7 +112,7 @@ async def patch_agent_tune(
 ):
     """Update an agent's search profile (per-agent retrieval tuning). Pass ?reset=true to clear."""
     auth.enforce_tenant(tenant_id)
-    # An agent may tune ITS OWN profile (also exposed via MCP memclaw_tune), but
+    # An agent may tune ITS OWN profile (also exposed via MCP caura_tune), but
     # not a peer's — block cross-agent tamper while leaving self-tune + admin keys.
     if auth.agent_id and auth.agent_id != agent_id:
         raise HTTPException(status_code=403, detail="Agents can only tune their own search profile.")

@@ -525,7 +525,7 @@ if (!config.plugins.load.paths.includes(pluginDir)) config.plugins.load.paths.pu
 
 if (!config.tools) config.tools = {{}};
 if (!Array.isArray(config.tools.alsoAllow)) config.tools.alsoAllow = [];
-const tools = ['memclaw_recall','memclaw_write','memclaw_manage','memclaw_doc','memclaw_list','memclaw_entity_get','memclaw_tune','memclaw_insights','memclaw_evolve','memclaw_stats','memclaw_keystones'];
+const tools = ['caura_recall','caura_write','caura_manage','caura_doc','caura_list','caura_entity_get','caura_tune','caura_insights','caura_evolve','caura_stats','caura_keystones'];
 for (const t of tools) {{
   if (!config.tools.alsoAllow.includes(t)) config.tools.alsoAllow.push(t);
 }}
@@ -831,6 +831,12 @@ async def install_skill_script(
         api_url=resolved_api_url, agent=agent, api_key=api_key, skill=skill
     )
     return PlainTextResponse(script, media_type="text/plain")
+
+
+@router.get("/skill/caura", response_class=PlainTextResponse)
+async def skill_caura():
+    """Rebrand alias for /skill/memclaw — same content, new name."""
+    return await skill_memclaw()
 
 
 @router.get("/skill/memclaw", response_class=PlainTextResponse)

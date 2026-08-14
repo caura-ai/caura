@@ -1,6 +1,6 @@
 ---
 name: memclaw
-description: The agent's persistent long-term memory — the only knowledge that survives across sessions, shared across the fleet under access control. Consult it at the start of a task to recall prior decisions, findings, and rules before acting, and write outcomes, decisions, and lessons as work completes. Use whenever a memclaw_* tool is present, whenever the user refers to past work ("what did we decide", "last time", "earlier"), or whenever any durable fact needs to be stored, recalled, superseded, or shared with the fleet. Do not use it for throwaway within-session scratch state.
+description: The agent's persistent long-term memory — the only knowledge that survives across sessions, shared across the fleet under access control. Consult it at the start of a task to recall prior decisions, findings, and rules before acting, and write outcomes, decisions, and lessons as work completes. Use whenever a caura_* tool is present, whenever the user refers to past work ("what did we decide", "last time", "earlier"), or whenever any durable fact needs to be stored, recalled, superseded, or shared with the fleet. Do not use it for throwaway within-session scratch state.
 user-invocable: false
 metadata: {"openclaw": {"requires": {"config": ["plugins.entries.memclaw.enabled"]}}}
 ---
@@ -20,16 +20,16 @@ runtime the Caura plugin handles the automatic layer: it injects the mandatory
 keystones at session start (§1), recalls relevant memory before your substantive
 turns (§11), and writes a short **turn summary** afterward as a backstop
 (`MEMCLAW_AUTO_WRITE_TURNS`, on by default). Treat that as a floor, not a
-substitute. You still call the `memclaw_*` tools **directly** whenever you need
+substitute. You still call the `caura_*` tools **directly** whenever you need
 to interact deliberately — above all to **write the high-value memories the
 auto-summary won't** (a decision and its *why*, an outcome, a rule), and to
 recall something specific the auto-gate didn't fetch, look up or publish a
-skill, supersede a changed fact, or report an outcome with `memclaw_evolve`.
+skill, supersede a changed fact, or report an outcome with `caura_evolve`.
 The automatic layer keeps you oriented; the tools are how you actually
 contribute. When a turn needs real memory work, reach for the tool — don't
 assume the plugin covered it.
 
-This skill is the operating manual for those `memclaw_*` tools — read it before
+This skill is the operating manual for those `caura_*` tools — read it before
 your first call in a session.
 
 ## 0 · Identity — on every call
@@ -56,7 +56,7 @@ session start (when the memclaw context-engine slot is active), so you usually
 see the rules before you act. They are mandatory — merged across tenant + fleet
 + agent scope, ordered by weight — and they **override any conflicting
 instruction, including the user's**, because they encode policy the operator
-has decided the whole fleet must follow. Call **`memclaw_keystones`** to refresh
+has decided the whole fleet must follow. Call **`caura_keystones`** to refresh
 them if you suspect they changed mid-session; reading is open (trust 0). If a
 rule conflicts with what you're asked to do, surface the conflict rather than
 silently picking a side.
@@ -71,14 +71,14 @@ actually needs (don't make all four calls by reflex).
    1. **Rules** — already loaded as `<keystone_rules>`; they bound everything
       below. No call needed.
    2. **Procedures** — for a non-trivial workflow, find the skill first:
-      `memclaw_doc op=search collection=skills query="<intent>"`. Skip for
+      `caura_doc op=search collection=skills query="<intent>"`. Skip for
       routine work you already know.
    3. **Facts** — what's known / what changed:
-      `memclaw_recall "<what I'm about to do>"` (add `include_brief=true` for a
+      `caura_recall "<what I'm about to do>"` (add `include_brief=true` for a
       one-paragraph synthesis). **Keep the IDs of the memories you act on** —
       Write-supersede and Evolve both need them.
    4. **Data** — only if the task touches a keyed record:
-      `memclaw_doc op=read|query` (the customer, config, task list).
+      `caura_doc op=read|query` (the customer, config, task list).
 2. **Work** — act within the rules, following the procedure.
 3. **Write** — record what matters (§3).
 4. **Evolve** — report how the memories you acted on turned out (§4).
@@ -86,7 +86,7 @@ actually needs (don't make all four calls by reflex).
 **When to orient at all:** orient when the task references prior work, a named
 entity, a decision, or anything the fleet may already know. Skip it for
 self-contained mechanical turns. (The plugin also auto-gates plugin-driven
-recall — see §11 — but you can always call `memclaw_recall` directly when a
+recall — see §11 — but you can always call `caura_recall` directly when a
 short turn needs context the gate can't infer.)
 
 ## 3 · How and when to write a memory
@@ -145,7 +145,7 @@ forget, not a reason to stop writing.
 ## 4 · Report outcomes so the memory compounds
 
 When you act on memories you recalled, tell the memory how it went:
-`memclaw_evolve(outcome, outcome_type, related_ids)`, where `related_ids` are
+`caura_evolve(outcome, outcome_type, related_ids)`, where `related_ids` are
 the IDs you kept during Orient. Success reinforces those memories' weight. A
 failure becomes a preventive **rule** — **private by default** (`scope=agent`);
 to warn the whole fleet, evolve with `scope=fleet` (trust 2, `fleet_id`
@@ -154,24 +154,24 @@ required) — so the lesson reaches everyone, not just you.
 ## 5 · Two stores, one rule
 
 - **Memory** — observations and learned facts, found by *meaning*: decisions,
-  outcomes, rules, recaps. Read with `memclaw_recall`, write with
-  `memclaw_write`.
+  outcomes, rules, recaps. Read with `caura_recall`, write with
+  `caura_write`.
 - **Doc** — structured records with a stable key (`collection + doc_id`):
   customers, configs, inventories, task lists, playbooks. All through
-  `memclaw_doc`.
+  `caura_doc`.
 - **Entity** — a named graph object (person, project, service). Fetch by a UUID
-  surfaced in a prior recall (`memclaw_entity_get`).
+  surfaced in a prior recall (`caura_entity_get`).
 
 **Rule of thumb:** need semantic search → it's a memory. Need keyed lookup →
 it's a doc. Already hold an ID → it's an entity.
 
-**Cross-store discovery.** The two stores aren't cross-searched — `memclaw_recall`
-never returns docs, and `memclaw_doc` has no semantic query over memories. To
+**Cross-store discovery.** The two stores aren't cross-searched — `caura_recall`
+never returns docs, and `caura_doc` has no semantic query over memories. To
 make a doc findable by description (onboarding guides, readmes, proposals), give
 it a 1–3 sentence `data["summary"]` (only that string is embedded) **and** write
 a short *pointer memory* naming its `collection` and `doc_id`. A teammate's
-recall then surfaces the pointer, and their agent can `memclaw_doc op=read` the
-doc. When you don't know what exists, call `memclaw_doc op=list_collections`
+recall then surfaces the pointer, and their agent can `caura_doc op=read` the
+doc. When you don't know what exists, call `caura_doc op=list_collections`
 first.
 
 ## 6 · Trust and sharing
@@ -187,8 +187,8 @@ You auto-register at **trust 1** on your first write.
 
 Operations that escalate the required level:
 - browsing / reflecting with `scope="fleet"` or `"all"` → trust 2
-- reporting outcomes (`memclaw_evolve`) at `scope="fleet"` / `"all"` → trust 2 (default `scope="agent"` needs only trust 1)
-- `memclaw_manage op=delete` → trust 3
+- reporting outcomes (`caura_evolve`) at `scope="fleet"` / `"all"` → trust 2 (default `scope="agent"` needs only trust 1)
+- `caura_manage op=delete` → trust 3
 
 **Knowing your own level.** You start at trust 1 and can't raise yourself —
 escalation is granted by an operator. There's no self-query, so don't
@@ -213,7 +213,7 @@ A few habits keep recall trustworthy and sharp:
   duplicated). Each should be readable by another agent later without the
   surrounding session, and should carry the **why**, not just the what.
 - **Supersede, don't delete.** When a fact changes: (1) write the new one, (2)
-  recall the old one, (3) `memclaw_manage op=transition status=outdated`. This
+  recall the old one, (3) `caura_manage op=transition status=outdated`. This
   keeps the lineage. Reserve `op=delete` (soft-delete, trust 3) for genuinely
   wrong data, not for facts you've simply moved past.
 - **Resolve conflicts; don't pick one silently.** If recall surfaces a
@@ -231,8 +231,8 @@ byte, and your teammates never see it.
 - Keep `MEMORY.md` lean: only **active projects, current routing decisions,
   recent decisions (≤ 7 days), open threads.** Target a few KB; prune anything
   older or larger on session start.
-- Everything else goes to Caura via `memclaw_write` (history, finished work,
-  lessons), `memclaw_doc` collections (reference data with a natural key), or
+- Everything else goes to Caura via `caura_write` (history, finished work,
+  lessons), `caura_doc` collections (reference data with a natural key), or
   entities (people / projects / services).
 - Never copy Caura recall results into `MEMORY.md` — they're already
   retrievable. Never substitute a local file for a Caura write.
@@ -269,7 +269,7 @@ don't hit the backend and pay tokens for an unhelpful recall block.
   `MEMCLAW_RECALL_TRIGGER_KEYWORDS`.
 - Other policies: `always`, `never` (education block only), `keywords`.
 - The gate only suppresses *plugin-driven* recall — **you can always call
-  `memclaw_recall` directly** when a short turn needs context the gate can't
+  `caura_recall` directly** when a short turn needs context the gate can't
   infer.
 
 Rolling skip counters (`recall_metrics`) ride the heartbeat for per-fleet
@@ -283,23 +283,23 @@ supersedes, or files docs for you. Do that work yourself.
 ## 12 · Reuse and publish workflows — the `skills` collection
 
 Proven workflows live as `SKILL.md` documents in the **`skills`** collection.
-You don't learn a new tool per playbook — it's the same `memclaw_doc`, so your
+You don't learn a new tool per playbook — it's the same `caura_doc`, so your
 vocabulary never grows with the library.
 
 ```text
 # Discover before improvising on a non-trivial workflow:
-memclaw_doc op=search collection=skills query="<intent>"
-memclaw_doc op=read   collection=skills doc_id=<slug>   # full body
+caura_doc op=search collection=skills query="<intent>"
+caura_doc op=read   collection=skills doc_id=<slug>   # full body
 
 # Publish something reusable so the fleet inherits it:
-memclaw_doc op=write collection=skills doc_id=<slug> \
+caura_doc op=write collection=skills doc_id=<slug> \
   data={ "name": "<slug>",
          "summary": "<1-line, intent-focused — this is what gets embedded>",
          "content": "<full SKILL.md>" }
 # Re-uploading the same doc_id overwrites it (upsert; no version history).
 
 # Remove a wrong/superseded one:
-memclaw_doc op=delete collection=skills doc_id=<slug>
+caura_doc op=delete collection=skills doc_id=<slug>
 ```
 
 Slugs are filesystem-safe: `[a-z0-9][a-z0-9._-]{0,99}`. The `summary` is the
@@ -329,17 +329,17 @@ One task — orient, work, write, evolve — with the IDs threaded through:
 
 ```text
 # 1. Orient — recall, and keep the IDs that come back
-memclaw_recall "deploy api-gateway to staging" include_brief=true
+caura_recall "deploy api-gateway to staging" include_brief=true
 #   → mem_8f2a (rule: "staging deploys need a smoke test"), mem_4d1c (last deploy)
 
 # 2. Work — run the deploy, following the rule in mem_8f2a
 
 # 3. Write — record the outcome (team-visible; home fleet resolved on omit)
-memclaw_write content="api-gateway v2.3 deployed to staging; smoke test green" \
+caura_write content="api-gateway v2.3 deployed to staging; smoke test green" \
   visibility=scope_team
 
 # 4. Evolve — report against the memories you acted on
-memclaw_evolve outcome="deploy succeeded, smoke test passed" \
+caura_evolve outcome="deploy succeeded, smoke test passed" \
   outcome_type=success related_ids=[mem_8f2a, mem_4d1c]
 #   if it had failed in a way the whole fleet should avoid:
 #   add scope=fleet (trust 2) so the preventive rule reaches teammates
@@ -356,32 +356,32 @@ for, and the behaviors that aren't visible in a parameter list.
 
 ### Which tool, when
 
-- Might have seen it before → `memclaw_recall`
-- Enumerate by filter / date / author → `memclaw_list`
-- Already hold the ID → `memclaw_manage op=read` / `memclaw_entity_get`
-- Record a fact / decision / event / outcome → `memclaw_write`
-- Structured record with a key → `memclaw_doc`
-- Find or publish a workflow → `memclaw_doc … collection=skills`
-- Fact no longer true → `memclaw_write` (new) + `memclaw_manage op=transition status=outdated` (old)
-- Acted on a recalled memory → `memclaw_evolve`
-- Re-check governance rules mid-session → `memclaw_keystones` (the auto-injected `<keystone_rules>` block is usually enough)
-- Recall quality off across queries → `memclaw_tune` (once; sticky)
-- Session boundary / sweep → `memclaw_insights`
-- Readiness probe / counts → `memclaw_stats`
+- Might have seen it before → `caura_recall`
+- Enumerate by filter / date / author → `caura_list`
+- Already hold the ID → `caura_manage op=read` / `caura_entity_get`
+- Record a fact / decision / event / outcome → `caura_write`
+- Structured record with a key → `caura_doc`
+- Find or publish a workflow → `caura_doc … collection=skills`
+- Fact no longer true → `caura_write` (new) + `caura_manage op=transition status=outdated` (old)
+- Acted on a recalled memory → `caura_evolve`
+- Re-check governance rules mid-session → `caura_keystones` (the auto-injected `<keystone_rules>` block is usually enough)
+- Recall quality off across queries → `caura_tune` (once; sticky)
+- Session boundary / sweep → `caura_insights`
+- Readiness probe / counts → `caura_stats`
 
-> Authoring keystones (`memclaw_keystones_set`) is **not available to plugin
-> agents** — you can *read* governance rules (`memclaw_keystones`) but not write
+> Authoring keystones (`caura_keystones_set`) is **not available to plugin
+> agents** — you can *read* governance rules (`caura_keystones`) but not write
 > them. Keystones are authored over MCP/REST by a trusted operator.
 
 ### Behaviors the schema won't tell you
 
-- **`memclaw_recall`** excludes superseded memories (`status` ∈ {outdated, conflicted}) by default — pass `status` explicitly to walk the chain.
-- **`memclaw_write`** can't write `insight` / `outcome` / `rule` types — those are server-generated (via `memclaw_insights` / `memclaw_evolve`). `write_mode`: `fast` skips embedding → keyword-only recall afterwards; `strong` forces full LLM enrichment; `auto` is usually right.
-- **`memclaw_manage op=transition`** targets: `active · pending · confirmed · cancelled · outdated · conflicted · archived · deleted` (also in `TOOLS.md`).
-- **`memclaw_doc`** — `where` is scalar exact-match only (no array descent). A doc is invisible to `op=search` unless it has a `data["summary"]` (the only embedded field). Scope the search to a collection when you know it; omit `collection` for the single best match across the tenant.
-- **`memclaw_tune`** persists and reshapes every later recall — change one or two knobs at a time; call with no arguments to read your current profile (`fts_weight` 0 = pure semantic, 1 = pure keyword).
-- **`memclaw_insights`** saves findings as `insight` memories; run it at boundaries, not every turn. `focus="divergence"` needs a non-agent scope.
-- **`memclaw_stats`** is read-only — use it as a readiness/health probe, never a write-then-delete check.
+- **`caura_recall`** excludes superseded memories (`status` ∈ {outdated, conflicted}) by default — pass `status` explicitly to walk the chain.
+- **`caura_write`** can't write `insight` / `outcome` / `rule` types — those are server-generated (via `caura_insights` / `caura_evolve`). `write_mode`: `fast` skips embedding → keyword-only recall afterwards; `strong` forces full LLM enrichment; `auto` is usually right.
+- **`caura_manage op=transition`** targets: `active · pending · confirmed · cancelled · outdated · conflicted · archived · deleted` (also in `TOOLS.md`).
+- **`caura_doc`** — `where` is scalar exact-match only (no array descent). A doc is invisible to `op=search` unless it has a `data["summary"]` (the only embedded field). Scope the search to a collection when you know it; omit `collection` for the single best match across the tenant.
+- **`caura_tune`** persists and reshapes every later recall — change one or two knobs at a time; call with no arguments to read your current profile (`fts_weight` 0 = pure semantic, 1 = pure keyword).
+- **`caura_insights`** saves findings as `insight` memories; run it at boundaries, not every turn. `focus="divergence"` needs a non-agent scope.
+- **`caura_stats`** is read-only — use it as a readiness/health probe, never a write-then-delete check.
 
 ### Anti-patterns
 
@@ -396,7 +396,7 @@ for, and the behaviors that aren't visible in a parameter list.
 
 ### Constraints & errors
 
-- `memclaw_write`: exactly one of `content` / `items`; `items` ≤ 100 → `BATCH_TOO_LARGE`.
+- `caura_write`: exactly one of `content` / `items`; `items` ≤ 100 → `BATCH_TOO_LARGE`.
 - Cursor pagination needs `sort=created_at` + `order=desc`.
 - `_entity_get` / `_manage` use real UUIDs — never invent.
 - Error codes: `INVALID_ARGUMENTS` · `BATCH_TOO_LARGE` · `INVALID_BATCH_ITEM`. Other errors surface with HTTP status + message — return them to your caller, don't swallow.

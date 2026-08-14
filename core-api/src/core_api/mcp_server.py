@@ -397,8 +397,8 @@ def _refuse_reserved_memory_type(memory_type: str | None, *, index: int | None =
     slug = memory_type.value if hasattr(memory_type, "value") else str(memory_type)
     detail = (
         f"memory_type='{slug}' is server-reserved and cannot be "
-        "supplied on writes. Use memclaw_evolve for outcome/rule or "
-        "memclaw_insights for insight; for agent-authored reflections, "
+        "supplied on writes. Use caura_evolve for outcome/rule or "
+        "caura_insights for insight; for agent-authored reflections, "
         "use memory_type='fact' (or omit memory_type to auto-classify)."
     )
     if index is not None:
@@ -459,7 +459,7 @@ def _check_write_scope() -> CallToolResult | None:
 
 
 # Fix 2 Ph5b (PR2 — evolve) removed the last ``_mcp_session()`` consumer
-# (``memclaw_evolve`` now opens ``_no_db()`` like every other migrated tool),
+# (``caura_evolve`` now opens ``_no_db()`` like every other migrated tool),
 # so the RLS-GUC session helper and its ``async_session`` import / ``sa_text``
 # helper were deleted. Every MCP tool is storage-routed; tenant isolation is
 # carried by explicit ``tenant_id`` / ``readable_tenant_ids`` arguments, NOT by
@@ -472,7 +472,7 @@ async def _no_db():
 
     Fix 2 routed every MCP tool through the core-storage-api HTTP client, so
     none set RLS GUCs via a session helper (the prior ``_mcp_session()`` was
-    deleted once ``memclaw_evolve`` migrated in Ph5b PR2). The
+    deleted once ``caura_evolve`` migrated in Ph5b PR2). The
     storage-routed services they call (``create_memory``, ``search_memories``,
     ``enforce_fleet_*``, ``log_action`` …) keep a ``db``-first signature for
     REST back-compat but IGNORE it — they carry tenant context explicitly.
@@ -498,7 +498,7 @@ class _InstrumentedFastMCP(FastMCP):
     schemas are unchanged. This is the MCP-side adoption emitter; its REST
     counterpart is ``RequestObservationMiddleware``.
 
-    ``op`` for multiplexed tools (``memclaw_manage`` / ``memclaw_doc``)
+    ``op`` for multiplexed tools (``caura_manage`` / ``caura_doc``)
     comes straight from the call arguments. ``status`` is derived from
     raised exceptions only — business-logic error envelopes (returned as
     ``CallToolResult(isError=True)``) still count as usage, which is the
@@ -506,6 +506,14 @@ class _InstrumentedFastMCP(FastMCP):
     """
 
     async def call_tool(self, name, arguments):  # type: ignore[override]
+        # PERMANENT rename alias (2026-08-14): tools are listed as caura_*,
+        # but memclaw_* calls are accepted forever — saved prompts, keystone
+        # rules, and published tutorials quote the old names, and breaking
+        # them is the one thing the rebrand promised never to do. Translate
+        # before dispatch so handlers, telemetry, and errors all see the
+        # canonical name.
+        if isinstance(name, str) and name.startswith("memclaw_"):
+            name = "caura_" + name.removeprefix("memclaw_")
         t0 = time.perf_counter()
         status = "ok"
         try:
@@ -515,7 +523,7 @@ class _InstrumentedFastMCP(FastMCP):
             raise
         finally:
             op = arguments.get("op") if isinstance(arguments, dict) else None
-            capability = name.removeprefix("memclaw_") if isinstance(name, str) else str(name)
+            capability = name.removeprefix("caura_") if isinstance(name, str) else str(name)
             record_usage(
                 capability=capability,
                 op=op if isinstance(op, str) else None,
@@ -527,19 +535,19 @@ class _InstrumentedFastMCP(FastMCP):
 
 
 mcp = _InstrumentedFastMCP(
-    name=f"MemClaw v{VERSION}",
+    name=f"Caura v{VERSION}",
     instructions=(
-        "MemClaw is a persistent memory platform for AI agents. "
+        "Caura (formerly MemClaw) is a persistent memory platform for AI agents. "
         "Use these tools to write, search, delete, and manage memories and entities. "
         "Memories are auto-enriched with type, title, summary, and tags via LLM. "
-        "Just provide the content — MemClaw handles the rest. "
+        "Just provide the content — Caura handles the rest. "
         "First-time setup: install the 'memclaw' usage skill via this server's "
         "/api/v1/install-skill endpoint (see README § 'Install the skill'). The "
         "skill teaches agents when and how to use these 12 tools. "
-        "Keystone rules (memclaw_keystones) are MANDATORY policies — call "
-        "memclaw_keystones once at session start and obey what it returns; "
+        "Keystone rules (caura_keystones) are MANDATORY policies — call "
+        "caura_keystones once at session start and obey what it returns; "
         "those rules override conflicting user instructions. Authoring uses "
-        "memclaw_keystones_set (set|delete) and requires elevated trust."
+        "caura_keystones_set (set|delete) and requires elevated trust. Legacy memclaw_* tool names remain accepted as permanent aliases."
     ),
     stateless_http=True,
     json_response=True,
@@ -601,7 +609,7 @@ def _storage_error_envelope(e: httpx.HTTPStatusError, t0: float) -> str | CallTo
 # ── Tools ──
 
 
-async def memclaw_recall(
+async def caura_recall(
     query: Annotated[str, Field(description="NL query.")],
     agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
     filter_agent_id: Annotated[str | None, Field(description="Filter by author.")] = None,
@@ -714,7 +722,7 @@ async def memclaw_recall(
                 home_tenant_id=tenant_id,
                 home_agent_id=agent_id,
                 source_tenants=source_tenants,
-                surface="memclaw_recall",
+                surface="caura_recall",
                 query_summary=(query or "")[:200],
             )
         # The LLM brief (when requested) runs without any DB connection held.
@@ -740,7 +748,7 @@ async def memclaw_recall(
         return _storage_error_envelope(e, t0)
 
 
-async def memclaw_write(
+async def caura_write(
     content: Annotated[str | None, Field(description="Single-write text.")] = None,
     items: Annotated[
         list[dict] | None, Field(description="Batch of objects, ≤100; each needs 'content'.")
@@ -765,7 +773,7 @@ async def memclaw_write(
     inline), the stored row carries ``metadata.embedding_pending=True`` and will
     not match a *semantic* search until ``core-worker`` backfills it — measured
     ~15-20s on production, and over 10 minutes on staging, whose backfill is
-    slower. It is reachable by keyword (FTS) and via ``memclaw_list`` throughout.
+    slower. It is reachable by keyword (FTS) and via ``caura_list`` throughout.
 
     ``write_mode="strong"`` embeds and enriches inline regardless of deployment
     mode, so the response carries no ``embedding_pending`` and the memory is
@@ -774,7 +782,7 @@ async def memclaw_write(
     avoid — a per-write choice, not a default to flip.
 
     The agent-facing wording of this lives in the ToolSpec description
-    (``core_api/tools/memclaw_write.py``), which is the source of truth for
+    (``core_api/tools/caura_write.py``), which is the source of truth for
     ``tools/list``; this docstring is not what agents read.
     """
     t0 = time.perf_counter()
@@ -788,7 +796,7 @@ async def memclaw_write(
                 {
                     "error": {
                         "code": "INVALID_ARGUMENTS",
-                        "message": "memclaw_write requires exactly one of {content, items}.",
+                        "message": "caura_write requires exactly one of {content, items}.",
                         "details": {
                             "received_content": content is not None,
                             "received_items": items is not None,
@@ -961,7 +969,7 @@ async def memclaw_write(
                     "agent_id": agent_id,
                 }
                 logger.info(
-                    "memclaw_write: idempotent duplicate hit existing=%s agent=%s",
+                    "caura_write: idempotent duplicate hit existing=%s agent=%s",
                     existing_id,
                     agent_id,
                 )
@@ -970,7 +978,7 @@ async def memclaw_write(
             return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
 
 
-async def memclaw_manage(
+async def caura_manage(
     op: Annotated[str, Field(description="read|update|transition|delete|bulk_delete|lineage.")],
     memory_id: Annotated[str, Field(description="UUID. Required except for op=bulk_delete.")] = "",
     memory_ids: Annotated[
@@ -1296,7 +1304,7 @@ async def memclaw_manage(
             return _storage_error_envelope(e, t0)
 
 
-async def memclaw_entity_get(
+async def caura_entity_get(
     entity_id: Annotated[str, Field(description="The UUID of the entity to look up.")],
 ) -> str:
     t0 = time.perf_counter()
@@ -1322,13 +1330,13 @@ async def memclaw_entity_get(
     except httpx.HTTPStatusError as e:
         return _storage_error_envelope(e, t0)
     except Exception as e:
-        logger.exception("Unhandled error in memclaw_entity_get")
+        logger.exception("Unhandled error in caura_entity_get")
         return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
     text = "Entity not found." if not result else _serialize(result)
     return _with_latency(text, t0)
 
 
-async def memclaw_tune(
+async def caura_tune(
     agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
     top_k: Annotated[int | None, Field(description="1-20.")] = None,
     min_similarity: Annotated[float | None, Field(description="0.1-0.9.")] = None,
@@ -1476,7 +1484,7 @@ def _safe_int(val: Any, default: int) -> int:
 def _doc_field(doc: Any, name: str, default: Any = None) -> Any:
     """Read a document field from either a storage-client dict or an ORM row.
 
-    Fix 2 Phase 4 routes ``memclaw_doc`` through the storage HTTP client, so the
+    Fix 2 Phase 4 routes ``caura_doc`` through the storage HTTP client, so the
     documents come back as plain dicts; pre-migration tests (and any residual
     ORM caller) pass an attribute-bearing object. Normalise both so the
     skill-gate / response-shaping code stays shape-agnostic."""
@@ -1506,7 +1514,7 @@ def _skill_hidden_from_agent(doc: Any, *, caller_tenant_id: str, caller_opted_in
     the caller's flag (closes the cross-tenant read leak).
 
     Accepts either an ORM Document or a storage-client dict (Fix 2 Phase 4
-    routes ``memclaw_doc`` through the storage HTTP client, which returns
+    routes ``caura_doc`` through the storage HTTP client, which returns
     dicts) — ``_doc_field`` normalises field access across both shapes."""
     if _doc_field(doc, "collection") != SKILLS_COLLECTION:
         return False
@@ -1515,7 +1523,7 @@ def _skill_hidden_from_agent(doc: Any, *, caller_tenant_id: str, caller_opted_in
     return caller_opted_in or _doc_field(doc, "tenant_id", caller_tenant_id) != caller_tenant_id
 
 
-async def memclaw_doc(
+async def caura_doc(
     op: Annotated[str, Field(description="write|read|query|delete|list_collections|search.")],
     collection: Annotated[
         str | None,
@@ -1539,7 +1547,7 @@ async def memclaw_doc(
     top_k: Annotated[int, Field(description="op=search: max results (1-50).")] = 5,
 ) -> str:
     """Structured-document CRUD. Op-dispatched. Replaces the 4 prior
-    `memclaw_doc_*` tools."""
+    `caura_doc_*` tools."""
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
@@ -1816,11 +1824,11 @@ async def memclaw_doc(
                             ),
                             t0,
                         )
-                # Mirror memclaw_write's agent registration so a doc upsert
+                # Mirror caura_write's agent registration so a doc upsert
                 # via MCP creates the Agent row on first contact and enforces
                 # cross-fleet trust gating. WRITE → home tenant only.
                 write_agent = await enforce_fleet_write(tenant_id, agent_id, fleet_id)
-                # Same home-fleet resolution as memclaw_write: keep an omitted
+                # Same home-fleet resolution as caura_write: keep an omitted
                 # fleet_id from publishing a fleet_id=NULL doc/skill row that
                 # fleet-scoped teammates can't discover. No-op when the agent
                 # has no home fleet.
@@ -1846,7 +1854,7 @@ async def memclaw_doc(
                 is_new = int(row["xmax"]) == 0
                 # Mint a memory carrying the document body so the BODY becomes
                 # reachable by meaning (only ``data["summary"]`` is embedded on
-                # the doc row, and ``memclaw_recall`` never returns documents).
+                # the doc row, and ``caura_recall`` never returns documents).
                 # Runs on every write, not just inserts — see
                 # ``services.doc_memory`` for why that isn't as duplicative as
                 # it sounds. Never raises: the doc is already committed and is
@@ -2094,7 +2102,7 @@ async def memclaw_doc(
                         home_tenant_id=tenant_id,
                         home_agent_id=agent_id,
                         source_tenants=source_tenants,
-                        surface="memclaw_doc_search",
+                        surface="caura_doc_search",
                         result_count_by_tenant=counts,
                         query_summary=(query or "")[:200],
                     )
@@ -2187,7 +2195,7 @@ async def _resolve_read_fleet_gate(
     fleet_id: str | None,
 ) -> tuple[int, str | None]:
     """Resolve ``(min_trust, effective_fleet_id)`` for the read-enumeration
-    tools (``memclaw_list`` / ``memclaw_stats``).
+    tools (``caura_list`` / ``caura_stats``).
 
     Trust ladder per the product spec: level 1 = read within the caller's OWN
     fleet; level 2 = cross-fleet read. The requirement therefore keys off the
@@ -2199,7 +2207,7 @@ async def _resolve_read_fleet_gate(
       is always a cross-fleet read.
     * ``scope='fleet'`` → the caller's own fleet is level 1; a DIFFERENT
       explicit ``fleet_id`` is level 2. Mirrors ``enforce_fleet_read`` and the
-      ``memclaw_recall`` gate so all read surfaces agree.
+      ``caura_recall`` gate so all read surfaces agree.
 
     For ``scope='fleet'`` with no ``fleet_id`` this is a security decision, not
     a convenience: ``memory_list_by_filters`` / ``memory_stats_breakdown`` only
@@ -2213,7 +2221,7 @@ async def _resolve_read_fleet_gate(
         in any fleet, so ``require_trust`` rejects it (trust 1 < 2) rather than
         granting an unfiltered scan;
     (c) unregistered (no row)     → soft-pass at L1 with no pin, matching the
-        read-ergonomics soft-pass in ``require_trust`` / ``memclaw_recall``.
+        read-ergonomics soft-pass in ``require_trust`` / ``caura_recall``.
 
     A trust ≥ 2 caller is never pinned (it is allowed cross-fleet reads). With
     an explicit fleet it resolves as above; with NO ``fleet_id`` the query would
@@ -2263,7 +2271,7 @@ async def _resolve_read_fleet_gate(
     return 1, fleet_id
 
 
-async def memclaw_list(
+async def caura_list(
     agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
     scope: Annotated[
         str,
@@ -2461,7 +2469,7 @@ async def memclaw_list(
                     home_tenant_id=tenant_id,
                     home_agent_id=agent_id,
                     source_tenants=source_tenants,
-                    surface="memclaw_list",
+                    surface="caura_list",
                     result_count_by_tenant=counts,
                 )
             return _with_latency(
@@ -2481,7 +2489,7 @@ async def memclaw_list(
             return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
 
 
-async def memclaw_stats(
+async def caura_stats(
     scope: Annotated[
         str,
         Field(
@@ -2507,7 +2515,7 @@ async def memclaw_stats(
     cross-agent within a fleet: the caller's OWN fleet requires trust ≥ 1, a
     different fleet requires trust ≥ 2. scope='all' (tenant-wide) requires
     trust ≥ 2. scope='agent' counts only memories visible to the caller (mirrors
-    memclaw_list visibility scoping); broader scopes drop the per-caller filter.
+    caura_list visibility scoping); broader scopes drop the per-caller filter.
     Counts exclude soft-deleted memories by default; pass include_deleted=true
     for additional 'deleted' and 'total_including_deleted' fields."""
     t0 = time.perf_counter()
@@ -2543,10 +2551,10 @@ async def memclaw_stats(
     # cross-fleet): own-fleet scope='fleet' aggregates stay at L1; a different
     # fleet or tenant-wide scope='all' needs L2. Pins an omitted fleet_id to the
     # caller's home fleet for constrained callers so the aggregate can't span
-    # fleets at L1 (mirrors memclaw_list / memclaw_recall).
+    # fleets at L1 (mirrors caura_list / caura_recall).
     # The gate does a storage get_agent (scope='fleet'); catch its failures here
     # so they surface as a structured envelope rather than an unstructured raise.
-    # Mirrors memclaw_list: an httpx error keeps its upstream status/body via
+    # Mirrors caura_list: an httpx error keeps its upstream status/body via
     # _storage_error_envelope; anything else degrades to INTERNAL_ERROR.
     try:
         min_level, fleet_id = await _resolve_read_fleet_gate(tenant_id, agent_id, scope, fleet_id)
@@ -2569,7 +2577,7 @@ async def memclaw_stats(
         if terr:
             return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
 
-        # scope='agent' filters to caller's own memories (mirrors memclaw_list);
+        # scope='agent' filters to caller's own memories (mirrors caura_list);
         # scope='fleet'/'all' drops the per-caller filter so cross-agent
         # aggregates surface — fleet_id (if supplied) still narrows the pool.
         effective_agent_id = agent_id if scope == "agent" else None
@@ -2599,12 +2607,12 @@ async def memclaw_stats(
                     home_tenant_id=tenant_id,
                     home_agent_id=agent_id,
                     source_tenants=source_tenants,
-                    surface="memclaw_stats",
+                    surface="caura_stats",
                     result_count_by_tenant=stats.get("by_tenant") or {},
                 )
             return _with_latency(json.dumps({**stats, "scope": scope}, default=str), t0)
         except Exception as e:
-            logger.exception("Unhandled error in memclaw_stats")
+            logger.exception("Unhandled error in caura_stats")
             return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
 
 
@@ -2613,7 +2621,7 @@ async def memclaw_stats(
 # ---------------------------------------------------------------------------
 
 
-async def memclaw_insights(
+async def caura_insights(
     focus: Annotated[
         str,
         Field(
@@ -2690,7 +2698,7 @@ async def memclaw_insights(
         async with _no_db():
             # Mirror the REST insights gate: ``require_trust`` soft-passes
             # a missing Agent row at ``DEFAULT_TRUST_LEVEL`` (read-only
-            # ergonomics — see ``memclaw_list`` below for the intended
+            # ergonomics — see ``caura_list`` below for the intended
             # consumer), but this handler persists insight memories +
             # audit-log rows keyed to ``agent_id``. Without a registered
             # row backing the name, attribution becomes unverifiable, so
@@ -2775,11 +2783,11 @@ async def memclaw_insights(
     except HTTPException as e:
         return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
     except Exception as e:
-        logger.exception("Unhandled error in memclaw_insights")
+        logger.exception("Unhandled error in caura_insights")
         return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
 
 
-async def memclaw_evolve(
+async def caura_evolve(
     outcome: Annotated[str, Field(description="Natural-language description of what happened.")],
     outcome_type: Annotated[str, Field(description="success|failure|partial.")],
     related_ids: Annotated[
@@ -2857,7 +2865,7 @@ async def memclaw_evolve(
         # ``check_and_increment`` ignore db and ``_filter_by_scope`` calls
         # core-storage-api. No pooled DB connection is held.
         async with _no_db():
-            # Mirror the REST evolve gate (and ``memclaw_insights`` above):
+            # Mirror the REST evolve gate (and ``caura_insights`` above):
             # block unregistered agents on the write path so the
             # outcome/rule memories + audit-log rows have a real
             # registered ``agent_id`` backing them.
@@ -2945,12 +2953,12 @@ async def memclaw_evolve(
     except HTTPException as e:
         return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
     except Exception as e:
-        logger.exception("Unhandled error in memclaw_evolve")
+        logger.exception("Unhandled error in caura_evolve")
         return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
 
 
 # ──────────────────────────────────────────────────────────────────────
-# memclaw_keystones / memclaw_keystones_set — CAURA-000
+# caura_keystones / caura_keystones_set — CAURA-000
 # ──────────────────────────────────────────────────────────────────────
 #
 # Keystones are mandatory governance rules. They live in core-storage
@@ -2974,7 +2982,7 @@ async def memclaw_evolve(
 #     a tenant-wide rule or impersonating another agent.
 
 
-async def memclaw_keystones(
+async def caura_keystones(
     agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
     fleet_id: Annotated[
         str | None,
@@ -3014,7 +3022,7 @@ async def memclaw_keystones(
     except httpx.HTTPStatusError as e:
         # storage_client raises this on non-2xx — surface the upstream
         # status + detail so a 4xx from storage doesn't surface as a 500.
-        # Mirrors the catch in ``memclaw_keystones_set`` and the
+        # Mirrors the catch in ``caura_keystones_set`` and the
         # ``_surface_storage_error`` helper in ``routes/keystones.py``.
         try:
             detail = e.response.json()
@@ -3025,7 +3033,7 @@ async def memclaw_keystones(
             t0,
         )
     except Exception as e:
-        logger.exception("Unhandled error in memclaw_keystones")
+        logger.exception("Unhandled error in caura_keystones")
         return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
     return _with_latency(
         json.dumps({"count": len(rows), "truncated": truncated, "rules": rows}, default=str),
@@ -3033,7 +3041,7 @@ async def memclaw_keystones(
     )
 
 
-async def memclaw_keystones_set(
+async def caura_keystones_set(
     op: Annotated[str, Field(description="set|delete.")],
     doc_id: Annotated[str, Field(description="Stable slug identifying the rule.")],
     title: Annotated[str | None, Field(description="op=set: human-readable title.")] = None,
@@ -3123,7 +3131,7 @@ async def memclaw_keystones_set(
         # The whole body sits inside the try so the catch-all also covers
         # ``_require_trust`` and the trust-error return paths — any of which can
         # raise errors that aren't ``HTTPStatusError`` or ``HTTPException``.
-        # Mirrors memclaw_keystones' fallback.
+        # Mirrors caura_keystones' fallback.
         try:
             sc = get_storage_client()
 
@@ -3236,7 +3244,7 @@ async def memclaw_keystones_set(
                     )
 
                 # Bump the tenant's write quota — matches every other MCP
-                # write handler (memclaw_write/doc/manage/evolve). OSS
+                # write handler (caura_write/doc/manage/evolve). OSS
                 # impl is a no-op; enterprise can wire real metering
                 # without touching this call site. Skipped for op=delete
                 # because deletes don't charge the write budget (mirrors
@@ -3387,7 +3395,7 @@ async def memclaw_keystones_set(
         except HTTPException as e:
             return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
         except Exception as e:
-            logger.exception("Unhandled error in memclaw_keystones_set")
+            logger.exception("Unhandled error in caura_keystones_set")
             return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
 
 
@@ -3408,11 +3416,11 @@ async def mcp_lifespan():
 
 
 # ── SoT registration ──────────────────────────────────────────────────────
-# Triggers loading of every `core_api.tools.memclaw_*.py` spec module. Each
+# Triggers loading of every `core_api.tools.caura_*.py` spec module. Each
 # spec module registers itself in the REGISTRY and calls `mcp_register(mcp, spec)`
 # to wire the handler to FastMCP. This import must run AFTER the 16 handler
 # functions above are defined — spec modules reference them via
-# `core_api.mcp_server.memclaw_X` attribute lookup.
+# `core_api.mcp_server.caura_X` attribute lookup.
 # The `noqa: E402,F401` silences "module-level import not at top" and
 # "imported but unused" — both are intentional.
 from core_api import tools  # noqa: F401

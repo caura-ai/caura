@@ -1,4 +1,4 @@
-"""ToolSpec for memclaw_recall — hybrid semantic+keyword search.
+"""ToolSpec for caura_recall — hybrid semantic+keyword search.
 
 Set ``include_brief=true`` to get an LLM-synthesized summary alongside
 raw results.
@@ -13,13 +13,13 @@ from ._types import ToolSpec
 _DESCRIPTION = (
     "Find memories by meaning (hybrid semantic+keyword). "
     "Set include_brief=true for an LLM summary paragraph. "
-    "For non-semantic browse use memclaw_list; for read-by-id use memclaw_manage op=read."
+    "For non-semantic browse use caura_list; for read-by-id use caura_manage op=read."
 )
 
 _SPEC = ToolSpec(
-    name="memclaw_recall",
+    name="caura_recall",
     description=_DESCRIPTION,
-    handler=mcp_server.memclaw_recall,
+    handler=mcp_server.caura_recall,
     plugin_exposed=True,
     trust_required=0,
 )

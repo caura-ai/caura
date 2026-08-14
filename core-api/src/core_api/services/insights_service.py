@@ -1094,7 +1094,7 @@ async def synthesize_insights(
 ) -> dict:
     """LLM-only analysis step. No DB access.
 
-    Audit finding P3: ``memclaw_insights`` previously held its
+    Audit finding P3: ``caura_insights`` previously held its
     ``_mcp_session()`` open across the multi-second ``_run_llm_analysis``
     round-trip, pinning a pooled DB connection. This helper takes the
     already-queried memories + resolved tenant config and produces the
@@ -1386,7 +1386,7 @@ async def generate_insights(
 
     # 3-5. LLM analysis (no DB). Delegated to ``synthesize_insights`` so
     # MCP callers that want to release their session before the LLM
-    # round-trip can do so independently (see ``memclaw_insights``).
+    # round-trip can do so independently (see ``caura_insights``).
     synth = await synthesize_insights(
         memories_or_clusters,
         is_clustered,

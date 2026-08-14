@@ -1,4 +1,4 @@
-"""ToolSpec for memclaw_manage — per-memory lifecycle (op-dispatched).
+"""ToolSpec for caura_manage — per-memory lifecycle (op-dispatched).
 
 Ops: read (by id), update, transition, delete. Per-op required params
 are documented in the description below.
@@ -18,9 +18,9 @@ _DESCRIPTION = (
 )
 
 _SPEC = ToolSpec(
-    name="memclaw_manage",
+    name="caura_manage",
     description=_DESCRIPTION,
-    handler=mcp_server.memclaw_manage,
+    handler=mcp_server.caura_manage,
     plugin_exposed=True,
     trust_required=0,
     ops=(

@@ -20,17 +20,17 @@
   },
   "contracts": {
     "tools": [
-      "memclaw_recall",
-      "memclaw_write",
-      "memclaw_manage",
-      "memclaw_doc",
-      "memclaw_list",
-      "memclaw_entity_get",
-      "memclaw_tune",
-      "memclaw_insights",
-      "memclaw_evolve",
-      "memclaw_stats",
-      "memclaw_keystones"
+      "caura_recall",
+      "caura_write",
+      "caura_manage",
+      "caura_doc",
+      "caura_list",
+      "caura_entity_get",
+      "caura_tune",
+      "caura_insights",
+      "caura_evolve",
+      "caura_stats",
+      "caura_keystones"
     ]
   }
 }

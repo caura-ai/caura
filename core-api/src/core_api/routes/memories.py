@@ -121,8 +121,8 @@ def _reject_reserved_memory_type(memory_type: str | None, *, index: int | None =
     slug = memory_type.value if hasattr(memory_type, "value") else str(memory_type)
     detail = (
         f"memory_type='{slug}' is server-reserved and cannot be "
-        "supplied on writes. Use memclaw_evolve for outcome/rule or "
-        "memclaw_insights for insight; for agent-authored reflections, "
+        "supplied on writes. Use caura_evolve for outcome/rule or "
+        "caura_insights for insight; for agent-authored reflections, "
         "use memory_type='fact' (or omit memory_type to auto-classify)."
     )
     if index is not None:

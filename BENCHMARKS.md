@@ -53,7 +53,7 @@ system is deployable inside a company:
 None of this moves a `recall@k` number; all of it moves whether you can deploy.
 MemClaw is built around these — scoped memory (agent / fleet / cross-fleet),
 per-agent trust tiers, keystone policies, PII quarantine before cross-fleet
-exposure, a full audit log, and the `memclaw_evolve` → `memclaw_insights`
+exposure, a full audit log, and the `caura_evolve` → `caura_insights`
 outcome-propagation loop. The field still needs a benchmark for the
 fleet-shaped problem; we're working toward one.
 

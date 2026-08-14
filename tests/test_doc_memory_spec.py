@@ -1,7 +1,7 @@
 """Unit tests for ``resolve_doc_memory`` — the doc -> memory derivation rule.
 
 Pure function, no I/O. This is the single source of truth shared by the MCP
-``memclaw_doc(op="write")`` handler and the REST ``POST /documents`` route, so
+``caura_doc(op="write")`` handler and the REST ``POST /documents`` route, so
 these tests pin the contract both surfaces depend on.
 
 Covers:

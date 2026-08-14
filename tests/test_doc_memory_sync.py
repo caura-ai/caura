@@ -209,7 +209,7 @@ async def test_mints_large_body_when_auto_chunk_off(patched):
 
 
 async def test_prefers_the_caller_agent_id(patched):
-    """Attribution is not cosmetic: ``memclaw_insights`` defaults to
+    """Attribution is not cosmetic: ``caura_insights`` defaults to
     ``scope="agent"`` and filters on ``agent_id``, so a service-attributed row
     is invisible to the real agent's default insights run."""
     await doc_memory.sync_doc_memory(
@@ -224,7 +224,7 @@ async def test_registers_the_caller_agent(patched):
     """REGRESSION (wet test, eyal-wet-tests): REST ``POST /documents`` has no
     ``enforce_fleet_write`` step, so without registering here the mint produced a
     memory attributed to an identity with no ``agents`` row — and
-    ``memclaw_insights`` then 403s with "Agent X is not registered", leaving the
+    ``caura_insights`` then 403s with "Agent X is not registered", leaving the
     minted memory unreachable by the default ``scope="agent"`` pass.
     """
     await doc_memory.sync_doc_memory(

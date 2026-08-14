@@ -1,4 +1,4 @@
-"""ToolSpec for memclaw_insights — Karpathy Loop reflection step.
+"""ToolSpec for caura_insights — Karpathy Loop reflection step.
 
 LLM-driven analysis over targeted memory subsets. Findings are persisted
 as ``insight``-typed memories so they compound across sessions.
@@ -21,9 +21,9 @@ _DESCRIPTION = (
 )
 
 _SPEC = ToolSpec(
-    name="memclaw_insights",
+    name="caura_insights",
     description=_DESCRIPTION,
-    handler=mcp_server.memclaw_insights,
+    handler=mcp_server.caura_insights,
     plugin_exposed=True,
     trust_required=1,
     impl_status="live",

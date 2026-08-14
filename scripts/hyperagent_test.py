@@ -2,7 +2,7 @@
 HyperAgent Search Benchmark — Per-agent search profile optimization.
 
 Seeds hundreds of memories, then systematically explores search profiles
-via memclaw_tune over MCP to find optimal retrieval configurations.
+via caura_tune over MCP to find optimal retrieval configurations.
 
 Usage:
     python scripts/hyperagent_test.py --universe acme --api-key mc_2026
@@ -131,11 +131,11 @@ class MCPClient:
                 return r.text
 
     def search(self, query: str, agent_id: str | None = None, **kwargs) -> list[dict]:
-        """Call memclaw_recall (without brief), return parsed memory list."""
+        """Call caura_recall (without brief), return parsed memory list."""
         args = {"query": query, **kwargs}
         if agent_id:
             args["agent_id"] = agent_id
-        text = self.call_tool("memclaw_recall", args)
+        text = self.call_tool("caura_recall", args)
         # Strip latency suffix if present
         text = re.sub(r'\n\n_latency_ms: \d+$', '', text)
         if text.startswith("No memories found"):
@@ -146,9 +146,9 @@ class MCPClient:
             return []
 
     def tune(self, agent_id: str, **profile) -> dict:
-        """Call memclaw_tune, return parsed response."""
+        """Call caura_tune, return parsed response."""
         args = {"agent_id": agent_id, **profile}
-        text = self.call_tool("memclaw_tune", args)
+        text = self.call_tool("caura_tune", args)
         text = re.sub(r'\n\n_latency_ms: \d+$', '', text)
         try:
             return json.loads(text)
@@ -156,9 +156,9 @@ class MCPClient:
             return {}
 
     def brief(self, query: str, **kwargs) -> dict:
-        """Call memclaw_recall with include_brief=True, return parsed response."""
+        """Call caura_recall with include_brief=True, return parsed response."""
         args = {"query": query, "include_brief": True, **kwargs}
-        text = self.call_tool("memclaw_recall", args)
+        text = self.call_tool("caura_recall", args)
         text = re.sub(r'\n\n_latency_ms: \d+$', '', text)
         try:
             return json.loads(text)

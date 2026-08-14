@@ -81,7 +81,7 @@ async def summarize_memories(
 ) -> dict:
     """LLM-only summarization step. No DB access.
 
-    Audit finding P3: ``memclaw_recall`` previously held the
+    Audit finding P3: ``caura_recall`` previously held the
     ``_mcp_session()`` open across the multi-second LLM round-trip,
     pinning a pooled DB connection. This helper takes already-fetched
     memories + the resolved tenant config and produces the same dict

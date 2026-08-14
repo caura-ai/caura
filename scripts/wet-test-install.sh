@@ -166,13 +166,13 @@ if [[ -f "$OPENCLAW_CONFIG" ]]; then
     // Keep in sync with MEMCLAW_TOOLS (plugin/src/tools.ts) — a missing
     // entry here means that tool is absent from tools.alsoAllow, so any
     // OpenClaw tools.profile (which grants core tools + alsoAllow only)
-    // strips it. memclaw_keystones was the casualty of this drift.
+    // strips it. caura_keystones was the casualty of this drift.
     if (!config.tools) config.tools = {};
     if (!Array.isArray(config.tools.alsoAllow)) config.tools.alsoAllow = [];
     const tools = [
-      'memclaw_recall','memclaw_write','memclaw_manage','memclaw_doc',
-      'memclaw_list','memclaw_entity_get','memclaw_tune','memclaw_insights',
-      'memclaw_evolve','memclaw_stats','memclaw_keystones'
+      'caura_recall','caura_write','caura_manage','caura_doc',
+      'caura_list','caura_entity_get','caura_tune','caura_insights',
+      'caura_evolve','caura_stats','caura_keystones'
     ];
     for (const t of tools) {
       if (!config.tools.alsoAllow.includes(t)) config.tools.alsoAllow.push(t);

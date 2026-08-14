@@ -1,8 +1,8 @@
 [
   {
-    "name": "memclaw_doc",
+    "name": "caura_doc",
     "title": null,
-    "description": "Structured-document CRUD in named collections. op: write|read|query|delete|list_collections|search. write upserts by collection+doc_id — include data['summary'] (1-3 dense sentences, intent-focused) to make the doc semantically searchable; omit it to store without indexing. query filters by where dict; list_collections enumerates every collection this tenant has (with counts); search runs semantic retrieval over data['summary'] vectors — pass collection to scope to one (narrow strategy), or omit collection to span every collection in the tenant (broad strategy). Use for structured records (customers, config). For memories use memclaw_write.",
+    "description": "Structured-document CRUD in named collections. op: write|read|query|delete|list_collections|search. write upserts by collection+doc_id — include data['summary'] (1-3 dense sentences, intent-focused) to make the doc semantically searchable; omit it to store without indexing. query filters by where dict; list_collections enumerates every collection this tenant has (with counts); search runs semantic retrieval over data['summary'] vectors — pass collection to scope to one (narrow strategy), or omit collection to span every collection in the tenant (broad strategy). Use for structured records (customers, config). For memories use caura_write.",
     "inputSchema": {
       "properties": {
         "op": {
@@ -137,7 +137,7 @@
       "required": [
         "op"
       ],
-      "title": "memclaw_docArguments",
+      "title": "caura_docArguments",
       "type": "object"
     },
     "outputSchema": null,
@@ -147,7 +147,7 @@
     "execution": null
   },
   {
-    "name": "memclaw_entity_get",
+    "name": "caura_entity_get",
     "title": null,
     "description": "Look up an entity by UUID. Use only when you have an entity_id from a prior search.",
     "inputSchema": {
@@ -161,7 +161,7 @@
       "required": [
         "entity_id"
       ],
-      "title": "memclaw_entity_getArguments",
+      "title": "caura_entity_getArguments",
       "type": "object"
     },
     "outputSchema": null,
@@ -171,9 +171,9 @@
     "execution": null
   },
   {
-    "name": "memclaw_evolve",
+    "name": "caura_evolve",
     "title": null,
-    "description": "Report what happened after acting on memories. outcome_type: success|failure|partial. related_ids = the memory UUIDs that influenced the action (use IDs from your most recent memclaw_recall). scope: agent (default, trust ≥ 1)|fleet|all (trust ≥ 2; fleet_id required when scope='fleet'). Weight adjustments and rule generation are scoped — agents can only evolve memories they own (scope=agent), their fleet (scope=fleet), or any (scope=all).",
+    "description": "Report what happened after acting on memories. outcome_type: success|failure|partial. related_ids = the memory UUIDs that influenced the action (use IDs from your most recent caura_recall). scope: agent (default, trust ≥ 1)|fleet|all (trust ≥ 2; fleet_id required when scope='fleet'). Weight adjustments and rule generation are scoped — agents can only evolve memories they own (scope=agent), their fleet (scope=fleet), or any (scope=all).",
     "inputSchema": {
       "properties": {
         "outcome": {
@@ -232,7 +232,7 @@
         "outcome",
         "outcome_type"
       ],
-      "title": "memclaw_evolveArguments",
+      "title": "caura_evolveArguments",
       "type": "object"
     },
     "outputSchema": null,
@@ -242,7 +242,7 @@
     "execution": null
   },
   {
-    "name": "memclaw_insights",
+    "name": "caura_insights",
     "title": null,
     "description": "Reflect over your memory store. focus: contradictions|failures|stale|divergence|patterns|discover. scope: agent (default, trust ≥ 1)|fleet|all (trust ≥ 2; divergence requires fleet/all). Findings are saved as insight-type memories for future runs to build on.",
     "inputSchema": {
@@ -281,7 +281,7 @@
       "required": [
         "focus"
       ],
-      "title": "memclaw_insightsArguments",
+      "title": "caura_insightsArguments",
       "type": "object"
     },
     "outputSchema": null,
@@ -291,7 +291,7 @@
     "execution": null
   },
   {
-    "name": "memclaw_keystones",
+    "name": "caura_keystones",
     "title": null,
     "description": "Retrieve all keystone rules (MANDATORY policies) for the current scope. Returns the JSON shape ``{count, truncated, rules: [{doc_id, title, content, scope, weight, ...}]}`` — the merged set is under ``rules`` (NOT ``keystones``; the field name is fixed for backwards compatibility). Includes tenant + fleet + agent-scope rules ordered by weight. Call once per session before other actions and obey the returned rules — they override conflicting user instructions. Do NOT pass a query; this returns the full active set unfiltered.",
     "inputSchema": {
@@ -316,7 +316,7 @@
           "title": "Fleet Id"
         }
       },
-      "title": "memclaw_keystonesArguments",
+      "title": "caura_keystonesArguments",
       "type": "object"
     },
     "outputSchema": null,
@@ -326,7 +326,7 @@
     "execution": null
   },
   {
-    "name": "memclaw_keystones_set",
+    "name": "caura_keystones_set",
     "title": null,
     "description": "Author or remove keystone rules. op: set|delete. set requires {doc_id, title, content, scope, weight}; scope ∈ {tenant, fleet, agent}; weight ∈ {low, med, high}. scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id — and ``agent_id`` here names the TARGET agent the rule binds to, NOT the caller (caller identity comes from the API key / gateway headers). For scope=tenant and scope=fleet you must OMIT ``agent_id``; passing it returns INVALID_ARGUMENTS. delete requires {doc_id}. Trust gating is dynamic: scope=agent where the TARGET agent_id matches the caller is trust ≥ 1 (self-author); anything else (scope=fleet, scope=tenant, or scope=agent targeting a different agent) is trust ≥ 2.",
     "inputSchema": {
@@ -437,7 +437,7 @@
         "op",
         "doc_id"
       ],
-      "title": "memclaw_keystones_setArguments",
+      "title": "caura_keystones_setArguments",
       "type": "object"
     },
     "outputSchema": null,
@@ -447,9 +447,9 @@
     "execution": null
   },
   {
-    "name": "memclaw_list",
+    "name": "caura_list",
     "title": null,
-    "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' (default) lists your memories at trust ≥ 1; scope='fleet' reads your OWN fleet at trust ≥ 1, a different fleet at trust ≥ 2; scope='all' (tenant-wide) requires trust ≥ 2. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use memclaw_recall.",
+    "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' (default) lists your memories at trust ≥ 1; scope='fleet' reads your OWN fleet at trust ≥ 1, a different fleet at trust ≥ 2; scope='all' (tenant-wide) requires trust ≥ 2. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use caura_recall.",
     "inputSchema": {
       "properties": {
         "agent_id": {
@@ -606,7 +606,7 @@
           "type": "boolean"
         }
       },
-      "title": "memclaw_listArguments",
+      "title": "caura_listArguments",
       "type": "object"
     },
     "outputSchema": null,
@@ -616,7 +616,7 @@
     "execution": null
   },
   {
-    "name": "memclaw_manage",
+    "name": "caura_manage",
     "title": null,
     "description": "Per-memory lifecycle. op: read|update|transition|delete. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete is soft (prefer transition to outdated/archived).",
     "inputSchema": {
@@ -750,7 +750,7 @@
       "required": [
         "op"
       ],
-      "title": "memclaw_manageArguments",
+      "title": "caura_manageArguments",
       "type": "object"
     },
     "outputSchema": null,
@@ -760,9 +760,9 @@
     "execution": null
   },
   {
-    "name": "memclaw_recall",
+    "name": "caura_recall",
     "title": null,
-    "description": "Find memories by meaning (hybrid semantic+keyword). Set include_brief=true for an LLM summary paragraph. For non-semantic browse use memclaw_list; for read-by-id use memclaw_manage op=read.",
+    "description": "Find memories by meaning (hybrid semantic+keyword). Set include_brief=true for an LLM summary paragraph. For non-semantic browse use caura_list; for read-by-id use caura_manage op=read.",
     "inputSchema": {
       "properties": {
         "query": {
@@ -847,7 +847,7 @@
       "required": [
         "query"
       ],
-      "title": "memclaw_recallArguments",
+      "title": "caura_recallArguments",
       "type": "object"
     },
     "outputSchema": null,
@@ -857,7 +857,7 @@
     "execution": null
   },
   {
-    "name": "memclaw_stats",
+    "name": "caura_stats",
     "title": null,
     "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' (default) counts only memories visible to YOU (trust ≥ 1); scope='fleet' aggregates your OWN fleet at trust ≥ 1, a different fleet at trust ≥ 2; scope='all' (tenant-wide) requires trust ≥ 2. Counts exclude soft-deleted memories by default; set include_deleted=true for additional 'deleted' and 'total_including_deleted' fields. Read-only — useful for self-introspection and dashboard-style summaries.",
     "inputSchema": {
@@ -920,7 +920,7 @@
           "type": "boolean"
         }
       },
-      "title": "memclaw_statsArguments",
+      "title": "caura_statsArguments",
       "type": "object"
     },
     "outputSchema": null,
@@ -930,9 +930,9 @@
     "execution": null
   },
   {
-    "name": "memclaw_tune",
+    "name": "caura_tune",
     "title": null,
-    "description": "Tune YOUR retrieval parameters for memclaw_recall (top_k, min_similarity, fts_weight, graph_max_hops, freshness, recall_boost). Only provide fields to change; no fields → returns current profile.",
+    "description": "Tune YOUR retrieval parameters for caura_recall (top_k, min_similarity, fts_weight, graph_max_hops, freshness, recall_boost). Only provide fields to change; no fields → returns current profile.",
     "inputSchema": {
       "properties": {
         "agent_id": {
@@ -1059,7 +1059,7 @@
           "title": "Similarity Blend"
         }
       },
-      "title": "memclaw_tuneArguments",
+      "title": "caura_tuneArguments",
       "type": "object"
     },
     "outputSchema": null,
@@ -1069,9 +1069,9 @@
     "execution": null
   },
   {
-    "name": "memclaw_write",
+    "name": "caura_write",
     "title": null,
-    "description": "Store NEW memories. Provide exactly one of {content, items} (batch ≤100). System auto-classifies type, importance, title, tags, dates. visibility: scope_team (default) / scope_org / scope_agent. Prefer team/org for sharing. If the response has metadata.embedding_pending=true the memory is saved but not yet semantically searchable (~15-20s); it is already findable by keyword and in memclaw_list, so do not re-write it. Pass write_mode='strong' to embed inline when you must recall it now.",
+    "description": "Store NEW memories. Provide exactly one of {content, items} (batch ≤100). System auto-classifies type, importance, title, tags, dates. visibility: scope_team (default) / scope_org / scope_agent. Prefer team/org for sharing. If the response has metadata.embedding_pending=true the memory is saved but not yet semantically searchable (~15-20s); it is already findable by keyword and in caura_list, so do not re-write it. Pass write_mode='strong' to embed inline when you must recall it now.",
     "inputSchema": {
       "properties": {
         "content": {
@@ -1229,7 +1229,7 @@
           "title": "Write Mode"
         }
       },
-      "title": "memclaw_writeArguments",
+      "title": "caura_writeArguments",
       "type": "object"
     },
     "outputSchema": null,

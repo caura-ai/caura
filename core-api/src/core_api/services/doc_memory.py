@@ -2,12 +2,12 @@
 
 Why this exists
 ---------------
-The two stores are not cross-searched: ``memclaw_recall`` never returns
+The two stores are not cross-searched: ``caura_recall`` never returns
 documents, and a document row embeds only ``data["summary"]`` — never its body.
 So a document's *content* is unreachable by meaning; you can only find it if you
 already know its ``collection`` + ``doc_id``. Minting a memory that carries the
 body verbatim closes that gap for the paths that read ``memories.content``
-directly (``memclaw_recall`` and the recall brief, neither of which truncates).
+directly (``caura_recall`` and the recall brief, neither of which truncates).
 
 Rewrite semantics come free from ``write_mode="fast"``
 -----------------------------------------------------
@@ -88,7 +88,7 @@ async def resolve_doc_memory_agent(
     """Identity to attribute the minted memory to, registered if new.
 
     Prefers the real document writer. Attribution is not cosmetic:
-    ``memclaw_insights`` defaults to ``scope="agent"``, which filters
+    ``caura_insights`` defaults to ``scope="agent"``, which filters
     ``Memory.agent_id == agent_id``, so a row attributed to the service identity
     is invisible to every real agent's default insights run.
 
@@ -99,7 +99,7 @@ async def resolve_doc_memory_agent(
     ``enforce_fleet_write`` before minting, which registers the caller on first
     contact — but REST ``POST /documents`` has no equivalent step. Returning the
     caller's id without registering it produced a memory attributed to an
-    identity with no ``agents`` row, which ``memclaw_insights`` then refuses to
+    identity with no ``agents`` row, which ``caura_insights`` then refuses to
     run for ("Agent X is not registered"), making the minted memory unreachable
     by the default ``scope="agent"`` pass. Found in the wet test on
     ``eyal-wet-tests``. ``get_or_create_agent`` is an idempotent upsert, so the

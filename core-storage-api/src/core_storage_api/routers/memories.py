@@ -1143,7 +1143,7 @@ async def admin_list(request: Request) -> list[dict]:
 
 @router.post("/list")
 async def list_by_filters(request: Request) -> list[dict]:
-    """Non-admin memory list WITH visibility scoping (MCP ``memclaw_list``).
+    """Non-admin memory list WITH visibility scoping (MCP ``caura_list``).
 
     Body: ``{tenant_id, caller_agent_id?, fleet_id?, written_by?, memory_type?,
     status?, run_id?, weight_min?, weight_max?, created_after?, created_before?,
@@ -1218,7 +1218,7 @@ async def list_by_filters(request: Request) -> list[dict]:
 
 @router.post("/stats-breakdown")
 async def stats_breakdown(request: Request) -> dict:
-    """Visibility-scoped stats breakdown (MCP ``memclaw_stats``).
+    """Visibility-scoped stats breakdown (MCP ``caura_stats``).
 
     Body: ``{tenant_id?, fleet_id?, agent_id?, memory_type?, status?,
     include_deleted?, readable_tenant_ids?}``. Returns ``{total, by_type,

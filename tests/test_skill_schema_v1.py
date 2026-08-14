@@ -8,9 +8,9 @@ SF-002 + SF-006.
 
 Maps to plan §15 Phase 0 acceptance criteria:
 
-  - ``memclaw_doc`` ``op=write`` against ``skills`` with
+  - ``caura_doc`` ``op=write`` against ``skills`` with
     ``description > 160 bytes`` returns 422
-  - ``memclaw_doc`` ``op=write`` against ``skills`` without
+  - ``caura_doc`` ``op=write`` against ``skills`` without
     ``name``/``slug``/``description``/``domain``/``kind``/``source``
     returns 422
   - ``kind='update'`` rejects on hash mismatch (409) and on missing

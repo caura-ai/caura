@@ -136,7 +136,7 @@ describe("isMemclawFullyConfigured — contextEngine slot is now required", () =
 
 describe("shouldRunAutoFix — allowlist drift gate", () => {
   // The original gate ran auto-fix once (guarded by .allowlist-applied),
-  // so a plugin upgrade that ADDED a tool (memclaw_keystones) never landed
+  // so a plugin upgrade that ADDED a tool (caura_keystones) never landed
   // it in tools.alsoAllow on existing installs — and a later OpenClaw
   // tools.profile then stripped it. The gate now also re-runs on drift.
   const clean = {

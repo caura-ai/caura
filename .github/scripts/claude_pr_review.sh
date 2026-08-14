@@ -89,7 +89,7 @@ recall_review_guidance() {
   local req
   req=$(jq -n --arg q "Code review standards, conventions, and known false-positive findings for ${REPO}, relevant to a pull request changing: ${files}" \
           --arg fleet "$fleet" \
-    '{jsonrpc:"2.0",method:"tools/call",id:1,params:{name:"memclaw_recall",arguments:{query:$q,agent_id:"caura-code-review",fleet_ids:[$fleet],top_k:10}}}') || return 0
+    '{jsonrpc:"2.0",method:"tools/call",id:1,params:{name:"caura_recall",arguments:{query:$q,agent_id:"caura-code-review",fleet_ids:[$fleet],top_k:10}}}') || return 0
   # -S so a failure (bad key, DNS, TLS) reaches the workflow log and warns — distinct from the
   # "no memories" no-op. Best-effort either way: the review proceeds without guidance.
   local resp

@@ -172,10 +172,10 @@ CHUNKING_THRESHOLD_CHARS = 2000  # content above this triggers auto-chunking
 MAX_QUERY_LENGTH = 5000
 
 # ── Doc-derived memories ──
-# ``memclaw_doc(op="write")`` mints a memory carrying the document body so the
+# ``caura_doc(op="write")`` mints a memory carrying the document body so the
 # body becomes reachable by MEANING (recall / recall-brief read
 # ``memories.content`` directly). Docs themselves are only searchable via their
-# ``data["summary"]`` embedding, and ``memclaw_recall`` never returns documents.
+# ``data["summary"]`` embedding, and ``caura_recall`` never returns documents.
 #
 # The memory content is the doc body VERBATIM, so the cutoff is simply the
 # memory schema ceiling: mint whenever the body fits in a memory at all.
@@ -203,7 +203,7 @@ assert DOC_MEMORY_MAX_CHARS <= MAX_CONTENT_LENGTH, (
 )
 
 # ── Tool surface bookkeeping ──
-# Tool descriptions live inline in `core_api/tools/memclaw_*.py` spec
+# Tool descriptions live inline in `core_api/tools/caura_*.py` spec
 # modules (the SoT). Nothing else should hold a copy.
 # STM tools were dropped in 6fea229; STM_ONLY_TOOLS constant removed.
 
@@ -658,7 +658,7 @@ INSIGHTS_FAILURES_WINDOW_DAYS = 90
 INSIGHTS_STALE_WINDOW_DAYS = 90
 INSIGHTS_FOCUS_MODES = ("contradictions", "failures", "stale", "divergence", "patterns", "discover")
 
-# Shared scope enum used by memclaw_list, memclaw_insights, memclaw_evolve and
+# Shared scope enum used by caura_list, caura_insights, caura_evolve and
 # their REST counterparts. Trust-level gating per scope lives in the individual
 # handlers (trust_service.require_trust); this tuple is the single source of
 # truth for "what values are accepted".

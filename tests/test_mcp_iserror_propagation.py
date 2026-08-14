@@ -26,10 +26,10 @@ pytestmark = pytest.mark.unit
 
 @pytest.mark.asyncio
 async def test_invalid_args_via_with_latency_sets_iserror(mcp_env):
-    """``memclaw_write`` with neither content nor items goes through
+    """``caura_write`` with neither content nor items goes through
     ``_with_latency(_error_response(...))``. The wrapper must promote
     the result to ``isError=True``."""
-    out = await mcp_server.memclaw_write()
+    out = await mcp_server.caura_write()
     assert is_error_envelope(out), f"expected isError=True, got {out!r}"
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INVALID_ARGUMENTS"
@@ -37,10 +37,10 @@ async def test_invalid_args_via_with_latency_sets_iserror(mcp_env):
 
 @pytest.mark.asyncio
 async def test_invalid_args_raw_return_sets_iserror(mcp_env):
-    """``memclaw_list`` with a bad scope returns the error via a
+    """``caura_list`` with a bad scope returns the error via a
     raw ``return _error_response(...)`` callsite (now wrapped through
     ``_with_latency`` for consistency)."""
-    out = await mcp_server.memclaw_list(scope="everywhere")
+    out = await mcp_server.caura_list(scope="everywhere")
     assert is_error_envelope(out)
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INVALID_ARGUMENTS"
@@ -48,9 +48,9 @@ async def test_invalid_args_raw_return_sets_iserror(mcp_env):
 
 @pytest.mark.asyncio
 async def test_invalid_memory_id_sets_iserror(mcp_env):
-    """``memclaw_manage`` with a malformed memory_id returns the
+    """``caura_manage`` with a malformed memory_id returns the
     INVALID_ARGUMENTS envelope through the raw-return path."""
-    out = await mcp_server.memclaw_manage(op="read", memory_id="not-a-uuid")
+    out = await mcp_server.caura_manage(op="read", memory_id="not-a-uuid")
     assert is_error_envelope(out)
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INVALID_ARGUMENTS"
@@ -90,7 +90,7 @@ async def test_success_path_unchanged(mcp_env, monkeypatch):
         return result
 
     mcp_env["db"].execute.return_value = _mock_result([])
-    out = await mcp_server.memclaw_list()
+    out = await mcp_server.caura_list()
     assert isinstance(out, str), f"success path must stay str, got {type(out).__name__}"
     payload = parse_envelope(out)
     assert "error" not in payload
@@ -106,9 +106,9 @@ async def test_success_path_unchanged(mcp_env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_b4_manage_update_no_fields_sets_iserror(mcp_env):
-    """``memclaw_manage(op='update')`` with no field args is the
+    """``caura_manage(op='update')`` with no field args is the
     ``"Error: No fields to update..."`` site."""
-    out = await mcp_server.memclaw_manage(
+    out = await mcp_server.caura_manage(
         op="update",
         memory_id="00000000-0000-0000-0000-000000000001",
     )
@@ -120,7 +120,7 @@ async def test_b4_manage_update_no_fields_sets_iserror(mcp_env):
 
 @pytest.mark.asyncio
 async def test_b4_doc_write_no_embedding_sets_iserror(mcp_env, monkeypatch):
-    """``memclaw_doc(op='write', ...)`` when the embedding provider returns
+    """``caura_doc(op='write', ...)`` when the embedding provider returns
     ``None`` is the ``"Error: embedding provider returned no vector ...
     Write aborted."`` site."""
     import common.embedding as _emb
@@ -129,7 +129,7 @@ async def test_b4_doc_write_no_embedding_sets_iserror(mcp_env, monkeypatch):
         return None
 
     monkeypatch.setattr(_emb, "get_embedding", _no_vector)
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write",
         collection="notes",
         doc_id="d1",
@@ -143,7 +143,7 @@ async def test_b4_doc_write_no_embedding_sets_iserror(mcp_env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_b4_doc_search_no_embedding_sets_iserror(mcp_env, monkeypatch):
-    """``memclaw_doc(op='search', ...)`` when the embedding provider returns
+    """``caura_doc(op='search', ...)`` when the embedding provider returns
     ``None`` is the ``"Error: embedding provider returned no vector ...
     Search aborted."`` site."""
     import common.embedding as _emb
@@ -152,7 +152,7 @@ async def test_b4_doc_search_no_embedding_sets_iserror(mcp_env, monkeypatch):
         return None
 
     monkeypatch.setattr(_emb, "get_embedding", _no_vector)
-    out = await mcp_server.memclaw_doc(op="search", query="anything")
+    out = await mcp_server.caura_doc(op="search", query="anything")
     assert is_error_envelope(out), f"expected isError=True, got {out!r}"
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "UPSTREAM_ERROR"
@@ -161,14 +161,14 @@ async def test_b4_doc_search_no_embedding_sets_iserror(mcp_env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_b4_insights_unregistered_agent_sets_iserror(mcp_env, monkeypatch):
-    """``memclaw_insights`` with ``_require_trust`` returning ``not_found=True``
+    """``caura_insights`` with ``_require_trust`` returning ``not_found=True``
     is one of the two ``"Error (403): Agent ... is not registered"`` sites."""
 
     async def _not_found(tenant_id, agent_id, min_level):
         return 0, True, None
 
     monkeypatch.setattr(mcp_server, "_require_trust", _not_found)
-    out = await mcp_server.memclaw_insights(focus="patterns", scope="agent")
+    out = await mcp_server.caura_insights(focus="patterns", scope="agent")
     assert is_error_envelope(out), f"expected isError=True, got {out!r}"
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "FORBIDDEN"
@@ -177,14 +177,14 @@ async def test_b4_insights_unregistered_agent_sets_iserror(mcp_env, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_b4_evolve_unregistered_agent_sets_iserror(mcp_env, monkeypatch):
-    """``memclaw_evolve`` with ``_require_trust`` returning ``not_found=True``
+    """``caura_evolve`` with ``_require_trust`` returning ``not_found=True``
     is the second ``"Error (403): Agent ... is not registered"`` site."""
 
     async def _not_found(tenant_id, agent_id, min_level):
         return 0, True, None
 
     monkeypatch.setattr(mcp_server, "_require_trust", _not_found)
-    out = await mcp_server.memclaw_evolve(
+    out = await mcp_server.caura_evolve(
         outcome="shipped a thing",
         outcome_type="success",
         scope="agent",

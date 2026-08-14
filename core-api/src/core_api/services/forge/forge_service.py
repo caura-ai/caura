@@ -576,7 +576,7 @@ async def _distill_cluster(
         )
         raise _PoisonedClusterSkip()
 
-    # Assemble the candidate doc ready for memclaw_doc upsert.
+    # Assemble the candidate doc ready for caura_doc upsert.
     now_iso = datetime.now(UTC).isoformat(timespec="seconds")
 
     # Forge writes go through the storage client directly (the worker is

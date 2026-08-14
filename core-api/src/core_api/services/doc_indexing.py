@@ -1,6 +1,6 @@
 """Doc-write derivation rules: what gets embedded, and what memory to mint.
 
-Single source of truth shared by the MCP ``memclaw_doc(op="write")``
+Single source of truth shared by the MCP ``caura_doc(op="write")``
 handler and the REST ``POST /documents`` route. Keeping the rules in
 one place prevents the two surfaces from drifting — they handle the
 resulting error in their own native style (JSON envelope vs.
@@ -20,7 +20,7 @@ Embed-source contract (``resolve_embed_source``):
 
 Doc-memory contract (``resolve_doc_memory``):
 - A doc write also mints a memory carrying the document body verbatim,
-  because the two stores are not cross-searched: ``memclaw_recall``
+  because the two stores are not cross-searched: ``caura_recall``
   never returns documents, and only ``data["summary"]`` is embedded on
   the document row. The minted memory is what makes the *body*
   reachable by meaning.
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 SKILLS_COLLECTION = "skills"
 
 # Field names checked, in order, for the document body. ``content`` is the
-# convention advertised in the ``memclaw_doc`` tool description ("The full body
+# convention advertised in the ``caura_doc`` tool description ("The full body
 # lives wherever the caller puts it (e.g. data['content'])"); ``body`` is
 # accepted as the obvious synonym.
 _BODY_FIELDS: tuple[str, ...] = ("content", "body")

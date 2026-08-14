@@ -179,17 +179,17 @@ class TestToolDescriptions:
     """Verify tool descriptions in the SoT registry reference visibility guidance."""
 
     def test_write_tool_mentions_visibility(self):
-        desc = get_spec("memclaw_write").description
+        desc = get_spec("caura_write").description
         assert "visibility" in desc.lower()
 
     def test_write_tool_encourages_sharing(self):
-        desc = get_spec("memclaw_write").description.lower()
+        desc = get_spec("caura_write").description.lower()
         assert "scope_team" in desc or "scope_org" in desc
 
     def test_recall_tool_mentions_fleet_filter(self):
-        # `memclaw_recall` advertises cross-fleet filtering via its parameter
+        # `caura_recall` advertises cross-fleet filtering via its parameter
         # list rather than prose.
-        spec = get_spec("memclaw_recall")
+        spec = get_spec("caura_recall")
         param_names = {p["name"] for p in __import__("core_api.tools", fromlist=["extract_param_descriptors"]).extract_param_descriptors(spec.handler)}
         assert "fleet_ids" in param_names
 

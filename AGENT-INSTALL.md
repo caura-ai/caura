@@ -193,22 +193,22 @@ Once connected via MCP or the OpenClaw plugin, you have these tools:
 
 | Tool | What it does |
 |---|---|
-| `memclaw_write` | Store a memory — send `content` (single) or `items` (batch ≤100). Everything else is auto-inferred |
-| `memclaw_recall` | Hybrid semantic + keyword search. Set `include_brief=true` for an LLM-summarized context paragraph |
-| `memclaw_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete` |
-| `memclaw_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2 |
-| `memclaw_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
-| `memclaw_entity_get` | Look up an entity with linked memories and relations |
-| `memclaw_tune` | Adjust per-agent search parameters (top_k, min_similarity, graph hops, blend weights) |
-| `memclaw_insights` | Analyze the store; focus: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. Persists findings as `insight` memories |
-| `memclaw_evolve` | Report a real-world outcome (success/failure/partial) against recalled memories — adjusts weights, auto-generates preventive rules (Karpathy Loop) |
-| `memclaw_stats` | Aggregate counts: total + breakdowns by `type`, `agent`, `status`. Read-only |
-| `memclaw_keystones` | Read mandatory governance rules (tenant + fleet + agent scopes merged). Call once per session and obey what it returns — keystones override conflicting user instructions |
-| `memclaw_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 for your own `scope=agent` rule; ≥ 2 for fleet/tenant scope or another agent |
+| `caura_write` | Store a memory — send `content` (single) or `items` (batch ≤100). Everything else is auto-inferred |
+| `caura_recall` | Hybrid semantic + keyword search. Set `include_brief=true` for an LLM-summarized context paragraph |
+| `caura_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete` |
+| `caura_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2 |
+| `caura_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
+| `caura_entity_get` | Look up an entity with linked memories and relations |
+| `caura_tune` | Adjust per-agent search parameters (top_k, min_similarity, graph hops, blend weights) |
+| `caura_insights` | Analyze the store; focus: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. Persists findings as `insight` memories |
+| `caura_evolve` | Report a real-world outcome (success/failure/partial) against recalled memories — adjusts weights, auto-generates preventive rules (Karpathy Loop) |
+| `caura_stats` | Aggregate counts: total + breakdowns by `type`, `agent`, `status`. Read-only |
+| `caura_keystones` | Read mandatory governance rules (tenant + fleet + agent scopes merged). Call once per session and obey what it returns — keystones override conflicting user instructions |
+| `caura_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 for your own `scope=agent` rule; ≥ 2 for fleet/tenant scope or another agent |
 
 MCP exposes all 12 tools; the OpenClaw plugin surfaces 11 — every tool except
-`memclaw_keystones_set` (the admin authoring path is not plugin-exposed). Skill sharing
-goes through `memclaw_doc` on the `skills` collection (`op=write` to share,
+`caura_keystones_set` (the admin authoring path is not plugin-exposed). Skill sharing
+goes through `caura_doc` on the `skills` collection (`op=write` to share,
 `op=delete` to remove, `op=search`/`op=query` to discover).
 
 ## Enable Real LLM Enrichment (optional)
@@ -229,7 +229,7 @@ Then restart the server (`docker compose restart app` or re-run uvicorn).
 
 - A local Caura server with full API + MCP
 - A single-tenant standalone setup (or admin-keyed multi-tenant, depending on which path you picked)
-- 12 tools ready to use (memory ops + document store + Karpathy Loop + stats + keystone governance; skill sharing rides on `memclaw_doc collection=skills`)
+- 12 tools ready to use (memory ops + document store + Karpathy Loop + stats + keystone governance; skill sharing rides on `caura_doc collection=skills`)
 - PostgreSQL with pgvector for semantic search
 - No external dependencies (fake providers, no API keys needed)
 - Full read/write access to your own memory store

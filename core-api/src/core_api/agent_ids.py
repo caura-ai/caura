@@ -36,7 +36,7 @@ INSIGHTER_TRUST_LEVEL = 3
 # via ``get_or_create_agent``.
 #
 # Prefer the real doc writer's agent_id whenever there is one. Attribution is not
-# cosmetic here: ``memclaw_insights`` defaults to ``scope="agent"``, which filters
+# cosmetic here: ``caura_insights`` defaults to ``scope="agent"``, which filters
 # ``Memory.agent_id == agent_id``, so rows attributed to this service identity are
 # invisible to every real agent's default insights run.
 DOC_INDEXER_AGENT_ID = "memclaw-doc-indexer"

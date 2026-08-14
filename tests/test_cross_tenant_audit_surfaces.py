@@ -6,10 +6,10 @@ Existing coverage (already shipped):
     ``rest_entity_get`` — see ``tests/test_entity_routes_cross_tenant.py``.
 
 This module covers the remaining surfaces:
-  - ``memclaw_recall``      (MCP)
-  - ``memclaw_doc`` search   (MCP)
-  - ``memclaw_list``         (MCP)
-  - ``memclaw_stats``        (MCP)
+  - ``caura_recall``      (MCP)
+  - ``caura_doc`` search   (MCP)
+  - ``caura_list``         (MCP)
+  - ``caura_stats``        (MCP)
   - ``rest_memories_list``   (REST)
   - ``rest_documents_search``(REST)
 
@@ -97,7 +97,7 @@ class _MemoryRow:
 
 def _memory_row_dict(tenant_id: str) -> dict:
     """Storage-client memory row (a dict) carrying the ``tenant_id`` the
-    cross-tenant audit count reads. Fix 2 Phase 4: ``memclaw_list`` consumes
+    cross-tenant audit count reads. Fix 2 Phase 4: ``caura_list`` consumes
     ``sc.list_memories_by_filters`` dict rows (``row.get("tenant_id")`` /
     ``_memory_to_out(dict)``), not ORM rows."""
     return {
@@ -144,10 +144,10 @@ def cross_tenant_mcp_env(mcp_env, monkeypatch):
     return spy
 
 
-# --- memclaw_recall ---------------------------------------------------------
+# --- caura_recall ---------------------------------------------------------
 
 
-async def test_memclaw_recall_emits_cross_tenant_audit(
+async def test_caura_recall_emits_cross_tenant_audit(
     cross_tenant_mcp_env, mcp_env, monkeypatch
 ):
     from core_api import mcp_server
@@ -167,23 +167,23 @@ async def test_memclaw_recall_emits_cross_tenant_audit(
     )
     stub_storage_client(monkeypatch, get_agent=None)
 
-    await mcp_server.memclaw_recall(query="cross-tenant probe", agent_id="a1")
+    await mcp_server.caura_recall(query="cross-tenant probe", agent_id="a1")
 
     cross_tenant_mcp_env.assert_awaited_once()
     kwargs = cross_tenant_mcp_env.await_args.kwargs
-    assert kwargs["surface"] == "memclaw_recall"
+    assert kwargs["surface"] == "caura_recall"
     assert kwargs["source_tenants"] == ["tenant-sibling"]
     assert kwargs["home_tenant_id"] == "tenant-home"
 
 
-# --- memclaw_list -----------------------------------------------------------
+# --- caura_list -----------------------------------------------------------
 
 
-async def test_memclaw_list_emits_cross_tenant_audit(
+async def test_caura_list_emits_cross_tenant_audit(
     cross_tenant_mcp_env, mcp_env, monkeypatch
 ):
-    """``memclaw_list`` widens via the same context-var path and
-    audits with ``surface=memclaw_list``."""
+    """``caura_list`` widens via the same context-var path and
+    audits with ``surface=caura_list``."""
     from core_api import mcp_server
 
     stub_storage_client(
@@ -201,23 +201,23 @@ async def test_memclaw_list_emits_cross_tenant_audit(
         mcp_server, "_require_trust", AsyncMock(return_value=(3, False, None))
     )
 
-    await mcp_server.memclaw_list(scope="fleet", agent_id="a1")
+    await mcp_server.caura_list(scope="fleet", agent_id="a1")
 
     cross_tenant_mcp_env.assert_awaited()
     kwargs = cross_tenant_mcp_env.await_args.kwargs
-    assert kwargs["surface"] == "memclaw_list"
+    assert kwargs["surface"] == "caura_list"
     assert "tenant-sibling" in kwargs["source_tenants"]
     counts = kwargs.get("result_count_by_tenant") or {}
     assert counts.get("tenant-sibling", 0) >= 1
 
 
-# --- memclaw_stats ---------------------------------------------------------
+# --- caura_stats ---------------------------------------------------------
 
 
-async def test_memclaw_stats_emits_cross_tenant_audit(
+async def test_caura_stats_emits_cross_tenant_audit(
     cross_tenant_mcp_env, mcp_env, monkeypatch
 ):
-    """``memclaw_stats`` with ``scope=fleet`` widens to readable_tenant_ids."""
+    """``caura_stats`` with ``scope=fleet`` widens to readable_tenant_ids."""
     from core_api import mcp_server
 
     monkeypatch.setattr(
@@ -240,22 +240,22 @@ async def test_memclaw_stats_emits_cross_tenant_audit(
         get_agent=None,
     )
 
-    await mcp_server.memclaw_stats(scope="fleet", agent_id="a1")
+    await mcp_server.caura_stats(scope="fleet", agent_id="a1")
 
     cross_tenant_mcp_env.assert_awaited()
     kwargs = cross_tenant_mcp_env.await_args.kwargs
-    assert kwargs["surface"] == "memclaw_stats"
+    assert kwargs["surface"] == "caura_stats"
     assert "tenant-sibling" in kwargs["source_tenants"]
 
 
-# --- memclaw_doc (search) ---------------------------------------------------
+# --- caura_doc (search) ---------------------------------------------------
 
 
-async def test_memclaw_doc_search_emits_cross_tenant_audit(
+async def test_caura_doc_search_emits_cross_tenant_audit(
     cross_tenant_mcp_env, mcp_env, monkeypatch
 ):
-    """``op=search`` on ``memclaw_doc`` widens via ``readable_tenant_ids``
-    and audits with ``surface=memclaw_doc_search``. The handler embeds
+    """``op=search`` on ``caura_doc`` widens via ``readable_tenant_ids``
+    and audits with ``surface=caura_doc_search``. The handler embeds
     the query, calls ``document_repo.search``, then emits."""
     from core_api import mcp_server
 
@@ -282,11 +282,11 @@ async def test_memclaw_doc_search_emits_cross_tenant_audit(
         AsyncMock(return_value=[0.1] * 8),
     )
 
-    await mcp_server.memclaw_doc(op="search", query="hello world", agent_id="a1")
+    await mcp_server.caura_doc(op="search", query="hello world", agent_id="a1")
 
     cross_tenant_mcp_env.assert_awaited()
     kwargs = cross_tenant_mcp_env.await_args.kwargs
-    assert kwargs["surface"] == "memclaw_doc_search"
+    assert kwargs["surface"] == "caura_doc_search"
     assert "tenant-sibling" in kwargs["source_tenants"]
 
 
@@ -356,7 +356,7 @@ async def test_rest_memories_list_emits_cross_tenant_audit(monkeypatch):
 
 
 async def test_rest_documents_search_emits_cross_tenant_audit(monkeypatch):
-    """The REST documents search endpoint mirrors ``memclaw_doc`` op=search
+    """The REST documents search endpoint mirrors ``caura_doc`` op=search
     on the cross-tenant audit emission, but with ``surface=rest_documents_search``."""
     from core_api.routes import documents as documents_routes
 

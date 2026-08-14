@@ -69,7 +69,7 @@ INTERNAL_ONLY_STATUSES: frozenset[str] = frozenset({"candidate"})
 
 # System-driven terminal / hold states. No HTTP caller — not Forge,
 # not admin, not a regular agent — may set these directly via
-# ``memclaw_doc``. The legitimate transitions to these states are:
+# ``caura_doc``. The legitimate transitions to these states are:
 #   - ``quarantined`` ← Sentinel scanner inside this validator
 #   - ``rejected``    ← HITL Inbox Reject action (Phase 2 dashboard)
 #   - ``stale``       ← hash-binding stale detection (Phase 4)
@@ -266,7 +266,7 @@ async def validate_and_normalize_skill_write(
             f"skills write: status={status!r} is system-managed and cannot be "
             "written directly. These transitions happen via Sentinel "
             "scan / Inbox Reject / hash-binding stale detection / "
-            "deprecation flow — not via memclaw_doc.",
+            "deprecation flow — not via caura_doc.",
         )
 
     # ── Adjustment 2: description cap ────────────────────────────

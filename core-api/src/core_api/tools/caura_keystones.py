@@ -1,9 +1,9 @@
-"""ToolSpec for memclaw_keystones — read mandatory governance rules.
+"""ToolSpec for caura_keystones — read mandatory governance rules.
 
 Keystones are policies an agent MUST obey. They live in core-storage's
 ``_keystones`` collection (PR1) and are fetched deterministically — no
 semantic search, no recall gating. This tool is the agent-facing read
-surface; authoring goes through ``memclaw_keystones_set`` (trust ≥ 2).
+surface; authoring goes through ``caura_keystones_set`` (trust ≥ 2).
 """
 
 from core_api import mcp_server
@@ -24,9 +24,9 @@ _DESCRIPTION = (
 )
 
 _SPEC = ToolSpec(
-    name="memclaw_keystones",
+    name="caura_keystones",
     description=_DESCRIPTION,
-    handler=mcp_server.memclaw_keystones,
+    handler=mcp_server.caura_keystones,
     plugin_exposed=True,
     trust_required=0,
     error_codes=("INTERNAL_ERROR",),

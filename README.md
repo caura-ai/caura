@@ -497,20 +497,20 @@ The client discovers 12 tools automatically:
 
 | Tool | Purpose |
 |---|---|
-| `memclaw_write` | Single or batch write (up to 100 items). LLM infers type, title, summary, tags, embedding |
-| `memclaw_recall` | Hybrid semantic + keyword recall with graph-enhanced retrieval; optional LLM brief |
-| `memclaw_manage` | Per-memory lifecycle: `read`, `update`, `transition`, `delete`, `bulk_delete`, `lineage` |
-| `memclaw_list` | Filter by type/status/agent/weight/date, sort, cursor-paginate |
-| `memclaw_doc` | Document CRUD: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
-| `memclaw_entity_get` | Look up an entity with linked memories and relations |
-| `memclaw_tune` | Tune per-agent retrieval parameters (top_k, min_similarity, graph_max_hops, etc.) |
-| `memclaw_insights` | Analyze the memory store across 6 focus modes. Findings persist as `insight` memories |
-| `memclaw_evolve` | Report outcomes against recalled memories — adjusts weights, generates rules (Karpathy Loop) |
-| `memclaw_stats` | Aggregate counts: total + breakdowns by type, agent, status. Read-only |
-| `memclaw_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
-| `memclaw_keystones_set` | Author or remove keystone rules (`op=set\|delete`). `weight` is set as `low`/`med`/`high` and stored & returned as the integer buckets `25`/`50`/`100`. Trust ≥ 1 for your own `scope=agent` rule; ≥ 2 for `scope=fleet`/`scope=tenant` or another agent |
+| `caura_write` | Single or batch write (up to 100 items). LLM infers type, title, summary, tags, embedding |
+| `caura_recall` | Hybrid semantic + keyword recall with graph-enhanced retrieval; optional LLM brief |
+| `caura_manage` | Per-memory lifecycle: `read`, `update`, `transition`, `delete`, `bulk_delete`, `lineage` |
+| `caura_list` | Filter by type/status/agent/weight/date, sort, cursor-paginate |
+| `caura_doc` | Document CRUD: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
+| `caura_entity_get` | Look up an entity with linked memories and relations |
+| `caura_tune` | Tune per-agent retrieval parameters (top_k, min_similarity, graph_max_hops, etc.) |
+| `caura_insights` | Analyze the memory store across 6 focus modes. Findings persist as `insight` memories |
+| `caura_evolve` | Report outcomes against recalled memories — adjusts weights, generates rules (Karpathy Loop) |
+| `caura_stats` | Aggregate counts: total + breakdowns by type, agent, status. Read-only |
+| `caura_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
+| `caura_keystones_set` | Author or remove keystone rules (`op=set\|delete`). `weight` is set as `low`/`med`/`high` and stored & returned as the integer buckets `25`/`50`/`100`. Trust ≥ 1 for your own `scope=agent` rule; ≥ 2 for `scope=fleet`/`scope=tenant` or another agent |
 
-> **Skill sharing** is now done via `memclaw_doc` — agents share a `SKILL.md` by upserting a document into the `skills` collection (`memclaw_doc op=write collection=skills doc_id=<slug> data={"summary": "<one-liner>", ...}`). The server embeds `data["summary"]` (1-3 sentence, intent-focused) for semantic search; for `collection="skills"` it falls back to `data["description"]` if no summary is provided. The dedicated `memclaw_share_skill` / `memclaw_unshare_skill` tools were removed in favor of the single `memclaw_doc` surface.
+> **Skill sharing** is now done via `caura_doc` — agents share a `SKILL.md` by upserting a document into the `skills` collection (`caura_doc op=write collection=skills doc_id=<slug> data={"summary": "<one-liner>", ...}`). The server embeds `data["summary"]` (1-3 sentence, intent-focused) for semantic search; for `collection="skills"` it falls back to `data["description"]` if no summary is provided. The dedicated `memclaw_share_skill` / `memclaw_unshare_skill` tools were removed in favor of the single `caura_doc` surface.
 
 ### Skill Factory
 
@@ -523,7 +523,7 @@ collection behaves exactly as described above (no lifecycle, every stored skill
 visible). Three pillars:
 
 - **Authoring — agents *and* Forge.** Agents author skills directly via
-  `memclaw_doc op=write collection=skills`. **Forge**, a server-side resident,
+  `caura_doc op=write collection=skills`. **Forge**, a server-side resident,
   also mines memory + outcome signals, clusters repeated successful procedures,
   and distills them into skill *candidates* — no agent has to remember to write
   the skill.
@@ -536,7 +536,7 @@ visible). Three pillars:
   `POST /api/v1/skills-inbox/{slug}/approve|edit|defer|quarantine|reject`
   acts on them. An agent write lands as `staged`, never instantly `active`.
 - **Delivery — pull and push.** Agents *pull* active skills over MCP
-  (`memclaw_doc op=search`/`op=read`), or the **OpenClaw plugin** *pushes* them:
+  (`caura_doc op=search`/`op=read`), or the **OpenClaw plugin** *pushes* them:
   its reconciler fetches every active skill from `POST /api/v1/skills/installable`
   and writes each to the node's skill directory, optionally registering that
   directory on OpenClaw's load path. Both tiers serve **active-only** once the
@@ -552,7 +552,7 @@ The full operator/developer guide lives in the
 
 ### The Interviewer
 
-`memclaw_write` captures what an agent *chose* to record. **The Interviewer**
+`caura_write` captures what an agent *chose* to record. **The Interviewer**
 captures what it *did*. On a schedule, it reads an agent's own **durable work
 trail** — the transcript or event log the harness already keeps — and asks an
 LLM to synthesize the activity into typed memories, so the decisions,
@@ -1084,9 +1084,9 @@ Typical results on a single-instance deployment (OpenAI embeddings + GPT-5.4 Nan
 
 | Operation | Mean | P50 | P95 |
 |---|---|---|---|
-| `memclaw_write` | ~2000ms | ~2000ms | ~2300ms |
-| `memclaw_recall` | ~650ms | ~640ms | ~670ms |
-| `memclaw_recall` (with `include_brief=true`) | ~1300ms | ~1200ms | ~2100ms |
+| `caura_write` | ~2000ms | ~2000ms | ~2300ms |
+| `caura_recall` | ~650ms | ~640ms | ~670ms |
+| `caura_recall` (with `include_brief=true`) | ~1300ms | ~1200ms | ~2100ms |
 
 Write latency is dominated by LLM enrichment. Recall latency by the embedding API call.
 
@@ -1110,20 +1110,20 @@ The MCP server is mounted at `/mcp`. Tool names, parameter names, and the docume
 
 | Tool | Purpose |
 |---|---|
-| `memclaw_recall` | Hybrid semantic + keyword search over memories, with optional LLM-summarised brief. |
-| `memclaw_write` | Single or batch (≤100) memory write; auto-enriched with type, title, summary, tags. |
-| `memclaw_manage` | Per-memory lifecycle, op-dispatched: `read` \| `update` \| `transition` \| `delete` \| `bulk_delete` \| `lineage`. |
-| `memclaw_list` | Non-semantic enumeration with filters, sort, cursor pagination. |
-| `memclaw_doc` | Structured-document CRUD, op-dispatched: `write` \| `read` \| `query` \| `delete` \| `list_collections` \| `search`. |
-| `memclaw_entity_get` | Look up a knowledge-graph entity by UUID. |
-| `memclaw_tune` | Read/update an agent's per-search profile (top_k, fts_weight, freshness, blend, …). |
-| `memclaw_insights` | Karpathy-Loop reflection: contradictions, failures, stale, divergence, patterns, discover. |
-| `memclaw_evolve` | Karpathy-Loop feedback: record an outcome (`success` \| `failure` \| `partial`) against memories. |
-| `memclaw_stats` | Aggregate counts: total + breakdowns by `type` / `agent` / `status`. Read-only. |
-| `memclaw_keystones` | Read mandatory governance rules for the current scope (tenant + fleet + agent merged). Call once per session. |
-| `memclaw_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 for self-authored `scope=agent`; ≥ 2 otherwise. |
+| `caura_recall` | Hybrid semantic + keyword search over memories, with optional LLM-summarised brief. |
+| `caura_write` | Single or batch (≤100) memory write; auto-enriched with type, title, summary, tags. |
+| `caura_manage` | Per-memory lifecycle, op-dispatched: `read` \| `update` \| `transition` \| `delete` \| `bulk_delete` \| `lineage`. |
+| `caura_list` | Non-semantic enumeration with filters, sort, cursor pagination. |
+| `caura_doc` | Structured-document CRUD, op-dispatched: `write` \| `read` \| `query` \| `delete` \| `list_collections` \| `search`. |
+| `caura_entity_get` | Look up a knowledge-graph entity by UUID. |
+| `caura_tune` | Read/update an agent's per-search profile (top_k, fts_weight, freshness, blend, …). |
+| `caura_insights` | Karpathy-Loop reflection: contradictions, failures, stale, divergence, patterns, discover. |
+| `caura_evolve` | Karpathy-Loop feedback: record an outcome (`success` \| `failure` \| `partial`) against memories. |
+| `caura_stats` | Aggregate counts: total + breakdowns by `type` / `agent` / `status`. Read-only. |
+| `caura_keystones` | Read mandatory governance rules for the current scope (tenant + fleet + agent merged). Call once per session. |
+| `caura_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 for self-authored `scope=agent`; ≥ 2 otherwise. |
 
-> Skill sharing uses the generic `memclaw_doc` surface — write/read/query/search/delete on `collection="skills"`. The server validates the slug and embeds `data["summary"]` for semantic discovery (with a back-compat fallback to `data["description"]` for skills).
+> Skill sharing uses the generic `caura_doc` surface — write/read/query/search/delete on `collection="skills"`. The server validates the slug and embeds `data["summary"]` for semantic discovery (with a back-compat fallback to `data["description"]` for skills).
 
 #### REST endpoints
 

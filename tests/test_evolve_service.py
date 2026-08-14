@@ -870,7 +870,7 @@ async def test_evolve_outcome_memory_visibility_matches_scope():
 
 
 class TestMCPHandlerTrustGating:
-    """memclaw_evolve handler must call _require_trust with scope-derived min_level."""
+    """caura_evolve handler must call _require_trust with scope-derived min_level."""
 
     @pytest.mark.asyncio
     async def test_scope_agent_requires_trust_1(self, monkeypatch, mcp_env):
@@ -904,7 +904,7 @@ class TestMCPHandlerTrustGating:
             AsyncMock(return_value={"outcome_id": "x"}),
         )
 
-        await mcp_server.memclaw_evolve(
+        await mcp_server.caura_evolve(
             outcome="ok",
             outcome_type="success",
             scope="agent",
@@ -932,7 +932,7 @@ class TestMCPHandlerTrustGating:
             AsyncMock(return_value={"outcome_id": "x"}),
         )
 
-        await mcp_server.memclaw_evolve(
+        await mcp_server.caura_evolve(
             outcome="ok",
             outcome_type="failure",
             scope="fleet",
@@ -961,7 +961,7 @@ class TestMCPHandlerTrustGating:
             AsyncMock(return_value={"outcome_id": "x"}),
         )
 
-        await mcp_server.memclaw_evolve(
+        await mcp_server.caura_evolve(
             outcome="ok",
             outcome_type="success",
             scope="all",
@@ -984,7 +984,7 @@ class TestMCPHandlerTrustGating:
         service_spy = AsyncMock(return_value={"outcome_id": "x"})
         monkeypatch.setattr(evolve_service, "report_outcome", service_spy)
 
-        out = await mcp_server.memclaw_evolve(
+        out = await mcp_server.caura_evolve(
             outcome="ok",
             outcome_type="failure",
             scope="all",
@@ -1000,7 +1000,7 @@ class TestMCPHandlerScopeValidation:
     async def test_invalid_scope_rejected(self, mcp_env):
         from core_api import mcp_server
 
-        out = await mcp_server.memclaw_evolve(
+        out = await mcp_server.caura_evolve(
             outcome="ok",
             outcome_type="success",
             scope="bogus",
@@ -1013,7 +1013,7 @@ class TestMCPHandlerScopeValidation:
     async def test_scope_fleet_without_fleet_id_rejected(self, mcp_env):
         from core_api import mcp_server
 
-        out = await mcp_server.memclaw_evolve(
+        out = await mcp_server.caura_evolve(
             outcome="ok",
             outcome_type="failure",
             scope="fleet",
@@ -1069,7 +1069,7 @@ class TestEvolveRequestValidation:
 async def test_evolve_rest_rejects_unknown_agent(client):
     """A previously-unseen ``body.agent_id`` from a tenant-key caller
     must 403 on the WRITE path. The trust soft-pass closes a usability
-    gap on read-only callers (memclaw_list, recall) but write paths
+    gap on read-only callers (caura_list, recall) but write paths
     persist memories + audit-log rows keyed to ``caller_agent_id``, so
     identity needs to be a real registered row before the audit trail
     can be trusted. Operators register agents by writing one memory
@@ -1205,7 +1205,7 @@ async def test_evolve_rest_translates_service_valueerror_to_422(monkeypatch, cli
 
 
 def test_mcp_session_helper_is_deleted():
-    """``memclaw_evolve`` was the final ``_mcp_session()`` consumer; once it
+    """``caura_evolve`` was the final ``_mcp_session()`` consumer; once it
     migrated to ``_no_db()`` the RLS-GUC session helper + its ``async_session``
     import were deleted. Guard against a reintroduction: the symbol must be
     gone from mcp_server, and the source must not redefine it."""

@@ -1,4 +1,4 @@
-"""ToolSpec for memclaw_evolve — Karpathy Loop feedback edge.
+"""ToolSpec for caura_evolve — Karpathy Loop feedback edge.
 
 Records a real-world outcome against the memories that influenced an
 action: adjusts weights, optionally generates preventive rules on
@@ -17,15 +17,15 @@ from ._types import ToolSpec
 _DESCRIPTION = (
     "Report what happened after acting on memories. outcome_type: success|failure|partial. "
     "related_ids = the memory UUIDs that influenced the action (use IDs from your most recent "
-    "memclaw_recall). scope: agent (default, trust ≥ 1)|fleet|all (trust ≥ 2; fleet_id required "
+    "caura_recall). scope: agent (default, trust ≥ 1)|fleet|all (trust ≥ 2; fleet_id required "
     "when scope='fleet'). Weight adjustments and rule generation are scoped — agents can only "
     "evolve memories they own (scope=agent), their fleet (scope=fleet), or any (scope=all)."
 )
 
 _SPEC = ToolSpec(
-    name="memclaw_evolve",
+    name="caura_evolve",
     description=_DESCRIPTION,
-    handler=mcp_server.memclaw_evolve,
+    handler=mcp_server.caura_evolve,
     plugin_exposed=True,
     trust_required=1,
     impl_status="live",

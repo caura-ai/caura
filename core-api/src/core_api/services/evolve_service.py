@@ -414,7 +414,7 @@ async def _generate_rule(
     Audit P3 (evolve): ``db`` was removed from this signature. The
     function only used it to resolve tenant config; callers now do
     that themselves and pass ``config`` in. This lets the MCP tool
-    (``memclaw_evolve``) close its DB session before invoking the
+    (``caura_evolve``) close its DB session before invoking the
     LLM round-trip — which can take multiple seconds and would
     otherwise pin a pooled connection.
 
@@ -738,7 +738,7 @@ async def report_outcome(
 
     # Resolve tenant config up front so ``_maybe_generate_rule`` can be
     # called without any DB dependency. Both REST (here) and MCP
-    # (``memclaw_evolve``) feed config in the same way.
+    # (``caura_evolve``) feed config in the same way.
     config = await resolve_config(tenant_id)
 
     # Phase 1: Generate rule BEFORE touching weights. The MCP tool

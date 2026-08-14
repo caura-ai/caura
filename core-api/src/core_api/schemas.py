@@ -606,7 +606,7 @@ class AgentTrustUpdate(BaseModel):
 
 
 # Derived from ``SEARCH_KNOBS`` rather than written out. The fields and their
-# bounds were hand-maintained here, in the MCP ``memclaw_tune`` signature and in
+# bounds were hand-maintained here, in the MCP ``caura_tune`` signature and in
 # the knob table, and they had already drifted: ``graph_max_hops`` was capped at 3
 # here while the table allowed 5, so a tenant-wide default could hold a depth no
 # agent profile could set (#730). One declaration removes the class of drift

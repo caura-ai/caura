@@ -45,7 +45,7 @@ router = APIRouter(tags=["Document Store"])
 SKILLS_COLLECTION = "skills"
 # Optional ``forge/`` or ``agent/`` prefix supports the Skill Factory's
 # doc_id namespacing (plan §3): Forge candidates land as ``forge/<slug>``
-# and synchronous agent-direct writes via ``memclaw_doc`` land as
+# and synchronous agent-direct writes via ``caura_doc`` land as
 # ``agent/<slug>``. Without this, Forge's own writes 422 themselves at
 # the route boundary. ``manual``/``imported`` rows keep the plain
 # ``<slug>`` shape — the prefix is opt-in, not required.
@@ -122,7 +122,7 @@ class InstallableSkillsRequest(BaseModel):
 class DocSearchRequest(BaseModel):
     """Vector search over indexed documents.
 
-    Mirrors MCP ``memclaw_doc op=search``: when ``collection`` is omitted,
+    Mirrors MCP ``caura_doc op=search``: when ``collection`` is omitted,
     search spans every collection in the tenant (broad strategy); when
     supplied, search is restricted to that collection (narrow strategy).
     Only documents written with a ``data["summary"]`` (i.e. with a
@@ -325,7 +325,7 @@ async def upsert_document(
         raise HTTPException(status_code=500, detail="Document upsert returned no rows")
     # Mint a memory carrying the document body so the BODY becomes reachable by
     # meaning (only data["summary"] is embedded on the doc row, and
-    # ``memclaw_recall`` never returns documents). Both upsert branches above
+    # ``caura_recall`` never returns documents). Both upsert branches above
     # converge here, so this one call covers indexed and unindexed writes.
     # Never raises: the doc is already committed and is the source of truth.
     try:
@@ -373,7 +373,7 @@ async def list_collections(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Enumerate document collections in the tenant. Mirror of MCP
-    ``memclaw_doc op=list_collections``. Returns one row per collection
+    ``caura_doc op=list_collections``. Returns one row per collection
     with the per-collection document count.
 
     Cross-tenant credentials see collections across every tenant in their
@@ -426,7 +426,7 @@ async def query_documents(
 
     Cross-tenant credentials may pass any tenant in their readable set
     as ``body.tenant_id`` (one-tenant-at-a-time scope; aggregate-across
-    widening lives on the direct-DB ``memclaw_doc`` MCP path).
+    widening lives on the direct-DB ``caura_doc`` MCP path).
     """
     auth.enforce_readable_tenant(body.tenant_id)
 
@@ -562,7 +562,7 @@ async def delete_document(
 
 # ── Vector search + collections enumeration ──
 #
-# These two endpoints mirror MCP ``memclaw_doc op=search`` and
+# These two endpoints mirror MCP ``caura_doc op=search`` and
 # ``op=list_collections``. Per the "all DB access via core-storage-api"
 # rule, they route through the storage-api HTTP hop (``sc.search_documents_vector`` /
 # ``sc.list_document_collections``). core-api still owns the embedding step
@@ -575,7 +575,7 @@ async def search_documents(
     body: DocSearchRequest,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Vector search over indexed documents. Mirror of MCP ``memclaw_doc op=search``.
+    """Vector search over indexed documents. Mirror of MCP ``caura_doc op=search``.
 
     Embeds ``body.query`` via the configured embedding provider, then ranks
     documents by cosine similarity. ``collection=None`` searches across all

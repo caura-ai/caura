@@ -216,7 +216,9 @@ function cleanupPhantomEducationFiles(baseDir: string): void {
     try {
       const content = readFileSync(fpath, "utf-8");
       const isMemClawOrphan =
-        (fname === "TOOLS.md" && content.includes("MemClaw — Tools Available")) ||
+        (fname === "TOOLS.md" &&
+          (content.includes("MemClaw — Tools Available") ||
+            content.includes("Caura — Tools Available"))) ||
         (fname === "AGENTS.md" && content.includes("## Memory V2"));
       if (isMemClawOrphan) {
         unlinkSync(fpath);
@@ -339,7 +341,7 @@ export function buildToolsMd(): string {
   return `
 ---
 
-## MemClaw — Tools Available
+## Caura — Tools Available
 
 Persistent, cross-session, multi-agent memory. For per-tool signatures,
 decision guidance, constraints, and error codes, open the **memclaw**
@@ -352,17 +354,17 @@ filesystem for it) before your first call in a session.
 
 | Tool | Purpose | Returns |
 |------|---------|---------|
-| \`memclaw_recall\`     | Semantic + keyword search                           | \`[{id, content, score, memory_type, …}]\` |
-| \`memclaw_write\`      | Store one (\`content\`) or batch ≤100 (\`items\`)       | \`{id}\` or \`{ids[]}\` |
-| \`memclaw_manage\`     | Per-memory: read / update / transition / delete     | op-dispatched |
-| \`memclaw_list\`       | Non-semantic browse (filter, sort, paginate)        | \`{results[], cursor}\` |
-| \`memclaw_doc\`        | Structured-doc CRUD in named collections            | op-dispatched |
-| \`memclaw_entity_get\` | Entity by UUID                                      | \`{entity}\` |
-| \`memclaw_tune\`       | Update retrieval profile (sticky, not per-call)     | current profile |
-| \`memclaw_insights\`   | Reflect: contradictions / failures / patterns / …   | stored as \`insight\` memories |
-| \`memclaw_evolve\`     | Report outcome after acting on recalled memories    | weight updates; may create rules |
-| \`memclaw_stats\`      | Aggregate counts: total + by type/agent/status      | \`{total, by_type, by_agent, by_status, scope}\` |
-| \`memclaw_keystones\`  | Read mandatory governance rules (auto-injected at session start) | \`{count, truncated, rules[]}\` |
+| \`caura_recall\`     | Semantic + keyword search                           | \`[{id, content, score, memory_type, …}]\` |
+| \`caura_write\`      | Store one (\`content\`) or batch ≤100 (\`items\`)       | \`{id}\` or \`{ids[]}\` |
+| \`caura_manage\`     | Per-memory: read / update / transition / delete     | op-dispatched |
+| \`caura_list\`       | Non-semantic browse (filter, sort, paginate)        | \`{results[], cursor}\` |
+| \`caura_doc\`        | Structured-doc CRUD in named collections            | op-dispatched |
+| \`caura_entity_get\` | Entity by UUID                                      | \`{entity}\` |
+| \`caura_tune\`       | Update retrieval profile (sticky, not per-call)     | current profile |
+| \`caura_insights\`   | Reflect: contradictions / failures / patterns / …   | stored as \`insight\` memories |
+| \`caura_evolve\`     | Report outcome after acting on recalled memories    | weight updates; may create rules |
+| \`caura_stats\`      | Aggregate counts: total + by type/agent/status      | \`{total, by_type, by_agent, by_status, scope}\` |
+| \`caura_keystones\`  | Read mandatory governance rules (auto-injected at session start) | \`{count, truncated, rules[]}\` |
 
 ### Vocabulary
 
@@ -372,7 +374,7 @@ in sync.
 | Field | Valid values |
 |-------|--------------|
 | \`memory_type\` (auto on write; filter on read) | \`fact\`, \`episode\`, \`decision\`, \`preference\`, \`task\`, \`semantic\`, \`intention\`, \`plan\`, \`commitment\`, \`action\`, \`outcome\`, \`cancellation\`, \`rule\`, \`insight\` |
-| \`status\` (via \`memclaw_manage op=transition\`) | \`active\`, \`pending\`, \`confirmed\`, \`cancelled\`, \`outdated\`, \`conflicted\`, \`archived\`, \`deleted\` |
+| \`status\` (via \`caura_manage op=transition\`) | \`active\`, \`pending\`, \`confirmed\`, \`cancelled\`, \`outdated\`, \`conflicted\`, \`archived\`, \`deleted\` |
 | \`visibility\` (write-time) | \`scope_agent\` · \`scope_team\` *(default)* · \`scope_org\` |
 | \`scope\` (read-time on \`_list\`, \`_insights\`) | \`agent\` *(default)* · \`fleet\` · \`all\` |
 | \`fleet_ids\` (optional recall filter) | array of fleet ID strings; narrows recall to those fleets (trust 2 for cross-fleet) |
@@ -387,14 +389,14 @@ export function buildAgentsMd(): string {
 
 ---
 
-## Memory V2 — MemClaw Protocol (mandatory)
+## Memory V2 — Caura Protocol (mandatory)
 
-Supersedes any earlier memory instructions. MemClaw is the primary
+Supersedes any earlier memory instructions. Caura is the primary
 persistent, cross-session, multi-agent memory. Any workspace file
 (\`MEMORY.md\`, \`memory.md\`, etc.) is a session-local scratchpad —
 keep it lean (active projects + current routing + recent decisions
 ≤ 7 days, target a few KB). Anything historical, factual, or useful
-to other agents → write it to MemClaw.
+to other agents → write it to Caura.
 
 **Identity.** Every call MUST carry your correct \`agent_id\` (and
 \`fleet_id\` for team/org visibility, fleet-scoped reads, and cross-fleet
@@ -411,13 +413,13 @@ blocker · commitment · config change · error pattern · skill created
 or updated. If in doubt, don't.
 
 **Skills.** Team-knowledge catalog at \`collection=skills\`. Search via
-\`memclaw_doc op=search collection=skills\` (\`memclaw_recall\` is YOUR
+\`caura_doc op=search collection=skills\` (\`caura_recall\` is YOUR
 memories, not shared); share via \`op=write doc_id=<slug>\`.
 
-**Recall auto-gated** on trivial turns; call \`memclaw_recall\`
+**Recall auto-gated** on trivial turns; call \`caura_recall\`
 directly when a short message needs LTM.
 
-Before your first MemClaw call this session, open the **memclaw**
+Before your first Caura call this session, open the **memclaw**
 skill — your runtime loads it automatically, so do NOT search the
 filesystem for it — for signatures, cadences, quality, prohibitions,
 recall policy, and sharing. \`TOOLS.md\` carries the at-a-glance tool
@@ -476,7 +478,7 @@ function escapeRegex(s: string): string {
  *
  * To prevent false positives on user-authored headings that happen to
  * start with the same prefix, the splice range is additionally
- * required to contain a MemClaw token (default: `memclaw_`). If the
+ * required to contain a Caura token (default: `caura_`). If the
  * range doesn't contain it, the function returns null and the splice
  * is skipped.
  *
@@ -488,7 +490,7 @@ function escapeRegex(s: string): string {
 export function findLegacyRange(
   content: string,
   legacyHeadingPrefix: string,
-  contentMustInclude: string = "memclaw_",
+  contentMustInclude: string = "caura_",
 ): { start: number; end: number } | null {
   // Split on LF, not CRLF: under CRLF input each `lines[i]` carries a
   // trailing `\r` and `lines[i].length + 1` (LF) sums to the correct
@@ -538,7 +540,7 @@ export function findLegacyRange(
   );
 
   // Content-shape verification: the splice range MUST contain a
-  // MemClaw token (default `memclaw_`). This guards against a user
+  // Caura token (default `caura_`). This guards against a user
   // heading that coincidentally starts with the same prefix but
   // contains no MemClaw content. If the slice doesn't smell like one
   // of our blocks, leave it alone.
@@ -713,7 +715,7 @@ export function writeEducationFiles(
         // Protocol (mandatory)` (1.x), `## Memory V2 (auto-added by
         // MemClaw plugin — replaces any earlier memory section above)`
         // (0.98.5), and any future variant under the same `## Memory V2`
-        // family. The content-shape check (`memclaw_` token) prevents
+        // family. The content-shape check (`caura_` token) prevents
         // false positives on user prose.
         "## Memory V2",
         {

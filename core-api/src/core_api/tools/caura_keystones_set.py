@@ -1,16 +1,16 @@
-"""ToolSpec for memclaw_keystones_set — author/remove governance rules.
+"""ToolSpec for caura_keystones_set — author/remove governance rules.
 
 Trust gating is tiered per the target rule's scope:
 
 * ``scope=agent`` AND ``agent_id == caller``: trust ≥ 1 (self-author).
 * ``scope=fleet`` / ``scope=tenant`` / cross-agent ``scope=agent``:
   trust ≥ 2 (the cross-agent governance bar used elsewhere for
-  ``memclaw_list/stats/evolve/insights`` with ``scope=fleet|all``).
+  ``caura_list/stats/evolve/insights`` with ``scope=fleet|all``).
 
 Declared ``trust_required=1`` is the minimum any successful call needs;
 the per-op floor is computed dynamically and enforced server-side
-(mirrors the ``memclaw_evolve`` / ``memclaw_list`` pattern of dynamic
-trust). Reads go through ``memclaw_keystones`` (open).
+(mirrors the ``caura_evolve`` / ``caura_list`` pattern of dynamic
+trust). Reads go through ``caura_keystones`` (open).
 
 Op-dispatched in one tool (set|delete) rather than two named tools so
 the write surface lives in a single, clearly admin-flavoured place.
@@ -38,9 +38,9 @@ _DESCRIPTION = (
 )
 
 _SPEC = ToolSpec(
-    name="memclaw_keystones_set",
+    name="caura_keystones_set",
     description=_DESCRIPTION,
-    handler=mcp_server.memclaw_keystones_set,
+    handler=mcp_server.caura_keystones_set,
     plugin_exposed=False,
     trust_required=1,
     ops=(

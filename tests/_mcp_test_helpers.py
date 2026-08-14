@@ -122,7 +122,7 @@ def mcp_env(monkeypatch):
 
         async def test_something(mcp_env):
             mcp_env["service"]("create_memory").return_value = ...
-            out = await mcp_server.memclaw_write(content="hello", ...)
+            out = await mcp_server.caura_write(content="hello", ...)
             assert ...
 
     The control object exposes:
@@ -147,7 +147,7 @@ def mcp_env(monkeypatch):
 
     monkeypatch.setattr(mcp_server, "_check_auth", lambda: None)
     monkeypatch.setattr(mcp_server, "_get_tenant", lambda: tenant)
-    # Fix 2 Ph5b (PR2): ``_mcp_session`` was deleted once ``memclaw_evolve`` —
+    # Fix 2 Ph5b (PR2): ``_mcp_session`` was deleted once ``caura_evolve`` —
     # its last consumer — migrated to ``_no_db()``. Every MCP handler now opens
     # ``_no_db()`` (yields None; storage-routed services carry tenant context
     # explicitly). Patch it with the MagicMock-yielding session so handlers that

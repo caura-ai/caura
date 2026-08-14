@@ -1034,7 +1034,7 @@ class CoreStorageClient:
         return (result or {}).get("deleted", 0)  # type: ignore[union-attr]
 
     async def list_memories_by_filters(self, data: dict) -> list[dict]:
-        """Non-admin memory list WITH visibility scoping (MCP ``memclaw_list``).
+        """Non-admin memory list WITH visibility scoping (MCP ``caura_list``).
 
         ``data`` carries the filter/sort/cursor params (incl. ``caller_agent_id``
         for the scope_agent visibility gate and an optional ``readable_tenant_ids``
@@ -1049,7 +1049,7 @@ class CoreStorageClient:
         return result  # type: ignore[return-value]
 
     async def memory_stats_breakdown(self, data: dict) -> dict:
-        """Visibility-scoped stats breakdown (MCP ``memclaw_stats``).
+        """Visibility-scoped stats breakdown (MCP ``caura_stats``).
 
         ``data`` carries ``{tenant_id?, fleet_id?, agent_id?, memory_type?,
         status?, include_deleted?, readable_tenant_ids?}``. Returns

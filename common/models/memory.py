@@ -145,7 +145,7 @@ class Memory(Base):
         Index("ix_memories_recall_count", "recall_count"),
         Index("ix_memories_tenant_fleet", "tenant_id", "fleet_id"),
         # Backs the cursor-paginated list path (``list_by_filters`` +
-        # the ``memclaw_list`` MCP tool) which orders by
+        # the ``caura_list`` MCP tool) which orders by
         # ``(created_at DESC, id DESC)`` under ``tenant_id = ?`` and
         # ``deleted_at IS NULL``. Partial WHERE keeps the index small
         # since soft-deleted rows are never read on the hot path.

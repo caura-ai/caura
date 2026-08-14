@@ -39,7 +39,7 @@ Single-agent benchmarks can't ask:
 - Is a memory written by the sales fleet visible — or correctly invisible — to an agent in support?
 - Does cross-tenant data ever leak when the recall query is ambiguous?
 
-These are the questions that decide whether a memory system is deployable inside a company. Caura was designed around them — scoped memory (agent / fleet / cross-fleet), per-agent trust tiers, PII quarantine before cross-fleet exposure, full audit log, the `memclaw_evolve` → `memclaw_insights` outcome-propagation loop. **None of this moves a recall@k number. All of it moves whether you can deploy.**
+These are the questions that decide whether a memory system is deployable inside a company. Caura was designed around them — scoped memory (agent / fleet / cross-fleet), per-agent trust tiers, PII quarantine before cross-fleet exposure, full audit log, the `caura_evolve` → `caura_insights` outcome-propagation loop. **None of this moves a recall@k number. All of it moves whether you can deploy.**
 
 The field needs a benchmark for the fleet-shaped problem. We're working toward one. If you're thinking about this too, the [Discord](https://discord.com/invite/aNfpgfpj) is open.
 
@@ -53,7 +53,7 @@ Caura differentiates on the dimensions a single-agent benchmark can't see:
 |---|---|
 | Scoped memory (agent / fleet / cross-fleet) | A write at the wrong scope is a data leak across teams |
 | Per-agent trust tiers | Lets you trust some agents more than others without rewriting the recall path |
-| Cross-agent outcome propagation (`memclaw_evolve` → `memclaw_insights`) | One agent's mistake becomes a preventive rule the rest of the fleet sees before repeating it |
+| Cross-agent outcome propagation (`caura_evolve` → `caura_insights`) | One agent's mistake becomes a preventive rule the rest of the fleet sees before repeating it |
 | Latency at fleet load | 23 ms p50 search × millions of calls/day stays affordable; 250 ms doesn't |
 | Token efficiency | 96–98% savings vs full context is the bill, not a microbenchmark curiosity |
 

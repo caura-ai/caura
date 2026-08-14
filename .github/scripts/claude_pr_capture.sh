@@ -254,7 +254,7 @@ while IFS= read -r NOTE; do
   # half em-dash), but jq accepts that byte sequence and exits 0 (verified too). A promise the
   # code cannot keep is worth closing whether or not today's jq is the thing that breaks it.
   REQ=$(jq -n --arg c "$CONTENT" --arg fleet "$CR_FLEET" \
-    '{jsonrpc:"2.0",method:"tools/call",id:1,params:{name:"memclaw_write",arguments:{content:$c,agent_id:"caura-code-review",fleet_id:$fleet,visibility:"scope_team"}}}') || {
+    '{jsonrpc:"2.0",method:"tools/call",id:1,params:{name:"caura_write",arguments:{content:$c,agent_id:"caura-code-review",fleet_id:$fleet,visibility:"scope_team"}}}') || {
     echo "::warning::could not build the write request for a note — skipping it"
     continue
   }
@@ -265,7 +265,7 @@ while IFS= read -r NOTE; do
   if printf '%s' "$RESP" | jq -e 'has("result") and (.error | not)' >/dev/null 2>&1; then
     SAVED=$((SAVED + 1))
   else
-    printf '::warning::memclaw_write rejected a note: %s\n' "${RESP:0:300}"
+    printf '::warning::caura_write rejected a note: %s\n' "${RESP:0:300}"
   fi
 done <<< "$NOTES"
 

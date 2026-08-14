@@ -1,4 +1,4 @@
-"""Evolve REST endpoints — mirrors memclaw_evolve MCP tool."""
+"""Evolve REST endpoints — mirrors caura_evolve MCP tool."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ class EvolveRequest(BaseModel):
     related_ids: list[str] | None = Field(
         default=None,
         description=(
-            "Memory UUIDs that influenced your action. Use IDs from your most recent memclaw_recall results."
+            "Memory UUIDs that influenced your action. Use IDs from your most recent caura_recall results."
         ),
     )
     scope: str = Field(

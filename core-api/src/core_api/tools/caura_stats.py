@@ -1,4 +1,4 @@
-"""ToolSpec for memclaw_stats — aggregate memory counts.
+"""ToolSpec for caura_stats — aggregate memory counts.
 
 Read-only aggregation: total plus breakdowns by type, agent, and status.
 Mirrors REST ``/memories/stats`` and shares its visibility-scoping logic
@@ -22,9 +22,9 @@ _DESCRIPTION = (
 )
 
 _SPEC = ToolSpec(
-    name="memclaw_stats",
+    name="caura_stats",
     description=_DESCRIPTION,
-    handler=mcp_server.memclaw_stats,
+    handler=mcp_server.caura_stats,
     plugin_exposed=True,
     trust_required=1,
 )

@@ -1,4 +1,4 @@
-"""Unit tests for ``memclaw_recall`` (replaces the prior search + brief).
+"""Unit tests for ``caura_recall`` (replaces the prior search + brief).
 
 Covers:
 - Happy path with results (no brief).
@@ -9,7 +9,7 @@ Covers:
 - ``HTTPException`` from the service → ``Error (…)`` envelope.
 - Auth failure short-circuits.
 
-Fix 2 Phase 4: ``memclaw_recall`` routes its DB access through the storage
+Fix 2 Phase 4: ``caura_recall`` routes its DB access through the storage
 client (``sc.get_agent`` replaces ``agent_repo.get_by_id``) and resolves
 ``resolve_config`` / ``summarize_memories`` via top-level imports bound on the
 ``mcp_server`` module, so tests patch those names on ``mcp_server`` and stub the
@@ -56,7 +56,7 @@ async def test_recall_happy_path(mcp_env, monkeypatch):
 
     _wire_recall_deps(monkeypatch)
 
-    out = await mcp_server.memclaw_recall(query="what do I know about onboarding?")
+    out = await mcp_server.caura_recall(query="what do I know about onboarding?")
     payload = parse_envelope(out)
     assert "results" in payload
     assert len(payload["results"]) == 2
@@ -77,7 +77,7 @@ async def test_recall_with_include_brief(mcp_env, monkeypatch):
     monkeypatch.setattr(mcp_server, "summarize_memories", brief_mock)
     _wire_recall_deps(monkeypatch)
 
-    out = await mcp_server.memclaw_recall(query="status?", include_brief=True)
+    out = await mcp_server.caura_recall(query="status?", include_brief=True)
     payload = parse_envelope(out)
     assert "brief" in payload
     assert payload["brief"]["summary"].startswith("alice")
@@ -87,19 +87,19 @@ async def test_recall_empty_results(mcp_env, monkeypatch):
     mcp_env["service"]("search_memories").return_value = []
     _wire_recall_deps(monkeypatch)
 
-    out = await mcp_server.memclaw_recall(query="nothing matches")
+    out = await mcp_server.caura_recall(query="nothing matches")
     payload = parse_envelope(out)
     assert payload["results"] == []
 
 
 async def test_recall_invalid_memory_type_returns_422(mcp_env):
-    out = await mcp_server.memclaw_recall(query="x", memory_type="garbage")
+    out = await mcp_server.caura_recall(query="x", memory_type="garbage")
     assert "INVALID_ARGUMENTS" in as_text(out)
     assert "Invalid memory_type 'garbage'" in as_text(out)
 
 
 async def test_recall_invalid_status_returns_422(mcp_env):
-    out = await mcp_server.memclaw_recall(query="x", status="badstatus")
+    out = await mcp_server.caura_recall(query="x", status="badstatus")
     assert "INVALID_ARGUMENTS" in as_text(out)
     assert "Invalid status 'badstatus'" in as_text(out)
 
@@ -112,7 +112,7 @@ async def test_recall_top_k_is_capped(mcp_env, monkeypatch):
     search_mock.return_value = []
     _wire_recall_deps(monkeypatch)
 
-    out = await mcp_server.memclaw_recall(query="x", top_k=1000)
+    out = await mcp_server.caura_recall(query="x", top_k=1000)
     kwargs = search_mock.await_args.kwargs
     assert kwargs["top_k"] == MAX_SEARCH_TOP_K
 
@@ -131,7 +131,7 @@ async def test_recall_http_exception_becomes_error_envelope(mcp_env, monkeypatch
     )
     _wire_recall_deps(monkeypatch)
 
-    out = await mcp_server.memclaw_recall(query="x")
+    out = await mcp_server.caura_recall(query="x")
     assert "RATE_LIMITED" in as_text(out)
     assert "rate limited" in as_text(out)
 
@@ -140,7 +140,7 @@ async def test_recall_auth_failure_shortcircuits(monkeypatch):
     """Auth failure skips the handler body entirely."""
     monkeypatch.setattr(mcp_server, "_check_auth", lambda: mcp_server._AUTH_ERROR)
 
-    out = await mcp_server.memclaw_recall(query="x")
+    out = await mcp_server.caura_recall(query="x")
     assert out == mcp_server._AUTH_ERROR
 
 
@@ -170,7 +170,7 @@ async def test_recall_brief_runs_after_search_no_db_held(mcp_env, monkeypatch):
     assert not hasattr(mcp_server, "_mcp_session")
     _wire_recall_deps(monkeypatch)
 
-    await mcp_server.memclaw_recall(query="x", include_brief=True)
+    await mcp_server.caura_recall(query="x", include_brief=True)
 
     assert search_returned_at["t"] is not None, "search never ran"
     assert brief_started_at["t"] is not None, "brief never ran"
@@ -192,7 +192,7 @@ async def test_recall_brief_skipped_when_include_brief_false(mcp_env, monkeypatc
     monkeypatch.setattr(mcp_server, "summarize_memories", _spy)
     _wire_recall_deps(monkeypatch)
 
-    out = await mcp_server.memclaw_recall(query="x")
+    out = await mcp_server.caura_recall(query="x")
     payload = parse_envelope(out)
     assert calls == []
     assert "brief" not in payload
