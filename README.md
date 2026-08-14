@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="static/images/memCLAW_logo_dark.png" alt="Caura" width="420" />
-</p>
+<h1 align="center">Caura &mdash; Shared governed memory for AI agents</h1>
 
 <h3 align="center">Fleet memory for AI agents &mdash; governed, shared, self-improving.</h3>
 
