@@ -2,11 +2,11 @@
  * Official TypeScript/JavaScript client for MemClaw — governed shared memory
  * for AI agent fleets. A thin wrapper over the MemClaw REST API.
  *
- * Point it at a managed (`https://memclaw.net`) or self-hosted
+ * Point it at a managed (`https://caura.ai`) or self-hosted
  * (`http://localhost:8000`) deployment.
  */
 
-export const DEFAULT_BASE_URL = "https://memclaw.net";
+export const DEFAULT_BASE_URL = "https://caura.ai";
 
 export class MemClawError extends Error {}
 

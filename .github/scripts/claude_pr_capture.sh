@@ -30,7 +30,7 @@
 #   GH_TOKEN          token with issues:read and pull-requests:read
 # Optional env:
 #   MEMCLAW_AGENTS_KEY   internal-agents tenant key (empty => dark no-op)
-#   MEMCLAW_API_URL      default https://memclaw.net
+#   MEMCLAW_API_URL      default https://caura.ai
 #   CODE_REVIEW_FLEET_ID default code-review
 #   MODEL                default claude-sonnet-5
 #   MAX_BUDGET_USD       per-invocation ceiling (default 2.00)

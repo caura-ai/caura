@@ -41,7 +41,7 @@ Method:
   on entity extraction).
 
 Usage:
-    export MEMCLAW_API_URL=https://memclaw.net
+    export MEMCLAW_API_URL=https://caura.ai
     export MEMCLAW_API_KEY=mc_...
     export MEMCLAW_TENANT_ID=ran-test
     python scripts/repro_contradictions_race.py

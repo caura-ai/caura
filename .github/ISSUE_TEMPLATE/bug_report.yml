@@ -24,7 +24,7 @@ body:
       options:
         - Self-hosted (Docker Compose)
         - Self-hosted (manual / uvicorn)
-        - Managed platform (memclaw.net)
+        - Managed platform (caura.ai)
         - Other (please describe in Additional Context)
     validations:
       required: true

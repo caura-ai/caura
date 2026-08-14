@@ -12,7 +12,7 @@ Operator-grade companion to the public benchmarks write-up. The blog answers *"i
 
 LoCoMo and LongMemEval are the two most-cited public agent-memory benchmarks. Both measure one agent, one user, one long conversation — the single-chatbot shape. Accuracy across the leading systems (Caura, Mem0, Zep) clusters in a narrow band.
 
-**Source:** [Fast, Token-Efficient, and Built for Fleets](https://memclaw.net/blog/memclaw-benchmarks) (2026-04-19).
+**Source:** [Fast, Token-Efficient, and Built for Fleets](https://caura.ai/blog/memclaw-benchmarks) (2026-04-19).
 
 **Last updated:** 2026-04-19. These numbers move when we re-run; check the blog for the current canonical version.
 
@@ -69,5 +69,5 @@ For the results table, the methodology, and step-by-step reproduction against th
 
 ## Sources
 
-- **Blog write-up:** [Fast, Token-Efficient, and Built for Fleets](https://memclaw.net/blog/memclaw-benchmarks) (2026-04-19)
+- **Blog write-up:** [Fast, Token-Efficient, and Built for Fleets](https://caura.ai/blog/memclaw-benchmarks) (2026-04-19)
 - **Public benchmarks:** [LoCoMo](https://arxiv.org/abs/2402.17753), [LongMemEval](https://arxiv.org/abs/2410.10813)

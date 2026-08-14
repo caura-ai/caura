@@ -1,7 +1,7 @@
 """Synchronous MemClaw client.
 
 A thin wrapper over the MemClaw REST API. Point it at a managed
-(``https://memclaw.net``) or self-hosted (``http://localhost:8000``) deployment.
+(``https://caura.ai``) or self-hosted (``http://localhost:8000``) deployment.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import httpx
 from .exceptions import AuthError, MemClawAPIError, NotFoundError
 from .models import Memory, RecallResult
 
-DEFAULT_BASE_URL = "https://memclaw.net"
+DEFAULT_BASE_URL = "https://caura.ai"
 
 
 class MemClaw:

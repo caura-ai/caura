@@ -162,6 +162,6 @@ in the README.
 
 ## Sources
 
-- **Blog write-up (canonical, current):** [Fast, Token-Efficient, and Built for Fleets](https://memclaw.net/blog/memclaw-benchmarks) (2026-04-19)
+- **Blog write-up (canonical, current):** [Fast, Token-Efficient, and Built for Fleets](https://caura.ai/blog/memclaw-benchmarks) (2026-04-19)
 - **Operator companion:** [`docs/performance.md`](docs/performance.md)
 - **Public benchmarks:** [LoCoMo](https://arxiv.org/abs/2402.17753) · [LongMemEval](https://arxiv.org/abs/2410.10813)

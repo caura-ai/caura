@@ -686,8 +686,8 @@ def _derive_api_url_from_request(request: Request) -> str:
     When the endpoint sits behind a proxy (nginx, Cloud Run, etc.) the
     reverse proxy forwards the original scheme and host via
     ``X-Forwarded-Proto`` and ``X-Forwarded-Host``. We prefer those — that
-    way a ``curl https://memclaw.net/api/v1/install-skill | bash`` yields a
-    script that keeps fetching from ``https://memclaw.net``, not from the
+    way a ``curl https://caura.ai/api/v1/install-skill | bash`` yields a
+    script that keeps fetching from ``https://caura.ai``, not from the
     internal ``http://127.0.0.1:8000`` the upstream service sees.
     """
     scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
@@ -797,7 +797,7 @@ async def install_skill_script(
         description=(
             "Override the server URL the script will install from. Auto-derived "
             "from the request Host (and X-Forwarded-Proto) when omitted — so "
-            "``curl https://memclaw.net/api/v1/install-skill | bash`` just works."
+            "``curl https://caura.ai/api/v1/install-skill | bash`` just works."
         ),
     ),
 ):

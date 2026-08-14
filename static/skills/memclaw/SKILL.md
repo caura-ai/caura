@@ -339,7 +339,7 @@ parameter list.
 ---
 
 *Install on a Claude Code / Codex runtime with
-`curl -s "https://memclaw.net/api/v1/install-skill?agent=both" | bash`, or copy
+`curl -s "https://caura.ai/api/v1/install-skill?agent=both" | bash`, or copy
 this file to `~/.claude/skills/memclaw/SKILL.md` (Claude Code) or
 `~/.agents/skills/memclaw/SKILL.md` (Codex). Per-workspace override: place a copy
 under `.claude/skills/memclaw/` or `.agents/skills/memclaw/`. OpenClaw fleets use
