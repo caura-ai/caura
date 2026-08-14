@@ -98,7 +98,7 @@ Get up and running in minutes — no infrastructure, automatic updates, usage an
 ```json
 {
   "mcpServers": {
-    "memclaw": {
+    "caura": {
       "url": "https://memclaw.net/mcp",
       "headers": { "X-API-Key": "mc_your_api_key_here" }
     }
@@ -459,7 +459,7 @@ Add Caura to any MCP client with one config block.
 ```json
 {
   "mcpServers": {
-    "memclaw": {
+    "caura": {
       "url": "http://localhost:8000/mcp",
       "headers": { "X-API-Key": "standalone" }
     }
@@ -472,7 +472,7 @@ Add Caura to any MCP client with one config block.
 ```json
 {
   "mcpServers": {
-    "memclaw": {
+    "caura": {
       "url": "https://memclaw.net/mcp",
       "headers": { "X-API-Key": "mc_your_api_key_here" }
     }
@@ -485,7 +485,7 @@ Add Caura to any MCP client with one config block.
 **Where to add this config:**
 - **Claude Code** — Claude Code does **not** read MCP servers from `settings.json`. Register the server with `claude mcp add` instead. Use `-s user` so it's available in **every** working directory — the default scope (`local`) only registers it for the current directory, which bites when you run agents from multiple folders:
   ```bash
-  claude mcp add --transport http -s user memclaw http://localhost:8000/mcp --header "X-API-Key: standalone"
+  claude mcp add --transport http -s user caura http://localhost:8000/mcp --header "X-API-Key: standalone"
   ```
   (Or commit the JSON block above to a project-root `.mcp.json` for a project-scoped server.)
 - **Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows)
@@ -623,7 +623,7 @@ Install Caura's usage guide as a **skill** so your agent knows *when* and
 anti-patterns. The skill is loaded on-demand (not per-turn), so it costs
 nothing until the agent reaches for Caura.
 
-> **Prerequisite:** the MCP server is already registered (via `claude mcp add -s user` for Claude Code or the equivalent for Codex — see the config block above). Confirm with `claude mcp list` — you should see `memclaw: ... ✓ Connected`.
+> **Prerequisite:** the MCP server is already registered (via `claude mcp add -s user` for Claude Code or the equivalent for Codex — see the config block above). Confirm with `claude mcp list` — you should see `caura: ... ✓ Connected`.
 
 #### Option A — one-liner (fastest)
 
