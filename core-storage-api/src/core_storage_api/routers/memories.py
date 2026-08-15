@@ -763,11 +763,21 @@ async def get_embedding_coverage(
     and made coverage read high on any tenant with more missing rows than
     that.
     """
-    missing = await _svc.memory_count_missing_embeddings(tenant_id, fleet_id)
-    total = await _svc.memory_count_active(tenant_id, fleet_id)
+    # One statement for all four counts, mirroring /embedding-coverage-all.
+    # Separate queries would not only cost extra round trips on a route ops
+    # tooling polls — they cannot see a consistent snapshot, so a concurrent
+    # write could leave the buckets failing to add up to the total they are
+    # reported against.
+    #
+    # The provenance counts are reported here as well as in the cross-tenant
+    # view: omitting them would make this route read as "no stale rows" for a
+    # tenant the aggregate flags, and absence is indistinguishable from zero.
+    total, missing, stale, unknown = await _svc.memory_embedding_coverage_for_tenant(tenant_id, fleet_id)
     return {
         "total_active": total,
         "missing_embeddings": missing,
+        "stale_embeddings": stale,
+        "unknown_provenance": unknown,
         "coverage_pct": round((total - missing) / total * 100, 1) if total > 0 else 0.0,
     }
 
@@ -790,6 +800,14 @@ async def get_embedding_coverage_all() -> dict:
         "total_active": sum(r["total_active"] for r in rows),
         "missing_embeddings": sum(r["missing_embeddings"] for r in rows),
         "tenants_with_missing": sum(1 for r in rows if r["missing_embeddings"]),
+        # Vectors computed from text the row no longer holds. Reported
+        # separately from ``missing`` because the repair differs: a missing
+        # vector is swept automatically, a stale one is invisible to that
+        # sweep and needs a re-embed of the row as it stands now.
+        "stale_embeddings": sum(r["stale_embeddings"] for r in rows),
+        "tenants_with_stale": sum(1 for r in rows if r["stale_embeddings"]),
+        # Embedded before provenance was recorded — undetermined, not damaged.
+        "unknown_provenance": sum(r["unknown_provenance"] for r in rows),
     }
 
 
@@ -1726,6 +1744,11 @@ async def update_embedding(memory_id: UUID, request: Request) -> dict:
         tenant_id=tenant_id,
         embedding=body["embedding"],
         metadata=body.get("metadata"),
+        # Optional: the hash of the text the caller actually embedded. Absent
+        # leaves provenance NULL ("unknown"), which is honest — the service
+        # deliberately does not infer it from the row, since the row may have
+        # moved on while the caller was embedding.
+        embedded_content_hash=body.get("embedded_content_hash"),
     )
     if not updated:
         # No row for this (id, tenant) — surface 404 rather than a silent

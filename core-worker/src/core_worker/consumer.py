@@ -179,6 +179,13 @@ async def handle_embed_request(event: Event) -> None:
             memory_id=request.memory_id,
             tenant_id=request.tenant_id,
             embedding=embedding,
+            # Provenance: the hash of the text this vector describes. Correct on
+            # both branches above — a fresh embed encodes ``request.content``,
+            # and a cache hit reuses a vector found BY this same hash, so either
+            # way the vector belongs to content hashing to this value. None when
+            # the publisher omitted it, which honestly records "unknown" rather
+            # than guessing.
+            embedded_content_hash=request.content_hash,
         )
 
     # Back-channel: announce successful embed so core-api can fire

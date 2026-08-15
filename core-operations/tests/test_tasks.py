@@ -307,7 +307,9 @@ async def test_embedding_coverage_tick_caps_per_tenant_lines_and_says_so(monkeyp
     truncated = _records(caplog, "embedding coverage per-tenant lines truncated")
     assert len(truncated) == 1
     assert truncated[0].reported == tasks._COVERAGE_TENANT_LOG_CAP
-    assert truncated[0].tenants_with_missing == over
+    # ``tenants_affected`` counts BOTH defects — a tenant whose rows are all
+    # embedded but stale is just as worth a line as one missing embeddings.
+    assert truncated[0].tenants_affected == over
 
     # The deployment-wide total is never truncated.
     assert _records(caplog, "embedding coverage total")[0].missing_embeddings == over
@@ -346,3 +348,49 @@ async def test_embedding_coverage_tick_swallows_non_json(monkeypatch, caplog):
 
     assert _records(caplog, "embedding coverage total") == []
     assert len(_records(caplog, "embedding-coverage returned non-JSON; will retry next tick")) == 1
+
+
+@pytest.mark.asyncio
+async def test_embedding_coverage_tick_reports_stale_separately(monkeypatch, caplog):
+    """Stale must not be folded into missing.
+
+    The nightly sweep repairs ``missing`` and CANNOT repair ``stale`` (the
+    column is non-NULL, so the sweep never sees the row). Collapsing them
+    would make a rising stale count look like something already being fixed.
+    """
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    body = {
+        "tenants": [
+            {
+                "tenant_id": "t-stale",
+                "total_active": 100,
+                "missing_embeddings": 0,
+                "stale_embeddings": 7,
+                "unknown_provenance": 3,
+                "coverage_pct": 100.0,
+            }
+        ],
+        "total_active": 100,
+        "missing_embeddings": 0,
+        "tenants_with_missing": 0,
+        "stale_embeddings": 7,
+        "tenants_with_stale": 1,
+        "unknown_provenance": 3,
+    }
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)):
+        await tasks.run_embedding_coverage_tick()
+
+    total = _records(caplog, "embedding coverage total")[0]
+    assert total.missing_embeddings == 0
+    assert total.stale_embeddings == 7
+    assert total.unknown_provenance == 3
+
+    # The tenant has ZERO missing but 7 stale — it must still get a line.
+    # Filtering on missing alone would hide exactly the case this release
+    # exists to surface.
+    per_tenant = _records(caplog, "embedding coverage tenant")
+    assert [r.tenant_id for r in per_tenant] == ["t-stale"]
+    assert per_tenant[0].stale_embeddings == 7

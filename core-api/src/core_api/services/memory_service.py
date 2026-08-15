@@ -2041,7 +2041,16 @@ async def _reembed_memory(
                 )
             )
             return
-        await sc.update_embedding(str(memory_id), tenant_id, embedding)
+        # Record WHICH text this vector came from. ``content`` is the string
+        # just embedded above, so hashing it here — rather than letting
+        # storage read the row's current hash — keeps the record accurate
+        # even if a content PATCH landed while we were embedding.
+        await sc.update_embedding(
+            str(memory_id),
+            tenant_id,
+            embedding,
+            embedded_content_hash=_content_hash(tenant_id, mem.get("fleet_id"), content),
+        )
         logger.info("Background re-embed succeeded for memory %s", memory_id)
     except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
         logger.exception("Background re-embed error for memory %s", memory_id)
@@ -2235,7 +2244,14 @@ async def _reembed_memories_bulk(
             )
             continue
         try:
-            await sc.update_embedding(str(memory_id), tenant_id, embedding)
+            # Same provenance stamp as the single-row path above: hash the
+            # text we embedded, not whatever the row says now.
+            await sc.update_embedding(
+                str(memory_id),
+                tenant_id,
+                embedding,
+                embedded_content_hash=_content_hash(tenant_id, mem.get("fleet_id"), content),
+            )
         except Exception:
             # Broad match for the same reason as the outer batch-call
             # except: httpx-layer errors, pool exhaustion, auth, etc.

@@ -807,14 +807,22 @@ class CoreStorageClient:
         memory_id: str,
         tenant_id: str,
         embedding: list[float],
+        embedded_content_hash: str | None = None,
     ) -> dict | None:
         # ``tenant_id`` (the row's home tenant) scopes the by-id embedding
         # write so a worker/backfill can't overwrite a foreign tenant's
         # vector.
-        return await self._patch(
-            f"/memories/{memory_id}/embedding",
-            {"embedding": embedding, "tenant_id": tenant_id},
-        )
+        #
+        # ``embedded_content_hash`` is the hash of the text this caller
+        # embedded. Pass it whenever the content is in hand: it is what makes
+        # a later content change detectable as a stale vector. Omitting it
+        # records provenance as unknown rather than guessing — storage will
+        # NOT infer it from the row, because the row can move between the
+        # caller's read and this write.
+        payload: dict[str, Any] = {"embedding": embedding, "tenant_id": tenant_id}
+        if embedded_content_hash is not None:
+            payload["embedded_content_hash"] = embedded_content_hash
+        return await self._patch(f"/memories/{memory_id}/embedding", payload)
 
     async def update_memory_entities(
         self,

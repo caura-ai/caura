@@ -114,3 +114,169 @@ async def test_admin_route_returns_totals(client):
     }
     assert body["total_active"] >= 0
     assert body["missing_embeddings"] >= 0
+
+
+# ---------------------------------------------------------------------------
+# Stale detection — a vector computed from text the row no longer holds
+# ---------------------------------------------------------------------------
+
+
+async def _coverage_for(tenant_id: str) -> dict:
+    agg = await get_storage_client().get_embedding_coverage_all()
+    return next((r for r in agg["tenants"] if r["tenant_id"] == tenant_id), {})
+
+
+async def test_content_change_without_reembed_is_detected_as_stale(client):
+    """The failure the NULL-sweep can never see.
+
+    Rewriting ``content`` (+ ``content_hash``) while leaving ``embedding``
+    untouched is exactly what ``update_memory`` used to do on a failed
+    re-embed. The row stays non-NULL, so no sweep finds it; only comparing
+    the vector's provenance against the current content reveals it.
+    """
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fleet_id, agent_id = f"stale-fleet-{tag}", f"stale-agent-{tag}"
+
+    memory_id = await _write(
+        client, tenant_id, headers, fleet_id, agent_id, f"original text {tag}"
+    )
+
+    before = await _coverage_for(tenant_id)
+    stale_before = before.get("stale_embeddings", 0)
+
+    # Move the content WITHOUT touching the embedding — the vector now
+    # describes text the row no longer holds.
+    sc = get_storage_client()
+    updated = await sc.update_memory(
+        memory_id,
+        tenant_id,
+        {
+            "content": f"REPLACED text {tag}",
+            "content_hash": f"hash-of-replaced-{tag}",
+        },
+    )
+    assert updated is not None
+
+    after = await _coverage_for(tenant_id)
+    assert after["stale_embeddings"] == stale_before + 1, after
+    # It is NOT missing — that is the whole point. A NULL-based sweep is blind
+    # to this row.
+    assert after["missing_embeddings"] == before.get("missing_embeddings", 0), after
+
+
+async def test_normal_write_records_provenance_and_is_not_stale(client):
+    """A row embedded at write time must not be reported as stale or unknown."""
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fleet_id, agent_id = f"fresh-fleet-{tag}", f"fresh-agent-{tag}"
+
+    before = await _coverage_for(tenant_id)
+    await _write(client, tenant_id, headers, fleet_id, agent_id, f"fresh text {tag}")
+    after = await _coverage_for(tenant_id)
+
+    # The new row adds to the total but to neither defect bucket, and it does
+    # NOT land in unknown_provenance — the insert stamped the hash.
+    assert after["total_active"] == before.get("total_active", 0) + 1, after
+    assert after["stale_embeddings"] == before.get("stale_embeddings", 0), after
+    assert after["unknown_provenance"] == before.get("unknown_provenance", 0), after
+
+
+async def test_null_content_hash_row_is_not_lost_from_every_bucket(client):
+    """A row with known provenance but NULL ``content_hash`` must still land
+    somewhere.
+
+    ``content_hash`` is nullable. Comparing with ``!=`` compiles to ``<>``,
+    which yields NULL against a NULL and is dropped by ``COUNT(*) FILTER`` — so
+    such a row was counted in ``total_active`` and in NO defect bucket: not
+    stale (NULL comparison), not unknown (its provenance IS known), not missing
+    (it has a vector). Silently unaccounted for by the detector itself.
+    """
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fleet_id, agent_id = f"nullhash-fleet-{tag}", f"nullhash-agent-{tag}"
+
+    memory_id = await _write(
+        client, tenant_id, headers, fleet_id, agent_id, f"content {tag}"
+    )
+
+    # Clear content_hash while leaving the embedding and its provenance intact.
+    sc = get_storage_client()
+    assert (
+        await sc.update_memory(memory_id, tenant_id, {"content_hash": None}) is not None
+    )
+
+    cov = await sc.get_embedding_coverage(tenant_id, fleet_id)
+    buckets = (
+        cov["missing_embeddings"] + cov["stale_embeddings"] + cov["unknown_provenance"]
+    )
+    assert cov["total_active"] == 1, cov
+    # The row must be accounted for — it is stale (its vector describes content
+    # whose hash no longer matches), not invisible.
+    assert cov["stale_embeddings"] == 1, cov
+    assert buckets == 1, cov
+
+
+async def test_per_tenant_and_aggregate_report_the_same_fields(client):
+    """Both coverage views must expose the same provenance keys.
+
+    If the per-tenant view omits them, a caller comparing it against the
+    aggregate reads absence as zero and concludes a flagged tenant is clean.
+    """
+    tenant_id, _ = get_test_auth()
+    sc = get_storage_client()
+    per_tenant = await sc.get_embedding_coverage(tenant_id)
+    aggregate_row = await _coverage_for(tenant_id)
+
+    provenance_keys = {"missing_embeddings", "stale_embeddings", "unknown_provenance"}
+    assert provenance_keys <= set(per_tenant), per_tenant
+    assert provenance_keys <= set(aggregate_row), aggregate_row
+    # And they must AGREE for the same tenant, not merely both be present.
+    for key in provenance_keys:
+        assert per_tenant[key] == aggregate_row[key], (key, per_tenant, aggregate_row)
+
+
+async def test_explicit_provenance_wins_over_derivation_on_update(client):
+    """A caller-supplied ``embedded_content_hash`` must survive a patch that
+    also carries ``content`` + ``content_hash``.
+
+    The insert path documents "explicit caller value wins"; the update path must
+    agree. Overriding the caller here would stamp the row's NEW hash onto a
+    vector the caller told us came from OLD text — marking a genuinely stale
+    write as freshly embedded, the exact inversion this column exists to catch.
+
+    Latent today (core-worker sends provenance without ``content_hash``), so
+    this test is what stops a future caller silently losing its stamp.
+    """
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fleet_id, agent_id = f"explicit-fleet-{tag}", f"explicit-agent-{tag}"
+
+    memory_id = await _write(
+        client, tenant_id, headers, fleet_id, agent_id, f"orig {tag}"
+    )
+    sc = get_storage_client()
+
+    # All FOUR keys at once. ``embedding`` is required to reach the derivation
+    # branch at all — without it the block never fires and the assertion below
+    # would hold either way, which is no test.
+    from common.constants import VECTOR_DIM
+
+    assert (
+        await sc.update_memory(
+            memory_id,
+            tenant_id,
+            {
+                "content": f"new text {tag}",
+                "content_hash": f"hash-new-{tag}",
+                "embedding": [0.25] * VECTOR_DIM,
+                "embedded_content_hash": f"hash-OLD-{tag}",
+            },
+        )
+        is not None
+    )
+
+    # The explicit stamp survived, so the row reads as stale — not silently
+    # "refreshed" by the derivation.
+    cov = await sc.get_embedding_coverage(tenant_id, fleet_id)
+    assert cov["stale_embeddings"] == 1, cov

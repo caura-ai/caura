@@ -664,7 +664,7 @@ class TestMigrationChain:
     def test_single_head(self):
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"036"}, f"Expected single head '036', got {sorted(heads)}"
+        assert heads == {"037"}, f"Expected single head '037', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -698,6 +698,9 @@ class TestMigrationChain:
         assert chain.get("035") == "034", "035 must follow 034"
         # 036: unified contradiction model (A55) — conflict/derivation tables + columns
         assert chain.get("036") == "035", "036 must follow 035"
+        # 037: memories.embedded_content_hash — embedding provenance, so a
+        # vector computed from superseded text becomes detectable
+        assert chain.get("037") == "036", "037 must follow 036"
 
     def test_no_plain_create_index_on_large_tables(self):
         """Indexes on large, pre-existing tables MUST be built ``CONCURRENTLY``
@@ -732,6 +735,11 @@ class TestMigrationChain:
             r"(?:IF\s+NOT\s+EXISTS\s+)?\w+\s+ON\s+(\w+)",
             re.IGNORECASE,
         )
+        # op.create_index("<name>", "<table>", ...) — the Alembic API form.
+        api_pat = re.compile(
+            r"op\.create_index\(\s*[\"'][^\"']+[\"']\s*,\s*[\"'](\w+)[\"']",
+            re.DOTALL,
+        )
         versions = pathlib.Path(
             "core-storage-api/src/core_storage_api/database/migrations/versions"
         )
@@ -744,9 +752,23 @@ class TestMigrationChain:
                 or int(prefix) in applied_debt
             ):
                 continue
-            for concurrently, table in pat.findall(f.read_text()):
+            src = f.read_text()
+            for concurrently, table in pat.findall(src):
                 if table.lower() in large_tables and not concurrently:
                     violations.append(f"{f.name}: plain CREATE INDEX on '{table}'")
+            # ``op.create_index(...)`` is the SAME hazard via Alembic's API
+            # rather than raw SQL: it emits a plain, in-transaction CREATE
+            # INDEX. The raw-SQL regex above cannot see it, so migration 037
+            # originally shipped a plain index build on ``memories`` and this
+            # guard passed. Alembic has no CONCURRENTLY option on
+            # ``create_index``, so on a large table the API form is always
+            # wrong — flag every occurrence.
+            for table in api_pat.findall(src):
+                if table.lower() in large_tables:
+                    violations.append(
+                        f"{f.name}: op.create_index() on '{table}' "
+                        "(no CONCURRENTLY option — use op.execute in an autocommit_block)"
+                    )
         assert not violations, (
             "Plain (non-CONCURRENTLY) CREATE INDEX on a large table blocks writes "
             "and holds the migration advisory lock for the whole build (crashed "
@@ -1012,7 +1034,9 @@ class TestBackfill034MatchesMigration:
         """Both directions: ``--revert`` must undo exactly what the forward pass did."""
         import re
 
-        src = pathlib.Path("core-storage-api/src/core_storage_api/scripts/backfill_034_search_vector.py").read_text()
+        src = pathlib.Path(
+            "core-storage-api/src/core_storage_api/scripts/backfill_034_search_vector.py"
+        ).read_text()
         m = re.search(rf'^{const} = "(.+)"$', src, re.M)
         assert m, f"backfill_034_search_vector.py no longer defines {const} on one line"
 

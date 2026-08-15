@@ -52,3 +52,8 @@ reports/
 !core-storage-api/uv.lock
 !core-worker/uv.lock
 !core-operations/uv.lock
+
+# Coverage data files. Untracked-but-present artefacts kept getting swept
+# into commits by `git add -A` (twice during the 2026-08 embedding work).
+.coverage
+.coverage.*

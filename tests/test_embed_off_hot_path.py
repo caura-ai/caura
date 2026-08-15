@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -813,7 +813,9 @@ async def test_bulk_reembed_reschedules_items_whose_get_memory_failed() -> None:
         )
 
     # Item B went through the normal write pass.
-    sc.update_embedding.assert_awaited_once_with(str(mem_b_id), TENANT_ID, [0.2] * VECTOR_DIM)
+    sc.update_embedding.assert_awaited_once_with(
+        str(mem_b_id), TENANT_ID, [0.2] * VECTOR_DIM, embedded_content_hash=ANY
+    )
     # Item A was rescheduled as a per-item retry (reembed task) AND
     # item B scheduled contradiction detection — both tracked.
     names = [call.args[1] for call in tracked.call_args_list]
@@ -838,7 +840,10 @@ async def test_bulk_reembed_patch_failure_reschedules_item() -> None:
     async def _get_memory(mid: str):
         return {"id": mid, "deleted_at": None, "fleet_id": "f", "embedding": None}
 
-    async def _update_embedding(mid: str, _tenant, _emb):
+    # Accepts ``embedded_content_hash``: the re-embed paths now record which
+    # text each vector came from, so a fake that rejects it would fail on the
+    # kwarg rather than on the behaviour under test.
+    async def _update_embedding(mid: str, _tenant, _emb, embedded_content_hash=None):
         if mid == str(mem_a_id):
             raise _MockHTTPError("connection pool exhausted for item A")
 
@@ -960,7 +965,9 @@ async def test_bulk_reembed_respects_existing_embedding_per_item() -> None:
 
     # mem_a: race guard → no PATCH, contradiction on the EXISTING embedding
     # mem_b: normal path → PATCH fresh, contradiction on the fresh embedding
-    sc.update_embedding.assert_awaited_once_with(str(mem_b_id), TENANT_ID, fresh)
+    sc.update_embedding.assert_awaited_once_with(
+        str(mem_b_id), TENANT_ID, fresh, embedded_content_hash=ANY
+    )
     assert len(detect_calls) == 2
     # Order matches the input order; arg[0]=memory_id, arg[4]=embedding
     by_id = {args[0]: args[4] for args in detect_calls}

@@ -267,6 +267,8 @@ async def embedding_coverage_all_tenants(
             "total_active": coverage.get("total_active"),
             "missing_embeddings": coverage.get("missing_embeddings"),
             "tenants_with_missing": coverage.get("tenants_with_missing"),
+            "stale_embeddings": coverage.get("stale_embeddings"),
+            "unknown_provenance": coverage.get("unknown_provenance"),
         },
     )
     return coverage

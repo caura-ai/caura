@@ -42,6 +42,25 @@ class Memory(Base):
     )
     title: Mapped[str | None] = mapped_column(Text)
     content_hash: Mapped[str | None] = mapped_column(Text)
+    # Provenance for ``embedding``: the ``content_hash`` of the text the
+    # vector was actually computed from. Without it a vector left over
+    # from earlier content is byte-identical to a correct one, so a
+    # mis-embedded row is undetectable — ``embedding IS NOT NULL`` says
+    # only that *something* was embedded, never *what*.
+    #
+    # Staleness is then expressible:
+    #     embedding IS NOT NULL
+    #     AND embedded_content_hash IS NOT NULL      -- provenance known
+    #     AND embedded_content_hash IS DISTINCT FROM content_hash
+    #
+    # NULL means "provenance unknown", NOT "stale": every row written
+    # before migration 037 has no recorded hash, and calling those stale
+    # would report the entire historical corpus as damaged.
+    #
+    # Which is why the second line is load-bearing rather than redundant:
+    # ``NULL IS DISTINCT FROM <hash>`` is TRUE, so dropping it silently
+    # folds every unknown row into the stale count.
+    embedded_content_hash: Mapped[str | None] = mapped_column(Text)
     # Per-attempt idempotency token (CAURA-602). Server-derived from
     # ``X-Bulk-Attempt-Id + ":" + index`` on the bulk path; NULL for
     # single-write and pre-rollout rows. The partial unique index

@@ -175,10 +175,25 @@ async def run_embedding_coverage_tick() -> None:
             "total_active": coverage.get("total_active"),
             "missing_embeddings": coverage.get("missing_embeddings"),
             "tenants_with_missing": coverage.get("tenants_with_missing"),
+            # A vector computed from text the row no longer holds. Tracked
+            # separately from ``missing`` because the nightly sweep CANNOT
+            # repair it — the column is non-NULL, so the sweep never sees the
+            # row. A rising number here means silently degraded recall.
+            "stale_embeddings": coverage.get("stale_embeddings"),
+            "tenants_with_stale": coverage.get("tenants_with_stale"),
+            # Embedded before provenance existed: undetermined, not damaged.
+            # Expected to fall over time; it is a measurement gap closing, so
+            # do not alert on it.
+            "unknown_provenance": coverage.get("unknown_provenance"),
             "tenant_count": len(tenants),
         },
     )
-    reported = [t for t in tenants if t.get("missing_embeddings")][:_COVERAGE_TENANT_LOG_CAP]
+    # A tenant is worth a line if it has EITHER defect. Filtering on missing
+    # alone would hide a tenant whose rows are all embedded but wrong — the
+    # exact case this release makes visible.
+    reported = [t for t in tenants if t.get("missing_embeddings") or t.get("stale_embeddings")][
+        :_COVERAGE_TENANT_LOG_CAP
+    ]
     for tenant in reported:
         logger.info(
             "embedding coverage tenant",
@@ -186,14 +201,16 @@ async def run_embedding_coverage_tick() -> None:
                 "tenant_id": tenant.get("tenant_id"),
                 "total_active": tenant.get("total_active"),
                 "missing_embeddings": tenant.get("missing_embeddings"),
+                "stale_embeddings": tenant.get("stale_embeddings"),
+                "unknown_provenance": tenant.get("unknown_provenance"),
                 "coverage_pct": tenant.get("coverage_pct"),
             },
         )
-    with_missing = coverage.get("tenants_with_missing") or 0
-    if with_missing > len(reported):
+    affected = sum(1 for t in tenants if t.get("missing_embeddings") or t.get("stale_embeddings"))
+    if affected > len(reported):
         logger.info(
             "embedding coverage per-tenant lines truncated",
-            extra={"reported": len(reported), "tenants_with_missing": with_missing},
+            extra={"reported": len(reported), "tenants_affected": affected},
         )
 
 

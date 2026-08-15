@@ -70,6 +70,11 @@ MEMORY_FIELDS: list[str] = [
     "created_at",
     "title",
     "content_hash",
+    # Which content the row's vector was computed from (migration 037).
+    # Exposed so a single row's provenance can be inspected — without it the
+    # only view is the aggregate coverage counters, which tell an operator that
+    # N rows are stale but never which, or why a specific row was classified.
+    "embedded_content_hash",
     "client_request_id",
     "expires_at",
     "deleted_at",

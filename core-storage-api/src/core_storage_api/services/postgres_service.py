@@ -534,7 +534,27 @@ class PostgresService:
 
     @staticmethod
     def _filter_memory_fields(data: dict) -> dict:
-        return {k: v for k, v in data.items() if k in _MEMORY_VALID_FIELDS}
+        out = {k: v for k, v in data.items() if k in _MEMORY_VALID_FIELDS}
+        # Stamp embedding provenance on insert. Both single (``memory_add``)
+        # and bulk (``memory_add_all``) go through here, so the two cannot
+        # drift apart — the reason this lives in the shared mapper rather
+        # than in each caller.
+        #
+        # Only when the row is inserted WITH a vector: a row created with
+        # ``embedding=None`` (deferred mode, or a failed inline embed) gets
+        # its provenance later, from whichever path supplies the vector.
+        # Writing a hash now would describe an embedding that does not exist.
+        #
+        # An explicit ``embedded_content_hash`` from the caller wins — a
+        # re-embed path that knows exactly which text it encoded is a better
+        # authority than this inference.
+        if (
+            out.get("embedding") is not None
+            and out.get("content_hash")
+            and not out.get("embedded_content_hash")
+        ):
+            out["embedded_content_hash"] = out["content_hash"]
+        return out
 
     async def memory_add(self, data: dict) -> Memory:
         async with get_session() as session:
@@ -725,6 +745,35 @@ class PostgresService:
         values: dict = {
             key: val for key, val in patch.items() if key != "metadata_patch" and hasattr(Memory, key)
         }
+        # Embedding provenance, derived here rather than at every call site.
+        # A patch that rewrites ``content`` carries the new ``content_hash``
+        # and the re-embedded vector together (see ``update_memory``), so the
+        # hash in THIS patch is by construction the text the vector was
+        # computed from. Stamping it keeps the row self-describing.
+        #
+        # Both keys must be present. Embedding without content_hash cannot be
+        # attributed, and content_hash without embedding means the text moved
+        # while the vector did not — precisely the stale state, which must
+        # keep its OLD provenance so the mismatch stays visible. Overwriting
+        # it there would forge freshness.
+        #
+        # ``embedding = None`` (a failed re-embed, per caura#775) clears
+        # provenance too: the row is genuinely unembedded, and leaving a hash
+        # behind would describe a vector that no longer exists.
+        # An explicit ``embedded_content_hash`` in the same patch WINS over this
+        # derivation, matching ``_filter_memory_fields`` on the insert path. A
+        # caller that names the hash knows which text it encoded; this branch is
+        # only an inference from "content and embedding moved together".
+        #
+        # Latent today — core-worker's PATCH sends ``embedded_content_hash``
+        # without ``content_hash``, so no caller currently hits all three — but
+        # the failure it prevents is the bad direction: overriding a caller's
+        # hash with the row's new one would stamp a genuinely stale write as
+        # freshly embedded, which is precisely what this column exists to catch.
+        if "embedding" in values and "content_hash" in values and "embedded_content_hash" not in values:
+            values["embedded_content_hash"] = (
+                values["content_hash"] if values["embedding"] is not None else None
+            )
         async with get_session() as session:
             # Existence check FIRST — runs even on empty / all-unknown-
             # keys patches so a PATCH on an absent or soft-deleted row
@@ -868,6 +917,7 @@ class PostgresService:
         tenant_id: str,
         embedding: list[float],
         metadata: dict | None = None,
+        embedded_content_hash: str | None = None,
     ) -> bool:
         # ``tenant_id`` scopes the write to the row's home tenant: a
         # memory_id from another tenant matches no row, so a stale or
@@ -875,8 +925,23 @@ class PostgresService:
         # Returns whether a row matched so the route can surface a 404 on
         # a no-op (mirrors memory_update / memory_update_status) instead of
         # a silent 200 that lets callers over-count successful writes.
+        #
+        # ``embedded_content_hash`` is the hash of the text the CALLER
+        # embedded, and is deliberately a parameter rather than being read
+        # off the row here. Copying the row's current ``content_hash`` would
+        # be wrong in exactly the case this column exists to catch: the
+        # worker fetches content, embeds it, then writes back, and a content
+        # PATCH landing inside that window means the row it writes has moved
+        # on. Reading the hash at write time would stamp the NEW hash onto a
+        # vector computed from the OLD text — recording the row as freshly
+        # embedded at the precise moment it became stale.
+        #
+        # Left NULL when the caller does not supply it: unknown provenance is
+        # honest, a wrong hash is not.
         async with get_session() as session:
             values: dict = {"embedding": embedding}
+            if embedded_content_hash is not None:
+                values["embedded_content_hash"] = embedded_content_hash
             if metadata is not None:
                 values["metadata_"] = metadata
             result = await session.execute(
@@ -2460,6 +2525,55 @@ class PostgresService:
             result = await session.execute(stmt)
             return result.scalar() or 0
 
+    async def memory_embedding_coverage_for_tenant(
+        self,
+        tenant_id: str,
+        fleet_id: str | None = None,
+    ) -> tuple[int, int, int, int]:
+        """``(total_active, missing, stale, unknown_provenance)`` for one tenant.
+
+        The per-tenant twin of ``memory_embedding_coverage_by_tenant``, and the
+        single source for ``GET /embedding-coverage``. Without the provenance
+        counts that route omits the keys entirely, and a caller comparing it
+        against ``/embedding-coverage-all`` reads "no stale rows" where the
+        aggregate says otherwise — absence looking like zero.
+
+        All four counts in ONE statement, mirroring the aggregate. The route
+        previously issued three sequential queries; besides the extra round
+        trips on an ops-polled endpoint, separate statements cannot see a
+        consistent snapshot, so a concurrent write could make the buckets fail
+        to add up to the total it is reported against.
+
+        Same population predicate and the same ``is_distinct_from`` NULL
+        handling as the aggregate; keep the two in step.
+        """
+        async with get_read_session() as session:
+            stmt = (
+                select(
+                    func.count(),
+                    func.count().filter(Memory.embedding.is_(None)),
+                    func.count().filter(
+                        Memory.embedding.isnot(None),
+                        Memory.embedded_content_hash.isnot(None),
+                        Memory.embedded_content_hash.is_distinct_from(Memory.content_hash),
+                    ),
+                    func.count().filter(
+                        Memory.embedding.isnot(None),
+                        Memory.embedded_content_hash.is_(None),
+                    ),
+                )
+                .select_from(Memory)
+                .where(
+                    Memory.tenant_id == tenant_id,
+                    Memory.status.in_(LIVE_MEMORY_STATUSES),
+                    Memory.deleted_at.is_(None),
+                )
+            )
+            if fleet_id:
+                stmt = stmt.where(Memory.fleet_id == fleet_id)
+            row = (await session.execute(stmt)).one()
+        return int(row[0] or 0), int(row[1] or 0), int(row[2] or 0), int(row[3] or 0)
+
     async def memory_embedding_coverage_by_tenant(self) -> list[dict]:
         """Embedding coverage for EVERY tenant, in one pass.
 
@@ -2482,14 +2596,51 @@ class PostgresService:
 
         Returns rows worst-first so the head of the list is the actionable part.
         Counts only — no memory content crosses this boundary.
+
+        Three distinct states, deliberately not collapsed:
+
+        * ``missing`` — no vector at all. The nightly sweep repairs these.
+        * ``stale`` — a vector computed from DIFFERENT text than the row now
+          holds (``embedded_content_hash`` disagrees with ``content_hash``).
+          Non-NULL, so no NULL-based sweep can see it; recall silently ranks
+          the row against text it no longer has.
+        * ``unknown_provenance`` — embedded, but written before migration 037,
+          so there is no hash to compare. NOT stale: it is undetermined.
+          Reporting it as stale would flag the entire historical corpus as
+          damaged; reporting it as fresh would assert a correctness nobody
+          verified. It drains as rows are rewritten or re-embedded.
         """
         missing = func.count().filter(Memory.embedding.is_(None))
+        stale = func.count().filter(
+            Memory.embedding.isnot(None),
+            Memory.embedded_content_hash.isnot(None),
+            # ``is_distinct_from``, NOT ``!=``. SQLAlchemy's ``!=`` compiles to
+            # plain ``<>``, which yields NULL when ``content_hash`` is NULL (it
+            # is a nullable column) — and ``COUNT(*) FILTER`` drops NULL. Such a
+            # row has a KNOWN provenance hash, so it is not ``unknown``; it has
+            # an embedding, so it is not ``missing``; and the NULL comparison
+            # kept it out of ``stale``. It counted in ``total_active`` and in no
+            # defect bucket at all — silently unaccounted for by the very
+            # detector this column exists to provide.
+            #
+            # This also keeps the ORM in step with the migration's partial index
+            # predicate, which uses IS DISTINCT FROM. The two encode one rule in
+            # two languages and nothing checks they agree, so they must be read
+            # together whenever either changes.
+            Memory.embedded_content_hash.is_distinct_from(Memory.content_hash),
+        )
+        unknown = func.count().filter(
+            Memory.embedding.isnot(None),
+            Memory.embedded_content_hash.is_(None),
+        )
         async with get_read_session() as session:
             stmt = (
                 select(
                     Memory.tenant_id,
                     func.count().label("total_active"),
                     missing.label("missing_embeddings"),
+                    stale.label("stale_embeddings"),
+                    unknown.label("unknown_provenance"),
                 )
                 .select_from(Memory)
                 .where(
@@ -2497,7 +2648,12 @@ class PostgresService:
                     Memory.deleted_at.is_(None),
                 )
                 .group_by(Memory.tenant_id)
-                .order_by(missing.desc())
+                # Worst-first on what is actionable TODAY: a stale row is
+                # actively wrong, a missing one is merely absent, so stale
+                # leads. Unknown is not ranked — it is a measurement gap, not
+                # a defect, and letting it sort the list would bury real
+                # damage under untriaged history.
+                .order_by((stale + missing).desc())
             )
             rows = (await session.execute(stmt)).all()
         return [
@@ -2505,6 +2661,8 @@ class PostgresService:
                 "tenant_id": row.tenant_id,
                 "total_active": int(row.total_active or 0),
                 "missing_embeddings": int(row.missing_embeddings or 0),
+                "stale_embeddings": int(row.stale_embeddings or 0),
+                "unknown_provenance": int(row.unknown_provenance or 0),
                 "coverage_pct": (
                     round((row.total_active - row.missing_embeddings) / row.total_active * 100, 1)
                     if row.total_active
