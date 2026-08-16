@@ -22,7 +22,7 @@ Rules:
 - relation_type: short verb phrase like works_on, uses, belongs_to, created_by, depends_on, manages, located_in
 - Extract every distinct named subject. Include identifiers (PR-2025-A, build-734), product codes (Vermillion-7), model names (gpt-5.4-nano), and version strings as entity_type=identifier or entity_type=artifact when they refer to a specific named thing.
 - Job titles (ceo, engineer, manager, director, officer) classify as entity_type=role — NOT person. Use entity_type=person only when a named individual is referenced (e.g., "Anna Bergstrom"). "the CEO" alone is a role; "Anna, the CEO" is one person entity plus one role entity.
-- mentions: list every surface form referring to an entity in the content, including pronouns. Assign coreferring mentions the same cluster_id integer (0, 1, 2, ...). Link each mention to its entity_canonical when known; use null for unresolved pronouns.
+- mentions: list every surface form referring to an entity in the content, including pronouns. Assign coreferring mentions the same cluster_id integer (0, 1, 2, ...) — cluster_id is never null. Set entity_canonical to the referenced entity, or null if unresolved.
 - If no entities found, return empty lists
 
 Return ONLY valid JSON matching this schema (no markdown fences):
@@ -52,7 +52,14 @@ class ExtractedRelation(BaseModel):
 
 class Mention(BaseModel):
     surface: str
-    cluster_id: int
+    # Nullable because nothing enforces the schema ``_do_extract`` sends (see
+    # there): while this was a bare ``int``, one null cluster_id failed the
+    # WHOLE ``ExtractedGraph``, burning the primary provider's retry budget and
+    # dropping through to the regex heuristic (prod, 2026-08-16). ``None``
+    # means "no coreference cluster assigned" — the surface form is still worth
+    # keeping. Nothing reads ``cluster_id`` today; it stays for the coreference
+    # work A5b (#169) added it for.
+    cluster_id: int | None = None
     entity_canonical: str | None = None
 
 
@@ -157,10 +164,14 @@ async def extract_entities_from_content(
         # integer that survives process restarts — unlike ``hash()`` which
         # is salted per-process for str inputs.
         seed = zlib.crc32(prompt.encode("utf-8"))
-        # A5b #3 — pin the output shape server-side via response_schema.
-        # ExtractedGraph.model_json_schema() encodes the entities /
-        # relations / mentions structure. Providers that don't support
-        # structured outputs ignore this kwarg.
+        # A5b #3 — declare the expected shape via response_schema. It is a
+        # HINT, not the server-side guarantee A5b originally claimed: the
+        # OpenAI provider sends it with ``strict=False`` (see
+        # ``common/llm/providers/openai.py``) and gemini/vertex accept and
+        # ignore it outright, so the provider can and does return values the
+        # schema forbids. The ``ExtractedGraph(**raw)`` parse below is the only
+        # real enforcement — see ``Mention.cluster_id`` for the prod failure
+        # that established this.
         raw = await llm.complete_json(
             prompt,
             seed=seed,
