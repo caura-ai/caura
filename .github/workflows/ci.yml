@@ -74,10 +74,20 @@ jobs:
         # have broken confusingly the first time core-operations grew a
         # dependency core-api lacks. Resolution cost of adding it: one extra
         # package (119 vs 118).
+        #
+        # core-worker likewise, and for a sharper reason: it had NO CI at all —
+        # not installed, linted, type-checked or tested by any workflow — while
+        # being the production write path in deferred/SaaS mode. It owns
+        # ``handle_embed_request`` (essentially all production embedding), the
+        # embed-backfill sweep consumer and the enrich consumer. The cost of
+        # that gap is not hypothetical: caura#786 shipped embedding provenance
+        # through every write path EXCEPT core-worker's, which would have left
+        # every production row permanently at ``unknown_provenance``; it was
+        # caught by human review because no automated check covered the tree.
         run: |
           uv venv .venv
           source .venv/bin/activate
-          uv pip install -e core-storage-api/[dev] -e core-api/[dev] -e core-operations/[dev]
+          uv pip install -e core-storage-api/[dev] -e core-api/[dev] -e core-operations/[dev] -e core-worker/[dev]
           echo "$VIRTUAL_ENV/bin" >> $GITHUB_PATH
 
       # --- Broker↔cloud API-versioning gate (Gate C / Phase 1, deliverables A+B) ---
@@ -163,6 +173,14 @@ jobs:
         # rather than common/'s 88, so the format check below is safe to gate.
         run: uv run ruff check core-operations/src/ core-operations/tests/
 
+      - name: Run Ruff linter (core-worker)
+        # Same pairing as core-operations above — an unlinted tree drifts, and
+        # this one was unlinted AND unrun despite being the deferred-mode
+        # production write path. core-worker/pyproject.toml declares its own
+        # line-length = 110, matching core-api / core-storage-api / core-operations
+        # rather than common/'s 88, so the format check below is safe to gate.
+        run: uv run ruff check core-worker/src/ core-worker/tests/
+
       - name: Run Ruff formatter check (core-api)
         run: uv run ruff format --check core-api/src/
 
@@ -174,6 +192,9 @@ jobs:
 
       - name: Run Ruff formatter check (core-operations)
         run: uv run ruff format --check core-operations/src/ core-operations/tests/
+
+      - name: Run Ruff formatter check (core-worker)
+        run: uv run ruff format --check core-worker/src/ core-worker/tests/
 
       - name: Run Ruff formatter check (vendored common/ files at ruff defaults)
         # This list mirrors the policy=identical entries of caura-memclaw-enterprise's
@@ -219,6 +240,12 @@ jobs:
         # mypy as a dev dep, same as its two siblings above; only the CI step
         # was missing.
         run: cd core-operations && uv run mypy src/
+
+      - name: Run mypy (core-worker)
+        # core-worker/pyproject.toml already carries a [tool.mypy] block with
+        # ``mypy_path = "src"`` and mypy as a dev dep — the config was there all
+        # along, nothing ever ran it.
+        run: cd core-worker && uv run mypy src/
 
       - name: Enable pgvector extension
         run: PGPASSWORD=changeme psql -h localhost -U memclaw -d memclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
@@ -354,6 +381,40 @@ jobs:
           # uploads coverage.xml to Codecov.
           COVERAGE_FILE: .coverage.core-operations
 
+      - name: Run core-worker tests
+        # core-worker had NO CI of any kind — the tree was never installed,
+        # linted, type-checked or run, while being the production write path in
+        # deferred/SaaS mode (``handle_embed_request``, the embed-backfill sweep
+        # consumer, the enrich consumer). Same blind spot the core-operations
+        # step above closed, on a service with more production surface.
+        #
+        # Two things that had rotted behind it, both fixed in this PR:
+        #   * ``test_post_gives_up_after_max_attempts_on_connect_timeout``
+        #     asserted a hardcoded 3 attempts and had been failing since the
+        #     connect-phase budget was raised to 5 after the 2026-06-16 prod
+        #     incident. It now asserts ``CONNECT_PHASE_MAX_ATTEMPTS`` itself.
+        #   * caura#786 threaded embedding provenance through every write path
+        #     EXCEPT this one, caught only by human review.
+        #
+        # No PYTHONPATH, deliberately — core-worker/pytest.ini sets its own
+        # ``pythonpath = src ..`` (src for core_worker, .. for common) and
+        # pytest resolves it as the configfile for this path rather than
+        # inheriting the root pytest.ini, so an env var here would be inert.
+        # Verified by running the suite with PYTHONPATH unset. No database
+        # either: the conftest pins ``EVENT_BUS_BACKEND=inprocess``.
+        #
+        # ``--cov-config`` is load-bearing for the same reason as
+        # core-operations: core-worker declares ``fail_under = 50`` and coverage
+        # discovers config relative to the CWD, so without the flag the run
+        # collects coverage while silently ignoring the floor. Currently ~70%.
+        run: |
+          uv run pytest core-worker/tests/ -v --tb=short \
+            --cov=core-worker/src/core_worker \
+            --cov-config=core-worker/pyproject.toml \
+            --cov-report=term-missing
+        env:
+          COVERAGE_FILE: .coverage.core-worker
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
         with:
@@ -363,11 +424,14 @@ jobs:
       - name: Build packages
         # core-operations included now that CI installs, lints, type-checks and
         # tests it — a broken pyproject/build-backend would otherwise surface
-        # only in its Docker build.
+        # only in its Docker build. core-worker joins for exactly the same
+        # reason, now that this workflow covers it: it ships as a package with
+        # its own pyproject, and until this PR nothing here exercised any of it.
         run: |
           cd core-api && uv build && cd ..
           cd core-storage-api && uv build && cd ..
-          cd core-operations && uv build
+          cd core-operations && uv build && cd ..
+          cd core-worker && uv build
 
   image-version:
     # Guards the /api/v1/version surface end-to-end: builds the actual
