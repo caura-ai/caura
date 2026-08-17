@@ -112,3 +112,65 @@ class EnrichmentResult(BaseModel):
     retrieval_hint: str = ""
     atomic_facts: list[AtomicFact] | None = None
     llm_ms: int = 0
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def _coerce_summary(cls, raw):
+        """Defensive normalisation, same reason as ``_normalize_tags`` above.
+
+        This model is built from unenforced LLM output, and the caller recovers
+        from a ValidationError by falling through to ``fake_enrich`` — so one
+        junk field discarded a whole good enrichment: title, tags, weight,
+        timestamps, atomic facts and all. ``summary`` was the last field
+        nothing guarded (``_validate_enrichment`` coerces the rest, ``tags``
+        is handled above), and a ``summary`` of ``5`` / ``None`` / ``{...}`` /
+        ``[...]`` raised.
+
+        SCOPED TO ``summary`` DELIBERATELY. ``title`` and ``retrieval_hint``
+        look like they belong here and do not: ``_validate_enrichment`` already
+        rewrites both to ``str`` BEFORE this validator runs, so listing them
+        would advertise a protection that never fires. Note the consequence
+        left in place — a junk ``title`` still persists as its repr
+        (``{'a': 1}`` becomes ``"{'a': 1}"``, ``None`` becomes ``"None"``).
+        That is a pre-existing display bug, not a crash, and fixing it means
+        moving truncation onto the model too; kept out so this stays a crash
+        fix.
+
+        A non-str value is DISCARDED rather than stringified: ``summary`` is
+        user-visible and lands in ``metadata["summary"]`` verbatim, so blank
+        reads as "no information" while ``"{'a': 1}"`` reads as prose the model
+        never wrote.
+        """
+        if raw is None:
+            return ""
+        return raw if isinstance(raw, str) else ""
+
+    @field_validator("pii_types", mode="before")
+    @classmethod
+    def _coerce_pii_types(cls, raw):
+        """Drop non-string entries instead of failing the whole enrichment.
+
+        ``_validate_enrichment`` normalises falsy values via
+        ``raw.get("pii_types") or []``, which leaves the two shapes the LLM
+        actually produces: a bare string (``"email"``) and a list with
+        non-string members (``[1, 2]``). Both raised.
+
+        A bare string is WRAPPED rather than dropped. Note what this does and
+        does not affect: the PII gate keys on ``contains_pii`` alone
+        (``governance_decision.py`` / ``governance_remediation.py``), so this
+        cannot change a drop/flag decision. It is the audit trail and row
+        metadata that matter — a compliance review reading ``categories: []``
+        on a flagged row cannot distinguish "no type declared" from "type lost
+        to normalisation", so the declared value is preserved as evidence.
+
+        ``AtomicFact`` gets no equivalent guard, which is not an oversight:
+        the service's item-walk pre-cleans facts into str-only dicts before
+        this model sees them.
+        """
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            return [raw] if raw.strip() else []
+        if not isinstance(raw, list):
+            return []
+        return [item for item in raw if isinstance(item, str) and item.strip()]

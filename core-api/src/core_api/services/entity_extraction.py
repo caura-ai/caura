@@ -115,9 +115,9 @@ def _parse_graph_lenient(raw: dict) -> tuple[ExtractedGraph, dict[str, int]]:
     Mirrors the ``atomic_facts`` loop in
     ``common/enrichment/service.py::_validate_enrichment``, which walks that
     provider output item-by-item and ``continue``s past entries it cannot use.
-    Note the mirror is only of the LIST walk: that function's outer
-    ``EnrichmentResult(**raw)`` is still atomic, so enrichment carries this same
-    exposure one level up.
+    That function's outer ``EnrichmentResult(**raw)`` used to be atomic and so
+    carried this same exposure one level up; its two unguarded fields now have
+    model-level ``mode="before"`` validators, so both layers are covered.
 
     A relation whose endpoint entity was dropped is not a dangling reference —
     ``entity_extraction_worker`` only writes an edge when both ids resolve, the
