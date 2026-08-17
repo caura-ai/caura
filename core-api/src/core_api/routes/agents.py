@@ -46,6 +46,16 @@ async def patch_agent_trust(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Update an agent's trust level (and optionally fleet)."""
+    # A read-only credential must not move the trust ladder. This gate was
+    # missing while the neighbouring fleet-reassignment route had it, so a
+    # capabilities={'read'} key could rewrite the very control the comment
+    # below calls the master key.
+    #
+    # NOT gated on ``enforce_usage_limits``, unlike that neighbour, and
+    # deliberately: this is the route you reach for to DEMOTE a misbehaving
+    # agent. An over-quota tenant must still be able to take trust away, so
+    # quota state must not stand between an operator and a mitigation.
+    auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
     # Trust changes are the master key to the whole ladder — an agent must not
     # be able to PATCH its own (or a peer's) trust_level to self-promote.

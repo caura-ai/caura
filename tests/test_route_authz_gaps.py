@@ -284,3 +284,163 @@ async def test_delete_audit_attributes_gateway_agent(client, as_auth, sc):
         )
     assert rows, "expected a delete audit row"
     assert rows[-1].agent_id == "deleter-agent"
+
+
+# ---------------------------------------------------------------------------
+# H-12 / H-13 / H-15 — write-shaped routes missing their capability gates
+#
+# Surfaced by the 2026-08-14 OSS/platform audit. All three are the same shape as
+# the 2026-06-11 findings above: a mutating route that skipped a gate its own
+# neighbours already applied.
+#
+#   H-13  POST /fleet/commands       — no enforce_tenant AND no enforce_read_only,
+#                                      with the target tenant taken from the BODY
+#   H-12  PATCH /agents/{id}/trust   — no enforce_read_only
+#   H-15  PUT  /settings             — checked is_demo by hand, so it caught the
+#                                      demo sandbox but not a read-only credential
+# ---------------------------------------------------------------------------
+
+READ_ONLY = {"read"}
+
+
+async def test_fleet_command_cannot_be_queued_into_another_tenant(client, as_auth):
+    """H-13: the queued command's tenant came from ``body.tenant_id``, unchecked.
+
+    The GET sibling has always called ``enforce_tenant``, so the write was the
+    weaker half of the pair.
+    """
+    victim = f"victim-{_uid()}"
+    attacker = f"attacker-{_uid()}"
+
+    # A real node in the victim's fleet, created by the victim.
+    as_auth(victim)
+    resp = await client.post(
+        "/api/v1/fleet/heartbeat",
+        json={
+            "tenant_id": victim,
+            "node_name": f"node-{_uid()}",
+            "fleet_id": f"fleet-{_uid()}",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    node_id = resp.json()["node_id"]
+
+    as_auth(attacker)
+    resp = await client.post(
+        "/api/v1/fleet/commands",
+        json={
+            "tenant_id": victim,
+            "node_id": node_id,
+            "command": "ping",
+            "payload": {"injected": True},
+        },
+    )
+    assert resp.status_code == 403, resp.text
+
+    # And nothing landed in the victim's queue.
+    as_auth(victim)
+    resp = await client.get(f"/api/v1/fleet/commands?tenant_id={victim}")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_fleet_command_rejects_a_read_only_credential(client, as_auth):
+    """H-13, second half: queueing a command is a write."""
+    tenant = f"tenant-{_uid()}"
+
+    as_auth(tenant)
+    resp = await client.post(
+        "/api/v1/fleet/heartbeat",
+        json={
+            "tenant_id": tenant,
+            "node_name": f"node-{_uid()}",
+            "fleet_id": f"fleet-{_uid()}",
+        },
+    )
+    node_id = resp.json()["node_id"]
+
+    as_auth(tenant, capabilities=READ_ONLY)
+    resp = await client.post(
+        "/api/v1/fleet/commands",
+        json={
+            "tenant_id": tenant,
+            "node_id": node_id,
+            "command": "ping",
+            "payload": {},
+        },
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_agent_trust_rejects_a_read_only_credential(client, as_auth, sc):
+    """H-12: trust is the master key to the ladder — a read key must not move it."""
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1)
+
+    as_auth(tenant, capabilities=READ_ONLY)
+    resp = await client.patch(
+        f"/api/v1/agents/{agent}/trust?tenant_id={tenant}",
+        json={"trust_level": 3},
+    )
+    assert resp.status_code == 403, resp.text
+
+    # The ladder did not move.
+    as_auth(tenant)
+    resp = await client.get(f"/api/v1/agents?tenant_id={tenant}")
+    assert resp.status_code == 200
+    row = next(a for a in resp.json() if a["agent_id"] == agent)
+    assert row["trust_level"] == 1
+
+
+async def test_agent_trust_still_works_when_over_usage_limits(client, as_auth, sc):
+    """Pins a deliberate omission, so nobody "fixes" it by adding the gate.
+
+    ``enforce_usage_limits`` is NOT applied to this route, unlike the
+    neighbouring fleet-reassignment one. This is the route you reach for to
+    DEMOTE a misbehaving agent, and an over-quota tenant must still be able to
+    take trust away — quota state must not stand between an operator and a
+    mitigation.
+    """
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=3)
+
+    as_auth(tenant, is_read_only=True)
+    resp = await client.patch(
+        f"/api/v1/agents/{agent}/trust?tenant_id={tenant}",
+        json={"trust_level": 0},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["trust_level"] == 0
+
+
+async def test_settings_rejects_a_read_only_credential(client, as_auth):
+    """H-15: the hand-rolled ``is_demo`` check missed read-only credentials.
+
+    Tenant settings carry security-relevant toggles — ``require_agent_approval``
+    governs whether new agents start quarantined — so a viewer/reporting key
+    rewriting them is a privilege escalation, not a cosmetic gap.
+    """
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, capabilities=READ_ONLY)
+    resp = await client.put(
+        "/api/v1/settings",
+        json={"tenant_id": tenant, "require_agent_approval": False},
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_settings_still_refuses_the_demo_sandbox(client, as_auth):
+    """Regression guard: the hand-rolled demo branch was REPLACED, not dropped.
+
+    ``enforce_read_only`` covers demo and read-only capabilities together, but
+    that only holds if it really does still refuse demo.
+    """
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, is_demo=True)
+    resp = await client.put(
+        "/api/v1/settings",
+        json={"tenant_id": tenant, "require_agent_approval": False},
+    )
+    assert resp.status_code == 403, resp.text
