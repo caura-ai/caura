@@ -319,6 +319,17 @@ async def extract_entities_from_content(
         service_label="entity-extraction",
         model_override=extraction_model,
         model_attr="entity_extraction_model",
+        # This caller is the one that can honestly declare a shape failure
+        # non-retryable: ``_do_extract`` pins ``seed`` to a CRC32 of the prompt
+        # SPECIFICALLY so retries reproduce byte-identical output, which means a
+        # second attempt is guaranteed to fail the same way. Only shape types
+        # are listed — a transport failure (timeout, 5xx) stays retryable, seed
+        # or no seed.
+        #
+        # This does NOT skip the fallback provider, only the wasted re-ask
+        # within each one. The alternative model still gets its turn, which is
+        # the whole reason a total loss raises rather than returning empty.
+        non_retryable=(ExtractionShapeError, ValidationError),
     )
     # A33 ①: undo the split-discriminator pattern before resolution.
     return _reattach_subject_discriminators(graph, content)

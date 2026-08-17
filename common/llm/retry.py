@@ -34,6 +34,7 @@ async def call_with_retry(
     max_attempts: int = LLM_RETRY_ATTEMPTS,
     base_delay: float = LLM_RETRY_DELAY_S,
     timeout: float | None = None,
+    non_retryable: tuple[type[BaseException], ...] = (),
 ) -> T:
     """Call *coro_fn* with retry and linear backoff.
 
@@ -49,6 +50,31 @@ async def call_with_retry(
         Base delay in seconds; actual delay = ``base_delay * attempt_number``.
     timeout:
         Optional per-attempt timeout in seconds.
+    non_retryable:
+        Exception types that must NOT be retried within this provider — the
+        first occurrence raises immediately. Empty by default, so every
+        existing caller keeps its current behaviour unchanged.
+
+        OPT-IN, and deliberately not a global classification. The obvious
+        version of this — "a ValidationError can't succeed on retry, so never
+        retry one" — is WRONG for most callers here. It is only true when the
+        call is deterministic, and determinism comes from the CALLER: only
+        entity extraction pins a ``seed`` (a CRC32 of its prompt, precisely so
+        retries reproduce byte-identical output). Every other caller,
+        enrichment included, is unseeded, so a re-ask genuinely may return
+        parseable output and its retry is worth having. Classifying globally
+        would strip a useful retry from ~10 services to save one wasted call
+        on the single deterministic one.
+
+        Keyed on exception TYPE rather than on seeded-ness because a seeded
+        call still has non-deterministic failure modes — a network timeout
+        must be retried no matter how fixed the seed is. Seeding is what makes
+        a SHAPE failure deterministic; the type is what separates shape from
+        transport.
+
+        Note this bounds retries WITHIN a provider only. ``call_with_fallback``
+        still advances to the fallback provider afterwards, which is correct:
+        that is a different model and may well parse what this one mangled.
 
     Raises the last exception if all attempts are exhausted.
     """
@@ -63,6 +89,19 @@ async def call_with_retry(
             return await coro
         except Exception as exc:
             last_exc = exc
+            # ``isinstance(exc, ())`` is False, so an empty tuple makes this a
+            # no-op for every caller that has not opted in.
+            if isinstance(exc, non_retryable):
+                logger.warning(
+                    "%s attempt %d/%d failed (%s: %s); NOT retrying — "
+                    "caller declared this type deterministic",
+                    label,
+                    attempt + 1,
+                    max_attempts,
+                    type(exc).__name__,
+                    exc,
+                )
+                break
             if attempt < max_attempts - 1:
                 delay = base_delay * (attempt + 1)
                 logger.warning(
@@ -90,6 +129,7 @@ async def call_with_fallback(
     timeout: float | None = None,
     max_attempts: int = LLM_RETRY_ATTEMPTS,
     provider_factory: Callable[..., Any] | None = None,
+    non_retryable: tuple[type[BaseException], ...] = (),
 ) -> T:
     """3-tier fallback chain for LLM calls.
 
@@ -127,6 +167,12 @@ async def call_with_fallback(
         Callable ``(name, tenant_config) -> LLMProvider``. Defaults to
         ``common.llm.registry.get_llm_provider`` (imported lazily to avoid
         circular imports).
+    non_retryable:
+        Forwarded to ``call_with_retry`` for BOTH providers — see its docstring
+        for why this is opt-in. Applied to the fallback provider too because
+        the seed travels with the prompt, so a deterministic failure is
+        deterministic there as well; what still runs is the PROVIDER hop, not
+        the retry.
     """
     if provider_factory is None:
         from common.llm.registry import get_llm_provider
@@ -158,6 +204,7 @@ async def call_with_fallback(
                 label=f"{label}-primary",
                 max_attempts=max_attempts,
                 timeout=timeout,
+                non_retryable=non_retryable,
             )
         logger.warning(
             "%s: provider '%s' resolved to FakeLLMProvider (no API key). Trying fallback.",
@@ -201,6 +248,7 @@ async def call_with_fallback(
                         label=f"{label}-fallback-{fb_provider_name}",
                         max_attempts=max_attempts,
                         timeout=timeout,
+                        non_retryable=non_retryable,
                     )
     except Exception:
         logger.warning(
