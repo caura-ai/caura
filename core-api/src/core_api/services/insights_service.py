@@ -976,6 +976,17 @@ async def _persist_findings(
                 memory_type="insight",
                 content=content,
                 weight=confidence,
+                # Pin the lifecycle status: caller-supplied status wins over
+                # the enrichment classifier (see MergeEnrichmentFields /
+                # create_memories_bulk precedence). Without this, the
+                # classifier reads the finding's imperative "Action:" line as
+                # a not-yet-started plan and files the insight as ``pending``
+                # (measured on the eToro fleet: 70-80% of post-clarity
+                # findings landed pending) — and pending insights escape the
+                # supersede-priors churn, accumulating as permanently-live
+                # zombies. An insight is a finished analysis artifact; it is
+                # born ``active``.
+                status="active",
                 # Embed inline so a finding is semantically searchable as soon as
                 # this persist returns. An insight exists to be recalled, and the
                 # obvious next action after an evolve cycle is to search for what

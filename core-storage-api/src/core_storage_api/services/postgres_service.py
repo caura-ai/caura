@@ -7651,9 +7651,18 @@ class PostgresService:
         scope: str,
         fleet_id: str | None = None,
     ) -> dict:
-        """Atomically select + outdate prior active insights for this
+        """Atomically select + outdate prior live insights for this
         focus/scope/fleet. Ports ``_persist_findings`` prior-select + outdate
         UPDATE into ONE transaction on the PRIMARY.
+
+        Covers ``pending`` as well as ``active``: historically the enrichment
+        classifier filed plan-phrased findings as ``pending``, and those
+        escaped an active-only supersede forever (219+ zombies accumulated on
+        the eToro fleet, one reaching 9,521 recalls). New insights are pinned
+        ``active`` at creation, but widening the supersede retires the
+        already-accumulated zombies organically — each run sweeps its own
+        focus/scope/agent slice, no manual cleanup pass needed. ``confirmed``
+        stays exempt: that's the operator's deliberate keep signal.
 
         ``:focus`` / ``:scope`` compare text-to-text via the ``->>`` jsonb
         text-accessor (NO jsonb cast). Returns ``{prior_ids, outdated_count}``.
@@ -7674,7 +7683,7 @@ class PostgresService:
                     WHERE tenant_id = :tenant_id
                       AND agent_id = :agent_id
                       AND memory_type = 'insight'
-                      AND status = 'active'
+                      AND status IN ('active', 'pending')
                       AND deleted_at IS NULL
                       AND metadata->>'insight_focus' = :focus
                       AND metadata->>'insight_scope' = :scope
