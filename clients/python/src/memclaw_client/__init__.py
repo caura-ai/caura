@@ -16,7 +16,6 @@ from __future__ import annotations
 import sys as _sys
 import warnings as _warnings
 
-import caura_client as _caura_client
 from caura_client import *  # noqa: F401,F403
 from caura_client import DEFAULT_BASE_URL, __all__, __version__  # noqa: F401
 
