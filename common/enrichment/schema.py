@@ -128,13 +128,9 @@ class EnrichmentResult(BaseModel):
 
         SCOPED TO ``summary`` DELIBERATELY. ``title`` and ``retrieval_hint``
         look like they belong here and do not: ``_validate_enrichment`` already
-        rewrites both to ``str`` BEFORE this validator runs, so listing them
-        would advertise a protection that never fires. Note the consequence
-        left in place — a junk ``title`` still persists as its repr
-        (``{'a': 1}`` becomes ``"{'a': 1}"``, ``None`` becomes ``"None"``).
-        That is a pre-existing display bug, not a crash, and fixing it means
-        moving truncation onto the model too; kept out so this stays a crash
-        fix.
+        normalises both to ``str`` BEFORE this validator runs, so listing them
+        would advertise a protection that never fires. Both discard a
+        non-string there rather than stringify it, for the same reason.
 
         A non-str value is DISCARDED rather than stringified: ``summary`` is
         user-visible and lands in ``metadata["summary"]`` verbatim, so blank

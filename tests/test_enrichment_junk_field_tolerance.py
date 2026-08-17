@@ -57,6 +57,22 @@ def test_junk_summary_does_not_discard_the_enrichment(junk) -> None:
     assert result.llm_ms == 12
 
 
+@pytest.mark.parametrize("junk", _JUNK)
+def test_junk_title_is_not_persisted_as_its_repr(junk) -> None:
+    """A junk ``title`` must normalise to empty, not to ``str(junk)``.
+
+    Unlike ``summary`` / ``pii_types`` above this was never a crash —
+    ``_validate_enrichment`` coerced with a bare ``str()``, so ``{'a': 1}``
+    reached storage as the string ``"{'a': 1}"`` and ``None`` as ``"None"``.
+    Both render in the UI as a title the model never wrote.
+    """
+    result = _validate_enrichment(_raw(title=junk), llm_ms=12)
+
+    assert result.title == "", (
+        f"a junk title must normalise to empty, not to its repr; got {result.title!r}"
+    )
+
+
 @pytest.mark.parametrize(
     "raw_value,expected",
     [
@@ -100,3 +116,8 @@ def test_clean_payload_is_untouched() -> None:
 # message assertion, by
 # tests/test_vertex_response_shape.py::TestEnrichmentValidatorRejectsNonDict.
 # Not duplicated here.
+#
+# Likewise the 80-char ``title`` cap, by
+# tests/test_p4_1_llm_fallback.py::TestValidateEnrichment::test_title_truncated_to_80
+# — same function via the ``core_api.services.memory_enrichment`` re-export, so
+# it already guards the truncation half of the ``title`` coercion above.
