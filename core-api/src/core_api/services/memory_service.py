@@ -2462,25 +2462,47 @@ async def _enrich_memory_background(
             parent_visibility = mem.get("visibility") or "scope_team"
             parent_weight = patch.get("weight") or mem.get("weight") or 0.5
             fanout_created = 0
+            fanout_unembedded = 0
             for fact in atomic_facts:
                 fact_content = fact.content
+                # A failed embed must NOT skip the fact. Both exits here used
+                # to ``continue`` BEFORE ``create_memory``, so the child row
+                # was never written at all and the fact was lost outright —
+                # nothing downstream could repair what does not exist. Persist
+                # unembedded instead, exactly as the auto-chunk parent insert
+                # does, and hand the vector off to the normal recovery path
+                # below.
+                #
+                # The two arms are not symmetric in how often they fire.
+                # ``get_embedding`` RETURNS None once its retry budget is
+                # exhausted rather than raising (see
+                # ``common/embedding/_service.py::_run_with_retry``), so under
+                # the gate saturation this path actually meets, the None arm is
+                # the common one. It was not silent globally — ``_run_with_retry``
+                # logs its own terminal error — but nothing here attributed the
+                # loss to a parent, a fact, or this code path.
+                child_embedding: list[float] | None = None
                 try:
                     child_embedding = await get_embedding(fact_content, tenant_config=tenant_config)
                 except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
                     logger.warning(
-                        "atomic-fact embed failed for memory %s (skipping this fact)",
+                        "atomic-fact embed raised for memory %s; persisting the fact unembedded",
                         memory_id,
                         exc_info=True,
                     )
-                    continue
-                if child_embedding is None:
-                    continue
                 child_ch = _content_hash(tenant_id, fleet_id, fact_content)
                 child_meta = {
                     "parent_memory_id": str(memory_id),
                     "source": "atomic_fact_fanout",
                     "retrieval_hint": fact.retrieval_hint or "",
                 }
+                if child_embedding is None:
+                    # ``embedding_pending`` is public API, not bookkeeping:
+                    # ``MemoryOut.metadata`` documents it, agents are told to
+                    # read it, and core-worker clears it when the vector
+                    # lands. Without it a fan-out child is indistinguishable
+                    # from a fully-embedded row to every consumer.
+                    child_meta["embedding_pending"] = True
                 # Intentionally NOT wrapped in ``per_tenant_storage_slot``
                 # (CAURA-602 follow-up): this site runs inside
                 # ``_enrich_memory_background``, a fire-and-forget task
@@ -2495,7 +2517,7 @@ async def _enrich_memory_background(
                 # storage-pool occupancy, revisit by giving the task
                 # its own deadline first.
                 try:
-                    await sc.create_memory(
+                    child = await sc.create_memory(
                         {
                             "tenant_id": tenant_id,
                             "fleet_id": fleet_id,
@@ -2511,17 +2533,96 @@ async def _enrich_memory_background(
                             "ts_valid_start": parent_ts_start,
                         }
                     )
-                    fanout_created += 1
                 except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
                     logger.warning(
                         "atomic-fact create_memory failed for parent %s",
                         memory_id,
                         exc_info=True,
                     )
+                    continue
+                # Everything below is post-write and deliberately OUTSIDE the
+                # try above. Folding it in would let a failure in the RECOVERY
+                # step surface as "create_memory failed" for a row that was in
+                # fact written — mislabelling the one log an operator would
+                # use to decide whether the fact exists.
+                fanout_created += 1
+                if child_embedding is None:
+                    # Durable handoff rather than waiting for the nightly
+                    # sweep. The sweep is the floor, not the mechanism:
+                    # ``embed_backfill_enabled`` defaults to FALSE, so a
+                    # deployment that has not turned it on would leave these
+                    # rows stranded indefinitely — which is how ~430 memories
+                    # were stranded in the 2026-07-27 incident this module
+                    # already carries a postmortem for.
+                    # ``_schedule_embed_or_reembed`` publishes EMBED_REQUESTED
+                    # in deferred mode (Pub/Sub owns retry/backoff/DLQ, paced
+                    # by the consumer's per-tenant slots) and retries
+                    # in-process otherwise.
+                    child_id = child.get("id") if isinstance(child, dict) else None
+                    if not child_id:
+                        # Loud, and NOT folded into fanout_unembedded: this
+                        # row is unembedded with no repair queued, which is a
+                        # strictly worse state than the counted one. The
+                        # nightly sweep remains its only recovery, and only
+                        # where enabled.
+                        # Log the response SHAPE, never the response. ``child``
+                        # is the created row, so it carries the raw fact text
+                        # and its metadata; interpolating it here would put
+                        # memory content — and any PII in it — into an ERROR
+                        # log. The key set is what actually diagnoses this
+                        # (which field the storage contract dropped) and is
+                        # content-free.
+                        logger.error(
+                            "atomic-fact child persisted unembedded but create_memory "
+                            "returned no usable id (response keys: %s) for parent %s; "
+                            "NO re-embed scheduled — recovery depends on the nightly sweep",
+                            sorted(child) if isinstance(child, dict) else type(child).__name__,
+                            memory_id,
+                        )
+                        continue
+                    # Counted only once the repair is actually queued, so the
+                    # summary below cannot claim a scheduled re-embed that was
+                    # never issued.
+                    fanout_unembedded += 1
+                    child_uuid = UUID(str(child_id))
+                    track_task(
+                        tracked_task(
+                            _schedule_embed_or_reembed(
+                                child_uuid,
+                                fact_content,
+                                tenant_id,
+                                content_hash=child_ch,
+                                is_failure_fallback=True,
+                            ),
+                            "embed_or_publish",
+                            # The CHILD's id, not the parent's. ``tracked_task``
+                            # uses this to label the BackgroundTaskLog row and
+                            # the failure log, so passing ``memory_id`` here
+                            # would file a failed child re-embed against the
+                            # parent — leaving the row that actually needs
+                            # repair untraceable. Every other call site passes
+                            # the same id to both the coroutine and the wrapper.
+                            child_uuid,
+                            tenant_id,
+                        )
+                    )
             if fanout_created:
                 logger.info(
                     "atomic-fact fan-out created %d children for parent %s",
                     fanout_created,
+                    memory_id,
+                )
+            if fanout_unembedded:
+                # WARNING rather than a field on the info line above, because
+                # it needs to be alertable on its own: it attributes an
+                # embedding-tier degradation to this specific path and parent,
+                # which the global coverage tick cannot do. Each of these
+                # children has a re-embed scheduled above; the count is what
+                # says how much of this fan-out is riding on that.
+                logger.warning(
+                    "atomic-fact fan-out persisted %d children without embeddings "
+                    "for parent %s; re-embed scheduled for each",
+                    fanout_unembedded,
                     memory_id,
                 )
 
