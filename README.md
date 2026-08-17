@@ -342,16 +342,19 @@ The plugin claims the OpenClaw `memory` slot (replacing `memory-core`) and expos
 Talk to any Caura deployment (managed or self-hosted) from Python:
 
 ```bash
-pip install memclaw-client
+pip install caura-client
 ```
 
 ```python
-from memclaw_client import MemClaw
+from caura_client import Caura
 
-mc = MemClaw("mc_xxx", tenant_id="my-team", agent_id="my-agent")
+mc = Caura("mc_xxx", tenant_id="my-team", agent_id="my-agent")
 mc.write("Q3 revenue target is $4M, set on 2026-04-15.")
 print(mc.recall("Q3 revenue target").summary)
 ```
+
+Formerly `memclaw-client` — the old package name, the `memclaw_client`
+import, and the `MemClaw` class all keep working forever as aliases.
 
 A thin wrapper over the REST API — see [`clients/python/`](clients/python/) for the full client.
 
@@ -364,12 +367,15 @@ npm install @caura/memclaw-client
 ```
 
 ```ts
-import { MemClaw } from "@caura/memclaw-client";
+import { Caura } from "@caura/memclaw-client";
 
-const mc = new MemClaw("mc_xxx", { tenantId: "my-team", agentId: "my-agent" });
+const mc = new Caura("mc_xxx", { tenantId: "my-team", agentId: "my-agent" });
 await mc.write("Q3 revenue target is $4M, set on 2026-04-15.");
 console.log((await mc.recall("Q3 revenue target")).summary);
 ```
+
+`MemClaw` remains a permanent alias of `Caura`, and `npm install caura`
+works too (a re-export of this package).
 
 See [`clients/typescript/`](clients/typescript/) for the full client.
 

@@ -91,7 +91,7 @@ def resolve_cmd() -> str:
     exe = shutil.which("memclaw-interviewer")
     if exe:
         return shlex.quote(exe)
-    return f"{shlex.quote(sys.executable)} -m memclaw_client.interviewer.cli"
+    return f"{shlex.quote(sys.executable)} -m caura_client.interviewer.cli"
 
 
 def build_run_command(

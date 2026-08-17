@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { MemClaw, MemClawApiError, AuthError, NotFoundError } from "./index.js";
+import { Caura, CauraApiError, AuthError, NotFoundError } from "./index.js";
 
 type Handler = (url: string, init: RequestInit) => Response | Promise<Response>;
 
@@ -12,8 +12,8 @@ function jsonResponse(status: number, data: unknown): Response {
   });
 }
 
-function makeClient(handler: Handler, options: Record<string, unknown> = {}): MemClaw {
-  return new MemClaw("mc_test", {
+function makeClient(handler: Handler, options: Record<string, unknown> = {}): Caura {
+  return new Caura("mc_test", {
     tenantId: "t1",
     baseUrl: "https://example.test",
     fetch: ((url: string, init: RequestInit) => Promise.resolve(handler(url, init))) as typeof fetch,
@@ -62,9 +62,9 @@ test("search posts to /search and returns a list", async () => {
 test("search throws when 200 body lacks items", async () => {
   const client = makeClient(() => jsonResponse(200, { error: "quota exceeded" }));
   await assert.rejects(client.search("q"), (err: unknown) => {
-    assert.ok(err instanceof MemClawApiError);
-    assert.equal((err as MemClawApiError).statusCode, 200);
-    assert.equal((err as MemClawApiError).message, '[200] search response missing "items" list');
+    assert.ok(err instanceof CauraApiError);
+    assert.equal((err as CauraApiError).statusCode, 200);
+    assert.equal((err as CauraApiError).message, '[200] search response missing "items" list');
     return true;
   });
 });
@@ -72,9 +72,9 @@ test("search throws when 200 body lacks items", async () => {
 test("search throws when 200 items is not a list", async () => {
   const client = makeClient(() => jsonResponse(200, { items: "not-a-list" }));
   await assert.rejects(client.search("q"), (err: unknown) => {
-    assert.ok(err instanceof MemClawApiError);
-    assert.equal((err as MemClawApiError).statusCode, 200);
-    assert.equal((err as MemClawApiError).message, '[200] search response "items" must be a list');
+    assert.ok(err instanceof CauraApiError);
+    assert.equal((err as CauraApiError).statusCode, 200);
+    assert.equal((err as CauraApiError).message, '[200] search response "items" must be a list');
     return true;
   });
 });
@@ -112,12 +112,12 @@ test("404 maps to NotFoundError", async () => {
   await assert.rejects(client.search("q"), NotFoundError);
 });
 
-test("500 maps to MemClawApiError", async () => {
+test("500 maps to CauraApiError", async () => {
   const client = makeClient(() => jsonResponse(500, { message: "boom" }));
-  await assert.rejects(client.recall("q"), MemClawApiError);
+  await assert.rejects(client.recall("q"), CauraApiError);
 });
 
 test("constructor validates apiKey and tenantId", () => {
-  assert.throws(() => new MemClaw("", { tenantId: "t" }));
-  assert.throws(() => new MemClaw("k", { tenantId: "" } as never));
+  assert.throws(() => new Caura("", { tenantId: "t" }));
+  assert.throws(() => new Caura("k", { tenantId: "" } as never));
 });

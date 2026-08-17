@@ -1,6 +1,6 @@
-"""Synchronous MemClaw client.
+"""Synchronous Caura client.
 
-A thin wrapper over the MemClaw REST API. Point it at a managed
+A thin wrapper over the Caura REST API. Point it at a managed
 (``https://caura.ai``) or self-hosted (``http://localhost:8000``) deployment.
 """
 
@@ -11,20 +11,20 @@ from typing import Any
 
 import httpx
 
-from .exceptions import AuthError, MemClawAPIError, NotFoundError
+from .exceptions import AuthError, CauraAPIError, NotFoundError
 from .models import Memory, RecallResult
 
 DEFAULT_BASE_URL = "https://caura.ai"
 
 
-class MemClaw:
-    """Client for a MemClaw deployment.
+class Caura:
+    """Client for a Caura deployment.
 
     Example::
 
-        from memclaw_client import MemClaw
+        from caura_client import Caura
 
-        mc = MemClaw("mc_xxx", tenant_id="my-team", agent_id="my-agent")
+        mc = Caura("mc_xxx", tenant_id="my-team", agent_id="my-agent")
         mc.write("Q3 revenue target is $4M, set on 2026-04-15.")
         for m in mc.search("Q3 revenue target"):
             print(m.title, m.content)
@@ -96,12 +96,12 @@ class MemClaw:
         body.update(extra)
         data = self._post("/api/v1/search", body)
         if not isinstance(data, dict):
-            raise MemClawAPIError(200, "search response must be a JSON object")
+            raise CauraAPIError(200, "search response must be a JSON object")
         if "items" not in data:
-            raise MemClawAPIError(200, 'search response missing "items" list')
+            raise CauraAPIError(200, 'search response missing "items" list')
         items = data["items"]
         if not isinstance(items, list):
-            raise MemClawAPIError(200, 'search response "items" must be a list')
+            raise CauraAPIError(200, 'search response "items" must be a list')
         return [Memory.from_dict(m) for m in items]
 
     def recall(self, query: str, *, top_k: int = 5, **extra: Any) -> RecallResult:
@@ -206,14 +206,19 @@ class MemClaw:
             raise AuthError(response.status_code, message or "authentication failed", details=details)
         if response.status_code == 404:
             raise NotFoundError(response.status_code, message or "not found", details=details)
-        raise MemClawAPIError(response.status_code, message or "request failed", details=details)
+        raise CauraAPIError(response.status_code, message or "request failed", details=details)
 
     # ------------------------------------------------------------- lifecycle
     def close(self) -> None:
         self._http.close()
 
-    def __enter__(self) -> MemClaw:
+    def __enter__(self) -> Caura:
         return self
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+# Permanent legacy alias (2026-08 rename) — same class, not a subclass, so
+# isinstance checks and type() comparisons agree across old and new code.
+MemClaw = Caura

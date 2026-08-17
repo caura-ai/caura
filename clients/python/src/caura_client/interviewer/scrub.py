@@ -12,7 +12,7 @@ import re
 
 _PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),  # OpenAI / Anthropic-style
-    re.compile(r"mc[ai]?_[A-Za-z0-9_\-]{16,}"),  # MemClaw credentials
+    re.compile(r"mc[ai]?_[A-Za-z0-9_\-]{16,}"),  # Caura credentials
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub tokens (classic)
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),  # GitHub fine-grained PAT
     re.compile(

@@ -25,8 +25,8 @@ from typing import Optional
 
 import httpx
 
-from ..client import MemClaw
-from ..exceptions import AuthError, MemClawAPIError, NotFoundError
+from ..client import Caura
+from ..exceptions import AuthError, CauraAPIError, NotFoundError
 from .discovery import HARNESS_CLAUDE_CODE, HARNESS_CURSOR, Transcript
 from .parser import count_lines, scan_events
 from .windows import Window, build_windows, window_is_worth_interviewing
@@ -97,7 +97,7 @@ def _log(cfg: RunConfig, msg: str) -> None:
         print(f"[interviewer] {msg}", file=sys.stderr)
 
 
-def read_watermark(mc: MemClaw, node_id: str) -> int:
+def read_watermark(mc: Caura, node_id: str) -> int:
     """Server-side cursor for this file; -1 when never interviewed."""
     try:
         doc = mc.get_document(watermark_doc_id(node_id), collection=WATERMARK_COLLECTION)
@@ -110,7 +110,7 @@ def read_watermark(mc: MemClaw, node_id: str) -> int:
         return -1
 
 
-def _submit_window(mc: MemClaw, cfg: RunConfig, node_id: str, window: Window) -> dict:
+def _submit_window(mc: Caura, cfg: RunConfig, node_id: str, window: Window) -> dict:
     return mc.submit_interview(
         node_id=node_id,
         agent_id=cfg.agent_id,
@@ -121,7 +121,7 @@ def _submit_window(mc: MemClaw, cfg: RunConfig, node_id: str, window: Window) ->
     )
 
 
-def run_file(mc: MemClaw, transcript: Transcript, cfg: RunConfig, windows_budget: int) -> FileResult:
+def run_file(mc: Caura, transcript: Transcript, cfg: RunConfig, windows_budget: int) -> FileResult:
     """Drain one transcript up to the shared windows budget."""
     result = FileResult(path=transcript.path)
     node_id = node_id_for(cfg.machine12, transcript.path, transcript.dialect)
@@ -187,7 +187,7 @@ def run_file(mc: MemClaw, transcript: Transcript, cfg: RunConfig, windows_budget
             response = _try_submit(mc, cfg, node_id, window)
         except AuthError:
             raise  # abort the whole run (403: tenant off / bad key)
-        except MemClawAPIError as exc:
+        except CauraAPIError as exc:
             result.error = f"window [{window.cursor_from}..{window.cursor_to}]: {exc}"
             _log(cfg, f"{transcript.path.name}: {result.error} - skipping file")
             break
@@ -207,11 +207,11 @@ def run_file(mc: MemClaw, transcript: Transcript, cfg: RunConfig, windows_budget
     return result
 
 
-def _try_submit(mc: MemClaw, cfg: RunConfig, node_id: str, window: Window) -> dict:
+def _try_submit(mc: Caura, cfg: RunConfig, node_id: str, window: Window) -> dict:
     """One submit with a single retry on 504/transport (dedup-safe)."""
     try:
         return _submit_window(mc, cfg, node_id, window)
-    except MemClawAPIError as exc:
+    except CauraAPIError as exc:
         if exc.status_code == 504:
             _log(cfg, f"504 on [{window.cursor_from}..{window.cursor_to}], one dedup-safe retry")
             return _submit_window(mc, cfg, node_id, window)
@@ -221,7 +221,7 @@ def _try_submit(mc: MemClaw, cfg: RunConfig, node_id: str, window: Window) -> di
         return _submit_window(mc, cfg, node_id, window)
 
 
-def run_all(mc: MemClaw, transcripts: list[Transcript], cfg: RunConfig) -> RunSummary:
+def run_all(mc: Caura, transcripts: list[Transcript], cfg: RunConfig) -> RunSummary:
     summary = RunSummary(windows_budget_left=cfg.max_windows)
     for transcript in transcripts:
         if summary.windows_budget_left <= 0:

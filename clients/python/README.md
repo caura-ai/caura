@@ -1,4 +1,6 @@
-# memclaw-client
+# caura-client
+
+> Formerly `memclaw-client` — the old package name, `memclaw_client` import, and `MemClaw` class remain permanent aliases.
 
 Official Python client for [Caura](https://caura.ai) — governed shared
 memory for AI agent fleets (multi-agent, multi-tenant, MCP-native).
@@ -9,13 +11,13 @@ A thin wrapper over the Caura REST API. Point it at a managed
 ## Install
 
 ```bash
-pip install memclaw-client
+pip install caura-client
 ```
 
 ## Quickstart
 
 ```python
-from memclaw_client import Caura
+from caura_client import Caura
 
 mc = Caura("mc_xxx", tenant_id="my-team", agent_id="my-agent")
 

@@ -1,7 +1,7 @@
 {
   "name": "@caura/memclaw-client",
-  "version": "0.1.0",
-  "description": "Official TypeScript/JavaScript client for Caura (formerly MemClaw) — governed shared memory for AI agent fleets (multi-agent, multi-tenant, MCP-native).",
+  "version": "1.0.0",
+  "description": "Official TypeScript/JavaScript client for Caura (formerly MemClaw) \u2014 governed shared memory for AI agent fleets (multi-agent, multi-tenant, MCP-native).",
   "license": "Apache-2.0",
   "author": "Caura <hello@caura.ai>",
   "type": "module",
@@ -13,7 +13,11 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist/index.js", "dist/index.d.ts", "README.md"],
+  "files": [
+    "dist/index.js",
+    "dist/index.d.ts",
+    "README.md"
+  ],
   "engines": {
     "node": ">=18"
   },

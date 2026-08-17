@@ -1,4 +1,4 @@
-"""Unit tests for the MemClaw client — fully mocked via httpx.MockTransport, no network."""
+"""Unit tests for the Caura client — fully mocked via httpx.MockTransport, no network."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ import json
 import httpx
 import pytest
 
-from memclaw_client import (
+from caura_client import (
     AuthError,
-    MemClaw,
-    MemClawAPIError,
+    Caura,
+    CauraAPIError,
     Memory,
     NotFoundError,
     RecallResult,
@@ -19,7 +19,7 @@ from memclaw_client import (
 
 def make_client(handler, **kwargs):
     transport = httpx.MockTransport(handler)
-    return MemClaw(
+    return Caura(
         "mc_test",
         tenant_id="t1",
         base_url="https://example.test",
@@ -67,7 +67,7 @@ def test_search_raises_on_missing_items_key():
     def handler(request):
         return httpx.Response(200, json={"error": "quota exceeded"})
 
-    with pytest.raises(MemClawAPIError) as exc:
+    with pytest.raises(CauraAPIError) as exc:
         make_client(handler).search("q")
     assert exc.value.status_code == 200
     assert str(exc.value) == '[200] search response missing "items" list'
@@ -77,7 +77,7 @@ def test_search_raises_on_items_not_a_list():
     def handler(request):
         return httpx.Response(200, json={"items": "not-a-list"})
 
-    with pytest.raises(MemClawAPIError) as exc:
+    with pytest.raises(CauraAPIError) as exc:
         make_client(handler).search("q")
     assert exc.value.status_code == 200
     assert str(exc.value) == '[200] search response "items" must be a list'
@@ -87,7 +87,7 @@ def test_search_raises_on_non_dict_body():
     def handler(request):
         return httpx.Response(200, json=["not", "a", "dict"])
 
-    with pytest.raises(MemClawAPIError) as exc:
+    with pytest.raises(CauraAPIError) as exc:
         make_client(handler).search("q")
     assert exc.value.status_code == 200
     assert str(exc.value) == "[200] search response must be a JSON object"
@@ -134,7 +134,7 @@ def test_generic_api_error():
     def handler(request):
         return httpx.Response(500, json={"message": "boom"})
 
-    with pytest.raises(MemClawAPIError):
+    with pytest.raises(CauraAPIError):
         make_client(handler).recall("q")
 
 
@@ -148,6 +148,6 @@ def test_context_manager():
 
 def test_requires_api_key_and_tenant():
     with pytest.raises(ValueError):
-        MemClaw("", tenant_id="t")
+        Caura("", tenant_id="t")
     with pytest.raises(ValueError):
-        MemClaw("k", tenant_id="")
+        Caura("k", tenant_id="")

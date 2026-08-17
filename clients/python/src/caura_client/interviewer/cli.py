@@ -24,7 +24,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from ..client import MemClaw
+from ..client import Caura
 from ..exceptions import AuthError
 from .discovery import (
     DEFAULT_CURSOR_PROJECTS_ROOT,
@@ -51,7 +51,7 @@ def _default_agent_id() -> str:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="memclaw-interviewer",
-        description="MemClaw Interviewer adapter for Claude Code transcripts (read-only).",
+        description="Caura Interviewer adapter for Claude Code transcripts (read-only).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -183,8 +183,8 @@ def _acquire_lock() -> Optional[object]:
         return object()
 
 
-def _make_client(args: argparse.Namespace) -> MemClaw:
-    return MemClaw(
+def _make_client(args: argparse.Namespace) -> Caura:
+    return Caura(
         args.api_key,
         tenant_id=args.tenant_id,
         base_url=args.base_url,

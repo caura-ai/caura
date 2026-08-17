@@ -1,6 +1,6 @@
 /**
- * Official TypeScript/JavaScript client for MemClaw — governed shared memory
- * for AI agent fleets. A thin wrapper over the MemClaw REST API.
+ * Official TypeScript/JavaScript client for Caura — governed shared memory
+ * for AI agent fleets. A thin wrapper over the Caura REST API.
  *
  * Point it at a managed (`https://caura.ai`) or self-hosted
  * (`http://localhost:8000`) deployment.
@@ -8,24 +8,24 @@
 
 export const DEFAULT_BASE_URL = "https://caura.ai";
 
-export class MemClawError extends Error {}
+export class CauraError extends Error {}
 
-export class MemClawApiError extends MemClawError {
+export class CauraApiError extends CauraError {
   readonly statusCode: number;
   readonly details: unknown;
   constructor(statusCode: number, message: string, details?: unknown) {
     super(`[${statusCode}] ${message}`);
-    this.name = "MemClawApiError";
+    this.name = "CauraApiError";
     this.statusCode = statusCode;
     this.details = details;
   }
 }
 
 /** Raised on 401/403 — bad or insufficiently-scoped credential. */
-export class AuthError extends MemClawApiError {}
+export class AuthError extends CauraApiError {}
 
 /** Raised on 404. */
-export class NotFoundError extends MemClawApiError {}
+export class NotFoundError extends CauraApiError {}
 
 export interface Memory {
   id: string | null;
@@ -47,7 +47,7 @@ export interface RecallResult {
   raw: Record<string, unknown>;
 }
 
-export interface MemClawOptions {
+export interface CauraOptions {
   tenantId: string;
   baseUrl?: string;
   agentId?: string;
@@ -86,7 +86,7 @@ function toMemory(d: Record<string, any>): Memory {
   };
 }
 
-export class MemClaw {
+export class Caura {
   readonly tenantId: string;
   readonly agentId?: string;
   private readonly baseUrl: string;
@@ -94,7 +94,7 @@ export class MemClaw {
   private readonly headers: Record<string, string>;
   private readonly fetchImpl: typeof globalThis.fetch;
 
-  constructor(apiKey: string, options: MemClawOptions) {
+  constructor(apiKey: string, options: CauraOptions) {
     if (!apiKey) throw new Error("apiKey is required");
     if (!options || !options.tenantId) throw new Error("tenantId is required");
     this.tenantId = options.tenantId;
@@ -129,14 +129,14 @@ export class MemClaw {
     Object.assign(body, extra);
     const data = await this.request("POST", "/api/v1/search", body);
     if (!data || typeof data !== "object" || Array.isArray(data)) {
-      throw new MemClawApiError(200, "search response must be a JSON object");
+      throw new CauraApiError(200, "search response must be a JSON object");
     }
     if (!("items" in data)) {
-      throw new MemClawApiError(200, 'search response missing "items" list');
+      throw new CauraApiError(200, 'search response missing "items" list');
     }
     const items = (data as Record<string, unknown>).items;
     if (!Array.isArray(items)) {
-      throw new MemClawApiError(200, 'search response "items" must be a list');
+      throw new CauraApiError(200, 'search response "items" must be a list');
     }
     return items.map((m) => toMemory(m as Record<string, any>));
   }
@@ -203,5 +203,15 @@ async function raiseForStatus(res: Response): Promise<void> {
   if (res.status === 404) {
     throw new NotFoundError(res.status, message || "not found", details);
   }
-  throw new MemClawApiError(res.status, message || "request failed", details);
+  throw new CauraApiError(res.status, message || "request failed", details);
 }
+
+// Permanent legacy aliases (2026-08 rename) — same classes/types, so
+// instanceof and catch clauses agree across old and new spellings.
+export const MemClaw = Caura;
+export type MemClaw = Caura;
+export const MemClawError = CauraError;
+export type MemClawError = CauraError;
+export const MemClawApiError = CauraApiError;
+export type MemClawApiError = CauraApiError;
+export type MemClawOptions = CauraOptions;
