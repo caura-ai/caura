@@ -595,6 +595,28 @@ class TestFakeExtract:
         result = _fake_extract("John Smith manages the Auth Team")
         assert result.relations == []
 
+    def test_never_claims_a_type_it_did_not_establish(self):
+        """A capitalised-bigram regex cannot classify, so it must not assert a class.
+
+        Every match used to be typed ``person`` — including "Helios Migration" and
+        "Last Tuesday". This output is PERSISTED to the entity graph on a provider
+        outage, so the wrong type reaches a real tenant.
+        """
+        from core_api.services.entity_extraction import _fake_extract
+
+        result = _fake_extract(
+            "Anna Bergstrom shipped the Helios Migration on Last Tuesday"
+        )
+        types = {e.entity_type for e in result.entities}
+
+        assert result.entities, "expected the regex to find the capitalised phrases"
+        assert types == {"unknown"}, (
+            f"the heuristic must report an undetermined type, not guess; got {types!r}"
+        )
+        # The point is not that 'person' is banned but that nothing is asserted:
+        # 'helios migration' is not a person and neither is 'last tuesday'.
+        assert "person" not in types
+
 
 # ---------------------------------------------------------------------------
 # Unit tests: call_with_fallback max_attempts (recall latency lever)

@@ -157,14 +157,39 @@ def _parse_graph_lenient(raw: dict) -> tuple[ExtractedGraph, dict[str, int]]:
     return ExtractedGraph(**fields), dropped
 
 
+# What the regex heuristic declares instead of guessing. NOT one of the ten types
+# the prompt above offers, deliberately: those are classifications, and this path
+# performed no classification. Free-form ``str`` on ``ExtractedEntity`` and no code
+# branches on the value (it is stored by ``entity_service`` and displayed), so this
+# is a change to what we ASSERT, not to what works.
+_UNCLASSIFIED_ENTITY_TYPE = "unknown"
+
+
 def _fake_extract(content: str) -> ExtractedGraph:
-    """Regex-based: extract capitalized multi-word phrases as person entities."""
+    """Regex heuristic: capitalised multi-word phrases, left deliberately untyped.
+
+    This is the last tier of the extraction chain, so its output is not a
+    throwaway — ``entity_extraction_worker`` persists these rows to the entity
+    graph and embeds every name.
+
+    It used to stamp ``entity_type="person"`` on every match, which contradicts
+    the extraction prompt's own rule twelve lines up ("Use entity_type=person only
+    when a named individual is referenced") and is wrong for most of what a
+    capitalised-bigram regex finds: "Helios Migration", "Last Tuesday" and "Good
+    Morning" all became people. On a provider outage that wrong type is what
+    reaches a real tenant's graph.
+
+    A regex cannot classify, so it no longer pretends to. The NAMES are still
+    worth keeping — "Anna Bergstrom" and "Acme Corp" are genuine entities, and
+    when every provider is down this is the only path that catches them — but the
+    type is reported as undetermined rather than invented.
+    """
     pattern = r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b"
     matches = list(set(re.findall(pattern, content)))
     entities = [
         ExtractedEntity(
             canonical_name=m.lower(),
-            entity_type="person",
+            entity_type=_UNCLASSIFIED_ENTITY_TYPE,
             role="mentioned",
         )
         for m in matches
