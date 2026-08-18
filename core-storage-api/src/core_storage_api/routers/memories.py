@@ -1550,6 +1550,80 @@ async def get_memory_detail(memory_id: UUID, tenant_id: str) -> dict:
     return detail
 
 
+@router.post("/{memory_id}/relations")
+async def upsert_memory_relation(memory_id: UUID, request: Request) -> dict:
+    """Create (or re-affirm) a typed link from ``memory_id`` to another memory.
+
+    Idempotent: re-issuing the same link returns the existing row rather than 409-ing,
+    and for a SYMMETRIC relation type the REVERSED pair counts as the same link. See
+    ``memory_relation_upsert`` for the reasoning and for the one race it leaves open.
+
+    ``supersedes`` is rejected with 422, not stored: that claim lives on
+    ``memories.supersedes_id``. The DB CHECK would also refuse it, but as a 500.
+
+    Both endpoints must exist, be live, and belong to ``tenant_id`` — checked here so a
+    caller cannot use a link to probe whether another tenant's memory id exists. A
+    missing or cross-tenant endpoint is a flat 404, the same shape the by-id read uses.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    to_memory_id = _require(body, "to_memory_id")
+    relation_type = _require(body, "relation_type")
+    try:
+        to_uuid = UUID(str(to_memory_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="to_memory_id must be a UUID") from exc
+
+    for endpoint in (memory_id, to_uuid):
+        if await _svc.memory_get_by_id_for_tenant(endpoint, tenant_id) is None:
+            raise HTTPException(status_code=404, detail="Memory not found")
+
+    try:
+        row, _created = await _svc.memory_relation_upsert(
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": body.get("fleet_id"),
+                "from_memory_id": memory_id,
+                "relation_type": relation_type,
+                "to_memory_id": to_uuid,
+                "metadata": body.get("metadata"),
+            }
+        )
+    except ValueError as exc:
+        # Vocabulary and self-link violations — the service raises these before touching
+        # the database precisely so they surface as 422 rather than an IntegrityError 500.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _relation_to_dict(row)
+
+
+@router.get("/{memory_id}/relations")
+async def list_memory_relations(memory_id: UUID, tenant_id: str, relation_type: str | None = None) -> dict:
+    """Every live link touching ``memory_id``, in either direction.
+
+    Links whose FAR endpoint is soft-deleted are omitted: soft delete leaves the row in
+    place (it is reversible), so this filter is what stops a deleted memory reappearing
+    through its graph.
+    """
+    if await _svc.memory_get_by_id_for_tenant(memory_id, tenant_id) is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    rows = await _svc.memory_relation_list(memory_id, tenant_id, relation_type=relation_type)
+    return {"relations": [_relation_to_dict(r) for r in rows]}
+
+
+def _relation_to_dict(row) -> dict:
+    """Serialise a ``MemoryRelation``. ``metadata_`` is exposed as ``metadata``."""
+    return {
+        "id": str(row.id),
+        "tenant_id": row.tenant_id,
+        "fleet_id": row.fleet_id,
+        "from_memory_id": str(row.from_memory_id),
+        "relation_type": row.relation_type,
+        "to_memory_id": str(row.to_memory_id),
+        "metadata": row.metadata_,
+        "created_at": row.created_at,
+    }
+
+
 @router.get("/{memory_id}/contradictions")
 async def get_memory_contradictions(memory_id: UUID, tenant_id: str) -> dict:
     """Raw contradiction rows: ``{memory, supersessors[], older|null}``.

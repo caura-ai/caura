@@ -42,7 +42,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import load_only
+from sqlalchemy.orm import aliased, load_only
 
 from common.constants import (
     CONTRADICTION_CANDIDATE_MAX,
@@ -76,9 +76,15 @@ from common.models import (
     Memory,
     MemoryConflict,
     MemoryEntityLink,
+    MemoryRelation,
     Relation,
 )
 from common.models.capability_usage import CapabilityUsage
+from common.models.memory_relation import (
+    STORED_RELATION_TYPES,
+    SUPERSEDES_RELATION_TYPE,
+    SYMMETRIC_RELATION_TYPES,
+)
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
 from common.organization_settings_merge import deep_merge, diff_settings
@@ -197,6 +203,11 @@ def _coerce_dt(value: Any) -> Any:
     if isinstance(value, str):
         return datetime.fromisoformat(value)
     return value
+
+
+# ``MemoryRelation``'s JSONB column, as a Column object. Needed because the string key
+# "metadata" resolves against the declarative class to ``Base.metadata``.
+_MEMORY_RELATION_METADATA = MemoryRelation.__table__.c["metadata"]
 
 
 def _relation_weight(relation_type: str, row_weight: float) -> float:
@@ -4903,6 +4914,157 @@ class PostgresService:
                     stmt = stmt.where(Relation.fleet_id == fleet_id)
             result = await session.execute(stmt)
             return list(result.scalars().all())
+
+    # ── memory <-> memory relations (the ``memory_link`` graph) ──
+    #
+    # Separate from the entity ``relation_*`` methods above and NOT interchangeable
+    # with them: those are entity<->entity. See ``common/models/memory_relation.py``
+    # for why ``supersedes`` is absent here (it reuses ``memories.supersedes_id``).
+
+    async def memory_relation_upsert(self, data: dict) -> tuple[MemoryRelation, bool]:
+        """Idempotent link write. Returns ``(row, created)``.
+
+        Idempotent by the natural key, for the reason ``relation_add`` above documents
+        at length: a plain INSERT there drove an ``IntegrityError`` cluster into 5xx
+        storms, with rows committed while the caller saw an error and retried. An agent
+        re-issuing ``memory_link`` must be a no-op, not a 500.
+
+        SYMMETRIC TYPES ALSO MATCH THE REVERSED PAIR. ``(A, contradicts, B)`` and
+        ``(B, contradicts, A)`` are the same claim, but they are different rows under
+        the natural key — the schema accepts both (pinned deliberately by
+        ``tests/test_memory_relations_schema.py``), so the check has to live here. The
+        existing row is returned unchanged rather than re-pointed, so the direction the
+        FIRST caller stated is preserved.
+
+        KNOWN RACE, and why it is left open: two concurrent calls writing opposite
+        directions of the same symmetric link can both pass this check and both insert,
+        leaving two rows that mean one thing. It is benign — a duplicate edge, not
+        corruption — and ``memory_link`` is an agent-initiated, low-rate write. Closing
+        it properly means a partial unique index on
+        ``(tenant_id, least(from, to), greatest(from, to), relation_type)`` limited to
+        the symmetric types, which would make the invariant structural at the cost of a
+        more awkward ON CONFLICT target. Worth doing if duplicates are ever observed;
+        not worth pre-empting.
+        """
+        relation_type = data["relation_type"]
+        if relation_type == SUPERSEDES_RELATION_TYPE:
+            # The CHECK constraint would also refuse this, but as a 500. Callers get a
+            # precise reason instead: the claim belongs on ``memories.supersedes_id``.
+            raise ValueError(
+                "relation_type 'supersedes' is not stored in memory_relations; it is "
+                "represented by memories.supersedes_id"
+            )
+        if relation_type not in STORED_RELATION_TYPES:
+            raise ValueError(
+                f"unknown relation_type {relation_type!r}; expected one of {sorted(STORED_RELATION_TYPES)}"
+            )
+        if data["from_memory_id"] == data["to_memory_id"]:
+            raise ValueError("a memory cannot be linked to itself")
+
+        async with get_session() as session:
+            if relation_type in SYMMETRIC_RELATION_TYPES:
+                existing = (
+                    await session.execute(
+                        select(MemoryRelation).where(
+                            MemoryRelation.tenant_id == data["tenant_id"],
+                            MemoryRelation.relation_type == relation_type,
+                            MemoryRelation.from_memory_id == data["to_memory_id"],
+                            MemoryRelation.to_memory_id == data["from_memory_id"],
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing is not None:
+                    return existing, False
+
+            # ``metadata`` is the WIRE name; the mapped attribute is ``metadata_``
+            # because ``metadata`` on a declarative class is SQLAlchemy's ``MetaData``.
+            # Passing the wire key straight to ``.values()`` resolves to that object and
+            # fails at execute time with ``'MetaData' object has no attribute
+            # '_bulk_update_tuples'`` — a long way from the cause. Normalise once, here,
+            # so callers keep speaking the wire shape.
+            values = dict(data)
+            supplied_metadata = values.pop("metadata", None)
+            if supplied_metadata is not None:
+                # Only set it when the caller actually sent it. Binding Python ``None``
+                # to a JSONB column stores JSON ``null``, which is NOT SQL NULL — the
+                # COALESCE below would then treat an omitted field as a real value and
+                # blank whatever an earlier link recorded.
+                values["metadata_"] = supplied_metadata
+            insert_stmt = pg_insert(MemoryRelation).values(**values)
+            upsert_stmt = insert_stmt.on_conflict_do_update(
+                constraint="uq_memory_relations_natural_key",
+                # Latest non-NULL metadata wins, so a caller that omits ``metadata``
+                # does not wipe what an earlier link recorded — same COALESCE reasoning
+                # as ``relation_add``'s ``evidence_memory_id``. ``fleet_id`` is
+                # deliberately untouched: first-writer-wins, as there too.
+                # Keyed by the COLUMN OBJECT, never the string ``"metadata"``: that name
+                # resolves against the declarative class to ``Base.metadata`` (the
+                # SQLAlchemy ``MetaData``), not to this column, and the resulting
+                # ``AttributeError: 'MetaData' object has no attribute
+                # '_bulk_update_tuples'`` appears only at execute time. Same
+                # reserved-name collision that forces the ``metadata_`` attribute name.
+                # Keyed by the ORM ATTRIBUTE name ``metadata_``, never the column name
+                # ``"metadata"``: the latter resolves against the declarative class to
+                # ``Base.metadata`` (the SQLAlchemy ``MetaData``), and the resulting
+                # ``AttributeError: 'MetaData' object has no attribute
+                # '_bulk_update_tuples'`` appears only at execute time. Same
+                # reserved-name collision that forces the ``metadata_`` attribute name.
+                set_={
+                    _MEMORY_RELATION_METADATA: func.coalesce(
+                        insert_stmt.excluded["metadata"], _MEMORY_RELATION_METADATA
+                    )
+                },
+            ).returning(MemoryRelation)
+            row = (await session.execute(upsert_stmt)).scalar_one()
+            # ``created`` is inferred from whether the row's id survived: on a conflict
+            # the pre-existing id is kept, so a caller cannot distinguish create from
+            # update by id alone. Report the cheap, honest thing instead — that the
+            # write landed — and let the route return 200 either way.
+            return row, True
+
+    async def memory_relation_list(
+        self,
+        memory_id: UUID,
+        tenant_id: str,
+        *,
+        relation_type: str | None = None,
+    ) -> list[MemoryRelation]:
+        """Every live link touching ``memory_id``, in either direction.
+
+        BOTH directions unconditionally, including for the asymmetric types: a caller
+        asking "what is linked to this memory" wants the edges pointing at it as much as
+        the ones leaving it, and the row carries ``from``/``to`` so direction is never
+        lost. That is also what makes the symmetric types work without storing two rows.
+
+        Endpoints that are SOFT-DELETED are excluded here rather than in the caller —
+        soft delete leaves the row (see the model docstring), so this filter is the only
+        thing that stops a deleted memory reappearing through its graph.
+        """
+        async with get_session() as session:
+            far_end = aliased(Memory)
+            stmt = (
+                select(MemoryRelation)
+                .join(
+                    far_end,
+                    far_end.id
+                    == case(
+                        (MemoryRelation.from_memory_id == memory_id, MemoryRelation.to_memory_id),
+                        else_=MemoryRelation.from_memory_id,
+                    ),
+                )
+                .where(
+                    MemoryRelation.tenant_id == tenant_id,
+                    or_(
+                        MemoryRelation.from_memory_id == memory_id,
+                        MemoryRelation.to_memory_id == memory_id,
+                    ),
+                    far_end.deleted_at.is_(None),
+                )
+                .order_by(MemoryRelation.created_at.desc())
+            )
+            if relation_type is not None:
+                stmt = stmt.where(MemoryRelation.relation_type == relation_type)
+            return list((await session.execute(stmt)).scalars().all())
 
     async def relation_get_outgoing(
         self,
