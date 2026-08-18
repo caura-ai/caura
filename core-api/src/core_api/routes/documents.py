@@ -143,14 +143,36 @@ class DocOut(BaseModel):
     collection: str
     doc_id: str
     data: dict
-    created_at: datetime
-    updated_at: datetime
+    # NULLABLE because the columns are. ``documents.created_at`` / ``updated_at``
+    # carry ``server_default=now()`` but were never declared ``nullable=False``
+    # (001_initial_schema, never tightened since), so a NULL is representable. This
+    # model previously required a ``datetime``, which meant such a row could not be
+    # serialised at all — the read raised ValidationError and the route 500'd. No
+    # client can be relying on non-null for those rows, because they were never
+    # served; ``null`` strictly widens what this endpoint can return.
+    created_at: datetime | None
+    updated_at: datetime | None
 
 
 # ── Helpers ──
 
 
 def _dict_to_out(d: dict) -> DocOut:
+    # ``.get(key, datetime.min)`` covered only the MISSING-KEY case and left the
+    # present-but-None one, which is the one the schema actually permits — so the
+    # default never fired where it mattered and the route 500'd instead. And where
+    # it did fire it served year 1 (naive, in a tz-aware field) to a caller with no
+    # way to recognise it as a sentinel. Pass the value through and let ``null``
+    # mean unknown.
+    if d.get("created_at") is None or d.get("updated_at") is None:
+        # Identifier only, never ``data`` — that is caller-supplied document content.
+        logger.warning(
+            "document_timestamp_null id=%s collection=%s created_at_null=%s updated_at_null=%s",
+            d.get("id"),
+            d.get("collection"),
+            d.get("created_at") is None,
+            d.get("updated_at") is None,
+        )
     return DocOut(
         id=str(d.get("id", "")),
         tenant_id=d.get("tenant_id", ""),
@@ -158,8 +180,8 @@ def _dict_to_out(d: dict) -> DocOut:
         collection=d.get("collection", ""),
         doc_id=d.get("doc_id", ""),
         data=d.get("data", {}),
-        created_at=d.get("created_at", datetime.min),
-        updated_at=d.get("updated_at", datetime.min),
+        created_at=d.get("created_at"),
+        updated_at=d.get("updated_at"),
     )
 
 
