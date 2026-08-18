@@ -643,6 +643,53 @@ class TestRouteSlugRegex:
 
 
 @pytest.mark.unit
+def _strip_docstrings_and_comments(src: str) -> str:
+    """Source with comments and docstrings removed, everything else verbatim.
+
+    A migration guard that greps raw source can be satisfied by a COMMENT, which
+    makes it documentation-checking rather than code-checking. Found by mutation:
+    stripping the real ``autocommit_block`` from 038 still passed, because the
+    module docstring named it.
+
+    Line-based on purpose. Rebuilding from ``tokenize`` output re-spaces the source
+    (``op . get_context ( )``) and, on 3.12+, splits f-strings into parts — either
+    of which silently breaks a literal substring check, which is the same class of
+    bug this helper exists to catch. Ordinary string literals are KEPT: the guarded
+    statements are themselves strings (``op.execute("ALTER TABLE ...")``).
+    """
+    import ast
+    import io
+    import tokenize
+
+    lines = src.splitlines()
+
+    drop: set[int] = set()
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+        body = getattr(node, "body", [])
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            drop.update(range(body[0].lineno, (body[0].end_lineno or body[0].lineno) + 1))
+
+    # Truncate each line at its comment, if any (1-indexed rows, 0-indexed cols).
+    cut: dict[int, int] = {}
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type == tokenize.COMMENT:
+            cut.setdefault(tok.start[0], tok.start[1])
+
+    kept = [
+        line[: cut[i]] if i in cut else line
+        for i, line in enumerate(lines, start=1)
+        if i not in drop
+    ]
+    return "\n".join(kept)
+
+
 class TestMigrationChain:
     """Sanity check that the Phase 0 migrations (020 / 021 / 022) chain
     correctly off the prior head (019). Detects accidental down_revision
@@ -664,7 +711,7 @@ class TestMigrationChain:
     def test_single_head(self):
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"037"}, f"Expected single head '037', got {sorted(heads)}"
+        assert heads == {"038"}, f"Expected single head '038', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -701,6 +748,81 @@ class TestMigrationChain:
         # 037: memories.embedded_content_hash — embedding provenance, so a
         # vector computed from superseded text becomes detectable
         assert chain.get("037") == "036", "037 must follow 036"
+        # 038: documents.created_at/updated_at NOT NULL — the columns were always
+        # nullable, so a NULL row 500'd the documents read path (OSS #826)
+        assert chain.get("038") == "037", "038 must follow 037"
+
+    def test_no_plain_set_not_null_on_large_tables(self):
+        """Tightening a column to NOT NULL on a large table must not full-scan
+        under an AccessExclusive lock.
+
+        Same hazard as the CREATE INDEX guard below, different statement: a bare
+        ``SET NOT NULL`` scans the whole table to verify while holding
+        AccessExclusive, blocking writes and pinning the migration advisory lock.
+        The safe shape adds a ``CHECK (col IS NOT NULL) NOT VALID``, VALIDATEs it
+        (ShareUpdateExclusive — does not block reads or writes), and only then sets
+        NOT NULL, which PG12+ satisfies from the validated constraint without a
+        second scan. Each step needs its own transaction, hence ``autocommit_block``.
+
+        Catches BOTH spellings, because the existing index guard learned this the
+        hard way: it originally checked only raw SQL, and ``op.create_index(...)``
+        carried the identical defect straight past it.
+        """
+        import re
+
+        large_tables = {
+            "audit_log",
+            "memories",
+            "entities",
+            "documents",
+            "memory_entity_links",
+            "relations",
+        }
+        # ALTER TABLE <table> ALTER COLUMN <col> SET NOT NULL
+        #
+        # The column position accepts ``{...}`` as well as a bare name, because
+        # ``ruff format`` collapses these statements into f-strings and a ``\w+``
+        # column would then match nothing — the guard would go SILENT on the very
+        # file it is meant to check, which is the documented blind spot that leaves
+        # 007 and 026 outside the CREATE INDEX guard below. Verified by mutation
+        # both ways.
+        #
+        # KNOWN GAP, same as that guard: an interpolated TABLE name cannot be
+        # classified against ``large_tables``, so ``f"ALTER TABLE {tbl} ..."`` is
+        # not caught. Keep the table literal in migrations.
+        raw_pat = re.compile(
+            r"ALTER\s+TABLE\s+(\w+)\s+ALTER\s+COLUMN\s+[\w{}]+\s+SET\s+NOT\s+NULL",
+            re.IGNORECASE,
+        )
+        # op.alter_column("<table>", "<col>", ..., nullable=False)
+        api_pat = re.compile(
+            r"op\.alter_column\(\s*[\"\'](\w+)[\"\'][^)]*nullable\s*=\s*False",
+            re.DOTALL,
+        )
+        versions = pathlib.Path(
+            "core-storage-api/src/core_storage_api/database/migrations/versions"
+        )
+        violations: list[str] = []
+        for f in sorted(versions.glob("*.py")):
+            prefix = f.stem.split("_")[0]
+            if not prefix.isdigit() or int(prefix) < 5:
+                continue
+            src = f.read_text()
+            tables = set(raw_pat.findall(src)) | set(api_pat.findall(src))
+            hit = {t for t in tables if t.lower() in large_tables}
+            if not hit:
+                continue
+            # Look at CODE, not prose. Checking the raw source let a migration
+            # satisfy this by DESCRIBING the safe pattern in its docstring while
+            # not doing it — caught by mutation: stripping the real
+            # ``autocommit_block`` still passed, because the docstring named it.
+            code = _strip_docstrings_and_comments(src)
+            if "VALIDATE CONSTRAINT" not in code.upper() or ".autocommit_block()" not in code:
+                violations.append(
+                    f"{f.name}: SET NOT NULL on {sorted(hit)} without the "
+                    "CHECK-NOT-VALID / VALIDATE / autocommit_block pattern"
+                )
+        assert not violations, "unsafe NOT NULL tightening:\n" + "\n".join(violations)
 
     def test_no_plain_create_index_on_large_tables(self):
         """Indexes on large, pre-existing tables MUST be built ``CONCURRENTLY``
