@@ -171,8 +171,23 @@ async def summarize_memories(
     )
 
     def _fake_recall() -> str:
-        """No-LLM fallback: join top memory contents."""
-        return " ".join(m.content[:100] for m in memories[:3])
+        """No-LLM fallback: the top memory contents, labelled as unsynthesized.
+
+        Unlike the other fallbacks in this sweep this one is a READ path — the
+        string lands in the response's ``summary`` and is never persisted — so
+        returning something beats returning nothing. What it must not do is pass
+        three truncated memory fragments off as a synthesised answer, which is what
+        an unlabelled join did.
+
+        Marked in the text rather than via a side-channel field because the caller
+        surfaces ``summary`` verbatim to whoever asked; a flag they don't read is
+        the same as no flag. Same shape as ``interview_service._fake_report``'s
+        "(LLM unavailable; unsynthesized)".
+        """
+        joined = " ".join(m.content[:100] for m in memories[:3])
+        if not joined:
+            return "No summary available (no LLM provider answered)."
+        return f"(LLM unavailable; top {min(len(memories), 3)} memories unsynthesized) {joined}"
 
     async def _do_recall(llm) -> str:
         return await llm.complete_text(
