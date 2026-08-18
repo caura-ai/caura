@@ -7,13 +7,32 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings
-from core_api.services.agent_service import broker_owned_agent_id
+from core_api.services.agent_service import enforce_fleet_write, resolve_write_agent
+from core_api.services.usage_service import check_and_increment
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["stm"])
+
+
+def _reject_reserved_memory_type(memory_type: str | None) -> None:
+    """Twin of ``memories._reject_reserved_memory_type``, for the promote door.
+
+    Deliberately a small duplicate rather than an import of that module's
+    private helper: importing across route modules to reach a ``_``-prefixed
+    function invites a circular import for no real gain. The source of truth
+    both share is ``SERVER_RESERVED_MEMORY_TYPES``, so the two cannot disagree
+    about WHICH types are reserved — only about wording.
+    """
+    if memory_type is None or memory_type not in SERVER_RESERVED_MEMORY_TYPES:
+        return
+    raise HTTPException(
+        status_code=422,
+        detail=(f"memory_type='{memory_type}' is server-reserved and cannot be supplied on writes."),
+    )
 
 
 def _check_stm_enabled() -> None:
@@ -147,6 +166,10 @@ async def promote_stm(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     tenant_id = _require_tenant(auth)
+    # A promote IS an LTM write, so it owes the same gates as POST /memories.
+    # It reached LTM having paid only the two above, which meant the STM door
+    # into long-term memory was cheaper than the front door.
+    _reject_reserved_memory_type(body.memory_type)
     # Bind the promoted memory to the authenticated agent identity when the
     # credential carries one — a caller must not promote into LTM on behalf
     # of an arbitrary peer agent.
@@ -155,13 +178,42 @@ async def promote_stm(
             status_code=403,
             detail=f"agent_id '{body.agent_id}' does not match the authenticated agent identity.",
         )
-    # Broker ownership boundary: an install-credential caller may only promote
-    # under an agent it owns. Degrade a foreign / reserved-namespace agent id to
-    # its own broker:<install> fallback (parity with the data-plane write paths).
-    # The auth.agent_id guard above is a no-op for brokers (auth.agent_id is None),
-    # so this is the check that actually constrains a broker's promote target.
-    if auth.is_install_credential and body.agent_id:
-        body.agent_id = await broker_owned_agent_id(body.agent_id, auth.install_uuid, tenant_id)
+
+    from core_api.services.organization_settings import resolve_config
+
+    write_config = await resolve_config(tenant_id)
+    # ``resolve_write_agent`` is what POST /memories uses, and it SUBSUMES the
+    # bare ``broker_owned_agent_id`` call this replaced: it enforces the same
+    # broker ownership boundary (degrading a foreign / reserved-namespace agent
+    # id to the caller's own broker:<install> fallback) AND applies the
+    # agent-approval policy, returning the agent row the trust gate below needs.
+    # Calling both would have done the ownership work twice.
+    agent, body.agent_id = await resolve_write_agent(
+        body.agent_id,
+        tenant_id,
+        body.fleet_id,
+        is_install_credential=auth.is_install_credential,
+        install_uuid=auth.install_uuid,
+        require_approval=write_config.require_agent_approval,
+    )
+    # A quarantined agent (trust_level 0) must not reach LTM by any door.
+    if agent.get("trust_level", 0) == 0:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Agent '{body.agent_id}' is not approved. Contact tenant admin to set trust_level >= 1.",
+        )
+    # Resolve fleet from the agent's home fleet, as the write path does, so the
+    # fleet-write policy below is evaluated against the fleet the memory will
+    # actually land in rather than against None.
+    if not body.fleet_id and agent.get("fleet_id"):
+        body.fleet_id = agent["fleet_id"]
+    if auth.tenant_id:  # skip enforcement + metering for admin, as POST /memories does
+        await enforce_fleet_write(tenant_id, body.agent_id, body.fleet_id)
+        # Metering, distinct from ``enforce_usage_limits`` above: that one
+        # refuses a write when the org is ALREADY over its plan cap, this one is
+        # what makes the write count toward the cap. Without it a tenant could
+        # promote without limit and never trip the check.
+        await check_and_increment(tenant_id, "write")
 
     from core_api.services.stm_service import promote
 

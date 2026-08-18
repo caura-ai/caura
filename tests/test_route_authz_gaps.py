@@ -538,3 +538,49 @@ async def test_a_tenant_credential_may_still_filter_search_by_any_agent(
         },
     )
     assert resp.status_code == 200, resp.text
+
+
+# ---------------------------------------------------------------------------
+# H-17 — /stm/promote owed the LTM write gates
+#
+# The June 2026 pass gave promote enforce_read_only / enforce_usage_limits and
+# bound its agent_id to the authenticated identity. It still reached LTM without
+# the gates POST /memories applies, so the STM door into long-term memory was
+# cheaper than the front door: reserved memory types, agent approval, the
+# trust==0 quarantine gate, fleet-write policy and write metering were all
+# skipped.
+# ---------------------------------------------------------------------------
+
+
+async def test_promote_rejects_a_server_reserved_memory_type(
+    client, as_auth, sc, _stm_enabled
+):
+    """POST /memories has rejected these at the boundary; promote did not."""
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "agent-a", trust_level=2)
+
+    as_auth(tenant, agent_id="agent-a")
+    resp = await client.post(
+        "/api/v1/stm/promote",
+        json={
+            "agent_id": "agent-a",
+            "content": "promoted",
+            "memory_type": "rule",
+        },
+    )
+    assert resp.status_code == 422, resp.text
+    assert "server-reserved" in resp.text
+
+
+async def test_promote_refuses_a_quarantined_agent(client, as_auth, sc, _stm_enabled):
+    """trust_level 0 is the quarantine state; it must hold at every LTM door."""
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "agent-q", trust_level=0)
+
+    as_auth(tenant, agent_id="agent-q")
+    resp = await client.post(
+        "/api/v1/stm/promote",
+        json={"agent_id": "agent-q", "content": "promoted"},
+    )
+    assert resp.status_code == 403, resp.text
+    assert "not approved" in resp.text

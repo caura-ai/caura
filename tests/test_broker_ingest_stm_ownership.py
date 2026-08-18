@@ -19,10 +19,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 from core_api.auth import AuthContext
 from core_api.routes import memories, stm
 from core_api.schemas import IngestCommitRequest, IngestFact
+from core_api.services import agent_service
 
 pytestmark = pytest.mark.unit
 
@@ -82,7 +82,12 @@ async def test_ingest_commit_non_broker_not_degraded(monkeypatch):
 async def _drive_stm(monkeypatch, *, agent_id, auth):
     monkeypatch.setattr(stm, "_check_stm_enabled", lambda: None)
     gate = AsyncMock(return_value="broker:install-1")
-    monkeypatch.setattr(stm, "broker_owned_agent_id", gate)
+    # Patched on ``agent_service``, not on ``stm``: the promote route now goes
+    # through ``resolve_write_agent`` (parity with POST /memories), which calls
+    # ``broker_owned_agent_id`` itself. So this still patches the REAL gate the
+    # ownership boundary runs on, one level down, rather than a seam the route
+    # no longer has.
+    monkeypatch.setattr(agent_service, "broker_owned_agent_id", gate)
     captured: dict[str, str] = {}
 
     async def _promote(
