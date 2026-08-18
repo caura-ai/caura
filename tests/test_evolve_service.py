@@ -486,13 +486,18 @@ async def test_evolve_generate_rule_returns_valid_structure(sc):
     mid, _ = await _create_test_memory_via_sc(sc, tenant_id, weight=0.5)
 
     from core_api.services.evolve_service import _generate_rule
-    from core_api.services.organization_settings import resolve_config
+    from core_api.services.organization_settings import ResolvedConfig
 
     # Audit P3 (evolve): ``_generate_rule`` no longer takes ``db`` —
     # callers resolve the tenant config first and pass it in. This
     # lets the MCP tool close its session before the LLM round-trip.
-    # Fix 2 Ph5b (PR2): resolve_config is storage-routed; db=None.
-    config = await resolve_config(tenant_id)
+    #
+    # Asks for ``fake`` EXPLICITLY rather than using ``resolve_config``, which
+    # would inherit the suite's ``ENTITY_EXTRACTION_PROVIDER=none``. ``none`` now
+    # means the feature is off and the generator abstains, so relying on it to
+    # hand back a stub is what this test used to do by accident. ``_generate_rule``
+    # reads only ``enrichment_provider`` and ``enrichment_model`` off the config.
+    config = ResolvedConfig({"enrichment": {"provider": "fake"}})
 
     # A10: _generate_rule now returns (skip_reason, rule_dict) tuple.
     reason, rule = await _generate_rule(
@@ -517,8 +522,39 @@ async def test_evolve_generate_rule_returns_valid_structure(sc):
     assert 0.0 <= rule["confidence"] <= 1.0
 
 
+@pytest.mark.asyncio
+async def test_evolve_generates_no_rule_when_provider_is_none(sc):
+    """``none`` means the feature is off: abstain, do not invent a rule.
+
+    The result is persisted as a ``memory_type="rule"`` memory, and ``rule`` is
+    server-reserved — the classifier may not emit it, so it carries the provenance
+    "an internal flow authored this". ``_fake_rule`` returns a generic rule at
+    confidence 0.6 that borrows that authority. See ``_skip_rule``.
+    """
+    tag = _uid()
+    tenant_id = f"test-tenant-{tag}"
+    mid, _ = await _create_test_memory_via_sc(sc, tenant_id, weight=0.5)
+
+    from core_api.services.evolve_service import _generate_rule
+    from core_api.services.organization_settings import ResolvedConfig
+
+    reason, rule = await _generate_rule(
+        tenant_id=tenant_id,
+        outcome=f"Failed because of bad info [{tag}]",
+        outcome_type="failure",
+        related_ids=[mid],
+        config=ResolvedConfig({"enrichment": {"provider": "none"}}),
+        agent_id="evolve-test-agent",
+        fleet_id=None,
+    )
+
+    assert rule is None, f"a disabled provider must not fabricate a rule; got {rule!r}"
+    assert reason == "llm_failed"
+
+
 class TestFakeRuleFallback:
-    """Test _fake_rule (used when ALL LLM providers fail, not when fake is primary)."""
+    """Test _fake_rule — reachable only via an explicitly configured ``fake``
+    provider now, NOT when a real provider fails or the feature is off."""
 
     def test_fake_rule_has_sufficient_confidence(self):
         from core_api.constants import EVOLVE_RULE_CONFIDENCE_THRESHOLD

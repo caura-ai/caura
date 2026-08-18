@@ -381,8 +381,33 @@ async def _adjust_weights(
 # -- Rule generation ----------------------------------------------------------
 
 
+def _skip_rule() -> None:
+    """No-LLM rule generation: produce nothing.
+
+    ``None`` fails the caller's ``isinstance(raw, dict)`` check, so it returns
+    ``("llm_failed", None)`` and no rule is written. That path already exists for a
+    provider that raised; this routes the no-provider case to it too.
+
+    Why this one matters: the result is persisted as a ``memory_type="rule"``
+    memory, and ``rule`` is in ``SERVER_RESERVED_MEMORY_TYPES`` — the enrichment
+    classifier is forbidden from emitting it, and any hallucinated ``rule`` is
+    demoted to the default type. So the reserved types carry the implicit provenance
+    "an internal flow authored this deliberately", not "a model guessed". A
+    fabricated one borrows that authority: ``_fake_rule`` returns a generic "verify
+    information against the most recent source" rule at confidence 0.6, plausible
+    enough to survive review and attributable to nobody.
+
+    (Nothing in recall boosts or prioritises ``rule`` today — I checked before
+    claiming it. The reserved-type provenance is the actual argument.)
+    """
+    logger.warning("evolve: no LLM — no rule generated")
+    return None
+
+
 def _fake_rule() -> dict:
-    """Placeholder rule for fake/test LLM provider."""
+    """Placeholder rule for an explicitly configured ``fake`` provider. TEST/DEV
+    ONLY — the production fallback abstains via ``_skip_rule``, because this output
+    is persisted as a ``rule``-type memory."""
     return {
         "condition": "When encountering a similar situation",
         "action": "Verify information against the most recent source before acting",
@@ -424,7 +449,7 @@ async def _generate_rule(
     examples) can light up without a signature break.
     """
     from core_api.clients.storage_client import get_storage_client
-    from core_api.providers._retry import call_with_fallback
+    from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
 
     sc = get_storage_client()
 
@@ -477,7 +502,10 @@ async def _generate_rule(
         raw = await call_with_fallback(
             primary_provider_name=config.enrichment_provider,
             call_fn=_do_generate,
-            fake_fn=_fake_rule,
+            # An outage or a disabled provider must not invent a rule — see
+            # ``_skip_rule``. ``none`` counts as disabled, not as a request for a
+            # stub; only an explicit ``fake`` provider gets one.
+            fake_fn=(_fake_rule if deliberate_fake_provider(config.enrichment_provider) else _skip_rule),
             tenant_config=config,
             service_label="evolve-rule",
             model_override=config.enrichment_model,
