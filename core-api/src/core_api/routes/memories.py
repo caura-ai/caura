@@ -1431,6 +1431,31 @@ async def _search_inner(
     # content, so this is a direct disclosure, not just id harvesting). A
     # tenant/user credential (auth.agent_id None, no filter) keeps full-tenant
     # search, unchanged.
+    # An agent credential may only filter to ITSELF. ``eff_agent_id`` below is
+    # body-first, and it feeds BOTH the visibility identity (which scope_agent
+    # rows are readable) AND the trust/fleet enforcement a few lines down, so a
+    # caller-asserted ``filter_agent_id`` bought two escalations at once:
+    #
+    #   1. Disclosure — naming a peer made that peer the visibility identity, so
+    #      its scope_agent memories (and private STM notes surfaced through
+    #      search) came back with full content, not just ids.
+    #   2. Gate evasion — the trust < 2 fleet forcing below runs against this
+    #      same id, so naming a trust-3 peer skipped the forcing entirely. That
+    #      is the identical escalation /memories/redistribute was fixed for in
+    #      the 2026-06-11 audit, which ran its trust gate against a
+    #      caller-supplied agent_id.
+    #
+    # A tenant/user credential (``auth.agent_id`` is None) is unaffected and may
+    # still filter by any agent — the restriction is on agent-scoped credentials,
+    # which is where the threat is.
+    if auth.agent_id and body.filter_agent_id and body.filter_agent_id != auth.agent_id:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"filter_agent_id '{body.filter_agent_id}' does not match the "
+                f"authenticated agent identity '{auth.agent_id}'."
+            ),
+        )
     eff_agent_id = body.filter_agent_id or auth.agent_id
     if auth.tenant_id:  # skip for admin
         if eff_agent_id:

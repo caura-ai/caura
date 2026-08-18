@@ -444,3 +444,97 @@ async def test_settings_still_refuses_the_demo_sandbox(client, as_auth):
         json={"tenant_id": tenant, "require_agent_approval": False},
     )
     assert resp.status_code == 403, resp.text
+
+
+# ---------------------------------------------------------------------------
+# H-14 / H-16 — client-trusted identity on READ paths
+#
+# The 2026-06-11 pass fixed the identity precedence on WRITE paths (delete/update
+# memory, DELETE /stm/notes, POST /stm/promote) and on /memories/redistribute's
+# trust gate. It left two reads trusting a caller-supplied agent id:
+#
+#   H-16  GET  /stm/notes  — reads a peer's per-agent PRIVATE notes by naming it
+#   H-14  POST /search     — filter_agent_id became the visibility identity AND
+#                            the subject of the trust<2 fleet forcing
+# ---------------------------------------------------------------------------
+
+
+async def test_stm_notes_of_a_peer_agent_cannot_be_read(client, as_auth, _stm_enabled):
+    """H-16: the DELETE twin has enforced this since June; the read had not.
+
+    So a peer's notes could not be cleared, only read — disclosure was the half
+    left open.
+    """
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, agent_id="agent-a")
+    resp = await client.get("/api/v1/stm/notes?agent_id=agent-b")
+    assert resp.status_code == 403, resp.text
+
+
+async def test_stm_notes_of_own_agent_are_still_readable(client, as_auth, _stm_enabled):
+    """The guard must not break an agent reading its OWN notes."""
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, agent_id="agent-a")
+    resp = await client.get("/api/v1/stm/notes?agent_id=agent-a")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["agent_id"] == "agent-a"
+
+
+async def test_search_cannot_borrow_a_peer_identity_via_filter_agent_id(
+    client, as_auth
+):
+    """H-14: ``filter_agent_id`` fed the visibility identity AND the trust gate.
+
+    Naming a peer both exposed that peer's scope_agent rows (with content, so a
+    direct disclosure) and skipped the trust<2 fleet forcing when the named peer
+    was trust>=2 — the same escalation /memories/redistribute was fixed for.
+    """
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, agent_id="agent-a")
+    resp = await client.post(
+        "/api/v1/search",
+        json={
+            "tenant_id": tenant,
+            "query": "anything",
+            "top_k": 5,
+            "filter_agent_id": "agent-b",
+        },
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_search_filtering_to_own_agent_id_is_allowed(client, as_auth):
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, agent_id="agent-a")
+    resp = await client.post(
+        "/api/v1/search",
+        json={
+            "tenant_id": tenant,
+            "query": "anything",
+            "top_k": 5,
+            "filter_agent_id": "agent-a",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+
+async def test_a_tenant_credential_may_still_filter_search_by_any_agent(
+    client, as_auth
+):
+    """Pins the preserved case: the restriction targets AGENT-scoped credentials.
+
+    A tenant/user credential (``auth.agent_id`` is None) is what the dashboard
+    uses to inspect a given agent's memories, and must keep working.
+    """
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant)  # no agent_id
+    resp = await client.post(
+        "/api/v1/search",
+        json={
+            "tenant_id": tenant,
+            "query": "anything",
+            "top_k": 5,
+            "filter_agent_id": "agent-b",
+        },
+    )
+    assert resp.status_code == 200, resp.text

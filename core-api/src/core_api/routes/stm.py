@@ -43,6 +43,18 @@ async def get_notes(
 ):
     _check_stm_enabled()
     tenant_id = _require_tenant(auth)
+    # Authenticated agent identity (gateway X-Agent-ID) takes precedence over the
+    # caller-supplied query param. Notes are per-agent PRIVATE (see the section
+    # header), so an agent credential must not read a peer's by naming it.
+    #
+    # The DELETE twin directly below has enforced this since the 2026-06-11
+    # audit, which left the pair lopsided: a peer's notes could not be cleared,
+    # only read. Disclosure was the half still open.
+    if auth.agent_id and agent_id != auth.agent_id:
+        raise HTTPException(
+            status_code=403,
+            detail=f"agent_id '{agent_id}' does not match the authenticated agent identity.",
+        )
     from core_api.services.stm_service import read_notes
 
     notes = await read_notes(tenant_id, agent_id, limit=limit)
