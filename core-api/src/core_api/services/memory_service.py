@@ -1998,7 +1998,24 @@ async def _schedule_enrich_or_inline(
         # cannot reach this branch today (``not settings.inline_enrichment``
         # guards it), so the flag is defence against that guard being relaxed.
         #
+        # ⚠ The default is OFF, which means a new caller that reaches this
+        # branch without passing the flag silently skips governance — the exact
+        # shape of H-18. If you add a third call site, it MUST pass
+        # ``run_governance_remediation=True`` unless it has already applied
+        # ``GovernanceDecision`` synchronously for the same write. Deriving it
+        # here instead is not possible today: only the caller knows the resolved
+        # write mode, and that is what decides whether the synchronous step ran.
+        #
         # ``enriched_row`` is ``None`` exactly when no verdict was produced.
+        #
+        # ``tenant_config`` is the snapshot the pipeline resolved for this write,
+        # while ``_enrich_memory_background`` re-resolves its own to decide
+        # whether to enrich at all. With a 5-minute TTL cache they are the same
+        # object in practice; if an org toggles governance in the window between
+        # pipeline start and enrichment completing, the enrich decision and the
+        # policy decision can come from different snapshots. Deliberate — using
+        # the pipeline's snapshot keeps the whole write governed by the config it
+        # started under, rather than one that changed underneath it.
         #
         # Deliberately unguarded, matching ``consumer.py`` on the deferred path.
         # This is the last statement of the task — extraction and Path A are
