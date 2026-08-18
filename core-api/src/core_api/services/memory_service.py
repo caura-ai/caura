@@ -1159,7 +1159,10 @@ async def create_memories_bulk(
     # -- Deterministic governance gate (eToro). Runs BEFORE embeddings +
     # content-hash so masked content flows through dedup + storage, and dropped
     # items never get embedded/enriched/written. The LLM free-form signal is
-    # applied post-persist via the enriched-consumer remediation (deferred bulk).
+    # applied post-persist instead: by the enriched-consumer remediation on a
+    # deferred deployment, and by the per-row ``remediate_after_enrichment`` in
+    # the fan-out loop below on an inline one (H-18 — the inline half used to be
+    # missing, so the verdict was computed and discarded).
     governance_errors: dict[int, str] = {}
     gov_pii = tenant_config.governance_pii
     if gov_pii.enabled:
@@ -1682,6 +1685,7 @@ async def create_memories_bulk(
         # already enqueued them (and re-running would double-bill the
         # LLM provider for entity extraction + enrichment).
         from core_api.services.contradiction import Trigger, run_contradiction_detection
+        from core_api.services.governance_remediation import remediate_after_enrichment
 
         # CAURA-595: per-row enrich publishes when deployment_mode is deferred.
         defer_enrich_publish = (
@@ -1704,6 +1708,40 @@ async def create_memories_bulk(
                             mem_data["memory_type"],
                         ),
                         "entity_extraction",
+                        mem_id,
+                        data.tenant_id,
+                    )
+                )
+            if enrichments[orig_idx] is not None:
+                # H-18, bulk/ingest half. This path enriches SYNCHRONOUSLY
+                # above and persists ``contains_pii`` / ``business_relevance``
+                # into the row's metadata, then had nothing act on them — the
+                # same defect as the single-write inline path, on a second
+                # entry point. The deterministic gate near the top of this
+                # function already rejected pattern-detectable PII pre-write;
+                # what was discarded here is the LLM's free-form judgement.
+                #
+                # A non-None enrichment is exactly "an LLM verdict exists for
+                # this row", which can only happen under
+                # ``settings.inline_enrichment`` — so it is also mutually
+                # exclusive with ``defer_enrich_publish`` below, where the
+                # worker's consumer owns remediation instead. Bulk never runs
+                # ``GovernanceDecision`` (it does not go through the write
+                # pipeline), so there is no strong-mode double-apply to guard
+                # against here as there is in ``_schedule_enrich_or_inline``.
+                track_task(
+                    tracked_task(
+                        remediate_after_enrichment(
+                            {
+                                "id": mem_id,
+                                "content": items[orig_idx].content,
+                                "tenant_id": data.tenant_id,
+                                "agent_id": data.agent_id,
+                                "metadata_": mem_data["metadata_"],
+                            },
+                            tenant_config,
+                        ),
+                        "governance_remediation",
                         mem_id,
                         data.tenant_id,
                     )
@@ -1896,6 +1934,7 @@ async def _schedule_enrich_or_inline(
     *,
     agent_provided_fields: list[str] | None = None,
     reference_datetime: datetime | None = None,
+    run_governance_remediation: bool = False,
 ) -> None:
     """Enrichment counterpart of :func:`_schedule_embed_or_reembed`.
 
@@ -1933,7 +1972,7 @@ async def _schedule_enrich_or_inline(
         # ``reference_datetime`` is still not forwarded — the inline path
         # resolves relative dates against the enrichment call's own clock, and
         # that is a separate concern.
-        await _enrich_memory_background(
+        enriched_row = await _enrich_memory_background(
             memory_id,
             content,
             tenant_id,
@@ -1941,6 +1980,36 @@ async def _schedule_enrich_or_inline(
             agent_id,
             agent_provided_fields=agent_provided_fields,
         )
+        # H-18: apply the LLM governance verdict on the INLINE path too.
+        #
+        # Fast mode always defers enrichment, so ``GovernanceDecision`` cannot
+        # run in its pipeline; the fast path is governed by post-write
+        # remediation instead. But that remediation lived ONLY in
+        # ``consumer.py``, which runs when the WORKER PATCHes enrichment back.
+        # An inline deployment — the DEFAULT — never publishes, so no consumer
+        # ever fired and the verdict computed just above was discarded. This is
+        # the inline counterpart of that call; both now converge on
+        # ``remediate_after_enrichment``.
+        #
+        # Gated on the caller rather than applied unconditionally, because
+        # strong mode already enforces the same policy synchronously via
+        # ``GovernanceDecision`` and would double-apply — duplicate audit rows
+        # and a second drop on a row policy already acted on. Its call site
+        # cannot reach this branch today (``not settings.inline_enrichment``
+        # guards it), so the flag is defence against that guard being relaxed.
+        #
+        # ``enriched_row`` is ``None`` exactly when no verdict was produced.
+        #
+        # Deliberately unguarded, matching ``consumer.py`` on the deferred path.
+        # This is the last statement of the task — extraction and Path A are
+        # scheduled as their own ``track_task`` calls, not chained behind it — so
+        # a failure here cannot cascade, and the enclosing ``tracked_task``
+        # records it as a ``BackgroundTaskLog`` row. Swallowing it locally would
+        # only downgrade an unenforced governance policy to a bare log line.
+        if run_governance_remediation and enriched_row is not None:
+            from core_api.services.governance_remediation import remediate_after_enrichment
+
+            await remediate_after_enrichment(enriched_row, tenant_config)
     else:
         await publish_memory_enrich_request(
             memory_id=memory_id,
@@ -2313,11 +2382,16 @@ async def _enrich_memory_background(
     agent_id: str,
     *,
     agent_provided_fields: list[str] | None = None,
-) -> None:
+) -> dict | None:
     """Background task: run LLM enrichment on a fast-path memory, then patch the row.
 
     After enrichment completes, fires entity extraction and contradiction detection
     as sub-tasks.
+
+    Returns the enriched row as governance needs to see it — ``id``, ``content``,
+    ``tenant_id``, ``agent_id`` and the merged ``metadata_`` — or ``None`` when no
+    LLM verdict was produced (enrichment disabled, the call failed, or the row
+    went away). See the assembly site below for why it is not re-read.
 
     ``agent_provided_fields`` names the enrichment columns the caller set
     EXPLICITLY at write time (computed by ``_agent_provided_enrichment_fields``
@@ -2345,25 +2419,29 @@ async def _enrich_memory_background(
         tenant_config = await resolve_config(tenant_id)
     except Exception:
         logger.exception("Background enrichment: failed to resolve config for memory %s", memory_id)
-        return
+        return None
 
     if not tenant_config.enrichment_enabled:
-        return
+        return None
 
     try:
         enrichment = await enrich_memory(content, tenant_config)
     except (ValueError, RuntimeError, OpenAIError, GoogleAPIError):
         logger.exception("Background enrichment LLM call failed for memory %s", memory_id)
-        return
+        return None
 
     if enrichment is None:
-        return
+        return None
+
+    # Returned even if the fan-out below then fails: an unrelated atomic-fact or
+    # extraction failure must not decide whether the tenant's PII policy runs.
+    governed_row: dict | None = None
 
     try:
         sc = get_storage_client()
         mem = await sc.get_memory(str(memory_id))
         if mem is None or mem.get("deleted_at") is not None:
-            return
+            return None
 
         # Build update patch.
         #
@@ -2403,6 +2481,16 @@ async def _enrich_memory_background(
             meta["contains_pii"] = True
             if enrichment.pii_types:
                 meta["pii_types"] = enrichment.pii_types
+        # H-18: this was MISSING here, and wiring up the verdict is not enough
+        # without it. ``remediate_after_enrichment`` keys its non-business branch
+        # on ``md["business_relevance"] == "personal"``, so while the field went
+        # unpersisted the non-business DROP and KEEP_PRIVATE dispositions could
+        # not fire on an inline deployment however the tenant configured them —
+        # only the PII branch, keyed on ``contains_pii``, worked. The synchronous
+        # path and core-worker both persist it, so the modes also disagreed about
+        # what an enriched row contains. ``getattr`` defaults to the schema's own
+        # "business", as ``GovernanceDecision`` does for this field.
+        meta["business_relevance"] = getattr(enrichment, "business_relevance", "business")
         if enrichment.retrieval_hint:
             # Persisted for debugging / auditability only; no longer used
             # to shape the embedding (see CAURA-222).
@@ -2436,6 +2524,22 @@ async def _enrich_memory_background(
                 await sc.update_memory(str(memory_id), tenant_id, patch)
             if status_val:
                 await sc.update_memory_status(str(memory_id), status_val, tenant_id=tenant_id)
+
+        # The enrichment signal is persisted, so the verdict now exists. These
+        # are the five keys ``remediate_after_enrichment`` reads, assembled from
+        # this frame rather than re-read: a re-read goes through ``get_memory``,
+        # which routes to the READ REPLICA when ``CORE_STORAGE_READ_URL`` is set,
+        # and a replica even briefly behind the PATCH above returns the
+        # pre-enrichment row with ``contains_pii`` / ``business_relevance`` unset.
+        # Governance would then silently no-op on exactly the content it exists
+        # to catch, on exactly the deployments large enough to run a read split.
+        governed_row = {
+            "id": str(memory_id),
+            "content": content,
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "metadata_": meta,
+        }
 
         memory_type = patch.get("memory_type") or mem.get("memory_type")
 
@@ -2658,6 +2762,8 @@ async def _enrich_memory_background(
         logger.info("Background enrichment succeeded for memory %s", memory_id)
     except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError):
         logger.exception("Background enrichment error for memory %s", memory_id)
+
+    return governed_row
 
 
 async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> None:

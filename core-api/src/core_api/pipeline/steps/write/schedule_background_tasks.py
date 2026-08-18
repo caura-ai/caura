@@ -54,6 +54,9 @@ class ScheduleBackgroundTasks:
                             tenant_config,
                             agent_provided_fields=_agent_provided_enrichment_fields(data),
                             reference_datetime=getattr(data, "reference_datetime", None),
+                            # H-18: nothing applies the LLM governance verdict on
+                            # an inline deployment — see ``_schedule_enrich_or_inline``.
+                            run_governance_remediation=True,
                         ),
                         "background_enrichment",
                         memory_id,
