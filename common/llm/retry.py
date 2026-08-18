@@ -117,6 +117,31 @@ async def call_with_retry(
     raise last_exc  # type: ignore[misc]
 
 
+def deliberate_fake_provider(provider_name: str | None) -> bool:
+    """Which of ``call_with_fallback``'s two ``fake_fn`` contexts is this?
+
+    ``fake_fn`` is invoked for two situations that are NOT the same, and callers
+    that conflate them ship a dev stub's output to production:
+
+    * The operator explicitly configured ``fake`` — dev or CI. The stub IS the
+      intent; it is often the only way a pipeline gets end-to-end coverage without
+      an API key.
+    * A REAL provider was configured and every attempt failed, or its key is
+      missing so it resolved to ``FakeLLMProvider``. That is an outage or a
+      misconfigured deployment, not a request for made-up output.
+
+    ``fake`` ONLY, deliberately not ``none``: "none" asks for the feature to be
+    off, which is an abstain. ``entity_extraction`` draws the same line — empty
+    graph for ``none``, heuristic for ``fake``.
+
+    Callers that persist their result should branch on this and take their own
+    "nothing came back" path in the outage case. See ``contradiction_detector``
+    (abstains rather than guessing a verdict that marks memories ``conflicted``),
+    ``crystallizer_service`` and ``insights_service``.
+    """
+    return provider_name == ProviderName.FAKE
+
+
 async def call_with_fallback(
     primary_provider_name: str,
     call_fn: Callable[..., Coroutine[Any, Any, T]],

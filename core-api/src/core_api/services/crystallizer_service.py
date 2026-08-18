@@ -38,7 +38,7 @@ from core_api.constants import (
     CRYSTALLIZER_STALE_MAX_WEIGHT,
     MEMORY_TYPES,
 )
-from core_api.providers._retry import call_with_fallback
+from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
 
 logger = logging.getLogger(__name__)
 
@@ -436,15 +436,43 @@ async def _crystallize_cluster(memories: list[dict], config) -> list[dict]:
     return await call_with_fallback(
         primary_provider_name=config.enrichment_provider,
         call_fn=_do_crystallize,
-        fake_fn=lambda: _crystallize_fake(memories),
+        # An outage must yield NOTHING here, not a stand-in. The caller does
+        # ``if not extracted: continue`` before it creates anything, so an empty
+        # list skips the cluster untouched — see ``_crystallize_fake``.
+        fake_fn=(
+            (lambda: _crystallize_fake(memories))
+            if deliberate_fake_provider(config.enrichment_provider)
+            else _skip_crystallize
+        ),
         tenant_config=config,
         service_label="crystallizer",
         timeout=30.0,
     )
 
 
+def _skip_crystallize() -> list[dict]:
+    """No-LLM crystallization: produce nothing, so the cluster is left alone.
+
+    This is not cosmetic. The caller creates one memory per returned fact and then
+    ARCHIVES every source memory in the cluster. With ``_crystallize_fake`` on the
+    outage path — it returns a verbatim copy of the cluster's highest-weight memory
+    — an LLM outage archived N memories and left one duplicate of one of them
+    behind, having synthesised nothing. The other N-1 memories' content is not in
+    the survivor, and ``archived`` is outside ``LIVE_MEMORY_STATUSES``.
+
+    Returning ``[]`` takes the caller's existing ``if not extracted: continue``
+    path, so nothing is created and nothing is archived. The cluster is still there
+    to crystallize once a provider answers.
+    """
+    logger.warning("crystallizer: no LLM — cluster skipped, nothing archived")
+    return []
+
+
 def _crystallize_fake(memories: list[dict]) -> list[dict]:
-    """Fake crystallization for testing: just pick the highest-weight memory from the cluster."""
+    """Stand-in crystallization for an explicitly configured ``fake`` provider:
+    pick the highest-weight memory from the cluster. TEST/DEV ONLY — the production
+    fallback abstains via ``_skip_crystallize``, because this output gets persisted
+    and its sources archived."""
     if not memories:
         return []
     best = max(memories, key=lambda m: m.get("weight", 0.5))

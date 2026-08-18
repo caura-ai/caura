@@ -9,7 +9,7 @@ Multi-provider support:
 - Vertex AI, OpenAI, Anthropic, OpenRouter via provider layer
 - Automatic fallback chain: configured provider -> fallback -> abstain
   (heuristic only when the ``fake`` provider was explicitly asked for; see
-  ``_deliberate_fake_provider``)
+  ``common.llm.retry.deliberate_fake_provider``)
 """
 
 import asyncio
@@ -19,12 +19,11 @@ import uuid as _uuid
 from datetime import datetime
 from uuid import UUID
 
-from common.provider_names import ProviderName
 from core_api.cache import cache_set_nx
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.constants import SINGLE_VALUE_PREDICATES
-from core_api.providers._retry import call_with_fallback
+from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
 from core_api.schemas import ContradictionInfo
 from core_api.services.subject_preflight import _subjects_differ_with_certainty
 
@@ -1010,7 +1009,7 @@ async def _llm_contradiction_check(
     1. Try the configured provider (with retry)
     2. Try the configured fallback provider (via resolve_fallback)
     3. Abstain — or, when the operator ASKED for the fake provider, the
-       negation-word heuristic. See :func:`_deliberate_fake_provider`.
+       negation-word heuristic. See :func:`common.llm.retry.deliberate_fake_provider`.
     """
     provider_name = (
         tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
@@ -1135,29 +1134,6 @@ async def _llm_contradiction_check_batch(
     )
 
 
-def _deliberate_fake_provider(provider_name: str | None) -> bool:
-    """Did the operator ASK for no LLM, or did a real one fail?
-
-    ``call_with_fallback`` invokes ``fake_fn`` for both, and they are not the same
-    situation — which is the whole bug this split exists to fix. A ``fake`` provider
-    was explicitly asked for, so the negation-word heuristic is the point: it is the
-    only way the detect → mark → ``conflicted`` pipeline gets end-to-end coverage
-    without an API key (``test_p1_contradiction.py`` relies on exactly this). A
-    configured REAL provider that failed is a production outage, where the same
-    heuristic is not survivable — see :func:`_skip_contradiction_pairwise`.
-
-    ``fake`` ONLY, not ``none``: "none" asks for the feature to be off, which is an
-    abstain, while "fake" asks for the test double. ``entity_extraction`` draws the
-    same line explicitly — ``provider == "none"`` returns an empty graph, ``"fake"``
-    calls its heuristic.
-
-    And the case that motivated all of this: ``entity_extraction_provider="openai"``
-    with no key resolves to ``FakeLLMProvider`` and lands on ``fake_fn`` too. That
-    is a misconfigured deployment, NOT a request for heuristics, so it abstains.
-    """
-    return provider_name == ProviderName.FAKE
-
-
 def _skip_contradiction_pairwise() -> tuple[bool, float]:
     """The no-LLM verdict for the per-candidate path: abstain.
 
@@ -1225,15 +1201,15 @@ def _skip_contradiction_batch(count: int) -> list[dict]:
 def _pairwise_fake_fn(provider_name, new_content: str, old_content: str):
     """The ``fake_fn`` for a per-candidate judge: heuristic if the operator asked
     for the fake provider, abstain otherwise. One place so a new call site cannot
-    pick the wrong side of :func:`_deliberate_fake_provider` by omission."""
-    if _deliberate_fake_provider(provider_name):
+    pick the wrong side of :func:`deliberate_fake_provider` by omission."""
+    if deliberate_fake_provider(provider_name):
         return lambda: (_fake_contradiction_check(new_content, old_content), _CONF_FALLBACK)
     return _skip_contradiction_pairwise
 
 
 def _batch_fake_fn(provider_name, new_content: str, candidates: list[dict]):
     """The ``fake_fn`` for the batch judge. See :func:`_pairwise_fake_fn`."""
-    if _deliberate_fake_provider(provider_name):
+    if deliberate_fake_provider(provider_name):
         return lambda: [
             {
                 "same_subject": True,

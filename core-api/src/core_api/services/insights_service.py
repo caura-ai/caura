@@ -639,7 +639,7 @@ def _format_clusters_for_analysis(clusters: list[dict]) -> tuple[str, set[str]]:
 
 async def _run_llm_analysis(prompt: str, config) -> dict:
     """Send the analysis prompt to the configured LLM provider."""
-    from core_api.providers._retry import call_with_fallback
+    from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
 
     async def _do_analysis(llm) -> dict:
         return await llm.complete_json(prompt, temperature=INSIGHTS_TEMPERATURE)
@@ -647,15 +647,33 @@ async def _run_llm_analysis(prompt: str, config) -> dict:
     return await call_with_fallback(
         primary_provider_name=config.enrichment_provider,
         call_fn=_do_analysis,
-        fake_fn=lambda: _fake_insights(),
+        fake_fn=(_fake_insights if deliberate_fake_provider(config.enrichment_provider) else _skip_insights),
         tenant_config=config,
         service_label="insights",
         model_override=config.enrichment_model,
     )
 
 
+def _skip_insights() -> dict:
+    """No-LLM analysis: no findings, so priors are left standing.
+
+    Persisting findings first transitions the prior insights for this focus/scope
+    to ``outdated`` — and that supersede is guarded by ``if findings:``. So with
+    ``_fake_insights`` on the outage path, an LLM outage retired a tenant's real
+    insights and replaced them with one headlined "Fake insight for testing".
+
+    Empty findings take the existing short-circuit, which exists for exactly this
+    reason: the comment there notes that outdating priors when there is nothing to
+    persist would leave the user with neither.
+    """
+    logger.warning("insights: no LLM — no findings, prior insights left intact")
+    return {"findings": [], "summary": "Analysis unavailable (no LLM provider answered)."}
+
+
 def _fake_insights() -> dict:
-    """Return placeholder findings for the fake/test provider."""
+    """Placeholder findings for an explicitly configured ``fake`` provider.
+    TEST/DEV ONLY — the production fallback abstains via ``_skip_insights``,
+    because persisting findings supersedes the tenant's prior insights."""
     return {
         "findings": [
             {
