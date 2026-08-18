@@ -697,6 +697,7 @@ class TestMigrationChain:
 
     def _load(self) -> dict[str, str | None]:
         chain: dict[str, str | None] = {}
+        declared_by: dict[str, str] = {}
         versions = pathlib.Path(
             "core-storage-api/src/core_storage_api/database/migrations/versions"
         )
@@ -705,13 +706,32 @@ class TestMigrationChain:
             assert spec is not None and spec.loader is not None
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
+            # Keyed by revision, so a duplicate id would overwrite rather than
+            # fork — and every assertion below would read a chain that looks
+            # fine. Two branches numbering a migration the same is the common
+            # way this happens (it happened on #828), and alembic answers it
+            # with "Multiple head revisions are present", at deploy time.
+            assert mod.revision not in chain, (
+                f"revision {mod.revision!r} is declared twice: "
+                f"{declared_by[mod.revision]} and {f.name} — "
+                "renumber the newer one onto the current head"
+            )
             chain[mod.revision] = mod.down_revision
+            declared_by[mod.revision] = f.name
         return chain
 
     def test_single_head(self):
+        """One head, and it is the newest migration.
+
+        The expected value is pinned rather than derived, so adding a migration
+        is a deliberate edit here — that is what catches a second head created
+        by two branches both claiming the same ``down_revision``. Bump it when
+        you add one; do not compute it, or the test stops detecting the fork it
+        exists for.
+        """
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"038"}, f"Expected single head '038', got {sorted(heads)}"
+        assert heads == {"039"}, f"Expected single head '039', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -751,6 +771,8 @@ class TestMigrationChain:
         # 038: documents.created_at/updated_at NOT NULL — the columns were always
         # nullable, so a NULL row 500'd the documents read path (OSS #826)
         assert chain.get("038") == "037", "038 must follow 037"
+        # 039: tenant_usage_counters — durable per-tenant, per-period counts
+        assert chain.get("039") == "038", "039 must follow 038"
 
     def test_no_plain_set_not_null_on_large_tables(self):
         """Tightening a column to NOT NULL on a large table must not full-scan

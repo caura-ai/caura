@@ -16,6 +16,7 @@ from common.models.memory import Memory
 from common.models.memory_conflict import MemoryConflict
 from common.models.memory_derivation import MemoryDerivation
 from common.models.skill_factory import ForgeRejectedFingerprint, SessionTrace
+from common.models.tenant_usage_counter import TenantUsageCounter
 
 __all__ = [
     "Agent",
@@ -40,4 +41,5 @@ __all__ = [
     "MemoryEntityLink",
     "Relation",
     "SessionTrace",
+    "TenantUsageCounter",
 ]

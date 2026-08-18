@@ -1154,6 +1154,18 @@ class CoreStorageClient:
         result = await self._post("/capability-usage", {"rows": rows})
         return result.get("inserted", 0)  # type: ignore[union-attr]
 
+    async def increment_tenant_usage(self, rows: list[dict]) -> int:
+        """ADD to per-tenant, per-period counters in ``tenant_usage_counters``.
+
+        Cross-tenant by design (each row carries its own ``tenant_id``).
+        ``period_start`` must be an ISO string. Additive and applied in the
+        database, so concurrent core-api instances metering one tenant all
+        land — unlike ``flush_capability_usage``, which appends rows for
+        consumers to SUM. Returns the rows-touched count.
+        """
+        result = await self._post("/tenant-usage/increment", {"rows": rows})
+        return result.get("updated", 0)  # type: ignore[union-attr]
+
     # =====================================================================
     # Entities
     # =====================================================================

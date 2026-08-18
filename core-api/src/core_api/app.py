@@ -268,8 +268,16 @@ async def lifespan(app):
         # hook was removed with core-api's repositories/DB pool.
         from core_api.services.audit_service import log_action
         from core_api.services.hooks import ServiceHooks, configure_hooks
+        from core_api.services.usage_meter import UsageMeter
 
-        configure_hooks(ServiceHooks(audit_log=log_action))
+        # caura-ai/caura-enterprise#83. Wired unconditionally: the counters are
+        # written through core-api's own storage client, so there is no
+        # platform dependency to gate on, and a standalone deployment gets
+        # accurate usage numbers for free. It still enforces nothing — limits
+        # arrive out-of-band via ``x-org-read-only`` (see ``usage_service``).
+        usage_meter = UsageMeter()
+        usage_meter.start()
+        configure_hooks(ServiceHooks(audit_log=log_action, usage_meter=usage_meter.record))
 
         # CAURA-628: bind + start the audit batch flusher. ``log_action``
         # checks for an active queue and falls back to a synchronous
@@ -506,6 +514,10 @@ async def lifespan(app):
             # rationale as the audit queue (the flush writes via the DB
             # session, which must still be live).
             shutdown_steps.append(capability_usage_agg.stop(timeout=5.0))
+        # Same ordering rationale: the final flush writes through the storage
+        # client, so it has to run before that client closes below. Without it
+        # a clean shutdown would discard up to one flush interval of counts.
+        shutdown_steps.append(usage_meter.stop(timeout=5.0))
         shutdown_steps.extend(
             [
                 event_bus.stop(),

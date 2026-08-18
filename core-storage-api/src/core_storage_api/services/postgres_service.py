@@ -81,6 +81,7 @@ from common.models import (
 from common.models.capability_usage import CapabilityUsage
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
+from common.models.tenant_usage_counter import TenantUsageCounter
 from common.organization_settings_merge import deep_merge, diff_settings
 from core_storage_api.observability import db_measure
 from core_storage_api.schemas import MEMORY_LIST_FIELDS, orm_to_dict
@@ -3315,6 +3316,50 @@ class PostgresService:
             return 0
         async with get_session() as session:
             session.add_all([CapabilityUsage(**r) for r in rows])
+        return len(rows)
+
+    async def tenant_usage_increment(self, rows: list[dict]) -> int:
+        """Atomically add to ``tenant_usage_counters``, ONE txn. Returns rows touched.
+
+        Each row is ``{tenant_id, operation, period_start, count}``. Upserts on
+        ``uq_tenant_usage_counters_key`` and ADDS to the existing count, which
+        is what makes this safe for many concurrent core-api instances metering
+        the same tenant: the addition happens in the database, not read-then-write
+        in a worker.
+
+        Cross-tenant and RLS-free by design (migration 038), like
+        ``capability_usage_insert`` above — one batch carries many tenants'
+        counters and each row names its own ``tenant_id``.
+
+        Deliberately NOT append-only: this backs plan limits, so the read has to
+        be a single row per period rather than a SUM over an unbounded history.
+        """
+        if not rows:
+            return 0
+        async with get_session() as session:
+            for r in rows:
+                stmt = pg_insert(TenantUsageCounter).values(
+                    tenant_id=r["tenant_id"],
+                    operation=r["operation"],
+                    period_start=r["period_start"],
+                    count=r.get("count", 1),
+                )
+                await session.execute(
+                    stmt.on_conflict_do_update(
+                        index_elements=[
+                            TenantUsageCounter.tenant_id,
+                            TenantUsageCounter.operation,
+                            TenantUsageCounter.period_start,
+                        ],
+                        set_={
+                            # ``+`` on the COLUMN, not on a value read earlier:
+                            # two instances incrementing the same period both
+                            # land, where a read-modify-write would lose one.
+                            "count": TenantUsageCounter.count + stmt.excluded.count,
+                            "updated_at": text("now()"),
+                        },
+                    )
+                )
         return len(rows)
 
     # ------------------------------------------------------------------
