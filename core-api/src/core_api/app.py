@@ -115,6 +115,80 @@ class SecurityHeadersMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 
+def _validate_production_settings(app_settings) -> None:  # type: ignore[no-untyped-def]
+    """Refuse to boot a production deployment that is missing a safety control.
+
+    Extracted from ``lifespan`` so these guards are reachable by tests. Buried in
+    the lifespan they were untestable in practice, which is why a block whose
+    entire job is to prevent unsafe production boots had no tests of its own.
+
+    No-op outside ``ENVIRONMENT=production``.
+    """
+    if app_settings.environment != "production":
+        return
+    if app_settings.is_standalone:
+        raise RuntimeError(
+            "IS_STANDALONE=true is not allowed in production. "
+            "Set IS_STANDALONE=false for production deployments."
+        )
+    if not app_settings.settings_encryption_key:
+        raise RuntimeError(
+            "SETTINGS_ENCRYPTION_KEY must be set when ENVIRONMENT=production. "
+            'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
+        )
+    _dangerous = {
+        "jwt_secret": "change-me-in-production",
+    }
+    for var, bad_val in _dangerous.items():
+        val = getattr(app_settings, var, None)
+        # A SecretStr field wraps its value, so compare against the unwrapped
+        # one or the guard is silently bypassed — `SecretStr("x") == "x"` is
+        # False. Kept generic on purpose: nothing in ``_dangerous`` is SecretStr
+        # today (the only ones are platform_llm_api_key /
+        # platform_embedding_api_key), so this exists for whatever gets added
+        # next. The example that used to be here, postgres_password, no longer
+        # exists — core-api dropped its DB engine.
+        if hasattr(val, "get_secret_value"):
+            val = val.get_secret_value()
+        if val == bad_val:
+            raise RuntimeError(f"{var.upper()} must be changed from default for production")
+    if not app_settings.admin_api_key:
+        raise RuntimeError("ADMIN_API_KEY must be set for production")
+    if not app_settings.gateway_shared_secret and not app_settings.memclaw_api_key:
+        # What production actually requires is A PERIMETER — not specifically the
+        # gateway one. ``MEMCLAW_API_KEY`` is the other way to have one: when it
+        # is set, auth.py's "Path 2" either authenticates the request against
+        # that key or raises 401 for everything else, so "Path 4" below it is
+        # UNREACHABLE and there is no header-trust surface left to protect. That
+        # is the documented network-exposed OSS pattern, and such a deployment
+        # legitimately sets ENVIRONMENT=production for JSON logging and Sentry.
+        # Demanding a gateway secret it has no gateway for would be a boot
+        # failure with no security value.
+        #
+        # The X-Tenant-ID auth path (auth.py "Path 4") carries NO credential of
+        # its own — it trusts the gateway to have authenticated the caller and
+        # injected the identity headers. Its perimeter check reads
+        # ``if gw_secret and not compare_digest(...)``, which is a NO-OP when the
+        # secret is unset. So an unset secret does not weaken that path, it
+        # DISABLES it: anyone able to reach this service directly (its public
+        # run.app URL, a sidecar, anything inside the VPC) becomes any tenant by
+        # setting a header.
+        #
+        # Refusing to boot is deliberately louder than 401ing the path per
+        # request. A silently-open perimeter is indistinguishable from a working
+        # one from the outside — which is how it would reach production
+        # unnoticed in the first place — whereas a service that will not start
+        # gets caught at deploy.
+        raise RuntimeError(
+            "GATEWAY_SHARED_SECRET (or MEMCLAW_API_KEY) must be set when "
+            "ENVIRONMENT=production. With neither, the X-Tenant-ID header-trust "
+            "auth path accepts caller-supplied identity headers from anyone who "
+            "can reach this service directly. Set GATEWAY_SHARED_SECRET to the "
+            "same value the gateway injects as X-Gateway-Secret, or set "
+            "MEMCLAW_API_KEY if this deployment is not fronted by the gateway."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app):
     # Re-route third-party loggers (uvicorn / fastmcp / mcp / slowapi) to the
@@ -168,30 +242,7 @@ async def lifespan(app):
     init_platform_providers()
 
     # Fail-fast: validate production environment
-    if app_settings.environment == "production":
-        if app_settings.is_standalone:
-            raise RuntimeError(
-                "IS_STANDALONE=true is not allowed in production. "
-                "Set IS_STANDALONE=false for production deployments."
-            )
-        if not app_settings.settings_encryption_key:
-            raise RuntimeError(
-                "SETTINGS_ENCRYPTION_KEY must be set when ENVIRONMENT=production. "
-                'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
-            )
-        _dangerous = {
-            "jwt_secret": "change-me-in-production",
-        }
-        for var, bad_val in _dangerous.items():
-            val = getattr(app_settings, var, None)
-            # SecretStr fields (e.g. postgres_password) wrap the value;
-            # unwrap before comparing so the guard isn't silently bypassed.
-            if hasattr(val, "get_secret_value"):
-                val = val.get_secret_value()
-            if val == bad_val:
-                raise RuntimeError(f"{var.upper()} must be changed from default for production")
-        if not app_settings.admin_api_key:
-            raise RuntimeError("ADMIN_API_KEY must be set for production")
+    _validate_production_settings(app_settings)
 
     async with mcp_lifespan():
         # Standalone mode: initialise fixed tenant id
