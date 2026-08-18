@@ -220,10 +220,38 @@ async def call_with_fallback(
         )
 
     # --- Step 2: Try fallback provider ---
+    # Record WHY we never reached the fallback, because otherwise this tier can be
+    # dead in a deployment and nothing says so: every skip path below is silent,
+    # and the only symptom is the step-3 warning, which reads as though every
+    # provider had been tried. Measured on prod core-api over 3 days to
+    # 2026-08-17: 82 "All LLM providers failed" and ZERO "falling back from" —
+    # the tier had never once executed, because only one provider key is set.
+    # Names only, never payloads.
+    # ``skip_code`` is the queryable one — ``_add_logrecord_extras`` promotes stdlib
+    # ``extra`` keys to JSON fields, so an operator can group by it instead of
+    # substring-searching prose, which is what answering the question above cost.
+    fallback_skipped: tuple[str, str] | None = None
     try:
-        if tenant_config is not None and hasattr(tenant_config, "resolve_fallback"):
+        if tenant_config is None or not hasattr(tenant_config, "resolve_fallback"):
+            fallback_skipped = ("no_tenant_config", "no tenant config exposing resolve_fallback()")
+        else:
             fb_provider_name, fb_model = tenant_config.resolve_fallback()
-            if fb_provider_name and fb_provider_name != primary_provider_name:
+            if not fb_provider_name:
+                fallback_skipped = (
+                    "no_fallback_configured",
+                    # Both levers, because ``resolve_fallback`` tries them in this
+                    # order: an explicit ``fallback_llm.provider`` is returned with NO
+                    # key check at all, and only if it is unset does it scan for a
+                    # keyed provider differing from the primary.
+                    "no fallback provider configured — set fallback_llm.provider, or "
+                    "supply an API key for a provider other than the primary",
+                )
+            elif fb_provider_name == primary_provider_name:
+                fallback_skipped = (
+                    "fallback_is_primary",
+                    f"resolved fallback is the primary provider '{primary_provider_name}'",
+                )
+            else:
                 fb_provider = provider_factory(
                     fb_provider_name,
                     tenant_config,
@@ -231,6 +259,8 @@ async def call_with_fallback(
                     model_attr=model_attr,
                 )
                 if getattr(fb_provider, "is_fake", False):
+                    # Already its own warning — not folded into ``fallback_skipped``,
+                    # which exists for the paths that had none.
                     logger.warning(
                         "%s: fallback provider '%s' also resolved to FakeLLMProvider (no API key).",
                         label,
@@ -251,10 +281,23 @@ async def call_with_fallback(
                         non_retryable=non_retryable,
                     )
     except Exception:
+        # Left as-is: this path is already loud, so it needs no skip reason.
         logger.warning(
             "%s fallback resolution/provider also failed",
             label,
             exc_info=True,
+        )
+
+    if fallback_skipped is not None:
+        skip_code, skip_detail = fallback_skipped
+        # Not "the next line is not evidence…": these two are adjacent in this
+        # coroutine but interleave with other instances in the aggregated log view,
+        # which is exactly where anyone reads them. State it self-containedly.
+        logger.warning(
+            "%s: fallback provider tier SKIPPED (%s); no second provider was tried",
+            label,
+            skip_detail,
+            extra={"fallback_skip_reason": skip_code},
         )
 
     # --- Step 3: Fake function as last resort ---

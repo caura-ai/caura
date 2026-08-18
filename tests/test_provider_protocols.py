@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import logging
+
 import pytest
 
 from uuid import uuid4
@@ -299,7 +301,7 @@ class TestCallWithFallback:
         assert not call_fn_called
 
     @pytest.mark.asyncio
-    async def test_primary_fails_fallback_succeeds(self):
+    async def test_primary_fails_fallback_succeeds(self, caplog):
         """Primary fails, fallback provider succeeds."""
         attempt = 0
 
@@ -320,6 +322,9 @@ class TestCallWithFallback:
             provider_factory=lambda name, _tc, **kw: _MockRealProvider(),
         )
         assert result == "fallback-ok"
+        # Control for the skip-reason logging below: the tier DID run, so nothing
+        # may claim it was skipped.
+        assert not [r for r in caplog.records if "SKIPPED" in r.getMessage()]
 
     @pytest.mark.asyncio
     async def test_all_fail_returns_fake(self):
@@ -338,6 +343,44 @@ class TestCallWithFallback:
             provider_factory=lambda name, _tc, **kw: _MockRealProvider(),
         )
         assert result == {"empty": True}
+
+    @pytest.mark.parametrize(
+        "tenant_config,expected_reason",
+        [
+            # The prod shape: only one provider key set, so resolve_fallback()
+            # returns (None, None) and the tier never runs.
+            (_MockTenantConfig(fb_provider=None), "no fallback provider configured"),
+            # Resolves, but to the provider that just failed.
+            (_MockTenantConfig(fb_provider="primary"), "resolved fallback is the primary"),
+            # No config at all — e.g. a caller that never plumbed one through.
+            (None, "no tenant config exposing resolve_fallback()"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_skipped_fallback_tier_says_so(self, caplog, tenant_config, expected_reason):
+        """A silently-skipped fallback tier must announce itself.
+
+        Every skip path logged nothing, so "All LLM providers failed" was the only
+        trace — and it reads as though a second provider had been tried. Prod ran
+        3 days with 82 of those lines and zero fallback attempts.
+        """
+
+        async def call_fn(provider):
+            raise RuntimeError("down")
+
+        with caplog.at_level(logging.WARNING, logger="common.llm.retry"):
+            result = await call_with_fallback(
+                "primary",
+                call_fn,
+                fake_fn=lambda: {"empty": True},
+                tenant_config=tenant_config,
+                provider_factory=lambda name, _tc, **kw: _MockRealProvider(),
+            )
+
+        assert result == {"empty": True}
+        skip_lines = [r.getMessage() for r in caplog.records if "SKIPPED" in r.getMessage()]
+        assert len(skip_lines) == 1, f"expected exactly one skip line, got {skip_lines}"
+        assert expected_reason in skip_lines[0]
 
 
 # ---------------------------------------------------------------------------
