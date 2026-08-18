@@ -7,7 +7,9 @@ P1 fixes:
 
 Multi-provider support:
 - Vertex AI, OpenAI, Anthropic, OpenRouter via provider layer
-- Automatic fallback chain: configured provider -> fallback -> heuristic
+- Automatic fallback chain: configured provider -> fallback -> abstain
+  (heuristic only when the ``fake`` provider was explicitly asked for; see
+  ``_deliberate_fake_provider``)
 """
 
 import asyncio
@@ -17,6 +19,7 @@ import uuid as _uuid
 from datetime import datetime
 from uuid import UUID
 
+from common.provider_names import ProviderName
 from core_api.cache import cache_set_nx
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
@@ -1006,7 +1009,8 @@ async def _llm_contradiction_check(
     Uses the standard 3-tier fallback chain:
     1. Try the configured provider (with retry)
     2. Try the configured fallback provider (via resolve_fallback)
-    3. Fall back to negation-word heuristic
+    3. Abstain — or, when the operator ASKED for the fake provider, the
+       negation-word heuristic. See :func:`_deliberate_fake_provider`.
     """
     provider_name = (
         tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
@@ -1021,7 +1025,7 @@ async def _llm_contradiction_check(
     return await call_with_fallback(
         primary_provider_name=provider_name,
         call_fn=_do_check,
-        fake_fn=lambda: (_fake_contradiction_check(new_content, old_content), _CONF_FALLBACK),
+        fake_fn=_pairwise_fake_fn(provider_name, new_content, old_content),
         tenant_config=tenant_config,
         service_label="contradiction",
         model_attr="entity_extraction_model",
@@ -1123,13 +1127,7 @@ async def _llm_contradiction_check_batch(
     return await call_with_fallback(
         primary_provider_name=provider_name,
         call_fn=_do_check,
-        fake_fn=lambda: [
-            {
-                "same_subject": True,
-                "contradicts": _fake_contradiction_check(new_content, c.get("content", "")),
-            }
-            for c in candidates
-        ],
+        fake_fn=_batch_fake_fn(provider_name, new_content, candidates),
         tenant_config=tenant_config,
         service_label="contradiction_batch",
         model_attr="entity_extraction_model",
@@ -1137,8 +1135,120 @@ async def _llm_contradiction_check_batch(
     )
 
 
+def _deliberate_fake_provider(provider_name: str | None) -> bool:
+    """Did the operator ASK for no LLM, or did a real one fail?
+
+    ``call_with_fallback`` invokes ``fake_fn`` for both, and they are not the same
+    situation — which is the whole bug this split exists to fix. A ``fake`` provider
+    was explicitly asked for, so the negation-word heuristic is the point: it is the
+    only way the detect → mark → ``conflicted`` pipeline gets end-to-end coverage
+    without an API key (``test_p1_contradiction.py`` relies on exactly this). A
+    configured REAL provider that failed is a production outage, where the same
+    heuristic is not survivable — see :func:`_skip_contradiction_pairwise`.
+
+    ``fake`` ONLY, not ``none``: "none" asks for the feature to be off, which is an
+    abstain, while "fake" asks for the test double. ``entity_extraction`` draws the
+    same line explicitly — ``provider == "none"`` returns an empty graph, ``"fake"``
+    calls its heuristic.
+
+    And the case that motivated all of this: ``entity_extraction_provider="openai"``
+    with no key resolves to ``FakeLLMProvider`` and lands on ``fake_fn`` too. That
+    is a misconfigured deployment, NOT a request for heuristics, so it abstains.
+    """
+    return provider_name == ProviderName.FAKE
+
+
+def _skip_contradiction_pairwise() -> tuple[bool, float]:
+    """The no-LLM verdict for the per-candidate path: abstain.
+
+    ``(False, _CONF_FALLBACK)`` is not a new convention — it is exactly what
+    ``_judge_contradiction`` returns for a malformed response, and per the rubric
+    above 0.50 means "could not tell, parser conservative-default". With no LLM we
+    are in precisely that position.
+
+    This replaced ``_fake_contradiction_check``'s verdict on the production
+    fallback, because a ``True`` here is not advisory. ``detect_contradictions``
+    acts on the boolean ALONE — the confidence is unpacked as ``_confidence`` and
+    only logged, since A4 #13's confidence-weighted veto is still deferred (the
+    only live threshold, ``RETRACTION_CONFIDENCE_THRESHOLD``, gates retraction and
+    not marking) — so it sets the older memory's ``status`` to ``"conflicted"``.
+
+    What that costs, stated precisely rather than dramatically:
+
+    * ``memory_scored_search`` does NOT drop every conflicted row. It keeps one that
+      is an exact lexical match, un-demoted; otherwise the row is demoted and falls
+      out of non-exact-match recall. So the damage is to semantic/vector recall,
+      which is the path that matters for a memory product, not to lookup-by-phrasing.
+    * Recovery exists but is narrow. No sweep re-checks the status, and Path C's
+      retraction judge (:func:`_attempt_path_c_retraction`) only restores the
+      canonical direction, needs resolved entities on both sides, needs confidence
+      ≥ ``RETRACTION_CONFIDENCE_THRESHOLD`` (0.90), and is tenant kill-switchable.
+      A flipped-direction mark is never revisited.
+
+    Abstaining instead loses a real contradiction during an outage, which leaves a
+    memory retrievable that should have been superseded — the recoverable direction,
+    and the same stance ``_fake_dedup_check`` takes when it errs toward keeping a
+    duplicate rather than dropping data.
+    """
+    logger.warning("contradiction_check_skipped candidates=1 reason=no_llm_abstained")
+    return False, _CONF_FALLBACK
+
+
+def _skip_contradiction_batch(count: int) -> list[dict]:
+    """The no-LLM verdict for the batch path: abstain for every candidate.
+
+    An EMPTY dict per candidate, deliberately — not ``_align``'s
+    ``{"contradicts": False}``. Every batch raw is fed straight to
+    ``_judge_contradiction``, and the two shapes score differently there:
+    ``{"contradicts": False}`` is a non-empty dict, so it misses the malformed
+    branch, trips no gate, and comes back ``(False, _CONF_CLEAN)`` — 0.90, which
+    reads as "confidently no contradiction". ``{}`` returns
+    ``(False, _CONF_FALLBACK)`` — 0.50, "could not tell" — matching
+    :func:`_skip_contradiction_pairwise` for the identical situation. Verdict is
+    ``False`` either way, so this is inert today; it stops being inert the moment
+    A4 #13 gates on confidence, when an abstain would otherwise present as a
+    high-confidence clean verdict.
+
+    (``_align`` is right to use ``{"contradicts": False}``: there the model DID
+    answer, just not for that index. This path has no answer at all.)
+
+    The previous fallback hardcoded ``same_subject: True`` for every candidate,
+    which contradicted the batch prompt's own rule — "Set true ONLY when subject_a
+    and subject_b refer to the SAME real-world entity", and "If same_subject is
+    false, contradicts MUST be false". See ``_skip_contradiction_pairwise`` for
+    what acting on that costs.
+    """
+    logger.warning("contradiction_check_skipped candidates=%d reason=no_llm_abstained", count)
+    return [{} for _ in range(count)]
+
+
+def _pairwise_fake_fn(provider_name, new_content: str, old_content: str):
+    """The ``fake_fn`` for a per-candidate judge: heuristic if the operator asked
+    for the fake provider, abstain otherwise. One place so a new call site cannot
+    pick the wrong side of :func:`_deliberate_fake_provider` by omission."""
+    if _deliberate_fake_provider(provider_name):
+        return lambda: (_fake_contradiction_check(new_content, old_content), _CONF_FALLBACK)
+    return _skip_contradiction_pairwise
+
+
+def _batch_fake_fn(provider_name, new_content: str, candidates: list[dict]):
+    """The ``fake_fn`` for the batch judge. See :func:`_pairwise_fake_fn`."""
+    if _deliberate_fake_provider(provider_name):
+        return lambda: [
+            {
+                "same_subject": True,
+                "contradicts": _fake_contradiction_check(new_content, c.get("content", "")),
+            }
+            for c in candidates
+        ]
+    return lambda: _skip_contradiction_batch(len(candidates))
+
+
 def _fake_contradiction_check(new_content: str, old_content: str) -> bool:
-    """Simple heuristic for testing: flag if negation words differ."""
+    """Simple negation-word heuristic. TEST UTILITY ONLY — deliberately NOT wired
+    to the production fallback; see ``_skip_contradiction_pairwise`` for why a
+    heuristic verdict here is not survivable. Exercised directly by
+    ``tests/test_p1_contradiction.py``."""
     negations = {
         "not",
         "no",
@@ -1454,7 +1564,7 @@ async def _llm_entity_aware_contradiction_check(
     return await call_with_fallback(
         primary_provider_name=provider_name,
         call_fn=_do_check,
-        fake_fn=lambda: (_fake_contradiction_check(new_content, old_content), _CONF_FALLBACK),
+        fake_fn=_pairwise_fake_fn(provider_name, new_content, old_content),
         tenant_config=tenant_config,
         service_label="contradiction-entity-aware",
         model_attr="entity_extraction_model",
@@ -1578,13 +1688,7 @@ async def _llm_entity_aware_contradiction_check_batch(
     return await call_with_fallback(
         primary_provider_name=provider_name,
         call_fn=_do_check,
-        fake_fn=lambda: [
-            {
-                "same_subject": True,
-                "contradicts": _fake_contradiction_check(new_content, c.get("content", "")),
-            }
-            for c in candidates
-        ],
+        fake_fn=_batch_fake_fn(provider_name, new_content, candidates),
         tenant_config=tenant_config,
         service_label="contradiction-entity-aware_batch",
         model_attr="entity_extraction_model",
@@ -1624,7 +1728,8 @@ async def _llm_entity_aware_contradiction_check_batch(
 #   0.85 — gate 2 fired (model named a non_conflict_reason)
 #   0.60 — gate 1 fired (model said contradicts=True same_subject=False;
 #          parser overrode). THIS IS THE STOCHASTIC FLIP CASE.
-#   0.50 — malformed / heuristic fallback
+#   0.50 — malformed response, or a no-LLM abstain (``_skip_contradiction_*``).
+#          NOT a heuristic verdict any more: the production fallback abstains.
 #
 # Raising the floor to 0.90 means retraction only fires on clean
 # agreement — both gates of the parser say "not a contradiction" with
@@ -1778,8 +1883,8 @@ async def _attempt_path_c_retraction(
         # Below the CAURA-128 floor (0.90). Covers gate-1 (0.60, the
         # stochastic-flip case where parser overrode ``contradicts=True
         # same_subject=False`` to False), gate-2 (0.85, single-gate
-        # ``non_conflict_reason``), and the heuristic / malformed
-        # fallback (0.50). None are trustworthy enough on their own —
+        # ``non_conflict_reason``), and the malformed / no-LLM-abstain
+        # case (0.50). None are trustworthy enough on their own —
         # the judge call is the same prompt + same inputs as Path A's
         # semantic judge, so a single-gate disagreement is just an
         # independent LLM roll flipping. Leave Path A's verdict in
