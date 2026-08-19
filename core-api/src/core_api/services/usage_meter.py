@@ -15,8 +15,13 @@ calling the platform. core-api has no route to a platform service in any
 environment — its only ``PLATFORM_*`` settings are LLM config, and the
 dependency runs the other way (platform-admin-api holds ``CORE_API_URL``).
 Introducing core → platform for metering would invert that. The platform reads
-``tenant_usage_counters`` instead; both schemas live in one database, so that
-costs it no network hop.
+``tenant_usage_counters`` instead, through core-storage-api's
+``POST /tenant-usage/query``.
+
+CORRECTION: this docstring previously said the platform would read the table
+directly, "so that costs it no network hop". They do share a database, but
+reading across schemas is not the boundary this codebase keeps — the rationale
+is in that router's docstring.
 
 BUFFERED, NOT PER-WRITE
 -----------------------

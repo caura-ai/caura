@@ -3327,7 +3327,7 @@ class PostgresService:
         the same tenant: the addition happens in the database, not read-then-write
         in a worker.
 
-        Cross-tenant and RLS-free by design (migration 038), like
+        Cross-tenant and RLS-free by design (migration 039), like
         ``capability_usage_insert`` above — one batch carries many tenants'
         counters and each row names its own ``tenant_id``.
 
@@ -3361,6 +3361,87 @@ class PostgresService:
                     )
                 )
         return len(rows)
+
+    async def tenant_usage_query(
+        self,
+        tenant_ids: list[str],
+        *,
+        period_start: datetime | None = None,
+        periods: int = 6,
+    ) -> list[dict]:
+        """Per-period, per-operation totals summed across ``tenant_ids``.
+
+        Summed across tenants because the consumer bills an ORGANISATION and an
+        org owns several tenants; the meter only ever knows the tenant. Returns
+        ``[{"period_start": iso-string, "operations": {op: total}}, ...]``,
+        newest period first.
+
+        ``period_start`` pins one period. Otherwise the newest ``periods``
+        periods THAT HAVE DATA are returned — not the last N calendar months,
+        which would spend a slot on a quiet month. That matches what the counter
+        table can answer: it has no row for a period nobody used.
+
+        Operation names are passed through as stored, not mapped onto a fixed
+        set. See ``core_api.services.usage_service.OperationType`` for the ones
+        core-api currently emits; the table keys the operation as data
+        deliberately, so a new one needs no migration.
+        """
+        if not tenant_ids:
+            return []
+
+        # No ORDER BY on the aggregate: the newest-first contract is met by
+        # sorting the reshaped result below, which is at most ``periods``
+        # entries, rather than asking Postgres to sort every grouped row.
+        totals = (
+            select(
+                TenantUsageCounter.period_start,
+                TenantUsageCounter.operation,
+                func.sum(TenantUsageCounter.count).label("total"),
+            )
+            .where(TenantUsageCounter.tenant_id.in_(tenant_ids))
+            .group_by(TenantUsageCounter.period_start, TenantUsageCounter.operation)
+        )
+        if period_start is not None:
+            totals = totals.where(TenantUsageCounter.period_start == period_start)
+        else:
+            # Ranked over the AGGREGATE, not the base table. Two things fall out
+            # of that.
+            #
+            # A plain LIMIT would cut mid-period, since one period contributes
+            # one row per operation. ``dense_rank`` ties every row of a period
+            # to one rank, so ``<= periods`` keeps whole periods —
+            # ``test_periods_means_periods_not_rows`` pins that.
+            #
+            # And choosing the window with a second subquery over
+            # ``tenant_usage_counters`` reads it twice: EXPLAIN gives that shape
+            # two ``Seq Scan``s on the table joined by a Hash Join, against one
+            # for this shape. Neither can prune by ``period_start`` — the
+            # composite index leads on ``tenant_id`` with ``operation`` in the
+            # middle — so each pass costs the named tenants' whole history.
+            # Ranking the aggregate pays that once, over a row set bounded by
+            # periods x operations, and Postgres additionally caps the window
+            # with a ``Run Condition`` on the rank.
+            agg = totals.cte("tenant_usage_agg")
+            ranked = select(
+                agg.c.period_start,
+                agg.c.operation,
+                agg.c.total,
+                func.dense_rank().over(order_by=agg.c.period_start.desc()).label("rnk"),
+            ).subquery()
+            totals = select(ranked.c.period_start, ranked.c.operation, ranked.c.total).where(
+                ranked.c.rnk <= periods
+            )
+
+        async with get_session() as session:
+            rows = (await session.execute(totals)).all()
+
+        by_period: dict[datetime, dict[str, int]] = {}
+        for period, operation, total in rows:
+            by_period.setdefault(period, {})[operation] = int(total)
+        return [
+            {"period_start": period.isoformat(), "operations": operations}
+            for period, operations in sorted(by_period.items(), reverse=True)
+        ]
 
     # ------------------------------------------------------------------
     # H) Entity links (memory side)

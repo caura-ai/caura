@@ -1,9 +1,20 @@
-"""Durable per-tenant usage-counter increments (billing-grade).
+"""Durable per-tenant usage counters (billing-grade): write and read.
 
-The write half of ``tenant_usage_counters`` (migration 039). core-api reaches
-this through ``ServiceHooks.usage_meter``; it holds no DB pool of its own
+``tenant_usage_counters`` (migration 039). core-api writes through
+``ServiceHooks.usage_meter``; it holds no DB pool of its own
 (storage-boundary rule), which is the same reason ``capability-usage`` lives
 here rather than being written directly.
+
+WHY THE READ IS HERE TOO, AND NOT A CROSS-SCHEMA QUERY IN THE PLATFORM
+----------------------------------------------------------------------
+The consumer is the enterprise platform, and `enterprise.*` and `public.*` do
+share one database — so the platform *could* join straight across. It does not,
+because this service owns ``public.*``: ``platform-storage-api`` is documented
+as owning ``enterprise.*`` only, and the org purge already reaches OSS data
+through core-storage-api rather than reaching into the schema (CAURA-689).
+platform-admin-api holds a ``core_storage_client`` for exactly that. One HTTP
+hop on a dashboard read is the price of not having two services owning one
+table's shape.
 
 The table is intentionally CROSS-TENANT / RLS-free: one batch carries many
 tenants' counters, so this endpoint applies NO per-tenant scoping — each row
@@ -20,11 +31,55 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from core_storage_api.services.postgres_service import PostgresService
 
 router = APIRouter(prefix="/tenant-usage", tags=["TenantUsage"])
 _svc = PostgresService()
+
+#: A list longer than this is a caller sending its whole tenant table by
+#: accident, not a large org. It does NOT bound the query's cost — that scales
+#: with how much history the named tenants have, which nothing here caps.
+MAX_TENANTS_PER_QUERY = 1000
+
+
+class TenantUsageQuery(BaseModel):
+    """Which tenants, and which periods, to total.
+
+    A POST for a read: the tenant list is the org's whole tenant set, which has
+    no fixed bound, and a query string does. Validated by pydantic rather than
+    hand-parsed — the write endpoint below hand-parses because it coerces
+    per-row datetimes, and that is exactly where a missing key turned into a
+    500 in review.
+    """
+
+    tenant_ids: list[str] = Field(min_length=1, max_length=MAX_TENANTS_PER_QUERY)
+    period_start: datetime | None = None
+    periods: int = Field(default=6, ge=1, le=24)
+
+
+@router.post("/query")
+async def query_tenant_usage(body: TenantUsageQuery) -> dict:
+    """Total the counters for a set of tenants, per period, per operation.
+
+    Body: ``{tenant_ids, period_start?, periods?}`` →
+    ``{"periods": [{"period_start": iso, "operations": {op: total}}, ...]}``,
+    newest first.
+
+    The operation names are passed through as stored rather than mapped onto a
+    fixed writes/searches/recalls triple. core-api also meters ``insights`` and
+    ``evolve`` (see ``core_api.services.usage_service.OperationType``), which
+    have no such column — mapping here would silently discard counts the write
+    path is already paying for.
+    """
+    return {
+        "periods": await _svc.tenant_usage_query(
+            body.tenant_ids,
+            period_start=body.period_start,
+            periods=body.periods,
+        )
+    }
 
 
 @router.post("/increment")

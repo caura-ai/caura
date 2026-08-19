@@ -21,8 +21,9 @@ migration.
 
 Cross-tenant like ``capability_usage``, and for the same reason: it holds
 counts and a ``tenant_id`` grouping dimension, never memory content. RLS is not
-enabled on it. The platform reads it directly to compute plan limits — both
-schemas live in one database, so that costs no network hop.
+enabled on it. The platform reads it through core-storage-api's
+``POST /tenant-usage/query`` — NOT by joining across schemas, even though both
+live in one database; see that router's docstring for why.
 
 Written via ``ServiceHooks.usage_meter``, so an OSS standalone deployment with
 no meter wired records nothing and enforces nothing. See
