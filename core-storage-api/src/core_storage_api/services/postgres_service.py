@@ -956,6 +956,40 @@ class PostgresService:
     # B) Content hash / dedup
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _warn_duplicate_content_hash(
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        agent_id: str | None,
+        content_hash: str,
+        kept_id: UUID,
+        path: str,
+        excluded_self: bool = False,
+    ) -> None:
+        """Report live rows that violate the uniqueness the schema never enforced.
+
+        H-04: shared by both dedup gates deliberately. They hit the same anomaly,
+        and a warning emitted from only one of them would undercount the duplicate
+        population — which is the number the partial unique index decision rests
+        on. One call site for the message also means the two cannot drift.
+        """
+        logger.warning(
+            "duplicate live rows share a content_hash — dedup returns the oldest",
+            extra={
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": agent_id,
+                "content_hash": content_hash[:12],
+                "kept_memory_id": str(kept_id),
+                # Which gate saw it, so the two are separable in a log query.
+                "dedup_path": path,
+                # True → the count excludes the row being updated, so the real
+                # group is one larger than what this gate could see.
+                "excluded_self": excluded_self,
+            },
+        )
+
     async def memory_find_by_content_hash(
         self,
         tenant_id: str,
@@ -979,7 +1013,44 @@ class PostgresService:
                 stmt = stmt.where(Memory.fleet_id.is_(None))
             if agent_id is not None:
                 stmt = stmt.where(Memory.agent_id == agent_id)
-            return (await session.execute(stmt)).scalar_one_or_none()
+            # H-04: oldest-first + LIMIT 2, not ``scalar_one_or_none()``.
+            #
+            # Nothing in the schema enforces one live row per
+            # (tenant, fleet, agent, content_hash) — ``ix_memories_content_hash``
+            # is a NON-unique index on (tenant_id, content_hash) — and several
+            # paths mint duplicates without any concurrency at all (auto-chunk
+            # children carry a content_hash and skip the dedup lookup entirely).
+            # ``scalar_one_or_none()`` raises ``MultipleResultsFound`` on two live
+            # rows, which surfaces as a storage 500 → a FAILED pipeline step →
+            # "Memory write pipeline failed unexpectedly". Permanently: every
+            # subsequent write of that content 500s instead of 409ing, and no code
+            # path heals it short of deleting a row by hand.
+            #
+            # Returning a row instead means duplicates degrade to the 409 the
+            # contract always intended. Oldest first so it is the row that
+            # legitimately won that contract.
+            #
+            # ``id`` breaks ties, and ties are the COMMON case here, not an edge:
+            # ``created_at`` is ``server_default=now()``, which Postgres fixes for
+            # the whole transaction, and the auto-chunk path inserts all its
+            # children in one ``create_memories`` call — so duplicates minted that
+            # way share ``created_at`` exactly. On a tie ``ORDER BY created_at``
+            # alone leaves the pick to the plan, which would defeat the stability
+            # this ordering exists to provide. Ordering by ``id`` is not
+            # chronological, but among rows of the same instant there is no
+            # chronology to preserve — only a stable answer to give.
+            stmt = stmt.order_by(Memory.created_at.asc(), Memory.id.asc()).limit(2)
+            rows = (await session.execute(stmt)).scalars().all()
+            if len(rows) > 1:
+                self._warn_duplicate_content_hash(
+                    tenant_id=tenant_id,
+                    fleet_id=fleet_id,
+                    agent_id=agent_id,
+                    content_hash=content_hash,
+                    kept_id=rows[0].id,
+                    path="find_by_content_hash",
+                )
+            return rows[0] if rows else None
 
     async def memory_find_duplicate_hash(
         self,
@@ -1003,7 +1074,34 @@ class PostgresService:
                 stmt = stmt.where(Memory.agent_id == agent_id)
             if exclude_id is not None:
                 stmt = stmt.where(Memory.id != exclude_id)
-            return (await session.execute(stmt)).scalar_one_or_none()
+            # Same H-04 wedge as ``memory_find_by_content_hash`` above: this is the
+            # UPDATE path's dedup gate, and two live rows sharing a hash made every
+            # content update to that value 500 rather than 409. Caller only needs
+            # "is there one, and which", so the oldest is as good an answer as any
+            # and a stable one.
+            #
+            # LIMIT 2 rather than 1 for the same reason as the read path: one extra
+            # row is what makes the anomaly observable. Reporting from only one of
+            # the two affected gates would undercount the duplicate population that
+            # the unique index decision depends on.
+            rows = (
+                (await session.execute(stmt.order_by(Memory.created_at.asc(), Memory.id.asc()).limit(2)))
+                .scalars()
+                .all()
+            )
+            if len(rows) > 1:
+                self._warn_duplicate_content_hash(
+                    tenant_id=tenant_id,
+                    fleet_id=fleet_id,
+                    agent_id=agent_id,
+                    content_hash=content_hash,
+                    kept_id=rows[0],
+                    path="find_duplicate_hash",
+                    # This gate excludes the row being updated, so >1 here means at
+                    # least two OTHER rows already share the hash.
+                    excluded_self=exclude_id is not None,
+                )
+            return rows[0] if rows else None
 
     async def memory_find_embedding_by_content_hash(
         self,

@@ -610,6 +610,177 @@ class TestMemories:
         # check_exact_duplicate step reads dup["id"] straight off this.
         assert resp.json()["content_hash"] == content_hash
 
+    async def test_duplicate_hashes_return_the_oldest_instead_of_500ing(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """H-04: two live rows sharing a content_hash must not wedge the gate.
+
+        Nothing enforces one live row per (tenant, fleet, agent, content_hash) —
+        ``ix_memories_content_hash`` is non-unique — and paths like auto-chunk mint
+        duplicates with no concurrency at all. ``scalar_one_or_none()`` raised
+        ``MultipleResultsFound`` on two rows, which became a storage 500 and a
+        FAILED write-pipeline step, PERMANENTLY: every later write of that content
+        500'd instead of 409ing, with no path that heals it.
+
+        Returning the oldest row degrades the state to the 409 the contract always
+        intended.
+        """
+        content = f"duplicate hash content {_uid()}"
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+        # Two live rows, same hash — exactly what the non-unique index permits.
+        # Distinct client_request_ids so the idempotency gate does not fold them.
+        first = await client.post(
+            f"{PREFIX}/memories",
+            json=_memory_payload(tenant_id, fleet_id, content=content, content_hash=content_hash),
+        )
+        second = await client.post(
+            f"{PREFIX}/memories",
+            json=_memory_payload(tenant_id, fleet_id, content=content, content_hash=content_hash),
+        )
+        assert first.status_code in (200, 201), first.text
+        assert second.status_code in (200, 201), second.text
+        assert first.json()["id"] != second.json()["id"], (
+            "storage accepted both rows — if this ever fails, a unique constraint "
+            "landed and this test's premise is gone (which would be good news)"
+        )
+
+        resp = await client.get(
+            f"{PREFIX}/memories/by-content-hash",
+            params={
+                "tenant_id": tenant_id,
+                "content_hash": content_hash,
+                "fleet_id": fleet_id,
+            },
+        )
+
+        # The whole point: 200 with a row, not 500.
+        assert resp.status_code == 200, resp.text
+        # And deterministically the OLDER row — the one that legitimately won the
+        # 409 contract — so repeated calls agree rather than following the planner.
+        assert resp.json()["id"] == first.json()["id"]
+
+    async def test_same_transaction_duplicates_resolve_stably(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """H-04: the tie case, which is the COMMON one rather than an edge.
+
+        ``created_at`` is ``server_default=now()`` and Postgres fixes ``now()`` for
+        the whole transaction, so duplicates inserted together — which is exactly
+        how the auto-chunk path writes its children, one ``create_memories`` call —
+        share ``created_at`` to the microsecond. Ordering by ``created_at`` alone
+        then leaves the pick to the query plan, so "returns the oldest, stably"
+        would hold only by luck.
+
+        HONEST LIMIT: this test does NOT fail if the ``Memory.id`` tie-break is
+        removed. Instability is plan-dependent, and on a table this small Postgres
+        returns heap order, which happens to be stable and insertion-ordered. So
+        treat this as an assertion about the intended OUTCOME — ties exist, the
+        answer is stable, and it is the tie-break winner — not as proof that the
+        unordered form is broken. The guarantee comes from the ORDER BY being
+        total, which no fixture can force Postgres to violate on demand.
+        """
+        content = f"same-txn duplicate {_uid()}"
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        attempt = _uid()
+        items = [
+            {
+                **_memory_payload(tenant_id, fleet_id, content=content, content_hash=content_hash),
+                "client_request_id": f"{attempt}:{idx}",
+            }
+            for idx in range(3)
+        ]
+
+        resp = await client.post(f"{PREFIX}/memories/bulk", json=items)
+        assert resp.status_code == 200, resp.text
+        inserted = [e["id"] for e in resp.json() if e["was_inserted"]]
+        assert len(inserted) == 3, f"expected 3 live duplicates, got {resp.json()}"
+
+        # Prove the premise rather than assuming it: if these rows did NOT share
+        # created_at, the assertions below would pass on ordinary chronological
+        # ordering and prove nothing about the tie-break.
+        stamps = set()
+        for mid in inserted:
+            row = await client.get(f"{PREFIX}/memories/{mid}")
+            assert row.status_code == 200, row.text
+            stamps.add(row.json()["created_at"])
+        assert len(stamps) == 1, f"expected one shared created_at, got {stamps}"
+
+        params = {
+            "tenant_id": tenant_id,
+            "content_hash": content_hash,
+            "fleet_id": fleet_id,
+        }
+        picks = []
+        for _ in range(4):
+            r = await client.get(f"{PREFIX}/memories/by-content-hash", params=params)
+            assert r.status_code == 200, r.text
+            picks.append(r.json()["id"])
+
+        # Same answer every time, and it is the tie-break winner (lowest id among
+        # the tied rows) rather than whatever the plan produced this run.
+        assert len(set(picks)) == 1, f"unstable pick across calls: {picks}"
+        assert picks[0] == min(inserted)
+
+    async def test_update_path_gate_also_reports_duplicates(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+        caplog,
+    ) -> None:
+        """H-04 round 2: the UPDATE path's gate hits the same anomaly.
+
+        Both gates were wedging on ``MultipleResultsFound``; only the read path was
+        made observable. Reporting from one of two affected gates undercounts the
+        duplicate population, and that count is what the partial unique index
+        decision rests on — so this pins the other half.
+        """
+        import logging
+
+        content = f"update-path duplicate {_uid()}"
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        attempt = _uid()
+        # No fleet: the ``/duplicate-hash`` route takes only tenant_id +
+        # content_hash + exclude_id, so it queries ``fleet_id IS NULL``. Rows with a
+        # fleet would not match it at all — a pre-existing narrowness of that route
+        # (the service method supports fleet_id and agent_id; the route exposes
+        # neither), noted rather than changed here since widening it would alter
+        # dedup scope.
+        items = [
+            {
+                **_memory_payload(tenant_id, fleet_id, content=content, content_hash=content_hash),
+                "fleet_id": None,
+                "client_request_id": f"{attempt}:{idx}",
+            }
+            for idx in range(3)
+        ]
+        resp = await client.post(f"{PREFIX}/memories/bulk", json=items)
+        assert resp.status_code == 200, resp.text
+        inserted = sorted(e["id"] for e in resp.json() if e["was_inserted"])
+        assert len(inserted) == 3
+
+        with caplog.at_level(logging.WARNING, logger="core_storage_api.services.postgres_service"):
+            r = await client.get(
+                f"{PREFIX}/memories/duplicate-hash",
+                params={"tenant_id": tenant_id, "content_hash": content_hash},
+            )
+
+        # 200 with a row, not the 500 this used to be.
+        assert r.status_code == 200, r.text
+        assert r.json()["memory_id"] == inserted[0]
+
+        warnings = [rec for rec in caplog.records if "share a content_hash" in rec.getMessage()]
+        assert warnings, "the update-path gate resolved a duplicate silently"
+        # Tagged with which gate saw it, so the two are separable in a log query.
+        assert getattr(warnings[-1], "dedup_path", None) == "find_duplicate_hash"
+
     async def test_find_by_content_hash_not_found(
         self,
         client: AsyncClient,
