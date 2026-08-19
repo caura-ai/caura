@@ -165,7 +165,7 @@
                 "type": "null"
               }
             ],
-            "description": "Memory type. Auto-classified by LLM if omitted. Valid values: fact, episode, decision, preference, task, intention, plan, commitment, action, cancellation.",
+            "description": "Memory type. Auto-classified by LLM if omitted. Valid values: fact, episode, decision, preference, task, plan, action.",
             "title": "Memory Type"
           },
           "metadata": {
@@ -1090,7 +1090,7 @@
                 "type": "null"
               }
             ],
-            "description": "Memory type. Auto-classified by LLM if omitted. Valid values: fact, episode, decision, preference, task, intention, plan, commitment, action, cancellation."
+            "description": "Memory type. Auto-classified by LLM if omitted. Valid values: fact, episode, decision, preference, task, plan, action."
           },
           "metadata": {
             "anyOf": [

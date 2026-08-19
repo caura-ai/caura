@@ -24,9 +24,13 @@ from common.enrichment.constants import (
 # exclusively by internal flows (insights_service / evolve_service) with the
 # type set explicitly, so they never travel through this prompt — offering
 # them here is what let agent writes leak into the insight space (CAURA-699).
-# The deprecated types (currently ``semantic``, CAURA-701) remain in the
-# enum for read-compat with historical rows but are hidden from the LLM so
-# it merges their content into the successor type (``fact``).
+# The deprecated types (``semantic`` from CAURA-701; ``intention``,
+# ``commitment``, and ``cancellation`` from CAURA-717) remain in the enum
+# for read-compat with historical rows but are hidden from the LLM so it
+# merges their content into the successor types (``fact``, ``plan``,
+# ``action``, ``task``, or ``decision`` depending on the case; the
+# ``_validate_enrichment`` demotion falls back to ``fact`` when the LLM
+# emits a deprecated slug anyway).
 _CLASSIFIABLE_TYPES = tuple(
     t
     for t in MEMORY_TYPES
@@ -50,30 +54,52 @@ Analyze the following memory content and return a JSON object with these fields:
     + _TYPE_BULLETS
     + """
 
-   Action vs episode vs fact — resolving the common confusion:
+   Action vs episode vs fact — resolving the most common confusion:
    - action = the ACTOR did a DEED. Verbs of doing (deployed, merged,
-     sent, completed, created, filed, staged) + first-person or agentic
-     subject.
+     sent, completed, created, filed, staged, confirmed, approved,
+     paused, cancelled) + first-person or agentic subject.
    - episode = an EVENT happened (observed, third-person framing). Not
      tied to the actor as the doer.
    - fact = a stable STATE or knowledge — durable statements of what IS,
      including documentation of a system, API, or process.
 
+   Action vs decision — the tiebreaker:
+   - action = execution of the deed itself. Includes verbs like
+     "approved", "paused", "signed off", "rejected", "cancelled" when
+     the content is just the deed + its object.
+   - decision = the deliberation and selection itself. Requires at least
+     one visible marker: reasoning ("because…", "for scale"), alternatives
+     ("X over Y", "instead of Z"), or group framing ("the team concluded").
+     Without these markers, an "approved X" or "paused Y" line is action,
+     not decision.
+   - If a line records BOTH the choice and its execution ("Approved config
+     X because scaling issues"), prefer decision when reasoning/alternatives
+     are visible; prefer action when it is just verb + object + parameters.
+
    The type is determined by what the statement DOES (deed / event /
-   state / choice / pending), not by who authored the content or by
-   surface prefixes.
+   state / choice / pending work / structured steps / preference), not
+   by who authored the content or by surface prefixes.
 
    Contrastive examples:
-     "Deployed v2.3 to production"                 -> action    (deed completed)
-     "The v2.3 deployment succeeded at 14:00"      -> episode   (third-person observed event)
-     "Merged the auth refactor PR"                 -> action    (deed completed)
-     "Production outage between 14:00 and 14:30"   -> episode   (event tied to time)
-     "Completed full data pipeline validation"     -> action    (deed completed)
-     "System uses OAuth 2.0 with refresh tokens"   -> fact      (durable state)
-     "API endpoints: /users, /posts, /admin"       -> fact      (documentation)
-     "Chose Postgres over MongoDB for scale"       -> decision  (choice + reasoning)
-     "Fix the login bug"                           -> task      (pending work)
-     "Will migrate the DB next month"              -> intention (not yet acted on)
+     "Deployed v2.3 to production"                        -> action     (deed completed)
+     "The v2.3 deployment succeeded at 14:00"             -> episode    (third-person observed event)
+     "Merged the auth refactor PR"                        -> action     (deed completed)
+     "Production outage between 14:00 and 14:30"          -> episode    (event tied to time)
+     "Completed full data pipeline validation"            -> action     (deed completed)
+     "Confirmed in DM to Eli that I will participate"     -> action     (confirmation is the deed)
+     "System uses OAuth 2.0 with refresh tokens"          -> fact       (durable state)
+     "API endpoints: /users, /posts, /admin"              -> fact       (documentation)
+     "The goal is $100M ARR by 2029 across LATAM"         -> plan       (specific target with a horizon — north-star endpoint)
+     "Our priority this quarter is faster iteration"      -> preference (aspirational orientation, not a specific target)
+     "Chose Postgres over MongoDB for scale"              -> decision   (alternatives + reasoning)
+     "Going with OAuth 2.0 over SAML, our clients need mobile support" -> decision (alternatives + reasoning)
+     "Team concluded we'll adopt async-first workflows"   -> decision   (group deliberation framing)
+     "Approved the new auth config: cap $1.20, target $0.70" -> action  (approval-deed, no deliberation)
+     "Paused the follow-up loop, will try a different approach" -> action (pause is the deed; future orientation is not deliberation)
+     "Cancelled the beta rollout"                         -> action     (cancellation-deed)
+     "Fix the login bug"                                  -> task       (pending work)
+     "Week 1-2: 1) Share doc with Legal 2) Risk review"   -> plan       (ordered steps)
+     "Team prefers concise Slack updates over long emails" -> preference (org style)
 
 2. "weight": float 0.0-1.0 indicating importance
    - 0.9-1.0: critical decisions, key facts with evidence, high-impact events
@@ -95,8 +121,8 @@ Analyze the following memory content and return a JSON object with these fields:
 
 6. "status": one of "active", "pending", "confirmed" (optional, default "active")
    - active: default for most memories — current and valid
-   - pending: for tasks/plans/commitments not yet confirmed or started
-   - confirmed: for verified facts or completed commitments
+   - pending: for tasks/plans not yet confirmed or started
+   - confirmed: for verified facts or completed actions
 
 7. "ts_valid_start": ISO 8601 datetime string (optional, null if not applicable)
    - The earliest time this memory is valid/relevant

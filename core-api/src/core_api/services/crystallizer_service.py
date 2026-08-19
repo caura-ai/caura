@@ -12,6 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from common.enrichment.constants import (
     CLASSIFIER_DEPRECATED_MEMORY_TYPES,
     DEFAULT_MEMORY_TYPE,
+    SERVER_RESERVED_MEMORY_TYPES,
 )
 from core_api.clients.storage_client import get_storage_client
 
@@ -36,7 +37,7 @@ from core_api.constants import (
     CRYSTALLIZER_SHORT_CONTENT_CHARS,
     CRYSTALLIZER_STALE_DAYS,
     CRYSTALLIZER_STALE_MAX_WEIGHT,
-    MEMORY_TYPES,
+    MEMORY_TYPES_WRITE,
 )
 from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
 
@@ -49,7 +50,16 @@ MAX_AFFECTED_IDS = 20
 # Crystallization LLM prompt
 # ---------------------------------------------------------------------------
 
-CRYSTALLIZATION_PROMPT = """\
+# The offered memory-type vocabulary is derived from ``MEMORY_TYPES_WRITE``
+# — the same source of truth that drives the enrichment prompt in
+# ``common/enrichment/_prompts.py`` and the OpenAPI schema description. Building
+# the list at import time (rather than as a literal string) means future
+# taxonomy shifts (CAURA-717, CAURA-XXX, …) propagate here automatically
+# instead of relying on a reviewer to spot a hand-edited slug list.
+_CRYSTALLIZER_TYPES_INLINE = ", ".join(f'"{t}"' for t in MEMORY_TYPES_WRITE)
+
+CRYSTALLIZATION_PROMPT = (
+    """\
 You are a memory crystallizer for a business agent memory system.
 
 You are given a batch of raw memories that may be noisy, redundant, or overlapping.
@@ -62,7 +72,9 @@ Rules:
 - Preserve important details: names, numbers, dates, decisions
 - Discard trivial or meaningless content
 - Each fact should be 1-2 sentences maximum
-- Assign a memory_type to each fact: one of "fact", "episode", "decision", "preference", "task", "intention", "plan", "commitment", "action", "outcome", "cancellation", "rule"
+- Assign a memory_type to each fact: one of """
+    + _CRYSTALLIZER_TYPES_INLINE
+    + """
 - Assign a weight (0.0-1.0) based on importance
 
 Input memories:
@@ -73,6 +85,7 @@ Return ONLY a JSON array of objects (no markdown fences):
 
 If the input contains no meaningful information worth preserving, return an empty array: []
 """
+)
 
 
 # ---------------------------------------------------------------------------
@@ -304,14 +317,17 @@ async def _run_crystallization(
 
         new_ids = []
         for fact in extracted:
-            # CAURA-701: crystallizer bypasses the write pipeline (calls
+            # CAURA-701/717: crystallizer bypasses the write pipeline (calls
             # create_memory directly, no MergeEnrichmentFields step), so its
             # LLM output cannot rely on the pipeline-level demotion of
             # deprecated types. Guard here instead — if residual training makes
             # the crystallizer LLM emit e.g. "semantic", coerce to the default
-            # so the merger is enforced on this path too.
+            # so the merger is enforced on this path too. Also demote
+            # server-reserved types (outcome/rule/insight) since ``create_memory``
+            # itself has no SERVER_RESERVED_MEMORY_TYPES check — that guard
+            # lives at the route/MCP boundary, which the crystallizer bypasses.
             mt = fact.get("memory_type", "fact")
-            if mt in CLASSIFIER_DEPRECATED_MEMORY_TYPES:
+            if mt in CLASSIFIER_DEPRECATED_MEMORY_TYPES or mt in SERVER_RESERVED_MEMORY_TYPES:
                 mt = DEFAULT_MEMORY_TYPE
             try:
                 mem_out = await create_memory(
@@ -424,8 +440,13 @@ async def _crystallize_cluster(memories: list[dict], config) -> list[dict]:
         for item in raw:
             if not isinstance(item, dict) or not item.get("content"):
                 continue
-            if item.get("memory_type") not in MEMORY_TYPES:
-                item["memory_type"] = "fact"
+            # CAURA-717: match the prompt's offered vocabulary — any type
+            # outside ``MEMORY_TYPES_WRITE`` (server-reserved OR
+            # classifier-deprecated) is coerced to the default here, so a stray
+            # LLM completion cannot smuggle a reserved/deprecated slug past
+            # the write pipeline that ``_run_crystallization`` bypasses.
+            if item.get("memory_type") not in MEMORY_TYPES_WRITE:
+                item["memory_type"] = DEFAULT_MEMORY_TYPE
             try:
                 item["weight"] = max(0.0, min(1.0, float(item.get("weight", 0.7))))
             except (TypeError, ValueError):
