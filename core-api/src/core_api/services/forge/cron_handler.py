@@ -125,12 +125,26 @@ def _make_memory_fetcher(tenant_id: str):
     return _fetch
 
 
-def _make_poison_checker():
+def _make_poison_checker(tenant_id: str, fleet_id: str | None):
     """Adapt :func:`is_fingerprint_poisoned` (storage-backed) to the
-    ``(tenant, fleet, fp) → bool`` shape the gate evaluator expects.
+    ``PoisonChecker`` seam ``run_forge_distill`` actually calls:
+    ``(fingerprint) → bool``, with the tenant and fleet closed over.
+
+    H-08: this used to take ``(tenant_id, fleet_id, fingerprint)`` — the shape
+    ``evaluate_auto_gates`` wants — while its only caller feeds
+    ``run_forge_distill``, which invokes ``await poison_checker(fingerprint.fp)``
+    with one argument. Every cluster therefore raised ``TypeError`` after the LLM
+    distill call, ``run_forge_distill``'s broad ``except Exception`` counted it as
+    ``skipped_io_error``, and the tick reported success having written nothing.
+
+    The gate-evaluator shape was never needed here: ``promote_pending_candidates``
+    is handed :func:`make_db_poison_checker` (skill_promoter), which is the
+    three-arg wrapper for that path. Closing over the identifiers instead mirrors
+    ``scripts/forge_dry_run.py``'s ``_wire_poison_checker``, which is why the
+    dry-run CLI was never affected.
     """
 
-    async def _check(tenant_id: str, fleet_id: str | None, fingerprint: str) -> bool:
+    async def _check(fingerprint: str) -> bool:
         return await is_fingerprint_poisoned(
             tenant_id=tenant_id,
             fleet_id=fleet_id,
@@ -239,7 +253,7 @@ async def run_forge_cron_tick(
 
     llm_fn = await _wire_llm_fn()
     memory_fetcher = _make_memory_fetcher(tenant_id)
-    poison_checker = _make_poison_checker()
+    poison_checker = _make_poison_checker(tenant_id, fleet_id)
     candidate_writer = _make_candidate_writer()
     status_checker = _make_status_checker()
 

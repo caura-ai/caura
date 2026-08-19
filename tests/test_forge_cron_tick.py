@@ -376,3 +376,132 @@ class TestRunForgeCronTick:
                 # Replace common with a stub missing ``llm``.
                 with patch.dict(sys.modules, {"common.llm": None}):
                     await _wire_llm_fn()
+
+
+# ── H-08: the injected callables must match the seams that call them ──
+
+
+@pytest.mark.unit
+class TestInjectedCallableArity:
+    """The cron adapter's whole job is wiring, and a shape mismatch here is
+    invisible to every other suite.
+
+    ``run_forge_distill`` swallows exceptions from ``_distill_cluster`` into
+    ``skipped_io_error`` so one bad cluster cannot abort a tick. That also means a
+    ``TypeError`` from a wrongly-shaped injectable looks exactly like a storage
+    hiccup: the tick returns success with zero candidates written. H-08 was that
+    bug — the poison checker took ``(tenant, fleet, fp)`` while
+    ``_distill_cluster`` calls ``await poison_checker(fingerprint.fp)`` — and it
+    survived because the test above stubs ``run_forge_distill``, so nothing ever
+    called what the cron handed it.
+
+    These tests call the injectables through the same seam the service does.
+    """
+
+    @pytest.mark.asyncio
+    async def test_make_poison_checker_takes_only_a_fingerprint(self):
+        """The ``PoisonChecker`` seam is ``Callable[[str], Awaitable[bool]]``."""
+        from core_api.services.forge.cron_handler import _make_poison_checker
+
+        checker = _make_poison_checker("t1", "fleet-a")
+
+        with patch(
+            "core_api.services.forge.cron_handler.is_fingerprint_poisoned",
+            new=AsyncMock(return_value=True),
+        ) as is_poisoned:
+            # Exactly how forge_service._distill_cluster invokes it.
+            assert await checker("fp-abc123") is True
+
+        # The identifiers must survive being closed over, or the check would
+        # silently consult the wrong tenant's cooloff rows.
+        is_poisoned.assert_awaited_once_with(
+            tenant_id="t1", fleet_id="fleet-a", cluster_fingerprint="fp-abc123"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cron_hands_run_forge_distill_a_checker_it_can_actually_call(self):
+        """The regression guard for H-08.
+
+        Captures the callable the cron passes and invokes it the way the service
+        does. Pre-fix this raised ``TypeError: _check() missing 2 required
+        positional arguments``, which the service would have buried in
+        ``skipped_io_error``.
+        """
+        from core_api.services.forge.cron_handler import run_forge_cron_tick
+
+        fake_forge_result = ForgeRunResult(
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=None,
+            window_end=None,
+            total_traces=0,
+            labeled_traces=0,
+            clusters_total=0,
+            clusters_eligible=0,
+            candidates_written=0,
+            candidates_skipped_poisoned=0,
+            candidates_skipped_sentinel=0,
+            candidates_skipped_distill_error=0,
+            candidates_skipped_io_error=0,
+            candidates_skipped_existing=0,
+            started_at=None,
+            run_label="forge-cron-t1-20260819T1200",
+            candidate_doc_ids=[],
+        )
+        fake_promote_result = PromoterRunResult(
+            tenant_id="t1", fleet_id=None, scanned=0, promoted=0, held=0, auto_approved=0
+        )
+
+        with (
+            patch(
+                "core_api.services.forge.cron_handler.get_settings_for_display",
+                new=AsyncMock(return_value={"skills_factory": {"forge": {}}}),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler._wire_llm_fn",
+                new=AsyncMock(return_value=AsyncMock()),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler._make_candidate_writer",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler._make_status_checker",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler.run_forge_distill",
+                new=AsyncMock(return_value=fake_forge_result),
+            ) as run_forge,
+            patch(
+                "core_api.services.forge.cron_handler.promote_pending_candidates",
+                new=AsyncMock(return_value=fake_promote_result),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler.make_db_poison_checker",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler.make_db_live_data_fetcher",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler.make_db_status_updater",
+                return_value=AsyncMock(),
+            ),
+        ):
+            await run_forge_cron_tick(
+                tenant_id="t1", fleet_id=None, run_label="forge-cron-t1-20260819T1200"
+            )
+
+            injected = run_forge.await_args.kwargs["poison_checker"]
+
+            with patch(
+                "core_api.services.forge.cron_handler.is_fingerprint_poisoned",
+                new=AsyncMock(return_value=False),
+            ) as is_poisoned:
+                assert await injected("fp-from-the-seam") is False
+
+        is_poisoned.assert_awaited_once_with(
+            tenant_id="t1", fleet_id=None, cluster_fingerprint="fp-from-the-seam"
+        )
