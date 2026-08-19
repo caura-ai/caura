@@ -301,7 +301,10 @@ async def upsert_document(
 
     embedding: list[float] | None = None
     if source is not None:
-        embedding = await get_embedding(source)
+        # Synchronous write: the client blocks on this and gets the 502
+        # below if it returns None, so it must not sit on the reduced
+        # deferred budget. See EMBEDDING_INTERACTIVE_RESERVED_SLOTS.
+        embedding = await get_embedding(source, background=False)
         if embedding is None:
             raise HTTPException(
                 status_code=502,
@@ -610,7 +613,9 @@ async def search_documents(
         # the search-budget cost for the widened query.
         await check_and_increment(auth.tenant_id, "search")
 
-    query_embedding = await get_embedding(body.query)
+    # A user is waiting on this search: keep it off the background budget
+    # so a bulk-ingest flood can't throttle it into the 503 below.
+    query_embedding = await get_embedding(body.query, background=False)
     if query_embedding is None:
         raise HTTPException(
             status_code=503,

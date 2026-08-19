@@ -125,7 +125,10 @@ async def test_b4_doc_write_no_embedding_sets_iserror(mcp_env, monkeypatch):
     Write aborted."`` site."""
     import common.embedding as _emb
 
-    async def _no_vector(_text: str):
+    async def _no_vector(_text: str, *_args: object, **_kwargs: object):
+        # Tolerates get_embedding's keyword-only ``background`` (interactive
+        # search opts out of the background budget); a positional-only stub
+        # would raise TypeError and surface as INTERNAL_ERROR instead.
         return None
 
     monkeypatch.setattr(_emb, "get_embedding", _no_vector)
@@ -148,7 +151,10 @@ async def test_b4_doc_search_no_embedding_sets_iserror(mcp_env, monkeypatch):
     Search aborted."`` site."""
     import common.embedding as _emb
 
-    async def _no_vector(_text: str):
+    async def _no_vector(_text: str, *_args: object, **_kwargs: object):
+        # Tolerates get_embedding's keyword-only ``background`` (interactive
+        # search opts out of the background budget); a positional-only stub
+        # would raise TypeError and surface as INTERNAL_ERROR instead.
         return None
 
     monkeypatch.setattr(_emb, "get_embedding", _no_vector)

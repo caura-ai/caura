@@ -1814,7 +1814,8 @@ async def caura_doc(
                 if source is not None:
                     from common.embedding import get_embedding
 
-                    embedding = await get_embedding(source)
+                    # Synchronous write — see routes/documents.py.
+                    embedding = await get_embedding(source, background=False)
                     if embedding is None:
                         return _with_latency(
                             _error_response(
@@ -2029,7 +2030,8 @@ async def caura_doc(
                     )
                 from common.embedding import get_embedding
 
-                query_embedding = await get_embedding(query)
+                # Interactive search — see documents.py: not background.
+                query_embedding = await get_embedding(query, background=False)
                 if query_embedding is None:
                     return _with_latency(
                         _error_response(

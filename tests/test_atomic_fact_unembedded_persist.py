@@ -120,12 +120,12 @@ async def _run_fanout(embed_stub):
     return children, scheduled
 
 
-async def _degraded(_content, tenant_config=None):
+async def _degraded(_content, tenant_config=None, **_kwargs):
     """``get_embedding``'s documented degrade: return None, do not raise."""
     return None
 
 
-async def _raises(_content, tenant_config=None):
+async def _raises(_content, tenant_config=None, **_kwargs):
     raise TimeoutError("embedding gate timeout")
 
 
@@ -261,7 +261,7 @@ async def test_successful_embed_attaches_vector_and_schedules_nothing() -> None:
     """
     vec = [0.25] * 8
 
-    async def _ok(_content, tenant_config=None):
+    async def _ok(_content, tenant_config=None, **_kwargs):
         return vec
 
     children, scheduled = await _run_fanout(_ok)

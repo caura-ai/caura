@@ -543,7 +543,9 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
 
         # Batch embeddings — single API call instead of N sequential calls
         child_texts = [fact["content"] for fact in facts]
-        child_embeddings = await get_embeddings_batch(child_texts, tenant_config)
+        # Auto-chunk children of a synchronous create: same priority as the
+        # parent embed, which is already background=False.
+        child_embeddings = await get_embeddings_batch(child_texts, tenant_config, background=False)
 
         child_payloads = []
         for fact, child_embedding in zip(facts, child_embeddings):
@@ -646,7 +648,8 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
 
         embedding_task = _return_cached()
     else:
-        embedding_task = get_embedding(data.content, tenant_config)
+        # Inline create: the request awaits this before responding.
+        embedding_task = get_embedding(data.content, tenant_config, background=False)
 
     enrichment_task = None
     if tenant_config.enrichment_enabled and tenant_config.enrichment_provider != "none":
@@ -812,7 +815,9 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
 
             # Batch embeddings — single API call instead of N sequential calls
             child_texts = [fact["content"] for fact in facts]
-            child_embeddings = await get_embeddings_batch(child_texts, tenant_config)
+            # Auto-chunk children of a synchronous create — see the sibling
+            # call in the ctx-based auto-chunk handler.
+            child_embeddings = await get_embeddings_batch(child_texts, tenant_config, background=False)
 
             child_payloads = []
             for fact, child_embedding in zip(facts, child_embeddings):
@@ -1242,6 +1247,14 @@ async def create_memories_bulk(
                     [items[i].content for i in embed_indices],
                     tenant_config,
                     budget_s=embed_timeout,
+                    # Reached only when inline_embedding is on or the item is
+                    # write_mode="strong". The caller synchronously awaits this
+                    # batch in BOTH cases, which is what makes background=False
+                    # correct. The consequence of failure differs, though: under
+                    # inline_embedding the handler below fails the request
+                    # outright, while a deferred deployment with a strong item
+                    # logs and falls through to the backfill path.
+                    background=False,
                 )
         except Exception as exc:
             # Inline deployments: this is the only place a row gets its vector, so
@@ -2073,7 +2086,8 @@ async def _reembed_memory(
 
     embedding = None
     for attempt in range(1, _REEMBED_MAX_RETRIES + 1):
-        embedding = await get_embedding(content, tenant_config=tenant_config)
+        # Background re-embed (already delayed above): nobody is waiting.
+        embedding = await get_embedding(content, tenant_config=tenant_config, background=True)
         if embedding is not None:
             break
         delay = _REEMBED_BACKOFF_BASE_S * attempt
@@ -2203,6 +2217,8 @@ async def _reembed_memories_bulk(
                 [content for _, content in items],
                 tenant_config,
                 budget_s=BULK_EMBEDDING_TIMEOUT_SECONDS,
+                # Background re-embed job: nobody is waiting on it.
+                background=True,
             ),
             timeout=BULK_EMBEDDING_TIMEOUT_SECONDS,
         )
@@ -2604,7 +2620,9 @@ async def _enrich_memory_background(
                 # loss to a parent, a fact, or this code path.
                 child_embedding: list[float] | None = None
                 try:
-                    child_embedding = await get_embedding(fact_content, tenant_config=tenant_config)
+                    child_embedding = await get_embedding(
+                        fact_content, tenant_config=tenant_config, background=True
+                    )
                 except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
                     logger.warning(
                         "atomic-fact embed raised for memory %s; persisting the fact unembedded",
@@ -2853,7 +2871,8 @@ async def update_memory(
     # Content change: re-embed, re-hash, check dedup
     if content_changed:
         tenant_config = await resolve_config(tenant_id)
-        new_embedding = await get_embedding(data.content, tenant_config)
+        # Synchronous update: the caller awaits the re-embed.
+        new_embedding = await get_embedding(data.content, tenant_config, background=False)
         new_hash = _content_hash(tenant_id, mem.get("fleet_id"), data.content)
 
         # Dedup check (exclude self)

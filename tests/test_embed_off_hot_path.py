@@ -461,7 +461,7 @@ async def test_bulk_reembed_preserves_batching() -> None:
     # all N items arrive in a single provider roundtrip.
     batch_calls: list[int] = []
 
-    async def _fake_batch(texts, _cfg, *, budget_s=None):
+    async def _fake_batch(texts, _cfg, *, budget_s=None, **_kwargs):
         batch_calls.append(len(texts))
         return [[0.1] * VECTOR_DIM for _ in texts]
 
@@ -674,7 +674,7 @@ async def test_bulk_reembed_fallback_passes_is_failure_fallback() -> None:
 
         return _noop()
 
-    async def _failing_batch(_texts, _cfg, *, budget_s=None):
+    async def _failing_batch(_texts, _cfg, *, budget_s=None, **_kwargs):
         raise RuntimeError("simulated provider outage")
 
     def _stub_tracked_task(coro, _name, *_a, **_k):
@@ -714,7 +714,7 @@ async def test_bulk_reembed_fallback_catches_unexpected_exception_types() -> Non
         """Stands in for e.g. google.auth.exceptions.RefreshError —
         NOT in the original narrow exception list."""
 
-    async def _failing_batch(_texts, _cfg, *, budget_s=None):
+    async def _failing_batch(_texts, _cfg, *, budget_s=None, **_kwargs):
         raise _MockAuthError("token refresh failed")
 
     called: list[dict] = []
@@ -774,7 +774,7 @@ async def test_bulk_reembed_reschedules_items_whose_get_memory_failed() -> None:
     sc.get_memory = AsyncMock(side_effect=_get_memory)
     sc.update_embedding = AsyncMock()
 
-    async def _batch(_texts, _cfg, *, budget_s=None):
+    async def _batch(_texts, _cfg, *, budget_s=None, **_kwargs):
         return [[0.1] * VECTOR_DIM, [0.2] * VECTOR_DIM]
 
     def _fake_detect(*args, **_kwargs):
@@ -851,7 +851,7 @@ async def test_bulk_reembed_patch_failure_reschedules_item() -> None:
     sc.get_memory = AsyncMock(side_effect=_get_memory)
     sc.update_embedding = AsyncMock(side_effect=_update_embedding)
 
-    async def _batch(_texts, _cfg, *, budget_s=None):
+    async def _batch(_texts, _cfg, *, budget_s=None, **_kwargs):
         return [[0.1] * VECTOR_DIM, [0.2] * VECTOR_DIM]
 
     def _fake_detect(*args, **_kwargs):
@@ -924,7 +924,7 @@ async def test_bulk_reembed_respects_existing_embedding_per_item() -> None:
     sc.get_memory = AsyncMock(side_effect=_get_memory)
     sc.update_embedding = AsyncMock()
 
-    async def _batch(_texts, _cfg, *, budget_s=None):
+    async def _batch(_texts, _cfg, *, budget_s=None, **_kwargs):
         return [fresh, fresh]
 
     detect_calls: list[tuple] = []
@@ -982,7 +982,7 @@ async def test_bulk_reembed_falls_back_on_length_mismatch() -> None:
     unembedded."""
     from core_api.services import memory_service
 
-    async def _short_batch(texts, _cfg, *, budget_s=None):
+    async def _short_batch(texts, _cfg, *, budget_s=None, **_kwargs):
         # Provider returned 2 embeddings for 5 inputs — real-world shape
         # when a provider partial-fails mid-batch.
         return [[0.1] * VECTOR_DIM for _ in texts[:2]]

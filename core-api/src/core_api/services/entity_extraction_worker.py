@@ -161,7 +161,7 @@ async def process_entity_extraction(
             # entity that fails to embed becomes ``None`` in its slot
             # rather than aborting the whole batch.
             embed_results = await asyncio.gather(
-                *(get_embedding(name) for name, _et, _role in filtered),
+                *(get_embedding(name, background=True) for name, _et, _role in filtered),
                 return_exceptions=True,
             )
             name_embeddings: dict[str, list[float] | None] = {}

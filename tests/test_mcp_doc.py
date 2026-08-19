@@ -256,7 +256,9 @@ async def test_doc_write_summary_embeds_and_forwards(mcp_env, monkeypatch):
     forwards the vector to the storage client. Response reports indexed=True."""
     captured: dict = {}
 
-    async def fake_embed(text):
+    # ``**kwargs`` tolerates get_embedding's keyword-only ``background``:
+    # the doc write is synchronous, so it opts out of the deferred budget.
+    async def fake_embed(text, **_kwargs):
         captured["embed_text"] = text
         return [0.1] * VECTOR_DIM
 
@@ -287,7 +289,7 @@ async def test_doc_write_no_summary_stores_unindexed(mcp_env, monkeypatch):
     embedding — the "I don't need semantic search" path stays open."""
     called = {"hit": False}
 
-    async def should_not_embed(text):  # noqa: ARG001
+    async def should_not_embed(text, **_kwargs):  # noqa: ARG001
         called["hit"] = True
         return [0.0] * VECTOR_DIM
 

@@ -12,9 +12,11 @@ import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
 
 from common.embedding._registry import get_embedding_provider
 from common.embedding.constants import (
+    EMBEDDING_BACKGROUND_MAX_CONCURRENCY,
     EMBEDDING_BUDGET_MARGIN_S,
     EMBEDDING_GATE_TIMEOUT_SECONDS,
     EMBEDDING_MAX_CONCURRENCY,
@@ -246,6 +248,8 @@ _misconfiguration_logged: set[str] = set()
 # stack.
 _gate: asyncio.Semaphore | None = None
 _gate_loop: asyncio.AbstractEventLoop | None = None
+_bg_gate: asyncio.Semaphore | None = None
+_bg_gate_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _concurrency_gate() -> asyncio.Semaphore:
@@ -261,7 +265,25 @@ def _concurrency_gate() -> asyncio.Semaphore:
     return _gate
 
 
-async def _call_gated[T](make_call: Callable[[], Awaitable[T]]) -> T:
+def _background_gate() -> asyncio.Semaphore:
+    """The tighter cap that only document/bulk embeds are held to.
+
+    Sized at ``EMBEDDING_BACKGROUND_MAX_CONCURRENCY`` so
+    ``EMBEDDING_INTERACTIVE_RESERVED_SLOTS`` of the shared cap stay reachable by
+    search-side query embeds during a write flood. Same per-event-loop
+    rebinding rationale as :func:`_concurrency_gate`.
+    """
+    global _bg_gate, _bg_gate_loop
+    loop = asyncio.get_running_loop()
+    if _bg_gate is None or _bg_gate_loop is not loop:
+        _bg_gate = asyncio.Semaphore(EMBEDDING_BACKGROUND_MAX_CONCURRENCY)
+        _bg_gate_loop = loop
+    return _bg_gate
+
+
+async def _call_gated[T](
+    make_call: Callable[[], Awaitable[T]], *, background: bool
+) -> T:
     """Run *make_call* holding a concurrency slot.
 
     The slot is acquired per ATTEMPT, not per retry sequence, so a
@@ -271,37 +293,68 @@ async def _call_gated[T](make_call: Callable[[], Awaitable[T]]) -> T:
     raises ``TimeoutError``, which callers already treat as a provider
     failure — the pre-existing degradation path — rather than letting
     waiters accumulate unboundedly and stall the write path.
+
+    *background* marks document/bulk work, which must additionally fit
+    inside ``EMBEDDING_BACKGROUND_MAX_CONCURRENCY`` so a write burst can
+    never consume the slots reserved for search-side query embeds. Query
+    embeds pass ``background=False`` and draw on the full cap.
+
+    Deadlock-free by arithmetic, not by luck: background takes the
+    background gate BEFORE the shared one, and the reserved slice is the
+    exact difference between the two caps. Even with query embeds holding
+    every reserved slot, the shared slots still free are
+    ``cap - reserved`` — precisely the background gate's size — so every
+    background holder can still acquire one. Query embeds only ever take
+    the shared gate, so they cannot be blocked behind background work.
     """
-    gate = _concurrency_gate()
-    # Log saturation explicitly. During the 2026-07-27 incident the backend
-    # reported 3.5 ms inference while callers timed out, and nothing said
-    # where the time went. These two messages separate "queued behind our
-    # own cap" from "backend slow" for the next one.
-    if gate.locked():
-        logger.debug(
-            "Embedding concurrency gate saturated (cap=%d); queueing",
-            EMBEDDING_MAX_CONCURRENCY,
-        )
-    # ``asyncio.timeout`` rather than ``wait_for``: it matches the sibling
-    # gates (``per_tenant_concurrency``), and ``wait_for`` is reached via the
-    # shared ``asyncio`` module object, so tests that patch
-    # ``<their_module>.asyncio.wait_for`` to spy on their OWN ceiling would
-    # instead capture this gate's timeout and assert against the wrong value.
-    try:
-        async with asyncio.timeout(EMBEDDING_GATE_TIMEOUT_SECONDS):
-            await gate.acquire()
-    except TimeoutError:
-        logger.warning(
-            "Embedding concurrency gate timeout after %.1fs (cap=%d) — "
-            "degrading as provider failure; backend may be undersized",
-            EMBEDDING_GATE_TIMEOUT_SECONDS,
-            EMBEDDING_MAX_CONCURRENCY,
-        )
-        raise
-    try:
+    # ``AsyncExitStack`` rather than hand-rolled release bookkeeping: it
+    # unwinds on ANY escape — TimeoutError, CancelledError, or a failure
+    # inside make_call — so a background caller that took its own slot but
+    # not the shared one can never leak it. Leaking one per abandoned wait
+    # would erode the background budget to zero and strangle writes, which
+    # would look exactly like the saturation this reservation fixes.
+    # Unwind is LIFO: shared slot first, then background.
+    async with AsyncExitStack() as stack:
+        gate = _concurrency_gate()
+        # Background work is ALWAYS held to the background gate, even when
+        # the reservation is 0 and the two caps are equal — one uncontended
+        # acquire (~0.3 us) is not worth an Optional branching through every
+        # release path.
+        bg = _background_gate() if background else None
+        # Log saturation explicitly. During the 2026-07-27 incident the
+        # backend reported 3.5 ms inference while callers timed out and
+        # nothing said where the time went. ``background`` is a field rather
+        # than two distinct message strings so one query aggregates both
+        # classes.
+        if gate.locked() or (bg is not None and bg.locked()):
+            logger.debug(
+                "Embedding concurrency gate saturated (background=%s, cap=%d, "
+                "background cap=%d); queueing",
+                background,
+                EMBEDDING_MAX_CONCURRENCY,
+                EMBEDDING_BACKGROUND_MAX_CONCURRENCY,
+            )
+        try:
+            async with asyncio.timeout(EMBEDDING_GATE_TIMEOUT_SECONDS):
+                # Background takes its own gate BEFORE the shared one. This
+                # order is required, not incidental: reversed, background
+                # would squat on a shared slot while waiting for its own
+                # budget, which is the starvation being prevented.
+                if bg is not None:
+                    await stack.enter_async_context(bg)
+                await stack.enter_async_context(gate)
+        except TimeoutError:
+            logger.warning(
+                "Embedding concurrency gate timeout after %.1fs (background=%s, "
+                "cap=%d, background cap=%d) — degrading as provider failure; "
+                "backend may be undersized",
+                EMBEDDING_GATE_TIMEOUT_SECONDS,
+                background,
+                EMBEDDING_MAX_CONCURRENCY,
+                EMBEDDING_BACKGROUND_MAX_CONCURRENCY,
+            )
+            raise
         return await make_call()
-    finally:
-        gate.release()
 
 
 def _resolve_provider_name(tenant_config: object | None) -> str:
@@ -318,6 +371,7 @@ async def get_embeddings_batch(
     tenant_config: object | None = None,
     *,
     budget_s: float | None = None,
+    background: bool,
 ) -> list[list[float]]:
     """Generate embeddings for multiple texts in a single API call.
 
@@ -425,14 +479,18 @@ async def get_embeddings_batch(
     # process anyway.
     try:
         if budget_s is None:
-            result = await _call_gated(lambda: provider.embed_batch(texts))
+            result = await _call_gated(
+                lambda: provider.embed_batch(texts), background=background
+            )
         else:
             # Floored rather than skipped: a budget at or under the margin is
             # a misconfiguration, and the honest response is to fail fast HERE
             # with an attributable TimeoutError instead of silently reverting
             # to the unbounded path the margin exists to replace.
             async with asyncio.timeout(max(0.1, budget_s - EMBEDDING_BUDGET_MARGIN_S)):
-                result = await _call_gated(lambda: provider.embed_batch(texts))
+                result = await _call_gated(
+                    lambda: provider.embed_batch(texts), background=background
+                )
     except BaseException:
         await _stats_for(scope, label).record_failure(bulk_batch_size=len(texts))
         raise
@@ -444,6 +502,8 @@ async def _run_with_retry(
     make_call: Callable[[], Awaitable[list[float]]],
     context: str,
     stats: _EmbeddingStats,
+    *,
+    background: bool,
 ) -> list[float] | None:
     """Execute *make_call* under the shared retry / stats / logging policy.
 
@@ -456,11 +516,16 @@ async def _run_with_retry(
     *context* is a short human-readable label (``"Embedding"``,
     ``"Query embedding"``) interpolated into the per-attempt warning
     and the terminal error log so failures are attributable.
+
+    *background* is forwarded to :func:`_call_gated` — see
+    ``EMBEDDING_INTERACTIVE_RESERVED_SLOTS``. It is per-ATTEMPT, like the slot
+    itself, so a retrying background call re-queues behind the background
+    budget instead of escalating into the reserved slice.
     """
     last_exc: BaseException | None = None
     for attempt in range(1, EMBEDDING_RETRY_ATTEMPTS + 1):
         try:
-            result = await _call_gated(make_call)
+            result = await _call_gated(make_call, background=background)
             await stats.record_success()
             return result
         # Intentionally broad: must catch all provider-specific errors during retry.
@@ -528,7 +593,10 @@ async def _resolve_provider_or_degrade(
 
 
 async def get_embedding(
-    text: str, tenant_config: object | None = None
+    text: str,
+    tenant_config: object | None = None,
+    *,
+    background: bool,
 ) -> list[float] | None:
     """Generate an embedding with retry. Returns ``None`` on exhausted retries.
 
@@ -542,6 +610,21 @@ async def get_embedding(
     This is the document/ingest path. For search-side queries that should
     pass through an instruction-aware encoder (Qwen3-Embedding, e5-instruct,
     etc.), use :func:`get_query_embedding` instead.
+
+    *background* is REQUIRED — on this function and on
+    :func:`get_embeddings_batch` — and deliberately has no default. The
+    classification cannot be inferred here: ``common/embedding`` has no
+    dependency on service config, so it cannot see ``deployment_mode``,
+    ``write_mode``, or whether an HTTP client is blocked on the response.
+    Only the call site knows. A default made the wrong answer the one you got
+    by forgetting, and four review passes over this change each found a
+    different call site that had silently inherited it — document search, the
+    inline write path, document/skill write, and the bulk/auto-chunk batch
+    paths. Omitting it is now a ``TypeError``.
+
+    Pass ``background=False`` when a caller is waiting on the result. Pass
+    ``background=True`` for deferred work nobody is waiting on. See
+    ``EMBEDDING_INTERACTIVE_RESERVED_SLOTS``.
     """
     provider_name = _resolve_provider_name(tenant_config)
     provider = await _resolve_provider_or_degrade(tenant_config, "Embedding")
@@ -554,6 +637,7 @@ async def get_embedding(
             _stats_scope(provider, provider_name),
             _stats_label(provider, provider_name),
         ),
+        background=background,
     )
 
 
@@ -608,4 +692,6 @@ async def get_query_embedding(
             _stats_scope(provider, provider_name),
             _stats_label(provider, provider_name),
         ),
+        # Search is always interactive — a user is waiting on the results.
+        background=False,
     )

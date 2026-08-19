@@ -25,16 +25,37 @@ from common.embedding import _service as svc
 
 @pytest.fixture
 def reset_gate():
-    """Isolate each test from the module-level lazy semaphore."""
+    """Isolate each test from the module-level lazy semaphores."""
     original_cap = svc.EMBEDDING_MAX_CONCURRENCY
     original_timeout = svc.EMBEDDING_GATE_TIMEOUT_SECONDS
+    original_bg_cap = svc.EMBEDDING_BACKGROUND_MAX_CONCURRENCY
     svc._gate = None
     svc._gate_loop = None
+    svc._bg_gate = None
+    svc._bg_gate_loop = None
     yield
     svc.EMBEDDING_MAX_CONCURRENCY = original_cap
     svc.EMBEDDING_GATE_TIMEOUT_SECONDS = original_timeout
+    svc.EMBEDDING_BACKGROUND_MAX_CONCURRENCY = original_bg_cap
     svc._gate = None
     svc._gate_loop = None
+    svc._bg_gate = None
+    svc._bg_gate_loop = None
+
+
+def _set_caps(total: int, reserved: int) -> None:
+    """Point the module at a (total, reserved) split for one test.
+
+    Sets only what the gate reads — the shared cap and the derived
+    background cap. ``reserved`` is expressed here as the difference so a
+    test can't configure an inconsistent triple.
+    """
+    svc.EMBEDDING_MAX_CONCURRENCY = total
+    svc.EMBEDDING_BACKGROUND_MAX_CONCURRENCY = total - reserved
+    svc._gate = None
+    svc._gate_loop = None
+    svc._bg_gate = None
+    svc._bg_gate_loop = None
 
 
 @pytest.mark.unit
@@ -44,7 +65,7 @@ class TestEmbeddingConcurrencyGate:
     @pytest.mark.asyncio
     async def test_caps_in_flight_calls(self, reset_gate):
         """30 callers against a cap of 3 never exceed 3 concurrent calls."""
-        svc.EMBEDDING_MAX_CONCURRENCY = 3
+        _set_caps(total=3, reserved=0)
 
         in_flight = 0
         peak = 0
@@ -60,7 +81,7 @@ class TestEmbeddingConcurrencyGate:
             in_flight -= 1
             return [0.1]
 
-        await asyncio.gather(*(svc._call_gated(fake_call) for _ in range(30)))
+        await asyncio.gather(*(svc._call_gated(fake_call, background=False) for _ in range(30)))
 
         assert peak <= 3, f"gate leaked: {peak} concurrent calls with cap 3"
         assert in_flight == 0, "slot not released"
@@ -68,20 +89,20 @@ class TestEmbeddingConcurrencyGate:
     @pytest.mark.asyncio
     async def test_releases_slot_on_exception(self, reset_gate):
         """A failing call must not leak its slot, or the cap drains to zero."""
-        svc.EMBEDDING_MAX_CONCURRENCY = 1
+        _set_caps(total=1, reserved=0)
 
         async def boom():
             raise RuntimeError("provider exploded")
 
         for _ in range(3):
             with pytest.raises(RuntimeError):
-                await svc._call_gated(boom)
+                await svc._call_gated(boom, background=False)
 
         # If the slot leaked, this would block until the gate timeout.
         async def ok():
             return [0.2]
 
-        assert await svc._call_gated(ok) == [0.2]
+        assert await svc._call_gated(ok, background=False) == [0.2]
 
     @pytest.mark.asyncio
     async def test_blocked_waiter_degrades_instead_of_hanging(self, reset_gate):
@@ -93,7 +114,7 @@ class TestEmbeddingConcurrencyGate:
         pre-existing path (persist ``embedding=NULL``, leave it to
         re-embed) instead of stalling the write.
         """
-        svc.EMBEDDING_MAX_CONCURRENCY = 1
+        _set_caps(total=1, reserved=0)
         svc.EMBEDDING_GATE_TIMEOUT_SECONDS = 0.05
 
         gate = svc._concurrency_gate()
@@ -103,7 +124,7 @@ class TestEmbeddingConcurrencyGate:
             return [0.3]
 
         with pytest.raises(TimeoutError):
-            await svc._call_gated(never_runs)
+            await svc._call_gated(never_runs, background=False)
 
     @pytest.mark.asyncio
     async def test_gate_rebinds_per_event_loop(self, reset_gate):
@@ -114,3 +135,220 @@ class TestEmbeddingConcurrencyGate:
         # Simulate a previously-used loop by faking the recorded identity.
         svc._gate_loop = None
         assert svc._concurrency_gate() is not first, "stale loop should rebind"
+
+
+@pytest.mark.unit
+class TestQueryEmbeddingReservation:
+    """Reserved slots keep live recall answerable during a write flood.
+
+    Regression cover for 2026-08-18: a bulk write burst (~1.3 k memories in
+    2 h against a ~5/h baseline) held every slot of the priority-blind cap
+    and produced 118 ``Query embedding failed after 2 attempts`` errors —
+    user-visible search degradation — while the backend itself stayed
+    healthy at ~3 ms inference with spare container concurrency.
+    """
+
+    @pytest.mark.asyncio
+    async def test_query_embed_still_runs_while_background_saturated(self, reset_gate):
+        """THE guarantee: background work cannot starve a query embed.
+
+        The flood is sized to the FULL shared cap, not to the background
+        budget — that distinction is what makes this test meaningful.
+        Without the reservation all ``total`` background calls occupy every
+        shared slot and the query embed times out (verified: this test fails
+        against a priority-blind gate). With it, background is held to
+        ``total - reserved``, so the reserved slots stay acquirable.
+        """
+        total, reserved = 4, 2
+        _set_caps(total=total, reserved=reserved)  # background budget = 2
+        svc.EMBEDDING_GATE_TIMEOUT_SECONDS = 0.5
+
+        parked = asyncio.Event()
+        background_running = asyncio.Semaphore(0)
+
+        async def background_call():
+            background_running.release()
+            await parked.wait()
+            return [0.1]
+
+        # ``total`` of them: enough to hold every shared slot if nothing
+        # stopped background from doing so.
+        bg_tasks = [
+            asyncio.create_task(svc._call_gated(background_call, background=True))
+            for _ in range(total)
+        ]
+        # Wait until the background budget is genuinely occupied and parked.
+        for _ in range(total - reserved):
+            await asyncio.wait_for(background_running.acquire(), timeout=1)
+
+        async def query_call():
+            return [0.2]
+
+        # No timeout suppression: without the reservation this raises
+        # TimeoutError and the test fails.
+        assert await svc._call_gated(query_call, background=False) == [0.2]
+
+        parked.set()
+        assert await asyncio.gather(*bg_tasks) == [[0.1]] * total
+
+    @pytest.mark.asyncio
+    async def test_background_capped_below_total(self, reset_gate):
+        """Background in-flight never exceeds ``total - reserved``."""
+        _set_caps(total=5, reserved=2)  # background budget = 3
+
+        in_flight = 0
+        peak = 0
+
+        async def call():
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0)
+            in_flight -= 1
+            return [0.0]
+
+        await asyncio.gather(
+            *(svc._call_gated(call, background=True) for _ in range(40))
+        )
+        assert peak <= 3, f"background peaked at {peak}, budget is 3"
+
+    @pytest.mark.asyncio
+    async def test_total_cap_still_holds_across_both_classes(self, reset_gate):
+        """The backend-protection invariant survives the split.
+
+        Reserving slots must not let (background + query) exceed the shared
+        cap — that cap is what keeps surplus work off the backend, and the
+        reservation is a partition of it, not an addition to it.
+        """
+        _set_caps(total=4, reserved=2)
+
+        in_flight = 0
+        peak = 0
+
+        async def call():
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0)
+            in_flight -= 1
+            return [0.0]
+
+        await asyncio.gather(
+            *(
+                svc._call_gated(call, background=bool(i % 2))
+                for i in range(60)
+            )
+        )
+        assert peak <= 4, f"total peaked at {peak}, shared cap is 4"
+
+    @pytest.mark.asyncio
+    async def test_background_slot_released_when_shared_gate_times_out(self, reset_gate):
+        """A background waiter that gives up must not leak its slot.
+
+        Background takes the background slot first, then the shared one. If
+        the second acquire times out and the first is not released, the
+        background budget erodes by one per abandoned wait until writes stop
+        entirely — a slow strangulation that would look like the very
+        saturation this change fixes.
+        """
+        _set_caps(total=2, reserved=1)  # background budget = 1
+        svc.EMBEDDING_GATE_TIMEOUT_SECONDS = 0.05
+
+        shared = svc._concurrency_gate()
+        await shared.acquire()
+        await shared.acquire()  # shared gate fully held; background cannot proceed
+
+        async def never_runs():  # pragma: no cover - gate blocks first
+            return [0.3]
+
+        with pytest.raises(TimeoutError):
+            await svc._call_gated(never_runs, background=True)
+
+        # The abandoned attempt must have handed its background slot back.
+        assert not svc._background_gate().locked(), "background slot leaked on timeout"
+
+        shared.release()
+        shared.release()
+
+        async def ok():
+            return [0.4]
+
+        assert await svc._call_gated(ok, background=True) == [0.4]
+
+    @pytest.mark.asyncio
+    async def test_get_embedding_honours_background_false(self, reset_gate):
+        """``get_embedding(background=False)`` must reach the reserved slots.
+
+        ``get_embedding`` defaults to the background budget, but document
+        search (``POST /documents/search``, ``caura_doc op=search``) embeds
+        its query through it and raises 503 on ``None``. Left on the
+        background budget those searches would be throttled behind the write
+        floods this reservation exists to survive. Pins the opt-out so the
+        default can't silently re-capture them.
+        """
+        total, reserved = 4, 2
+        _set_caps(total=total, reserved=reserved)
+        svc.EMBEDDING_GATE_TIMEOUT_SECONDS = 0.5
+
+        parked = asyncio.Event()
+        running = asyncio.Semaphore(0)
+
+        async def background_call():
+            running.release()
+            await parked.wait()
+            return [0.1]
+
+        bg_tasks = [
+            asyncio.create_task(svc._call_gated(background_call, background=True))
+            for _ in range(total)
+        ]
+        for _ in range(total - reserved):
+            await asyncio.wait_for(running.acquire(), timeout=1)
+
+        class _Provider:
+            async def embed(self, text: str) -> list[float]:
+                return [0.9]
+
+        monkey = _Provider()
+
+        async def _fake_resolve(tenant_config, context):
+            return monkey
+
+        original = svc._resolve_provider_or_degrade
+        svc._resolve_provider_or_degrade = _fake_resolve
+        try:
+            # Interactive: must succeed against a saturated background budget.
+            assert await svc.get_embedding("q", background=False) == [0.9]
+        finally:
+            svc._resolve_provider_or_degrade = original
+
+        parked.set()
+        await asyncio.gather(*bg_tasks)
+
+    @pytest.mark.asyncio
+    async def test_no_reservation_lets_background_use_full_cap(self, reset_gate):
+        """At ``reserved=0`` background can still use the whole cap.
+
+        The background gate is always interposed (simpler than an Optional
+        through every release path), so this pins that sizing it equal to the
+        shared cap costs no throughput — only one uncontended extra acquire.
+        Reachable in practice only at ``cap == 1``; see the clamp note in
+        ``constants.py``.
+        """
+        _set_caps(total=3, reserved=0)
+
+        in_flight = 0
+        peak = 0
+
+        async def call():
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0)
+            in_flight -= 1
+            return [0.0]
+
+        await asyncio.gather(
+            *(svc._call_gated(call, background=True) for _ in range(30))
+        )
+        assert peak == 3, f"background should reach the full cap of 3, got {peak}"

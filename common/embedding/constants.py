@@ -17,6 +17,7 @@ late. Examples:
 from __future__ import annotations
 
 import os
+import sys
 
 # Default model identifiers per provider. Override via env (e.g. swap
 # ``OPENAI_EMBEDDING_MODEL=text-embedding-3-large`` for a higher-dim
@@ -145,6 +146,66 @@ EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS: float | None = read_float_env(
 # maxScale/containerConcurrency is the actual capacity fix; set this
 # explicitly per deployment with the arithmetic written down.
 EMBEDDING_MAX_CONCURRENCY: int = read_int_env("EMBEDDING_MAX_CONCURRENCY", 16)
+
+# Slots of the cap above that only INTERACTIVE embeds may occupy.
+#
+# "Interactive" means a caller is blocked on the result: a search query
+# embed, or a synchronous write (``POST /documents``, ``caura_doc op=write``,
+# an inline/strong memory create or update, and the auto-chunk children of
+# one). "Deferred" means nobody is waiting: backfills, the entity-extraction
+# worker, background re-embeds.
+#
+# The cap alone is priority-blind — both classes draw from one pool, so a
+# burst of deferred work can hold every slot and starve interactive work.
+# That is not hypothetical: on 2026-08-18 a bulk write burst (~1.3 k memories
+# in 2 h against a ~5/h baseline) consumed the pool and produced 118
+# "Query embedding failed after 2 attempts" errors — user-visible search
+# degradation — while the backend itself stayed healthy at ~3 ms inference
+# with spare container concurrency.
+#
+# Reserving a slice keeps interactive work answerable during a deferred
+# flood. Only deferred work is held to the reduced budget below; interactive
+# callers may use the full cap, so TOTAL in-flight is still bounded by
+# ``EMBEDDING_MAX_CONCURRENCY`` and the backend-protection invariant the cap
+# exists for is unchanged.
+#
+# Default is proportional (a quarter, at least one) so it tracks whatever
+# cap a deployment sets rather than needing a second tuning decision.
+#
+# Clamped to leave deferred work at least one slot, because a deferred
+# budget of 0 would deadlock every deferred embed. No ``max(0, ...)`` floor is
+# needed on either operand: ``read_int_env`` already rejects values < 1
+# (falling back to the default, itself >= 1), so a reservation of 0 is
+# reachable only at ``cap == 1`` — where it means "no reservation is
+# possible", not "reservation disabled". Note the corollary: an operator
+# cannot switch the reservation off by setting this to 0; that value is
+# rejected as non-positive. Lowering it to 1 is the minimum.
+_reserved_requested: int = read_int_env(
+    "EMBEDDING_INTERACTIVE_RESERVED_SLOTS",
+    max(1, EMBEDDING_MAX_CONCURRENCY // 4),
+)
+EMBEDDING_INTERACTIVE_RESERVED_SLOTS: int = min(
+    _reserved_requested, EMBEDDING_MAX_CONCURRENCY - 1
+)
+if _reserved_requested != EMBEDDING_INTERACTIVE_RESERVED_SLOTS:
+    # Clamping silently would be the same trap ``clamp_keepalive`` exists
+    # to avoid: an operator tuning under an incident reads the env var
+    # they set, not the value in force. stderr because structured logging
+    # isn't wired up at import time.
+    print(
+        f"WARN: EMBEDDING_INTERACTIVE_RESERVED_SLOTS ({_reserved_requested}) must "
+        f"leave at least one of EMBEDDING_MAX_CONCURRENCY "
+        f"({EMBEDDING_MAX_CONCURRENCY}) for deferred embeds; clamping to "
+        f"{EMBEDDING_INTERACTIVE_RESERVED_SLOTS}",
+        file=sys.stderr,
+    )
+
+# What DEFERRED embeds are actually allowed to hold concurrently.
+# Derived, not configured, so it can't drift out of step with the two
+# values above.
+EMBEDDING_BACKGROUND_MAX_CONCURRENCY: int = (
+    EMBEDDING_MAX_CONCURRENCY - EMBEDDING_INTERACTIVE_RESERVED_SLOTS
+)
 
 # Bound the wait for a slot. Queueing is the point, but an unbounded wait
 # would let waiters pile up and stall the write path well past its own

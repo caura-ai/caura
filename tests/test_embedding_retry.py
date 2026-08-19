@@ -74,7 +74,7 @@ async def test_retry_exhaustion_returns_none():
         ),
         patch("common.embedding._service.asyncio.sleep", new_callable=AsyncMock),
     ):
-        result = await get_embedding("hello world")
+        result = await get_embedding("hello world", background=False)
 
     assert result is None
     assert mock_provider.embed.call_count == EMBEDDING_RETRY_ATTEMPTS
@@ -101,7 +101,7 @@ async def test_success_on_second_attempt():
         ),
         patch("common.embedding._service.asyncio.sleep", new_callable=AsyncMock),
     ):
-        result = await get_embedding("hello world")
+        result = await get_embedding("hello world", background=False)
 
     assert result == fake_vec
     assert mock_provider.embed.call_count == 2
@@ -124,7 +124,7 @@ async def test_fake_provider_never_returns_none():
     monkeypatch_env = pytest.MonkeyPatch()
     monkeypatch_env.setenv("EMBEDDING_PROVIDER", "fake")
     try:
-        result = await get_embedding("any text")
+        result = await get_embedding("any text", background=False)
     finally:
         monkeypatch_env.undo()
 
@@ -183,7 +183,7 @@ async def test_get_embedding_returns_none_on_registry_value_error(
         )
 
     monkeypatch.setattr("common.embedding._service.get_embedding_provider", _explode)
-    result = await get_embedding("anything")
+    result = await get_embedding("anything", background=False)
     assert result is None
 
 
@@ -227,7 +227,7 @@ async def test_value_error_in_provider_construction_does_not_propagate(
     monkeypatch.setattr("common.embedding._service.get_embedding_provider", _explode)
 
     with caplog.at_level(logging.ERROR, logger="common.embedding._service"):
-        await get_embedding("anything")
+        await get_embedding("anything", background=False)
 
     assert any(
         "misconfiguration" in rec.getMessage() for rec in caplog.records
@@ -259,7 +259,7 @@ async def test_misconfiguration_error_logged_only_once_per_provider(
     with caplog.at_level(logging.ERROR, logger="common.embedding._service"):
         # Five back-to-back calls simulate five incoming requests.
         for _ in range(5):
-            assert await get_embedding("x") is None
+            assert await get_embedding("x", background=False) is None
 
     matches = [
         rec for rec in caplog.records if "misconfiguration" in rec.getMessage()
@@ -294,7 +294,7 @@ async def test_failure_stats_still_increment_under_misconfig_dedup(
     monkeypatch.setattr("common.embedding._service.get_embedding_provider", _explode)
 
     for _ in range(4):
-        assert await get_embedding("x") is None
+        assert await get_embedding("x", background=False) is None
 
     # All four calls bumped failure stats even though only the first
     # one logged.
@@ -364,10 +364,10 @@ async def test_bulk_failure_reports_even_while_single_embeds_succeed(
     with caplog.at_level(logging.WARNING, logger="common.embedding._service"):
         for _ in range(3):
             with pytest.raises(RuntimeError):
-                await get_embeddings_batch(["a"] * 50)
+                await get_embeddings_batch(["a"] * 50, background=False)
             # A healthy single embed between every bulk failure — exactly
             # what search traffic does to the shared streak.
-            assert await get_embedding("q") is not None
+            assert await get_embedding("q", background=False) is not None
 
     assert _only_stats(service_mod).consecutive_failures == 0, (
         "precondition: the interleaved successes must clear the shared "
@@ -434,10 +434,10 @@ async def test_one_backend_success_does_not_clear_another_backends_streak(
         for _ in range(3):
             current["which"] = "broken"
             with pytest.raises(RuntimeError):
-                await get_embeddings_batch(["a"] * 50)
+                await get_embeddings_batch(["a"] * 50, background=False)
             # A different backend, healthy, between every failure.
             current["which"] = "healthy"
-            assert len(await get_embeddings_batch(["a", "b"])) == 2
+            assert len(await get_embeddings_batch(["a", "b"], background=False)) == 2
 
     scopes = service_mod._stats_by_scope
     assert len(scopes) == 2, f"expected two backend scopes, got {sorted(scopes)}"
@@ -478,7 +478,7 @@ async def test_bulk_failure_report_is_rate_limited_not_per_call(
     with caplog.at_level(logging.WARNING, logger="common.embedding._service"):
         for _ in range(13):
             with pytest.raises(RuntimeError):
-                await get_embeddings_batch(["a"] * 50)
+                await get_embeddings_batch(["a"] * 50, background=False)
 
     matches = [
         rec
@@ -523,7 +523,7 @@ async def test_bulk_failure_counted_when_caller_deadline_cancels_us(
 
     with pytest.raises(TimeoutError):
         async with asyncio.timeout(0.05):
-            await get_embeddings_batch(["a"] * 50)
+            await get_embeddings_batch(["a"] * 50, background=False)
 
     assert _only_stats(service_mod).consecutive_bulk_failures == 1, (
         "a deadline-cancelled bulk call must advance the bulk streak"
@@ -571,7 +571,7 @@ async def test_budget_makes_a_slow_provider_attributable(
     started = time.monotonic()
     with pytest.raises(TimeoutError):
         async with asyncio.timeout(5):
-            await get_embeddings_batch(["a"] * 50, budget_s=0.2)
+            await get_embeddings_batch(["a"] * 50, budget_s=0.2, background=False)
     elapsed = time.monotonic() - started
 
     assert elapsed < 1, (
@@ -603,7 +603,7 @@ async def test_no_budget_keeps_the_previous_unbounded_behaviour(
         lambda *_a, **_k: FakeEmbeddingProvider(),
     )
 
-    assert len(await get_embeddings_batch(["a", "b", "c"])) == 3
+    assert len(await get_embeddings_batch(["a", "b", "c"], background=False)) == 3
     assert _only_stats(service_mod).consecutive_bulk_failures == 0
 
 
@@ -621,12 +621,12 @@ async def test_bulk_success_rearms_the_bulk_report(
 
     for _ in range(3):
         with pytest.raises(RuntimeError):
-            await get_embeddings_batch(["a"] * 50)
+            await get_embeddings_batch(["a"] * 50, background=False)
     # The SAME backend recovers — recovery is the cached instance starting to
     # answer again, not a new provider appearing. Flipping behaviour on the
     # instance the registry already returned is what production does; swapping
     # in a fresh object would key as a different backend and clear a streak
     # that was never set.
     provider.recovered = True
-    assert len(await get_embeddings_batch(["a", "b"])) == 2
+    assert len(await get_embeddings_batch(["a", "b"], background=False)) == 2
     assert _only_stats(service_mod).consecutive_bulk_failures == 0
