@@ -109,6 +109,25 @@ CandidateWriter = Callable[[dict[str, Any]], Awaitable[None]]
 # expected — that's how Forge refines its own candidates over time).
 StatusChecker = Callable[[str, str, str], Awaitable[str | None]]
 
+#: Exceptions that mean OUR code is wrong, not that an external system had a bad
+#: moment. Classified separately from I/O throughout the cluster loop because the
+#: two demand opposite responses: an I/O failure says "look at storage, maybe
+#: retry", this says "read the traceback as a bug report". They are also
+#: near-always DETERMINISTIC — they hit every cluster this tick and every tick
+#: after — where I/O failures are transient.
+#:
+#: This is the classification H-08 (#818) lacked: a 3-arg poison checker wired
+#: into the 1-arg seam raised ``TypeError`` on every cluster, all of it landed in
+#: ``candidates_skipped_io_error``, and the tick reported success having written
+#: nothing for ~2.5 months.
+#:
+#: Deliberately just these two. ``KeyError`` is not included — the dict subscripts
+#: in this module are on dicts it builds itself, and a bad-DATA ``ValueError`` from
+#: a validator is not a bug in us (``DistillParseError`` already covers the
+#: LLM-shaped case, and is caught earlier). Widening this set would re-blur the
+#: line it exists to draw.
+_PROGRAMMING_ERRORS = (TypeError, AttributeError)
+
 
 # ── Run summary ───────────────────────────────────────────────────
 
@@ -154,6 +173,11 @@ class ForgeRunResult:
     # distill errors so the run summary actionably surfaces "3 parse
     # errors" vs "2 storage hiccups".
     candidates_skipped_io_error: int
+    # Programming errors from an injected callable or cluster handling — see
+    # ``_PROGRAMMING_ERRORS``. Deliberately NOT defaulted: a construction site
+    # that forgets it would report "no internal errors", which is the same
+    # silent-zero failure this counter exists to end.
+    candidates_skipped_internal_error: int
     # Candidates where ``status_checker`` reported the target doc_id
     # already exists with a non-``candidate`` status (active, rejected,
     # quarantined, stale, deprecated). Forge skips the write to avoid
@@ -251,6 +275,7 @@ async def run_forge_distill(
     skipped_sentinel = 0
     skipped_distill_error = 0
     skipped_io_error = 0
+    skipped_internal_error = 0
     skipped_existing = 0
 
     # 5. Distill each eligible cluster.
@@ -287,6 +312,13 @@ async def run_forge_distill(
             logger.warning("forge: skipping cluster — LLM response unparseable: %s", exc)
             skipped_distill_error += 1
             continue
+        except _PROGRAMMING_ERRORS:
+            # Still ``continue`` rather than abort: one malformed cluster must not
+            # cost the whole tick, and these are not ALWAYS deterministic. The
+            # run-level summary below is what escalates when they clearly are.
+            logger.exception("forge: cluster distill raised a programming error (not I/O) — skipping cluster")
+            skipped_internal_error += 1
+            continue
         except Exception:
             # Transient I/O failures inside _distill_cluster
             # (memory_fetcher / poison_checker DB hiccup, entity-
@@ -304,6 +336,13 @@ async def run_forge_distill(
         if status_checker is not None:
             try:
                 existing_status = await status_checker(tenant_id, "skills", candidate_doc["doc_id"])
+            except _PROGRAMMING_ERRORS:
+                logger.exception(
+                    "forge: status_checker raised a programming error (not I/O) for slug=%s — skipping write",
+                    candidate_doc.get("data", {}).get("slug"),
+                )
+                skipped_internal_error += 1
+                continue
             except Exception:
                 # storage-layer failure → I/O bucket, not parse-error.
                 logger.exception(
@@ -323,6 +362,15 @@ async def run_forge_distill(
 
         try:
             await candidate_writer(candidate_doc)
+        except _PROGRAMMING_ERRORS:
+            # A writer with the wrong signature would otherwise read as a
+            # UNIQUE-violation or a network drop.
+            logger.exception(
+                "forge: candidate_writer raised a programming error (not I/O) for slug=%s — skipping",
+                candidate_doc.get("data", {}).get("slug"),
+            )
+            skipped_internal_error += 1
+            continue
         except Exception:
             # candidate_writer failure (UNIQUE-violation, schema
             # validator hiccup, network drop) → I/O bucket.
@@ -339,6 +387,32 @@ async def run_forge_distill(
         # (tenant_id, collection, doc_id) primary-key shape.
         written_ids.append(candidate_doc["doc_id"])
 
+    # The signal H-08 never produced. Per-cluster tracebacks existed even then —
+    # the bug was that nothing summarised them, so a tick that mined nothing at
+    # all still returned a result the audit row rendered as success. A run that
+    # had eligible clusters, wrote NOTHING, and hit programming errors is not a
+    # quiet day: it is a broken deployment, and one line at ERROR says so.
+    #
+    # Guarded on ``written_ids`` being empty rather than on the error count alone,
+    # because a single malformed cluster among many successes is genuinely routine
+    # and must not page anyone. ``eligible`` is not re-tested: every increment site
+    # is inside the loop over it, so a non-zero counter already implies it was
+    # non-empty. Says "almost certainly" rather than "is" a bug because one shape
+    # reaches here honestly — a provider returning an unexpected object makes
+    # ``llm_fn`` raise AttributeError on every cluster, which looks identical.
+    if not written_ids and skipped_internal_error:
+        logger.error(
+            "forge: run wrote NOTHING and hit %d programming error(s) across %d attempted "
+            "cluster(s) — almost certainly a code/wiring bug rather than storage, and every "
+            "cluster paid for its LLM call before failing. Read the tracebacks above; the "
+            "counter is candidates_skipped_internal_error (tenant=%s fleet=%s run=%s).",
+            skipped_internal_error,
+            len(eligible[: cfg.max_writes_per_run]),
+            tenant_id,
+            fleet_id,
+            run_label,
+        )
+
     result = ForgeRunResult(
         tenant_id=tenant_id,
         fleet_id=fleet_id,
@@ -353,6 +427,7 @@ async def run_forge_distill(
         candidates_skipped_sentinel=skipped_sentinel,
         candidates_skipped_distill_error=skipped_distill_error,
         candidates_skipped_io_error=skipped_io_error,
+        candidates_skipped_internal_error=skipped_internal_error,
         candidates_skipped_existing=skipped_existing,
         candidate_doc_ids=written_ids,
         started_at=run_started_at,
@@ -361,7 +436,7 @@ async def run_forge_distill(
     logger.info(
         "forge_run: run_label=%s tenant=%s fleet=%s traces=%d labeled=%d "
         "clusters=%d eligible=%d written=%d poisoned=%d sentinel=%d "
-        "distill_errors=%d io_errors=%d existing=%d",
+        "distill_errors=%d io_errors=%d internal_errors=%d existing=%d",
         result.run_label,
         result.tenant_id,
         result.fleet_id,
@@ -374,6 +449,7 @@ async def run_forge_distill(
         result.candidates_skipped_sentinel,
         result.candidates_skipped_distill_error,
         result.candidates_skipped_io_error,
+        result.candidates_skipped_internal_error,
         result.candidates_skipped_existing,
     )
     return result

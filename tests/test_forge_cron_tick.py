@@ -184,6 +184,7 @@ class TestRunForgeCronTick:
             candidates_skipped_sentinel=0,
             candidates_skipped_distill_error=0,
             candidates_skipped_io_error=0,
+            candidates_skipped_internal_error=0,
             candidates_skipped_existing=0,
             started_at=None,
             run_label="forge-cron-t1-20260608T2100",
@@ -254,6 +255,9 @@ class TestRunForgeCronTick:
         # Skip counters surface from the Forge result.
         assert stats["skipped_poisoned"] == 1
         assert stats["skipped_sentinel"] == 0
+        # The bucket that means "we shipped a bug" has to reach the stats dict,
+        # since that is the structured line an alert would key on.
+        assert stats["skipped_internal_error"] == 0
         # auto_approved surfaces from the promoter result (0 here — the
         # flag defaults off because the patched settings omit it).
         assert stats["auto_approved"] == 0
@@ -278,6 +282,7 @@ class TestRunForgeCronTick:
             candidates_skipped_sentinel=0,
             candidates_skipped_distill_error=0,
             candidates_skipped_io_error=0,
+            candidates_skipped_internal_error=0,
             candidates_skipped_existing=0,
             started_at=None,
             run_label="forge-cron-t1-20260610T0000",
@@ -443,6 +448,7 @@ class TestInjectedCallableArity:
             candidates_skipped_sentinel=0,
             candidates_skipped_distill_error=0,
             candidates_skipped_io_error=0,
+            candidates_skipped_internal_error=0,
             candidates_skipped_existing=0,
             started_at=None,
             run_label="forge-cron-t1-20260819T1200",

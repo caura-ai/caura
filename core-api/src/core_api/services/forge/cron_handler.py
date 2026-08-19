@@ -36,7 +36,12 @@ from typing import Any
 
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.forge.forge_service import (
+    CandidateWriter,
     ForgeConfig,
+    LlmFn,
+    MemoryFetcher,
+    PoisonChecker,
+    StatusChecker,
     run_forge_distill,
 )
 from core_api.services.forge.poison import is_fingerprint_poisoned
@@ -107,7 +112,7 @@ async def _resolve_auto_promote_clean(org_id: str) -> bool:
 # ── Injectable factories ──────────────────────────────────────────
 
 
-def _make_memory_fetcher(tenant_id: str):
+def _make_memory_fetcher(tenant_id: str) -> MemoryFetcher:
     """Bulk-load ``memories.content`` by id via core-storage-api.
 
     Mirrors the dry-run CLI's fetcher. NULL-safe (storage coerces a NULL
@@ -125,7 +130,7 @@ def _make_memory_fetcher(tenant_id: str):
     return _fetch
 
 
-def _make_poison_checker(tenant_id: str, fleet_id: str | None):
+def _make_poison_checker(tenant_id: str, fleet_id: str | None) -> PoisonChecker:
     """Adapt :func:`is_fingerprint_poisoned` (storage-backed) to the
     ``PoisonChecker`` seam ``run_forge_distill`` actually calls:
     ``(fingerprint) → bool``, with the tenant and fleet closed over.
@@ -154,7 +159,7 @@ def _make_poison_checker(tenant_id: str, fleet_id: str | None):
     return _check
 
 
-def _make_candidate_writer():
+def _make_candidate_writer() -> CandidateWriter:
     """Persist a fresh Forge candidate via the storage HTTP client.
 
     Uses ``upsert_document`` so re-running the same cluster (same
@@ -168,7 +173,7 @@ def _make_candidate_writer():
     return _write
 
 
-def _make_status_checker():
+def _make_status_checker() -> StatusChecker:
     """Existence check used to skip writes against already-active /
     rejected / quarantined docs. Returns the live ``data.status`` or
     ``None`` if the slug doesn't exist yet.
@@ -185,7 +190,7 @@ def _make_status_checker():
     return _check
 
 
-async def _wire_llm_fn():
+async def _wire_llm_fn() -> LlmFn:
     """Resolve a working LLM callable from the project's existing
     provider plumbing. Falls back to a structured ``RuntimeError`` if
     the provider chain isn't importable — the cron should NEVER
@@ -237,7 +242,7 @@ async def run_forge_cron_tick(
         in this tick (matches ``ForgeRunResult.candidates_written``).
       * ``promoted`` — number of candidates that flowed
         ``candidate → staged`` in the same tick.
-      * ``scanned``, ``held``, plus the 5 Forge skip counters — so an
+      * ``scanned``, ``held``, plus the 6 Forge skip counters — so an
         operator inspecting an audit row can see exactly what the
         tick did without running the dry-run CLI to reproduce.
 
@@ -301,13 +306,24 @@ async def run_forge_cron_tick(
         "auto_approved": promote_result.auto_approved,
         "scanned": promote_result.scanned,
         "held": promote_result.held,
-        # Surface the 5 Forge skip buckets so audit rows are
-        # actionable — "3 io_errors" vs "1 sentinel block" vs
-        # "5 poisoned" tells an operator very different stories.
+        # Surface the 6 Forge skip buckets so the structured log line below is
+        # actionable — "3 io_errors" vs "1 sentinel block" vs "5 poisoned" tells
+        # an operator very different stories.
+        #
+        # These reach the LOG, not the audit row: ``lifecycle_audit`` reduces this
+        # whole dict to ``candidates_written + promoted`` and stores that single
+        # int as ``stats.candidates_produced``. So a log-based alert can key on
+        # these; an audit-row query cannot. (The previous wording claimed audit
+        # rows, for five buckets — it was wrong then too.)
         "skipped_poisoned": forge_result.candidates_skipped_poisoned,
         "skipped_sentinel": forge_result.candidates_skipped_sentinel,
         "skipped_distill_error": forge_result.candidates_skipped_distill_error,
         "skipped_io_error": forge_result.candidates_skipped_io_error,
+        # Non-zero here means a bug in our code, not a bad day for storage — the
+        # distinction H-08 (#818) did not have. Unlike every other bucket, a
+        # healthy deployment never produces this one, which makes it the one worth
+        # alerting on.
+        "skipped_internal_error": forge_result.candidates_skipped_internal_error,
         "skipped_existing": forge_result.candidates_skipped_existing,
     }
     logger.info(

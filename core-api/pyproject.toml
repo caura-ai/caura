@@ -166,6 +166,10 @@ module = [
 ]
 ignore_errors = true
 
+[[tool.mypy.overrides]]
+module = "core_api.services.forge.*"
+ignore_errors = false
+
 [tool.coverage.run]
 source = ["src"]
 branch = true
