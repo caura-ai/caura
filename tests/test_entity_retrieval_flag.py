@@ -59,6 +59,10 @@ _CLASSIFY_LOGGER = "core_api.pipeline.steps.search.classify_query"
 
 _DUMMY_EMBED = [0.1] * 1536
 
+#: Shared by the ctx builder and the entity fixture — the short-circuit only
+#: fires when the pool can fill top_k, so the two must move together.
+_TOP_K = 10
+
 # A query whose tokens WOULD hit the entity index — every classify test below
 # uses it so a passing assertion means the flag suppressed entity retrieval,
 # not that the tokenizer found nothing to look up.
@@ -70,7 +74,7 @@ def _classify_ctx(*, fts_weight: float = 0.3, **extra) -> PipelineContext:
         "query": _ENTITY_QUERY,
         "tenant_id": "t1",
         "fleet_ids": ["fleet-1"],
-        "search_params": {"graph_max_hops": 2, "top_k": 10, "fts_weight": fts_weight},
+        "search_params": {"graph_max_hops": 2, "top_k": _TOP_K, "fts_weight": fts_weight},
         **extra,
     }
     return PipelineContext(data=data)
@@ -91,22 +95,32 @@ def _boost_ctx(extra: dict | None = None) -> PipelineContext:
 
 
 def _entity_match_sc() -> AsyncMock:
-    """Storage client whose entity index WOULD short-circuit to ENTITY_LOOKUP."""
-    eid, mid = str(uuid4()), str(uuid4())
+    """Storage client whose entity index WOULD short-circuit to ENTITY_LOOKUP.
+
+    Links ``top_k`` memories on purpose: H-03 gated the short-circuit on the
+    entity pool being able to fill the request, so a one-memory fixture would no
+    longer take the exclusive route and these tests would stop exercising the
+    flag they exist to test.
+    """
+    eid = str(uuid4())
+    mids = [str(uuid4()) for _ in range(_TOP_K)]
     sc = AsyncMock()
     sc.fts_search_entities = AsyncMock(return_value=[eid])
     sc.expand_graph = AsyncMock(return_value={eid: {"hop": 0, "weight": 1.0}})
     sc.get_memory_ids_by_entity_ids = AsyncMock(
-        return_value=[{"memory_id": mid, "entity_id": eid, "role": "subject"}]
+        return_value=[
+            {"memory_id": mid, "entity_id": eid, "role": "subject"} for mid in mids
+        ]
     )
     sc.load_memories_by_ids = AsyncMock(
         return_value=[
             {
                 "id": mid,
                 "tenant_id": "t1",
-                "content": "Comet 0002 launch_date is 2026-01-01",
+                "content": f"Comet {i:04d} launch_date is 2026-01-01",
                 "memory_type": "fact",
             }
+            for i, mid in enumerate(mids)
         ]
     )
     return sc

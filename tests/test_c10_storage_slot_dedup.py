@@ -120,14 +120,25 @@ class _recording_slots:
 
 
 def _make_classify_ctx(
-    query: str, *, tenant_id: str = "t1", **extra
+    query: str, *, tenant_id: str = "t1", top_k: int | None = None, **extra
 ) -> PipelineContext:
-    """Build a PipelineContext with the keys ClassifyQuery reads."""
+    """Build a PipelineContext with the keys ClassifyQuery reads.
+
+    ``top_k`` is a seam because H-03 made _collect_memories bail BEFORE the
+    load when the linked-memory pool cannot fill it. ``_entity_match_sc``
+    links exactly one memory, so tests here that need the load to actually
+    happen — every test about the storage-slot sentinel does — must ask for
+    one row. Otherwise no load runs, no slot is taken, and the sentinel these
+    tests exist to police is never set.
+    """
+    search_params = dict(_DEFAULT_SEARCH_PARAMS_FULL)
+    if top_k is not None:
+        search_params["top_k"] = top_k
     data: dict[str, Any] = {
         "query": query,
         "tenant_id": tenant_id,
         "fleet_ids": ["fleet-1"],
-        "search_params": dict(_DEFAULT_SEARCH_PARAMS_FULL),
+        "search_params": search_params,
         **extra,
     }
     return PipelineContext(data=data)
@@ -233,7 +244,7 @@ async def test_entity_lookup_success_classify_acquires_once_execute_skips():
             }
         ],
     )
-    ctx = _make_classify_ctx("Alice")
+    ctx = _make_classify_ctx("Alice", top_k=1)
 
     with _shared_storage_client(sc), _recording_slots() as acquisitions:
         await ClassifyQuery().execute(ctx)
@@ -269,7 +280,7 @@ async def test_entity_lookup_fallthrough_execute_skips_slot_but_calls_scored_sea
     # the sentinel, then returns [] → classify falls through past the
     # ENTITY_LOOKUP plan-emission.
     sc = _entity_match_sc(eid=eid, mid=mid, memories=[])
-    ctx = _make_classify_ctx("Alice")
+    ctx = _make_classify_ctx("Alice", top_k=1)
 
     with _shared_storage_client(sc), _recording_slots() as acquisitions:
         await ClassifyQuery().execute(ctx)
@@ -333,7 +344,7 @@ async def test_sentinel_only_suppresses_slot_not_scored_search_call():
     eid = str(uuid.uuid4())
     mid = str(uuid.uuid4())
     sc = _entity_match_sc(eid=eid, mid=mid, memories=[])
-    ctx = _make_classify_ctx("Alice")
+    ctx = _make_classify_ctx("Alice", top_k=1)
 
     with _shared_storage_client(sc), _recording_slots() as acquisitions:
         await ClassifyQuery().execute(ctx)
@@ -366,7 +377,7 @@ async def test_sentinel_does_not_leak_across_requests():
     eid = str(uuid.uuid4())
     mid = str(uuid.uuid4())
     sc_first = _entity_match_sc(eid=eid, mid=mid, memories=[])
-    ctx_a = _make_classify_ctx("Alice")
+    ctx_a = _make_classify_ctx("Alice", top_k=1)
 
     with _shared_storage_client(sc_first) as _sc, _recording_slots() as acquisitions:
         await ClassifyQuery().execute(ctx_a)
@@ -404,7 +415,7 @@ async def test_load_failure_does_not_mark_sentinel():
     mid = str(uuid.uuid4())
     boom = RuntimeError("storage exploded")
     sc = _entity_match_sc(eid=eid, mid=mid, memories=None, raise_on_load=boom)
-    ctx = _make_classify_ctx("Alice")
+    ctx = _make_classify_ctx("Alice", top_k=1)
 
     with _shared_storage_client(sc), _recording_slots() as acquisitions:
         # Classify's outer try/except may catch the exception and fall through.
