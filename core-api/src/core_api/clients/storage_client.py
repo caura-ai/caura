@@ -467,8 +467,16 @@ class CoreStorageClient:
             _reject_reserved_write_id(item.get("agent_id"))
         return await self._post("/memories/bulk", data)
 
-    async def get_memory(self, memory_id: str) -> dict | None:
-        return await self._get(f"/memories/{memory_id}")
+    async def get_memory(self, memory_id: str, *, read: bool = True) -> dict | None:
+        """Fetch one memory by id.
+
+        ``read=False`` routes to the WRITER. Pass it for a read-your-write — a
+        read-back of a row this request (or an event's producer) just wrote, where
+        replica lag would make the row or the freshly-PATCHed column invisible.
+        Same reasoning as the write-path dedup gate below, which passes it for the
+        same reason.
+        """
+        return await self._get(f"/memories/{memory_id}", read=read)
 
     async def get_memory_for_tenant(self, tenant_id: str, memory_id: str) -> dict | None:
         return await self._get(f"/memories/{memory_id}", tenant_id=tenant_id)

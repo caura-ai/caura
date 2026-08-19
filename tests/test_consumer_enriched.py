@@ -100,7 +100,11 @@ async def test_handle_memory_enriched_invokes_contradiction_detection(
 
     await consumer.handle_memory_enriched(event)
 
-    mock_storage_client.get_memory.assert_awaited_once_with(str(memory_id))
+    # H-02: the read-back MUST go to the writer. This is a read-your-write —
+    # the worker PATCHes then publishes immediately, so a replica read races
+    # replication and the miss ack-drops, killing one of only two
+    # contradiction-detection triggers on the deferred path.
+    mock_storage_client.get_memory.assert_awaited_once_with(str(memory_id), read=False)
     # ``new_memory`` is passed kwarg-only — threading the row through
     # eliminates the redundant second ``get_memory`` inside
     # ``detect_contradictions_async``.
@@ -286,3 +290,82 @@ async def test_register_consumers_subscribes_to_both_topics() -> None:
         consumer.handle_org_settings_changed,
         broadcast=True,
     )
+
+
+# ── H-02: both back-channel read-backs must hit the WRITER ────────────────
+
+
+def _embedded_event(memory_id, tenant_id: str = "tenant-A", content: str = "postgres it is") -> Event:
+    """EMBEDDED envelope. ``_make_event`` above hardcodes ENRICHED, and the two
+    payloads are different models, so this stays separate rather than growing a
+    topic parameter onto a helper every other test calls with no arguments."""
+    return Event(
+        event_type=Topics.Memory.EMBEDDED,
+        tenant_id=tenant_id,
+        payload={
+            "memory_id": str(memory_id),
+            "tenant_id": tenant_id,
+            "content": content,
+        },
+    )
+
+
+
+
+@pytest.mark.asyncio
+async def test_embedded_handler_reads_the_writer_not_the_replica(
+    mock_storage_client, mock_detect
+) -> None:
+    """``handle_memory_embedded`` is the sharper of the two.
+
+    On the deferred-embed path this back-channel is the SOLE Path A contradiction
+    trigger, and when a tenant has enrichment disabled no ENRICHED event ever fires
+    to cover for it. So a lagged replica read dropped detection unconditionally, and
+    contradictory memories both stayed ``active`` — recall kept serving the stale
+    one, silently.
+    """
+    memory_id = uuid.uuid4()
+    mock_storage_client.get_memory.return_value = {
+        "id": str(memory_id),
+        "tenant_id": "tenant-A",
+        "fleet_id": "fleet-X",
+        "content": "postgres it is",
+        "embedding": [0.2] * 1536,
+    }
+
+    await consumer.handle_memory_embedded(
+        _embedded_event(memory_id)
+    )
+
+    mock_storage_client.get_memory.assert_awaited_once_with(str(memory_id), read=False)
+
+
+@pytest.mark.asyncio
+async def test_embedded_handler_does_not_silently_absorb_a_missing_embedding(
+    mock_storage_client, mock_detect, caplog
+) -> None:
+    """Reading the writer makes "should not happen" true, so if it DOES happen it is
+    a real invariant violation and must not hide at warning level.
+
+    Still acked: a retry reads the same writer row and reaches the same branch.
+    """
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="core_api.consumer")
+    memory_id = uuid.uuid4()
+    mock_storage_client.get_memory.return_value = {
+        "id": str(memory_id),
+        "tenant_id": "tenant-A",
+        "fleet_id": None,
+        "content": "x",
+        "embedding": None,
+    }
+
+    await consumer.handle_memory_embedded(
+        _embedded_event(memory_id)
+    )
+
+    mock_detect.assert_not_awaited()
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors, f"expected an ERROR; got {[(r.levelname, r.getMessage()) for r in caplog.records]}"
+    assert "embedding missing on read-back" in errors[0].getMessage()
