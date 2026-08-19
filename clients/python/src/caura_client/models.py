@@ -52,5 +52,23 @@ class RecallResult:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RecallResult:
-        memories = [Memory.from_dict(m) for m in (data.get("supporting_memories") or [])]
+        """Build from a ``POST /api/v1/recall`` body.
+
+        The wire key is ``memories``; the server aliases the identical list under
+        ``items`` as well, for consumers written against ``/search``'s shape, so
+        either is accepted.
+
+        H-01: this used to read ``supporting_memories`` — a key the server has
+        never emitted in any commit. It was invented in this SDK and mirrored into
+        the TypeScript one, so every ``recall()`` returned an empty list while
+        ``summary`` kept working, and the test mocked the invented shape so the
+        suite stayed green against a broken contract.
+
+        The ATTRIBUTE keeps the name ``supporting_memories``: that is published
+        API and renaming it would break callers. Only the wire key was wrong.
+        """
+        raw = data.get("memories")
+        if raw is None:
+            raw = data.get("items")
+        memories = [Memory.from_dict(m) for m in (raw or [])]
         return cls(summary=data.get("summary"), supporting_memories=memories, raw=data)

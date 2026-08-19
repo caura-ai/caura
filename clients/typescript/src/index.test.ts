@@ -79,14 +79,58 @@ test("search throws when 200 items is not a list", async () => {
   });
 });
 
+// The exact top-level key set POST /api/v1/recall returns, per
+// core_api.services.recall_service.summarize_memories — pinned server-side by
+// tests/test_c4_recall_items_alias.py::_EXPECTED_TOP_LEVEL_KEYS. Note what is NOT
+// here: `supporting_memories`. H-01 was this SDK reading that invented key with a
+// fixture that mocked it, so CI passed while every live recall() returned nothing.
+function liveRecallBody(memories: Array<Record<string, unknown>>) {
+  return {
+    query: "q",
+    summary: "S",
+    memory_count: memories.length,
+    memories,
+    items: memories, // server aliases the identical list
+    recall_ms: 12,
+  };
+}
+
 test("recall returns the summary and supporting memories", async () => {
   const client = makeClient((url) => {
     assert.equal(new URL(url).pathname, "/api/v1/recall");
-    return jsonResponse(200, { summary: "S", supporting_memories: [{ id: "m1", content: "a" }] });
+    return jsonResponse(200, liveRecallBody([{ id: "m1", content: "a" }]));
   });
   const result = await client.recall("q");
   assert.equal(result.summary, "S");
   assert.equal(result.supportingMemories[0].id, "m1");
+});
+
+test("recall accepts the items alias alone", async () => {
+  const client = makeClient(() =>
+    jsonResponse(200, { summary: "S", items: [{ id: "m2", content: "b" }] }),
+  );
+  const result = await client.recall("q");
+  assert.deepEqual(
+    result.supportingMemories.map((m) => m.id),
+    ["m2"],
+  );
+});
+
+test("recall with no memories is empty, not an error", async () => {
+  const client = makeClient(() => jsonResponse(200, liveRecallBody([])));
+  const result = await client.recall("q");
+  assert.deepEqual(result.supportingMemories, []);
+  assert.equal(result.summary, "S");
+});
+
+test("recall ignores the key the server never sends", async () => {
+  // Guard against the regression: a body carrying ONLY the invented key must
+  // yield no memories, so nobody "fixes" this by reinstating it.
+  const client = makeClient(() =>
+    jsonResponse(200, { summary: "S", supporting_memories: [{ id: "ghost" }] }),
+  );
+  const result = await client.recall("q");
+  assert.deepEqual(result.supportingMemories, []);
 });
 
 test("health hits /health", async () => {

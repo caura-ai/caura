@@ -145,7 +145,16 @@ export class Caura {
   async recall(query: string, options: { topK?: number } = {}): Promise<RecallResult> {
     const body = { tenant_id: this.tenantId, query, top_k: options.topK ?? 5 };
     const data = await this.request("POST", "/api/v1/recall", body);
-    const supporting: unknown = data?.supporting_memories;
+    // Wire key is `memories`; the server aliases the identical list under
+    // `items` too, for consumers written against /search's shape.
+    //
+    // H-01: this read `data?.supporting_memories`, a key the server has never
+    // emitted in any commit — it was invented in the Python SDK and mirrored
+    // here, so every recall() returned [] while `summary` kept working, and the
+    // test below mocked the invented shape so CI stayed green. The RESULT FIELD
+    // keeps its name (`supportingMemories`) since that is published API; only
+    // the wire key was wrong.
+    const supporting: unknown = data?.memories ?? data?.items;
     return {
       summary: data?.summary ?? null,
       supportingMemories: Array.isArray(supporting)
