@@ -28,7 +28,7 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
-from common.events.base import Event
+from common.events.base import Event, PermanentOpError
 from common.events.factory import get_event_bus
 from common.events.lifecycle_archive_request import (
     LifecycleArchiveRequest,
@@ -239,23 +239,53 @@ async def _run_action(
     try:
         count = await run_op(request)
     except Exception as exc:
-        # Wrap the failure update in its own guard: if it raises, the
-        # outer ``raise`` below would never run and the original op
-        # exception would be silently replaced by the audit error,
-        # leaving the row stuck in ``in_progress`` indistinguishable
-        # from a crashed worker.
+        # ``PermanentOpError`` means the op has established that a retry cannot
+        # help, so this handler acks instead of nacking. Both classes write the
+        # SAME row through the same guarded call — one site, so a future edit to
+        # the failure row cannot land on one failure class and miss the other.
+        permanent = isinstance(exc, PermanentOpError)
+        # ``stats`` is what distinguishes the two in the DURABLE record. Without
+        # it a terminal failure and a mid-retry failure are byte-identical rows,
+        # and "nothing more will happen, a human must act" is the whole point —
+        # it has to be queryable, not just present in a log line. Mirrors how the
+        # dedup gate above disambiguates two meanings of ``success`` via
+        # ``stats={"skipped": True}``.
+        recorded = True
         try:
             await adapter.update_lifecycle_audit_row(
                 audit_id,
                 status="failure",
+                stats={"terminal": True} if permanent else None,
                 error_message=str(exc)[:500],
             )
         except Exception:
+            recorded = False
+            # Wrap the failure update in its own guard: if it raises, the
+            # ``raise`` below would never run and the original op exception
+            # would be silently replaced by the audit error, leaving the row
+            # stuck in ``in_progress`` indistinguishable from a crashed worker.
             logger.warning(
                 "lifecycle audit failure update failed; row stuck in_progress",
                 exc_info=True,
                 extra={"audit_id": audit_id, "action": action},
             )
+        if permanent and recorded:
+            # Acking is only defensible because the ``failure`` row IS the durable
+            # record. When the write failed there is no record, so fall through to
+            # the raise and let redelivery have another go at producing one — one
+            # wasted retry is cheaper than a row stuck in_progress forever.
+            logger.error(
+                "lifecycle %s failed permanently; not retrying",
+                action,
+                exc_info=True,
+                extra={
+                    "audit_id": audit_id,
+                    "org_id": org_id,
+                    "triggered_by": triggered_by,
+                    "terminal": True,
+                },
+            )
+            return
         # Re-raise so the bus nacks → Pub/Sub redelivers (subject to
         # max-delivery-attempts → DLQ). The ``failure`` row above is
         # the durable record (when the update succeeded).

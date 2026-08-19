@@ -34,6 +34,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from common.events.base import PermanentOpError
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.forge.forge_service import (
     CandidateWriter,
@@ -249,6 +250,11 @@ async def run_forge_cron_tick(
     Exceptions propagate so the shared lifecycle handler marks the
     audit row ``failure`` with the exception text; the next tick
     retries on its normal schedule.
+
+    Raises :class:`PermanentOpError` when the mining half wrote nothing
+    and hit programming errors — a deterministic wiring failure, which
+    the runner records as ``failure`` WITHOUT redelivering. Anything
+    else raised here is treated as retryable in the usual way.
     """
     cfg = await _resolve_forge_config(tenant_id)
     auto_promote_clean = await _resolve_auto_promote_clean(tenant_id)
@@ -334,4 +340,31 @@ async def run_forge_cron_tick(
         window_end.isoformat(),
         stats,
     )
+
+    # A mining half that wrote nothing AND hit programming errors is a broken
+    # deployment, not a quiet day — so the tick must not report success. Permanent
+    # rather than a generic raise because the failure is deterministic; see
+    # ``PermanentOpError``.
+    #
+    # Raised AFTER the log above, deliberately: the audit row carries only
+    # ``candidates_written + promoted``, and this path forfeits even that, so the
+    # log line is the sole record of what actually happened.
+    #
+    # The condition is about the MINING half only. ``promote_result.promoted`` is
+    # not consulted, so a tick that promoted earlier candidates and then failed to
+    # mine still fails — that promotion work survives in the log line above but not
+    # in the audit row. Deliberate: a wiring bug that silences mining is the more
+    # important signal, and it is what went unnoticed for months. What the guard
+    # does protect is the common case — ``candidates_written`` non-zero means one
+    # malformed cluster among successes, which is routine and must not fail a tick
+    # or page anyone.
+    if forge_result.candidates_skipped_internal_error and not forge_result.candidates_written:
+        raise PermanentOpError(
+            f"forge tick wrote no candidates and hit "
+            f"{forge_result.candidates_skipped_internal_error} programming error(s) "
+            f"across {forge_result.clusters_eligible} eligible cluster(s) "
+            f"(tenant={tenant_id} fleet={fleet_id} run={run_label}) — a code/wiring "
+            f"bug; see candidates_skipped_internal_error and the tracebacks above"
+        )
+
     return stats
