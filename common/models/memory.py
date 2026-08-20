@@ -148,6 +148,32 @@ class Memory(Base):
                 "deleted_at IS NULL AND client_request_id IS NOT NULL"
             ),
         ),
+        # Enforces the dedup contract the write path advertises: one LIVE row
+        # per (tenant, fleet, agent, content_hash). Created ``CONCURRENTLY`` in
+        # migration 040 with the same key and predicate; declared here so
+        # reflection / autogen round-trip against the live schema, and so the
+        # suites that build a schema from this metadata rather than from the
+        # migration chain (``tests/conftest.py`` uses
+        # ``Base.metadata.create_all``) exercise the constraint too.
+        #
+        # ``ix_memories_content_hash`` above is NOT a substitute: it is
+        # non-unique and keyed on ``(tenant_id, content_hash)`` only — it makes
+        # the lookup fast, it never made it correct.
+        #
+        # ``agent_id`` is in the key because two agents recording identical
+        # content are two independent observations, which is the same scope
+        # ``memory_find_by_content_hash`` dedups on. ``COALESCE(fleet_id, '')``
+        # for the reason 007 needs it: PostgreSQL treats NULLs as distinct, so
+        # without it fleetless rows would escape the constraint entirely.
+        Index(
+            "uq_memories_live_content_hash",
+            "tenant_id",
+            func.coalesce(text("fleet_id"), ""),
+            "agent_id",
+            "content_hash",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL AND content_hash IS NOT NULL"),
+        ),
         Index("ix_memories_valid_range", "ts_valid_start", "ts_valid_end"),
         Index("ix_memories_subject_entity", "subject_entity_id"),
         # For DELETEs, not reads — grep will find no query using it. This is the

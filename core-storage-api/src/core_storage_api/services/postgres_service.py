@@ -481,6 +481,52 @@ def _attach_agent_display_names(rows: Any) -> list[Memory]:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+# Migration 040's partial unique index. Named here because ``memory_add`` has to
+# tell it apart from ``ix_memories_attempt_unique``, which can raise the same
+# IntegrityError and means something different.
+_INDEX_MEMORIES_LIVE_CONTENT_HASH = "uq_memories_live_content_hash"
+
+
+class DuplicateContentHashError(ValueError):
+    """A live row already holds this ``(tenant, fleet, agent, content_hash)``.
+
+    Its own class, for the same reason ``BulkValidationError`` is: the route maps
+    exactly this to 409 and lets anything else from inside the session keep
+    surfacing as a 500. A bare ``except ValueError`` around the call would
+    relabel a genuine server fault as a client error.
+
+    Subclasses ``ValueError`` so the 409 convention the entities routes already
+    use (``except ValueError -> HTTPException(409)``) keeps working unchanged.
+    """
+
+
+def _content_hash_fleet_scope(fleet_id: str | None):
+    """Fleet predicate matching ``uq_memories_live_content_hash``'s grouping.
+
+    NOT ``fleet_id == x`` / ``IS NULL`` chosen on falsiness, which is what every
+    dedup lookup here used to do. The index keys on ``COALESCE(fleet_id, '')``,
+    so a NULL and an empty string are the SAME group to it — while a
+    falsiness-branching lookup filters ``IS NULL`` for a caller who passed ``''``
+    and therefore cannot see a row stored as ``''``.
+
+    That divergence is reachable, not theoretical: ``fleet_id`` is
+    ``str | None`` with no empty-string normalisation anywhere on the write path,
+    so ``POST /memories`` with ``fleet_id: ""`` stores a literal ``''``.
+    Reproduced before this was written — two such writes got the index's 409, but
+    the winner lookup missed the live row and reported "no longer live; retry the
+    write", which is advice that can only 409 again.
+
+    One helper rather than the predicate written out three times, so the gate
+    (``memory_find_by_content_hash``), its sibling
+    (``memory_find_duplicate_hash``) and the winner lookup cannot drift apart
+    from each other or from the constraint they all describe.
+
+    Also index-friendly: equality on the same ``COALESCE`` expression the index
+    is built over remains usable by the planner.
+    """
+    return func.coalesce(Memory.fleet_id, "") == (fleet_id or "")
+
+
 class BulkValidationError(ValueError):
     """A bulk batch violated its input contract before any DB work started.
 
@@ -558,11 +604,78 @@ class PostgresService:
         return out
 
     async def memory_add(self, data: dict) -> Memory:
+        try:
+            async with get_session() as session:
+                memory = Memory(**self._filter_memory_fields(data))
+                session.add(memory)
+                await session.flush()
+                return memory
+        except IntegrityError as exc:
+            # Migration 040 gave ``(tenant, fleet, agent, content_hash)`` a
+            # partial unique index, so this insert can now be REJECTED where
+            # before it silently duplicated. Unhandled that is a 500 for what is
+            # squarely the 409 the dedup contract already promises —
+            # ``CheckExactDuplicate`` raises exactly that when it sees the row up
+            # front. This is the same outcome for the case that gate cannot see:
+            # it looked, found nothing, and a concurrent writer won the race.
+            #
+            # Matched on the index NAME, not on IntegrityError broadly:
+            # ``ix_memories_attempt_unique`` can also fire here, and that one
+            # means "this attempt id already committed", which is a different
+            # answer. Relabelling it as duplicate content would tell the caller
+            # the wrong thing about their own retry.
+            if _INDEX_MEMORIES_LIVE_CONTENT_HASH not in str(exc.orig):
+                raise
+            # The try wraps the WHOLE ``async with``, not just the flush, so by
+            # the time this runs the failed session has unwound and rolled back.
+            # That is required, not tidiness: ``get_session`` holds an explicit
+            # ``session.begin()``, so rolling back inside it and then querying
+            # raises "Can't operate on closed transaction inside context
+            # manager" — which would turn every duplicate insert into the 500
+            # this handler exists to prevent. The lookup below therefore opens a
+            # fresh session of its own.
+            raise DuplicateContentHashError(await self._describe_content_hash_winner(data)) from exc
+
+    async def _describe_content_hash_winner(self, data: dict) -> str:
+        """Message naming the row that already holds this content.
+
+        Re-SELECTed rather than omitted, and it is the whole reason this raises a
+        message instead of a bare flag: ``CheckExactDuplicate``'s 409 says
+        ``Duplicate memory exists: <id>``, and an agent that gets a 409 without an
+        id cannot find the row it is supposed to use instead. Same
+        re-SELECT-the-winner shape as ``entity_add``'s dedup race.
+
+        Opens its OWN session, and takes no session parameter so it cannot be
+        handed the failed one: the caller reaches here only after an
+        ``IntegrityError`` has unwound ``get_session``'s ``session.begin()``, and
+        a query on that session raises ``InvalidRequestError`` rather than
+        answering.
+
+        Ordered ``(created_at, id)`` so the id handed back is the same row
+        ``memory_find_by_content_hash`` returns — a 409 pointing at a different
+        row than the lookup would give is worse than no id at all.
+        """
+        stmt = select(Memory.id).where(
+            Memory.tenant_id == data["tenant_id"],
+            Memory.content_hash == data.get("content_hash"),
+            Memory.agent_id == data["agent_id"],
+            Memory.deleted_at.is_(None),
+        )
+        # Same ``COALESCE`` grouping as the index — see
+        # ``_content_hash_fleet_scope``. The previous form branched on falsiness
+        # and so could not find a winner stored with ``fleet_id = ''``.
+        stmt = stmt.where(_content_hash_fleet_scope(data.get("fleet_id")))
         async with get_session() as session:
-            memory = Memory(**self._filter_memory_fields(data))
-            session.add(memory)
-            await session.flush()
-            return memory
+            winner = (
+                await session.execute(stmt.order_by(Memory.created_at.asc(), Memory.id.asc()).limit(1))
+            ).scalar_one_or_none()
+        if winner is None:
+            # The winner was soft-deleted between the conflict and this read, so
+            # the content is free again. Reported honestly rather than retried
+            # here: a retry inside the failed transaction's handler is a loop
+            # waiting to happen, and the caller's own retry will now succeed.
+            return "Duplicate memory exists but is no longer live; retry the write"
+        return f"Duplicate memory exists: {winner}"
 
     async def memory_add_all(self, items: list[dict]) -> list[dict]:
         """Insert with per-attempt idempotency (CAURA-602).
@@ -654,9 +767,40 @@ class PostgresService:
                 )
                 .returning(Memory.id, Memory.client_request_id)
             )
-            inserted: dict[str, UUID] = {
-                row.client_request_id: row.id for row in (await session.execute(stmt)).all()
-            }
+            try:
+                result = await session.execute(stmt)
+            except IntegrityError as exc:
+                # ON CONFLICT arbitrates ONE index, and this statement's is
+                # ``ix_memories_attempt_unique``. A violation of migration 040's
+                # ``uq_memories_live_content_hash`` therefore is NOT swallowed —
+                # it aborts the whole multi-row INSERT, taking the batch's
+                # unrelated items with it. Unhandled that is a 500, which is
+                # exactly the outcome the single-row path above stopped
+                # producing; leaving the bulk path behind would mean the same
+                # duplicate answers 409 or 500 depending only on which endpoint
+                # the caller used.
+                #
+                # A second arbiter is not available (a statement names one), and
+                # per-row upserts would trade the batch's single roundtrip for N.
+                # So the batch fails as a unit and says so — which is honest,
+                # because nothing was written.
+                #
+                # Same index-name match as ``memory_add``: the attempt-idempotency
+                # index means "this attempt already committed", a different answer
+                # that must keep its own handling.
+                if _INDEX_MEMORIES_LIVE_CONTENT_HASH not in str(exc.orig):
+                    raise
+                # Raw driver text to the log, never to the caller — it carries
+                # the constraint name and the offending values.
+                logger.info(
+                    "Bulk insert rejected by the live content_hash constraint: %s",
+                    exc.orig,
+                )
+                raise DuplicateContentHashError(
+                    "bulk insert rejected: an item's content already exists for "
+                    "this agent; nothing in this batch was written"
+                ) from exc
+            inserted: dict[str, UUID] = {row.client_request_id: row.id for row in result.all()}
 
             # Items the conflict swallowed already exist — committed by a
             # prior attempt with the same ``X-Bulk-Attempt-Id``. Re-read
@@ -1007,10 +1151,13 @@ class PostgresService:
                 Memory.content_hash == content_hash,
                 Memory.deleted_at.is_(None),
             )
-            if fleet_id:
-                stmt = stmt.where(Memory.fleet_id == fleet_id)
-            else:
-                stmt = stmt.where(Memory.fleet_id.is_(None))
+            # ``COALESCE`` grouping, matching the unique index rather than
+            # branching on falsiness — see ``_content_hash_fleet_scope``. All
+            # three content-hash lookups get it: a gate that disagrees with the
+            # constraint hands the write path a clean "no duplicate" and lets the
+            # INSERT be rejected instead, which is the mismatch this PR's index
+            # would otherwise make load-bearing.
+            stmt = stmt.where(_content_hash_fleet_scope(fleet_id))
             if agent_id is not None:
                 stmt = stmt.where(Memory.agent_id == agent_id)
             # H-04: oldest-first + LIMIT 2, not ``scalar_one_or_none()``.
@@ -1066,10 +1213,13 @@ class PostgresService:
                 Memory.content_hash == content_hash,
                 Memory.deleted_at.is_(None),
             )
-            if fleet_id:
-                stmt = stmt.where(Memory.fleet_id == fleet_id)
-            else:
-                stmt = stmt.where(Memory.fleet_id.is_(None))
+            # ``COALESCE`` grouping, matching the unique index rather than
+            # branching on falsiness — see ``_content_hash_fleet_scope``. All
+            # three content-hash lookups get it: a gate that disagrees with the
+            # constraint hands the write path a clean "no duplicate" and lets the
+            # INSERT be rejected instead, which is the mismatch this PR's index
+            # would otherwise make load-bearing.
+            stmt = stmt.where(_content_hash_fleet_scope(fleet_id))
             if agent_id is not None:
                 stmt = stmt.where(Memory.agent_id == agent_id)
             if exclude_id is not None:
@@ -1346,10 +1496,13 @@ class PostgresService:
                 Memory.content_hash.in_(hashes),
                 Memory.deleted_at.is_(None),
             )
-            if fleet_id:
-                stmt = stmt.where(Memory.fleet_id == fleet_id)
-            else:
-                stmt = stmt.where(Memory.fleet_id.is_(None))
+            # ``COALESCE`` grouping, matching the unique index rather than
+            # branching on falsiness — see ``_content_hash_fleet_scope``. All
+            # three content-hash lookups get it: a gate that disagrees with the
+            # constraint hands the write path a clean "no duplicate" and lets the
+            # INSERT be rejected instead, which is the mismatch this PR's index
+            # would otherwise make load-bearing.
+            stmt = stmt.where(_content_hash_fleet_scope(fleet_id))
             if agent_id is not None:
                 stmt = stmt.where(Memory.agent_id == agent_id)
             # H-04 sibling: the dict comprehension below keeps ONE row per hash,

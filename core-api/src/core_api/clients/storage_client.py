@@ -19,6 +19,38 @@ from core_api.config import settings
 
 logger = logging.getLogger(__name__)
 
+_DUPLICATE_FALLBACK_DETAIL = "Duplicate memory exists"
+
+
+class DuplicateMemoryError(Exception):
+    """Storage refused a memory insert: a live row already holds this content.
+
+    Only raisable since migration 040 gave ``(tenant, fleet, agent,
+    content_hash)`` a partial unique index. Before it, an insert of duplicate
+    content succeeded and quietly created a second row.
+
+    Carries storage's ``detail`` verbatim, which names the winning row's id — an
+    agent told "duplicate" without being told *which* row cannot use the one it
+    should have got. Callers that own an HTTP contract map this to 409, matching
+    ``CheckExactDuplicate``: that gate answers the duplicate it can see before
+    the write, this answers the race it cannot, and callers should not have to
+    tell the two apart.
+    """
+
+
+def _storage_detail(response: httpx.Response) -> str:
+    """Storage's ``detail`` string, or a safe stand-in.
+
+    Defensive about the body because this runs on an error path: a 409 whose body
+    is not JSON, or is JSON without ``detail``, must not turn a clean 409 into a
+    JSONDecodeError from inside the exception handler.
+    """
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return _DUPLICATE_FALLBACK_DETAIL
+    return detail if isinstance(detail, str) and detail else _DUPLICATE_FALLBACK_DETAIL
+
 
 def _reject_reserved_write_id(agent_id: str | None) -> None:
     """Storage-boundary reserved-id backstop. No-op under ``allow``/``warn``;
@@ -442,7 +474,23 @@ class CoreStorageClient:
         # ({"main"}) reject; the de-collapsed main-<install_id> form (#507) and
         # every named id pass untouched.
         _reject_reserved_write_id(data.get("agent_id"))
-        return await self._post("/memories", data)
+        try:
+            return await self._post("/memories", data)
+        except httpx.HTTPStatusError as exc:
+            # Migration 040's unique index can now REJECT this insert, which
+            # storage maps to 409. Recognised here, at the single boundary every
+            # memory insert funnels through, so no caller has to know that a
+            # storage 409 is a thing this endpoint does.
+            #
+            # A TYPED error rather than ``HTTPException``: nothing else in
+            # ``core_api/clients/`` raises a FastAPI type, and the app-level
+            # ``httpx.HTTPStatusError`` handler documents the reason it cannot do
+            # this job either — it deliberately re-raises 4xx as "a bug in OUR
+            # request shape", which a legitimate duplicate is not. Callers that
+            # own an HTTP contract translate it; see ``WriteMemoryRow``.
+            if exc.response.status_code != 409:
+                raise
+            raise DuplicateMemoryError(_storage_detail(exc.response)) from exc
 
     async def create_memories(self, data: list[dict]) -> list[dict]:
         """Bulk-insert memories with per-attempt idempotency (CAURA-602).
@@ -465,7 +513,21 @@ class CoreStorageClient:
         # Defense-in-depth reserved-id chokepoint (see create_memory).
         for item in data:
             _reject_reserved_write_id(item.get("agent_id"))
-        return await self._post("/memories/bulk", data)
+        try:
+            return await self._post("/memories/bulk", data)
+        except httpx.HTTPStatusError as exc:
+            # Same translation as ``create_memory``, for the same reason — and it
+            # has to be here too, not only there: migration 040's constraint can
+            # abort a whole batch, and ON CONFLICT cannot arbitrate a second
+            # index, so the bulk route answers 409 as well. Without this the two
+            # endpoints would disagree about what a duplicate looks like to a
+            # core-api caller.
+            #
+            # NOTE the batch is all-or-nothing: a 409 here means NOTHING in the
+            # batch was written, unlike the per-item outcomes a success returns.
+            if exc.response.status_code != 409:
+                raise
+            raise DuplicateMemoryError(_storage_detail(exc.response)) from exc
 
     async def get_memory(self, memory_id: str, *, read: bool = True) -> dict | None:
         """Fetch one memory by id.

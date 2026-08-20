@@ -1579,6 +1579,7 @@ class TestMemories:
         client: AsyncClient,
         tenant_id: str,
         fleet_id: str,
+        without_content_hash_index,
     ) -> None:
         """H-04 sibling: the batch lookup keeps one row per hash, so on a
         pre-existing duplicate group it picks a winner. Unordered, that winner was
@@ -1657,6 +1658,7 @@ class TestMemories:
         tenant_id: str,
         fleet_id: str,
         caplog,
+        without_content_hash_index,
     ) -> None:
         """``_warn_duplicate_content_hash`` is shared by both dedup gates on
         purpose — its own docstring says a warning from only one of them

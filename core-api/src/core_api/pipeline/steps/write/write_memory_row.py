@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import time
 
-from core_api.clients.storage_client import get_storage_client
+from fastapi import HTTPException
+
+from core_api.clients.storage_client import DuplicateMemoryError, get_storage_client
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 from core_api.services.hooks import get_hooks
@@ -82,7 +84,23 @@ class WriteMemoryRow:
             "visibility": data.visibility or "scope_team",
         }
         storage_t0 = time.perf_counter()
-        memory = await sc.create_memory(memory_data)
+        try:
+            memory = await sc.create_memory(memory_data)
+        except DuplicateMemoryError as exc:
+            # Migration 040's unique index rejected the insert. ``CheckExactDuplicate``
+            # ran earlier in this same pipeline and found nothing, so reaching here
+            # means a concurrent writer committed the same content in between — the
+            # one duplicate case a check-then-insert gate cannot see.
+            #
+            # 409, the same code and shape that gate raises, because it is the same
+            # answer: the content is already stored, here is the row. Without this
+            # the step would be marked FAILED and the caller would get "Memory
+            # write pipeline failed unexpectedly" — a 500 for a completely ordinary
+            # race, and one that says nothing about which row to use instead.
+            #
+            # Nothing has been committed by THIS request at this point, so unlike
+            # everything below, raising here is correct rather than a strand.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         timings["storage_ms"] = round((time.perf_counter() - storage_t0) * 1000)
 
         # H-05: the row above is COMMITTED, so everything after it degrades rather

@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 
-from core_api.clients.storage_client import get_storage_client
+from core_api.clients.storage_client import DuplicateMemoryError, get_storage_client
 from core_api.config import settings
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot, per_tenant_storage_slot
 from core_api.services.agent_identity import ReservedAgentIdError, enforce_reserved_write_id
@@ -253,6 +253,75 @@ def _drop_duplicate_facts(
             },
         )
     return kept
+
+
+async def _insert_children_or_degrade(
+    payloads: list[dict],
+    *,
+    tenant_id: str,
+    parent_id: str,
+    source: str,
+) -> None:
+    """Insert auto-chunk children; a duplicate refusal degrades, never raises.
+
+    The parent row is ALREADY COMMITTED by the time this runs. Raising here would
+    hand the caller a 500 for a write that persisted, and leave the parent
+    childless with nothing recording why — the H-05 shape (#815), for which the
+    established answer is to degrade and report rather than abort.
+
+    Only ``DuplicateMemoryError`` is degraded, and it is the one exception where
+    degrading loses nothing: migration 040's constraint refuses the batch only
+    when the content is already stored, so the children this call would have
+    written already exist. Every other failure still propagates, because for
+    those the rows genuinely are missing.
+
+    The batch is all-or-nothing — ON CONFLICT cannot arbitrate a second index, so
+    one refused row aborts the statement. So this can drop children that were NOT
+    duplicates, which is why it logs at WARNING with the count: the parent's
+    ``child_count`` will overstate what exists, and this line is the only record
+    of the gap.
+
+    Empty list short-circuits: dedup can empty it (a document re-chunked with
+    every fact already live), ``create_memories([])`` is a pointless roundtrip,
+    and the storage-side statement would build an INSERT with no VALUES.
+    """
+    if not payloads:
+        return
+    async with per_tenant_storage_slot("storage_write", tenant_id):
+        try:
+            await get_storage_client().create_memories(payloads)
+        except DuplicateMemoryError:
+            logger.warning(
+                "auto-chunk children refused as duplicates; parent kept without them",
+                extra={
+                    "source": source,
+                    "parent_memory_id": parent_id,
+                    "children_dropped": len(payloads),
+                },
+            )
+
+
+async def _create_memory_or_409(payload: dict) -> dict:
+    """``create_memory``, with migration 040's duplicate rejection mapped to 409.
+
+    Since 040 the insert can be REFUSED where it previously duplicated silently.
+    Untranslated that is a 500 — the pipeline marks the step FAILED and the caller
+    reads "write pipeline failed unexpectedly" — for what is an ordinary race, and
+    an outcome the dedup contract already has a code for.
+
+    409 with the winning row's id, matching ``CheckExactDuplicate`` exactly: that
+    gate answers the duplicate visible before the write, this answers the race it
+    cannot see, and a caller should not have to tell the two apart.
+
+    A helper rather than a try at each site because there are three of them (the
+    auto-chunk parent on both handlers, plus the legacy single write) and each
+    passes a long inline dict; wrapping them individually would re-indent all
+    three for no gain. It fetches the client itself so the swap is call-for-call.
+    """
+    try:
+        return await get_storage_client().create_memory(payload)
+    except DuplicateMemoryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 async def _find_semantic_duplicate(
@@ -662,7 +731,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         # tenant doing heavy auto-chunking can't park more storage
         # connections than the cap allows.
         async with per_tenant_storage_slot("storage_write", data.tenant_id):
-            parent = await sc.create_memory(
+            parent = await _create_memory_or_409(
                 {
                     "tenant_id": data.tenant_id,
                     "fleet_id": data.fleet_id,
@@ -745,17 +814,15 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                     "visibility": data.visibility or "scope_team",
                 }
             )
-        # Auto-chunk children — second storage roundtrip in this
-        # request after the parent insert above. Same per-tenant cap
-        # applies; held only across the bulk call itself.
-        #
-        # ``if child_payloads`` because dedup can empty the list — a document
-        # re-chunked with every fact already live. ``create_memories([])`` would
-        # be a pointless roundtrip, and the storage-side statement builds an
-        # INSERT with no VALUES.
-        if child_payloads:
-            async with per_tenant_storage_slot("storage_write", data.tenant_id):
-                await sc.create_memories(child_payloads)
+        # Auto-chunk children — second storage roundtrip in this request after
+        # the parent insert above. The parent is committed, so a refusal here
+        # degrades rather than raising; see ``_insert_children_or_degrade``.
+        await _insert_children_or_degrade(
+            child_payloads,
+            tenant_id=data.tenant_id,
+            parent_id=str(parent_id),
+            source="auto_chunk",
+        )
 
         if tenant_config.entity_extraction_enabled:
             track_task(
@@ -964,7 +1031,7 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
             # Legacy-path auto-chunk parent insert. Mirrors the
             # pipeline-path coverage in ``_handle_auto_chunk_from_ctx``.
             async with per_tenant_storage_slot("storage_write", data.tenant_id):
-                parent = await sc.create_memory(
+                parent = await _create_memory_or_409(
                     {
                         "tenant_id": data.tenant_id,
                         "fleet_id": data.fleet_id,
@@ -1043,12 +1110,15 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
                         "visibility": data.visibility or "scope_team",
                     }
                 )
-            # Legacy-path auto-chunk children — same bulkhead key as
-            # the parent insert above. See ``_handle_auto_chunk_from_ctx``
-            # for the pipeline-path equivalent.
-            if child_payloads:
-                async with per_tenant_storage_slot("storage_write", data.tenant_id):
-                    await sc.create_memories(child_payloads)
+            # Legacy-path auto-chunk children. See
+            # ``_handle_auto_chunk_from_ctx`` for the pipeline-path equivalent;
+            # the parent is committed here too, so the same degrade applies.
+            await _insert_children_or_degrade(
+                child_payloads,
+                tenant_id=data.tenant_id,
+                parent_id=str(parent_id),
+                source="auto_chunk_legacy",
+            )
 
             if tenant_config.entity_extraction_enabled:
                 track_task(
@@ -1127,7 +1197,7 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
     # route-entry slot (``per_tenant_slot("write", ...)``) was already
     # held; this slot is held only across the storage call.
     async with per_tenant_storage_slot("storage_write", data.tenant_id):
-        created = await sc.create_memory(
+        created = await _create_memory_or_409(
             {
                 "tenant_id": data.tenant_id,
                 "fleet_id": data.fleet_id,
@@ -1766,7 +1836,21 @@ async def create_memories_bulk(
             asyncio.timeout(settings.storage_bulk_timeout_seconds),
             per_tenant_storage_slot("storage_write", data.tenant_id),
         ):
-            storage_results = await sc.create_memories([d for _, d in pending])
+            try:
+                storage_results = await sc.create_memories([d for _, d in pending])
+            except DuplicateMemoryError as exc:
+                # Migration 040's constraint aborted the batch. 409, not the 500
+                # an untranslated error would give: nothing was written, and the
+                # cause is a duplicate rather than a fault.
+                #
+                # Whole-request rather than per-item, unlike everything else this
+                # function returns, because the INSERT is one statement — there is
+                # no per-item outcome to report when none of them landed. This
+                # path is reachable only by a race: the loop above already
+                # resolved every duplicate it could see, through
+                # ``existing_hashes`` and ``seen_hashes``. A retry re-runs those
+                # against the now-committed winner and succeeds.
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         # Map each storage result back to its source item via
         # ``client_request_id``. Postgres ``RETURNING`` order is
@@ -2905,6 +2989,19 @@ async def _enrich_memory_background(
                             "ts_valid_start": parent_ts_start,
                         }
                     )
+                except DuplicateMemoryError:
+                    # NOT an error here, and deliberately not routed through
+                    # ``_create_memory_or_409``: this loop has no HTTP contract to
+                    # honour — it runs inside a fire-and-forget background task, so
+                    # a 409 would go nowhere and abort the remaining facts.
+                    #
+                    # A 409 means the fact is already recorded, which is the
+                    # outcome this loop wants. The dedup lookup above catches the
+                    # ordinary case; reaching here means a concurrent enrichment of
+                    # the same parent committed it in between. Counted with the
+                    # deduped facts because that is what it is.
+                    fanout_deduped += 1
+                    continue
                 except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
                     logger.warning(
                         "atomic-fact create_memory failed for parent %s",
