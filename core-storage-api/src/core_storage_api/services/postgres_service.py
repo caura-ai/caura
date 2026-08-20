@@ -1352,8 +1352,49 @@ class PostgresService:
                 stmt = stmt.where(Memory.fleet_id.is_(None))
             if agent_id is not None:
                 stmt = stmt.where(Memory.agent_id == agent_id)
+            # H-04 sibling: the dict comprehension below keeps ONE row per hash,
+            # so on a pre-existing duplicate group it silently picks a winner.
+            # Unordered, that winner is whatever the plan happened to emit last —
+            # so the batch lookup could disagree with
+            # ``memory_find_by_content_hash``, which returns the OLDEST after
+            # #839, and two dedup paths would point callers at different rows for
+            # the same content.
+            #
+            # Ascending + first-wins rather than descending + last-wins, because
+            # ``id`` has to break the tie and ties are the common case here:
+            # ``created_at`` is ``server_default=now()``, fixed for a whole
+            # transaction, and the auto-chunk path inserts all its children in
+            # one call — so duplicates minted that way share ``created_at``
+            # exactly. Same ordering, same reason, as #839.
+            stmt = stmt.order_by(Memory.created_at.asc(), Memory.id.asc())
             rows = (await session.execute(stmt)).all()
-            return {row[0]: {"id": row[1], "client_request_id": row[2]} for row in rows}
+            out: dict[str, dict] = {}
+            duplicated: list[str] = []
+            for row in rows:
+                if row[0] in out:
+                    # First extra row for this hash — the group is a duplicate.
+                    if len(duplicated) == 0 or duplicated[-1] != row[0]:
+                        duplicated.append(row[0])
+                    continue
+                out[row[0]] = {"id": row[1], "client_request_id": row[2]}
+            # Warn, for the reason ``_warn_duplicate_content_hash``'s own
+            # docstring gives: it is shared by both dedup gates deliberately,
+            # because a warning from only one of them undercounts the duplicate
+            # population — and that population is the number the partial unique
+            # index decision rests on. Before the ordering above this path could
+            # not report a group honestly (it did not know which row it kept);
+            # now that it does, staying silent would be the remaining half of the
+            # H-04 blind spot rather than a cosmetic gap.
+            for content_hash in duplicated:
+                self._warn_duplicate_content_hash(
+                    tenant_id=tenant_id,
+                    fleet_id=fleet_id,
+                    agent_id=agent_id,
+                    content_hash=content_hash,
+                    kept_id=out[content_hash]["id"],
+                    path="bulk_find_by_content_hashes",
+                )
+            return out
 
     # ------------------------------------------------------------------
     # C) Scored search (CTE-based)

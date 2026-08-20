@@ -130,6 +130,131 @@ def _auto_chunk_request_id() -> str:
     return f"auto-chunk:{uuid4()}"
 
 
+async def _live_duplicate_hashes(
+    sc,
+    *,
+    tenant_id: str,
+    fleet_id: str | None,
+    agent_id: str,
+    hashes: list[str],
+) -> set[str]:
+    """Which of ``hashes`` already have a LIVE row, in dedup scope.
+
+    The server-internal write paths — auto-chunk children (both the pipeline
+    and legacy handlers) and the atomic-fact fanout — attach a ``content_hash``
+    to every child and then insert it without ever consulting a dedup lookup.
+    The public bulk path does consult one (``existing_hashes`` +
+    ``seen_hashes`` in ``create_memories_bulk``), and the single-write path has
+    ``CheckExactDuplicate``; these three had neither. That is why prod carries
+    duplicate content-hash groups with no concurrency involved at all: the same
+    document re-chunked, or an LLM emitting the same fact twice, minted a fresh
+    row every time.
+
+    ``_auto_chunk_request_id()`` cannot substitute for this. It mints a fresh
+    UUID per item per call, so the attempt-idempotency index
+    (``ix_memories_attempt_unique``) sees every re-run as a brand-new attempt —
+    it makes a *retried* batch idempotent only when the caller replays the same
+    ids, which these callers never do.
+
+    Scope is ``(tenant, fleet, agent, content_hash)`` over live rows, matching
+    ``memory_find_by_content_hash`` exactly, so a child is judged a duplicate by
+    the same rule the single-write gate would apply to it.
+
+    WHAT THIS DOES NOT CLOSE. It is check-then-insert, so two concurrent runs can
+    both pass the check and both insert — two overlapping redeliveries enriching
+    the same parent, or two racing auto-chunk requests for the same document.
+    Nothing here can prevent that; only a unique constraint can, and adding one
+    is the second half of #814. So this closes the source that needs NO
+    concurrency to fire — which is the source prod's duplicate groups actually
+    came from — and leaves the race for the index. Do not read a green here as
+    "duplicates are impossible"; read it as "duplicates now require a race".
+    """
+    if not hashes:
+        return set()
+    existing = await sc.bulk_find_by_content_hashes(
+        tenant_id,
+        hashes,
+        fleet_id=fleet_id,
+        agent_id=agent_id,
+    )
+    return set(existing)
+
+
+def _drop_duplicate_facts(
+    facts: list[dict],
+    *,
+    tenant_id: str,
+    fleet_id: str | None,
+    live_hashes: set[str],
+    source: str,
+) -> list[dict]:
+    """Return the chunker's facts minus the ones already recorded.
+
+    Drops two kinds of duplicate, which have to be handled separately because
+    no index can collapse the first:
+
+    * **already live** — the content exists from an earlier call, per
+      ``live_hashes``.
+    * **repeated within this batch** — two children of the SAME call carrying
+      identical content. A unique index cannot resolve this one: the conflict is
+      between two rows of a single INSERT, so it has to be collapsed before the
+      statement runs.
+
+    Applied to the FACTS, before the parent insert and before the batch embed,
+    rather than to the finished child payloads. Two things fall out of that
+    ordering, and both matter more than the slightly earlier call site:
+
+    * the parent's ``child_count`` is the number of children that will exist,
+      not the number the chunker proposed — otherwise this change would make
+      that field silently wrong;
+    * a dropped child never costs an embedding. The embed is the expensive part
+      of this path, and it is a batch call, so paying for text we are about to
+      discard would be the dominant cost of deduping at all.
+
+    Dropping rather than collapsing-and-reporting is deliberate: these children
+    are derived rows, not caller-submitted items. Nothing upstream holds an
+    index into them — both auto-chunk handlers discard ``create_memories``'
+    return value entirely — so there is no per-item result to point at a
+    survivor, and the parent memory is what the caller gets back either way.
+    """
+    kept: list[dict] = []
+    seen: set[str] = set()
+    dropped_live = 0
+    dropped_repeat = 0
+    for fact in facts:
+        content = fact.get("content")
+        if not content:
+            # Outside the dedup contract: an unhashable fact cannot collide.
+            kept.append(fact)
+            continue
+        content_hash = _content_hash(tenant_id, fleet_id, content)
+        if content_hash in live_hashes:
+            dropped_live += 1
+            continue
+        if content_hash in seen:
+            dropped_repeat += 1
+            continue
+        seen.add(content_hash)
+        kept.append(fact)
+
+    if dropped_live or dropped_repeat:
+        # INFO, not WARNING: a re-chunked document hitting this is the feature
+        # working. Logged at all because it is the only account of why a
+        # document that produced N chunks has fewer than N children.
+        logger.info(
+            "dedup dropped %d duplicate auto-chunk children before insert",
+            dropped_live + dropped_repeat,
+            extra={
+                "source": source,
+                "dropped_already_live": dropped_live,
+                "dropped_repeated_in_batch": dropped_repeat,
+                "kept": len(kept),
+                "submitted": len(facts),
+            },
+        )
+    return kept
+
+
 async def _find_semantic_duplicate(
     tenant_id: str,
     fleet_id: str | None,
@@ -500,6 +625,31 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
 
     if len(facts) > 1:
         ch = _content_hash(data.tenant_id, data.fleet_id, data.content)
+        # Give the children the dedup lookup every other write path already has
+        # (OSS #814). Inside the ``len(facts) > 1`` branch rather than above it:
+        # dedup can reduce the count to 1 or 0, and falling out of the branch on
+        # that would write the WHOLE document as a single memory instead — a
+        # different row than either outcome the caller asked for.
+        #
+        # Ahead of ``child_count`` and the batch embed, both deliberately: see
+        # ``_drop_duplicate_facts``.
+        facts = _drop_duplicate_facts(
+            facts,
+            tenant_id=data.tenant_id,
+            fleet_id=data.fleet_id,
+            live_hashes=await _live_duplicate_hashes(
+                sc,
+                tenant_id=data.tenant_id,
+                fleet_id=data.fleet_id,
+                agent_id=data.agent_id,
+                hashes=[
+                    _content_hash(data.tenant_id, data.fleet_id, f["content"])
+                    for f in facts
+                    if f.get("content")
+                ],
+            ),
+            source="auto_chunk",
+        )
         parent_metadata = dict(fields["metadata"])
         parent_metadata["auto_chunked"] = True
         parent_metadata["child_count"] = len(facts)
@@ -598,8 +748,14 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         # Auto-chunk children — second storage roundtrip in this
         # request after the parent insert above. Same per-tenant cap
         # applies; held only across the bulk call itself.
-        async with per_tenant_storage_slot("storage_write", data.tenant_id):
-            await sc.create_memories(child_payloads)
+        #
+        # ``if child_payloads`` because dedup can empty the list — a document
+        # re-chunked with every fact already live. ``create_memories([])`` would
+        # be a pointless roundtrip, and the storage-side statement builds an
+        # INSERT with no VALUES.
+        if child_payloads:
+            async with per_tenant_storage_slot("storage_write", data.tenant_id):
+                await sc.create_memories(child_payloads)
 
         if tenant_config.entity_extraction_enabled:
             track_task(
@@ -779,6 +935,27 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
 
         if len(facts) > 1:
             ch = _content_hash(data.tenant_id, data.fleet_id, data.content)
+            # Same dedup as the pipeline handler, at the same point in the
+            # branch. Applied here too rather than only on the pipeline path:
+            # this is its sibling, and on two of this audit's last three
+            # findings the filed location was only half the problem.
+            facts = _drop_duplicate_facts(
+                facts,
+                tenant_id=data.tenant_id,
+                fleet_id=data.fleet_id,
+                live_hashes=await _live_duplicate_hashes(
+                    sc,
+                    tenant_id=data.tenant_id,
+                    fleet_id=data.fleet_id,
+                    agent_id=data.agent_id,
+                    hashes=[
+                        _content_hash(data.tenant_id, data.fleet_id, f["content"])
+                        for f in facts
+                        if f.get("content")
+                    ],
+                ),
+                source="auto_chunk_legacy",
+            )
             parent_metadata = dict(metadata)
             parent_metadata["auto_chunked"] = True
             parent_metadata["child_count"] = len(facts)
@@ -869,8 +1046,9 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
             # Legacy-path auto-chunk children — same bulkhead key as
             # the parent insert above. See ``_handle_auto_chunk_from_ctx``
             # for the pipeline-path equivalent.
-            async with per_tenant_storage_slot("storage_write", data.tenant_id):
-                await sc.create_memories(child_payloads)
+            if child_payloads:
+                async with per_tenant_storage_slot("storage_write", data.tenant_id):
+                    await sc.create_memories(child_payloads)
 
             if tenant_config.entity_extraction_enabled:
                 track_task(
@@ -2622,8 +2800,42 @@ async def _enrich_memory_background(
             parent_weight = patch.get("weight") or mem.get("weight") or 0.5
             fanout_created = 0
             fanout_unembedded = 0
+            # The fanout's dedup lookup (OSS #814), batched once for every fact
+            # rather than per-fact: this loop calls ``create_memory`` (singular)
+            # per child, so a per-fact lookup would double the roundtrips on a
+            # path that already runs one write each.
+            fanout_live_hashes = await _live_duplicate_hashes(
+                sc,
+                tenant_id=tenant_id,
+                fleet_id=fleet_id,
+                agent_id=agent_id,
+                hashes=[_content_hash(tenant_id, fleet_id, f.content) for f in atomic_facts],
+            )
+            # Repeats within this fanout. The live set cannot cover them: those
+            # rows do not exist yet at lookup time, and each is written by its
+            # own ``create_memory`` call, so the second one would land as a
+            # duplicate of a row this very loop just created.
+            fanout_seen_hashes: set[str] = set()
+            fanout_deduped = 0
             for fact in atomic_facts:
                 fact_content = fact.content
+                child_ch = _content_hash(tenant_id, fleet_id, fact_content)
+                if child_ch in fanout_live_hashes or child_ch in fanout_seen_hashes:
+                    # The fact is already recorded — either from an earlier
+                    # enrichment of this parent, or earlier in this very loop.
+                    # Writing it again is one of the two reasons prod carries
+                    # duplicate content-hash groups with no concurrency.
+                    #
+                    # Before the embed below on purpose: a dropped fact must not
+                    # cost an embedding call. This ``continue`` is unlike the two
+                    # inside the embed block — those exit AFTER deciding
+                    # ``child_embedding`` precisely so a failed embed still
+                    # persists the fact (see below); this one decides the fact
+                    # should not be persisted at all, so it is the one case where
+                    # skipping ahead of the embed is correct.
+                    fanout_deduped += 1
+                    continue
+                fanout_seen_hashes.add(child_ch)
                 # A failed embed must NOT skip the fact. Both exits here used
                 # to ``continue`` BEFORE ``create_memory``, so the child row
                 # was never written at all and the fact was lost outright —
@@ -2651,7 +2863,6 @@ async def _enrich_memory_background(
                         memory_id,
                         exc_info=True,
                     )
-                child_ch = _content_hash(tenant_id, fleet_id, fact_content)
                 child_meta = {
                     "parent_memory_id": str(memory_id),
                     "source": "atomic_fact_fanout",
@@ -2771,6 +2982,17 @@ async def _enrich_memory_background(
                 logger.info(
                     "atomic-fact fan-out created %d children for parent %s",
                     fanout_created,
+                    memory_id,
+                )
+            if fanout_deduped:
+                # Its own line rather than a field on the created line above,
+                # because it explains a discrepancy an operator would otherwise
+                # read as loss: the enrichment reported N atomic facts and fewer
+                # than N children exist. INFO because a re-enriched parent
+                # hitting this is the dedup working, not a fault.
+                logger.info(
+                    "atomic-fact fan-out skipped %d facts already recorded for parent %s",
+                    fanout_deduped,
                     memory_id,
                 )
             if fanout_unembedded:

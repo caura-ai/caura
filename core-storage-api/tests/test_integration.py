@@ -14,8 +14,13 @@ import uuid
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
 
 from common.constants import VECTOR_DIM
+
+# The transactional session (commits on success), used by the one test that has
+# to age rows directly — no endpoint sets ``created_at``.
+from core_storage_api.services.postgres_service import get_session as _svc_session
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -1568,6 +1573,170 @@ class TestMemories:
             entity_ids[2]: "mentioned",
             new_entity["id"]: "mentioned",
         }
+
+    async def test_bulk_hash_lookup_returns_the_oldest_of_a_duplicate_group(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """H-04 sibling: the batch lookup keeps one row per hash, so on a
+        pre-existing duplicate group it picks a winner. Unordered, that winner was
+        whatever the scan reached first — which could disagree with
+        ``memory_find_by_content_hash``, which returns the OLDEST after #839. Two
+        dedup paths pointing at different rows for the same content is the bug;
+        agreeing on the oldest is the fix.
+
+        THE INSERTION ORDER IS THE TEST. Rows are written NEWEST-first, so heap
+        order and ``created_at`` order disagree: unordered, the scan reaches the
+        newest row first and keeps it, which is the wrong answer. Written
+        oldest-first instead, the unordered path would return the oldest by
+        accident and the test would pass with the fix removed — measured, on an
+        earlier version of exactly this test: 5 of 5 runs passed with the
+        ``order_by`` reverted.
+
+        Ten independent groups for the same reason: one group can go either way on
+        a plan change, ten agreeing by chance cannot.
+        """
+        agent = f"agent-dupgroup-{_uid()}"
+        groups: dict[str, list[str]] = {}
+
+        for group in range(10):
+            content = f"a duplicated observation {_uid()}-{group}"
+            content_hash = hashlib.sha256(content.encode()).hexdigest()
+            ids = []
+            for _ in range(3):
+                payload = _memory_payload(tenant_id, fleet_id, content=content)
+                payload["agent_id"] = agent
+                payload["content_hash"] = content_hash
+                resp = await client.post(f"{PREFIX}/memories", json=payload)
+                assert resp.status_code == 200, resp.text
+                ids.append(resp.json()["id"])
+            # Written ascending, so ids[0] is the oldest. The rows are then
+            # REWRITTEN newest-first below by shifting created_at, which is what
+            # makes heap order disagree with age.
+            groups[content_hash] = ids
+
+        # Age them in reverse: the last-written row becomes the oldest. Heap order
+        # is unchanged, so "first row the scan reaches" is now the NEWEST.
+        async with _svc_session() as session:
+            for ids in groups.values():
+                for offset, memory_id in enumerate(ids):
+                    await session.execute(
+                        text(
+                            "UPDATE memories SET created_at = "
+                            "timestamptz '2026-01-01 00:00:00+00' - make_interval(days => :d) "
+                            "WHERE id = CAST(:id AS uuid)"
+                        ),
+                        {"d": offset, "id": memory_id},
+                    )
+
+        resp = await client.post(
+            f"{PREFIX}/memories/bulk-by-content-hashes",
+            json={
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": agent,
+                "hashes": list(groups),
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        resolved = resp.json()
+
+        # After the re-aging, the OLDEST of each group is its last-written row.
+        wrong = {h: (resolved[h]["id"], ids[-1]) for h, ids in groups.items() if resolved[h]["id"] != ids[-1]}
+        assert not wrong, (
+            f"{len(wrong)} of {len(groups)} groups resolved to a row other than "
+            f"the oldest, so the batch lookup disagrees with the single-write "
+            f"dedup gate about which row owns this content: {list(wrong.items())[:3]}"
+        )
+
+    async def test_bulk_hash_lookup_reports_the_duplicate_group_it_resolved(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+        caplog,
+    ) -> None:
+        """``_warn_duplicate_content_hash`` is shared by both dedup gates on
+        purpose — its own docstring says a warning from only one of them
+        undercounts the duplicate population, and that population is the number
+        the partial unique index decision rests on. This path resolved groups
+        silently, so every duplicate seen only here was missing from that count.
+        """
+        import logging
+
+        agent = f"agent-warn-{_uid()}"
+        content = f"a duplicated observation {_uid()}"
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+        for _ in range(2):
+            payload = _memory_payload(tenant_id, fleet_id, content=content)
+            payload["agent_id"] = agent
+            payload["content_hash"] = content_hash
+            assert (await client.post(f"{PREFIX}/memories", json=payload)).status_code == 200
+
+        with caplog.at_level(logging.WARNING):
+            resp = await client.post(
+                f"{PREFIX}/memories/bulk-by-content-hashes",
+                json={
+                    "tenant_id": tenant_id,
+                    "fleet_id": fleet_id,
+                    "agent_id": agent,
+                    "hashes": [content_hash],
+                },
+            )
+        assert resp.status_code == 200, resp.text
+
+        warned = [
+            r
+            for r in caplog.records
+            if "duplicate live rows share a content_hash" in r.getMessage()
+            and getattr(r, "dedup_path", None) == "bulk_find_by_content_hashes"
+        ]
+        assert warned, (
+            "the batch lookup resolved a duplicate group without reporting it, "
+            "so duplicates visible only on this path stay uncounted"
+        )
+
+    async def test_bulk_hash_lookup_stays_quiet_when_there_is_no_duplicate(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+        caplog,
+    ) -> None:
+        """The guard against a warning that fires on every healthy lookup — which
+        would make the signal useless for counting anything."""
+        import logging
+
+        agent = f"agent-quiet-{_uid()}"
+        content = f"a unique observation {_uid()}"
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+        payload = _memory_payload(tenant_id, fleet_id, content=content)
+        payload["agent_id"] = agent
+        payload["content_hash"] = content_hash
+        assert (await client.post(f"{PREFIX}/memories", json=payload)).status_code == 200
+
+        with caplog.at_level(logging.WARNING):
+            resp = await client.post(
+                f"{PREFIX}/memories/bulk-by-content-hashes",
+                json={
+                    "tenant_id": tenant_id,
+                    "fleet_id": fleet_id,
+                    "agent_id": agent,
+                    "hashes": [content_hash],
+                },
+            )
+        assert resp.status_code == 200, resp.text
+
+        assert not [
+            r
+            for r in caplog.records
+            if "duplicate live rows share a content_hash" in r.getMessage()
+            and getattr(r, "dedup_path", None) == "bulk_find_by_content_hashes"
+        ]
 
 
 # =====================================================================
