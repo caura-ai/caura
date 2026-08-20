@@ -5384,7 +5384,35 @@ class PostgresService:
         async with get_session() as session:
             link = MemoryEntityLink(**data)
             session.add(link)
-            await session.flush()
+            try:
+                await session.flush()
+            except IntegrityError as exc:
+                # H-05 follow-up: ``memory_id`` and ``entity_id`` are both
+                # caller-supplied and both carry an FK, so pointing at a row that
+                # does not exist is a CLIENT error. It used to escape as a bare
+                # IntegrityError → 500, which made the fault indistinguishable
+                # from storage being down: core-api saw HTTPStatusError(500) for
+                # both and could only treat them the same.
+                #
+                # ``ValueError`` because the router already maps it to 409 for
+                # ``entity_add`` (routers/entities.py) — same shape, one
+                # convention. The composite PK ``(memory_id, entity_id)`` lands
+                # here too: re-linking an existing pair is a conflict, not a
+                # server fault.
+                #
+                # The raw ``exc.orig`` is logged, never interpolated into the
+                # message: that message becomes the 409 ``detail`` the caller
+                # reads, and the driver text carries constraint names and the
+                # offending values. ``entity_add`` above draws the same line.
+                logger.info(
+                    "Entity link rejected for memory %s → entity %s: %s",
+                    data.get("memory_id"),
+                    data.get("entity_id"),
+                    exc.orig,
+                )
+                raise ValueError(
+                    "entity link rejected: memory_id or entity_id does not exist, or the link already exists"
+                ) from exc
             return link
 
     async def entity_bulk_upsert_links(self, items: list[dict]) -> list[dict]:

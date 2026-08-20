@@ -271,6 +271,26 @@ async def create_memory(data: MemoryCreate) -> MemoryOut:
     return await _create_memory_legacy(data)
 
 
+def _memory_out_with_created_links(ctx, memory: dict) -> MemoryOut:
+    """Build the response echoing the links that PERSISTED, not the requested ones.
+
+    H-05: ``WriteMemoryRow`` degrades a failed entity link instead of failing the
+    write, so "requested" and "created" can differ. Reporting a link that does not
+    exist would be a quieter wrong answer than the 500 this replaces.
+
+    Shared because BOTH callers of the persist pipeline return from here — the main
+    create path and the auto-chunk fall-through — and only one of them was fixed
+    first. A third caller would have drifted the same way.
+    """
+    return _memory_to_out(
+        memory,
+        entity_links=[
+            EntityLinkOut(entity_id=link.entity_id, role=link.role)
+            for link in ctx.data["entity_links_created"]
+        ],
+    )
+
+
 async def _create_memory_pipeline(data: MemoryCreate) -> MemoryOut:
     """Pipeline-based create_memory — same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.write import (
@@ -406,12 +426,7 @@ async def _create_memory_pipeline(data: MemoryCreate) -> MemoryOut:
             raise _exc
 
         memory = ctx.data["memory"]
-        return _memory_to_out(
-            memory,
-            entity_links=[
-                EntityLinkOut(entity_id=link.entity_id, role=link.role) for link in data.entity_links
-            ],
-        )
+        return _memory_out_with_created_links(ctx, memory)
     finally:
         timings = ctx.data.get("phase_timings", {})
         # Defensive ``.get`` — when the pipeline raised, ``ctx.data["memory"]``
@@ -448,6 +463,14 @@ async def _create_memory_pipeline(data: MemoryCreate) -> MemoryOut:
                 "embedding_pending": bool(memory_metadata.get("embedding_pending")),
                 "enrichment_pending": bool(memory_metadata.get("enrichment_pending")),
                 "cached_embedding": ctx.data.get("cached_embedding") is not None,
+                # H-05: how many caller-supplied entity links were dropped. The
+                # write still succeeds, so ``success`` alone cannot show it, and a
+                # link that was never created leaves no row for
+                # ``GET /entities/broken-links`` to find later — the per-link ERROR
+                # log and this count are the only traces. Sits beside the
+                # ``*_pending`` flags because it is the same kind of statement:
+                # the row is real, one aspect of it is not settled.
+                "entity_links_failed": len(ctx.data.get("entity_link_failures") or ()),
                 "success": _exc is None,
             },
         )
@@ -606,10 +629,9 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         raise HTTPException(status_code=500, detail="Memory write pipeline failed unexpectedly")
 
     memory = ctx.data["memory"]
-    return _memory_to_out(
-        memory,
-        entity_links=[EntityLinkOut(entity_id=link.entity_id, role=link.role) for link in data.entity_links],
-    )
+    # Same persist pipeline as the main path, so the same truthful echo. This site
+    # is reachable when auto-chunking extracts 0-1 facts and falls through.
+    return _memory_out_with_created_links(ctx, memory)
 
 
 async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:

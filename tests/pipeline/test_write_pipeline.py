@@ -33,7 +33,7 @@ def _make_input(
         agent_id=AGENT_ID,
         content=content,
         persist=persist,
-        entity_links=[],
+        # entity_links rides **kwargs — MemoryCreate already defaults it to [].
         **kwargs,
     )
 
@@ -900,5 +900,293 @@ async def test_auto_mode_decision_type_routes_to_strong():
         assert isinstance(result, MemoryOut)
         assert result.metadata is not None
         assert result.metadata.get("write_mode") == "strong"
+    finally:
+        memory_service._USE_PIPELINE_WRITE = original
+
+
+# ---------------------------------------------------------------------------
+# H-05: a committed row must not be abandoned by a later failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bad_entity_link_does_not_abandon_the_committed_row(caplog):
+    """H-05: the memory row commits BEFORE entity links are written.
+
+    A raise in the link loop marked the pipeline FAILED and broke before
+    ``ScheduleBackgroundTasks``, so the caller got a 500 for a write that had
+    persisted — and in deferred-embedding deployments the row kept
+    ``embedding=NULL`` forever, invisible to semantic search, while a retry hit
+    CheckExactDuplicate and 409'd pointing at that same degraded row. Neither
+    writable nor repairable.
+
+    ``entity_links`` are caller-supplied UUIDs with no upstream existence check,
+    so a nonexistent id is an FK violation — which is what this drives.
+    """
+    import logging
+
+    from core_api.schemas import EntityLinkIn
+    from core_api.services import memory_service
+
+    original = memory_service._USE_PIPELINE_WRITE
+    memory_service._USE_PIPELINE_WRITE = True
+    try:
+        from core_api.services.memory_service import create_memory
+
+        ghost = uuid.uuid4()  # no such entity row
+        data = _make_input(
+            content="H-05 probe: a memory whose entity link cannot resolve, at length.",
+            entity_links=[EntityLinkIn(entity_id=ghost, role="subject")],
+        )
+
+        with caplog.at_level(logging.ERROR, logger="core_api.pipeline.steps.write.write_memory_row"):
+            result = await create_memory(data)
+
+        # 1. The write stands. Previously a 500.
+        assert isinstance(result, MemoryOut)
+        assert result.id
+
+        # 2. The response is TRUTHFUL: it reports the link as absent rather than
+        #    echoing the request, which would claim a link that does not exist.
+        assert result.entity_links == [], result.entity_links
+
+        # 3. The drop is loud — this is user-visible data loss, unlike the audit
+        #    hook next to it which is genuinely non-critical.
+        errors = [r for r in caplog.records if "entity link failed" in r.getMessage()]
+        assert errors, "a dropped entity link left no trace"
+        assert getattr(errors[0], "entity_id", None) == str(ghost)
+    finally:
+        memory_service._USE_PIPELINE_WRITE = original
+
+
+@pytest.mark.asyncio
+async def test_good_entity_links_are_still_reported():
+    """The truthful-echo change must not under-report a link that DID persist —
+    otherwise the fix would trade a loud failure for a quiet one."""
+    from core_api.schemas import EntityLinkIn
+    from core_api.services import memory_service
+
+    original = memory_service._USE_PIPELINE_WRITE
+    memory_service._USE_PIPELINE_WRITE = True
+    try:
+        from core_api.clients.storage_client import get_storage_client
+        from core_api.services.memory_service import create_memory
+
+        sc = get_storage_client()
+        entity = await sc.create_entity(
+            {
+                "tenant_id": TENANT_ID,
+                "fleet_id": FLEET_ID,
+                "canonical_name": f"h05-entity-{uuid.uuid4().hex[:8]}",
+                "entity_type": "other",
+            }
+        )
+        data = _make_input(
+            content="H-05 probe: a memory whose entity link resolves cleanly, at length.",
+            entity_links=[EntityLinkIn(entity_id=uuid.UUID(entity["id"]), role="subject")],
+        )
+
+        result = await create_memory(data)
+
+        assert [str(link.entity_id) for link in result.entity_links] == [entity["id"]]
+    finally:
+        memory_service._USE_PIPELINE_WRITE = original
+
+
+@pytest.mark.asyncio
+async def test_one_bad_link_does_not_discard_the_good_ones():
+    """The property the per-link try/except exists for, and the only one the
+    all-fail and all-succeed cases above cannot show.
+
+    Without this, a refactor to a single ``try`` around the whole loop — or to a
+    batch call that aborts on first violation — passes every other test in this
+    file while silently dropping valid links beside a bad one.
+    """
+    from core_api.schemas import EntityLinkIn
+    from core_api.services import memory_service
+
+    original = memory_service._USE_PIPELINE_WRITE
+    memory_service._USE_PIPELINE_WRITE = True
+    try:
+        from core_api.clients.storage_client import get_storage_client
+        from core_api.services.memory_service import create_memory
+
+        sc = get_storage_client()
+        real = await sc.create_entity(
+            {
+                "tenant_id": TENANT_ID,
+                "fleet_id": FLEET_ID,
+                "canonical_name": f"h05-mixed-{uuid.uuid4().hex[:8]}",
+                "entity_type": "other",
+            }
+        )
+        ghost = uuid.uuid4()
+
+        # Ghost FIRST, so a loop that aborts on the first failure loses the real one.
+        data = _make_input(
+            content="H-05 probe: one resolvable link and one ghost, mixed together.",
+            entity_links=[
+                EntityLinkIn(entity_id=ghost, role="subject"),
+                EntityLinkIn(entity_id=uuid.UUID(real["id"]), role="object"),
+            ],
+        )
+
+        result = await create_memory(data)
+
+        assert [str(link.entity_id) for link in result.entity_links] == [real["id"]], (
+            "the valid link beside a bad one was discarded"
+        )
+    finally:
+        memory_service._USE_PIPELINE_WRITE = original
+
+
+@pytest.mark.asyncio
+async def test_bad_link_still_runs_the_post_write_step(monkeypatch):
+    """The actual harm H-05 caused, asserted directly.
+
+    The 500 was the visible symptom. The damage was that the pipeline broke BEFORE
+    ``ScheduleBackgroundTasks``, so the embed and enrichment backfill were never
+    scheduled — in a deferred-embedding deployment the row kept ``embedding=NULL``
+    and stayed permanently invisible to semantic search.
+
+    Asserts the STEP RAN rather than that a particular task was scheduled. What the
+    step schedules is config-gated (the embed branch needs ``embedding is None``,
+    i.e. deferred mode and no cached embedding), so an assertion on the task would
+    be vacuous in an inline-embedding environment like this one — green for the
+    wrong reason. "The step after a committed write still runs" is the invariant,
+    and it holds in every configuration.
+    """
+    from core_api.pipeline.steps.write.schedule_background_tasks import (
+        ScheduleBackgroundTasks,
+    )
+    from core_api.schemas import EntityLinkIn
+    from core_api.services import memory_service
+
+    ran: list[bool] = []
+    original_execute = ScheduleBackgroundTasks.execute
+
+    async def _spy(self, ctx):
+        ran.append(True)
+        return await original_execute(self, ctx)
+
+    monkeypatch.setattr(ScheduleBackgroundTasks, "execute", _spy)
+
+    original = memory_service._USE_PIPELINE_WRITE
+    memory_service._USE_PIPELINE_WRITE = True
+    try:
+        from core_api.services.memory_service import create_memory
+
+        data = _make_input(
+            content=f"H-05 probe {uuid.uuid4().hex}: post-write step must still run.",
+            entity_links=[EntityLinkIn(entity_id=uuid.uuid4(), role="subject")],
+        )
+
+        result = await create_memory(data)
+
+        assert isinstance(result, MemoryOut)
+        assert ran, (
+            "ScheduleBackgroundTasks was skipped — the embed/enrich backfill would "
+            "never be scheduled, which is the real H-05 damage"
+        )
+    finally:
+        memory_service._USE_PIPELINE_WRITE = original
+
+
+@pytest.mark.asyncio
+async def test_a_bad_id_is_classified_permanent_not_transient(caplog):
+    """Review round 1: degrading every failure identically meant a caller's bad id
+    and an unreachable storage service looked the same in the logs.
+
+    They now differ, which only became possible after the links route started
+    returning 409 for a bad id — before that an FK violation and an outage were
+    both a bare 500, so no core-api-side classification could have separated them.
+    """
+    import logging
+
+    from core_api.schemas import EntityLinkIn
+    from core_api.services import memory_service
+
+    original = memory_service._USE_PIPELINE_WRITE
+    memory_service._USE_PIPELINE_WRITE = True
+    try:
+        from core_api.services.memory_service import create_memory
+
+        with caplog.at_level(
+            logging.ERROR, logger="core_api.pipeline.steps.write.write_memory_row"
+        ):
+            await create_memory(
+                _make_input(
+                    content=f"H-05 probe {uuid.uuid4().hex}: a ghost id is the caller's fault.",
+                    entity_links=[EntityLinkIn(entity_id=uuid.uuid4(), role="subject")],
+                )
+            )
+
+        dropped = [r for r in caplog.records if "entity link failed" in r.getMessage()]
+        assert dropped, "the dropped link left no trace"
+        assert getattr(dropped[0], "permanent") is True, (
+            "a nonexistent entity_id is the caller's input, not a storage outage — "
+            "misclassifying it sends on-call after the wrong system"
+        )
+        assert getattr(dropped[0], "status_code") == 409
+    finally:
+        memory_service._USE_PIPELINE_WRITE = original
+
+
+@pytest.mark.asyncio
+async def test_a_storage_outage_is_classified_transient_and_summarised(caplog):
+    """The case the review was really worried about: if the links endpoint is down,
+    every link in every write drops and the API still returns 201 — an outage with
+    zero failed requests. It must be distinguishable from a bad id, and it must
+    survive the per-link log cap."""
+    import logging
+    from unittest.mock import AsyncMock, patch
+
+    import httpx
+
+    from core_api.schemas import EntityLinkIn
+    from core_api.services import memory_service
+
+    original = memory_service._USE_PIPELINE_WRITE
+    memory_service._USE_PIPELINE_WRITE = True
+    try:
+        from core_api.clients.storage_client import get_storage_client
+        from core_api.services.memory_service import create_memory
+
+        sc = get_storage_client()
+        # More links than the per-link log cap, so the cap and the summary both
+        # get exercised.
+        links = [EntityLinkIn(entity_id=uuid.uuid4(), role="subject") for _ in range(7)]
+        outage = httpx.HTTPStatusError(
+            "storage down",
+            request=httpx.Request("POST", "http://storage/entities/links"),
+            response=httpx.Response(503),
+        )
+
+        with (
+            patch.object(sc, "create_entity_link", new=AsyncMock(side_effect=outage)),
+            caplog.at_level(logging.ERROR, logger="core_api.pipeline.steps.write.write_memory_row"),
+        ):
+            result = await create_memory(
+                _make_input(
+                    content=f"H-05 probe {uuid.uuid4().hex}: storage links endpoint is down.",
+                    entity_links=links,
+                )
+            )
+
+        # The write still stands — degrading is not negotiable.
+        assert isinstance(result, MemoryOut)
+        assert result.entity_links == []
+
+        per_link = [r for r in caplog.records if "entity link failed" in r.getMessage()]
+        assert all(getattr(r, "permanent") is False for r in per_link), (
+            "a 503 is storage's problem, not the caller's"
+        )
+        # Capped, so log volume does not track caller input.
+        assert len(per_link) == 5, f"expected the cap to hold, got {len(per_link)}"
+        # ...and the cap does not hide the outage.
+        summary = [r for r in caplog.records if "entity links dropped" in r.getMessage()]
+        assert summary, "the cap swallowed the outage signal"
+        assert getattr(summary[0], "transient") == 7
+        assert getattr(summary[0], "dropped") == 7
     finally:
         memory_service._USE_PIPELINE_WRITE = original

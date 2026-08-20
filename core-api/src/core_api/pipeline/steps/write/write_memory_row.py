@@ -12,6 +12,11 @@ from core_api.services.hooks import get_hooks
 
 logger = logging.getLogger(__name__)
 
+#: Per-link ERROR lines emitted per request before falling back to the single
+#: summary below. ``entity_links`` has no schema bound, so this is what keeps
+#: log volume from tracking caller input.
+_MAX_LINK_ERROR_LOGS = 5
+
 
 class WriteMemoryRow:
     @property
@@ -80,20 +85,104 @@ class WriteMemoryRow:
         memory = await sc.create_memory(memory_data)
         timings["storage_ms"] = round((time.perf_counter() - storage_t0) * 1000)
 
+        # H-05: the row above is COMMITTED, so everything after it degrades rather
+        # than raising. A raise here marks the pipeline FAILED and breaks before
+        # ``ScheduleBackgroundTasks`` — which is what schedules the embed and
+        # enrichment backfill — so the caller got a 500 for a write that persisted
+        # and the row was left unreachable and unrepairable. The test in
+        # tests/pipeline/test_write_pipeline.py carries the full incident.
+        #
+        # ``entity_links`` are caller-supplied UUIDs with no upstream existence
+        # check, so one bad id is an FK violation → storage 500 → HTTPStatusError.
+        # Per-link rather than one try around the loop: a single bad id must not
+        # discard the valid links beside it.
         links_t0 = time.perf_counter()
+        linked: list = []
+        link_failures: list[dict] = []
         for link in data.entity_links:
-            await sc.create_entity_link(
-                {
-                    "memory_id": memory["id"],
-                    # Stringify the UUID for JSON transport — mirrors
-                    # line 60's handling of ``subject_entity_id`` and
-                    # the bulk write path. SQLAlchemy auto-coerces on
-                    # receive, so the persisted value is identical.
-                    "entity_id": str(link.entity_id),
-                    "role": link.role,
-                }
-            )
+            try:
+                await sc.create_entity_link(
+                    {
+                        "memory_id": memory["id"],
+                        # Stringify the UUID for JSON transport — mirrors
+                        # line 60's handling of ``subject_entity_id`` and
+                        # the bulk write path. SQLAlchemy auto-coerces on
+                        # receive, so the persisted value is identical.
+                        "entity_id": str(link.entity_id),
+                        "role": link.role,
+                    }
+                )
+            except Exception as exc:
+                # Still degrade in EVERY case — the row is committed, and letting
+                # anything propagate here is exactly the H-05 bug. But the two
+                # causes need different operator responses, so they are not
+                # logged identically:
+                #
+                #   * 4xx — the caller named a memory/entity that does not exist,
+                #     or a pair already linked. Permanent, their input, one link.
+                #   * anything else (5xx, connect, timeout) — storage's problem,
+                #     ours to chase. If it hits every link in the request it is an
+                #     outage, not N independent data-loss events, and an outage
+                #     with zero failed requests is the worst kind to diagnose.
+                #
+                # This distinction only became possible once the links route
+                # started returning 409 for a bad id; before that an FK violation
+                # and an unreachable storage service were both a bare 500.
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                permanent = status is not None and 400 <= status < 500
+                link_failures.append(
+                    {"entity_id": str(link.entity_id), "role": link.role, "permanent": permanent}
+                )
+                if len(link_failures) <= _MAX_LINK_ERROR_LOGS:
+                    # ERROR, not warning: unlike the audit hook, a dropped link is
+                    # user-visible data loss — the memory exists but is not
+                    # reachable through that entity, and a link that was never
+                    # created leaves no row for ``GET /entities/broken-links`` to
+                    # find later. The row itself is fine, so the write stands.
+                    logger.error(
+                        "entity link failed; memory kept without it",
+                        exc_info=True,
+                        extra={
+                            "memory_id": memory["id"],
+                            "tenant_id": data.tenant_id,
+                            "entity_id": str(link.entity_id),
+                            "role": link.role,
+                            "error_type": type(exc).__name__,
+                            "status_code": status,
+                            # False → chase storage, not the caller.
+                            "permanent": permanent,
+                        },
+                    )
+                continue
+            linked.append(link)
         timings["entity_links_ms"] = round((time.perf_counter() - links_t0) * 1000)
+        # Read by ``_memory_out_with_created_links``, which echoes these rather
+        # than the request so the caller is told what actually persisted.
+        ctx.data["entity_links_created"] = linked
+        if link_failures:
+            ctx.data["entity_link_failures"] = link_failures
+            transient = sum(1 for f in link_failures if not f["permanent"])
+            if len(link_failures) > _MAX_LINK_ERROR_LOGS or transient:
+                # One summary, because ``entity_links`` is unbounded: a caller
+                # sending a thousand bad ids would otherwise emit a thousand ERROR
+                # lines, and log volume proportional to caller input is a
+                # denial-of-observability. Also fires whenever ANY failure was
+                # transient — that is the outage signal, and it must not be the
+                # thing the cap swallowed.
+                logger.error(
+                    "entity links dropped: %d of %d (%d transient)",
+                    len(link_failures),
+                    len(data.entity_links),
+                    transient,
+                    extra={
+                        "memory_id": memory["id"],
+                        "tenant_id": data.tenant_id,
+                        "dropped": len(link_failures),
+                        "requested": len(data.entity_links),
+                        "transient": transient,
+                        "logged_individually": min(len(link_failures), _MAX_LINK_ERROR_LOGS),
+                    },
+                )
 
         detail = {
             "memory_type": fields["memory_type"],
