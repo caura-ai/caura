@@ -340,11 +340,55 @@ _PURGE_TENANT_TABLES: tuple[str, ...] = (
     "agents",
     "fleet_nodes",
     "audit_log",
+    # The tamper-evident chain head for ``audit_log`` (migration 025). Listed
+    # right after it, and NOT retained: with the log rows gone the head points at
+    # nothing, and leaving it behind would make a later chain verification fail
+    # against a tenant that no longer exists.
+    "audit_chain_head",
     "documents",
     "analysis_reports",
     "dedup_reviews",
     "background_task_log",
     "idempotency_responses",
+    # ── H-09 (OSS #819): tenant-scoped tables added by later migrations that
+    # this tuple never grew to include. None has an ON DELETE CASCADE path from
+    # any table above, so their rows SURVIVED an org hard-delete — an endpoint
+    # documented as permanently destroying the tenant's data reported success
+    # while the content below was still queryable by tenant_id.
+    #
+    # Ordering is free among these: every one was verified to have no foreign key
+    # at all, so none can trip another's DELETE. Derived from the live schema
+    # rather than from the issue, which is how ``tenant_usage_counters`` (added
+    # after the audit was written) turned up.
+    #
+    # ``recall_event`` carries the raw user query text (migration 027).
+    # ``recall_candidate`` is NOT listed: it has no ``tenant_id`` of its own and
+    # rides the ON DELETE CASCADE from ``recall_event``, the same way
+    # ``memory_entity_links`` rides ``memories``.
+    "recall_event",
+    # ``goal_phrase``, ``memory_ids``, ``signals_summary`` (migration 021).
+    "session_traces",
+    # ``narrative`` is an LLM summary OF the tenant's memories (migration 029) —
+    # derived content, but still the tenant's content.
+    "agent_activity_digests",
+    "forge_rejected_fingerprints",
+    "capability_usage",
+    "tenant_usage_counters",
+)
+
+# Tenant-scoped and deliberately NOT purged, recorded here so their absence
+# reads as a decision rather than the oversight H-09 was:
+#
+# ``tenant_suppression`` — the suppression flag itself. Wiping it would
+# UN-suppress a tenant as part of deleting them, which is the opposite of what
+# a purge is for; the row is a few bytes of policy, not tenant content.
+#
+# ``lifecycle_audit`` (``org_id``-keyed) — the operational audit trail,
+# including the row recording the hard-delete being performed. See
+# ``_PURGE_ORG_KEYED_TABLES``.
+_RETAINED_TENANT_TABLES: tuple[str, ...] = (
+    "tenant_suppression",
+    "lifecycle_audit",
 )
 # OSS keys these by ``org_id``, which equals the tenant id in the
 # single-key-per-tenant OSS model (CAURA-654). ``lifecycle_audit`` is
@@ -384,6 +428,16 @@ _PURGE_FLEET_TABLES: tuple[str, ...] = (
     "documents",
     "analysis_reports",
     "dedup_reviews",
+    # H-09 sibling, which the issue does not mention: of the tables added above,
+    # exactly these three carry their own ``fleet_id``, so the fleet-scoped purge
+    # was leaving them behind for the same reason the tenant one did. The rest
+    # (``recall_event``, ``capability_usage``, ``audit_chain_head``,
+    # ``tenant_usage_counters``) are tenant-wide with no ``fleet_id`` column and
+    # so are correctly absent — removing them for one fleet would delete another
+    # fleet's rows.
+    "session_traces",
+    "agent_activity_digests",
+    "forge_rejected_fingerprints",
 )
 
 
