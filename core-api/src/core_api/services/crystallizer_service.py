@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import httpx
+from fastapi import HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 
 from common.enrichment.constants import (
@@ -14,6 +15,7 @@ from common.enrichment.constants import (
     DEFAULT_MEMORY_TYPE,
     SERVER_RESERVED_MEMORY_TYPES,
 )
+from common.events.lifecycle_publishers import publish_crystallize_on_demand_request
 from core_api.clients.storage_client import get_storage_client
 
 try:
@@ -44,6 +46,10 @@ from core_api.providers._retry import call_with_fallback, deliberate_fake_provid
 logger = logging.getLogger(__name__)
 
 MAX_AFFECTED_IDS = 20
+
+# A report at one of these has finished; re-running it would overwrite a result.
+# ``running`` is deliberately absent — see ``execute_reserved_report``.
+_TERMINAL_REPORT_STATUSES = frozenset({"completed", "failed"})
 
 
 # ---------------------------------------------------------------------------
@@ -93,21 +99,19 @@ If the input contains no meaningful information worth preserving, return an empt
 # ---------------------------------------------------------------------------
 
 
-async def run_crystallization(
-    tenant_id: str,
-    fleet_id: str | None = None,
-    trigger: str = "manual",
-    auto_crystallize: bool = True,
-) -> UUID:
-    """Run a full memory crystallization for a tenant. Returns the report ID."""
-    sc = get_storage_client()
+async def _reserve_report(sc, tenant_id: str, fleet_id: str | None, trigger: str):
+    """The id of an in-flight report, or a freshly created one.
 
-    # Check for an already-running report for this tenant/fleet
+    Split out so the reservation can be AWAITED by a caller while the analysis
+    itself runs elsewhere — see ``start_crystallization``. Returning the id is the
+    only part a caller needs synchronously.
+
+    Returns ``(report_id, is_new)``. ``is_new=False`` means a run is already in
+    flight and this call must not start a second one.
+    """
     running = await sc.find_running_report(tenant_id, fleet_id, report_type="crystallization")
     if running:
-        return running.get("id")
-
-    # Create report row
+        return running.get("id"), False
     report = await sc.create_report(
         {
             "tenant_id": tenant_id,
@@ -117,124 +121,343 @@ async def run_crystallization(
             "report_type": "crystallization",
         }
     )
-    report_id = report.get("id")
+    return report.get("id"), True
 
-    t0 = time.monotonic()
-    checks_failed = 0
-    checks_total = 0
 
-    # --- Hygiene checks ---
-    hygiene: dict = {}
-    for name, fn in [
-        ("orphaned_entities", _check_orphaned_entities),
-        ("near_duplicates", _check_near_duplicates),
-        ("missing_embeddings", _check_missing_embeddings),
-        ("expired_still_active", _check_expired_still_active),
-        ("stale_memories", _check_stale_memories),
-        ("short_content", _check_short_content),
-        ("broken_entity_links", _check_broken_entity_links),
-    ]:
+async def start_crystallization(
+    tenant_id: str,
+    fleet_id: str | None = None,
+    trigger: str = "manual",
+    auto_crystallize: bool = True,
+) -> UUID:
+    """Reserve a report and run the analysis OFF the request. Returns the id.
+
+    ``POST /crystallize`` used to AWAIT the whole run and then answer
+    ``status="running"`` — a claim that was never true, since the run had already
+    finished by the time the response was written.
+
+    That only appeared to work because the run aborted almost immediately: an
+    uncaught 409 on the first crystallized fact ended it in about a second (and
+    wedged the report, which is the rest of this change). With the 409 handled the
+    run does its actual work — hygiene checks across the tenant's memories, then a
+    create per extracted fact, each with its own embedding and dedup lookups — and
+    on a non-trivial tenant that does not fit in a request. Measured on a ~19k-row
+    database: about 1s aborting, past the request timeout when completing.
+
+    So the run moves off the request and the response becomes true. The report id
+    is still returned synchronously, and ``GET /crystallize/reports`` is how a
+    caller follows it — which is what the endpoint's own response shape has always
+    implied.
+
+    The nightly path keeps using ``run_crystallization`` and awaiting it: it is
+    already a background job with no request budget, and its caller wants the
+    completed result.
+    """
+    sc = get_storage_client()
+    report_id, is_new = await _reserve_report(sc, tenant_id, fleet_id, trigger)
+    if not is_new:
+        return report_id
+
+    # Published, NOT ``track_task``-ed. A fire-and-forget asyncio task assumes the
+    # process keeps scheduling it after the response is flushed, which a managed
+    # runtime that allocates CPU per-request does not guarantee — the deployed
+    # core-api has no ``--no-cpu-throttling`` in staging, and even where it does,
+    # nothing keeps an instance alive for a multi-minute task once no request is in
+    # flight. That failure mode is this bug again by another route: a report stuck
+    # 'running', starved instead of crashed.
+    #
+    # The event bus is the existing answer to exactly this. Under
+    # ``EVENT_BUS_BACKEND=pubsub`` (what the deployed services run) the run becomes
+    # a queued delivery with retry and a DLQ. Under the in-process bus (OSS
+    # standalone default) it is an asyncio task in this process — no better than
+    # ``track_task``, and fine there, because a self-hosted container is not
+    # subject to request-scoped CPU throttling.
+    #
+    # The staleness cutoff in ``report_find_running`` remains the backstop for the
+    # case where the message is never delivered at all.
+    try:
+        await publish_crystallize_on_demand_request(
+            tenant_id=tenant_id,
+            report_id=str(report_id),
+            fleet_id=fleet_id,
+            auto_crystallize=auto_crystallize,
+        )
+    except BaseException:
+        # The row is already 'running' and nothing will ever execute it, so
+        # leaving it would block every later trigger for this tenant until the
+        # staleness cutoff expires — an hour of "crystallization does nothing"
+        # bought by one transient publish error. That is this bug's own shape,
+        # reached through the fix for it.
+        #
+        # Marked terminal before re-raising, so the caller gets a report they can
+        # inspect rather than only a 500, and the next trigger is free to start.
+        logger.exception(
+            "crystallize-on-demand publish failed for tenant %s; failing report %s",
+            tenant_id,
+            report_id,
+        )
+        try:
+            await sc.update_report(
+                str(report_id),
+                {
+                    "status": "failed",
+                    "completed_at": datetime.now(UTC).isoformat(),
+                    "summary": {"error": "could not queue the crystallization run"},
+                },
+            )
+        except BaseException:
+            # Same best-effort rule as the run's own guard: this must not replace
+            # the publish failure the caller needs to see.
+            logger.exception("Could not mark report %s failed", report_id)
+        raise
+    return report_id
+
+
+async def execute_reserved_report(
+    *,
+    report_id: str,
+    tenant_id: str,
+    fleet_id: str | None,
+    auto_crystallize: bool,
+) -> None:
+    """Run the analysis for a report the API already reserved.
+
+    The consumer side of ``start_crystallization``. Separate from
+    ``run_crystallization`` because it must NOT reserve: the row exists and the
+    caller is already polling its id, so reserving another would leave that id
+    unfinished forever — the wedge, reintroduced by the fix for it.
+
+    IDEMPOTENT, because ``EventBus.subscribe`` says handlers must be and Pub/Sub
+    is at-least-once. This op is not cheap to repeat — it is the multi-minute run
+    that made moving off the request necessary in the first place — which also
+    makes redelivery LIKELY rather than hypothetical: a run that outlives the
+    subscription's ack deadline is redelivered while the first attempt is still
+    going. Re-running would repeat every LLM call and overwrite a report that had
+    already finished, so a row at a terminal status short-circuits.
+
+    Deliberately NOT a lock: two deliveries can still overlap while the row is
+    'running', because a status read cannot exclude an in-flight run. What this
+    prevents is the case that actually corrupts a result — clobbering a
+    'completed' or 'failed' report with a second full run.
+    """
+    sc = get_storage_client()
+    # ``read=False``: this is a read-your-write across a delivery boundary. The
+    # status being checked was written by the PREVIOUS delivery of this same
+    # message, so a lagging replica can answer 'running' for a report that has
+    # already finished — and then the whole multi-minute run happens again, which
+    # is the exact duplication this check exists to prevent. Same class as H-02
+    # (#812), where replica lag on a back-channel read-back dropped the trigger.
+    existing = await sc.get_report(report_id, read=False)
+    if existing is None:
+        # Nothing to execute against. Reserving one here would hand back an id the
+        # caller never asked for, so this drops — and the publisher's row going
+        # missing is itself worth a line in the log.
+        logger.warning("crystallize-on-demand: report %s no longer exists; dropping", report_id)
+        return
+    status = existing.get("status")
+    if status in _TERMINAL_REPORT_STATUSES:
+        logger.info(
+            "crystallize-on-demand: report %s already %s; skipping redelivery",
+            report_id,
+            status,
+        )
+        return
+    await _execute_crystallization(sc, report_id, tenant_id, fleet_id, auto_crystallize)
+
+
+async def run_crystallization(
+    tenant_id: str,
+    fleet_id: str | None = None,
+    trigger: str = "manual",
+    auto_crystallize: bool = True,
+) -> UUID:
+    """Run a full memory crystallization for a tenant, INLINE. Returns the id.
+
+    Kept awaiting for callers with no request budget that want the finished
+    result — the nightly lifecycle trigger. Request handlers use
+    ``start_crystallization``.
+    """
+    sc = get_storage_client()
+    report_id, is_new = await _reserve_report(sc, tenant_id, fleet_id, trigger)
+    if not is_new:
+        return report_id
+    await _execute_crystallization(sc, report_id, tenant_id, fleet_id, auto_crystallize)
+    return report_id
+
+
+async def _execute_crystallization(
+    sc,
+    report_id,
+    tenant_id: str,
+    fleet_id: str | None,
+    auto_crystallize: bool,
+) -> None:
+    """Run the analysis for an ALREADY-RESERVED report row and give it a terminal
+    status. Never leaves the row 'running'."""
+    # H-07: everything from here to ``update_report`` runs inside a guard, because
+    # the report row is ALREADY 'running' and ``find_running_report`` short-circuits
+    # on it. An exception escaping here left the row 'running' forever, so every
+    # later run — manual POST and the nightly lifecycle trigger alike — returned
+    # that stale id and did nothing. Crystallization stayed off for the tenant
+    # until someone hand-edited the row.
+    #
+    # ``except BaseException`` rather than ``Exception``: a CancelledError (the
+    # nightly trigger's task being torn down, or a request deadline) wedges the row
+    # exactly as thoroughly as a bug does, and is MORE likely in the scheduled
+    # path. The row is marked and the exception re-raised unchanged, so callers and
+    # cancellation semantics are untouched.
+    try:
+        t0 = time.monotonic()
+        checks_failed = 0
+        checks_total = 0
+
+        # --- Hygiene checks ---
+        hygiene: dict = {}
+        for name, fn in [
+            ("orphaned_entities", _check_orphaned_entities),
+            ("near_duplicates", _check_near_duplicates),
+            ("missing_embeddings", _check_missing_embeddings),
+            ("expired_still_active", _check_expired_still_active),
+            ("stale_memories", _check_stale_memories),
+            ("short_content", _check_short_content),
+            ("broken_entity_links", _check_broken_entity_links),
+        ]:
+            checks_total += 1
+            try:
+                hygiene[name] = await fn(tenant_id, fleet_id)
+            except (SQLAlchemyError, ValueError, RuntimeError, Exception):
+                logger.exception("Crystallizer check %s failed for tenant %s", name, tenant_id)
+                hygiene[name] = {"error": True}
+                checks_failed += 1
+
+        # --- Health metrics ---
+        health: dict = {}
         checks_total += 1
         try:
-            hygiene[name] = await fn(tenant_id, fleet_id)
-        except (SQLAlchemyError, ValueError, RuntimeError, Exception):
-            logger.exception("Crystallizer check %s failed for tenant %s", name, tenant_id)
-            hygiene[name] = {"error": True}
+            health = await _compute_health(tenant_id, fleet_id)
+        except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError):
+            logger.exception("Crystallizer health computation failed for tenant %s", tenant_id)
+            health = {"error": True}
             checks_failed += 1
 
-    # --- Health metrics ---
-    health: dict = {}
-    checks_total += 1
-    try:
-        health = await _compute_health(tenant_id, fleet_id)
-    except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError):
-        logger.exception("Crystallizer health computation failed for tenant %s", tenant_id)
-        health = {"error": True}
-        checks_failed += 1
-
-    # --- Usage metrics ---
-    usage: dict = {}
-    checks_total += 1
-    try:
-        usage = await _compute_usage(tenant_id, fleet_id)
-    except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError):
-        logger.exception("Crystallizer usage computation failed for tenant %s", tenant_id)
-        usage = {"error": True}
-        checks_failed += 1
-
-    # Remediating missing embeddings is deliberately NOT done here. Repair
-    # lives in ``core_worker.backfill``, which pages
-    # ``GET /memories/null-embedding-ids`` and publishes one
-    # ``EMBED_REQUESTED`` per row, inheriting the consumer's per-tenant
-    # concurrency, retry and DLQ wiring. Embedding inline inside a
-    # crystallization run would instead draw from the process-wide embedding
-    # gate that write traffic already oversubscribes, so a hygiene report
-    # could stall the write path it is reporting on. This run's job is to
-    # SURFACE the count (``_check_missing_embeddings``); acting on it is
-    # ``python -m core_worker.cli backfill-embeddings --tenant-id X``.
-
-    # --- Issues ---
-    issues: list[dict] = []
-    try:
-        issues = _generate_issues(hygiene, health, usage)
-    except (ValueError, RuntimeError, KeyError):
-        logger.exception("Crystallizer issue generation failed for tenant %s", tenant_id)
-
-    # --- Crystallization (auto-curate) ---
-    crystallization: dict = {
-        "enabled": auto_crystallize,
-        "clusters_found": 0,
-        "memories_crystallized": 0,
-        "memories_archived": 0,
-        "new_memories": 0,
-    }
-    if auto_crystallize:
+        # --- Usage metrics ---
+        usage: dict = {}
+        checks_total += 1
         try:
-            crystallization = await _run_crystallization(tenant_id, fleet_id, hygiene)
+            usage = await _compute_usage(tenant_id, fleet_id)
         except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError):
-            logger.exception("Crystallization failed for tenant %s (non-blocking)", tenant_id)
-            crystallization["error"] = True
+            logger.exception("Crystallizer usage computation failed for tenant %s", tenant_id)
+            usage = {"error": True}
+            checks_failed += 1
 
-    # Score: deduct points per severity
-    critical = sum(1 for i in issues if i.get("severity") == "critical")
-    warning = sum(1 for i in issues if i.get("severity") == "warning")
-    info = sum(1 for i in issues if i.get("severity") == "info")
-    overall_score = max(0, 100 - (critical * 20 + warning * 5 + info * 1))
+        # Remediating missing embeddings is deliberately NOT done here. Repair
+        # lives in ``core_worker.backfill``, which pages
+        # ``GET /memories/null-embedding-ids`` and publishes one
+        # ``EMBED_REQUESTED`` per row, inheriting the consumer's per-tenant
+        # concurrency, retry and DLQ wiring. Embedding inline inside a
+        # crystallization run would instead draw from the process-wide embedding
+        # gate that write traffic already oversubscribes, so a hygiene report
+        # could stall the write path it is reporting on. This run's job is to
+        # SURFACE the count (``_check_missing_embeddings``); acting on it is
+        # ``python -m core_worker.cli backfill-embeddings --tenant-id X``.
 
-    elapsed_ms = int((time.monotonic() - t0) * 1000)
-    status = "failed" if checks_failed == checks_total else "completed"
+        # --- Issues ---
+        issues: list[dict] = []
+        try:
+            issues = _generate_issues(hygiene, health, usage)
+        except (ValueError, RuntimeError, KeyError):
+            logger.exception("Crystallizer issue generation failed for tenant %s", tenant_id)
 
-    await sc.update_report(
-        str(report_id),
-        {
-            "status": status,
-            "completed_at": datetime.now(UTC).isoformat(),
-            "duration_ms": elapsed_ms,
-            "summary": {
-                "overall_score": overall_score,
-                "critical": critical,
-                "warning": warning,
-                "info": info,
+        # --- Crystallization (auto-curate) ---
+        crystallization: dict = {
+            "enabled": auto_crystallize,
+            "clusters_found": 0,
+            "memories_crystallized": 0,
+            "memories_archived": 0,
+            "new_memories": 0,
+            # Same shape as ``_run_crystallization``'s result, so
+            # ``analysis_reports.crystallization`` does not depend on whether
+            # auto-curate ran. A consumer reading ``duplicate_facts`` should not
+            # have to know which branch produced the row.
+            "duplicate_facts": 0,
+            "failed_facts": 0,
+        }
+        if auto_crystallize:
+            try:
+                crystallization = await _run_crystallization(tenant_id, fleet_id, hygiene)
+            except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError, HTTPException):
+                # ``HTTPException`` added (H-07): it is not a ``ValueError``, so it
+                # used to pass straight through this handler AND the per-fact one
+                # inside the call, aborting the run before ``update_report``. The
+                # per-fact handler is the real fix; this is the backstop for a 4xx
+                # raised anywhere else under this call, and it preserves the
+                # contract that a crystallization failure is NON-BLOCKING — the
+                # report still completes with ``error: True``.
+                logger.exception("Crystallization failed for tenant %s (non-blocking)", tenant_id)
+                crystallization["error"] = True
+
+        # Score: deduct points per severity
+        critical = sum(1 for i in issues if i.get("severity") == "critical")
+        warning = sum(1 for i in issues if i.get("severity") == "warning")
+        info = sum(1 for i in issues if i.get("severity") == "info")
+        overall_score = max(0, 100 - (critical * 20 + warning * 5 + info * 1))
+
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        status = "failed" if checks_failed == checks_total else "completed"
+
+        await sc.update_report(
+            str(report_id),
+            {
+                "status": status,
+                "completed_at": datetime.now(UTC).isoformat(),
+                "duration_ms": elapsed_ms,
+                "summary": {
+                    "overall_score": overall_score,
+                    "critical": critical,
+                    "warning": warning,
+                    "info": info,
+                },
+                "hygiene": hygiene,
+                "health": health,
+                "usage_data": usage,
+                "issues": issues,
+                "crystallization": crystallization,
             },
-            "hygiene": hygiene,
-            "health": health,
-            "usage_data": usage,
-            "issues": issues,
-            "crystallization": crystallization,
-        },
-    )
+        )
 
-    logger.info(
-        "Crystallization complete for tenant=%s fleet=%s score=%d status=%s (%d ms, crystallized=%d->%d)",
-        tenant_id,
-        fleet_id,
-        overall_score,
-        status,
-        elapsed_ms,
-        crystallization.get("memories_archived", 0),
-        crystallization.get("new_memories", 0),
-    )
-    return report_id
+        logger.info(
+            "Crystallization complete for tenant=%s fleet=%s score=%d status=%s (%d ms, crystallized=%d->%d)",
+            tenant_id,
+            fleet_id,
+            overall_score,
+            status,
+            elapsed_ms,
+            crystallization.get("memories_archived", 0),
+            crystallization.get("new_memories", 0),
+        )
+    except BaseException:
+        logger.exception("Crystallization run failed for tenant %s; marking report failed", tenant_id)
+        # Best-effort: if this write also fails there is nothing left to try, and
+        # its exception must not replace the original one. The staleness cutoff in
+        # ``report_find_running`` is the backstop for exactly that case.
+        try:
+            await sc.update_report(
+                str(report_id),
+                {
+                    "status": "failed",
+                    "completed_at": datetime.now(UTC).isoformat(),
+                    "duration_ms": int((time.monotonic() - t0) * 1000),
+                },
+            )
+        except BaseException:
+            # ``BaseException``, matching the outer handler, and for the same
+            # reason: if this write is itself cancelled — plausible during a
+            # shutdown that cancelled the run in the first place — an
+            # ``except Exception`` here would let that CancelledError escape and
+            # REPLACE the exception being handled, which is precisely the
+            # guarantee the comment above claims.
+            logger.exception("Could not mark report %s failed", report_id)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +484,12 @@ async def _run_crystallization(
         "memories_archived": 0,
         "new_memories": 0,
         "clusters": [],
+        # H-07: reported rather than merely logged. A run whose facts were all
+        # rejected as duplicates now COMPLETES with ``new_memories: 0``, which is
+        # indistinguishable from "found nothing to crystallize" unless the
+        # rejections are counted somewhere the report can show.
+        "duplicate_facts": 0,
+        "failed_facts": 0,
     }
 
     # Collect candidate memory IDs from near-duplicate pairs
@@ -316,6 +545,8 @@ async def _run_crystallization(
         from core_api.services.memory_service import create_memory
 
         new_ids = []
+        duplicate_facts = 0
+        failed_facts = 0
         for fact in extracted:
             # CAURA-701/717: crystallizer bypasses the write pipeline (calls
             # create_memory directly, no MergeEnrichmentFields step), so its
@@ -343,7 +574,44 @@ async def _run_crystallization(
                     ),
                 )
                 new_ids.append(str(mem_out.id))
+            except HTTPException as exc:
+                # H-07: a 409 here is the EXPECTED outcome, not a fault, and it
+                # used to escape this handler entirely — ``HTTPException`` is not
+                # a ``ValueError``, so it propagated out of ``_run_crystallization``,
+                # past the outer handler in ``run_crystallization`` (whose tuple
+                # does not include it either), and aborted the run BEFORE
+                # ``update_report`` — leaving the report row 'running' forever and
+                # every later run short-circuiting on it. Permanently, until an
+                # operator hand-edited the row.
+                #
+                # Expected by construction: a crystallized fact is a near-verbatim
+                # merge of cluster members that are >=0.95 similar to each other
+                # and still ACTIVE at this point (sources are archived only after
+                # this loop), so ``create_memory``'s semantic gate fires on it. The
+                # fake-LLM path returns a member's content VERBATIM, so the EXACT
+                # content-hash gate fires too — that one does not even need
+                # semantic dedup enabled.
+                #
+                # Non-409s are counted here as well rather than re-raised: this
+                # loop's job is per-fact isolation, and a 422/500 on one fact is
+                # no more reason to abandon the cluster than a 409 is. Both are
+                # logged, and a run that creates nothing still completes and says
+                # so, which is what makes the report honest instead of absent.
+                if exc.status_code == 409:
+                    duplicate_facts += 1
+                    logger.info(
+                        "Crystallized fact already exists; skipping",
+                        extra={"tenant_id": tenant_id, "detail": str(exc.detail)},
+                    )
+                else:
+                    failed_facts += 1
+                    logger.warning(
+                        "Crystallized fact rejected with %d: %s",
+                        exc.status_code,
+                        exc.detail,
+                    )
             except (SQLAlchemyError, ValueError, GoogleAPIError):
+                failed_facts += 1
                 logger.exception("Failed to create crystallized memory")
 
         # Archive source memories via a single per-cluster batch HTTP
@@ -391,6 +659,8 @@ async def _run_crystallization(
         )
         result["memories_archived"] += len(archived_ids)
         result["new_memories"] += len(new_ids)
+        result["duplicate_facts"] += duplicate_facts
+        result["failed_facts"] += failed_facts
 
     result["memories_crystallized"] = result["memories_archived"]
     return result

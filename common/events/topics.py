@@ -65,6 +65,17 @@ class Lifecycle(enum.StrEnum):
     # ``run_crystallization`` and ``build_full_entity_linking_pipeline``
     # both live there and have transitive deps the worker doesn't carry.
     CRYSTALLIZE_REQUESTED = "memclaw.lifecycle.crystallize-requested"
+    # OSS #817: the SAME operation, triggered by ``POST /crystallize`` instead of
+    # the nightly fanout, and on its own topic because the fanout's handler is a
+    # poor fit for an on-demand request — it needs a ``lifecycle_audit`` row to
+    # report into, and it dedups on a 24h window, which would silently skip a
+    # person asking for a run because last night's succeeded. Consumer is core-api
+    # for the same reason as above. One message per request; the run is not bounded
+    # by an HTTP request budget, which is the whole point — completing a real run
+    # does not fit in one. See ``common.events.crystallize_on_demand_request``.
+    CRYSTALLIZE_ON_DEMAND_REQUESTED = (
+        "memclaw.lifecycle.crystallize-on-demand-requested"
+    )
     ENTITY_LINK_REQUESTED = "memclaw.lifecycle.entity-link-requested"
     INSIGHTS_REQUESTED = "memclaw.lifecycle.insights-requested"
     # Periodic sweep that re-embeds rows whose embedding is still NULL.

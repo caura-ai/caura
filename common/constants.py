@@ -7,6 +7,7 @@ bounds into core-api and the flags into here would put the knob NAME in two
 files, which is the drift it exists to remove.
 """
 
+from datetime import timedelta
 from typing import NamedTuple
 
 # ── Memory liveness ──
@@ -503,3 +504,23 @@ SQL_SCORING_REQUIRED_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.it
 # The agent-facing tuning surface, derived the same way: ``SearchProfileUpdate``
 # and the ``caura_tune`` MCP tool expose exactly these.
 AGENT_TUNABLE_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.agent_tunable)
+
+
+# ---------------------------------------------------------------------------
+# Analysis reports
+# ---------------------------------------------------------------------------
+
+# H-07: how long a report row may sit in ``status='running'`` before
+# ``report_find_running`` stops treating it as in flight.
+#
+# NOT a timeout — nothing is cancelled, and no run is shortened. It bounds how
+# long an ORPHANED row (one whose run died without writing a terminal status) can
+# suppress future runs, which used to be forever: ``run_crystallization``
+# short-circuits on whatever that lookup returns, so a single crashed run
+# disabled crystallization for the tenant until someone edited the row by hand.
+#
+# One hour is a ceiling on a plausible run, not a typical one: a run does an LLM
+# call per selected cluster, so minutes is normal and an hour is far outside it.
+# Raising this lengthens the outage a crash causes; lowering it risks two
+# concurrent runs, whose only consequence is a second report row.
+REPORT_RUNNING_STALE_AFTER = timedelta(hours=1)

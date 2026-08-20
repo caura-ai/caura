@@ -54,6 +54,7 @@ from common.constants import (
     LIVE_MEMORY_STATUSES,
     RECALL_BOOST_SCALE,
     RELATION_TYPE_WEIGHTS,
+    REPORT_RUNNING_STALE_AFTER,
     SEMANTIC_DEDUP_CANDIDATE_LIMIT,
     SEMANTIC_DEDUP_THRESHOLD,
     TYPE_DECAY_DAYS,
@@ -9343,17 +9344,49 @@ class PostgresService:
         tenant_id: str,
         fleet_id: str | None,
     ) -> UUID | None:
+        """The in-flight report for this tenant/fleet, if one is genuinely running.
+
+        H-07: this is the short-circuit that ``run_crystallization`` consults, so
+        whatever it returns disables crystallization for that tenant until the row
+        stops matching. It matched on ``status == 'running'`` and nothing else, so
+        a row orphaned by a crashed run — which is what an escaping exception used
+        to produce — suppressed every future run, manual and scheduled, forever.
+
+        The guard in ``run_crystallization`` stops NEW orphans appearing. The
+        cutoff here is what recovers the ones already in the table, and the
+        backstop for the case that guard cannot cover: the failure-marking write
+        itself failing.
+
+        ``REPORT_RUNNING_STALE_AFTER`` is a ceiling on a plausible run, not a
+        timeout — nothing is cancelled. A run that outlives it simply stops
+        holding the lock, so a concurrent run becomes possible; that is the
+        deliberate trade against a permanent wedge, and the loser of such a race
+        writes a second report row rather than corrupting anything.
+        """
+        cutoff = datetime.now(UTC) - REPORT_RUNNING_STALE_AFTER
         async with get_session() as session:
             result = await session.execute(
-                select(CrystallizationReport.id).where(
+                select(CrystallizationReport.id)
+                .where(
                     CrystallizationReport.tenant_id == tenant_id,
                     CrystallizationReport.fleet_id == fleet_id
                     if fleet_id
                     else CrystallizationReport.fleet_id.is_(None),
                     CrystallizationReport.status == "running",
+                    CrystallizationReport.started_at > cutoff,
                 )
+                # H-04 family: ``scalar_one_or_none()`` raises
+                # ``MultipleResultsFound`` on two matching rows, which here means
+                # a 500 on EVERY call rather than a wedge — and two rows is
+                # reachable, because two first calls racing both create one.
+                # Nothing in the schema prevents it, so the read degrades instead:
+                # newest first, take one. Newest rather than oldest because this
+                # answers "is a run in flight", and the newest is the one most
+                # likely still alive.
+                .order_by(CrystallizationReport.started_at.desc())
+                .limit(1)
             )
-            return result.scalar_one_or_none()
+            return result.scalars().first()
 
     async def report_add(self, data: dict) -> CrystallizationReport:
         async with get_session() as session:

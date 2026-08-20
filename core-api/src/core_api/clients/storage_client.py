@@ -2621,8 +2621,18 @@ class CoreStorageClient:
     async def create_report(self, data: dict) -> dict:
         return await self._post("/reports", data)  # type: ignore[return-value]
 
-    async def get_report(self, report_id: str) -> dict | None:
-        return await self._get(f"/reports/{report_id}")
+    async def get_report(self, report_id: str, *, read: bool = True) -> dict | None:
+        """Fetch one analysis report.
+
+        ``read`` defaults to True — the replica is right for the read paths that
+        display a report. Pass ``read=False`` for a read-your-write, where replica
+        lag would answer with a state the writer has already moved past: the
+        crystallize-on-demand idempotency check does, because it is asking
+        "did a previous delivery already finish this?" and a stale 'running'
+        there re-runs a multi-minute LLM job. Same reason
+        ``find_by_content_hash`` pins the writer.
+        """
+        return await self._get(f"/reports/{report_id}", read=read)
 
     async def update_report(self, report_id: str, data: dict) -> dict | None:
         return await self._patch(f"/reports/{report_id}", data)

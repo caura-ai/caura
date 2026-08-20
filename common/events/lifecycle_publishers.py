@@ -10,6 +10,7 @@ exposes per-handler.
 from __future__ import annotations
 
 from common.events.base import Event
+from common.events.crystallize_on_demand_request import CrystallizeOnDemandRequest
 from common.events.factory import get_event_bus
 from common.events.lifecycle_archive_request import (
     LifecycleArchiveRequest,
@@ -18,6 +19,44 @@ from common.events.lifecycle_archive_request import (
 from common.events.lifecycle_forge_request import LifecycleForgeDistillRequest
 from common.events.lifecycle_purge_request import LifecyclePurgeRequest
 from common.events.topics import Topics
+
+
+async def publish_crystallize_on_demand_request(
+    *,
+    tenant_id: str,
+    report_id: str,
+    fleet_id: str | None = None,
+    auto_crystallize: bool = True,
+) -> None:
+    """OSS #817: run crystallization for an already-reserved report, off-request.
+
+    Its own publisher rather than a flag on ``publish_crystallize_request``
+    because the payload has no ``audit_id`` and the consumer must not dedup — see
+    ``CrystallizeOnDemandRequest`` for why the nightly fanout's handler cannot be
+    reused.
+
+    Under ``EVENT_BUS_BACKEND=pubsub`` (what the deployed services run) this is a
+    real queued delivery with retry and a DLQ, which is what makes it safe to
+    return from the request before the work is done. Under the in-process bus
+    (OSS standalone default) it is an ``asyncio`` task in the same process —
+    acceptable there precisely because a self-hosted container is not subject to
+    the request-scoped CPU throttling a managed platform applies.
+    """
+    payload = CrystallizeOnDemandRequest(
+        tenant_id=tenant_id,
+        report_id=report_id,
+        fleet_id=fleet_id,
+        auto_crystallize=auto_crystallize,
+    )
+    topic = Topics.Lifecycle.CRYSTALLIZE_ON_DEMAND_REQUESTED
+    await get_event_bus().publish(
+        topic,
+        Event(
+            event_type=topic,
+            tenant_id=tenant_id,
+            payload=payload.model_dump(mode="json"),
+        ),
+    )
 
 
 async def _publish(topic: str, payload: LifecycleRequestBase) -> None:

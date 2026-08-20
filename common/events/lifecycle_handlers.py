@@ -29,6 +29,7 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from common.events.base import Event, PermanentOpError
+from common.events.crystallize_on_demand_request import CrystallizeOnDemandRequest
 from common.events.factory import get_event_bus
 from common.events.lifecycle_archive_request import (
     LifecycleArchiveRequest,
@@ -72,6 +73,20 @@ class PipelineStorageAdapter(Protocol):
     """
 
     async def crystallize(self, *, org_id: str, fleet_id: str | None) -> int: ...
+
+    # OSS #817: execute an ALREADY-RESERVED report row. Distinct from
+    # ``crystallize`` above, which reserves its own: the API path reserves
+    # synchronously so it can hand the caller a pollable id, then delegates the
+    # run here. A consumer that reserved a second row would leave the caller
+    # watching an id nothing ever finishes.
+    async def crystallize_reserved_report(
+        self,
+        *,
+        tenant_id: str,
+        report_id: str,
+        fleet_id: str | None,
+        auto_crystallize: bool,
+    ) -> None: ...
 
     async def entity_link(self, *, org_id: str, fleet_id: str | None) -> int: ...
 
@@ -393,7 +408,48 @@ def register_pipeline_consumers(adapter: PipelineStorageAdapter) -> None:
             org_id=req.org_id, fleet_id=req.fleet_id, run_label=req.run_label
         )
 
+    async def crystallize_on_demand(event) -> None:
+        """OSS #817: run an API-triggered crystallization off the request.
+
+        Deliberately NOT routed through ``_run_action``: that wrapper reports into
+        a ``lifecycle_audit`` row this request has no id for, and dedups on a 24h
+        window that would silently drop a manual trigger after a successful
+        nightly run.
+
+        Exceptions propagate to the bus, which logs them; the report row is given
+        a terminal status by the run itself, so a failure here still leaves a
+        readable report rather than a wedged one.
+        """
+        try:
+            # Same guard, and the same reason, as ``_run_action`` above: an
+            # unhandled exception on a bad payload nacks the delivery and
+            # redelivers forever / DLQs (audit M16). A malformed payload is not
+            # retryable — most plausibly a rolling deploy where publisher and
+            # consumer briefly disagree on the schema — so it is dropped and
+            # logged. Bypassing ``_run_action`` cost this handler the guard, which
+            # is exactly the kind of thing bypassing shared machinery costs.
+            request = CrystallizeOnDemandRequest.model_validate(event.payload)
+        except ValidationError:
+            logger.exception(
+                "dropping malformed crystallize-on-demand payload",
+                extra={
+                    "event_type": event.event_type,
+                    "event_id": str(event.event_id),
+                    "dropped": True,
+                },
+            )
+            return
+        await adapter.crystallize_reserved_report(
+            tenant_id=request.tenant_id,
+            report_id=request.report_id,
+            fleet_id=request.fleet_id,
+            auto_crystallize=request.auto_crystallize,
+        )
+
     bus = get_event_bus()
+    bus.subscribe(
+        Topics.Lifecycle.CRYSTALLIZE_ON_DEMAND_REQUESTED, crystallize_on_demand
+    )
     bus.subscribe(
         Topics.Lifecycle.CRYSTALLIZE_REQUESTED,
         partial(
