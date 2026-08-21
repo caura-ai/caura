@@ -104,7 +104,7 @@ async def handle_memory_enriched(event: Event) -> None:
     # counterpart to the synchronous GovernanceDecision step. ``resolve_config``
     # tolerates a None session (cache-first; cold-miss opens its own).
     gov_cfg = await resolve_config(payload.tenant_id)
-    if await remediate_after_enrichment(memory, gov_cfg):
+    if (await remediate_after_enrichment(memory, gov_cfg)).dropped:
         # Row was dropped by policy — skip contradiction detection on it.
         logger.info(
             "memory-enriched: row dropped by governance policy; ack",

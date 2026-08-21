@@ -16,6 +16,7 @@ eventually-consistent here (≈ enrichment-deferral latency).
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from core_api.clients.storage_client import get_storage_client
@@ -33,17 +34,34 @@ from core_api.services.governance_gate import (
 logger = logging.getLogger(__name__)
 
 
-async def remediate_after_enrichment(memory: dict, cfg: Any) -> bool:
+@dataclass(frozen=True)
+class RemediationOutcome:
+    """What remediation did to the row — enough for a caller to follow it.
+
+    ``dropped`` alone was sufficient while the only caller had nothing left to
+    do afterwards. A caller that goes on to create rows DERIVED from this one
+    needs the rest: ``keep_private`` downgrades the row's visibility, and a
+    derived row that keeps the pre-downgrade visibility re-publishes exactly
+    the content the policy just made private (#808).
+    """
+
+    dropped: bool = False
+    visibility: str | None = None
+    """The row's new visibility when remediation changed it; ``None`` when it
+    was left alone."""
+
+
+async def remediate_after_enrichment(memory: dict, cfg: Any) -> RemediationOutcome:
     """Apply LLM-signal governance to a fast-mode row after enrichment landed.
 
-    Returns ``True`` if the row was dropped (the caller should then stop further
-    processing of it). No-op + ``False`` when governance is disabled or the
-    signals are clean.
+    Returns what was done. A caller that only needs "should I stop?" reads
+    ``.dropped``; one that creates derived rows must also honour
+    ``.visibility``. No-op when governance is disabled or the signals are clean.
     """
     pii_cfg = cfg.governance_pii
     nb_cfg = cfg.governance_non_business
     if not pii_cfg.enabled and not nb_cfg.enabled:
-        return False
+        return RemediationOutcome()
 
     md = memory.get("metadata_") or memory.get("metadata") or {}
     content = memory.get("content") or ""
@@ -54,7 +72,7 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> bool:
         # A malformed enriched-event payload without an id would otherwise
         # soft-delete "None" and stamp resource_id="None" on every audit row.
         logger.warning("governance: remediate_after_enrichment called with memory missing 'id'; skipping")
-        return False
+        return RemediationOutcome()
     memory_id = str(raw_id)
     sc = get_storage_client()
 
@@ -78,7 +96,7 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> bool:
             )
             await sc.soft_delete_memory(memory_id)
             logger.info("governance: dropped fast-mode memory %s (pii)", memory_id)
-            return True
+            return RemediationOutcome(dropped=True)
         # mask/flag: the LLM gives no offsets to redact a free-form span, and in
         # fast mode the row is already persisted — so a "mask"-configured tenant
         # can only be flagged here. Keep the action truthful (flag), but record
@@ -113,7 +131,7 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> bool:
             )
             await sc.soft_delete_memory(memory_id)
             logger.info("governance: dropped fast-mode memory %s (non-business)", memory_id)
-            return True
+            return RemediationOutcome(dropped=True)
         if nb_cfg.disposition == "keep_private":
             await sc.update_memory(memory_id, tenant_id, {"visibility": "scope_agent"})
             await emit_governance_audit(
@@ -123,4 +141,7 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> bool:
                 detail=nonbusiness_audit_detail(ACTION_NB_KEEP_PRIVATE, content, "fast"),
                 resource_id=memory_id,
             )
-    return False
+            # Reported so a caller creating derived rows can carry the
+            # downgrade to them instead of publishing the same content wider.
+            return RemediationOutcome(visibility="scope_agent")
+    return RemediationOutcome()

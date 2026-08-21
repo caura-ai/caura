@@ -2269,61 +2269,55 @@ async def _schedule_enrich_or_inline(
         # ``reference_datetime`` is still not forwarded — the inline path
         # resolves relative dates against the enrichment call's own clock, and
         # that is a separate concern.
-        enriched_row = await _enrich_memory_background(
+        await _enrich_memory_background(
             memory_id,
             content,
             tenant_id,
             fleet_id,
             agent_id,
             agent_provided_fields=agent_provided_fields,
+            governance_config=tenant_config,
+            run_governance_remediation=run_governance_remediation,
         )
-        # H-18: apply the LLM governance verdict on the INLINE path too.
+        # H-18 governance (the LLM verdict) is applied INSIDE
+        # ``_enrich_memory_background``, not here.
         #
-        # Fast mode always defers enrichment, so ``GovernanceDecision`` cannot
-        # run in its pipeline; the fast path is governed by post-write
-        # remediation instead. But that remediation lived ONLY in
-        # ``consumer.py``, which runs when the WORKER PATCHes enrichment back.
-        # An inline deployment — the DEFAULT — never publishes, so no consumer
-        # ever fired and the verdict computed just above was discarded. This is
-        # the inline counterpart of that call; both now converge on
-        # ``remediate_after_enrichment``.
+        # It ran here originally, and #808 is why it moved: by the time this
+        # function regained control, the atomic-fact fan-out had already
+        # written a child memory per claim extracted from the parent's
+        # content. A DROP then removed the parent and left the children — same
+        # text, no governance metadata, no audit trail. Governance has to
+        # happen before anything derived from the row exists, and only the
+        # enrichment function knows where that boundary is.
         #
-        # Gated on the caller rather than applied unconditionally, because
-        # strong mode already enforces the same policy synchronously via
-        # ``GovernanceDecision`` and would double-apply — duplicate audit rows
-        # and a second drop on a row policy already acted on. Its call site
-        # cannot reach this branch today (``not settings.inline_enrichment``
-        # guards it), so the flag is defence against that guard being relaxed.
+        # ``run_governance_remediation`` is still the caller's to set, for the
+        # original reason: strong mode already enforces the same policy
+        # synchronously via ``GovernanceDecision`` and would double-apply —
+        # duplicate audit rows and a second drop on a row policy already acted
+        # on. Only the caller knows the resolved write mode, and that is what
+        # decides whether the synchronous step ran. Its call site cannot reach
+        # this branch today (``not settings.inline_enrichment`` guards it), so
+        # the flag is defence against that guard being relaxed.
         #
         # ⚠ The default is OFF, which means a new caller that reaches this
         # branch without passing the flag silently skips governance — the exact
         # shape of H-18. If you add a third call site, it MUST pass
         # ``run_governance_remediation=True`` unless it has already applied
-        # ``GovernanceDecision`` synchronously for the same write. Deriving it
-        # here instead is not possible today: only the caller knows the resolved
-        # write mode, and that is what decides whether the synchronous step ran.
+        # ``GovernanceDecision`` synchronously for the same write.
         #
-        # ``enriched_row`` is ``None`` exactly when no verdict was produced.
+        # ``tenant_config`` is forwarded as ``governance_config``: it is the
+        # snapshot the pipeline resolved for this write, while
+        # ``_enrich_memory_background`` re-resolves its own to decide whether to
+        # enrich at all. With a 5-minute TTL cache they are the same object in
+        # practice; if an org toggles governance in the window between pipeline
+        # start and enrichment completing, the enrich decision and the policy
+        # decision can come from different snapshots. Deliberate — the write
+        # stays governed by the config it started under, not one that changed
+        # underneath it.
         #
-        # ``tenant_config`` is the snapshot the pipeline resolved for this write,
-        # while ``_enrich_memory_background`` re-resolves its own to decide
-        # whether to enrich at all. With a 5-minute TTL cache they are the same
-        # object in practice; if an org toggles governance in the window between
-        # pipeline start and enrichment completing, the enrich decision and the
-        # policy decision can come from different snapshots. Deliberate — using
-        # the pipeline's snapshot keeps the whole write governed by the config it
-        # started under, rather than one that changed underneath it.
-        #
-        # Deliberately unguarded, matching ``consumer.py`` on the deferred path.
-        # This is the last statement of the task — extraction and Path A are
-        # scheduled as their own ``track_task`` calls, not chained behind it — so
-        # a failure here cannot cascade, and the enclosing ``tracked_task``
-        # records it as a ``BackgroundTaskLog`` row. Swallowing it locally would
-        # only downgrade an unenforced governance policy to a bare log line.
-        if run_governance_remediation and enriched_row is not None:
-            from core_api.services.governance_remediation import remediate_after_enrichment
-
-            await remediate_after_enrichment(enriched_row, tenant_config)
+        # The return value is deliberately discarded. It used to be the
+        # governance hook; it is diagnostics only now, and treating it as one
+        # again would re-apply a policy that has already run.
     else:
         await publish_memory_enrich_request(
             memory_id=memory_id,
@@ -2699,6 +2693,8 @@ async def _enrich_memory_background(
     agent_id: str,
     *,
     agent_provided_fields: list[str] | None = None,
+    governance_config: object | None = None,
+    run_governance_remediation: bool = False,
 ) -> dict | None:
     """Background task: run LLM enrichment on a fast-path memory, then patch the row.
 
@@ -2706,9 +2702,20 @@ async def _enrich_memory_background(
     as sub-tasks.
 
     Returns the enriched row as governance needs to see it — ``id``, ``content``,
-    ``tenant_id``, ``agent_id`` and the merged ``metadata_`` — or ``None`` when no
-    LLM verdict was produced (enrichment disabled, the call failed, or the row
-    went away). See the assembly site below for why it is not re-read.
+    ``tenant_id``, ``agent_id`` and the merged ``metadata_`` — or ``None`` when
+    there is no live governed row to describe: enrichment disabled, the call
+    failed, the row went away, or governance DROPPED it. See the assembly site
+    below for why it is not re-read.
+
+    Non-``None`` therefore means "this row exists and has been governed", which
+    is the reading a caller is most likely to assume. Returning the pre-drop
+    snapshot instead would hand the next caller a dict for a row that had just
+    been soft-deleted. The value is diagnostics only — the sole caller discards
+    it — and it is NOT a governance hook; remediation runs inside this function.
+
+    ``governance_config`` is REQUIRED when ``run_governance_remediation`` is set,
+    and passing the flag without it raises rather than crashing downstream on an
+    attribute of ``None``.
 
     ``agent_provided_fields`` names the enrichment columns the caller set
     EXPLICITLY at write time (computed by ``_agent_provided_enrichment_fields``
@@ -2731,6 +2738,16 @@ async def _enrich_memory_background(
     from core_api.services.memory_enrichment import enrich_memory
     from core_api.services.organization_settings import resolve_config
     from core_api.services.task_tracker import tracked_task
+
+    if run_governance_remediation and governance_config is None:
+        # Programming error, raised before any work: the two parameters are
+        # independent, and ``remediate_after_enrichment`` dereferences
+        # ``cfg.governance_pii`` immediately. Without this a call site that set
+        # the flag but forgot the config would fail safe (no derived rows) but
+        # opaquely, as an AttributeError on ``None`` from two modules away —
+        # and the caller-side ⚠ note about adding a third call site is exactly
+        # the scenario in which that happens.
+        raise ValueError("run_governance_remediation=True requires governance_config")
 
     try:
         tenant_config = await resolve_config(tenant_id)
@@ -2858,6 +2875,43 @@ async def _enrich_memory_background(
             "metadata_": meta,
         }
 
+    except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError):
+        logger.exception("Background enrichment error for memory %s", memory_id)
+        return governed_row
+
+    # ── Govern, between enriching and deriving ────────────────────────────────
+    #
+    # #808: the verdict is applied HERE, before anything derived from this row
+    # exists. It used to run in the CALLER, after this function returned — by
+    # which time the atomic-fact fan-out below had already written a child
+    # memory per claim extracted from this same content. On a DROP the parent
+    # was then soft-deleted and the children survived it: same text, no
+    # governance metadata, no audit row tying them to the drop. A policy that
+    # says this row must not exist must not first spawn rows derived from it.
+    # The early return also skips the entity extraction scheduled at the end —
+    # entities mined out of dropped content are the same leak in another table.
+    #
+    # Deliberately OUTSIDE both ``try`` blocks, and that is why this function
+    # has two of them. The enclosing ``tracked_task`` turns an exception here
+    # into a ``BackgroundTaskLog`` row; letting the enrichment handler catch it
+    # would downgrade an unenforced governance policy to a log line among
+    # ordinary enrichment errors — the property
+    # ``test_remediation_failure_surfaces_to_the_task_tracker`` pins. Raising
+    # also skips the fan-out, which is the fail-safe order: a policy that could
+    # not be applied must not be followed by rows it might have forbidden.
+    effective_visibility: str | None = None
+    if run_governance_remediation and governed_row is not None:
+        from core_api.services.governance_remediation import remediate_after_enrichment
+
+        outcome = await remediate_after_enrichment(governed_row, governance_config)
+        if outcome.dropped:
+            # ``None``: the row no longer exists, and the return value's whole
+            # meaning is "here is the live governed row".
+            return None
+        effective_visibility = outcome.visibility
+
+    # ── Derive: rows and links built out of the governed content ──────────────
+    try:
         memory_type = patch.get("memory_type") or mem.get("memory_type")
 
         # Hint-based re-embed removed (CAURA-222): the hot path embeds raw
@@ -2880,7 +2934,13 @@ async def _enrich_memory_background(
         atomic_facts = getattr(enrichment, "atomic_facts", None) or []
         if len(atomic_facts) >= 1:
             parent_ts_start = mem.get("ts_valid_start")
-            parent_visibility = mem.get("visibility") or "scope_team"
+            # ``effective_visibility`` when remediation downgraded the parent:
+            # ``mem`` was read before the PATCH and still holds the pre-policy
+            # value, so reading it here would hand the children the visibility
+            # keep_private just took away (#808). Not re-fetched — the row read
+            # can route to a replica, which is the H-02 shape the governed_row
+            # assembly above documents.
+            parent_visibility = effective_visibility or mem.get("visibility") or "scope_team"
             parent_weight = patch.get("weight") or mem.get("weight") or 0.5
             fanout_created = 0
             fanout_unembedded = 0
@@ -2952,6 +3012,17 @@ async def _enrich_memory_background(
                     "source": "atomic_fact_fanout",
                     "retrieval_hint": fact.retrieval_hint or "",
                 }
+                # #808: carry the parent's verdict onto the derived rows. They
+                # are extracted from the parent's content, so the LLM's finding
+                # about that content is a finding about them. Without it a
+                # child reads as clean to every later consumer — an audit
+                # query, or any future remediation pass — while being made of
+                # the text that was flagged. A DROP never reaches here (the
+                # early return above), so this only ever labels rows the policy
+                # allowed to live.
+                for _signal in ("contains_pii", "pii_types", "business_relevance"):
+                    if _signal in meta:
+                        child_meta[_signal] = meta[_signal]
                 if child_embedding is None:
                     # ``embedding_pending`` is public API, not bookkeeping:
                     # ``MemoryOut.metadata`` documents it, agents are told to
@@ -3137,7 +3208,10 @@ async def _enrich_memory_background(
         # respective worker PATCHes land.
         logger.info("Background enrichment succeeded for memory %s", memory_id)
     except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError):
-        logger.exception("Background enrichment error for memory %s", memory_id)
+        # Distinct from the enrichment handler above so the two phases are
+        # tellable apart in logs: by this point the row is enriched AND
+        # governed, and only the derived rows failed.
+        logger.exception("Background enrichment fan-out error for memory %s", memory_id)
 
     return governed_row
 
