@@ -17,6 +17,10 @@ Public surface:
   process-wide concurrency gate, for the one caller that holds a provider
   directly instead of going through the entrypoints above. Never nest it
   inside them; see its docstring for why that deadlocks.
+* :class:`EmbeddingGateTimeout` — raised when the concurrency gate, not the
+  backend, is what stopped an embed. A ``TimeoutError`` subclass, so
+  existing handlers are unaffected; catch it only to tell saturation apart
+  from provider failure.
 * :func:`init_platform_embedding` / :func:`get_platform_embedding` —
   platform-tier singleton, initialised once at service startup from
   ``PLATFORM_EMBEDDING_*`` env vars.
@@ -43,6 +47,7 @@ from common.embedding._platform import (
 )
 from common.embedding._registry import get_embedding_provider
 from common.embedding._service import (
+    EmbeddingGateTimeout,
     call_embedding_gated,
     get_embedding,
     get_embeddings_batch,
@@ -55,6 +60,7 @@ from common.embedding.providers.fake import (
 )
 
 __all__ = [
+    "EmbeddingGateTimeout",
     "EmbeddingProvider",
     "FakeEmbeddingProvider",
     "InstructionAwareEmbedder",

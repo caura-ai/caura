@@ -12,8 +12,10 @@ Unit tests validate:
   - In-flight provider calls never exceed ``EMBEDDING_MAX_CONCURRENCY``
   - A slot is held per ATTEMPT, so a backing-off retry doesn't squat
   - A waiter that can't get a slot in time degrades (raises) rather than
-    hanging forever, and the raised type is one the retry path treats as
-    a provider failure
+    hanging forever
+  - That timeout is classified as CAPACITY, not provider failure: the retry
+    path declines to retry it (retrying saturation deepens it) and it does
+    not advance the provider's degraded streak
 """
 
 import asyncio
@@ -108,11 +110,12 @@ class TestEmbeddingConcurrencyGate:
     async def test_blocked_waiter_degrades_instead_of_hanging(self, reset_gate):
         """Exhausted gate raises rather than accumulating waiters forever.
 
-        ``TimeoutError`` is deliberately a subclass of ``Exception`` (not
-        ``BaseException``), so ``_run_with_retry``'s broad handler treats
-        it as a provider failure and the caller degrades down the
-        pre-existing path (persist ``embedding=NULL``, leave it to
-        re-embed) instead of stalling the write.
+        Raises :class:`EmbeddingGateTimeout` — a ``TimeoutError`` subclass,
+        so it stays an ``Exception`` (not ``BaseException``) and the caller
+        still degrades down the pre-existing path (persist
+        ``embedding=NULL``, leave it to re-embed) instead of stalling the
+        write. The distinct type is what lets ``_run_with_retry`` decline to
+        retry it; see ``TestGateTimeoutIsNotRetried``.
         """
         _set_caps(total=1, reserved=0)
         svc.EMBEDDING_GATE_TIMEOUT_SECONDS = 0.05
@@ -352,3 +355,122 @@ class TestQueryEmbeddingReservation:
             *(svc.call_embedding_gated(call, background=True) for _ in range(30))
         )
         assert peak == 3, f"background should reach the full cap of 3, got {peak}"
+
+
+@pytest.mark.unit
+class TestGateTimeoutIsNotRetried:
+    """A gate timeout is a capacity signal, so the retry path must decline it.
+
+    Retrying saturation deepens it: every attempt queues another waiter for
+    another full ``EMBEDDING_GATE_TIMEOUT_SECONDS``, so the retry adds load
+    to the backlog it is reacting to and the caller waits
+    ``attempts x timeout + backoff`` to learn what attempt one already knew.
+    """
+
+    @staticmethod
+    def _counting(exc: BaseException):
+        """A ``call_embedding_gated`` stand-in that records attempts and always raises."""
+        calls = {"n": 0}
+
+        async def fake_gated(make_call, *, background):
+            calls["n"] += 1
+            raise exc
+
+        return calls, fake_gated
+
+    @pytest.mark.asyncio
+    async def test_gate_timeout_attempted_once(self, monkeypatch, reset_gate):
+        calls, fake = self._counting(svc.EmbeddingGateTimeout("saturated"))
+        monkeypatch.setattr(svc, "call_embedding_gated", fake)
+        stats = svc._EmbeddingStats(label="test-backend")
+
+        result = await svc._run_with_retry(
+            lambda: None, "Embedding", stats, background=True
+        )
+
+        assert result is None, "caller must still degrade to None"
+        assert calls["n"] == 1, f"gate timeout was retried {calls['n']} times"
+
+    @pytest.mark.asyncio
+    async def test_provider_error_is_still_retried(self, monkeypatch, reset_gate):
+        """The narrowing must not disarm retries for real provider faults."""
+        calls, fake = self._counting(RuntimeError("backend exploded"))
+        monkeypatch.setattr(svc, "call_embedding_gated", fake)
+        monkeypatch.setattr(svc, "EMBEDDING_RETRY_DELAY_S", 0)
+        stats = svc._EmbeddingStats(label="test-backend")
+
+        result = await svc._run_with_retry(
+            lambda: None, "Embedding", stats, background=True
+        )
+
+        assert result is None
+        assert calls["n"] == svc.EMBEDDING_RETRY_ATTEMPTS, (
+            f"provider error should be retried {svc.EMBEDDING_RETRY_ATTEMPTS}x, "
+            f"got {calls['n']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_gate_timeout_does_not_blame_the_provider(
+        self, monkeypatch, reset_gate
+    ):
+        """It must not advance the streak behind "Embedding service degraded".
+
+        Our own queue is not evidence about the backend's health, and that
+        streak is what an operator reads to decide the backend is unhealthy.
+        """
+        stats = svc._EmbeddingStats(label="test-backend")
+
+        _, gate_timeout = self._counting(svc.EmbeddingGateTimeout("saturated"))
+        monkeypatch.setattr(svc, "call_embedding_gated", gate_timeout)
+        for _ in range(5):
+            await svc._run_with_retry(lambda: None, "Embedding", stats, background=True)
+        assert stats.consecutive_failures == 0, (
+            "gate timeouts advanced the provider-degraded streak "
+            f"to {stats.consecutive_failures}"
+        )
+
+        # Control: a genuine provider fault still does advance it, so the
+        # assertion above is about classification and not a dead counter.
+        _, provider_error = self._counting(RuntimeError("backend exploded"))
+        monkeypatch.setattr(svc, "call_embedding_gated", provider_error)
+        monkeypatch.setattr(svc, "EMBEDDING_RETRY_DELAY_S", 0)
+        await svc._run_with_retry(lambda: None, "Embedding", stats, background=True)
+        assert stats.consecutive_failures == 1
+
+    @pytest.mark.asyncio
+    async def test_earlier_provider_failure_survives_a_later_gate_timeout(
+        self, monkeypatch, reset_gate
+    ):
+        """A real failure then a gate timeout must still count the real one.
+
+        ``record_failure`` is otherwise only reached by exhausting the loop,
+        so returning early on the timeout would discard evidence the backend
+        had already misbehaved on an earlier attempt of the SAME call. That
+        mix — erroring and slow enough to saturate the gate — is what an
+        outage looks like, which is exactly when the degraded signal must not
+        go quiet.
+        """
+        monkeypatch.setattr(svc, "EMBEDDING_RETRY_DELAY_S", 0)
+        stats = svc._EmbeddingStats(label="test-backend")
+        calls = {"n": 0}
+
+        async def provider_error_then_gate_timeout(make_call, *, background):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("backend exploded")
+            raise svc.EmbeddingGateTimeout("saturated")
+
+        monkeypatch.setattr(
+            svc, "call_embedding_gated", provider_error_then_gate_timeout
+        )
+
+        result = await svc._run_with_retry(
+            lambda: None, "Embedding", stats, background=True
+        )
+
+        assert result is None
+        assert calls["n"] == 2, "attempt 1 failed for a real reason; it should retry"
+        assert stats.consecutive_failures == 1, (
+            "the real provider failure from attempt 1 was dropped when attempt 2 "
+            "hit the gate"
+        )

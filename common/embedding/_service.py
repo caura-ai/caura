@@ -252,6 +252,24 @@ _bg_gate: asyncio.Semaphore | None = None
 _bg_gate_loop: asyncio.AbstractEventLoop | None = None
 
 
+class EmbeddingGateTimeout(TimeoutError):
+    """No slot freed within ``EMBEDDING_GATE_TIMEOUT_SECONDS``.
+
+    A distinct type because this is a CAPACITY signal, not a provider
+    fault — the provider never saw the call. Conflating the two is not
+    cosmetic: it makes the retry path amplify the very saturation it is
+    reacting to, since every retry queues another waiter for another full
+    gate timeout, and it credits the provider's degraded-streak with
+    failures it did not cause.
+
+    Subclasses :class:`TimeoutError` so the existing handlers keep working
+    unchanged — a gate timeout has always surfaced as one (see
+    ``parallel_embed_entity_boost``, ``parallel_embed_enrich``), and callers
+    that only want "the embed didn't happen" still need no changes. Only
+    code that must tell saturation apart from failure catches this.
+    """
+
+
 def _concurrency_gate() -> asyncio.Semaphore:
     """The process-wide cap on concurrent provider calls.
 
@@ -290,9 +308,12 @@ async def call_embedding_gated[T](
     backing-off retry never squats on a slot another caller could use.
 
     A slot that doesn't free within ``EMBEDDING_GATE_TIMEOUT_SECONDS``
-    raises ``TimeoutError``, which callers already treat as a provider
-    failure — the pre-existing degradation path — rather than letting
-    waiters accumulate unboundedly and stall the write path.
+    raises :class:`EmbeddingGateTimeout` rather than letting waiters
+    accumulate unboundedly and stall the write path. It is a
+    ``TimeoutError`` subclass, so callers that only care that the embed
+    didn't happen need no change; the distinct type exists so the retry and
+    stats paths can tell "we queued" apart from "the backend failed",
+    which they must, because retrying the former deepens it.
 
     *background* marks document/bulk work, which must additionally fit
     inside ``EMBEDDING_BACKGROUND_MAX_CONCURRENCY`` so a write burst can
@@ -357,17 +378,20 @@ async def call_embedding_gated[T](
                 if bg is not None:
                     await stack.enter_async_context(bg)
                 await stack.enter_async_context(gate)
-        except TimeoutError:
+        except TimeoutError as exc:
             logger.warning(
                 "Embedding concurrency gate timeout after %.1fs (background=%s, "
-                "cap=%d, background cap=%d) — degrading as provider failure; "
-                "backend may be undersized",
+                "cap=%d, background cap=%d) — capacity signal, not a provider "
+                "fault; the backend never saw this call",
                 EMBEDDING_GATE_TIMEOUT_SECONDS,
                 background,
                 EMBEDDING_MAX_CONCURRENCY,
                 EMBEDDING_BACKGROUND_MAX_CONCURRENCY,
             )
-            raise
+            raise EmbeddingGateTimeout(
+                f"embedding gate timeout after {EMBEDDING_GATE_TIMEOUT_SECONDS:.1f}s "
+                f"(background={background})"
+            ) from exc
         return await make_call()
 
 
@@ -505,6 +529,12 @@ async def get_embeddings_batch(
                 result = await call_embedding_gated(
                     lambda: provider.embed_batch(texts), background=background
                 )
+    except EmbeddingGateTimeout:
+        # Excluded from the bulk streak for the same reason the retry path
+        # excludes it: the streak drives "Embedding service degraded
+        # [<backend>]", and our own queue is not evidence about the backend's
+        # health. Still raised — the caller has no vector either way.
+        raise
     except BaseException:
         await _stats_for(scope, label).record_failure(bulk_batch_size=len(texts))
         raise
@@ -542,6 +572,49 @@ async def _run_with_retry(
             result = await call_embedding_gated(make_call, background=background)
             await stats.record_success()
             return result
+        # Saturation is not failure, and retrying it is actively harmful:
+        # each attempt queues another waiter for another full
+        # ``EMBEDDING_GATE_TIMEOUT_SECONDS``, so the retry adds load to the
+        # backlog it is reacting to while the caller waits
+        # attempts x timeout + backoff to be told what the first attempt
+        # already knew. Return immediately instead, on the FIRST timeout.
+        #
+        # Nothing is lost by not retrying: the provider never saw the call,
+        # so there is no partial work to reconcile, and the degradation
+        # contract is unchanged — ``None`` still means "no vector", which the
+        # write path persists as NULL for the backfill sweep and the search
+        # path turns into a 503. What changes is that it arrives in ~5s
+        # instead of ~11s, and without a second slot-wait.
+        #
+        # The timeout itself is deliberately NOT counted via
+        # ``record_failure``: that streak drives the "Embedding service
+        # degraded [<backend>]" ERROR, and a queue we imposed on ourselves is
+        # not evidence the backend is unhealthy. The gate's own warning is the
+        # signal for this condition, and it names the caps.
+        #
+        # But an EARLIER attempt in this same call may have failed for a real
+        # reason, and that evidence must survive. ``last_exc`` is set only by
+        # the provider-failure branch below, so it is exactly the predicate
+        # for "the backend already misbehaved this call"; without recording
+        # it here, returning early would discard it, because
+        # ``record_failure`` is otherwise only reached by exhausting the loop.
+        # That mixed case is not exotic — a provider both erroring and slow
+        # enough to saturate the gate is what an outage looks like, which is
+        # precisely when the degraded signal must not go quiet.
+        except EmbeddingGateTimeout:
+            logger.warning(
+                "%s gave up at the concurrency gate on attempt %d/%d — not "
+                "retrying; retrying saturation deepens it%s",
+                context,
+                attempt,
+                EMBEDDING_RETRY_ATTEMPTS,
+                " (an earlier attempt failed for a provider reason; counting that)"
+                if last_exc is not None
+                else "",
+            )
+            if last_exc is not None:
+                await stats.record_failure()
+            return None
         # Intentionally broad: must catch all provider-specific errors during retry.
         except Exception as exc:
             # Capture so the terminal log below can attach the stack trace.
