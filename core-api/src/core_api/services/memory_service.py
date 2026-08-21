@@ -150,6 +150,32 @@ def _auto_chunk_request_id() -> str:
     return f"auto-chunk:{uuid4()}"
 
 
+# The LLM governance verdict, as ``MergeEnrichmentFields`` / the enrichment
+# worker record it on the parent's metadata.
+_GOVERNANCE_SIGNAL_KEYS = ("contains_pii", "pii_types", "business_relevance")
+
+
+def _inherit_governance_signals(child_meta: dict, parent_meta: dict) -> None:
+    """Copy the parent's governance verdict onto a row derived from its content.
+
+    Derived rows — atomic facts (#808), auto-chunk children (#852) — are built
+    out of the parent's text, so a finding about that content is a finding about
+    them. Without the copy a child reads as clean to every later consumer (an
+    audit query, any future remediation pass) while being made of the flagged
+    text.
+
+    Only ever called on rows the policy allowed to live: a ``drop`` verdict
+    stops both fan-outs before they reach their children.
+
+    Shared by the two fan-outs rather than repeated, because that repetition is
+    exactly the shape #847 is about — the first of the pair got this in #808 and
+    the second did not.
+    """
+    for key in _GOVERNANCE_SIGNAL_KEYS:
+        if key in parent_meta:
+            child_meta[key] = parent_meta[key]
+
+
 async def _live_duplicate_hashes(
     sc,
     *,
@@ -692,7 +718,36 @@ async def _create_memory_pipeline(data: MemoryCreate) -> MemoryOut:
 
 async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> MemoryOut:
     """Auto-chunking branch using pipeline context enrichment results."""
+    from core_api.pipeline.compositions.write import (
+        build_auto_chunk_governance_pipeline,
+        build_persist_pipeline,
+    )
     from core_api.services.ingest_service import _chunk_content
+
+    # #852: apply the LLM's free-form verdict, which this branch had computed
+    # and then discarded. It belongs HERE rather than at the one call site so
+    # that the enforcement travels with the function that does the writing.
+    #
+    # First statement in the function, ahead of the chunking call, for two
+    # reasons: a rejected write should not pay for the chunking LLM round-trip,
+    # and a policy that could not be applied must not be followed by rows it
+    # might have forbidden.
+    #
+    # The step mutates in place — ``fields["metadata"]`` for the PII flag,
+    # ``data.visibility`` for a ``keep_private`` downgrade — and both the parent
+    # payload and every child payload below read those. That is what makes the
+    # downgrade cascade rather than needing to be threaded through by hand, and
+    # it is why this runs before either payload is built.
+    governance = await build_auto_chunk_governance_pipeline().run(ctx)
+    if governance.failed:
+        # Not optional, and not merely tidy: the runner CATCHES a non-HTTP
+        # exception and returns ``failed`` instead of raising. Without this
+        # check a governance step that blew up would return here as an ordinary
+        # ``None`` result and the write would proceed ungoverned — the exact
+        # defect this function is being fixed for, reintroduced one level up.
+        # (An ``HTTPException`` — the 422 a ``drop`` policy raises — is
+        # re-raised by the runner and never reaches this line.)
+        raise HTTPException(status_code=500, detail="Memory governance pipeline failed unexpectedly")
 
     sc = get_storage_client()
     fields = ctx.data["memory_fields"]
@@ -812,6 +867,14 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         child_payloads = []
         for fact, child_embedding in zip(facts, child_embeddings):
             child_ch = _content_hash(data.tenant_id, data.fleet_id, fact["content"])
+            child_meta = {
+                "parent_memory_id": str(parent_id),
+                "source": "auto_chunk",
+            }
+            # Read off ``parent_metadata``, the dict actually written to the
+            # parent row, so the children cannot end up labelled differently
+            # from the row they were cut out of.
+            _inherit_governance_signals(child_meta, parent_metadata)
             child_payloads.append(
                 {
                     "tenant_id": data.tenant_id,
@@ -823,10 +886,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                     "weight": fields["weight"],
                     "source_uri": data.source_uri,
                     "run_id": data.run_id,
-                    "metadata_": {
-                        "parent_memory_id": str(parent_id),
-                        "source": "auto_chunk",
-                    },
+                    "metadata_": child_meta,
                     "content_hash": child_ch,
                     "client_request_id": _auto_chunk_request_id(),
                     "expires_at": data.expires_at.isoformat() if data.expires_at else None,
@@ -863,9 +923,12 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
 
         return _dict_to_memory_out(parent)
 
-    # Chunking produced 0-1 facts: fall through to persist pipeline
-    from core_api.pipeline.compositions.write import build_persist_pipeline
-
+    # Chunking produced 0-1 facts: fall through to persist pipeline. Governed
+    # by the gate at the top of this function — ``build_persist_pipeline`` has
+    # no ``GovernanceDecision`` of its own, and the fast-mode fan-out in
+    # ``ScheduleBackgroundTasks`` (which is what would otherwise request
+    # post-write remediation) is keyed on a ``resolved_write_mode`` this branch
+    # never sets.
     persist_pipeline = build_persist_pipeline()
     persist_result = await persist_pipeline.run(ctx)
     if persist_result.failed:
@@ -3032,17 +3095,10 @@ async def _enrich_memory_background(
                     "source": "atomic_fact_fanout",
                     "retrieval_hint": fact.retrieval_hint or "",
                 }
-                # #808: carry the parent's verdict onto the derived rows. They
-                # are extracted from the parent's content, so the LLM's finding
-                # about that content is a finding about them. Without it a
-                # child reads as clean to every later consumer — an audit
-                # query, or any future remediation pass — while being made of
-                # the text that was flagged. A DROP never reaches here (the
-                # early return above), so this only ever labels rows the policy
-                # allowed to live.
-                for _signal in ("contains_pii", "pii_types", "business_relevance"):
-                    if _signal in meta:
-                        child_meta[_signal] = meta[_signal]
+                # #808: carry the parent's verdict onto the derived rows. A DROP
+                # never reaches here — the early return above — so this only
+                # ever labels rows the policy allowed to live.
+                _inherit_governance_signals(child_meta, meta)
                 if child_embedding is None:
                     # ``embedding_pending`` is public API, not bookkeeping:
                     # ``MemoryOut.metadata`` documents it, agents are told to

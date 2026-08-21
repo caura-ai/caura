@@ -27,6 +27,7 @@ import pytest
 
 from core_api.services import memory_service
 from core_api.services.memory_enrichment import AtomicFact
+from core_api.services.organization_settings import ResolvedConfig
 
 # No ``asyncio`` mark: ``pytest.ini`` sets ``asyncio_mode = auto``, and applying
 # it module-wide here warns on every sync test in the file.
@@ -35,6 +36,20 @@ pytestmark = [pytest.mark.unit]
 TENANT = "t-child-dedup"
 FLEET = "f1"
 AGENT = "a"
+
+
+def _tenant_config() -> ResolvedConfig:
+    """The real resolver, not a ``SimpleNamespace`` with the two attributes the
+    handler happened to read when these tests were written.
+
+    ``_handle_auto_chunk_from_ctx`` now also runs ``GovernanceDecision`` (#852),
+    which reads ``governance_pii`` / ``governance_non_business``; a stand-in
+    missing them raised ``AttributeError`` inside the step. Using the real class
+    means the next attribute the handler starts reading resolves to its actual
+    default instead of failing here. Governance is left unconfigured, so the new
+    step SKIPs and these dedup tests observe what they always did.
+    """
+    return ResolvedConfig({"entity_extraction": {"enabled": False}})
 
 
 def _fact(content: str) -> dict:
@@ -317,7 +332,7 @@ async def _run_auto_chunk(chunks: list[str], live: dict[str, dict]) -> list[dict
             "embedding": [0.0],
             "t0": 0.0,
         },
-        tenant_config=SimpleNamespace(entity_extraction_enabled=False),
+        tenant_config=_tenant_config(),
     )
 
     async def _chunks(_content, _x, _cfg):
@@ -396,7 +411,7 @@ async def test_the_parent_child_count_is_the_number_of_children_that_exist() -> 
             "embedding": [0.0],
             "t0": 0.0,
         },
-        tenant_config=SimpleNamespace(entity_extraction_enabled=False),
+        tenant_config=_tenant_config(),
     )
 
     async def _chunks(_content, _x, _cfg):
@@ -474,7 +489,7 @@ async def test_a_dropped_child_is_never_embedded() -> None:
             "embedding": [0.0],
             "t0": 0.0,
         },
-        tenant_config=SimpleNamespace(entity_extraction_enabled=False),
+        tenant_config=_tenant_config(),
     )
 
     async def _chunks(_content, _x, _cfg):
