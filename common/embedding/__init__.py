@@ -13,6 +13,10 @@ Public surface:
   falls back to :func:`get_embedding`'s symmetric behaviour. Backwards-
   compatible with the prior ``core_api.services.embedding`` module.
 * :func:`get_embedding_provider` — factory.
+* :func:`is_blank_text` — the predicate the entrypoints above use to reject
+  unembeddable input. Public so callers can apply the SAME definition of
+  blank when they need to answer differently (e.g. a 400 rather than a
+  degraded result) instead of re-implementing it.
 * :func:`call_embedding_gated` — runs a caller-supplied embed under the
   process-wide concurrency gate, for the one caller that holds a provider
   directly instead of going through the entrypoints above. Never nest it
@@ -52,6 +56,7 @@ from common.embedding._service import (
     get_embedding,
     get_embeddings_batch,
     get_query_embedding,
+    is_blank_text,
 )
 from common.embedding.protocols import EmbeddingProvider, InstructionAwareEmbedder
 from common.embedding.providers.fake import (
@@ -72,5 +77,6 @@ __all__ = [
     "get_platform_embedding",
     "get_platform_init_errors",
     "get_query_embedding",
+    "is_blank_text",
     "init_platform_embedding",
 ]

@@ -35,7 +35,12 @@ except ImportError:
 
 
 from common.constants import VECTOR_DIM
-from common.embedding import get_embedding, get_embeddings_batch, get_query_embedding
+from common.embedding import (
+    get_embedding,
+    get_embeddings_batch,
+    get_query_embedding,
+    is_blank_text,
+)
 from common.events import publish_memory_embed_request, publish_memory_enrich_request
 from common.governance import mask, scan
 from core_api.constants import (
@@ -113,7 +118,22 @@ logger = logging.getLogger(__name__)
 # instead of degrading it. Rolling storage back is not the fix — a storage
 # revision predating that commit reads nested params fine.
 _USE_PIPELINE_WRITE = True
+
+
 _USE_PIPELINE_SEARCH = True
+
+
+class BlankQuery(ValueError):
+    """A search query with nothing in it to embed.
+
+    Subclasses ``ValueError`` deliberately: the search paths funnel
+    ``ValueError`` into ``HTTPException(503)``, so a handler that does not
+    know this type keeps the pre-existing behaviour rather than escaping as
+    a 500. The two handlers that DO know it answer 400 — a blank query is
+    the caller's to fix, and a 503 pages an on-call for a backend that is
+    healthy, which is what happened for the whole 2026-08-18 17:00-18:59
+    window.
+    """
 
 
 def _content_hash(tenant_id: str, fleet_id: str | None, content: str) -> str:
@@ -3782,6 +3802,20 @@ async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
         async with per_tenant_slot("embed", tenant_id):
             embedding = await asyncio.wait_for(get_query_embedding(query, tenant_config), timeout=10.0)
         if embedding is None:
+            # Two different things arrive as ``None`` and they are not the
+            # same incident. A blank query cannot be embedded by anyone, and
+            # calling that "service unavailable" sent operators after a
+            # healthy backend for the whole 2026-08-18 17:00-18:59 window —
+            # the embedder was answering in ~7 ms while every one of these
+            # blamed it.
+            #
+            # A distinct TYPE, not just a distinct message: every caller
+            # funnels ``ValueError`` into ``HTTPException(503)``, so a message
+            # alone still pages someone for a 5xx. ``BlankQuery`` subclasses
+            # ``ValueError`` so any handler that does not know about it keeps
+            # the old behaviour, and the two that do can answer 400.
+            if is_blank_text(query):
+                raise BlankQuery("Search query must not be blank")
             raise ValueError("Embedding service unavailable")
         await cache_set(_cache_key, json.dumps(embedding), ttl=EMBEDDING_CACHE_TTL)
         fut.set_result(embedding)
@@ -4251,6 +4285,13 @@ async def _search_memories_legacy(
         emb_task.cancel()
         ent_task.cancel()
         raise HTTPException(status_code=504, detail="Search embedding timed out")
+    except BlankQuery as exc:
+        # Same 400-not-503 reasoning as the pipeline step. Kept in step even
+        # though this path is deprecated: a divergence here would be a trap
+        # for whoever flips ``_USE_PIPELINE_SEARCH`` back during a hotfix.
+        emb_task.cancel()
+        ent_task.cancel()
+        raise HTTPException(status_code=400, detail=str(exc))
     except ValueError as exc:
         emb_task.cancel()
         ent_task.cancel()

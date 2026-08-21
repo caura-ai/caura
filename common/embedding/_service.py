@@ -395,6 +395,16 @@ async def call_embedding_gated[T](
         return await make_call()
 
 
+def is_blank_text(text: str) -> bool:
+    """Whether *text* carries nothing for a model to encode.
+
+    Whitespace counts as blank, not just the empty string: a lone space is
+    equally unembeddable and reaches the backend as the same validation
+    error.
+    """
+    return not text or not text.strip()
+
+
 def _resolve_provider_name(tenant_config: object | None) -> str:
     """Tenant override first, else ``EMBEDDING_PROVIDER`` env, else ``"fake"``."""
     if tenant_config is not None:
@@ -713,6 +723,24 @@ async def get_embedding(
     ``background=True`` for deferred work nobody is waiting on. See
     ``EMBEDDING_INTERACTIVE_RESERVED_SLOTS``.
     """
+    # Blank text is a CALLER problem, not a backend one, and the backend
+    # says so: TEI answers ``413 Input validation error: `inputs` cannot be
+    # empty``. Prod took 274 of those in one week — 272 inside the
+    # 2026-08-18 17:00-18:59 incident — because nothing checked, each one
+    # was retried (the error is deterministic, so the retry could only fail
+    # again), and the ``None`` that came out was reported to users as
+    # "Embedding service unavailable" while the backend was serving
+    # normally at ~7 ms.
+    #
+    # Returning ``None`` keeps the documented contract — callers already
+    # handle it — but now it costs zero backend requests instead of two,
+    # and the log names the real cause instead of blaming the provider.
+    if is_blank_text(text):
+        logger.warning(
+            "Embedding skipped: blank text, nothing to encode (no request sent)"
+        )
+        return None
+
     provider_name = _resolve_provider_name(tenant_config)
     provider = await _resolve_provider_or_degrade(tenant_config, "Embedding")
     if provider is None:
@@ -749,6 +777,15 @@ async def get_query_embedding(
     same ``None`` is returned on a registry-level ``ValueError`` (env-var
     misconfiguration).
     """
+    # Same guard as :func:`get_embedding`, and this is the path that was
+    # actually hit: the 2026-08-18 tracebacks are all ``embed_query``. A
+    # blank search query is the easiest blank text to produce.
+    if is_blank_text(text):
+        logger.warning(
+            "Query embedding skipped: blank text, nothing to encode (no request sent)"
+        )
+        return None
+
     provider_name = _resolve_provider_name(tenant_config)
     provider = await _resolve_provider_or_degrade(tenant_config, "Query embedding")
     if provider is None:
