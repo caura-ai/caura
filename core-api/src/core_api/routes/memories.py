@@ -68,6 +68,7 @@ from core_api.services.agent_service import (
     enforce_fleet_write,
     get_or_create_agent,
     lookup_agent,
+    resolve_read_fleet_gate,
     resolve_write_agent,
 )
 from core_api.services.audit_service import log_action, log_cross_tenant_read
@@ -91,6 +92,7 @@ from core_api.services.memory_service import (
     update_memory,
 )
 from core_api.services.tenants import list_active_tenant_ids
+from core_api.services.trust_service import parse_trust_error, require_trust
 from core_api.services.usage_service import bulk_check_and_increment, check_and_increment
 
 logger = logging.getLogger(__name__)
@@ -183,11 +185,91 @@ async def list_fleets(
     return await get_storage_client().memory_fleet_distribution(tenant_id, exclude_scope_agent=True)
 
 
+async def _resolve_scoped_read(
+    scope: str,
+    *,
+    auth_tenant_id: str | None,
+    tenant_id: str | None,
+    caller_agent_id: str | None,
+    fleet_id: str | None,
+    written_by: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve ``(author_filter, effective_fleet_id)`` for an explicit ``scope``
+    on the read-enumeration routes, and enforce the trust ladder.
+
+    ``scope`` is opt-in: the routes only call this when the caller supplied it,
+    so an omitted ``scope`` leaves the historical REST behaviour untouched (the
+    dashboard passes none). It exists because the plugin and the MCP tools
+    advertise a ``scope``/``written_by`` contract that GET /memories previously
+    dropped on the floor — FastAPI ignores undeclared query params, so
+    ``caura_list {agent_id:'me', written_by:'agent-b'}`` silently answered with
+    the caller's OWN memories instead of agent-b's.
+
+    The ladder itself is ``resolve_read_fleet_gate`` — the same implementation
+    the MCP ``caura_list`` / ``caura_stats`` handlers call — so a scoped read
+    over REST cannot be a cheaper way to reach rows the MCP surface gates.
+    Without that, ``scope='all'`` would be a trust-1 tenant-wide read here while
+    MCP requires trust ≥ 2.
+
+    The gate needs a *verifiable* caller to resolve against, so it runs under
+    the same condition ``enforce_fleet_read`` already uses on these routes
+    (``auth.tenant_id and tenant_id and caller_agent_id``). A tenant/user
+    credential has no agent identity and is tenant-wide by design; the trust
+    ladder is an agent-scoped concept and does not apply to it. ``scope='agent'``
+    is the exception — it names an identity it cannot resolve — so it is
+    rejected outright rather than silently degrading to "no author filter",
+    which would widen the very read the caller asked to narrow.
+    """
+    if scope == "agent":
+        if not caller_agent_id:
+            raise HTTPException(
+                status_code=400,
+                detail="scope='agent' requires an agent identity: authenticate with an agent credential or pass agent_id.",
+            )
+        if written_by is not None and written_by != caller_agent_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"written_by must be omitted or match your own agent_id ('{caller_agent_id}') when scope='agent'.",
+            )
+        # Mirrors the MCP handlers' ``effective_written_by``: scope='agent'
+        # pins the author filter to the caller regardless of other filters.
+        author_filter: str | None = caller_agent_id
+    else:
+        author_filter = written_by
+
+    if auth_tenant_id and tenant_id and caller_agent_id:
+        min_level, fleet_id = await resolve_read_fleet_gate(tenant_id, caller_agent_id, scope, fleet_id)
+        # Read-only path: gate on ``terr`` only. ``caura_list`` is the canonical
+        # "soft-pass OK" call site (see require_trust's warning) — an
+        # unregistered agent_id is cosmetic here because nothing is persisted.
+        _, _, terr = await require_trust(tenant_id, caller_agent_id, min_level=min_level)
+        if terr:
+            raise HTTPException(status_code=403, detail=parse_trust_error(terr))
+    return author_filter, fleet_id
+
+
 @router.get("/memories", response_model=PaginatedMemoryResponse)
 async def list_memories(
     tenant_id: str | None = Query(default=None),
     fleet_id: str | None = Query(default=None),
     agent_id: str | None = Query(default=None),
+    scope: str | None = Query(
+        default=None,
+        pattern=r"^(agent|fleet|all)$",
+        description=(
+            "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own "
+            "memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet "
+            "trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). "
+            "Omit for the historical behaviour, where `agent_id` is the author filter."
+        ),
+    ),
+    written_by: str | None = Query(
+        default=None,
+        description=(
+            "Author filter. Distinct from `agent_id`, which also serves as the "
+            "visibility identity; falls back to `agent_id` when omitted."
+        ),
+    ),
     memory_type: str | None = Query(default=None),
     exclude_memory_types: list[str] | None = Query(default=None),
     created_after: datetime | None = Query(default=None),
@@ -195,6 +277,8 @@ async def list_memories(
     status: str | None = Query(default=None),
     visibility: str | None = Query(default=None),
     run_id: str | None = Query(default=None),
+    weight_min: float | None = Query(default=None, ge=0, le=1),
+    weight_max: float | None = Query(default=None, ge=0, le=1),
     cursor: str | None = Query(default=None),
     sort: str = Query(
         default="created_at",
@@ -223,6 +307,17 @@ async def list_memories(
     created with agent-scoped visibility will only appear when ``agent_id`` is
     passed.
 
+    **Author filter:** ``written_by`` selects the authoring agent. It is separate
+    from ``agent_id`` (the visibility identity) so a caller can ask for a peer's
+    authored rows without claiming that peer's identity; ``agent_id`` remains the
+    author filter when ``written_by`` is omitted. Filtering by author only ever
+    narrows the caller's existing visibility — it cannot surface a row an
+    unfiltered list would have hidden.
+
+    **Scope:** ``scope`` is optional and mirrors the MCP / plugin ``caura_list``
+    contract, including its trust ladder (see ``_resolve_scoped_read``). Omit it
+    and the route behaves exactly as before.
+
     **Pagination:** Both cursor-based and offset-based pagination are supported.
     Cursor pagination (via ``cursor``) is recommended for large datasets and only
     works with ``sort=created_at&order=desc``. Offset pagination works with any
@@ -246,8 +341,35 @@ async def list_memories(
     # A tenant/user credential (auth.agent_id None) keeps using the param, as the
     # dashboard intends.
     caller_agent_id = auth.agent_id or agent_id
+    # ``written_by`` is the author filter; ``agent_id`` keeps serving as that
+    # filter when ``written_by`` is omitted, so existing callers are unaffected.
+    author_filter = written_by if written_by is not None else agent_id
+    if scope is not None:
+        # An explicit scope decides the author filter and the trust bar, and may
+        # PIN fleet_id to the caller's home fleet (the L1 case). enforce_fleet_read
+        # below then re-checks the pinned value, which is by definition the
+        # caller's own fleet and passes.
+        author_filter, fleet_id = await _resolve_scoped_read(
+            scope,
+            auth_tenant_id=auth.tenant_id,
+            tenant_id=tenant_id,
+            caller_agent_id=caller_agent_id,
+            fleet_id=fleet_id,
+            written_by=written_by,
+        )
+    # Not redundant with the ladder above: scope='agent' resolves to L1 WITHOUT
+    # inspecting the fleet it was handed, so this is the only thing standing
+    # between a constrained caller and `scope=agent&fleet_id=<someone else's>`.
     if auth.tenant_id and tenant_id and caller_agent_id and fleet_id:
         await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
+
+    # An inverted range matches nothing. Say so rather than serving an empty
+    # page the caller reads as "no such memories".
+    if weight_min is not None and weight_max is not None and weight_min > weight_max:
+        raise HTTPException(
+            status_code=422,
+            detail=f"weight_min ({weight_min}) must not exceed weight_max ({weight_max}).",
+        )
 
     # Cursor-based pagination (only applies to created_at descending sort)
     if cursor and (sort != "created_at" or order != "desc"):
@@ -266,6 +388,8 @@ async def list_memories(
     # visibility-scoping identity. When present, the caller can see their
     # own scope_agent memories. When absent, scope_agent memories are
     # hidden (safe default — fixes the scope_agent visibility gap).
+    # ``written_by`` splits the two apart when a caller needs a different
+    # author than itself; ``author_filter`` above holds the resolved value.
     # Cross-tenant widening: when the caller's credential carries a
     # readable set wider than home AND didn't pin tenant_id, storage
     # widens to ``tenant_id = ANY($readable)``. Pinning to one tenant
@@ -276,13 +400,15 @@ async def list_memories(
         "tenant_id": tenant_id or "",
         "caller_agent_id": caller_agent_id,  # visibility scoping (authenticated identity)
         "fleet_id": fleet_id,
-        "written_by": agent_id,  # author filter (query param)
+        "written_by": author_filter,  # author filter (written_by, else agent_id)
         "memory_type": memory_type,
         "exclude_memory_types": exclude_memory_types,
         "created_after": created_after.isoformat() if created_after else None,
         "created_before": created_before.isoformat() if created_before else None,
         "status": status,
         "run_id": run_id,
+        "weight_min": weight_min,
+        "weight_max": weight_max,
         "include_deleted": include_deleted,
         "sort": sort,
         "order": order,
@@ -290,8 +416,13 @@ async def list_memories(
         "offset": offset,
         "cursor_ts": c_ts.isoformat() if c_ts else None,
         "cursor_id": str(c_id) if c_id else None,
+        # scope='agent' never widens across tenants — it means "my own memories",
+        # which live in the home tenant. Mirrors the MCP handler, which passes
+        # ``readable_tenant_ids`` only when scope != 'agent'.
         "readable_tenant_ids": (
-            auth.readable_tenant_ids if auth.is_cross_tenant_read and not tenant_id_explicit else None
+            auth.readable_tenant_ids
+            if auth.is_cross_tenant_read and not tenant_id_explicit and scope != "agent"
+            else None
         ),
     }
     rows = await get_storage_client().list_memories_by_filters(list_payload)
@@ -304,9 +435,11 @@ async def list_memories(
         last = rows[limit - 1]
         next_cursor = encode_cursor(datetime.fromisoformat(last["created_at"]), UUID(last["id"]))
 
-    # Cross-tenant audit (F2): count per-tenant from served rows.
+    # Cross-tenant audit (F2): count per-tenant from served rows. Conditioned on
+    # the same expression as ``readable_tenant_ids`` above — scope='agent' does
+    # not widen, so logging it as a cross-tenant read would be a false entry.
     source_tenants = auth.source_tenants_for_audit()
-    if source_tenants and auth.is_cross_tenant_read and not tenant_id_explicit:
+    if source_tenants and auth.is_cross_tenant_read and not tenant_id_explicit and scope != "agent":
         counts: dict[str, int] = {}
         for row in rows[:limit]:
             rt = row.get("tenant_id")
@@ -328,11 +461,28 @@ async def memory_stats(
     tenant_id: str | None = Query(default=None),
     fleet_id: str | None = Query(default=None),
     agent_id: str | None = Query(default=None),
+    scope: str | None = Query(
+        default=None,
+        pattern=r"^(agent|fleet|all)$",
+        description=(
+            "Opt-in aggregate scope, mirroring the MCP/plugin contract. 'agent' = your "
+            "own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet "
+            "trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). "
+            "Omit for the historical behaviour."
+        ),
+    ),
     memory_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
     include_deleted: bool = Query(default=False),
     auth: AuthContext = Depends(get_auth_context),
 ):
+    """Aggregate counts: total plus breakdowns by type, agent, and status.
+
+    Mirrors ``GET /memories``: same visibility scoping, same fleet-read gate, and
+    the same optional ``scope`` ladder, so a count can never disagree with the
+    list it summarises or be reachable at a lower trust level than the rows it
+    counts.
+    """
     tenant_id_explicit = bool(tenant_id)
     if tenant_id:
         auth.enforce_readable_tenant(tenant_id)
@@ -341,6 +491,43 @@ async def memory_stats(
             raise HTTPException(status_code=400, detail="tenant_id is required")
         tenant_id = auth.tenant_id
 
+    # ``agent_id`` here is BOTH the author filter and the visibility identity —
+    # it admits the named agent's own scope_agent rows into the counts. An agent
+    # credential naming a PEER would therefore learn that peer's private
+    # per-type/status counts; GET /memories closes the same widening by
+    # preferring the gateway-authenticated agent over the query param.
+    # Stats cannot borrow that fix as-is: with one knob doing both jobs, forcing
+    # it to the caller would silently narrow the historical "no agent_id →
+    # team/org-wide" aggregate. Rejecting the conflict closes the leak and
+    # leaves every legitimate call (omitted, or naming yourself) untouched.
+    if auth.agent_id and agent_id and agent_id != auth.agent_id:
+        raise HTTPException(
+            status_code=403,
+            detail=f"agent_id must be omitted or match the authenticated agent ('{auth.agent_id}').",
+        )
+    caller_agent_id = auth.agent_id or agent_id
+    effective_agent_id = agent_id
+    if scope is not None:
+        # scope='fleet'/'all' drops the per-caller filter so cross-agent
+        # aggregates surface; scope='agent' keeps it. Mirrors the MCP handler's
+        # ``effective_agent_id``. The returned author filter is unused here —
+        # stats has a single ``agent_id`` knob — but the call still enforces the
+        # trust ladder and may pin fleet_id.
+        _, fleet_id = await _resolve_scoped_read(
+            scope,
+            auth_tenant_id=auth.tenant_id,
+            tenant_id=tenant_id,
+            caller_agent_id=caller_agent_id,
+            fleet_id=fleet_id,
+            written_by=None,
+        )
+        effective_agent_id = caller_agent_id if scope == "agent" else None
+    # A fleet-scoped aggregate is a fleet-scoped read: gate it exactly as
+    # GET /memories does. Previously absent here, which let a trust-1 agent
+    # read another fleet's breakdown that the list route would have refused.
+    if auth.tenant_id and tenant_id and caller_agent_id and fleet_id:
+        await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
+
     # Type/agent/status breakdown (GROUPING SETS) via core-storage-api. Aggregates
     # across the readable set when the caller has cross-tenant read AND didn't pin
     # tenant_id; pinning to a specific tenant returns just that tenant's stats.
@@ -348,12 +535,15 @@ async def memory_stats(
         {
             "tenant_id": tenant_id,
             "fleet_id": fleet_id,
-            "agent_id": agent_id,
+            "agent_id": effective_agent_id,
             "memory_type": memory_type,
             "status": status,
             "include_deleted": include_deleted,
+            # scope='agent' is home-tenant by definition — same rule as the list route.
             "readable_tenant_ids": (
-                auth.readable_tenant_ids if auth.is_cross_tenant_read and not tenant_id_explicit else None
+                auth.readable_tenant_ids
+                if auth.is_cross_tenant_read and not tenant_id_explicit and scope != "agent"
+                else None
             ),
         }
     )

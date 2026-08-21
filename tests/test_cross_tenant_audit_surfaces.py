@@ -326,10 +326,19 @@ async def test_rest_memories_list_emits_cross_tenant_audit(monkeypatch):
 
     auth = _cross_tenant_auth()
 
+    # Every parameter is passed explicitly: calling the endpoint function
+    # directly bypasses FastAPI's dependency resolution, so an omitted argument
+    # arrives as the ``Query(...)`` default OBJECT rather than its default
+    # value — which is neither None nor comparable. A new param must be added
+    # here too.
     await memories_routes.list_memories(
         tenant_id=None,  # broad — triggers widening
         fleet_id=None,
         agent_id=None,
+        scope=None,
+        written_by=None,
+        weight_min=None,
+        weight_max=None,
         memory_type=None,
         exclude_memory_types=None,
         created_after=None,

@@ -111,6 +111,12 @@ def stub_storage_client(monkeypatch, **method_returns):
     # test must patch the alias on ``mcp_server`` (where Python resolves it at
     # call time) — not the original module path.
     monkeypatch.setattr("core_api.mcp_server.get_storage_client", _factory)
+    # ``resolve_read_fleet_gate`` — the trust ladder behind scope='fleet' for
+    # both the MCP tools and the REST read routes — lives in ``agent_service``
+    # and resolves the factory through THAT module's namespace. Patch its alias
+    # too, or a ``get_agent`` stub set here is silently ignored by the gate and
+    # the pin/level assertions read the real (ASGI-bridged) storage instead.
+    monkeypatch.setattr("core_api.services.agent_service.get_storage_client", _factory)
     return sc
 
 

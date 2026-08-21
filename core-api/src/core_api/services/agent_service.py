@@ -303,6 +303,92 @@ async def enforce_fleet_read(
         )
 
 
+async def resolve_read_fleet_gate(
+    tenant_id: str,
+    agent_id: str,
+    scope: str,
+    fleet_id: str | None,
+) -> tuple[int, str | None]:
+    """Resolve ``(min_trust, effective_fleet_id)`` for the scoped read-enumeration
+    surfaces: the MCP tools ``caura_list`` / ``caura_stats`` and the REST routes
+    ``GET /memories`` / ``GET /memories/stats`` when they are called with an
+    explicit ``scope``. All four share this one implementation so the ladder
+    cannot drift between the surfaces.
+
+    Trust ladder per the product spec: level 1 = read within the caller's OWN
+    fleet; level 2 = cross-fleet read. The requirement therefore keys off the
+    TARGET, not the ``scope`` string alone:
+
+    * ``scope='agent'`` → ``(1, fleet_id)`` — own memories (caller-filtered
+      upstream); no agent lookup needed.
+    * ``scope='all'``   → ``(2, fleet_id)`` — spans fleets by definition, so it
+      is always a cross-fleet read.
+    * ``scope='fleet'`` → the caller's own fleet is level 1; a DIFFERENT
+      explicit ``fleet_id`` is level 2. Mirrors ``enforce_fleet_read`` and the
+      ``caura_recall`` gate so all read surfaces agree.
+
+    For ``scope='fleet'`` with no ``fleet_id`` this is a security decision, not
+    a convenience: ``memory_list_by_filters`` / ``memory_stats_breakdown`` only
+    apply the ``fleet_id`` filter when it is set, and their visibility predicate
+    returns ``scope_team`` rows across ALL fleets — so an unfiltered level-1 read
+    would fan out to other fleets' shared rows. A constrained caller (trust < 2)
+    that omits ``fleet_id`` is therefore resolved by three cases:
+
+    (a) has a home fleet          → PIN ``fleet_id`` to it (own-fleet read, L1);
+    (b) registered but fleet-less → force L2 — the caller can't prove membership
+        in any fleet, so ``require_trust`` rejects it (trust 1 < 2) rather than
+        granting an unfiltered scan;
+    (c) unregistered (no row)     → soft-pass at L1 with no pin, matching the
+        read-ergonomics soft-pass in ``require_trust`` / ``caura_recall``.
+
+    A trust ≥ 2 caller is never pinned (it is allowed cross-fleet reads). With
+    an explicit fleet it resolves as above; with NO ``fleet_id`` the query would
+    fan out across all fleets, so this returns ``(2, fleet_id)`` — the caller
+    clears L2, while a caller demoted below 2 between this read and the
+    ``require_trust`` re-read does not.
+    """
+    if scope == "agent":
+        return 1, fleet_id
+    if scope == "all":
+        return 2, fleet_id
+    # scope == "fleet": decide by target fleet vs the caller's home fleet.
+    agent = await get_storage_client().get_agent(agent_id, tenant_id)
+    home_fleet = (agent or {}).get("fleet_id")
+    # trust_level pre-read from the agent storage row (agents.trust_level is the
+    # single source of truth; update_trust_level writes it directly). Used to:
+    #   1. Pick the pin branch (docstring a/b): trust < 2 pins to the home fleet,
+    #      or forces L2 when the caller is fleet-less.
+    #   2. Pick the fan-out branch: trust >= 2 with no fleet_id returns L2, so the
+    #      unfiltered cross-fleet scan is gated at the level it actually needs.
+    # Every branch returns a min_level that MATCHES the access it grants, so a
+    # stale read can only UNDER-grant (a narrower result), never over-grant:
+    # require_trust re-reads trust and rejects a caller demoted below the
+    # returned bar. get_agent is uncached, keeping even that transient divergence
+    # to a single async context switch (do NOT add caching — it would widen it).
+    trust = (agent or {}).get("trust_level", DEFAULT_TRUST_LEVEL)
+    # A different fleet is cross-fleet (L2). An unregistered / fleet-less caller
+    # (no home_fleet) that names an explicit fleet also can't prove ownership,
+    # so it must clear the L2 gate too — require_trust then rejects an
+    # unregistered id (effective trust 1 < 2) rather than granting an
+    # own-fleet pass for a fleet the caller has no established membership in.
+    if fleet_id and (not home_fleet or fleet_id != home_fleet):
+        return 2, fleet_id  # cross-fleet read → level 2
+    if not fleet_id and trust < 2:
+        if home_fleet:
+            fleet_id = home_fleet  # (a) pin to own fleet → L1
+        elif agent is not None:
+            return 2, fleet_id  # (b) registered fleet-less → L2 (require_trust rejects)
+        # (c) unregistered soft-pass → falls through to (1, None).
+    elif not fleet_id:
+        # trust >= 2, no pin requested — but fleet_id=None means the downstream
+        # query fans out across all fleets (scope_team rows). Return L2 so
+        # require_trust enforces the correct bar and eliminates the TOCTOU
+        # window: a still-trust-2 caller passes L2; a race-demoted trust-1
+        # caller does not.
+        return 2, fleet_id
+    return 1, fleet_id
+
+
 async def authorize_memory_access(
     tenant_id: str,
     caller_agent_id: str | None,
