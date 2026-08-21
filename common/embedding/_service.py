@@ -270,6 +270,54 @@ class EmbeddingGateTimeout(TimeoutError):
     """
 
 
+class EmbeddingBackendBusy(Exception):
+    """The backend refused the call because it is at capacity (HTTP 429).
+
+    The same class of signal as :class:`EmbeddingGateTimeout`, one layer
+    out: our gate says "this PROCESS is at its cap", a 429 says "the
+    SHARED backend is". Both are capacity, neither is a fault, and
+    retrying either deepens it.
+
+    Worth naming separately because a 429 is the only evidence any single
+    process can ever have about aggregate demand. The concurrency cap is
+    per process, so ``cap x instances`` is what actually arrives at the
+    backend and no instance can observe that number — but a 429 can only
+    happen once the other instances have taken the capacity, so it
+    reports the aggregate directly. It is the signal an aggregate cap
+    would have to be built on, which is why it must not be swallowed into
+    the generic provider-failure path (where it was: a 429 counted
+    against the degraded-provider streak, and was retried).
+
+    Deliberately NOT a ``TimeoutError`` subclass, unlike its sibling. A
+    gate timeout is one — we really did wait — and existing handlers were
+    already written for that. A refusal is immediate, and callers that
+    special-case timeouts should not silently inherit this.
+    """
+
+
+def _is_backend_busy(exc: BaseException) -> bool:
+    """Whether *exc* is the backend declining for capacity (HTTP 429).
+
+    Duck-typed on the status code rather than importing the provider SDK:
+    this is the service layer, it is shared by every provider, and it has
+    no ``openai`` import today. ``openai.APIStatusError`` exposes
+    ``status_code`` directly and ``httpx.HTTPStatusError`` exposes it via
+    ``.response``, so both shapes are covered without either dependency.
+
+    Only 429 counts, and the narrowness is the point. Cloud Run returns
+    429 for "no instance available" and TEI returns it when its queue is
+    full, so a 429 unambiguously means "at capacity, try later". A 503 is
+    the ambiguous one — it is equally what a genuine outage looks like —
+    and classifying it as capacity would suppress the degraded-provider
+    ERROR during a real one. A 503 therefore stays a provider failure:
+    retried, counted, and loud.
+    """
+    code = getattr(exc, "status_code", None)
+    if code is None:
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+    return code == 429
+
+
 def _concurrency_gate() -> asyncio.Semaphore:
     """The process-wide cap on concurrent provider calls.
 
@@ -392,7 +440,45 @@ async def call_embedding_gated[T](
                 f"embedding gate timeout after {EMBEDDING_GATE_TIMEOUT_SECONDS:.1f}s "
                 f"(background={background})"
             ) from exc
-        return await make_call()
+        # Classify the backend's answer HERE, at the one choke point every
+        # embed passes through, rather than at each call site. Same
+        # reasoning as putting the gate here (see the note above on
+        # ``call_embedding_gated`` being the single entry): a caller that
+        # forgets the classification would silently fall back to treating
+        # saturation as a fault, which is the bug being fixed, and there
+        # is no way to notice from the call site.
+        try:
+            return await make_call()
+        except Exception as exc:
+            if not _is_backend_busy(exc):
+                raise
+            # WARNING, not debug: unlike our own gate saturating, this
+            # says the shared backend ran out, which is the only
+            # aggregate-demand signal that exists (see
+            # ``EmbeddingBackendBusy``). It has never fired in prod — TEI
+            # served 345,802 requests in the 7 days to 2026-08-21 with
+            # zero 429s — so if it starts, that is new information and
+            # should be visible without turning debug on.
+            #
+            # The provider's own text is carried rather than left to the
+            # exception chain. This has never fired, so the first time it
+            # does the operator's question is "was that really a 429, or
+            # did the classifier catch something else" — and the answer
+            # has to be in the line that alerts, not in a traceback a
+            # level up. Not ``exc_info``: a genuine capacity event fires
+            # this per refused call, and the gate-timeout precedent is
+            # 1,915 in one hour.
+            logger.warning(
+                "Embedding backend refused at capacity (429, background=%s, "
+                "per-process cap=%d) — the shared backend is full, not faulty; "
+                "not retrying. Backend said: %s",
+                background,
+                EMBEDDING_MAX_CONCURRENCY,
+                exc,
+            )
+            raise EmbeddingBackendBusy(
+                f"embedding backend at capacity (background={background})"
+            ) from exc
 
 
 def is_blank_text(text: str) -> bool:
@@ -423,14 +509,26 @@ async def get_embeddings_batch(
 ) -> list[list[float]]:
     """Generate embeddings for multiple texts in a single API call.
 
-    Raises on any provider-side error. Bulk callers
-    (``memory_service.create_memories_bulk``,
-    ``_reembed_batch_via_provider``) already wrap this in
-    ``try: ... except Exception:`` and fall back to per-item retries,
-    so any exception type is acceptable here — what matters is that
-    the failure stats counter increments so the registry-level
-    degraded-provider trip-wire fires consistently with the single-embed
-    paths (``get_embedding`` / ``get_query_embedding``).
+    Raises on any provider-side error. Both bulk callers wrap this in
+    ``try: ... except Exception:``, so any exception type is acceptable
+    here — what matters is that the failure stats counter increments so
+    the registry-level degraded-provider trip-wire fires consistently
+    with the single-embed paths (``get_embedding`` /
+    ``get_query_embedding``).
+
+    What they do with the exception differs, and it is worth being exact
+    because an earlier version of this docstring credited both with a
+    per-item retry:
+
+    * ``_reembed_batch_via_provider`` DOES fan the batch out per item,
+      through the inline/deferred router — so in deferred mode a rejected
+      batch becomes N durable EMBED_REQUESTED messages that drain at
+      core-worker's sequential rate. That is the demand smoothing, and it
+      is why a 429 here needs no special caller handling.
+    * ``create_memories_bulk`` does NOT. Inline it re-raises (504 on a
+      timeout); otherwise it logs and leaves ``embedding=NULL`` for the
+      backfill sweep to collect. Durable either way, but there is no
+      second attempt in this request.
 
     A failed ``embed_batch`` also advances a bulk-only failure streak that
     single-embed successes cannot reset — see ``record_failure`` for why
@@ -539,11 +637,13 @@ async def get_embeddings_batch(
                 result = await call_embedding_gated(
                     lambda: provider.embed_batch(texts), background=background
                 )
-    except EmbeddingGateTimeout:
+    except (EmbeddingGateTimeout, EmbeddingBackendBusy):
         # Excluded from the bulk streak for the same reason the retry path
-        # excludes it: the streak drives "Embedding service degraded
-        # [<backend>]", and our own queue is not evidence about the backend's
-        # health. Still raised — the caller has no vector either way.
+        # excludes both: the streak drives "Embedding service degraded
+        # [<backend>]", and neither our own queue nor a backend correctly
+        # shedding load is evidence about that backend's health. Still raised —
+        # the caller has no vector either way, and raising is what routes the
+        # batch to the durable per-item path described above.
         raise
     except BaseException:
         await _stats_for(scope, label).record_failure(bulk_batch_size=len(texts))
@@ -615,6 +715,43 @@ async def _run_with_retry(
             logger.warning(
                 "%s gave up at the concurrency gate on attempt %d/%d — not "
                 "retrying; retrying saturation deepens it%s",
+                context,
+                attempt,
+                EMBEDDING_RETRY_ATTEMPTS,
+                " (an earlier attempt failed for a provider reason; counting that)"
+                if last_exc is not None
+                else "",
+            )
+            if last_exc is not None:
+                await stats.record_failure()
+            return None
+        # A 429 gets the identical treatment, for the identical reason one
+        # layer out: the backend told us it is full, so a retry adds load
+        # to the thing that is full. The only difference is that this one
+        # DID reach the backend, so it cost a round trip — which is an
+        # argument for retrying it less, not more.
+        #
+        # Not counted against the degraded streak either: that streak
+        # drives "Embedding service degraded [<backend>]", and a backend
+        # correctly shedding load is healthy. Counting it would page an
+        # operator toward a service that is behaving exactly as intended,
+        # which is what the 2026-08-18 window looked like from the logs.
+        # ``last_exc`` carries the same meaning as above — a genuine
+        # earlier failure in this call must still be recorded.
+        #
+        # The message says what THIS layer did and stops there. It must not
+        # claim the work is deferred: whether a ``None`` becomes durable
+        # work is the caller's property, not ours. A write's ``None``
+        # persists as ``embedding=NULL`` for the backfill sweep and a
+        # batch's fans out to EMBED_REQUESTED, but a query embed has no
+        # queue behind it at all — the search just fails with a 503. An
+        # operator reading "the work defers instead" during a search
+        # outage would be told recovery was in hand when it was not, in
+        # exactly the incident this classification exists to make legible.
+        except EmbeddingBackendBusy:
+            logger.warning(
+                "%s stopped at a busy backend on attempt %d/%d — not retrying;"
+                " a refusal is capacity, and retrying it deepens the shortage%s",
                 context,
                 attempt,
                 EMBEDDING_RETRY_ATTEMPTS,

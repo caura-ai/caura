@@ -61,6 +61,45 @@ def test_one_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
     assert read_int_env("CAURA_TEST_KEY", 42) == 1
 
 
+def test_minimum_zero_accepts_zero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Not every knob has 1 as its floor, and the difference is not cosmetic.
+
+    ``EMBEDDING_PROVIDER_MAX_RETRIES`` defaults to 0 on purpose. Under the
+    fixed floor of 1, setting it to 0 warned about a correct value AND
+    took the fallback path — so if the default were ever changed, an
+    explicit 0 would silently become the new default instead of 0.
+    """
+    monkeypatch.setenv("CAURA_TEST_KEY", "0")
+    assert read_int_env("CAURA_TEST_KEY", 0, minimum=0) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_minimum_zero_still_rejects_negative(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Lowering the floor lowers it to exactly the value asked for."""
+    monkeypatch.setenv("CAURA_TEST_KEY", "-1")
+    assert read_int_env("CAURA_TEST_KEY", 7, minimum=0) == 7
+    assert ">= 0" in capsys.readouterr().err
+
+
+def test_minimum_zero_still_rejects_garbage(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The floor is the only thing that moves; the parse guard stays."""
+    monkeypatch.setenv("CAURA_TEST_KEY", "none")
+    assert read_int_env("CAURA_TEST_KEY", 3, minimum=0) == 3
+    assert "not a valid int" in capsys.readouterr().err
+
+
+def test_minimum_defaults_to_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every pre-existing caller must be unaffected by the new parameter."""
+    monkeypatch.setenv("CAURA_TEST_KEY", "0")
+    assert read_int_env("CAURA_TEST_KEY", 42) == 42
+
+
 def test_whitespace_around_int_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     """``int("  100  ")`` succeeds in Python — the env var would parse and
     return 100, not the default. This documents that surrounding

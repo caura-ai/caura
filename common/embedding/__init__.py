@@ -25,6 +25,11 @@ Public surface:
   backend, is what stopped an embed. A ``TimeoutError`` subclass, so
   existing handlers are unaffected; catch it only to tell saturation apart
   from provider failure.
+* :class:`EmbeddingBackendBusy` — the same distinction for the SHARED
+  backend: raised on a 429, meaning capacity ran out across every calling
+  instance rather than in this process. Not a ``TimeoutError`` (the
+  refusal is immediate). Catch it to tell aggregate saturation apart from
+  a provider fault; the concurrency cap is per process and cannot see it.
 * :func:`init_platform_embedding` / :func:`get_platform_embedding` —
   platform-tier singleton, initialised once at service startup from
   ``PLATFORM_EMBEDDING_*`` env vars.
@@ -51,6 +56,7 @@ from common.embedding._platform import (
 )
 from common.embedding._registry import get_embedding_provider
 from common.embedding._service import (
+    EmbeddingBackendBusy,
     EmbeddingGateTimeout,
     call_embedding_gated,
     get_embedding,
@@ -65,6 +71,7 @@ from common.embedding.providers.fake import (
 )
 
 __all__ = [
+    "EmbeddingBackendBusy",
     "EmbeddingGateTimeout",
     "EmbeddingProvider",
     "FakeEmbeddingProvider",

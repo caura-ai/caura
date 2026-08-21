@@ -43,8 +43,16 @@ OPENAI_REQUEST_TIMEOUT_SECONDS: float = float(
 )
 
 # Retry budget for the high-level ``get_embedding`` call. Two attempts
-# is enough to ride out a single slow / 429 round-trip without
-# meaningfully extending the hot-path tail.
+# is enough to ride out a single slow round-trip without meaningfully
+# extending the hot-path tail.
+#
+# This is the WHOLE retry budget, which it previously was not: the OpenAI
+# SDK retries internally too (``DEFAULT_MAX_RETRIES = 2``, i.e. three
+# HTTP requests per call), and nothing pinned it, so one logical embed
+# could reach the backend six times. See
+# ``EMBEDDING_PROVIDER_MAX_RETRIES``, which now holds it at zero so this
+# number means what it says. A 429 is no longer retried at any layer —
+# see ``EmbeddingBackendBusy``.
 EMBEDDING_RETRY_ATTEMPTS: int = int(os.environ.get("EMBEDDING_RETRY_ATTEMPTS", "2"))
 EMBEDDING_RETRY_DELAY_S: float = float(os.environ.get("EMBEDDING_RETRY_DELAY_S", "1.0"))
 
@@ -118,11 +126,49 @@ EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS: float | None = read_float_env(
     "EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS", None
 )
 
+# Retries the OpenAI SDK performs INSIDE one provider call. Zero, so this
+# module's retry policy is the only one there is.
+#
+# Left unset, the SDK applies ``DEFAULT_MAX_RETRIES = 2`` — three HTTP
+# requests per call, on 429/408/409/5xx and connection errors — beneath a
+# service layer that then retries ``EMBEDDING_RETRY_ATTEMPTS`` times of
+# its own. One logical embed could reach the backend six times, and the
+# multiplication was invisible: the retries happen below the gate, so
+# they occupy no slot, emit no log line, and count as one call in every
+# stat we keep.
+#
+# Two concrete harms, not just tidiness:
+#
+#  1. It inverts the response to saturation. A 429 means the shared
+#     backend is already full, and the honest reply is to stop; instead
+#     each layer retried, so the reply was 6x the load at the exact
+#     moment capacity ran out. Same shape as retrying a gate timeout,
+#     which ``EmbeddingGateTimeout`` exists to prevent one layer up.
+#  2. It breaks the timeout arithmetic that other budgets are derived
+#     from. ``OPENAI_REQUEST_TIMEOUT_SECONDS`` is per REQUEST, so three
+#     of them is 75 s inside a call the caller believes is capped at 25 s
+#     — and ``BULK_STRONG_EMBED_TIMEOUT_SECONDS`` (8 s) was sized against
+#     the 25 s figure.
+#
+# Nothing is lost by zeroing it: ``_run_with_retry`` still retries genuine
+# provider errors, and it does so holding a gate slot, with the attempt
+# counted and logged. Env-tunable purely so an incident can restore the
+# old behaviour without a deploy.
+#
+# ``minimum=0`` because 0 is the intended value here and
+# ``read_int_env``'s usual floor of 1 would reject it — the value would
+# arrive by FALLING BACK rather than by being accepted. That warns on a
+# correct manifest, and would silently substitute a different value if
+# the default were ever changed. Garbage input is still caught.
+EMBEDDING_PROVIDER_MAX_RETRIES: int = read_int_env(
+    "EMBEDDING_PROVIDER_MAX_RETRIES", 0, minimum=0
+)
+
 
 # ── Client-side concurrency cap (backpressure) ───────────────────────
 #
-# The embedding backend is finite and can be much smaller than the
-# fleet calling it: prod's TEI service serves
+# The embedding backend is finite and can be much smaller than the set
+# of services calling it: prod's TEI service serves
 # ``maxScale x containerConcurrency`` requests at once, while core-api
 # scales to many instances that each hold a large httpx pool. Aggregate
 # demand can therefore oversubscribe the backend by orders of magnitude.
@@ -139,12 +185,46 @@ EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS: float | None = read_float_env(
 # a cheap in-process semaphore instead of holding a connection until it
 # times out.
 #
-# Be honest about the bound: this is PER PROCESS, so the fleet-wide total
-# is this value x instance count. At the default 16 x minScale 10 that is
-# still ~8x TEI's capacity, and far more at maxScale — so this reduces
-# thrash AMPLITUDE, it does not restore a capacity invariant. Raising TEI
-# maxScale/containerConcurrency is the actual capacity fix; set this
-# explicitly per deployment with the arithmetic written down.
+# Be honest about the bound: this is PER PROCESS, so the deployment-wide
+# total is this value x instance count, and nothing coordinates it.
+# Measured prod, 2026-08-21:
+#
+#   core-api      minScale 10, maxScale 200, cap 16  -> 160 in flight at
+#                 the scale prod actually runs (instance count observed
+#                 between 9 and 12 across a week), 3,200 at the ceiling
+#   core-worker   minScale 2, maxScale 20, ONE embed in flight per
+#                 instance because the Pub/Sub pull loop drains a batch
+#                 sequentially -> 2 now, 20 at the ceiling
+#   TEI (supply)  minScale 2, maxScale 3, containerConcurrency 10
+#                 -> 20 warm, 30 absolute
+#
+# So ~8x oversubscribed at the scale prod runs at, and ~107x at the
+# configured ceiling.
+#
+# DO NOT "fix" that by dividing this cap by the instance count. Fair
+# shares (30 / 10 = 3) would optimise for a coincident burst that has
+# never been observed, at the cost of the case that is observed
+# constantly: in the 7 days to 2026-08-21 TEI served 345,802 requests
+# with ZERO 5xx and ZERO 429 — every non-2xx was one of the 270
+# blank-input 413s — while OUR gate rejected work it would have served
+# (1,915 gate timeouts on 08-17 alone, TEI sitting at roughly half of a
+# single instance's container concurrency). Demand is bursty and not
+# coincident across instances, so a generous per-process cap plus a hard
+# aggregate signal beats a small per-process cap. Raising this from 8 to
+# 16 was the 2026-08-21 change, and it was in that direction on purpose.
+#
+# What bounds the aggregate is therefore NOT this number. It is the
+# backend's own 429 at ``maxScale``, which is the one signal carrying
+# cross-instance information: it can only fire when the OTHER instances
+# have taken the capacity. The requirement is that we neither amplify it
+# nor mistake it for an outage — see ``EmbeddingBackendBusy`` and
+# ``EMBEDDING_PROVIDER_MAX_RETRIES``. Rejected work lands on the durable
+# EMBED_REQUESTED path and drains at core-worker's sequential rate, which
+# is the demand smoothing; no shared token bucket is needed for it.
+#
+# Note for anyone reaching for the supply side first: TEI cannot be
+# grown. L4 GPUs are unavailable in us-central1 and the 3 -> 8 quota
+# request was DENIED, not deferred. maxScale 3 is a hard ceiling.
 EMBEDDING_MAX_CONCURRENCY: int = read_int_env("EMBEDDING_MAX_CONCURRENCY", 16)
 
 # Slots of the cap above that only INTERACTIVE embeds may occupy.

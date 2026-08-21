@@ -15,6 +15,7 @@ from common.embedding.constants import (
     EMBEDDING_HTTPX_MAX_CONNECTIONS,
     EMBEDDING_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
     EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS,
+    EMBEDDING_PROVIDER_MAX_RETRIES,
     EMBEDDING_REMOTE_MAX_BATCH,
     OPENAI_EMBEDDING_MODEL,
     OPENAI_REQUEST_TIMEOUT_SECONDS,
@@ -113,8 +114,15 @@ class OpenAIEmbeddingProvider:
         # ``OpenAILLMProvider``: the SDK's default httpx pool (100 max
         # / 20 keepalive) saturates under storm load and queues other
         # tenants' embed calls at the pool layer.
+        #
+        # ``max_retries`` is pinned rather than left at the SDK's default
+        # 2, which would put a silent 3x multiplier under every retry the
+        # service layer already performs — and under the per-request
+        # timeout that the bulk budgets are derived from. See
+        # ``EMBEDDING_PROVIDER_MAX_RETRIES``.
         client_kwargs: dict = {
             "api_key": api_key,
+            "max_retries": EMBEDDING_PROVIDER_MAX_RETRIES,
             "timeout": httpx.Timeout(
                 connect=EMBEDDING_HTTPX_CONNECT_TIMEOUT_SECONDS,
                 # read AND write keep the full request budget — the bare float

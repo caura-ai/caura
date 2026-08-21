@@ -179,11 +179,19 @@ async def handle_embed_request(event: Event) -> None:
     # worker throughput — that spends a shared backend to speed up work no
     # one is waiting for.
     #
-    # A gate timeout raises ``TimeoutError``, which propagates and nacks
-    # rather than acking the message embedding-less. Saturation is
-    # transient, so redelivery with Pub/Sub backoff (and the DLQ behind it)
-    # is the right answer for a queue consumer — unlike core-api, which
-    # degrades to ``None`` because an HTTP caller is waiting on it.
+    # Both saturation classes propagate from here and nack rather than
+    # acking the message embedding-less: ``EmbeddingGateTimeout`` (this
+    # process is at its cap) and ``EmbeddingBackendBusy`` (the shared
+    # backend is, HTTP 429). Neither is caught, and that is the intended
+    # handling — saturation is transient, so redelivery with Pub/Sub
+    # backoff, and the DLQ behind it, is the right answer for a queue
+    # consumer. Unlike core-api, which degrades to ``None`` because an
+    # HTTP caller is waiting on it.
+    #
+    # That nack is also what makes the queue the demand-smoothing
+    # mechanism rather than just a transport: a refused embed comes back
+    # later at Pub/Sub's pace instead of being retried into a backend that
+    # just said it was full.
     if embedding is None:
         embedding = await call_embedding_gated(lambda: provider.embed(request.content), background=True)
 
