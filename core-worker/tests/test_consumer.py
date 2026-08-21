@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import httpx
 import pytest
 
+import common.embedding._service as embedding_service
 import core_worker.consumer as consumer
 from common.events.base import Event
 from core_worker.config import Settings
@@ -397,3 +399,59 @@ async def test_update_memory_embedding_omits_provenance_when_unknown():
     await update_memory_embedding(client, memory_id=uuid4(), tenant_id="tenant-A", embedding=[0.1] * 768)
 
     assert "embedded_content_hash" not in client.patch.await_args.kwargs["json"]
+
+
+@pytest.mark.asyncio
+async def test_embed_request_is_held_to_the_embedding_concurrency_gate(
+    monkeypatch, settings, mock_provider, mock_storage_client
+):
+    """8 concurrent embed-requests against a background cap of 2 never exceed 2.
+
+    Ungated — ``provider.embed`` called straight on the platform singleton —
+    peak in-flight equals the number of callers instead.
+    """
+    cap = 2
+    callers = 8
+
+    # Only the background cap: this path passes ``background=True``, so that
+    # is the binding one, and leaving the shared cap alone keeps
+    # ``EMBEDDING_INTERACTIVE_RESERVED_SLOTS`` non-zero the way it is in a
+    # real process. The per-loop gate cache rebinds on its own because
+    # pytest-asyncio gives each test a fresh event loop.
+    monkeypatch.setattr(embedding_service, "EMBEDDING_BACKGROUND_MAX_CONCURRENCY", cap)
+
+    in_flight = 0
+    peak = 0
+
+    async def _embed(_text: str) -> list[float]:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0)  # yield so overlap is observable without wall-clock
+        in_flight -= 1
+        return [0.1] * 768
+
+    mock_provider.embed = AsyncMock(side_effect=_embed)
+
+    consumer.configure(mock_storage_client)
+    monkeypatch.setattr(consumer, "find_embedding_by_content_hash", AsyncMock(return_value=None))
+    monkeypatch.setattr(consumer, "update_memory_embedding", AsyncMock(return_value=None))
+
+    await asyncio.gather(
+        *(
+            consumer.handle_embed_request(
+                _make_event(
+                    {
+                        "memory_id": str(uuid4()),
+                        "tenant_id": "tenant-A",
+                        "content": f"content {i}",
+                    }
+                )
+            )
+            for i in range(callers)
+        )
+    )
+
+    # Every request still embedded — the gate serialises, it does not drop.
+    assert mock_provider.embed.await_count == callers
+    assert peak <= cap, f"peak in-flight {peak} exceeded the gate cap {cap}"

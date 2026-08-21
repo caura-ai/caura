@@ -104,11 +104,23 @@ class PubSubEventBus(EventBus):
         # filtering) — preserves the pre-guard behaviour for single-env
         # deployments and in-process tests.
         env: str | None = None,
-        # Batch size per pull. Caps ``workers x max_messages``
-        # concurrent embed calls across the deployed pool, so 25
-        # balances drain throughput against the OpenAI per-org
-        # rate limit and the blast radius of a single wedged
-        # dispatch cycle.
+        # Batch size per pull — how many messages one ``pull`` may return.
+        # NOT a concurrency cap, despite what an earlier version of this
+        # comment claimed: ``_pull_loop`` awaits ``_dispatch_all`` once per
+        # message inside a ``for``, so a batch drains SEQUENTIALLY and only
+        # ONE EVENT's handlers are in flight per pull loop at a time
+        # (``_dispatch_all`` does gather that event's handlers, so a topic
+        # with several handlers runs those concurrently). Handler
+        # concurrency is therefore ``subscriptions x handlers-per-subscription
+        # x instances`` and is independent of this number, which bounds only
+        # how much work one wedged dispatch cycle holds.
+        #
+        # Worth stating rather than leaving implicit: that serialisation is
+        # a property of this loop's shape, not a limit anyone chose. Raising
+        # drain throughput by parallelising it reads as a pure win while
+        # removing the only thing holding per-instance handler concurrency
+        # near one, so anything that lifts it needs a real bound of its own
+        # — see ``common.embedding.call_embedding_gated`` for the embed path.
         max_messages: int = 25,
         pull_timeout: float = 20.0,
         error_backoff: float = 5.0,

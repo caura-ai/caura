@@ -50,7 +50,7 @@ from types import SimpleNamespace
 import httpx
 from pydantic import ValidationError
 
-from common.embedding import get_platform_embedding
+from common.embedding import call_embedding_gated, get_platform_embedding
 from common.enrichment import EnrichmentResult, enrich_memory
 from common.events.base import Event
 from common.events.factory import get_event_bus
@@ -163,16 +163,39 @@ async def handle_embed_request(event: Event) -> None:
                 },
             )
 
-    # Step 2 — provider call (skipped on cache hit).
+    # Step 2 — provider call (skipped on cache hit), under the embedding
+    # gate. ``provider`` is the platform singleton, which does not traverse
+    # the semaphore ``get_embedding`` applies, so this call has to take it
+    # explicitly or take none at all.
+    #
+    # ``background=True`` does NOT buy this process anything: the gate is
+    # per process and core-worker has no interactive embeds, so the slots
+    # ``EMBEDDING_INTERACTIVE_RESERVED_SLOTS`` holds back are unusable here
+    # and the worker is capped at the background budget rather than the
+    # full one. It is still correct, for the resource that is actually
+    # shared: the embedding BACKEND is one pool that core-api's search hits
+    # too, and a deferred backfill is nobody's blocked request, so it
+    # should be the load that yields. Do not "fix" this to False to buy
+    # worker throughput — that spends a shared backend to speed up work no
+    # one is waiting for.
+    #
+    # A gate timeout raises ``TimeoutError``, which propagates and nacks
+    # rather than acking the message embedding-less. Saturation is
+    # transient, so redelivery with Pub/Sub backoff (and the DLQ behind it)
+    # is the right answer for a queue consumer — unlike core-api, which
+    # degrades to ``None`` because an HTTP caller is waiting on it.
     if embedding is None:
-        embedding = await provider.embed(request.content)
+        embedding = await call_embedding_gated(lambda: provider.embed(request.content), background=True)
 
     # Step 3 — persist. Raises on non-2xx → nacks → redelivers.
     # Per-tenant slot scoped to the PATCH roundtrip only, so a
     # tenant-A storm can't park every storage-writer connection here
-    # while tenant B's lone PATCH queues behind. Provider call above
-    # stays unguarded — that's the expensive step and it doesn't
-    # touch the storage-writer pool.
+    # while tenant B's lone PATCH queues behind. Distinct from the
+    # embedding gate above, which bounds the embedding backend rather than
+    # the storage-writer pool. Note this slot is per tenant and that gate
+    # is not, so one tenant's backfill flood can still hold the whole
+    # background budget — core-api wraps its embed in a per-tenant slot
+    # (``memory_service``) and core-worker has no equivalent yet.
     async with per_tenant_storage_slot(request.tenant_id):
         await update_memory_embedding(
             storage,

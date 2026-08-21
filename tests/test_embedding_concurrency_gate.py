@@ -81,7 +81,7 @@ class TestEmbeddingConcurrencyGate:
             in_flight -= 1
             return [0.1]
 
-        await asyncio.gather(*(svc._call_gated(fake_call, background=False) for _ in range(30)))
+        await asyncio.gather(*(svc.call_embedding_gated(fake_call, background=False) for _ in range(30)))
 
         assert peak <= 3, f"gate leaked: {peak} concurrent calls with cap 3"
         assert in_flight == 0, "slot not released"
@@ -96,13 +96,13 @@ class TestEmbeddingConcurrencyGate:
 
         for _ in range(3):
             with pytest.raises(RuntimeError):
-                await svc._call_gated(boom, background=False)
+                await svc.call_embedding_gated(boom, background=False)
 
         # If the slot leaked, this would block until the gate timeout.
         async def ok():
             return [0.2]
 
-        assert await svc._call_gated(ok, background=False) == [0.2]
+        assert await svc.call_embedding_gated(ok, background=False) == [0.2]
 
     @pytest.mark.asyncio
     async def test_blocked_waiter_degrades_instead_of_hanging(self, reset_gate):
@@ -124,7 +124,7 @@ class TestEmbeddingConcurrencyGate:
             return [0.3]
 
         with pytest.raises(TimeoutError):
-            await svc._call_gated(never_runs, background=False)
+            await svc.call_embedding_gated(never_runs, background=False)
 
     @pytest.mark.asyncio
     async def test_gate_rebinds_per_event_loop(self, reset_gate):
@@ -174,7 +174,7 @@ class TestQueryEmbeddingReservation:
         # ``total`` of them: enough to hold every shared slot if nothing
         # stopped background from doing so.
         bg_tasks = [
-            asyncio.create_task(svc._call_gated(background_call, background=True))
+            asyncio.create_task(svc.call_embedding_gated(background_call, background=True))
             for _ in range(total)
         ]
         # Wait until the background budget is genuinely occupied and parked.
@@ -186,7 +186,7 @@ class TestQueryEmbeddingReservation:
 
         # No timeout suppression: without the reservation this raises
         # TimeoutError and the test fails.
-        assert await svc._call_gated(query_call, background=False) == [0.2]
+        assert await svc.call_embedding_gated(query_call, background=False) == [0.2]
 
         parked.set()
         assert await asyncio.gather(*bg_tasks) == [[0.1]] * total
@@ -208,7 +208,7 @@ class TestQueryEmbeddingReservation:
             return [0.0]
 
         await asyncio.gather(
-            *(svc._call_gated(call, background=True) for _ in range(40))
+            *(svc.call_embedding_gated(call, background=True) for _ in range(40))
         )
         assert peak <= 3, f"background peaked at {peak}, budget is 3"
 
@@ -235,7 +235,7 @@ class TestQueryEmbeddingReservation:
 
         await asyncio.gather(
             *(
-                svc._call_gated(call, background=bool(i % 2))
+                svc.call_embedding_gated(call, background=bool(i % 2))
                 for i in range(60)
             )
         )
@@ -262,7 +262,7 @@ class TestQueryEmbeddingReservation:
             return [0.3]
 
         with pytest.raises(TimeoutError):
-            await svc._call_gated(never_runs, background=True)
+            await svc.call_embedding_gated(never_runs, background=True)
 
         # The abandoned attempt must have handed its background slot back.
         assert not svc._background_gate().locked(), "background slot leaked on timeout"
@@ -273,7 +273,7 @@ class TestQueryEmbeddingReservation:
         async def ok():
             return [0.4]
 
-        assert await svc._call_gated(ok, background=True) == [0.4]
+        assert await svc.call_embedding_gated(ok, background=True) == [0.4]
 
     @pytest.mark.asyncio
     async def test_get_embedding_honours_background_false(self, reset_gate):
@@ -299,7 +299,7 @@ class TestQueryEmbeddingReservation:
             return [0.1]
 
         bg_tasks = [
-            asyncio.create_task(svc._call_gated(background_call, background=True))
+            asyncio.create_task(svc.call_embedding_gated(background_call, background=True))
             for _ in range(total)
         ]
         for _ in range(total - reserved):
@@ -349,6 +349,6 @@ class TestQueryEmbeddingReservation:
             return [0.0]
 
         await asyncio.gather(
-            *(svc._call_gated(call, background=True) for _ in range(30))
+            *(svc.call_embedding_gated(call, background=True) for _ in range(30))
         )
         assert peak == 3, f"background should reach the full cap of 3, got {peak}"

@@ -281,7 +281,7 @@ def _background_gate() -> asyncio.Semaphore:
     return _bg_gate
 
 
-async def _call_gated[T](
+async def call_embedding_gated[T](
     make_call: Callable[[], Awaitable[T]], *, background: bool
 ) -> T:
     """Run *make_call* holding a concurrency slot.
@@ -306,6 +306,20 @@ async def _call_gated[T](
     ``cap - reserved`` — precisely the background gate's size — so every
     background holder can still acquire one. Query embeds only ever take
     the shared gate, so they cannot be blocked behind background work.
+
+    **Never nest this call.** :func:`get_embedding`,
+    :func:`get_embeddings_batch` and :func:`get_query_embedding` already
+    gate internally, so wrapping one of them deadlocks under saturation:
+    the outer hold occupies a shared slot while the inner acquire waits
+    for one, and once ``EMBEDDING_MAX_CONCURRENCY`` callers are inside,
+    none can proceed and each burns the full timeout. Callers that hold an
+    :class:`EmbeddingProvider` directly — core-worker's deferred-embed
+    consumer is the only one — call this instead of, never in addition to,
+    those three. The hazard is reachable rather than theoretical: the
+    registry can hand back the platform singleton itself
+    (:func:`common.embedding._registry.get_embedding_provider`), so one
+    provider object is reachable by both routes, which is also why the
+    gate belongs at the call site and not inside the provider.
     """
     # ``AsyncExitStack`` rather than hand-rolled release bookkeeping: it
     # unwinds on ANY escape — TimeoutError, CancelledError, or a failure
@@ -479,7 +493,7 @@ async def get_embeddings_batch(
     # process anyway.
     try:
         if budget_s is None:
-            result = await _call_gated(
+            result = await call_embedding_gated(
                 lambda: provider.embed_batch(texts), background=background
             )
         else:
@@ -488,7 +502,7 @@ async def get_embeddings_batch(
             # with an attributable TimeoutError instead of silently reverting
             # to the unbounded path the margin exists to replace.
             async with asyncio.timeout(max(0.1, budget_s - EMBEDDING_BUDGET_MARGIN_S)):
-                result = await _call_gated(
+                result = await call_embedding_gated(
                     lambda: provider.embed_batch(texts), background=background
                 )
     except BaseException:
@@ -517,7 +531,7 @@ async def _run_with_retry(
     ``"Query embedding"``) interpolated into the per-attempt warning
     and the terminal error log so failures are attributable.
 
-    *background* is forwarded to :func:`_call_gated` — see
+    *background* is forwarded to :func:`call_embedding_gated` — see
     ``EMBEDDING_INTERACTIVE_RESERVED_SLOTS``. It is per-ATTEMPT, like the slot
     itself, so a retrying background call re-queues behind the background
     budget instead of escalating into the reserved slice.
@@ -525,7 +539,7 @@ async def _run_with_retry(
     last_exc: BaseException | None = None
     for attempt in range(1, EMBEDDING_RETRY_ATTEMPTS + 1):
         try:
-            result = await _call_gated(make_call, background=background)
+            result = await call_embedding_gated(make_call, background=background)
             await stats.record_success()
             return result
         # Intentionally broad: must catch all provider-specific errors during retry.

@@ -260,7 +260,7 @@ class OpenAIEmbeddingProvider:
 
         SEQUENTIAL, unlike the reranker's concurrent ``asyncio.gather``.
         Two reasons, both about not undoing work this module already did:
-        ``_call_gated`` holds ONE ``EMBEDDING_MAX_CONCURRENCY`` slot for
+        ``call_embedding_gated`` holds ONE ``EMBEDDING_MAX_CONCURRENCY`` slot for
         this whole call, so fanning out inside it would multiply the real
         provider concurrency by the chunk count and defeat a cap that
         exists because of the 2026-07-27 connection-pool exhaustion. And

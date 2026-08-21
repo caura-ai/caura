@@ -13,6 +13,10 @@ Public surface:
   falls back to :func:`get_embedding`'s symmetric behaviour. Backwards-
   compatible with the prior ``core_api.services.embedding`` module.
 * :func:`get_embedding_provider` — factory.
+* :func:`call_embedding_gated` — runs a caller-supplied embed under the
+  process-wide concurrency gate, for the one caller that holds a provider
+  directly instead of going through the entrypoints above. Never nest it
+  inside them; see its docstring for why that deadlocks.
 * :func:`init_platform_embedding` / :func:`get_platform_embedding` —
   platform-tier singleton, initialised once at service startup from
   ``PLATFORM_EMBEDDING_*`` env vars.
@@ -39,6 +43,7 @@ from common.embedding._platform import (
 )
 from common.embedding._registry import get_embedding_provider
 from common.embedding._service import (
+    call_embedding_gated,
     get_embedding,
     get_embeddings_batch,
     get_query_embedding,
@@ -53,6 +58,7 @@ __all__ = [
     "EmbeddingProvider",
     "FakeEmbeddingProvider",
     "InstructionAwareEmbedder",
+    "call_embedding_gated",
     "fake_embedding",
     "get_embedding",
     "get_embedding_provider",
