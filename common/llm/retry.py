@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -104,6 +105,7 @@ async def call_with_retry(
     base_delay: float = LLM_RETRY_DELAY_S,
     timeout: float | None = None,
     non_retryable: tuple[type[BaseException], ...] = (),
+    budget_s: float | None = None,
 ) -> T:
     """Call *coro_fn* with retry and linear backoff.
 
@@ -119,6 +121,30 @@ async def call_with_retry(
         Base delay in seconds; actual delay = ``base_delay * attempt_number``.
     timeout:
         Optional per-attempt timeout in seconds.
+    budget_s:
+        Optional wall-clock budget for this whole call — every attempt plus
+        every delay between them. PER PROVIDER, exactly like *timeout*:
+        ``call_with_fallback`` forwards the same value to the primary and to
+        the fallback, so two providers means two budgets.
+
+        Given one, three things stop being guesses. Each attempt's timeout
+        becomes ``min(timeout, remaining)`` so an attempt cannot overrun the
+        budget; the loop stops once the budget is spent instead of starting
+        an attempt with no time to finish; and the cap on a ``Retry-After``
+        is DERIVED from what is left rather than read from
+        ``LLM_MAX_RETRY_AFTER_S``, which exists precisely because callers
+        without a declared budget give this layer nothing to reason from.
+
+        Why it matters more than tidiness: without it the worst case is
+        enforced by parameter VALUES rather than by structure. ``recall``
+        documents "one primary attempt (15s), then one fallback attempt
+        (15s) ... worst case ~30s" — a guarantee that holds only while
+        ``max_attempts`` stays 1, and that silently doubles if anyone
+        restores the default. A budget makes the same promise hold whatever
+        the attempt count is.
+
+        Omitting it keeps the previous behaviour exactly, which is right for
+        the callers that have no deadline of their own to declare.
     non_retryable:
         Exception types that must NOT be retried within this provider — the
         first occurrence raises immediately. Empty by default, so every
@@ -149,12 +175,60 @@ async def call_with_retry(
     """
     if max_attempts <= 0:
         raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
+    if budget_s is not None and budget_s <= 0:
+        # Same reasoning as the guard above: a caller asking for a
+        # zero-length budget has misconfigured something, and silently
+        # running one unbounded attempt would hide it behind exactly the
+        # overrun the budget was meant to prevent.
+        raise ValueError(f"budget_s must be > 0, got {budget_s}")
+    # ``monotonic``, not ``time()``: a deadline must not move because NTP
+    # stepped the wall clock mid-retry.
+    deadline = None if budget_s is None else time.monotonic() + budget_s
     last_exc: BaseException | None = None
     for attempt in range(max_attempts):
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            # Checked BEFORE ``coro_fn()`` so no coroutine is created that
+            # never gets awaited. Reachable without any sleep: an attempt
+            # that runs to its own timeout can exhaust the budget by itself.
+            logger.warning(
+                "%s giving up before attempt %d/%d — the %.1fs budget is spent",
+                label,
+                attempt + 1,
+                max_attempts,
+                budget_s,
+            )
+            # This is the ONLY break that can be reached with nothing caught
+            # yet — the other two are inside the ``except`` below, where
+            # ``last_exc`` is always set. On the first iteration it would
+            # leave the ``raise`` at the end of this function executing
+            # ``raise None``, which Python reports as "exceptions must derive
+            # from BaseException": a confusing type error standing in for a
+            # perfectly clear condition.
+            #
+            # Only synthesised when there is nothing to report. If an earlier
+            # attempt failed for a real reason, THAT exception is the useful
+            # one and running out of time afterwards must not overwrite it —
+            # same precedence the retry paths below apply.
+            if last_exc is None:
+                last_exc = TimeoutError(
+                    f"{label}: the {budget_s:.1f}s budget was spent before any "
+                    "attempt could start"
+                )
+            break
         try:
             coro = coro_fn()
-            if timeout is not None:
-                return await asyncio.wait_for(coro, timeout=timeout)
+            # The budget binds each attempt too, not just the loop. Without
+            # this an attempt could start with 2 s left and run for its full
+            # ``timeout``, so the budget would be advisory — enforced only by
+            # whoever cancels us from outside.
+            attempt_timeout = timeout
+            if remaining is not None:
+                attempt_timeout = (
+                    remaining if timeout is None else min(timeout, remaining)
+                )
+            if attempt_timeout is not None:
+                return await asyncio.wait_for(coro, timeout=attempt_timeout)
             return await coro
         except Exception as exc:
             last_exc = exc
@@ -180,18 +254,34 @@ async def call_with_retry(
                 # never sooner than we were told.
                 asked = retry_after_seconds(exc)
                 if asked is not None:
-                    if asked > LLM_MAX_RETRY_AFTER_S:
-                        # Sleeping this out is worse than not retrying. Every
-                        # budget above us is 10-35 s (see
-                        # ``LLM_MAX_RETRY_AFTER_S``), so a longer wait spends
-                        # the whole window on a sleep and the outer timeout
-                        # fires with nothing to show. Giving up HERE is not
-                        # giving up on the call: ``call_with_fallback`` hops
-                        # to the second provider, which is the right answer
-                        # to "this one is rate-limited for the next minute".
+                    # Derived when there is a budget to derive from, and only
+                    # then falling back to the fixed constant. Half of what
+                    # is left, so honouring a wait always leaves at least as
+                    # much time again for the attempt it precedes — waiting
+                    # out a hint and then having no time to use it is the
+                    # same wasted request as not waiting at all.
+                    #
+                    # This can exceed ``LLM_MAX_RETRY_AFTER_S``, deliberately.
+                    # That constant is the answer for callers that declared
+                    # nothing; a caller that declares 60 s has said it can
+                    # afford to wait, and second-guessing it would make the
+                    # budget decorative.
+                    now = time.monotonic()
+                    cap = (
+                        LLM_MAX_RETRY_AFTER_S
+                        if deadline is None
+                        else max(0.0, (deadline - now) / 2)
+                    )
+                    if asked > cap:
+                        # Sleeping this out is worse than not retrying: the
+                        # wait spends the window and the outer timeout fires
+                        # with nothing to show. Giving up HERE is not giving
+                        # up on the call — ``call_with_fallback`` hops to the
+                        # second provider, which is the right answer to "this
+                        # one is rate-limited for the next minute".
                         logger.warning(
                             "%s attempt %d/%d failed (%s: %s); provider asked "
-                            "for %.1fs, over the %.1fs we can wait — NOT "
+                            "for %.1fs, over the %.1fs we can wait (%s) — NOT "
                             "retrying it, so the fallback provider is tried "
                             "instead",
                             label,
@@ -200,7 +290,10 @@ async def call_with_retry(
                             type(exc).__name__,
                             exc,
                             asked,
-                            LLM_MAX_RETRY_AFTER_S,
+                            cap,
+                            "half the remaining budget"
+                            if deadline is not None
+                            else "no budget declared, so the fixed cap",
                         )
                         break
                     delay = max(delay, asked)
@@ -217,6 +310,25 @@ async def call_with_retry(
                 # however the value arrived.
                 jitter_fraction = max(0.0, LLM_RETRY_JITTER_FRACTION)
                 jittered = delay + random.uniform(0.0, jitter_fraction * delay)
+                # The plain linear delay needs the same check the Retry-After
+                # path gets from its cap: a 2 s backoff with 1 s left is a
+                # sleep that guarantees the next attempt has nothing. Only
+                # the loop-top check would catch that, and only AFTER
+                # sleeping the budget away for no reason.
+                if deadline is not None and time.monotonic() + jittered >= deadline:
+                    logger.warning(
+                        "%s attempt %d/%d failed (%s: %s); a %.1fs wait would "
+                        "spend the rest of the %.1fs budget — NOT retrying it, "
+                        "so the fallback provider is tried instead",
+                        label,
+                        attempt + 1,
+                        max_attempts,
+                        type(exc).__name__,
+                        exc,
+                        jittered,
+                        budget_s,
+                    )
+                    break
                 logger.warning(
                     "%s attempt %d/%d failed (%s: %s), retrying in %.1fs%s",
                     label,
@@ -269,6 +381,7 @@ async def call_with_fallback(
     max_attempts: int = LLM_RETRY_ATTEMPTS,
     provider_factory: Callable[..., Any] | None = None,
     non_retryable: tuple[type[BaseException], ...] = (),
+    budget_s: float | None = None,
 ) -> T:
     """3-tier fallback chain for LLM calls.
 
@@ -306,6 +419,12 @@ async def call_with_fallback(
         Callable ``(name, tenant_config) -> LLMProvider``. Defaults to
         ``common.llm.registry.get_llm_provider`` (imported lazily to avoid
         circular imports).
+    budget_s:
+        Forwarded to ``call_with_retry`` for BOTH providers, so it is a budget
+        PER PROVIDER rather than for the chain — the same semantics *timeout*
+        already has. Two providers at ``budget_s=15`` means a ~30 s worst case
+        before ``fake_fn``, which is exactly the arithmetic ``recall`` spells
+        out by hand today.
     non_retryable:
         Forwarded to ``call_with_retry`` for BOTH providers — see its docstring
         for why this is opt-in. Applied to the fallback provider too because
@@ -344,6 +463,7 @@ async def call_with_fallback(
                 max_attempts=max_attempts,
                 timeout=timeout,
                 non_retryable=non_retryable,
+                budget_s=budget_s,
             )
         logger.warning(
             "%s: provider '%s' resolved to FakeLLMProvider (no API key). Trying fallback.",
@@ -418,6 +538,7 @@ async def call_with_fallback(
                         max_attempts=max_attempts,
                         timeout=timeout,
                         non_retryable=non_retryable,
+                        budget_s=budget_s,
                     )
     except Exception:
         # Left as-is: this path is already loud, so it needs no skip reason.

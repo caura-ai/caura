@@ -212,6 +212,14 @@ async def summarize_memories(
         # keeps the worst case ~30s and fails fast instead of hanging.
         timeout=15.0,
         max_attempts=1,
+        # The same 15s, declared as a budget rather than implied by the two
+        # values above. That arithmetic held only while ``max_attempts`` stayed
+        # 1: restoring the default — an entirely reasonable-looking change —
+        # silently doubled the worst case to ~60s, with nothing but this
+        # comment to say otherwise. ``budget_s`` bounds the wall clock per
+        # provider whatever the attempt count is, so the ~30s promise is now
+        # structural.
+        budget_s=15.0,
     )
 
     recall_ms = int((time.perf_counter() - t0) * 1000)

@@ -122,6 +122,17 @@ async def _llm_dedup_check(
         service_label="dedup",
         model_attr="entity_extraction_model",
         timeout=10.0,
+        # Per-attempt was the ONLY bound here, and it does not bound much: at
+        # the default 2 attempts across 2 providers that is 2 x 2 x 10s plus
+        # backoff — about 42s worst case, on the write path, inside a 45s
+        # request budget. Declaring the budget makes it 10s per provider, so
+        # ~20s before ``_fake_dedup_check``.
+        #
+        # Reaching the heuristic sooner is the intended trade, not a
+        # regression: a duplicate check that has already spent 40s has failed
+        # at its job either way, and the confidence floor below this call
+        # exists so a heuristic verdict can never sink a legitimate write.
+        budget_s=10.0,
     )
 
 
