@@ -13,13 +13,14 @@ Multi-provider support:
 """
 
 import asyncio
+import hashlib
 import logging
 import time
 import uuid as _uuid
 from datetime import datetime
 from uuid import UUID
 
-from core_api.cache import cache_set_nx
+from core_api.cache import cache_delete_if, cache_set_nx
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.constants import SINGLE_VALUE_PREDICATES
@@ -41,22 +42,82 @@ logger = logging.getLogger(__name__)
 _DETECTION_LOCK_TTL_SECONDS = 3600
 
 
-async def _acquire_path_a_lock(memory_id) -> bool:
+def _content_fingerprint(content: str) -> str:
+    """Short stable digest of the text a detection run examined.
+
+    Part of the lock key (H-06). Keyed on ``memory_id`` alone, the lock also
+    deduped runs that were checking DIFFERENT text: ``update_memory`` clears
+    supersession state and re-fires detection on a content edit, but a memory
+    corrected within the TTL — the normal case for a quick fix — still held the
+    write-time lock, so the edited content was never checked and no later
+    trigger re-fired. Including the content makes an edit a different lock.
+
+    Hashed rather than embedded: memory content is unbounded and Redis keys are
+    values. Truncated because this only has to separate versions of ONE
+    memory's text, not resist collision across a corpus.
+    """
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:32]
+
+
+def _path_a_lock_key(memory_id, content: str) -> str:
+    return f"contradiction:path_a:{memory_id}:{_content_fingerprint(content)}"
+
+
+def _path_c_lock_key(memory_id, content: str) -> str:
+    return f"contradiction:path_c:{memory_id}:{_content_fingerprint(content)}"
+
+
+def _lock_token() -> str:
+    """A fresh per-acquisition owner token — see ``_release_lock``."""
+    return _uuid.uuid4().hex
+
+
+async def _acquire_path_a_lock(memory_id, content: str, token: str) -> bool:
     """Try to acquire the Path A (semantic + RDF) idempotency lock for
-    ``memory_id``. Returns True iff this caller owns the lock and should
-    proceed; False if another caller already holds it and we should skip.
+    ``memory_id`` at this ``content``. Returns True iff this caller owns the
+    lock and should proceed; False if another caller already holds it and we
+    should skip.
 
     Lock is keyed per-path so Path A and Path C run independently for
-    the same memory.
+    the same memory, and per-content so an edit is not deduped against the
+    run that checked the previous text. ``token`` identifies THIS acquisition
+    so the release can tell its own lock from a successor's.
     """
-    return await cache_set_nx(f"contradiction:path_a:{memory_id}", "1", _DETECTION_LOCK_TTL_SECONDS)
+    return await cache_set_nx(_path_a_lock_key(memory_id, content), token, _DETECTION_LOCK_TTL_SECONDS)
 
 
-async def _acquire_path_c_lock(memory_id) -> bool:
+async def _acquire_path_c_lock(memory_id, content: str, token: str) -> bool:
     """Try to acquire the Path C (entity-overlap) idempotency lock for
-    ``memory_id``. Returns True iff this caller owns the lock; False
-    means another caller already ran detection for this memory."""
-    return await cache_set_nx(f"contradiction:path_c:{memory_id}", "1", _DETECTION_LOCK_TTL_SECONDS)
+    ``memory_id`` at this ``content``. Returns True iff this caller owns the
+    lock; False means another caller already ran detection for this memory at
+    this content."""
+    return await cache_set_nx(_path_c_lock_key(memory_id, content), token, _DETECTION_LOCK_TTL_SECONDS)
+
+
+async def _release_lock(key: str, token: str) -> None:
+    """Drop a detection lock so the next trigger can retry.
+
+    Released ONLY when a run did not reach a verdict — it threw, or it exited
+    before examining anything (a missing / soft-deleted row). A run that
+    concluded keeps its lock for the full TTL, INCLUDING the "no candidates"
+    and "preflight dropped them all" outcomes, which are results rather than
+    failures. Collapsing the back-to-back ENRICHED and EMBEDDED deliveries is
+    the entire point of the lock: releasing on success would let the second
+    delivery re-run every LLM judgement whenever it landed more than one
+    detection apart from the first.
+
+    Compare-and-delete on ``token``, never a bare DEL. A run whose work outran
+    the 3600s TTL no longer owns the key: by then the lock may have expired and
+    been re-taken by a NEW run, and an unconditional delete would take that
+    successor's lock away and hand it a duplicate detection — the exact
+    guarantee this lock exists to provide. Releasing by token makes a late
+    release a no-op instead.
+
+    ``cache_delete_if`` is total — it swallows both a missing Redis and a
+    failed EVAL — so this cannot break the never-raises contract that lets the
+    Pub/Sub consumers ack unconditionally.
+    """
+    await cache_delete_if(key, token)
 
 
 def _parse_dt(value) -> datetime | None:
@@ -183,7 +244,18 @@ async def detect_contradictions_async(
     t_start = time.monotonic()
     n_conflicts = 0
     skipped = False
+    lock_held = False
+    concluded = False
+    lock_key = None
+    lock_token = ""
     try:
+        if new_memory is None:
+            sc = get_storage_client()
+            new_memory = await sc.get_memory(str(memory_id))
+        if not new_memory or new_memory.get("deleted_at") is not None:
+            # Resolved before the lock is taken, so a gone row never holds one.
+            return
+
         # A4 #14 — back-channel idempotency. Both the ENRICHED and
         # EMBEDDED handlers fire ``detect_contradictions_async`` for
         # the same memory; whichever arrives first owns the lock and
@@ -191,18 +263,37 @@ async def detect_contradictions_async(
         # unavailable, ``_acquire_path_a_lock`` returns True and we
         # fall back to the prior double-detection behaviour (storage
         # CAS still keeps writes idempotent).
-        if not await _acquire_path_a_lock(memory_id):
+        # H-06: keyed on the CONTENT as well as the memory, so an edit
+        # re-fired by ``update_memory`` is not deduped against the run that
+        # checked the previous text.
+        #
+        # Fingerprint the text detection will ACTUALLY examine — ``_detect``
+        # reads ``new_memory``, not the ``content`` parameter. The parameter is
+        # the caller's copy: the back-channel consumers pass the write-time
+        # payload, which a mid-flight update leaves stale. Keying on it would
+        # put a lock on text nobody looked at, and would make the fix depend on
+        # every future caller keeping the two in step. ``content`` remains the
+        # fallback for a row with no content at all.
+        # ``is None``, not ``or``: an EMPTY row content is a real value, and
+        # ``_detect`` reads it as one (``new_memory.get("content", "")``).
+        # Falling back to the caller's copy for it would key the lock on text
+        # detection never looks at — the very divergence this line exists to
+        # close. The caller's ``content`` is only a stand-in for a row that has
+        # no content field at all, and the final ``or ""`` keeps a str reaching
+        # the fingerprint: an AttributeError there lands in the outer handler
+        # and silently costs that memory its detection.
+        raw_content = new_memory.get("content")
+        examined = raw_content if raw_content is not None else (content or "")
+        lock_key = _path_a_lock_key(memory_id, examined)
+        lock_token = _lock_token()
+        if not await _acquire_path_a_lock(memory_id, examined, lock_token):
             skipped = True
             return
-
-        if new_memory is None:
-            sc = get_storage_client()
-            new_memory = await sc.get_memory(str(memory_id))
-        if not new_memory or new_memory.get("deleted_at") is not None:
-            return
+        lock_held = True
 
         tenant_config = await resolve_config(tenant_id)
         contradictions = await _detect(new_memory, embedding, tenant_config)
+        concluded = True
         n_conflicts = len(contradictions) if contradictions else 0
 
         if contradictions:
@@ -214,6 +305,14 @@ async def detect_contradictions_async(
     except Exception:
         logger.exception("Async contradiction detection failed for memory %s", memory_id)
     finally:
+        # H-06: keep the lock only for a run that reached a verdict. The lock
+        # is taken BEFORE detection, so without this one transient LLM or
+        # storage failure suppressed every later trigger for this memory for a
+        # full hour, with nothing scheduled to retry. A run that concluded
+        # keeps its lock — that is the duplicate-delivery collapse the lock
+        # exists for. Mirrors the Path C block below.
+        if lock_held and not concluded and lock_key is not None:
+            await _release_lock(lock_key, lock_token)
         elapsed_ms = round((time.monotonic() - t_start) * 1000)
         logger.info(
             "path_a_completed for memory %s n_conflicts=%d skipped=%s elapsed_ms=%d tenant_id=%s",
@@ -1951,19 +2050,35 @@ async def detect_contradictions_by_entities_async(
     n_conflicts = 0
     n_retractions = 0
     skipped = False
+    lock_held = False
+    concluded = False
+    lock_key = None
+    lock_token = ""
     try:
-        # A4 #14 — back-channel idempotency. Entity extraction can
-        # complete more than once per memory (delta re-extraction,
-        # partial retry), each completion firing Path C. First caller
-        # wins the lock; the rest skip. Fail-open on Redis outage.
-        if not await _acquire_path_c_lock(memory_id):
-            skipped = True
-            return
-
+        # The row is fetched BEFORE the lock is taken, unlike Path A. The lock
+        # key carries a fingerprint of the content this run will examine (H-06)
+        # and Path C — unlike Path A — is not handed that content by its
+        # caller. The extra GET on a duplicate delivery is cheap beside the LLM
+        # work the lock protects, and fetching first also means a soft-deleted
+        # row no longer burns a lock for the rest of the TTL.
         sc = get_storage_client()
         new_memory = await sc.get_memory(str(memory_id))
         if not new_memory or new_memory.get("deleted_at") is not None:
             return
+
+        # A4 #14 — back-channel idempotency. Entity extraction can
+        # complete more than once per memory (delta re-extraction,
+        # partial retry), each completion firing Path C. First caller
+        # wins the lock; the rest skip. Fail-open on Redis outage.
+        # H-06: per-content, so entity re-extraction after a content edit is
+        # not deduped against the run that examined the previous text.
+        content = new_memory.get("content") or ""
+        lock_key = _path_c_lock_key(memory_id, content)
+        lock_token = _lock_token()
+        if not await _acquire_path_c_lock(memory_id, content, lock_token):
+            skipped = True
+            return
+        lock_held = True
 
         tenant_config = await resolve_config(tenant_id)
 
@@ -2005,6 +2120,7 @@ async def detect_contradictions_by_entities_async(
             n_candidates,
         )
         if not candidates:
+            concluded = True
             return
 
         # A1 #17 — subject preflight. Drop candidates whose
@@ -2038,6 +2154,7 @@ async def detect_contradictions_by_entities_async(
                 n_preflight_skipped,
                 memory_id,
             )
+            concluded = True
             return
 
         # CAURA-130 (L3.4) — entity-links subject preflight. The A1 #17
@@ -2211,6 +2328,7 @@ async def detect_contradictions_by_entities_async(
                 n_entity_links_skipped,
                 memory_id,
             )
+            concluded = True
             return
 
         # CAURA-131 — entity-aware judge for each surviving candidate
@@ -2403,9 +2521,17 @@ async def detect_contradictions_by_entities_async(
                     memory_id,
                     path_c_result["skipped"],
                 )
+        concluded = True
     except Exception:
         logger.exception("Entity-based contradiction detection failed for %s", memory_id)
     finally:
+        # H-06 — see the matching block in ``detect_contradictions_async``.
+        # ``concluded`` is set at each legitimate exit rather than once early,
+        # so a throw ANYWHERE in the judging loop still releases: a failure
+        # half way through must not block the retry for the rest of the TTL.
+        # The storage writes are CAS-guarded, so re-running is safe.
+        if lock_held and not concluded and lock_key is not None:
+            await _release_lock(lock_key, lock_token)
         elapsed_ms = round((time.monotonic() - t_start) * 1000)
         logger.info(
             "path_c_completed for memory %s n_candidates=%d n_conflicts=%d "
