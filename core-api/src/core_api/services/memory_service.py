@@ -150,6 +150,24 @@ def _auto_chunk_request_id() -> str:
     return f"auto-chunk:{uuid4()}"
 
 
+def _enrichment_backfill_needed(enrichment, tenant_config) -> bool:
+    """Does this row still owe an LLM enrichment pass?
+
+    The condition ``ScheduleBackgroundTasks`` applies on its strong / no-mode
+    branch, lifted so the auto-chunk handler — which never runs that step — can
+    ask the same question rather than approximate it. All four clauses matter:
+    an inline deployment already enriched, and a tenant with enrichment off or
+    on the ``none`` provider will never be enriched by anyone, so claiming a
+    pending pass for either would be a marker that never clears.
+    """
+    return bool(
+        enrichment is None
+        and not settings.inline_enrichment
+        and tenant_config.enrichment_enabled
+        and tenant_config.enrichment_provider != "none"
+    )
+
+
 # The LLM governance verdict, as ``MergeEnrichmentFields`` / the enrichment
 # worker record it on the parent's metadata.
 _GOVERNANCE_SIGNAL_KEYS = ("contains_pii", "pii_types", "business_relevance")
@@ -798,6 +816,18 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         parent_metadata["auto_chunked"] = True
         parent_metadata["child_count"] = len(facts)
         parent_metadata["write_latency_ms"] = round((time.perf_counter() - t0) * 1000)
+        # #856: in a deferred deployment ``ParallelEmbedEnrich`` skipped both
+        # provider calls, so this row is incomplete. ``MemoryOut.metadata``
+        # documents absent flags as "that stage ran inline", which for this row
+        # is the opposite of the truth — so say so, on the same conditions the
+        # backfills below are scheduled on. The other exit of this function gets
+        # both flags for free: ``write_memory_row`` sets ``embedding_pending``
+        # and ``MergeEnrichmentFields`` sets ``enrichment_pending``.
+        defer_enrichment = _enrichment_backfill_needed(ctx.data.get("enrichment"), tenant_config)
+        if embedding is None:
+            parent_metadata["embedding_pending"] = True
+        if defer_enrichment:
+            parent_metadata["enrichment_pending"] = True
 
         # Auto-chunk parent insert — wrapped in the storage bulkhead
         # like the regular single-write path. Auto-chunk fires two
@@ -904,6 +934,53 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
             source="auto_chunk",
         )
 
+        # #856: the two deferred-path backfills. Until this, the multi-fact exit
+        # scheduled nothing but the entity extraction below, so on a deferred
+        # deployment the parent stayed unembedded and unenriched forever — while
+        # the OTHER exit of this very function, the 0-1-fact fall-through, got
+        # both for free from ``ScheduleBackgroundTasks`` (whose strong branch is
+        # commented "Strong mode (or no mode set)" — this branch's exact case).
+        # Inert inline: both values are present there, so neither fires.
+        #
+        # Not reusing that step: it reads ``ctx.data["memory"]``, which this
+        # branch never populates, and it also schedules Path A contradiction
+        # detection, which auto-chunk parents have never had and which is not
+        # this fix's to add. A test pins the two exits at parity instead.
+        if defer_enrichment:
+            track_task(
+                tracked_task(
+                    _schedule_enrich_or_inline(
+                        parent_id,
+                        data.content,
+                        data.tenant_id,
+                        data.fleet_id,
+                        data.agent_id,
+                        tenant_config,
+                        agent_provided_fields=_agent_provided_enrichment_fields(data),
+                        reference_datetime=getattr(data, "reference_datetime", None),
+                        # ``_schedule_enrich_or_inline`` warns that a THIRD call
+                        # site must pass this unless ``GovernanceDecision`` has
+                        # already applied the verdict synchronously — the H-18
+                        # shape. This is that third call site, and the answer is
+                        # True: the step did run (#852), but ``defer_enrichment``
+                        # implies ``enrichment is None``, which is precisely when
+                        # it takes its "uncertain signal" branch and enforces
+                        # nothing. So it holds whenever this line can be reached,
+                        # not merely today.
+                        #
+                        # Inert in practice — the flag is read only on the inline
+                        # arm, which ``not settings.inline_enrichment`` in
+                        # ``defer_enrichment`` makes unreachable from here. The
+                        # deferred arm publishes, and ``core_api.consumer``
+                        # remediates when the ENRICHED back-channel returns.
+                        run_governance_remediation=True,
+                    ),
+                    "enrich_or_publish",
+                    parent_id,
+                    data.tenant_id,
+                )
+            )
+
         if tenant_config.entity_extraction_enabled:
             track_task(
                 tracked_task(
@@ -916,6 +993,26 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                         data.memory_type,
                     ),
                     "entity_extraction",
+                    parent_id,
+                    data.tenant_id,
+                )
+            )
+
+        if embedding is None:
+            # ``ch`` rather than ``ctx.data["content_hash"]``: this branch
+            # computed its own hash for the parent above, and they are the same
+            # value only because both hash ``data.content``. Passing the one
+            # this row was actually written with keeps the shim's dedup lookup
+            # keyed on the row it is repairing.
+            track_task(
+                tracked_task(
+                    _schedule_embed_or_reembed(
+                        parent_id,
+                        data.content,
+                        data.tenant_id,
+                        content_hash=ch,
+                    ),
+                    "embed_or_publish",
                     parent_id,
                     data.tenant_id,
                 )
