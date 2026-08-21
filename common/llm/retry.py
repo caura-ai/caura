@@ -17,15 +17,84 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, TypeVar
 
-from common.llm.constants import LLM_RETRY_ATTEMPTS, LLM_RETRY_DELAY_S
+from common.llm.constants import (
+    LLM_MAX_RETRY_AFTER_S,
+    LLM_RETRY_ATTEMPTS,
+    LLM_RETRY_DELAY_S,
+    LLM_RETRY_JITTER_FRACTION,
+)
 from common.provider_names import ProviderName
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+def retry_after_seconds(exc: BaseException) -> float | None:
+    """How long the provider asked us to wait, or ``None`` if it did not.
+
+    Duck-typed on the exception rather than importing a provider SDK: this
+    module is shared by the OpenAI-compatible, Gemini and Vertex providers
+    and imports none of them. ``openai.APIStatusError`` and
+    ``httpx.HTTPStatusError`` both expose ``.response.headers``, which is
+    all this needs.
+
+    Reads ``retry-after-ms`` before ``Retry-After``. OpenAI sends both,
+    the millisecond form expresses the same intent more precisely, and it
+    is the one the SDK's own retry logic preferred — worth keeping now that
+    this layer has taken that job over. The two can genuinely disagree at
+    the ``LLM_MAX_RETRY_AFTER_S`` boundary, where a hint of 5,200 ms and a
+    hint of "5" fall on opposite sides.
+
+    ``Retry-After`` is either delta-seconds or an HTTP-date (RFC 9110
+    §10.2.3) and real providers send both, so both are parsed. A date in
+    the past clamps to 0 rather than going negative — a clock skew must not
+    turn into a negative sleep.
+
+    Returns ``None`` for anything unparseable, which is the same answer as
+    "no header": the caller falls back to its own backoff. A provider
+    sending a malformed hint should not break the retry it was hinting
+    about.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    ms = headers.get("retry-after-ms")
+    if ms is not None:
+        # Its own guard, not the shared one below: a malformed millisecond
+        # header must not discard a well-formed ``Retry-After`` sitting
+        # beside it. Preferring the precise header is only an improvement
+        # if failing to parse it costs nothing.
+        try:
+            return max(0.0, float(ms) / 1000.0)
+        except (TypeError, ValueError):
+            pass
+    try:
+        raw = headers.get("retry-after")
+        if raw is None:
+            return None
+        raw = raw.strip()
+        # Try delta-seconds first: it is what providers actually send, and
+        # ``parsedate_to_datetime`` accepts some bare numbers as dates.
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+        when = parsedate_to_datetime(raw)
+        # A date without a zone is UTC by RFC 9110; ``parsedate_to_datetime``
+        # returns it naive, and subtracting an aware datetime would raise.
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        return max(0.0, (when - datetime.now(UTC)).total_seconds())
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 async def call_with_retry(
@@ -104,16 +173,61 @@ async def call_with_retry(
                 break
             if attempt < max_attempts - 1:
                 delay = base_delay * (attempt + 1)
+                # What the provider asked for beats what we guessed — but
+                # only upward. A hint SHORTER than our own backoff would
+                # have us hammer a provider that is already refusing, so
+                # ``max`` keeps both floors: never sooner than we planned,
+                # never sooner than we were told.
+                asked = retry_after_seconds(exc)
+                if asked is not None:
+                    if asked > LLM_MAX_RETRY_AFTER_S:
+                        # Sleeping this out is worse than not retrying. Every
+                        # budget above us is 10-35 s (see
+                        # ``LLM_MAX_RETRY_AFTER_S``), so a longer wait spends
+                        # the whole window on a sleep and the outer timeout
+                        # fires with nothing to show. Giving up HERE is not
+                        # giving up on the call: ``call_with_fallback`` hops
+                        # to the second provider, which is the right answer
+                        # to "this one is rate-limited for the next minute".
+                        logger.warning(
+                            "%s attempt %d/%d failed (%s: %s); provider asked "
+                            "for %.1fs, over the %.1fs we can wait — NOT "
+                            "retrying it, so the fallback provider is tried "
+                            "instead",
+                            label,
+                            attempt + 1,
+                            max_attempts,
+                            type(exc).__name__,
+                            exc,
+                            asked,
+                            LLM_MAX_RETRY_AFTER_S,
+                        )
+                        break
+                    delay = max(delay, asked)
+                # Jitter AFTER the max, so it can only ever lengthen the
+                # wait — decorrelating must not undercut a Retry-After.
+                # ``random`` rather than ``secrets``: this schedules a
+                # sleep, it does not protect anything.
+                #
+                # The fraction is floored again HERE, not only where the
+                # env var is read. "Additive only" is the invariant this
+                # ordering exists to provide, so it belongs at the point
+                # that relies on it — a negative fraction would make
+                # ``uniform`` subtract, and the guarantee would be gone
+                # however the value arrived.
+                jitter_fraction = max(0.0, LLM_RETRY_JITTER_FRACTION)
+                jittered = delay + random.uniform(0.0, jitter_fraction * delay)
                 logger.warning(
-                    "%s attempt %d/%d failed (%s: %s), retrying in %.1fs",
+                    "%s attempt %d/%d failed (%s: %s), retrying in %.1fs%s",
                     label,
                     attempt + 1,
                     max_attempts,
                     type(exc).__name__,
                     exc,
-                    delay,
+                    jittered,
+                    f" (provider asked for {asked:.1f}s)" if asked is not None else "",
                 )
-                await asyncio.sleep(delay)
+                await asyncio.sleep(jittered)
     raise last_exc  # type: ignore[misc]
 
 

@@ -7,6 +7,7 @@ keeps re-exports for back-compat; new code should import from here.
 from __future__ import annotations
 
 import os
+import sys
 
 from common.env_utils import read_float_env as _read_float_env
 from common.env_utils import read_int_env
@@ -49,6 +50,65 @@ OPENROUTER_DEFAULT_MODEL = os.environ.get(
 # EXPONENTIAL backoff underneath it was wrong.
 LLM_RETRY_ATTEMPTS = 2
 LLM_RETRY_DELAY_S = 1.0
+
+# Longest ``Retry-After`` this layer will actually wait out.
+#
+# Pinning the SDK's retries (below) also dropped its ``Retry-After``
+# compliance, so ``call_with_retry`` honours the header itself now — but it
+# cannot honour it unconditionally, because every budget above it is small
+# and fixed:
+#
+#   dedup_judge            per-attempt wait_for   10 s
+#   recall_service         per-attempt wait_for   15 s
+#   BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS         30 s
+#   enrichment_inline_timeout_seconds             35 s
+#
+# A provider saying "come back in 60 s" is entirely normal, and sleeping
+# that out inside a 15 s budget is strictly worse than not retrying: the
+# outer timeout fires having spent the whole window asleep. So a hint over
+# this cap ends the retry loop instead, which hands the call to
+# ``call_with_fallback``'s second provider — the right response to "this
+# provider is rate-limited for the next minute", and one the old hidden
+# SDK retries could never make because they had no idea a fallback
+# existed.
+#
+# 5 s because it must leave room for the retry it precedes: the tightest
+# budget is 10 s and a request can take ``OPENAI_REQUEST_TIMEOUT_SECONDS``,
+# so anything much larger cannot fit a wait AND an attempt.
+LLM_MAX_RETRY_AFTER_S = _read_float_env("LLM_MAX_RETRY_AFTER_S", 5.0)
+
+# Fraction of the delay added as random jitter, so concurrent callers stop
+# retrying in lockstep.
+#
+# The lockstep is real, not theoretical: ``BULK_ENRICHMENT_CONCURRENCY``
+# is 10, so a bulk write fires ten enrichment calls at once. With a purely
+# linear delay, a provider that rate-limits the batch gets all ten back at
+# the same instant, one second later — which is how a rate limit sustains
+# itself. Jitter is part of the same fix as the header handling above:
+# both are about not hammering a provider that just said no.
+#
+# Additive only (see ``call_with_retry``), so it can never undercut a
+# ``Retry-After``. ``random`` rather than ``secrets`` is deliberate — this
+# schedules a sleep, it does not protect anything.
+#
+# Floored at 0 rather than trusted, because "additive only" is an
+# invariant this value can break: ``read_float_env`` deliberately permits
+# negatives, and a negative fraction makes ``random.uniform`` return an
+# offset that SUBTRACTS from the delay — sleeping less than a provider's
+# ``Retry-After`` asked for, which is the one thing the ordering in
+# ``call_with_retry`` exists to prevent. An env var must not be able to
+# invert a documented guarantee silently.
+_jitter_requested = _read_float_env("LLM_RETRY_JITTER_FRACTION", 0.25)
+LLM_RETRY_JITTER_FRACTION = max(0.0, _jitter_requested)
+if _jitter_requested != LLM_RETRY_JITTER_FRACTION:
+    # stderr, not a logger: structured logging is not wired up at import
+    # time, and this is the same channel ``read_int_env`` uses.
+    print(
+        f"WARN: LLM_RETRY_JITTER_FRACTION ({_jitter_requested}) cannot be "
+        "negative — jitter may only lengthen a retry delay, never shorten it; "
+        "clamping to 0.0",
+        file=sys.stderr,
+    )
 
 # Retries the OpenAI-compatible SDK performs INSIDE one provider call.
 # Zero, so ``call_with_retry`` above is the whole retry policy.
