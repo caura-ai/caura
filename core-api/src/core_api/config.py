@@ -76,13 +76,20 @@ class Settings(BaseSettings):
     # (typical p95 ~6-12s, plus 2 retries x 1s linear backoff) without
     # breaching the 45s outer request budget. Must stay below
     # ``request_timeout_seconds`` so this fires first.
+    #
+    # That derivation counts ONE request per attempt, which only became
+    # true with ``LLM_PROVIDER_MAX_RETRIES``: the SDK's own default of 2
+    # made an attempt up to three requests, each with the per-request
+    # budget below, plus its own exponential backoff — so the worst case
+    # exceeded this ceiling on the first attempt rather than the third.
     enrichment_inline_timeout_seconds: float = 35.0
     # Per-call timeout passed to the AsyncOpenAI client (covers both LLM
     # enrichment and embedding providers). Without an explicit value the
     # SDK rides httpx's default — long enough that a single hung upstream
     # call eats the whole enrichment budget silently. 25s gives the
     # provider room to respond while still leaving budget for one retry
-    # under the inline ceiling.
+    # under the inline ceiling. Per REQUEST, not per attempt — see
+    # ``LLM_PROVIDER_MAX_RETRIES`` for why that distinction mattered.
     openai_request_timeout_seconds: float = 25.0
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
