@@ -98,7 +98,7 @@ def test_filter_description_still_lists_every_stored_type():
 
 
 @pytest.mark.asyncio
-async def test_bulk_write_demotes_deprecated_semantic_to_fact(db):
+async def test_bulk_write_demotes_deprecated_semantic_to_fact():
     tenant = _tenant()
     req = BulkMemoryCreate(
         tenant_id=tenant,
@@ -120,7 +120,7 @@ async def test_bulk_write_demotes_deprecated_semantic_to_fact(db):
 
 
 @pytest.mark.asyncio
-async def test_bulk_write_keeps_non_deprecated_type(db):
+async def test_bulk_write_keeps_non_deprecated_type():
     """Control: an ordinary writable type is stored unchanged."""
     tenant = _tenant()
     req = BulkMemoryCreate(
@@ -142,7 +142,7 @@ async def test_bulk_write_keeps_non_deprecated_type(db):
 
 
 @pytest.mark.asyncio
-async def test_update_demotes_deprecated_semantic_to_fact(db):
+async def test_update_demotes_deprecated_semantic_to_fact():
     """The update path (PATCH / MCP op=update) folds a caller-supplied deprecated
     type into the default — it bypasses MergeEnrichmentFields, so update_memory
     enforces the merger itself. Created as ``decision`` so the demotion (current
@@ -168,7 +168,7 @@ async def test_update_demotes_deprecated_semantic_to_fact(db):
 
 
 @pytest.mark.asyncio
-async def test_update_semantic_on_fact_row_is_noop(db):
+async def test_update_semantic_on_fact_row_is_noop():
     """A semantic->fact PATCH on a row already stored as the default records no
     phantom change (guards the demotion block against an old==new audit entry)."""
     tenant = _tenant()

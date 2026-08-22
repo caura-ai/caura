@@ -28,7 +28,8 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
-from common.events.base import Event
+from common.events.base import Event, PermanentOpError
+from common.events.crystallize_on_demand_request import CrystallizeOnDemandRequest
 from common.events.factory import get_event_bus
 from common.events.lifecycle_archive_request import (
     LifecycleArchiveRequest,
@@ -72,6 +73,20 @@ class PipelineStorageAdapter(Protocol):
     """
 
     async def crystallize(self, *, org_id: str, fleet_id: str | None) -> int: ...
+
+    # OSS #817: execute an ALREADY-RESERVED report row. Distinct from
+    # ``crystallize`` above, which reserves its own: the API path reserves
+    # synchronously so it can hand the caller a pollable id, then delegates the
+    # run here. A consumer that reserved a second row would leave the caller
+    # watching an id nothing ever finishes.
+    async def crystallize_reserved_report(
+        self,
+        *,
+        tenant_id: str,
+        report_id: str,
+        fleet_id: str | None,
+        auto_crystallize: bool,
+    ) -> None: ...
 
     async def entity_link(self, *, org_id: str, fleet_id: str | None) -> int: ...
 
@@ -239,23 +254,53 @@ async def _run_action(
     try:
         count = await run_op(request)
     except Exception as exc:
-        # Wrap the failure update in its own guard: if it raises, the
-        # outer ``raise`` below would never run and the original op
-        # exception would be silently replaced by the audit error,
-        # leaving the row stuck in ``in_progress`` indistinguishable
-        # from a crashed worker.
+        # ``PermanentOpError`` means the op has established that a retry cannot
+        # help, so this handler acks instead of nacking. Both classes write the
+        # SAME row through the same guarded call — one site, so a future edit to
+        # the failure row cannot land on one failure class and miss the other.
+        permanent = isinstance(exc, PermanentOpError)
+        # ``stats`` is what distinguishes the two in the DURABLE record. Without
+        # it a terminal failure and a mid-retry failure are byte-identical rows,
+        # and "nothing more will happen, a human must act" is the whole point —
+        # it has to be queryable, not just present in a log line. Mirrors how the
+        # dedup gate above disambiguates two meanings of ``success`` via
+        # ``stats={"skipped": True}``.
+        recorded = True
         try:
             await adapter.update_lifecycle_audit_row(
                 audit_id,
                 status="failure",
+                stats={"terminal": True} if permanent else None,
                 error_message=str(exc)[:500],
             )
         except Exception:
+            recorded = False
+            # Wrap the failure update in its own guard: if it raises, the
+            # ``raise`` below would never run and the original op exception
+            # would be silently replaced by the audit error, leaving the row
+            # stuck in ``in_progress`` indistinguishable from a crashed worker.
             logger.warning(
                 "lifecycle audit failure update failed; row stuck in_progress",
                 exc_info=True,
                 extra={"audit_id": audit_id, "action": action},
             )
+        if permanent and recorded:
+            # Acking is only defensible because the ``failure`` row IS the durable
+            # record. When the write failed there is no record, so fall through to
+            # the raise and let redelivery have another go at producing one — one
+            # wasted retry is cheaper than a row stuck in_progress forever.
+            logger.error(
+                "lifecycle %s failed permanently; not retrying",
+                action,
+                exc_info=True,
+                extra={
+                    "audit_id": audit_id,
+                    "org_id": org_id,
+                    "triggered_by": triggered_by,
+                    "terminal": True,
+                },
+            )
+            return
         # Re-raise so the bus nacks → Pub/Sub redelivers (subject to
         # max-delivery-attempts → DLQ). The ``failure`` row above is
         # the durable record (when the update succeeded).
@@ -363,7 +408,48 @@ def register_pipeline_consumers(adapter: PipelineStorageAdapter) -> None:
             org_id=req.org_id, fleet_id=req.fleet_id, run_label=req.run_label
         )
 
+    async def crystallize_on_demand(event) -> None:
+        """OSS #817: run an API-triggered crystallization off the request.
+
+        Deliberately NOT routed through ``_run_action``: that wrapper reports into
+        a ``lifecycle_audit`` row this request has no id for, and dedups on a 24h
+        window that would silently drop a manual trigger after a successful
+        nightly run.
+
+        Exceptions propagate to the bus, which logs them; the report row is given
+        a terminal status by the run itself, so a failure here still leaves a
+        readable report rather than a wedged one.
+        """
+        try:
+            # Same guard, and the same reason, as ``_run_action`` above: an
+            # unhandled exception on a bad payload nacks the delivery and
+            # redelivers forever / DLQs (audit M16). A malformed payload is not
+            # retryable — most plausibly a rolling deploy where publisher and
+            # consumer briefly disagree on the schema — so it is dropped and
+            # logged. Bypassing ``_run_action`` cost this handler the guard, which
+            # is exactly the kind of thing bypassing shared machinery costs.
+            request = CrystallizeOnDemandRequest.model_validate(event.payload)
+        except ValidationError:
+            logger.exception(
+                "dropping malformed crystallize-on-demand payload",
+                extra={
+                    "event_type": event.event_type,
+                    "event_id": str(event.event_id),
+                    "dropped": True,
+                },
+            )
+            return
+        await adapter.crystallize_reserved_report(
+            tenant_id=request.tenant_id,
+            report_id=request.report_id,
+            fleet_id=request.fleet_id,
+            auto_crystallize=request.auto_crystallize,
+        )
+
     bus = get_event_bus()
+    bus.subscribe(
+        Topics.Lifecycle.CRYSTALLIZE_ON_DEMAND_REQUESTED, crystallize_on_demand
+    )
     bus.subscribe(
         Topics.Lifecycle.CRYSTALLIZE_REQUESTED,
         partial(

@@ -3,7 +3,7 @@
 The agent-harness install surface the OpenClaw plugin reconciler pulls
 from. It applies the SAME active-only + opt-in gate the MCP pull surface
 applies (PR #315), server-side, so push (reconciler → disk) and pull
-(``memclaw_doc``) agree on what an agent may see.
+(``caura_doc``) agree on what an agent may see.
 
 Asserted contract:
   - opted-in tenant → storage query forced to ``where={"status":"active"}``;

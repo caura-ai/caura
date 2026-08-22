@@ -45,6 +45,26 @@ class Settings(BaseSettings):
     # 12x write-latency regression.
     per_tenant_storage_write_concurrency: int = 2
 
+    # Outstanding-publish cap for the scheduled embed-backfill sweep, well
+    # under ``run_embedding_backfill``'s own default of 100. It bounds how fast
+    # the sweep ENQUEUES work, not how fast it is embedded — provider calls are
+    # paced by the per-tenant slots above and the embedding concurrency gate.
+    # Deliberately low anyway: the sweep shares ``EMBED_REQUESTED`` with live
+    # deferred writes, so a large backlog in front of them delays real traffic,
+    # and the backend it feeds serves roughly 30 concurrent. Env-tunable so a
+    # sweep competing with live load can be throttled without a deploy.
+    embed_backfill_max_inflight: int = 25
+
+    @field_validator("embed_backfill_max_inflight")
+    @classmethod
+    def _embed_backfill_inflight_must_be_positive(cls, v: int) -> int:
+        # 0 would make ``asyncio.Semaphore(0)`` block every publish forever,
+        # so the sweep would hang rather than fail — same trap as the
+        # per-tenant cap above. Reject at config load.
+        if v < 1:
+            raise ValueError("embed_backfill_max_inflight must be >= 1; 0 would hang every sweep")
+        return v
+
     @field_validator("per_tenant_storage_write_concurrency")
     @classmethod
     def _per_tenant_cap_must_be_positive(cls, v: int) -> int:

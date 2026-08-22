@@ -2,7 +2,7 @@
 
 Encodes/decodes an opaque base64 cursor of the form ``{created_at}:{id}``
 for use with stable, tuple-ordered pagination across the REST memory
-list endpoint and the MCP ``memclaw_list`` tool.
+list endpoint and the MCP ``caura_list`` tool.
 
 Callers must ensure the cursor is only used with queries ordered by
 ``(created_at desc, id desc)`` — any other ordering breaks the ``(ts,

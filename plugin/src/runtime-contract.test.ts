@@ -852,7 +852,7 @@ describe("MemClawContextEngine.constructor — undefined-config tolerance (v2.6.
 // Customer escalation 2026-05-26: WhatsApp group sessions stuck
 // running on plugin v2.6.3. ``openclaw status`` showed group
 // contexts over budget (312k/272k, 292k/272k tokens). Agent looped
-// on ``memclaw_keystones`` tool calls 3-5 times per turn, never
+// on ``caura_keystones`` tool calls 3-5 times per turn, never
 // finalizing; final replies were silently dropped.
 //
 // Root cause: ``info.ownsCompaction: true`` (set in PR #212 with

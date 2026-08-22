@@ -1,7 +1,7 @@
 """Outcome inference — the 6 free signals (Skill Factory plan §6).
 
 The lake produces a memory stream. This package mines that stream
-for passive outcome evidence — no ``memclaw_evolve`` call required.
+for passive outcome evidence — no ``caura_evolve`` call required.
 Each signal module reads existing MemClaw data (memories table
 columns, recall counters, contradiction status, audit log) and
 emits :class:`SignalEvidence` events keyed by ``(tenant_id, run_id,

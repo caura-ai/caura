@@ -8,6 +8,7 @@ from pathlib import Path
 from common.constants import (  # noqa: F401
     CONTRADICTION_CANDIDATE_MAX,
     CONTRADICTION_SIMILARITY_THRESHOLD,
+    CRYSTALLIZER_SHORT_CONTENT_CHARS,
     DEFAULT_RELATION_TYPE_WEIGHT,
     ENTITY_RESOLUTION_CANDIDATE_LIMIT,
     GRAPH_MAX_EXPANDED_ENTITIES,
@@ -18,9 +19,14 @@ from common.constants import (  # noqa: F401
     SEMANTIC_DEDUP_CANDIDATE_LIMIT,
     SEMANTIC_DEDUP_THRESHOLD,
     SINGLE_VALUE_PREDICATES,
+    SQL_SCORING_PARAM_KEYS,
     TYPE_DECAY_DAYS,
     VECTOR_DIM,
 )
+
+# The embedding concurrency-gate timeout, which the bulk strong-embed budget
+# below must stay ordered above — see BULK_STRONG_EMBED_TIMEOUT_SECONDS.
+from common.embedding.constants import EMBEDDING_GATE_TIMEOUT_SECONDS
 
 # Re-export memory-vocabulary constants from common.enrichment (CAURA-595).
 # common is the source of truth so core-api and core-worker stay in sync.
@@ -34,6 +40,7 @@ from common.enrichment.constants import (  # noqa: F401
     SERVER_RESERVED_MEMORY_TYPES,
     MemoryType,
 )
+from common.env_utils import read_float_env
 
 # Re-export LLM provider constants from common.llm (CAURA-595).
 from common.llm.constants import (  # noqa: F401
@@ -164,8 +171,39 @@ MAX_CONTENT_LENGTH = 10000
 CHUNKING_THRESHOLD_CHARS = 2000  # content above this triggers auto-chunking
 MAX_QUERY_LENGTH = 5000
 
+# ── Doc-derived memories ──
+# ``caura_doc(op="write")`` mints a memory carrying the document body so the
+# body becomes reachable by MEANING (recall / recall-brief read
+# ``memories.content`` directly). Docs themselves are only searchable via their
+# ``data["summary"]`` embedding, and ``caura_recall`` never returns documents.
+#
+# The memory content is the doc body VERBATIM, so the cutoff is simply the
+# memory schema ceiling: mint whenever the body fits in a memory at all.
+# Over-cutoff bodies are SKIPPED rather than truncated — a truncated body reads
+# as complete and would produce confidently wrong downstream conclusions.
+DOC_MEMORY_MAX_CHARS = MAX_CONTENT_LENGTH
+
+# NOTE: there is deliberately no ``DOC_MEMORY_TYPE``. Doc-derived memories pass
+# no ``memory_type`` at all, so the enrichment classifier assigns one per
+# document — a decision record becomes ``decision``, a runbook ``rule``, an
+# incident writeup ``episode``. Pinning every document to a single type would
+# throw that away. (And ``reference`` was never an option: it is not a
+# MemoryType, and the ``memories_memory_type_check`` CHECK constraint from
+# migration 013 would reject it.)
+
+# Provenance only — written to ``memories.source_uri`` as
+# ``memclaw-doc://<collection>/<doc_id>``. Nothing queries it yet (that would
+# need a storage-side filter + index); it exists so a later reconciliation
+# mechanism has a stable key to match a doc to the memories minted from it.
+DOC_MEMORY_URI_SCHEME = "memclaw-doc"
+
+assert DOC_MEMORY_MAX_CHARS <= MAX_CONTENT_LENGTH, (
+    "DOC_MEMORY_MAX_CHARS must not exceed MemoryCreate.content max_length "
+    f"({MAX_CONTENT_LENGTH}) — an over-cap spec would fail schema validation."
+)
+
 # ── Tool surface bookkeeping ──
-# Tool descriptions live inline in `core_api/tools/memclaw_*.py` spec
+# Tool descriptions live inline in `core_api/tools/caura_*.py` spec
 # modules (the SoT). Nothing else should hold a copy.
 # STM tools were dropped in 6fea229; STM_ONLY_TOOLS constant removed.
 
@@ -532,11 +570,43 @@ GRAPH_MAX_BOOSTED_MEMORIES = 50  # cap on memories receiving graph boost (preven
 ENTITY_LOOKUP_MAX_MATCHES = 20
 
 FTS_WEIGHT = 0.3  # blend: (1 - FTS_WEIGHT) * vector + FTS_WEIGHT * keyword
+# Scale applied to ts_rank_cd BEFORE the saturating map, putting fts_score on the
+# same scale as cosine so FTS_WEIGHT above bites in effect and not just in name
+# (#687). Division of labour: FTS_WEIGHT is the *preference* between the two
+# signals; this is the *unit conversion* that makes the preference meaningful.
+#
+# The input to the derivation: migration 001 builds ``search_vector`` as a bare
+# ``to_tsvector('english', content)`` with no ``setweight``, so every lexeme is
+# weight D = 0.1 and a modal single-occurrence match scores ts_rank_cd = 0.1 →
+# 0.0909, against measured cosine of 0.35-0.39. Re-derive if that trigger starts
+# weighting lexemes; changing FTS_WEIGHT alone does NOT require it.
+#
+# Why 6: derived, not tuned. k*0.1/(1+k*0.1) ≈ 0.37 lands a modal match in the
+# cosine range. Do not treat it as a free dial.
+#
+# Calibrated at the MODE, not across the distribution: ts_rank_cd's cover-density
+# penalty is not a constant factor, so a spread-out multi-term match still lands
+# well below the band. That residual is arguably right — spread terms are a worse
+# match — but it means "effective ≈ nominal weight" describes the typical query,
+# not a global property. A corpus of spread-term queries will measure lower; that
+# is not the scale being broken.
+#
+# Measured before shipping — see BENCHMARKS.md § First-stage retrieval, and note
+# there that the effect rises monotonically across the whole range swept, so the
+# benchmark does NOT locate an optimum. 6 is the derivation's answer, not the
+# sweep's. 1.0 reproduces the pre-#687 formula exactly; per-tenant override lives
+# at ``search.default_profile.fts_rank_scale``.
+FTS_RANK_SCALE = 6.0
 FTS_WEIGHT_BOOSTED = 0.6  # for short specific queries (1-3 proper nouns / identifiers)
 FTS_BOOST_MAX_TOKENS = 3  # queries with more meaningful tokens than this stay at FTS_WEIGHT
 FTS_BOOST_SPECIFICITY_RATIO = 0.4  # strict >; at N=2 this means >=1 specific token triggers boost
 SIMILARITY_BLEND = 0.85  # base_score = SIMILARITY_BLEND * similarity + (1 - SIMILARITY_BLEND) * weight (raised from 0.75 — LoCoMo sweep showed +13pp recall)
 SEARCH_OVERFETCH_FACTOR = 2  # fetch top_k * N candidates from storage, trim to top_k after min_similarity filter — gives post-filter headroom
+FTS_ONLY_RESERVED_RESULTS = 1  # #687: result slots held for rows that FTS-match but are not embedded yet (transient deferred-embed window); 0 restores the pre-#687 head-slice behaviour
+# ``SQL_SCORING_PARAM_KEYS`` — the set both search-path builders project through
+# before sending ``search_params`` — is re-exported from ``common.constants``
+# above, because storage reads the same set and the drift that matters is
+# set-against-SQL.
 # A26: recall_count is bumped for every RETURNED row, used or not (see
 # TrackRecalls + memory_increment_recall), and feeds recall_boost back into the
 # rank score — a self-reinforcing "returned → boosted → returned" loop with no
@@ -563,10 +633,32 @@ MEMORY_RECALL_SUMMARY_MAX_TOKENS = 500
 INSIGHTS_MAX_MEMORIES = 50  # max memories per analysis pass (token budget ~10k)
 INSIGHTS_TEMPERATURE = 0.3  # analytical, not creative
 INSIGHTS_DISCOVER_SAMPLE_SIZE = 200  # memories to sample for vector clustering
+# Trailing window the discover sample is spread over. Without it the sample is
+# "newest N", which on a busy tenant spans hours — discover then clusters
+# yesterday's activity instead of the corpus, and consecutive nightly runs
+# re-find the same shapes in near-identical slices.
+INSIGHTS_DISCOVER_WINDOW_DAYS = 30
 INSIGHTS_DISCOVER_CLUSTERS = 6  # k-means cluster count for discover mode
+# Trailing window for the patterns read. Semantically aligned with the mode
+# (the prompt analyzes "recent" memories) — but primarily a cost bound: the
+# title-dedup subquery computes window functions over every row matching the
+# filters, so an unbounded patterns read would scan the tenant's whole active
+# history to return 50 deduped rows (pre-dedup it early-terminated on the
+# (tenant_id, created_at DESC) index). Separate from the discover window so
+# the two modes stay independently tunable.
+INSIGHTS_PATTERNS_WINDOW_DAYS = 30
+# Same cost bound for the failures and stale reads (their weight/recall
+# predicates prune less and less as the corpus grows; the dedup subquery has
+# no inner LIMIT). 90 days — deliberately wider than the stale mode's own
+# 30/14-day age thresholds, which rows must EXCEED to qualify: stale now
+# surfaces the 30-90-day "recently became stale" band instead of perpetually
+# re-reporting the same ancient tail (which is the archive-stale lifecycle
+# job's business, not nightly reporting's).
+INSIGHTS_FAILURES_WINDOW_DAYS = 90
+INSIGHTS_STALE_WINDOW_DAYS = 90
 INSIGHTS_FOCUS_MODES = ("contradictions", "failures", "stale", "divergence", "patterns", "discover")
 
-# Shared scope enum used by memclaw_list, memclaw_insights, memclaw_evolve and
+# Shared scope enum used by caura_list, caura_insights, caura_evolve and
 # their REST counterparts. Trust-level gating per scope lives in the individual
 # handlers (trust_service.require_trust); this tuple is the single source of
 # truth for "what values are accepted".
@@ -641,7 +733,8 @@ NODE_OFFLINE_SECONDS = 300
 CRYSTALLIZER_STALE_DAYS = 180
 CRYSTALLIZER_STALE_MAX_WEIGHT = 0.3
 CRYSTALLIZER_DEDUP_THRESHOLD = 0.95
-CRYSTALLIZER_SHORT_CONTENT_CHARS = 10
+# CRYSTALLIZER_SHORT_CONTENT_CHARS now lives in common/ (re-exported above) —
+# core-storage-api needs the same bound to list short-content candidates.
 CRYSTALLIZER_LOW_EMBEDDING_COVERAGE_PCT = 90
 CRYSTALLIZER_HIGH_PENDING_PCT = 20
 CRYSTALLIZER_HIGH_PII_COUNT = 10
@@ -679,6 +772,61 @@ BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS = 30.0
 # ``storage_bulk_timeout_seconds`` per-phase deadline can fire before the
 # umbrella ``bulk_request_timeout_seconds``.
 BULK_EMBEDDING_TIMEOUT_SECONDS = 30.0
+
+# Margin over the concurrency gate for the opportunistic embed's default budget,
+# and the floor that margin can't take it below.
+_STRONG_EMBED_GATE_MARGIN_SECONDS = 3.0
+_STRONG_EMBED_MIN_SECONDS = 8.0
+
+
+def _default_strong_embed_timeout(gate_seconds: float, required_seconds: float) -> float:
+    """Default budget for the opportunistic bulk embed.
+
+    Derived from the gate rather than fixed, so raising
+    ``EMBEDDING_GATE_TIMEOUT_SECONDS`` — an operator's env var — can never leave a
+    deployment unable to start. A fixed literal here would do exactly that: any
+    install that had already raised the gate past it would fail the startup
+    ordering check on upgrade, fixable only by a code change.
+
+    Must land STRICTLY between the two, since that is what the startup validator
+    enforces: ``gate < budget < required``. Clamping to ``required_seconds`` is not
+    enough — for a gate within the margin of the cap that clamp lands exactly ON
+    the cap, and the validator then refuses to start for an operator who only
+    raised the gate to a legitimate value below it. So when the full margin doesn't
+    fit, take the midpoint of the remaining room, which is strictly inside the
+    bound for any ``gate < required``.
+
+    A gate at or above the cap has no such room, and is incoherent on its own terms
+    — it would outlive the embed it gates. That returns ``required_seconds`` and
+    lets the validator say so rather than papering over it.
+    """
+    preferred = max(_STRONG_EMBED_MIN_SECONDS, gate_seconds + _STRONG_EMBED_GATE_MARGIN_SECONDS)
+    if preferred < required_seconds:
+        return preferred
+    if gate_seconds < required_seconds:
+        return (gate_seconds + required_seconds) / 2.0
+    return required_seconds
+
+
+# Cap on the *opportunistic* bulk embed — the one a ``write_mode="strong"`` item
+# triggers on a deployment that otherwise defers. Much tighter than the required
+# cap above, because this branch's documented fallback is "defer to the backfill
+# anyway": spending 30s to reach an outcome that was free is latency charged to
+# every other item in the batch, none of which asked for inline embedding.
+#
+# Must stay ABOVE ``EMBEDDING_GATE_TIMEOUT_SECONDS``, which is deliberately set
+# below callers' deadlines so a saturated concurrency gate surfaces as
+# attributable backpressure rather than an anonymous caller timeout. Drop below it
+# and every gate-saturated strong write is reported as a generic embed failure.
+#
+# The default is derived from that gate so the ordering holds however the operator
+# tunes it, and is env-overridable so a deployment that needs a specific value has
+# a config-only lever rather than a code change. ``_validate_timeout_ordering`` in
+# config.py still rejects an explicit override that conflicts with the gate.
+BULK_STRONG_EMBED_TIMEOUT_SECONDS = read_float_env(
+    "BULK_STRONG_EMBED_TIMEOUT_SECONDS",
+    _default_strong_embed_timeout(EMBEDDING_GATE_TIMEOUT_SECONDS, BULK_EMBEDDING_TIMEOUT_SECONDS),
+)
 
 # ── Lifecycle automation ──
 LIFECYCLE_INTERVAL_HOURS = 24  # run lifecycle cycle every N hours

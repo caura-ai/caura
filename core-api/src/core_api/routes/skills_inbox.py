@@ -109,7 +109,7 @@ def _require_inbox_admin(auth: AuthContext) -> None:
     # Mirror documents.py:215-216 — admin status may come from either
     # the legacy ``is_admin`` flag OR ``org_role == "admin"``. Keeping
     # both surfaces in lockstep means an operator authorized to write
-    # admin-gated skills via ``memclaw_doc`` can also act on the inbox.
+    # admin-gated skills via ``caura_doc`` can also act on the inbox.
     is_admin = bool(getattr(auth, "is_admin", False)) or (getattr(auth, "org_role", None) == "admin")
     if not is_admin:
         raise HTTPException(

@@ -116,7 +116,15 @@ class ParallelEmbedEnrich:
             # core-worker" where the key is absent entirely.
             embedding_task = _timed(_return_cached(), timings, "embedding_ms")
         elif not defer_embedding:
-            embedding_task = _timed(get_embedding(data.content, tenant_config), timings, "embedding_ms")
+            # Not deferred means a caller is blocked on the HTTP response
+            # (deployment_mode="inline", or write_mode="strong" which is always
+            # inline), so this must NOT sit on the reduced background budget —
+            # see ``EMBEDDING_INTERACTIVE_RESERVED_SLOTS``.
+            embedding_task = _timed(
+                get_embedding(data.content, tenant_config, background=False),
+                timings,
+                "embedding_ms",
+            )
 
         enrichment_task = None
         if (

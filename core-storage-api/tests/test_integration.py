@@ -14,8 +14,13 @@ import uuid
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
 
 from common.constants import VECTOR_DIM
+
+# The transactional session (commits on success), used by the one test that has
+# to age rows directly — no endpoint sets ``created_at``.
+from core_storage_api.services.postgres_service import get_session as _svc_session
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -146,6 +151,107 @@ class TestMemories:
         assert resp2.status_code == 200
         assert resp2.json()["id"] == memory_id
 
+    async def test_a55_contradiction_fields_round_trip(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """A55 unified-contradiction fields (confidence / is_inferred / scope)
+        persist on write and surface on read via ``MEMORY_FIELDS`` serialization.
+
+        These are system-populated (not agent-supplied in production), but the
+        storage write whitelist is derived from the ORM columns, so a payload
+        carrying them round-trips — which is what read serialization must expose.
+        """
+        payload = {
+            **_memory_payload(tenant_id, fleet_id),
+            "confidence": 0.9,
+            "is_inferred": True,
+            "scope": {"role": "engineer", "location": "us"},
+        }
+        created = (await client.post(f"{PREFIX}/memories", json=payload)).json()
+        assert created["confidence"] == 0.9
+        assert created["is_inferred"] is True
+        assert created["scope"] == {"role": "engineer", "location": "us"}
+
+        fetched = (await client.get(f"{PREFIX}/memories/{created['id']}")).json()
+        assert fetched["confidence"] == 0.9
+        assert fetched["is_inferred"] is True
+        assert fetched["scope"] == {"role": "engineer", "location": "us"}
+
+    async def test_a55_contradiction_fields_default_on_legacy_write(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """A write that omits the A55 fields gets the server defaults on read:
+        ``confidence`` NULL, ``is_inferred`` false, ``scope`` ``{}``."""
+        created = (await client.post(f"{PREFIX}/memories", json=_memory_payload(tenant_id, fleet_id))).json()
+        fetched = (await client.get(f"{PREFIX}/memories/{created['id']}")).json()
+        assert fetched["confidence"] is None
+        assert fetched["is_inferred"] is False
+        assert fetched["scope"] == {}
+
+    async def test_a55_memory_conflict_record_round_trip(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """A55 — POST /memories/conflicts inserts a classification record
+        (relationship/diagnosis/evidence/action + confidences + audit + metadata)
+        referencing two real memories."""
+        a = (await client.post(f"{PREFIX}/memories", json=_memory_payload(tenant_id, fleet_id))).json()
+        b = (await client.post(f"{PREFIX}/memories", json=_memory_payload(tenant_id, fleet_id))).json()
+        payload = {
+            "tenant_id": tenant_id,
+            "fleet_id": fleet_id,
+            "new_memory_id": a["id"],
+            "old_memory_id": b["id"],
+            "relationship": "exact_value",
+            "relationship_confidence": 0.9,
+            "diagnosis": "temporal_change",
+            "diagnosis_confidence": 0.8,
+            "evidence_strength": "explicit",
+            "action": "supersede",
+            "audit_reason": "exact_value/temporal_change -> supersede",
+            "created_by": "test",
+            "metadata": {"k": "v"},
+        }
+        resp = await client.post(f"{PREFIX}/memories/conflicts", json=payload)
+        assert resp.status_code == 200, resp.text
+        row = resp.json()
+        assert row["relationship"] == "exact_value"
+        assert row["diagnosis"] == "temporal_change"
+        assert row["evidence_strength"] == "explicit"
+        assert row["action"] == "supersede"
+        assert row["new_memory_id"] == a["id"]
+        assert row["old_memory_id"] == b["id"]
+        assert row["relationship_confidence"] == 0.9
+        assert row["metadata_"] == {"k": "v"}
+
+    async def test_a55_memory_conflict_rejects_bad_relationship(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """A bad enum value is a 400 (validated) rather than a 500 CHECK violation."""
+        a = (await client.post(f"{PREFIX}/memories", json=_memory_payload(tenant_id, fleet_id))).json()
+        b = (await client.post(f"{PREFIX}/memories", json=_memory_payload(tenant_id, fleet_id))).json()
+        resp = await client.post(
+            f"{PREFIX}/memories/conflicts",
+            json={
+                "tenant_id": tenant_id,
+                "new_memory_id": a["id"],
+                "old_memory_id": b["id"],
+                "relationship": "bogus",
+            },
+        )
+        assert resp.status_code == 400
+
     async def test_update_status_via_patch(
         self,
         client: AsyncClient,
@@ -158,7 +264,7 @@ class TestMemories:
 
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
-            json={"status": "archived"},
+            json={"tenant_id": tenant_id, "status": "archived"},
         )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
@@ -203,12 +309,18 @@ class TestMemories:
 
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
-            json={"metadata_patch": {"embedding_pending": False, "summary": "done"}},
+            json={
+                "tenant_id": tenant_id,
+                "metadata_patch": {"embedding_pending": False, "summary": "done"},
+            },
         )
         assert resp.status_code == 200, resp.text
 
         updated = (await client.get(f"{PREFIX}/memories/{memory_id}")).json()
-        md = updated["metadata"]
+        # Storage serialises the ORM attribute name verbatim, so the wire key
+        # is ``metadata_`` (as the seed payload above already uses) — not the
+        # ``metadata`` spelling core-api uses in its own internal field dicts.
+        md = updated["metadata_"]
         # Patched keys reflect the new values.
         assert md["embedding_pending"] is False
         assert md["summary"] == "done"
@@ -245,6 +357,7 @@ class TestMemories:
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
             json={
+                "tenant_id": tenant_id,
                 "ts_valid_start": "2026-09-14T00:00:00+00:00",
                 "ts_valid_end": "2026-10-15T23:59:59+00:00",
             },
@@ -278,7 +391,10 @@ class TestMemories:
 
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
-            json={"ts_valid_start": "tomorrow"},  # not a valid ISO string
+            json={
+                "tenant_id": tenant_id,
+                "ts_valid_start": "tomorrow",  # not a valid ISO string
+            },
         )
         assert resp.status_code == 422, resp.text
         body = resp.json()
@@ -296,16 +412,22 @@ class TestMemories:
         m1 = (await client.post(f"{PREFIX}/memories", json=p1)).json()
         m2 = (await client.post(f"{PREFIX}/memories", json=p2)).json()
 
-        resp = await client.patch(
-            f"{PREFIX}/memories/batch-status",
+        # POST /batch-update-status, with tenant_id carried at the batch level
+        # (the route's cross-tenant write guard). The old PATCH /batch-status
+        # spelling in this test matched no route at all — it fell through to
+        # PATCH /memories/{memory_id} and 422'd on UUID coercion of the
+        # literal "batch-status". core-api's storage_client uses this path.
+        resp = await client.post(
+            f"{PREFIX}/memories/batch-update-status",
             json={
+                "tenant_id": tenant_id,
                 "updates": [
                     {"memory_id": m1["id"], "status": "archived"},
                     {"memory_id": m2["id"], "status": "archived"},
                 ],
             },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         assert resp.json()["ok"] is True
 
     async def test_soft_delete(
@@ -359,7 +481,11 @@ class TestMemories:
         # route must surface 404.
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}",
-            json={"status": "active", "metadata_patch": {"resurrect_attempt": True}},
+            json={
+                "tenant_id": tenant_id,
+                "status": "active",
+                "metadata_patch": {"resurrect_attempt": True},
+            },
         )
         assert resp.status_code == 404, resp.text
 
@@ -368,11 +494,15 @@ class TestMemories:
         after = (await client.get(f"{PREFIX}/memories/{memory_id}")).json()
         assert after["deleted_at"] is not None
         assert after["status"] == "deleted"
-        assert (after.get("metadata") or {}).get("resurrect_attempt") is None
+        # ``metadata_``, not ``metadata`` — with the wrong key this assertion
+        # was vacuous (always {} → always None) and could never have caught a
+        # resurrected metadata merge.
+        assert (after.get("metadata_") or {}).get("resurrect_attempt") is None
 
     async def test_patch_on_nonexistent_memory_returns_404(
         self,
         client: AsyncClient,
+        tenant_id: str,
     ) -> None:
         """PATCH on a memory_id that never existed must surface 404 too,
         not the legacy ``200 {"ok": True}`` silent success.
@@ -385,7 +515,7 @@ class TestMemories:
         fake_id = str(uuid.uuid4())
         resp = await client.patch(
             f"{PREFIX}/memories/{fake_id}",
-            json={"status": "active"},
+            json={"tenant_id": tenant_id, "status": "active"},
         )
         assert resp.status_code == 404, resp.text
 
@@ -448,10 +578,13 @@ class TestMemories:
         bypass it (CAURA-602)."""
         payload = _memory_payload(tenant_id, fleet_id)  # no client_request_id
         resp = await client.post(f"{PREFIX}/memories/bulk", json=[payload])
-        # Storage-writer surfaces the ValueError as 500; core-api would
-        # be the layer that returns a clean 4xx — but at this layer the
-        # important assertion is "no row was inserted."
-        assert resp.status_code >= 400
+        # 422, not 500: a batch missing client_request_id is a bad request,
+        # not a server fault. This used to let the service's ValueError escape
+        # unhandled — a 500 that pages and lands in the DLQ for something only
+        # the caller can fix. Asserting the exact code (the old assertion was
+        # a permissive >= 400) is what keeps it from regressing to a 5xx.
+        assert resp.status_code == 422, resp.text
+        assert "client_request_id" in resp.json()["detail"]
 
     async def test_find_by_content_hash(
         self,
@@ -477,10 +610,181 @@ class TestMemories:
                 "fleet_id": fleet_id,
             },
         )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["memory"] is not None
-        assert body["memory"]["content_hash"] == content_hash
+        assert resp.status_code == 200, resp.text
+        # Flat ORM dict, not an {"memory": ...} envelope — core-api's
+        # check_exact_duplicate step reads dup["id"] straight off this.
+        assert resp.json()["content_hash"] == content_hash
+
+    async def test_duplicate_hashes_return_the_oldest_instead_of_500ing(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """H-04: two live rows sharing a content_hash must not wedge the gate.
+
+        Nothing enforces one live row per (tenant, fleet, agent, content_hash) —
+        ``ix_memories_content_hash`` is non-unique — and paths like auto-chunk mint
+        duplicates with no concurrency at all. ``scalar_one_or_none()`` raised
+        ``MultipleResultsFound`` on two rows, which became a storage 500 and a
+        FAILED write-pipeline step, PERMANENTLY: every later write of that content
+        500'd instead of 409ing, with no path that heals it.
+
+        Returning the oldest row degrades the state to the 409 the contract always
+        intended.
+        """
+        content = f"duplicate hash content {_uid()}"
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+        # Two live rows, same hash — exactly what the non-unique index permits.
+        # Distinct client_request_ids so the idempotency gate does not fold them.
+        first = await client.post(
+            f"{PREFIX}/memories",
+            json=_memory_payload(tenant_id, fleet_id, content=content, content_hash=content_hash),
+        )
+        second = await client.post(
+            f"{PREFIX}/memories",
+            json=_memory_payload(tenant_id, fleet_id, content=content, content_hash=content_hash),
+        )
+        assert first.status_code in (200, 201), first.text
+        assert second.status_code in (200, 201), second.text
+        assert first.json()["id"] != second.json()["id"], (
+            "storage accepted both rows — if this ever fails, a unique constraint "
+            "landed and this test's premise is gone (which would be good news)"
+        )
+
+        resp = await client.get(
+            f"{PREFIX}/memories/by-content-hash",
+            params={
+                "tenant_id": tenant_id,
+                "content_hash": content_hash,
+                "fleet_id": fleet_id,
+            },
+        )
+
+        # The whole point: 200 with a row, not 500.
+        assert resp.status_code == 200, resp.text
+        # And deterministically the OLDER row — the one that legitimately won the
+        # 409 contract — so repeated calls agree rather than following the planner.
+        assert resp.json()["id"] == first.json()["id"]
+
+    async def test_same_transaction_duplicates_resolve_stably(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """H-04: the tie case, which is the COMMON one rather than an edge.
+
+        ``created_at`` is ``server_default=now()`` and Postgres fixes ``now()`` for
+        the whole transaction, so duplicates inserted together — which is exactly
+        how the auto-chunk path writes its children, one ``create_memories`` call —
+        share ``created_at`` to the microsecond. Ordering by ``created_at`` alone
+        then leaves the pick to the query plan, so "returns the oldest, stably"
+        would hold only by luck.
+
+        HONEST LIMIT: this test does NOT fail if the ``Memory.id`` tie-break is
+        removed. Instability is plan-dependent, and on a table this small Postgres
+        returns heap order, which happens to be stable and insertion-ordered. So
+        treat this as an assertion about the intended OUTCOME — ties exist, the
+        answer is stable, and it is the tie-break winner — not as proof that the
+        unordered form is broken. The guarantee comes from the ORDER BY being
+        total, which no fixture can force Postgres to violate on demand.
+        """
+        content = f"same-txn duplicate {_uid()}"
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        attempt = _uid()
+        items = [
+            {
+                **_memory_payload(tenant_id, fleet_id, content=content, content_hash=content_hash),
+                "client_request_id": f"{attempt}:{idx}",
+            }
+            for idx in range(3)
+        ]
+
+        resp = await client.post(f"{PREFIX}/memories/bulk", json=items)
+        assert resp.status_code == 200, resp.text
+        inserted = [e["id"] for e in resp.json() if e["was_inserted"]]
+        assert len(inserted) == 3, f"expected 3 live duplicates, got {resp.json()}"
+
+        # Prove the premise rather than assuming it: if these rows did NOT share
+        # created_at, the assertions below would pass on ordinary chronological
+        # ordering and prove nothing about the tie-break.
+        stamps = set()
+        for mid in inserted:
+            row = await client.get(f"{PREFIX}/memories/{mid}")
+            assert row.status_code == 200, row.text
+            stamps.add(row.json()["created_at"])
+        assert len(stamps) == 1, f"expected one shared created_at, got {stamps}"
+
+        params = {
+            "tenant_id": tenant_id,
+            "content_hash": content_hash,
+            "fleet_id": fleet_id,
+        }
+        picks = []
+        for _ in range(4):
+            r = await client.get(f"{PREFIX}/memories/by-content-hash", params=params)
+            assert r.status_code == 200, r.text
+            picks.append(r.json()["id"])
+
+        # Same answer every time, and it is the tie-break winner (lowest id among
+        # the tied rows) rather than whatever the plan produced this run.
+        assert len(set(picks)) == 1, f"unstable pick across calls: {picks}"
+        assert picks[0] == min(inserted)
+
+    async def test_update_path_gate_also_reports_duplicates(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+        caplog,
+    ) -> None:
+        """H-04 round 2: the UPDATE path's gate hits the same anomaly.
+
+        Both gates were wedging on ``MultipleResultsFound``; only the read path was
+        made observable. Reporting from one of two affected gates undercounts the
+        duplicate population, and that count is what the partial unique index
+        decision rests on — so this pins the other half.
+        """
+        import logging
+
+        content = f"update-path duplicate {_uid()}"
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        attempt = _uid()
+        # No fleet: the ``/duplicate-hash`` route takes only tenant_id +
+        # content_hash + exclude_id, so it queries ``fleet_id IS NULL``. Rows with a
+        # fleet would not match it at all — a pre-existing narrowness of that route
+        # (the service method supports fleet_id and agent_id; the route exposes
+        # neither), noted rather than changed here since widening it would alter
+        # dedup scope.
+        items = [
+            {
+                **_memory_payload(tenant_id, fleet_id, content=content, content_hash=content_hash),
+                "fleet_id": None,
+                "client_request_id": f"{attempt}:{idx}",
+            }
+            for idx in range(3)
+        ]
+        resp = await client.post(f"{PREFIX}/memories/bulk", json=items)
+        assert resp.status_code == 200, resp.text
+        inserted = sorted(e["id"] for e in resp.json() if e["was_inserted"])
+        assert len(inserted) == 3
+
+        with caplog.at_level(logging.WARNING, logger="core_storage_api.services.postgres_service"):
+            r = await client.get(
+                f"{PREFIX}/memories/duplicate-hash",
+                params={"tenant_id": tenant_id, "content_hash": content_hash},
+            )
+
+        # 200 with a row, not the 500 this used to be.
+        assert r.status_code == 200, r.text
+        assert r.json()["memory_id"] == inserted[0]
+
+        warnings = [rec for rec in caplog.records if "share a content_hash" in rec.getMessage()]
+        assert warnings, "the update-path gate resolved a duplicate silently"
+        # Tagged with which gate saw it, so the two are separable in a log query.
+        assert getattr(warnings[-1], "dedup_path", None) == "find_duplicate_hash"
 
     async def test_find_by_content_hash_not_found(
         self,
@@ -491,8 +795,10 @@ class TestMemories:
             f"{PREFIX}/memories/by-content-hash",
             params={"tenant_id": tenant_id, "content_hash": "nonexistent"},
         )
-        assert resp.status_code == 200
-        assert resp.json()["memory"] is None
+        # 404-on-miss, which core-api's shared _get maps back to None — a
+        # 200 with a null envelope would make the duplicate check treat every
+        # write as a duplicate.
+        assert resp.status_code == 404, resp.text
 
     async def test_get_stats(
         self,
@@ -520,6 +826,72 @@ class TestMemories:
         fake_id = str(uuid.uuid4())
         resp = await client.get(f"{PREFIX}/memories/{fake_id}")
         assert resp.status_code == 404
+
+    async def test_scored_search_rejects_a_payload_without_nested_search_params(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        """Scoring knobs must arrive nested; flat top-level keys are not read.
+
+        The route used to rebuild ``search_params`` from top-level keys named in
+        a hardcoded allowlist — see the rationale on the route itself. A flat
+        payload must now fail LOUDLY at the edge rather than sail through with
+        every knob silently dropped.
+        """
+        flat = {
+            "tenant_id": tenant_id,
+            "embedding": [0.1] * VECTOR_DIM,
+            "query": "anything",
+            "top_k": 10,
+            # Flat, the way the allowlist used to accept it. Nothing reads it here.
+            "fts_weight": 0.5,
+        }
+        resp = await client.post(f"{PREFIX}/memories/scored-search", json=flat)
+        assert resp.status_code == 422, (
+            f"a flat-key payload must be rejected at the edge, got {resp.status_code}: {resp.text}"
+        )
+        assert "search_params" in resp.json()["detail"]
+
+        # Present-but-empty is the same malformed request: the scoring keys are
+        # read out of it one by one, so ``{}`` leaves every one of them missing.
+        resp_empty = await client.post(f"{PREFIX}/memories/scored-search", json={**flat, "search_params": {}})
+        assert resp_empty.status_code == 422, resp_empty.text
+
+    async def test_scored_search_names_the_missing_required_scoring_keys(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+    ) -> None:
+        """A partial ``search_params`` is rejected, and the 422 says which keys.
+
+        The SQL builder reads ``SQL_SCORING_REQUIRED_KEYS`` positionally, so an
+        incomplete dict would otherwise raise a KeyError from inside the session
+        and surface as a 500 — a server fault for a malformed request. The
+        omission is named because the caller cannot see which of the six the SQL
+        wanted from a bare 422.
+        """
+        partial = {
+            "tenant_id": tenant_id,
+            "embedding": [0.1] * VECTOR_DIM,
+            "query": "anything",
+            "top_k": 10,
+            # Non-empty, so the dict guard passes; two required keys short.
+            "search_params": {
+                "fts_weight": 0.5,
+                "freshness_floor": 0.5,
+                "freshness_decay_days": 30.0,
+                "similarity_blend": 0.7,
+            },
+        }
+        resp = await client.post(f"{PREFIX}/memories/scored-search", json=partial)
+        assert resp.status_code == 422, (
+            f"a partial search_params must be rejected at the edge, got {resp.status_code}: {resp.text}"
+        )
+        detail = resp.json()["detail"]
+        assert "recall_boost_cap" in detail and "recall_decay_window_days" in detail, detail
+        # The keys that WERE supplied must not be reported missing.
+        assert "fts_weight" not in detail, detail
 
     async def test_scored_search_surfaces_null_embedding_via_fts(
         self,
@@ -966,7 +1338,7 @@ class TestMemories:
 
         Regression for the count-inflation bug: prior to the fix these
         endpoints reported tombstoned rows alongside live ones, so the
-        marketing-site landing-page tiles were ~10× higher than the
+        marketing-site landing-page tiles were ~10x higher than the
         actually-queryable footprint.
         """
         # Use a fresh, dedicated agent_id so distinct-agent / distinct-tenant
@@ -1202,6 +1574,172 @@ class TestMemories:
             new_entity["id"]: "mentioned",
         }
 
+    async def test_bulk_hash_lookup_returns_the_oldest_of_a_duplicate_group(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+        without_content_hash_index,
+    ) -> None:
+        """H-04 sibling: the batch lookup keeps one row per hash, so on a
+        pre-existing duplicate group it picks a winner. Unordered, that winner was
+        whatever the scan reached first — which could disagree with
+        ``memory_find_by_content_hash``, which returns the OLDEST after #839. Two
+        dedup paths pointing at different rows for the same content is the bug;
+        agreeing on the oldest is the fix.
+
+        THE INSERTION ORDER IS THE TEST. Rows are written NEWEST-first, so heap
+        order and ``created_at`` order disagree: unordered, the scan reaches the
+        newest row first and keeps it, which is the wrong answer. Written
+        oldest-first instead, the unordered path would return the oldest by
+        accident and the test would pass with the fix removed — measured, on an
+        earlier version of exactly this test: 5 of 5 runs passed with the
+        ``order_by`` reverted.
+
+        Ten independent groups for the same reason: one group can go either way on
+        a plan change, ten agreeing by chance cannot.
+        """
+        agent = f"agent-dupgroup-{_uid()}"
+        groups: dict[str, list[str]] = {}
+
+        for group in range(10):
+            content = f"a duplicated observation {_uid()}-{group}"
+            content_hash = hashlib.sha256(content.encode()).hexdigest()
+            ids = []
+            for _ in range(3):
+                payload = _memory_payload(tenant_id, fleet_id, content=content)
+                payload["agent_id"] = agent
+                payload["content_hash"] = content_hash
+                resp = await client.post(f"{PREFIX}/memories", json=payload)
+                assert resp.status_code == 200, resp.text
+                ids.append(resp.json()["id"])
+            # Written ascending, so ids[0] is the oldest. The rows are then
+            # REWRITTEN newest-first below by shifting created_at, which is what
+            # makes heap order disagree with age.
+            groups[content_hash] = ids
+
+        # Age them in reverse: the last-written row becomes the oldest. Heap order
+        # is unchanged, so "first row the scan reaches" is now the NEWEST.
+        async with _svc_session() as session:
+            for ids in groups.values():
+                for offset, memory_id in enumerate(ids):
+                    await session.execute(
+                        text(
+                            "UPDATE memories SET created_at = "
+                            "timestamptz '2026-01-01 00:00:00+00' - make_interval(days => :d) "
+                            "WHERE id = CAST(:id AS uuid)"
+                        ),
+                        {"d": offset, "id": memory_id},
+                    )
+
+        resp = await client.post(
+            f"{PREFIX}/memories/bulk-by-content-hashes",
+            json={
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": agent,
+                "hashes": list(groups),
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        resolved = resp.json()
+
+        # After the re-aging, the OLDEST of each group is its last-written row.
+        wrong = {h: (resolved[h]["id"], ids[-1]) for h, ids in groups.items() if resolved[h]["id"] != ids[-1]}
+        assert not wrong, (
+            f"{len(wrong)} of {len(groups)} groups resolved to a row other than "
+            f"the oldest, so the batch lookup disagrees with the single-write "
+            f"dedup gate about which row owns this content: {list(wrong.items())[:3]}"
+        )
+
+    async def test_bulk_hash_lookup_reports_the_duplicate_group_it_resolved(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+        caplog,
+        without_content_hash_index,
+    ) -> None:
+        """``_warn_duplicate_content_hash`` is shared by both dedup gates on
+        purpose — its own docstring says a warning from only one of them
+        undercounts the duplicate population, and that population is the number
+        the partial unique index decision rests on. This path resolved groups
+        silently, so every duplicate seen only here was missing from that count.
+        """
+        import logging
+
+        agent = f"agent-warn-{_uid()}"
+        content = f"a duplicated observation {_uid()}"
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+        for _ in range(2):
+            payload = _memory_payload(tenant_id, fleet_id, content=content)
+            payload["agent_id"] = agent
+            payload["content_hash"] = content_hash
+            assert (await client.post(f"{PREFIX}/memories", json=payload)).status_code == 200
+
+        with caplog.at_level(logging.WARNING):
+            resp = await client.post(
+                f"{PREFIX}/memories/bulk-by-content-hashes",
+                json={
+                    "tenant_id": tenant_id,
+                    "fleet_id": fleet_id,
+                    "agent_id": agent,
+                    "hashes": [content_hash],
+                },
+            )
+        assert resp.status_code == 200, resp.text
+
+        warned = [
+            r
+            for r in caplog.records
+            if "duplicate live rows share a content_hash" in r.getMessage()
+            and getattr(r, "dedup_path", None) == "bulk_find_by_content_hashes"
+        ]
+        assert warned, (
+            "the batch lookup resolved a duplicate group without reporting it, "
+            "so duplicates visible only on this path stay uncounted"
+        )
+
+    async def test_bulk_hash_lookup_stays_quiet_when_there_is_no_duplicate(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+        caplog,
+    ) -> None:
+        """The guard against a warning that fires on every healthy lookup — which
+        would make the signal useless for counting anything."""
+        import logging
+
+        agent = f"agent-quiet-{_uid()}"
+        content = f"a unique observation {_uid()}"
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+        payload = _memory_payload(tenant_id, fleet_id, content=content)
+        payload["agent_id"] = agent
+        payload["content_hash"] = content_hash
+        assert (await client.post(f"{PREFIX}/memories", json=payload)).status_code == 200
+
+        with caplog.at_level(logging.WARNING):
+            resp = await client.post(
+                f"{PREFIX}/memories/bulk-by-content-hashes",
+                json={
+                    "tenant_id": tenant_id,
+                    "fleet_id": fleet_id,
+                    "agent_id": agent,
+                    "hashes": [content_hash],
+                },
+            )
+        assert resp.status_code == 200, resp.text
+
+        assert not [
+            r
+            for r in caplog.records
+            if "duplicate live rows share a content_hash" in r.getMessage()
+            and getattr(r, "dedup_path", None) == "bulk_find_by_content_hashes"
+        ]
+
 
 # =====================================================================
 # Entities
@@ -1250,7 +1788,7 @@ class TestEntities:
         await client.post(f"{PREFIX}/entities", json=payload)
 
         resp = await client.get(
-            f"{PREFIX}/entities/by-name",
+            f"{PREFIX}/entities/exact",
             params={
                 "tenant_id": tenant_id,
                 "name": name,
@@ -1258,10 +1796,10 @@ class TestEntities:
                 "fleet_id": fleet_id,
             },
         )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["entity"] is not None
-        assert body["entity"]["canonical_name"] == name
+        assert resp.status_code == 200, resp.text
+        # Flat entity dict (orm_to_dict), not an {"entity": ...} envelope —
+        # matches what core-api's find_exact_entity consumes.
+        assert resp.json()["canonical_name"] == name
 
     async def test_find_exact_entity_not_found(
         self,
@@ -1269,15 +1807,17 @@ class TestEntities:
         tenant_id: str,
     ) -> None:
         resp = await client.get(
-            f"{PREFIX}/entities/by-name",
+            f"{PREFIX}/entities/exact",
             params={
                 "tenant_id": tenant_id,
                 "name": "NoSuchEntity",
                 "entity_type": "person",
             },
         )
-        assert resp.status_code == 200
-        assert resp.json()["entity"] is None
+        # 404-on-miss is the contract, not 200-with-null: core-api's shared
+        # storage-client _get maps 404 → None, which is how find_exact_entity
+        # produces its `| None` return.
+        assert resp.status_code == 404, resp.text
 
     async def test_create_relation(
         self,
@@ -1421,21 +1961,21 @@ class TestEntities:
         memory_id = mem["id"]
 
         link_resp = await client.post(
-            f"{PREFIX}/entities/memory-links/create",
+            f"{PREFIX}/entities/links",
             json={
                 "memory_id": memory_id,
                 "entity_id": entity_id,
                 "role": "subject",
             },
         )
-        assert link_resp.status_code == 200
+        assert link_resp.status_code == 200, link_resp.text
 
         # Get entity with linked memories
         resp = await client.get(
-            f"{PREFIX}/entities/linked-memories/{entity_id}",
+            f"{PREFIX}/entities/{entity_id}/with-memories",
             params={"tenant_id": tenant_id},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["entity"]["id"] == entity_id
         assert len(body["linked_memories"]) >= 1
@@ -1447,6 +1987,37 @@ class TestEntities:
         fake_id = str(uuid.uuid4())
         resp = await client.get(f"{PREFIX}/entities/{fake_id}")
         assert resp.status_code == 404
+
+    async def test_link_to_ghost_entity_409s_without_leaking_driver_text(
+        self,
+        client: AsyncClient,
+        tenant_id: str,
+        fleet_id: str,
+    ) -> None:
+        """A caller-supplied id that does not exist is a 409, and the body says so
+        without quoting the database.
+
+        Review round 2: the message becomes the 409 ``detail`` the caller reads, so
+        interpolating ``exc.orig`` hands out the constraint name, the table name and
+        the offending value. ``entity_add`` draws the same line.
+        """
+        mem = (await client.post(f"{PREFIX}/memories", json=_memory_payload(tenant_id, fleet_id))).json()
+        ghost_entity_id = str(uuid.uuid4())
+
+        resp = await client.post(
+            f"{PREFIX}/entities/links",
+            json={
+                "memory_id": mem["id"],
+                "entity_id": ghost_entity_id,
+                "role": "subject",
+            },
+        )
+
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert ghost_entity_id not in detail, "the offending value must not be echoed back"
+        assert "violates" not in detail.lower(), "raw driver text reached the caller"
+        assert "memory_entity_links" not in detail, "internal table name reached the caller"
 
 
 # =====================================================================
@@ -1525,7 +2096,9 @@ class TestAgents:
         )
 
         resp = await client.patch(
-            f"{PREFIX}/agents/{agent_id}/trust",
+            # Storage spells this /trust-level; /trust is the PUBLIC core-api
+            # route (core_api/routes/agents.py). The two layers differ.
+            f"{PREFIX}/agents/{agent_id}/trust-level",
             json={
                 "tenant_id": tenant_id,
                 "trust_level": 3,
@@ -1583,12 +2156,15 @@ class TestDocuments:
         assert body["doc_id"] == doc_id
         assert body["data"]["title"] == "Test Document"
 
-        # GET by doc_id
+        # GET by doc_id. Collection is a path segment here, not a query param:
+        # the route is /{collection}/{doc_id:path} so that doc_ids containing
+        # slashes work. The single-segment form silently matched the
+        # list-documents route instead and returned 200 [].
         resp2 = await client.get(
-            f"{PREFIX}/documents/{doc_id}",
-            params={"tenant_id": tenant_id, "collection": collection},
+            f"{PREFIX}/documents/{collection}/{doc_id}",
+            params={"tenant_id": tenant_id},
         )
-        assert resp2.status_code == 200
+        assert resp2.status_code == 200, resp2.text
         assert resp2.json()["doc_id"] == doc_id
 
     async def test_upsert_updates_existing(
@@ -1670,18 +2246,18 @@ class TestDocuments:
         )
 
         resp = await client.delete(
-            f"{PREFIX}/documents/{doc_id}",
-            params={"tenant_id": tenant_id, "collection": collection},
+            f"{PREFIX}/documents/{collection}/{doc_id}",
+            params={"tenant_id": tenant_id},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         assert "deleted_id" in resp.json()
 
         # Verify deleted
         resp2 = await client.get(
-            f"{PREFIX}/documents/{doc_id}",
-            params={"tenant_id": tenant_id, "collection": collection},
+            f"{PREFIX}/documents/{collection}/{doc_id}",
+            params={"tenant_id": tenant_id},
         )
-        assert resp2.status_code == 404
+        assert resp2.status_code == 404, resp2.text
 
     async def test_get_nonexistent_document_returns_404(
         self,
@@ -1689,10 +2265,10 @@ class TestDocuments:
         tenant_id: str,
     ) -> None:
         resp = await client.get(
-            f"{PREFIX}/documents/nonexistent-doc",
-            params={"tenant_id": tenant_id, "collection": "nope"},
+            f"{PREFIX}/documents/nope/nonexistent-doc",
+            params={"tenant_id": tenant_id},
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 404, resp.text
 
 
 # =====================================================================
@@ -1823,11 +2399,12 @@ class TestFleet:
                 },
             )
 
+        # node_name is a query param on this route, not a path segment.
         resp = await client.get(
-            f"{PREFIX}/fleet/commands/pending/{node_name}",
-            params={"tenant_id": tenant_id},
+            f"{PREFIX}/fleet/commands/pending",
+            params={"tenant_id": tenant_id, "node_name": node_name},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         pending = resp.json()
         assert isinstance(pending, list)
         assert len(pending) >= 2

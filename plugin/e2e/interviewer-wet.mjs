@@ -51,6 +51,7 @@ async function nodeUuid() {
 const cmd = process.argv[2];
 const arg1 = process.argv[3];
 const arg2 = process.argv[4];
+const arg3 = process.argv[5];
 
 try {
   if (cmd === "set-enabled") {
@@ -145,6 +146,126 @@ try {
     out({ enabled: !!(s.interviewer || {}).enabled });
   } else if (cmd === "node-uuid") {
     out({ node_uuid: await nodeUuid() });
+
+    // ------------------------------------------------------------------
+    // Phase 1.5 (task-trail, #654) — capture-layer subcommands. Unlike
+    // "append" (which hand-feeds the buffer and therefore validates only
+    // the pipeline), these operate on the OpenClaw task_runs DB so the
+    // REAL capture path (discovery -> probe -> delta -> buffer) is what
+    // gets exercised.
+    // ------------------------------------------------------------------
+  } else if (cmd === "sync") {
+    // Run the real task-trail sync directly; print its result AND the
+    // sidecar (db_paths records which DBs discovery actually found — on
+    // >= 2026.6 this documents the consolidated DB's real filename).
+    const { syncTaskTrail } = await import("../dist/task-trail.js");
+    const res = await syncTaskTrail();
+    let sidecar = null;
+    try {
+      const { readFileSync } = await import("fs");
+      const { join } = await import("path");
+      const { homedir } = await import("os");
+      sidecar = JSON.parse(
+        readFileSync(
+          join(homedir(), ".openclaw", "plugins", "memclaw", "interview-task-sync.json"),
+          "utf-8",
+        ),
+      );
+    } catch {
+      // sidecar may not exist yet
+    }
+    out({ ...res, db_paths: sidecar?.db_paths ?? null, tracked_tasks: sidecar ? Object.keys(sidecar.tasks).length : 0 });
+  } else if (cmd === "task-insert") {
+    // arg1: db path, arg2: count, arg3: label, argv[6]: "terminal" to
+    // insert already-finished rows. Schema-INTROSPECTING: reads the real
+    // table's columns via PRAGMA and only fills what exists, so the same
+    // command works against whatever schema the installed OpenClaw
+    // version created — rows are as real as the schema is.
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(arg1);
+    const cols = db.prepare("PRAGMA table_info(task_runs)").all();
+    const names = new Set(cols.map((c) => c.name));
+    const notNull = cols.filter((c) => c.notnull && c.dflt_value === null && c.name !== "task_id");
+    const n = parseInt(arg2 || "1", 10);
+    const label = arg3 || "wet";
+    const terminal = process.argv[6] === "terminal";
+    const now = Date.now();
+    const ids = [];
+    for (let i = 0; i < n; i++) {
+      const id = `wet-${label}-${now}-${i}`;
+      const row = { task_id: id };
+      // Known semantic columns first.
+      if (names.has("task")) row.task = `[${label}] investigate wet-test workload item ${i}`;
+      if (names.has("status")) row.status = terminal ? "completed" : "running";
+      if (names.has("runtime")) row.runtime = "subagent";
+      if (names.has("label")) row.label = label;
+      if (names.has("created_at")) row.created_at = now - 10_000 + i;
+      if (names.has("last_event_at")) row.last_event_at = now - 5_000 + i;
+      if (terminal) {
+        if (names.has("ended_at")) row.ended_at = now - 1_000 + i;
+        if (names.has("terminal_summary"))
+          row.terminal_summary = `completed wet workload ${i}: validated the ${label} path end-to-end`;
+        if (names.has("terminal_outcome")) row.terminal_outcome = "ok";
+      }
+      // Any remaining NOT-NULL-without-default column gets a type-shaped
+      // filler so the insert works on schema variants we haven't seen.
+      for (const c of notNull) {
+        if (row[c.name] !== undefined) continue;
+        row[c.name] = /INT|REAL|NUM/i.test(c.type || "") ? 0 : "wet";
+      }
+      const keys = Object.keys(row);
+      db.prepare(
+        `INSERT OR REPLACE INTO task_runs (${keys.join(",")}) VALUES (${keys.map(() => "?").join(",")})`,
+      ).run(...keys.map((k) => row[k]));
+      ids.push(id);
+    }
+    db.close();
+    out({ ok: true, inserted: n, terminal, first_id: ids[0], db: arg1 });
+  } else if (cmd === "task-finish") {
+    // arg1: db path, arg2: task_id, arg3: summary, argv[6]: outcome
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(arg1);
+    const names = new Set(db.prepare("PRAGMA table_info(task_runs)").all().map((c) => c.name));
+    const sets = ["status = 'completed'"];
+    const vals = [];
+    if (names.has("ended_at")) sets.push(`ended_at = ${Date.now()}`);
+    if (names.has("last_event_at")) sets.push(`last_event_at = ${Date.now()}`);
+    if (names.has("terminal_summary")) {
+      sets.push("terminal_summary = ?");
+      vals.push(arg3 || "finished");
+    }
+    if (names.has("terminal_outcome")) {
+      sets.push("terminal_outcome = ?");
+      vals.push(process.argv[6] || "ok");
+    }
+    db.prepare(`UPDATE task_runs SET ${sets.join(", ")} WHERE task_id = ?`).run(...vals, arg2);
+    db.close();
+    out({ ok: true, task_id: arg2 });
+  } else if (cmd === "task-db-schema") {
+    // arg1: db path — print the REAL table columns (documents what the
+    // installed OpenClaw version actually ships; phase-B evidence).
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(arg1, { readOnly: true });
+    const cols = db.prepare("PRAGMA table_info(task_runs)").all().map((c) => c.name);
+    const count = db.prepare("SELECT COUNT(*) AS c FROM task_runs").get().c;
+    db.close();
+    out({ ok: true, db: arg1, columns: cols, rows: count });
+  } else if (cmd === "tick") {
+    // arg1: since_seq — one full interview tick: queue command on the
+    // rail, heartbeat to process it, return the latest command result
+    // (incl. synced_tasks / task_trail — the phase-1.5 observability).
+    const uuid = await nodeUuid();
+    await api("POST", "/fleet/commands", {
+      tenant_id: TENANT,
+      node_id: uuid,
+      command: "interview_request",
+      payload: { node_id: uuid, since_seq: parseInt(arg1 || "0", 10), template_id: "default-v1", period_hours: 12 },
+    });
+    const { sendHeartbeat } = await import("../dist/heartbeat.js");
+    await sendHeartbeat();
+    const rows = await api("GET", "/fleet/commands", undefined, { tenant_id: TENANT });
+    const ours = rows.filter((c) => c.command === "interview_request");
+    out({ ok: true, status: ours[0]?.status, result: ours[0]?.result ?? null });
   } else {
     throw new Error(`unknown subcommand: ${cmd}`);
   }

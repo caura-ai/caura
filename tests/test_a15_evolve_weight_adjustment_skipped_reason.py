@@ -1,6 +1,6 @@
 """A15 — weight-adjustment silent-noop observability.
 
-Gap measured: ``memclaw_evolve`` returns 200 OK with ``weight_adjustments=[]``
+Gap measured: ``caura_evolve`` returns 200 OK with ``weight_adjustments=[]``
 when scope-filter drops every related_id or the bulk UPDATE updates zero rows,
 making the caller's "RL feedback was applied" assumption silently wrong.
 

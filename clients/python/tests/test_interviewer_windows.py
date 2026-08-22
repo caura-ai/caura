@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from memclaw_client.interviewer.parser import ParsedEvent
-from memclaw_client.interviewer.windows import (
+from caura_client.interviewer.parser import ParsedEvent
+from caura_client.interviewer.windows import (
     Window,
     build_windows,
     window_is_worth_interviewing,

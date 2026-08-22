@@ -1,4 +1,4 @@
-"""Audit P3 regression test for ``memclaw_insights``.
+"""Audit P3 regression test for ``caura_insights``.
 
 The handler previously held a single ``_mcp_session()`` open across
 the multi-second LLM round-trip in ``_run_llm_analysis``, pinning a
@@ -112,7 +112,7 @@ async def test_insights_closes_first_session_before_llm(mcp_env, monkeypatch):
         AsyncMock(return_value=[]),
     )
 
-    await mcp_server.memclaw_insights(
+    await mcp_server.caura_insights(
         focus="contradictions", scope="agent", agent_id="a1"
     )
 
@@ -175,7 +175,7 @@ async def test_insights_short_circuits_when_no_memories(mcp_env, monkeypatch):
 
     monkeypatch.setattr("core_api.services.insights_service.synthesize_insights", _spy)
 
-    await mcp_server.memclaw_insights(
+    await mcp_server.caura_insights(
         focus="contradictions", scope="agent", agent_id="a1"
     )
 

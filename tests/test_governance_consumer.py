@@ -16,11 +16,11 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from core_api import consumer
+from core_api.services.organization_settings import ResolvedConfig
 
 from common.events.base import Event
 from common.events.topics import Topics
-from core_api import consumer
-from core_api.services.organization_settings import ResolvedConfig
 
 pytestmark = pytest.mark.asyncio
 
@@ -55,8 +55,13 @@ def sc(monkeypatch):
 
 @pytest.fixture
 def detect(monkeypatch):
+    # The consumer reaches the detector through the A55 engine seam
+    # (run_contradiction_detection); with the flag OFF that synchronously calls
+    # the detector source symbol with the same args, so patch it there.
     fn = AsyncMock(return_value=None)
-    monkeypatch.setattr("core_api.consumer.detect_contradictions_async", fn)
+    monkeypatch.setattr(
+        "core_api.services.contradiction_detector.detect_contradictions_async", fn
+    )
     return fn
 
 

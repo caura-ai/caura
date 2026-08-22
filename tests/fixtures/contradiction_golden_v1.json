@@ -1,0 +1,64 @@
+{
+  "path_a_rdf_cand_newer": [
+    [
+      "cand",
+      "active",
+      "new"
+    ],
+    [
+      "new",
+      "outdated",
+      null
+    ]
+  ],
+  "path_a_rdf_cand_older": [
+    [
+      "cand",
+      "outdated",
+      null
+    ],
+    [
+      "new",
+      "active",
+      "cand"
+    ]
+  ],
+  "path_a_semantic_conflict": [
+    [
+      "cand",
+      "conflicted",
+      null
+    ],
+    [
+      "new",
+      "active",
+      "cand"
+    ]
+  ],
+  "path_a_semantic_no_conflict": [],
+  "path_c_forward_conflict": [
+    [
+      "cand",
+      "conflicted",
+      null
+    ],
+    [
+      "new",
+      "active",
+      "cand"
+    ]
+  ],
+  "path_c_forward_no_conflict": [],
+  "path_c_retraction": [
+    [
+      "cand",
+      "active",
+      null
+    ],
+    [
+      "new",
+      "active",
+      "UNSET"
+    ]
+  ]
+}

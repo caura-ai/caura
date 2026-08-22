@@ -37,7 +37,7 @@ ImplStatus = Literal["live", "reserved", "deprecated"]
 
 @dataclass(frozen=True)
 class OpSpec:
-    """One op of an op-dispatched tool (e.g., memclaw_doc op=write|read|query|delete)."""
+    """One op of an op-dispatched tool (e.g., caura_doc op=write|read|query|delete)."""
 
     name: str
     description: str
@@ -77,8 +77,8 @@ class ToolSpec:
 
     def __post_init__(self) -> None:
         # Light invariants (full validation happens in _registry on import).
-        if not self.name.startswith("memclaw_"):
-            raise ValueError(f"Tool name must start with 'memclaw_': {self.name}")
+        if not self.name.startswith("caura_"):
+            raise ValueError(f"Tool name must start with 'caura_': {self.name}")
         if self.trust_required not in (0, 1, 2, 3):
             raise ValueError(f"trust_required must be 0..3, got {self.trust_required} for {self.name}")
         if self.impl_status == "reserved" and self.plugin_exposed:

@@ -192,11 +192,11 @@ async def test_mcp_call_tool_records_capability_and_op(monkeypatch):
 
     server = mcp_server._InstrumentedFastMCP(name="test")
 
-    @server.tool(name="memclaw_doc")
+    @server.tool(name="caura_doc")
     async def doc_tool(op: str) -> str:
         return f"ran {op}"
 
-    await server.call_tool("memclaw_doc", {"op": "search"})
+    await server.call_tool("caura_doc", {"op": "search"})
 
     assert len(calls) == 1
     k = calls[0]
@@ -216,12 +216,12 @@ async def test_mcp_call_tool_records_error_on_raise(monkeypatch):
 
     server = mcp_server._InstrumentedFastMCP(name="test")
 
-    @server.tool(name="memclaw_write")
+    @server.tool(name="caura_write")
     async def boom() -> str:
         raise RuntimeError("kaboom")
 
     with pytest.raises(Exception):
-        await server.call_tool("memclaw_write", {})
+        await server.call_tool("caura_write", {})
 
     assert len(calls) == 1
     assert calls[0]["capability"] == "write"

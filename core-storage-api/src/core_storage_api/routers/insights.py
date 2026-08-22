@@ -48,6 +48,29 @@ def _max_memories(body: dict) -> int:
     return val
 
 
+def _window_start(body: dict) -> datetime | None:
+    """Parse the optional ``window_start`` ISO datetime (the windowed
+    insight reads). ``created_at`` is timestamptz; asyncpg interprets a
+    NAIVE bound through local-time semantics instead of erroring, silently
+    shifting the window by the server's UTC offset — reject rather than
+    guess. Absent/null → the mode's legacy unbounded behaviour, keeping
+    older core-api callers working. Only None gets that fallback: an
+    explicit ``""`` (or any other non-ISO value) is a caller bug and 422s
+    like every other invalid value."""
+    raw = body.get("window_start")
+    if raw is None:
+        return None
+    try:
+        window_start = datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="Invalid ISO datetime for window_start")
+    if window_start.tzinfo is None:
+        raise HTTPException(
+            status_code=422, detail="window_start must be timezone-aware (e.g. include +00:00)"
+        )
+    return window_start
+
+
 # ──────────────────────────────────────────────────────────────────────
 #  Analytic reads (one per focus)
 # ──────────────────────────────────────────────────────────────────────
@@ -76,6 +99,7 @@ async def insights_failures(request: Request) -> list[dict]:
         agent_id=agent_id,
         scope=scope,
         max_memories=_max_memories(body),
+        window_start=_window_start(body),
     )
 
 
@@ -101,6 +125,7 @@ async def insights_stale(request: Request) -> list[dict]:
         thirty_days_ago=thirty,
         fourteen_days_ago=fourteen,
         max_memories=_max_memories(body),
+        window_start=_window_start(body),
     )
 
 
@@ -127,12 +152,19 @@ async def insights_patterns(request: Request) -> list[dict]:
         agent_id=agent_id,
         scope=scope,
         max_memories=_max_memories(body),
+        window_start=_window_start(body),
     )
 
 
 @router.post("/insights/discover-sample")
 async def insights_discover_sample(request: Request) -> list[dict]:
-    """Rows (INCLUDING ``embedding``) for client-side k-means clustering."""
+    """Rows (INCLUDING ``embedding``) for client-side k-means clustering.
+
+    ``window_start`` (optional ISO datetime, computed on the core-api clock
+    from ``INSIGHTS_DISCOVER_WINDOW_DAYS`` — same pattern as the stale-age
+    thresholds) switches the draw from newest-first to a spread sample over
+    the window. Absent → legacy newest-first, keeping older core-api
+    callers working."""
     body: dict = await request.json()
     tenant_id, fleet_id, agent_id, scope = _scope_args(body)
     sample_size = body.get("sample_size")
@@ -144,6 +176,7 @@ async def insights_discover_sample(request: Request) -> list[dict]:
         agent_id=agent_id,
         scope=scope,
         sample_size=sample_size,
+        window_start=_window_start(body),
     )
 
 

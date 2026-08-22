@@ -12,7 +12,7 @@ from collections import OrderedDict
 from types import SimpleNamespace
 
 from core_api.clients.storage_client import get_storage_client
-from core_api.constants import SEARCH_OVERFETCH_FACTOR
+from core_api.constants import SEARCH_OVERFETCH_FACTOR, SQL_SCORING_PARAM_KEYS
 from core_api.middleware.per_tenant_concurrency import per_tenant_storage_slot
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
@@ -62,11 +62,31 @@ class ExecuteScoredSearch:
             top_k = top_k * SEARCH_OVERFETCH_FACTOR
 
         # Build the request payload for the storage client.
+        #
+        # ``search_params`` is PROJECTED through ``SQL_SCORING_PARAM_KEYS`` rather
+        # than sent whole: ``ctx.data["search_params"]`` is core-api's working set
+        # and a superset of the wire contract, carrying knobs no storage query
+        # reads. Projecting at the boundary — rather than removing them at the
+        # source — keeps them available to the steps that do read them while
+        # guaranteeing they cannot reach the SQL. Why that guarantee is worth
+        # having, and what it costs when it is missing: see the tuple's own note.
+        #
+        # ``if k in sp``: ResolveSearchProfile always writes the full set, but
+        # unit-test contexts hand-build a partial one (e.g.
+        # tests/test_audit_s6_c1_events.py), so tolerate a subset here and let the
+        # storage route's required-key check be the one place that rejects.
+        #
+        # The diagnostic branch's widening to 50 was defeated by the same
+        # shadowing and is restored — but note that mode is half-wired:
+        # ``SearchRequest.diagnostic`` is never read by a route and nothing writes
+        # ``diagnostic_results``, so no caller reaches it. Whoever reconnects it
+        # should know the branch skips ``final_top_k``, so PostFilterResults does
+        # not trim and TrackRecalls would bump ``recall_count`` for all 50 rows.
         search_data: dict = {
             "tenant_id": data["tenant_id"],
             "query": data["query"],
             "embedding": embedding,
-            "search_params": sp,
+            "search_params": {k: sp[k] for k in SQL_SCORING_PARAM_KEYS if k in sp},
             "top_k": top_k,
             "recall_boost_enabled": recall_boost_enabled,
         }

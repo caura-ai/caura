@@ -1,13 +1,13 @@
 """Regression: the MCP / STM write path runs ``create_memory`` with ``db=None``.
 
-The MCP ``memclaw_write`` tool opens ``_no_db()`` (yields ``None``) and calls
+The MCP ``caura_write`` tool opens ``_no_db()`` (yields ``None``) and calls
 ``create_memory(...)`` — the storage-routed write path. Before Fix 2
 Ph5b PR2 (#472), four ``write_fast`` steps (``load_tenant_config``,
 ``detect_near_duplicate``, ``check_semantic_duplicate``, and
 ``write_memory_row``'s audit hook) called ``ctx.require_db``, which **raises** on
 ``db=None``. The runner logged + broke the failing step without re-raising, then
 ``create_memory`` read the unset ``ctx.data["memory"]`` and surfaced
-``KeyError: 'memory'`` to MCP clients as ``Error executing tool memclaw_write:
+``KeyError: 'memory'`` to MCP clients as ``Error executing tool caura_write:
 'memory'`` (loadtest ``mcp-tool-broken-write`` HIGH; prod regression 2026-06-23).
 
 #472 switched those four steps to the nullable ``ctx.db`` (the functions they
@@ -19,7 +19,7 @@ No existing test exercised this: ``test_mcp_write.py`` mocks ``create_memory``,
 and the ``mcp_env`` fixture patches ``_no_db`` to yield a ``MagicMock`` (not
 ``None``). The tests below drive the REAL write pipeline with ``db=None`` against
 the integration DB, so reintroducing a ``require_db`` in any write step — or
-regressing the ``_no_db`` wiring in ``memclaw_write`` — fails here. ``fast`` mode
+regressing the ``_no_db`` wiring in ``caura_write`` — fails here. ``fast`` mode
 covers ``load_tenant_config`` + ``detect_near_duplicate`` + ``write_memory_row``;
 ``strong`` mode additionally covers ``check_semantic_duplicate``.
 """
@@ -98,8 +98,8 @@ async def test_create_memory_tolerates_db_none(db, write_mode):
     assert row.agent_id == "test-agent"
 
 
-async def test_memclaw_write_mcp_handler_succeeds_with_no_db(monkeypatch):
-    """End-to-end through the real ``memclaw_write`` handler: it opens the REAL
+async def test_caura_write_mcp_handler_succeeds_with_no_db(monkeypatch):
+    """End-to-end through the real ``caura_write`` handler: it opens the REAL
     ``_no_db()`` (yields ``None``) and must return a success payload — not the
     ``KeyError: 'memory'`` envelope the prod regression produced. Only the auth /
     identity context is stubbed; ``_no_db``, ``create_memory``,
@@ -114,7 +114,7 @@ async def test_memclaw_write_mcp_handler_succeeds_with_no_db(monkeypatch):
     monkeypatch.setattr(mcp_server, "_get_agent_id", lambda: "test-agent")
 
     content = "The Pacific is the largest ocean on Earth." + _PADDING
-    out = await mcp_server.memclaw_write(
+    out = await mcp_server.caura_write(
         content=content, agent_id="test-agent", fleet_id="test-fleet"
     )
 

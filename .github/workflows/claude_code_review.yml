@@ -1,8 +1,24 @@
 # Claude Code Review
 #
+# DELIBERATELY A LOCAL COPY, NOT THE ORG'S SHARED PIPELINE. Do not "consolidate" this into
+# ``uses: caura-ai/.github/...`` — that was tried in #733 and it CANNOT work here. This
+# repository is PUBLIC and ``caura-ai/.github`` is PRIVATE, and GitHub allows a component
+# (reusable workflow or composite action) in a private repository to be used only by private
+# repositories. The failure mode is silent and easy to misread: the run dies instantly with
+# "This run likely failed because of a workflow file issue", creates ZERO jobs and writes no
+# logs, so it looks like malformed YAML rather than a refusal. Every run between 2026-08-08 and
+# the revert failed that way, and no pull request here was reviewed in that window.
+#
+# Sharing this with the org would require the pipeline to live in a PUBLIC repository. That is a
+# real option, not a dead end — it is just a decision about publishing the pipeline, and until
+# it is taken this copy is the supported arrangement. Keep it in step with the shared pipeline
+# by porting changes deliberately rather than by pointing at it.
+#
 # Runs automatically when a PR is opened/reopened by a public member of
-# the ``caura-ai`` organization. Re-trigger after pushing changes by
-# commenting "@claude" on the PR (also restricted to org members).
+# the ``caura-ai`` organization. Commenting "@claude" on the PR triggers a
+# review too (also restricted to org members) — that is how you re-review
+# after a push, AND the only way to review a draft. See "TWO ENTRY POINTS"
+# below, because the two paths do not enforce the same conditions.
 #
 # Why org-only: this workflow consumes ``ANTHROPIC_API_KEY`` and burns
 # real budget per review. ``pull_request`` events from forks don't
@@ -10,22 +26,97 @@
 # members makes the policy explicit and stops fork PRs from triggering
 # silent-failure runs.
 #
-# Membership is checked at runtime against ``orgs/caura-ai/members/{user}``
-# (returns 204 for visible members, 404 otherwise). The ``pull_request``
-# event's ``author_association`` field is captured at PR-creation time
-# and never refreshes, so a member whose visibility was PRIVATE when
-# they opened a PR would be permanently locked out — the live API call
-# avoids that. Members must still make their org membership public for
-# the API to return 204.
+# TWO ENTRY POINTS, AND THEY DO NOT SHARE GATES. This is the single most
+# surprising thing about this workflow, so read it before adding a check.
+#
+#   ``pull_request``  -> pre-checks -> claude-review
+#   ``issue_comment`` -> claude-retrigger          (pre-checks never runs)
+#
+# ``pre-checks`` is gated on ``if: github.event_name == 'pull_request'``,
+# and ``claude-retrigger`` has no ``needs: pre-checks``. So on a comment
+# event ``pre-checks`` does not run at all, and EVERY condition it owns is
+# absent from that path. Today that is all six of them: org membership of
+# the PR author, synchronize-event skip, draft skip, bot skip, the
+# ``MAX_FILES`` cap, and the tests/docs/config-only skip.
+#
+# Consequences worth knowing:
+#
+#   * A DRAFT PR GETS NO REVIEW ON OPEN. ``pre-checks`` reports
+#     ``reason=draft PR`` and ``claude-review`` is skipped. Commenting
+#     "@claude" on that same draft DOES produce a full review, because the
+#     retrigger path never consults the draft check. So the effective
+#     policy is "drafts get opt-in review, not automatic review" — which is
+#     deliberate (drafts are unfinished; each review costs real budget), and
+#     is the intended way to request one. It is not discoverable from the
+#     skip message, which is why it is written down here.
+#   * The ``MAX_FILES`` cap is likewise bypassed on the comment path, so an
+#     "@claude" comment can review a PR of any size. Left as-is on purpose:
+#     it is a useful escape hatch for a large but genuinely reviewable PR.
+#     If that ever needs to change, change it deliberately — a member may
+#     be relying on it.
+#   * Membership IS still enforced on the comment path, but it validates the
+#     COMMENTER (``claude-retrigger``'s job-level ``author_association``
+#     gate plus its step-level re-check), not the PR author. A member
+#     vouching for someone else's PR is therefore a supported flow.
+#
+# MAINTAINER NOTE: adding a condition to ``pre-checks`` applies it to the
+# ``pull_request`` path ONLY. If a new gate should hold universally, it has
+# to be duplicated into ``claude-retrigger`` or lifted somewhere both jobs
+# consult. See issue #683 for the history.
+#
+# OPERATIONAL REQUIREMENT: every member who wants their pull requests
+# reviewed must set their caura-ai org membership to **Public**
+# (Organization -> People -> their row -> Public). Nobody can set it on
+# their behalf. A member whose membership is private is skipped exactly
+# like a stranger — silently, behind a green check. This is not a
+# preference; it is what the gate below can actually see.
+#
+# Membership is checked at runtime against ``orgs/caura-ai/members/{user}``.
+# That endpoint answers for its CALLER, and ``GITHUB_TOKEN`` sees only
+# PUBLIC members: 204 for a public member, 404 for a private member and
+# for a non-member alike.
+#
+# Why not the payload's ``author_association``, which needs no API call:
+# it does not report org membership for a private member on a
+# ``pull_request`` event. Observed values here, all for the same private
+# member of this org:
+#
+#   github.event.pull_request.author_association  ->  CONTRIBUTOR
+#   github.event.comment.author_association       ->  MEMBER
+#   GET /repos/{repo}/pulls/{n} .author_association -> MEMBER
+#
+# Three things follow. The two payloads DISAGREE, which is why an
+# ``@claude`` retrigger worked for private members while the on-open
+# review did not. ``CONTRIBUTOR`` is unusable as a gate on a public repo,
+# since anyone with a merged commit earns it. And the REST value is
+# computed for whoever asks — a personal token reports ``MEMBER`` where
+# CI sees ``CONTRIBUTOR`` — so it must NOT be used to check this gate's
+# behaviour. Verify against a real workflow run, not a local ``gh`` call.
 
 name: Claude Code Review
 
 on:
   pull_request:
     branches: [main, dev]
-    types: [opened, reopened, synchronize]
+    # `closed` feeds claude-capture ONLY (merged PRs). pre-checks excludes it, which is
+    # what stops a merge triggering a fresh review.
+    types: [opened, reopened, synchronize, closed]
   issue_comment:
     types: [created]
+  # Manual backfill for claude-capture, mirroring the shared pipeline's caller. Two uses: it makes
+  # capture verifiable the moment MEMCLAW_AGENTS_KEY is added — the on-merge path cannot be tested
+  # on demand, since it needs a real merge that happens to carry a declined finding — and it can
+  # extract declines from pull requests that merged BEFORE capture existed here.
+  #
+  # `required: true` because the only failure mode of an empty value is a confusing one: the script
+  # would request `issues//comments`, get a 404, warn, and exit 0 looking like a repo with nothing
+  # to capture.
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Merged PR number to capture declined findings from"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -66,12 +157,17 @@ env:
     4. **Suggestions**: Nice-to-have
     Skip empty sections.
 
-    ## 🚀 Fix All Prompts
-    At the end, add one "Fix All" code block per severity level that has issues (🔴 Critical, 🟠 High, 🟡 Medium/Low, 🟢 Suggestions). Each block combines all prompts from that level.
+    Every prompt above is self-contained, so do not repeat them in a combined "fix all" block at the
+    end. One prompt per issue, once. Output nothing after the last issue.
+
+    Everything inside a prompt block is text for a person or an agent to READ. Never emit tool calls,
+    function-call syntax, or JSON arrays of edit operations (`{"tool_code": ...}`,
+    `default_api.replace(...)`, `old_string`/`new_string` pairs). Describe the change in words and
+    name the file and lines; do not write code that performs it.
 
 jobs:
   pre-checks:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
     runs-on: ubuntu-latest
     outputs:
       skip: ${{ steps.decide.outputs.skip }}
@@ -91,12 +187,14 @@ jobs:
           REPO=${{ github.repository }}
 
           # 1. Org membership gate — checked at runtime, not via the
-          # webhook-frozen ``author_association`` field. The payload
-          # captures membership at PR-creation time, so a user whose
-          # caura-ai membership was PRIVATE at PR-open shows up as
-          # ``NONE`` even after they make it public. The ``orgs/{org}/
-          # members/{user}`` endpoint returns 204 for visible members
-          # and 404 for private members + non-members. We distinguish
+          # payload's ``author_association``, which on a ``pull_request``
+          # event reports ``CONTRIBUTOR`` for a private org member and so
+          # cannot distinguish one from any past contributor. The values
+          # are measured and recorded in the file header; read them before
+          # changing this, and note that a local ``gh`` call reports a
+          # DIFFERENT value than CI sees. The ``orgs/{org}/members/{user}``
+          # endpoint returns 204 for public members and 404 for private
+          # members and non-members alike. We distinguish
           # 404 (skip with the membership reason) from other failures
           # (rate-limit, network, bad token — skip but log a warning so
           # operators can tell a real "non-member" from a transient
@@ -117,9 +215,18 @@ jobs:
           fi
 
           # 2. Skip synchronize events (push to PR branch) — use @claude to re-trigger
+          #
+          # notify=false because this is the ONE skip that repeats: it fires on every push to
+          # every open pull request, and the comment below would stack one "skipped" note per
+          # push. The others each explain a one-off decision worth a comment. This has not been
+          # visible until now only because the membership check above returns first for an author
+          # whose org membership is not public, which pre-empted it.
           if [[ "$PR_ACTION" == "synchronize" ]]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "reason=push to PR branch (synchronize) — comment @claude to re-trigger" >> "$GITHUB_OUTPUT"
+            {
+              echo "skip=true"
+              echo "notify=false"
+              echo "reason=push to PR branch (synchronize) — comment @claude to re-trigger"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -138,7 +245,13 @@ jobs:
           fi
 
           # 5. Too many changed files
-          FILE_COUNT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" --jq 'length')
+          # --paginate, and the sum, are both load-bearing. This endpoint returns 30 items per
+          # page by default, which is exactly MAX_FILES — so unpaginated, FILE_COUNT could never
+          # exceed 30 and `-gt 30` could never fire. The cap read as enforced and enforced
+          # nothing. The awk sum is because `--paginate --jq` applies the filter per page and
+          # emits one number per page; summing is correct whether that is one line or many.
+          FILE_COUNT=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" --jq 'length' \
+            | awk '{s+=$1} END {print s+0}')
           if [[ "$FILE_COUNT" -gt "$MAX_FILES" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "reason=PR has ${FILE_COUNT} files (limit: ${MAX_FILES})" >> "$GITHUB_OUTPUT"
@@ -146,8 +259,12 @@ jobs:
           fi
 
           # 6. Only test/config/docs files changed — no source to review
-          SRC_FILES=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
-            --jq '[.[] | select(.filename | (startswith("tests/") or startswith("test_") or test("^(Dockerfile|helm/|docs/|.*\\.(md|toml|lock|ya?ml)$)")) | not)] | length')
+          # Paginated for the same reason as the count above, and here the failure is worse than
+          # a dead cap: unpaginated, a pull request whose first 30 files are all docs would be
+          # skipped as "no source files" even with source changes on page two.
+          SRC_FILES=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+            --jq '[.[] | select(.filename | (startswith("tests/") or startswith("test_") or test("^(Dockerfile|helm/|docs/|.*\\.(md|toml|lock|ya?ml)$)")) | not)] | length' \
+            | awk '{s+=$1} END {print s+0}')
           if [[ "$SRC_FILES" -eq 0 ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "reason=no source files to review (only tests/docs/config)" >> "$GITHUB_OUTPUT"
@@ -157,8 +274,10 @@ jobs:
           echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "reason=" >> "$GITHUB_OUTPUT"
 
+      # `!= 'false'` rather than `== 'true'`: every skip branch except the synchronize one leaves
+      # `notify` unset, which reads as empty, and an empty value must still post.
       - name: Log skip reason
-        if: steps.decide.outputs.skip == 'true'
+        if: steps.decide.outputs.skip == 'true' && steps.decide.outputs.notify != 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           REASON: ${{ steps.decide.outputs.reason }}
@@ -211,6 +330,11 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           EXTRA_PROMPT: ${{ env.EXTRA_PROMPT }}
           REVIEW_PROMPT: ${{ env.REVIEW_PROMPT }}
+          # Learned guidance from the shared code-review fleet. Resolves to '' where the secret
+          # is unreadable — which is TODAY, because the org secret is `private` visibility and
+          # this repo is public — and recall is then a silent no-op leaving the review
+          # byte-for-byte unchanged. Adding a repo-level secret turns it on with no code change.
+          MEMCLAW_AGENTS_KEY: ${{ secrets.MEMCLAW_AGENTS_KEY }}
         run: bash .github/scripts/claude_pr_review.sh
 
   # Runs on @claude comment — only for public org members (MEMBER or OWNER).
@@ -238,9 +362,16 @@ jobs:
         run: |
           # ``author_association`` is set by GitHub on the event payload
           # and reflects the commenter's relationship to the repo's
-          # owner organization. ``MEMBER`` = public org member,
-          # ``OWNER`` = org owner. PRIVATE org members surface as
-          # ``NONE`` — see header comment for the workaround.
+          # owner organization. ``MEMBER`` = org member, ``OWNER`` = org
+          # owner.
+          #
+          # On an ``issue_comment`` payload this DOES resolve for a private
+          # org member — observed reporting ``MEMBER`` for a member whose
+          # org membership was private — which is why this path kept
+          # working while the on-open review was skipping everyone. Do not
+          # "align" the two gates by moving pre-checks onto this field: on a
+          # ``pull_request`` payload the same person reports ``CONTRIBUTOR``.
+          # See the header comment for the measured values.
           #
           # ``COLLABORATOR`` (non-org members granted direct repo write
           # access via Settings → Collaborators) is INTENTIONALLY
@@ -267,8 +398,10 @@ jobs:
           PR_NUMBER=${{ github.event.issue.number }}
           REPO=${{ github.repository }}
 
-          # Verify this is a PR comment, not an issue comment
-          HTTP_CODE=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.number' 2>/dev/null) || {
+          # Verify this is a PR comment, not an issue comment. Only the exit status is used —
+          # the captured value was never read, and it held the PR number rather than the HTTP
+          # code its name claimed.
+          gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.number' >/dev/null 2>&1 || {
             echo "Not a PR comment, skipping"
             echo "is_pr=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -305,4 +438,57 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           EXTRA_PROMPT: ${{ env.EXTRA_PROMPT }}
           REVIEW_PROMPT: ${{ env.REVIEW_PROMPT }}
+          # Learned guidance from the shared code-review fleet. Resolves to '' where the secret
+          # is unreadable — which is TODAY, because the org secret is `private` visibility and
+          # this repo is public — and recall is then a silent no-op leaving the review
+          # byte-for-byte unchanged. Adding a repo-level secret turns it on with no code change.
+          MEMCLAW_AGENTS_KEY: ${{ secrets.MEMCLAW_AGENTS_KEY }}
         run: bash .github/scripts/claude_pr_review.sh
+
+  # Runs on MERGE, and only on merge: extracts findings a maintainer DECLINED into the shared
+  # code-review fleet so future reviews stop re-raising them. The write half of the loop; recall
+  # in claude_pr_review.sh is the read half.
+  #
+  # `merged == true` rather than just `closed`: a pull request closed WITHOUT merging carries no
+  # accepted judgement, and capturing declines from an abandoned branch would teach the reviewer
+  # from a decision nobody stood behind.
+  #
+  # Dark and silent without MEMCLAW_AGENTS_KEY, which is the state on the day this lands — the
+  # org secret is `private` visibility and this repo is public, so it reads as ''. The job still
+  # runs and exits 0 having logged that it was dark, which is the diagnosable outcome.
+  # Only this job answers a workflow_dispatch. pre-checks is gated on `pull_request` and
+  # claude-review needs pre-checks to have succeeded, so a dispatch cannot start a review; the
+  # retrigger needs issue_comment. Nothing else can fire.
+  claude-capture:
+    if: >-
+      (github.event_name == 'pull_request'
+       && github.event.action == 'closed'
+       && github.event.pull_request.merged == true)
+      || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # Read-only: this job reads a comment thread and writes to MemClaw, never to the PR.
+      issues: read
+      # Needed IN ADDITION to issues:read — listing comments on an issue that is actually a pull
+      # request 403s without it.
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code@2.1.159 # pinned: keep in step with the review job
+
+      - name: Capture declined review findings
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # pull_request supplies the number; on workflow_dispatch that context is absent and the
+          # input takes over. Ordered this way so a merge never reads a stale dispatch input.
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          MEMCLAW_AGENTS_KEY: ${{ secrets.MEMCLAW_AGENTS_KEY }}
+        run: bash .github/scripts/claude_pr_capture.sh

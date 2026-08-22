@@ -27,18 +27,18 @@ ADAPTER_PATH = REPO_ROOT / "static" / "skills" / "memclaw" / "SKILL.md"
 # Every tool the canonical adapter documents (direct-MCP exposes all 12,
 # including keystones_set — which the OpenClaw plugin variant withholds).
 ALL_TOOLS = (
-    "memclaw_recall",
-    "memclaw_write",
-    "memclaw_manage",
-    "memclaw_list",
-    "memclaw_doc",
-    "memclaw_entity_get",
-    "memclaw_tune",
-    "memclaw_insights",
-    "memclaw_evolve",
-    "memclaw_stats",
-    "memclaw_keystones",
-    "memclaw_keystones_set",
+    "caura_recall",
+    "caura_write",
+    "caura_manage",
+    "caura_list",
+    "caura_doc",
+    "caura_entity_get",
+    "caura_tune",
+    "caura_insights",
+    "caura_evolve",
+    "caura_stats",
+    "caura_keystones",
+    "caura_keystones_set",
 )
 
 
@@ -120,7 +120,7 @@ def test_does_not_reintroduce_signature_cards() -> None:
     NOT carry per-tool signature cards (``memclaw_x(arg, ...)``) that merely
     duplicate the always-in-context MCP tool schemas."""
     skill = _read_adapter()
-    assert "`memclaw_recall(" not in skill and "`memclaw_write(" not in skill, (
+    assert "`caura_recall(" not in skill and "`caura_write(" not in skill, (
         "adapter reintroduced signature cards; signatures live in the MCP "
         "tool schemas — keep the lean 'Behaviors the schema won't tell you' form"
     )
@@ -163,7 +163,7 @@ def test_contains_canonical_content_invariants() -> None:
         "op=list_collections",         # enumerate collections
         "op=search",                   # semantic search over docs
         'data["summary"]',             # opt-in semantic indexing on write
-        "scalar exact-match only",     # memclaw_doc where-filter gotcha
+        "scalar exact-match only",     # caura_doc where-filter gotcha
         # Trust self-awareness
         "trust 1",                     # auto-register tier
         # Reflective ingest (Interviewer) — realtime writes stay mandatory

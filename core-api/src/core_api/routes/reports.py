@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -144,6 +145,31 @@ _LANE_KEYWORDS = {
         "on-call",
         "stall",
     ),
+}
+# Each lane's keywords, anchored at a word START (``\b``) but deliberately NOT at
+# a word end, so the prefixes above still match their inflections — "complian"
+# still matches compliance/compliant, "reliab" reliability, "build" building.
+#
+# The anchor is what is load-bearing. Bare substring matching fired on a keyword
+# buried inside an unrelated word, and the collisions are common English, not
+# exotica: "feedback" contains "dba" (Operating), "ownership" and "partnership"
+# contain "ship" (Building), "install" contains "stall" (Operating), "distrust"
+# contains "trust" (Governing). Each one silently outranked the memory-type
+# fallback, so a `decision` whose content merely said "customer feedback" was
+# filed under Operating rather than Governing.
+#
+# It also made classification depend on random data: the tests seed a
+# ``uuid4().hex`` id into content, and any hex id containing "dba" — ~0.15% of
+# them, since d/b/a are all hex digits — moved a memory to Operating. That is
+# the flake in test_report_internal_group_durable_filter (CI run 31636233722).
+#
+# Trade accepted: prefixed forms no longer match ("rebuild", "redeploy",
+# "unhealthy", "unreliable"). They fall through to the memory-type lane, which
+# is the intended default for text this heuristic cannot place, and that is a
+# better failure than matching inside arbitrary words.
+_LANE_PATTERNS = {
+    lane: re.compile(r"\b(?:" + "|".join(re.escape(k) for k in keywords) + r")")
+    for lane, keywords in _LANE_KEYWORDS.items()
 }
 _TYPE_LANE = {
     "rule": "Governing",
@@ -460,7 +486,7 @@ async def get_report(
         for m in durable:
             text = (_title(m) + " " + (m.get("content") or "")).lower()
             lane = next(
-                (name for name, kws in _LANE_KEYWORDS.items() if any(k in text for k in kws)),
+                (name for name, pattern in _LANE_PATTERNS.items() if pattern.search(text)),
                 None,
             )
             if lane is None:

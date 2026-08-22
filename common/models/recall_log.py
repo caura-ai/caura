@@ -1,6 +1,6 @@
 """Recall logging models — ``recall_event`` + ``recall_candidate``.
 
-A per-tenant, opt-in diagnostic log of agent-chosen ``memclaw_recall`` calls:
+A per-tenant, opt-in diagnostic log of agent-chosen ``caura_recall`` calls:
 what was queried, with what scope, and which memories were considered (raw
 cosine + final score), including a few near-misses below the similarity floor.
 Used to answer "why aren't good memories recalled?" — see migration 027.

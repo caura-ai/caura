@@ -1,7 +1,7 @@
 """Recall logging: ``recall_event`` + ``recall_candidate``.
 
 Opt-in, per-tenant diagnostic log answering "why aren't good memories
-recalled?". One ``recall_event`` row per agent-chosen ``memclaw_recall`` call
+recalled?". One ``recall_event`` row per agent-chosen ``caura_recall`` call
 (the plugin's automatic ``/search`` is NOT logged), plus a handful of
 ``recall_candidate`` rows — the returned top-k *and* a few near-misses just
 below the similarity floor, each carrying the raw cosine + final score. The

@@ -1,0 +1,27 @@
+# Local dev overlay: run the in-process MiniLM reranker (RANK_PROVIDER=local).
+#
+# The TEI rerank sidecar (the prod path, RANK_PROVIDER=remote) has no arm64
+# image and can't run on an Apple-Silicon Mac — so for LOCAL dev the reranker
+# runs in-process inside core-api instead. This overlay (a) builds core-api
+# with torch + sentence-transformers via the WITH_RERANK_LOCAL build-arg, and
+# (b) turns reranking on. It is the reranker analogue of `--profile embed-local`
+# for embeddings (which can't be a plain profile here because the model runs
+# in-process, not as a separate service, so it needs a build-arg, not a service).
+#
+# Usage (must --build so the build-arg takes effect):
+#   docker compose -f docker-compose.yml -f docker-compose.rerank-local.yml up --build
+#
+# The default `docker compose up` is completely unaffected — no torch, rerank
+# off. First build is slow + large (~2GB torch); the MiniLM weights download
+# from HuggingFace at first search (local machine has egress, unlike the VPC).
+services:
+  core-api:
+    build:
+      args:
+        WITH_RERANK_LOCAL: "1"
+    environment:
+      RANK_ENABLED: "true"
+      RANK_PROVIDER: "local"
+      # Optional overrides:
+      # RANK_MODEL: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+      # RANK_TIMEOUT_SECONDS: "0.5"

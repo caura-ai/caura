@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from memclaw_client.interviewer.parser import (
+from caura_client.interviewer.parser import (
     MIN_EVENT_CHARS,
     count_lines,
     scan_events,

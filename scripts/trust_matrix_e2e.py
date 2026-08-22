@@ -132,17 +132,17 @@ def provision():
 def build_grid(ids):
     """(label, tool, args, min_trust) — run across the fleeted wt-t1/2/3 agents."""
     return [
-        ("recall own-fleet", "memclaw_recall", {"query": "seed", "fleet_ids": [OWN]}, 1),
-        ("recall cross-fleet", "memclaw_recall", {"query": "seed", "fleet_ids": [OTHER]}, 2),
-        ("list own-fleet", "memclaw_list", {"scope": "fleet", "fleet_id": OWN}, 1),
-        ("list cross-fleet", "memclaw_list", {"scope": "fleet", "fleet_id": OTHER}, 2),
-        ("list no-fleet(pin)", "memclaw_list", {"scope": "fleet"}, 1),
-        ("list all", "memclaw_list", {"scope": "all"}, 2),
-        ("stats own-fleet", "memclaw_stats", {"scope": "fleet", "fleet_id": OWN}, 1),
-        ("stats cross-fleet", "memclaw_stats", {"scope": "fleet", "fleet_id": OTHER}, 2),
-        ("stats all", "memclaw_stats", {"scope": "all"}, 2),
+        ("recall own-fleet", "caura_recall", {"query": "seed", "fleet_ids": [OWN]}, 1),
+        ("recall cross-fleet", "caura_recall", {"query": "seed", "fleet_ids": [OTHER]}, 2),
+        ("list own-fleet", "caura_list", {"scope": "fleet", "fleet_id": OWN}, 1),
+        ("list cross-fleet", "caura_list", {"scope": "fleet", "fleet_id": OTHER}, 2),
+        ("list no-fleet(pin)", "caura_list", {"scope": "fleet"}, 1),
+        ("list all", "caura_list", {"scope": "all"}, 2),
+        ("stats own-fleet", "caura_stats", {"scope": "fleet", "fleet_id": OWN}, 1),
+        ("stats cross-fleet", "caura_stats", {"scope": "fleet", "fleet_id": OTHER}, 2),
+        ("stats all", "caura_stats", {"scope": "all"}, 2),
     ]
-    # NOTE: memclaw_manage op=read's by-id fleet isolation keys off the
+    # NOTE: caura_manage op=read's by-id fleet isolation keys off the
     # gateway-VERIFIED caller identity (authorize_memory_access uses
     # _get_agent_id(), not the agent_id argument). This gatewayless keyed
     # harness has no verified identity, so op=read runs tenant-scoped and can't
@@ -173,9 +173,9 @@ def run_fleetless():
     print(f"{'case':40s} {'result':12s} expect")
     print("-" * 66)
     tests = [
-        ("list scope=fleet, no fleet_id", "memclaw_list", {"scope": "fleet"}),
-        ("stats scope=fleet, no fleet_id", "memclaw_stats", {"scope": "fleet"}),
-        ("list scope=fleet, foreign fleet_id", "memclaw_list", {"scope": "fleet", "fleet_id": OWN}),
+        ("list scope=fleet, no fleet_id", "caura_list", {"scope": "fleet"}),
+        ("stats scope=fleet, no fleet_id", "caura_stats", {"scope": "fleet"}),
+        ("list scope=fleet, foreign fleet_id", "caura_list", {"scope": "fleet", "fleet_id": OWN}),
     ]
     all_ok = True
     for label, tool, args in tests:
@@ -188,7 +188,7 @@ def run_fleetless():
 
 def run_read_liveness(ids):
     print("\n=== op=read liveness (tenant-scoped in this harness; see note) ===")
-    status, _ = mcp("wt-t1", "memclaw_manage", {"op": "read", "memory_id": ids["wt-t1"]})
+    status, _ = mcp("wt-t1", "caura_manage", {"op": "read", "memory_id": ids["wt-t1"]})
     print(f"read own memory → {status}")
     return status == "OK"
 

@@ -40,7 +40,7 @@ async def test_read_embed_write_roundtrip():
     sc.list_null_embedding_entities = AsyncMock(return_value=[{"id": eid, "canonical_name": "Globex"}])
     sc.set_entity_embeddings = AsyncMock(return_value=1)
 
-    async def _fake_embed(text, tenant_config):
+    async def _fake_embed(text, tenant_config, **_kwargs):
         return [0.1] * 8
 
     with (

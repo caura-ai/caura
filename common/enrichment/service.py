@@ -44,10 +44,7 @@ def _parse_temporal(val: str) -> datetime | None:
     """Parse a temporal string to UTC datetime, returning None on failure."""
     try:
         dt = dateutil_parser.parse(val, fuzzy=False)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        else:
-            dt = dt.astimezone(UTC)
+        dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
         # Sanity check: not before 1970, not after 2100
         if dt.year < 1970 or dt.year > 2100:
             logger.warning("Temporal value out of range: %s", val)
@@ -110,7 +107,14 @@ def _validate_enrichment(raw: dict, llm_ms: int) -> EnrichmentResult:
     except (TypeError, ValueError):
         weight = 0.7
     raw["weight"] = max(0.0, min(1.0, weight))
-    raw["title"] = str(raw.get("title", ""))[:80]
+    # ``str()`` on a non-string persisted the REPR: a ``title`` of ``{"a": 1}``
+    # was stored as ``"{'a': 1}"`` and ``None`` as ``"None"``. Discard instead,
+    # for the reason ``_coerce_summary`` gives in ``schema.py`` — and because
+    # ``_build_patch`` skips an empty ``title`` specifically so it cannot
+    # clobber a previously-stored good one. Discarding is therefore a storage
+    # no-op; a repr would overwrite a valid title on redelivery.
+    title = raw.get("title")
+    raw["title"] = title[:80] if isinstance(title, str) else ""
     parsed_ts: dict[str, datetime | None] = {}
     for ts_field in ("ts_valid_start", "ts_valid_end"):
         val = raw.get(ts_field)

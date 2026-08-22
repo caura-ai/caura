@@ -111,6 +111,12 @@ def stub_storage_client(monkeypatch, **method_returns):
     # test must patch the alias on ``mcp_server`` (where Python resolves it at
     # call time) — not the original module path.
     monkeypatch.setattr("core_api.mcp_server.get_storage_client", _factory)
+    # ``resolve_read_fleet_gate`` — the trust ladder behind scope='fleet' for
+    # both the MCP tools and the REST read routes — lives in ``agent_service``
+    # and resolves the factory through THAT module's namespace. Patch its alias
+    # too, or a ``get_agent`` stub set here is silently ignored by the gate and
+    # the pin/level assertions read the real (ASGI-bridged) storage instead.
+    monkeypatch.setattr("core_api.services.agent_service.get_storage_client", _factory)
     return sc
 
 
@@ -122,7 +128,7 @@ def mcp_env(monkeypatch):
 
         async def test_something(mcp_env):
             mcp_env["service"]("create_memory").return_value = ...
-            out = await mcp_server.memclaw_write(content="hello", ...)
+            out = await mcp_server.caura_write(content="hello", ...)
             assert ...
 
     The control object exposes:
@@ -147,7 +153,7 @@ def mcp_env(monkeypatch):
 
     monkeypatch.setattr(mcp_server, "_check_auth", lambda: None)
     monkeypatch.setattr(mcp_server, "_get_tenant", lambda: tenant)
-    # Fix 2 Ph5b (PR2): ``_mcp_session`` was deleted once ``memclaw_evolve`` —
+    # Fix 2 Ph5b (PR2): ``_mcp_session`` was deleted once ``caura_evolve`` —
     # its last consumer — migrated to ``_no_db()``. Every MCP handler now opens
     # ``_no_db()`` (yields None; storage-routed services carry tenant context
     # explicitly). Patch it with the MagicMock-yielding session so handlers that
@@ -211,7 +217,10 @@ def mcp_env(monkeypatch):
     # monkeypatch.
     async def _stub_resolve_config(tenant_id):
         return SimpleNamespace(
-            require_agent_approval=False, recall_boost=False, graph_expand=False
+            require_agent_approval=False,
+            recall_boost=False,
+            graph_expand=False,
+            entity_retrieval=True,
         )
 
     monkeypatch.setattr(mcp_server, "resolve_config", _stub_resolve_config)

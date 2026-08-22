@@ -49,7 +49,7 @@ class BackfillEntityEmbeddings:
             eid = row["id"]
             canonical_name = row["canonical_name"]
             try:
-                embedding = await get_embedding(canonical_name, ctx.tenant_config)
+                embedding = await get_embedding(canonical_name, ctx.tenant_config, background=True)
             except Exception:
                 logger.warning("Failed to embed entity %s (%s)", eid, canonical_name, exc_info=True)
                 continue

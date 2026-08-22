@@ -9,17 +9,17 @@ from __future__ import annotations
 
 import json
 
-from memclaw_client.interviewer.discovery import (
+from caura_client.interviewer.discovery import (
     HARNESS_CURSOR,
     find_transcripts,
     transcript_from_path,
 )
-from memclaw_client.interviewer.parser import (
+from caura_client.interviewer.parser import (
     _parse_cursor_timestamp,
     _strip_redacted,
     scan_events,
 )
-from memclaw_client.interviewer.runner import node_id_for
+from caura_client.interviewer.runner import node_id_for
 
 LONG = "x" * 80  # comfortably past MIN_EVENT_CHARS
 
@@ -218,7 +218,7 @@ def test_invalid_harness_env_fails_loudly(monkeypatch, capsys):
     defaults) must exit 2 with guidance, not silently run as claude-code."""
     import pytest
 
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
 
     monkeypatch.setenv("MEMCLAW_INTERVIEWER_HARNESS", "Cursor")  # wrong case
     with pytest.raises(SystemExit) as exc:
@@ -232,7 +232,7 @@ def test_invalid_harness_env_never_breaks_hook(tmp_path, monkeypatch):
     an ALWAYS-exit-0 contract (and ignores --harness, inferring from path)."""
     import io
 
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
 
     path = _write_session(tmp_path)
     payload = json.dumps({"transcript_path": str(path), "hook_event_name": "sessionEnd"})
@@ -247,7 +247,7 @@ def test_cursor_hook_autodetects_and_respects_allowlist(tmp_path, monkeypatch, c
     up), not its session dir — and still gate on the allowlist."""
     import io
 
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
 
     path = _write_session(tmp_path)
     payload = json.dumps({"transcript_path": str(path), "hook_event_name": "sessionEnd"})

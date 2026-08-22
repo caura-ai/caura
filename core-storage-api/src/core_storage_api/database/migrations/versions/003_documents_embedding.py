@@ -1,7 +1,7 @@
 """Add ``embedding`` column + HNSW index to ``documents``.
 
 Opt-in semantic search for the doc store. Existing rows keep
-``embedding = NULL`` and do not participate in ``memclaw_doc op=search``
+``embedding = NULL`` and do not participate in ``caura_doc op=search``
 — only rows written with ``embed_field=...`` get embedded. A partial
 HNSW index (``WHERE embedding IS NOT NULL``) keeps the index small
 while the feature rolls out.

@@ -1,4 +1,4 @@
-"""Unit tests for ``memclaw_list`` — non-semantic memory enumeration.
+"""Unit tests for ``caura_list`` — non-semantic memory enumeration.
 
 Covers:
 - Scope-based trust gating: scope='agent' at trust ≥ 1; scope='fleet' own-fleet at
@@ -25,7 +25,7 @@ from tests._mcp_test_helpers import as_text, parse_envelope, stub_storage_client
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
-# Fix 2 Phase 4: ``memclaw_list`` ports ``memory_repo.list_by_filters`` into the
+# Fix 2 Phase 4: ``caura_list`` ports ``memory_repo.list_by_filters`` into the
 # storage layer (``PostgresService.memory_list_by_filters``) and calls it via
 # ``sc.list_memories_by_filters(payload)``. The visibility / cursor / deleted_at
 # SQL now lives in core-storage-api (covered by its own service tests against the
@@ -56,7 +56,7 @@ async def test_list_scope_agent_allowed_at_trust_1(mcp_env, monkeypatch):
 
     monkeypatch.setattr(mcp_server, "_require_trust", _trust_1)
     stub_storage_client(monkeypatch, list_memories_by_filters=[])
-    out = await mcp_server.memclaw_list(agent_id="alice")  # scope='agent' by default
+    out = await mcp_server.caura_list(agent_id="alice")  # scope='agent' by default
     assert "FORBIDDEN" not in as_text(out)
     payload = parse_envelope(out)
     assert payload["scope"] == "agent"
@@ -82,7 +82,7 @@ async def test_list_scope_fleet_own_allowed_at_trust_1(mcp_env, monkeypatch):
         get_agent={"fleet_id": "RND", "trust_level": 1},
         list_memories_by_filters=[],
     )
-    out = await mcp_server.memclaw_list(agent_id="alice", scope="fleet")
+    out = await mcp_server.caura_list(agent_id="alice", scope="fleet")
     assert "FORBIDDEN" not in as_text(out)
     # Omitted fleet_id is pinned to the caller's home fleet.
     payload = sc.list_memories_by_filters.await_args.args[0]
@@ -103,7 +103,7 @@ async def test_list_scope_fleet_cross_blocked_at_trust_1(mcp_env, monkeypatch):
 
     monkeypatch.setattr(mcp_server, "_require_trust", _trust_1)
     stub_storage_client(monkeypatch, get_agent={"fleet_id": "RND", "trust_level": 1})
-    out = await mcp_server.memclaw_list(agent_id="alice", scope="fleet", fleet_id="OTHER")
+    out = await mcp_server.caura_list(agent_id="alice", scope="fleet", fleet_id="OTHER")
     assert "FORBIDDEN" in as_text(out)
     assert "trust_level=1" in as_text(out)
 
@@ -121,7 +121,7 @@ async def test_list_scope_all_blocked_at_trust_1(mcp_env, monkeypatch):
         return 1, False, None
 
     monkeypatch.setattr(mcp_server, "_require_trust", _trust_1)
-    out = await mcp_server.memclaw_list(agent_id="alice", scope="all")
+    out = await mcp_server.caura_list(agent_id="alice", scope="all")
     assert "FORBIDDEN" in as_text(out)
 
 
@@ -183,7 +183,7 @@ async def test_list_fleet_gate_storage_error_returns_structured_envelope(mcp_env
     and surfaced as a structured error, not an unhandled raise."""
     sc = stub_storage_client(monkeypatch)
     sc.get_agent = AsyncMock(side_effect=RuntimeError("storage down"))
-    out = await mcp_server.memclaw_list(agent_id="alice", scope="fleet")
+    out = await mcp_server.caura_list(agent_id="alice", scope="fleet")
     assert "INTERNAL_ERROR" in as_text(out)
 
 
@@ -195,29 +195,29 @@ async def test_list_fleet_gate_httpx_error_returns_storage_envelope(mcp_env, mon
     sc.get_agent = AsyncMock(
         side_effect=httpx.HTTPStatusError("unavailable", request=req, response=resp)
     )
-    out = await mcp_server.memclaw_list(agent_id="alice", scope="fleet")
+    out = await mcp_server.caura_list(agent_id="alice", scope="fleet")
     # Structured error envelope (not an unhandled exception).
     assert "error" in as_text(out).lower()
 
 
 async def test_stats_fleet_gate_storage_error_returns_structured_envelope(mcp_env, monkeypatch):
-    """Same call-site guard for memclaw_stats: gate failures → INTERNAL_ERROR."""
+    """Same call-site guard for caura_stats: gate failures → INTERNAL_ERROR."""
     sc = stub_storage_client(monkeypatch)
     sc.get_agent = AsyncMock(side_effect=RuntimeError("storage down"))
-    out = await mcp_server.memclaw_stats(agent_id="alice", scope="fleet")
+    out = await mcp_server.caura_stats(agent_id="alice", scope="fleet")
     assert "INTERNAL_ERROR" in as_text(out)
 
 
 async def test_stats_fleet_gate_httpx_error_returns_storage_envelope(mcp_env, monkeypatch):
-    """memclaw_stats maps a gate httpx error through _storage_error_envelope too
-    (preserving upstream status), matching memclaw_list — not a flat INTERNAL_ERROR."""
+    """caura_stats maps a gate httpx error through _storage_error_envelope too
+    (preserving upstream status), matching caura_list — not a flat INTERNAL_ERROR."""
     sc = stub_storage_client(monkeypatch)
     req = httpx.Request("GET", "http://storage/agents/alice")
     resp = httpx.Response(503, request=req)
     sc.get_agent = AsyncMock(
         side_effect=httpx.HTTPStatusError("unavailable", request=req, response=resp)
     )
-    out = await mcp_server.memclaw_stats(agent_id="alice", scope="fleet")
+    out = await mcp_server.caura_stats(agent_id="alice", scope="fleet")
     assert "error" in as_text(out).lower()
 
 
@@ -238,14 +238,14 @@ async def test_resolve_read_fleet_gate_unknown_agent_explicit_fleet_is_l2(monkey
 
 
 async def test_list_invalid_scope(mcp_env):
-    out = await mcp_server.memclaw_list(scope="everywhere")
+    out = await mcp_server.caura_list(scope="everywhere")
     assert "INVALID_ARGUMENTS" in as_text(out)
     assert "Invalid scope" in as_text(out)
 
 
 async def test_list_scope_agent_rejects_foreign_written_by(mcp_env):
     """scope='agent' + written_by != caller returns 422."""
-    out = await mcp_server.memclaw_list(
+    out = await mcp_server.caura_list(
         agent_id="alice", scope="agent", written_by="bob"
     )
     assert "INVALID_ARGUMENTS" in as_text(out)
@@ -255,7 +255,7 @@ async def test_list_scope_agent_rejects_foreign_written_by(mcp_env):
 async def test_list_scope_agent_forces_written_by(mcp_env, monkeypatch):
     """scope='agent' forces written_by to the caller's agent_id."""
     sc = stub_storage_client(monkeypatch, list_memories_by_filters=[])
-    await mcp_server.memclaw_list(agent_id="alice", scope="agent")
+    await mcp_server.caura_list(agent_id="alice", scope="agent")
     payload = sc.list_memories_by_filters.await_args.args[0]
     assert payload["written_by"] == "alice"
     # scope='agent' must NOT widen via the readable set.
@@ -264,60 +264,60 @@ async def test_list_scope_agent_forces_written_by(mcp_env, monkeypatch):
 
 
 async def test_list_invalid_memory_type(mcp_env):
-    out = await mcp_server.memclaw_list(memory_type="chicken")
+    out = await mcp_server.caura_list(memory_type="chicken")
     assert "INVALID_ARGUMENTS" in as_text(out)
     assert "Invalid memory_type 'chicken'" in as_text(out)
 
 
 async def test_list_invalid_status(mcp_env):
-    out = await mcp_server.memclaw_list(status="fancy")
+    out = await mcp_server.caura_list(status="fancy")
     assert "INVALID_ARGUMENTS" in as_text(out)
 
 
 async def test_list_invalid_sort(mcp_env):
-    out = await mcp_server.memclaw_list(sort="content")
+    out = await mcp_server.caura_list(sort="content")
     assert "INVALID_ARGUMENTS" in as_text(out)
     assert "Invalid sort" in as_text(out)
 
 
 async def test_list_invalid_order(mcp_env):
-    out = await mcp_server.memclaw_list(order="sideways")
+    out = await mcp_server.caura_list(order="sideways")
     assert "INVALID_ARGUMENTS" in as_text(out)
     assert "order must be 'asc' or 'desc'" in as_text(out)
 
 
 async def test_list_cursor_with_non_default_sort_errors(mcp_env):
-    out = await mcp_server.memclaw_list(cursor="x", sort="weight")
+    out = await mcp_server.caura_list(cursor="x", sort="weight")
     assert "INVALID_ARGUMENTS" in as_text(out)
     assert "cursor pagination requires" in as_text(out)
 
 
 async def test_list_cursor_with_asc_order_errors(mcp_env):
-    out = await mcp_server.memclaw_list(cursor="x", order="asc")
+    out = await mcp_server.caura_list(cursor="x", order="asc")
     assert "INVALID_ARGUMENTS" in as_text(out)
 
 
 async def test_list_invalid_cursor_payload(mcp_env):
-    out = await mcp_server.memclaw_list(cursor="@@not-base64@@")
+    out = await mcp_server.caura_list(cursor="@@not-base64@@")
     assert "INVALID_ARGUMENTS" in as_text(out)
     assert "Invalid cursor" in as_text(out)
 
 
 async def test_list_invalid_created_after_iso(mcp_env):
-    out = await mcp_server.memclaw_list(created_after="not-iso")
+    out = await mcp_server.caura_list(created_after="not-iso")
     assert "INVALID_ARGUMENTS" in as_text(out)
     assert "created_after must be ISO8601" in as_text(out)
 
 
 async def test_list_invalid_created_before_iso(mcp_env):
-    out = await mcp_server.memclaw_list(created_before="not-iso")
+    out = await mcp_server.caura_list(created_before="not-iso")
     assert "INVALID_ARGUMENTS" in as_text(out)
     assert "created_before must be ISO8601" in as_text(out)
 
 
 async def test_list_happy_path_empty_results(mcp_env, monkeypatch):
     stub_storage_client(monkeypatch, list_memories_by_filters=[])
-    out = await mcp_server.memclaw_list()
+    out = await mcp_server.caura_list()
     payload = parse_envelope(out)
     assert payload == {"count": 0, "results": [], "next_cursor": None, "scope": "agent"}
 
@@ -335,7 +335,7 @@ async def test_list_happy_path_with_rows_and_next_cursor(mcp_env, monkeypatch):
     ]
     stub_storage_client(monkeypatch, list_memories_by_filters=rows)
     monkeypatch.setattr(mcp_server, "_memory_to_out", lambda m: _out_stub(m["id"]))
-    out = await mcp_server.memclaw_list(limit=2)
+    out = await mcp_server.caura_list(limit=2)
     payload = parse_envelope(out)
     assert payload["count"] == 2
     assert len(payload["results"]) == 2
@@ -355,7 +355,7 @@ async def test_list_include_deleted_requires_trust_3(mcp_env, monkeypatch):
 
     monkeypatch.setattr(mcp_server, "_require_trust", _trust_2)
     sc = stub_storage_client(monkeypatch, list_memories_by_filters=[])
-    await mcp_server.memclaw_list(agent_id="alice", include_deleted=True)
+    await mcp_server.caura_list(agent_id="alice", include_deleted=True)
     payload = sc.list_memories_by_filters.await_args.args[0]
     assert payload["include_deleted"] is False
 
@@ -369,14 +369,14 @@ async def test_list_include_deleted_honored_at_trust_3(mcp_env, monkeypatch):
 
     monkeypatch.setattr(mcp_server, "_require_trust", _trust_3)
     sc = stub_storage_client(monkeypatch, list_memories_by_filters=[])
-    await mcp_server.memclaw_list(agent_id="admin", include_deleted=True)
+    await mcp_server.caura_list(agent_id="admin", include_deleted=True)
     payload = sc.list_memories_by_filters.await_args.args[0]
     assert payload["include_deleted"] is True
 
 
 async def test_list_auth_failure_shortcircuits(monkeypatch):
     monkeypatch.setattr(mcp_server, "_check_auth", lambda: mcp_server._AUTH_ERROR)
-    out = await mcp_server.memclaw_list()
+    out = await mcp_server.caura_list()
     assert out == mcp_server._AUTH_ERROR
 
 
@@ -388,8 +388,8 @@ async def test_list_limit_clamped_to_1_50(mcp_env, monkeypatch):
     over-fetch internally. So we assert the clamped value core-api sends."""
     sc = stub_storage_client(monkeypatch, list_memories_by_filters=[])
 
-    await mcp_server.memclaw_list(limit=999)
+    await mcp_server.caura_list(limit=999)
     assert sc.list_memories_by_filters.await_args.args[0]["limit"] == 50
 
-    await mcp_server.memclaw_list(limit=0)
+    await mcp_server.caura_list(limit=0)
     assert sc.list_memories_by_filters.await_args.args[0]["limit"] == 1
