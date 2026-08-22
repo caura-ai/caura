@@ -266,8 +266,20 @@ jobs:
           # Paginated for the same reason as the count above, and here the failure is worse than
           # a dead cap: unpaginated, a pull request whose first 30 files are all docs would be
           # skipped as "no source files" even with source changes on page two.
+          #
+          # `conftest.py` and `tests/_*.py` count as SOURCE here, which is the other half of the
+          # carve-out #872 made to REVIEW_PROMPT. Telling the reviewer to review them achieved
+          # nothing on its own: a change confined to those files still counted zero here, so the
+          # job skipped and the prompt was never read. #866 was exactly that, and #872 itself was
+          # too — a lone workflow `.yml` is config, so the PR fixing the exclusion was not
+          # reviewed either. They earn it: they are the highest-fan-in files in the suite
+          # (`tests/_scoped_module.py` is imported by five test files), and a defect in one is a
+          # defect in everything that imports it.
+          #
+          # The expression is pinned by tests/test_review_source_filter.py, which extracts THIS
+          # line from THIS file and runs it — a copy in a test would only prove the copy works.
           SRC_FILES=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" \
-            --jq '[.[] | select(.filename | (startswith("tests/") or startswith("test_") or test("^(Dockerfile|helm/|docs/|.*\\.(md|toml|lock|ya?ml)$)")) | not)] | length' \
+            --jq '[.[] | select(.filename | if (test("(^|/)conftest\\.py$") or test("^tests/_[^/]*\\.py$")) then true else ((startswith("tests/") or startswith("test_") or test("^(Dockerfile|helm/|docs/|.*\\.(md|toml|lock|ya?ml)$)")) | not) end)] | length' \
             | awk '{s+=$1} END {print s+0}')
           if [[ "$SRC_FILES" -eq 0 ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
