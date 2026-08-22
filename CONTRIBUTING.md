@@ -193,6 +193,43 @@ You don't bump versions by hand; just write good commit messages.
 - Line length: 110 characters for Python.
 - No trailing whitespace, LF line endings.
 
+## Naming: use Caura, not the old brand
+
+The product renamed to Caura and the codebase is being migrated to match. CI runs
+a ratchet — `scripts/legacy_name_ratchet.py` — that fails any pull request adding
+a line carrying the old brand to a file that did not already have one.
+
+Name new services, secrets, topics, environment variables, files and identifiers
+`caura`. Every old-brand name that lands has to be redirected and supported
+indefinitely, and it removes a rename option that has already been paid for.
+
+Some additions are legitimate: a compatibility alias, a redirect, a test pinning
+the old wire format. Old names stay readable forever, so these are expected.
+Append the marker to the line and it is exempt:
+
+```python
+LEGACY_TOOL_ALIAS = "..."  # legacy-name-ok: permanent shim, plugins pinned to v1
+```
+
+Put the reason after the marker. The marker exempts only its own line, so it
+lands in the diff where a reviewer will see it and can disagree.
+
+It has to be the whole token — `legacy-name-okay` in a sentence does not exempt
+anything — but the casing is up to you, and the reason is asked for rather than
+enforced.
+
+Marking a line exempt frees a slot in that file, so every new exemption is
+printed in the CI output whether the check passes or not. That is deliberate: it
+is the one move the ratchet cannot adjudicate for itself, so it is the one that
+must never be quiet.
+
+To see the current footprint, or to check a change before pushing:
+
+```bash
+python3 scripts/legacy_name_ratchet.py --report
+python3 scripts/legacy_name_ratchet.py --base origin/main
+```
+
 ## Questions
 
 For questions that aren't bug reports, use

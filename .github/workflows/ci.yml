@@ -483,3 +483,33 @@ jobs:
             echo "::error::numpy is missing from the core-api image — insights discover mode would silently fall back to non-clustered analysis. It must stay declared in core-api/pyproject.toml (see services/insights_service.py::_numpy_kmeans)."
             exit 1
           }
+
+  legacy-name-ratchet:
+    # Hard rule 7 of the sunset plan: mint nothing new carrying the old brand.
+    # Every one adds a redirect somebody has to keep forever and spends a rename
+    # option already paid for — and the programme runs for weeks with ordinary
+    # feature work alongside it, so the rule needs a gate rather than a
+    # reviewer's attention.
+    #
+    # A separate job on purpose: it needs no Postgres, no uv and no install, so
+    # it reports in seconds instead of waiting behind the suite, and its status
+    # check reads on its own terms rather than as one more way for "CI" to be red.
+    #
+    # ``depth=1`` is enough. On a ``pull_request`` the checkout is already the
+    # merge commit, so main's tree is the exact base for this PR's contribution
+    # and no merge-base walk is needed. Same anonymous fetch the broker gate uses.
+    name: Legacy-name ratchet
+    runs-on: ubuntu-latest
+    # Seconds of work; the only thing that can hang is the fetch.
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: No new old-brand names
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          python3 scripts/legacy_name_ratchet.py --base origin/main
