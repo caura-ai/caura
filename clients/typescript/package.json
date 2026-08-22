@@ -1,6 +1,6 @@
 {
   "name": "@caura/memclaw-client",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Official TypeScript/JavaScript client for Caura (formerly MemClaw) \u2014 governed shared memory for AI agent fleets (multi-agent, multi-tenant, MCP-native).",
   "license": "Apache-2.0",
   "author": "Caura <hello@caura.ai>",
