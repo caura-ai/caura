@@ -19,6 +19,7 @@ cases for the publish path.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -29,6 +30,7 @@ from core_api.constants import VECTOR_DIM
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.steps.write.parallel_embed_enrich import ParallelEmbedEnrich
 from core_api.schemas import MemoryCreate
+from tests._scoped_module import scoped
 
 pytestmark = pytest.mark.asyncio
 
@@ -211,7 +213,7 @@ async def test_reembed_skips_initial_sleep_when_flag_off() -> None:
             new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.memory_service.asyncio.sleep", new=_fake_sleep),
+        patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_fake_sleep)),
         patch.object(memory_service, "track_task"),
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -250,7 +252,7 @@ async def test_reembed_sleeps_on_failure_path_when_flag_on() -> None:
             new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.memory_service.asyncio.sleep", new=_fake_sleep),
+        patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_fake_sleep)),
         patch.object(memory_service, "track_task"),
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -295,7 +297,7 @@ async def test_reembed_schedules_contradiction_after_success() -> None:
             new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.memory_service.asyncio.sleep", new=_noop_sleep),
+        patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_noop_sleep)),
         patch.object(memory_service, "track_task"),
         patch.object(
             memory_service,
@@ -350,7 +352,7 @@ async def test_reembed_race_guard_fires_with_flag_on_too() -> None:
             new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.memory_service.asyncio.sleep", new=_noop_sleep),
+        patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_noop_sleep)),
         patch.object(memory_service, "track_task"),
         patch.object(
             memory_service,
@@ -417,7 +419,7 @@ async def test_reembed_respects_existing_embedding_from_enrich_race() -> None:
             new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.memory_service.asyncio.sleep", new=_noop_sleep),
+        patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_noop_sleep)),
         patch(
             "core_api.services.contradiction_detector.detect_contradictions_async",
             new=_fake_detect,
@@ -636,7 +638,7 @@ async def test_reembed_is_failure_fallback_triggers_backoff() -> None:
             new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.memory_service.asyncio.sleep", new=_fake_sleep),
+        patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_fake_sleep)),
         patch.object(memory_service, "track_task"),
         patch(
             "core_api.services.organization_settings.resolve_config",

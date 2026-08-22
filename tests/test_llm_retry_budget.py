@@ -28,6 +28,7 @@ that is the common case and the controls here cover it.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import httpx
 import openai
@@ -35,6 +36,7 @@ import pytest
 
 from common.llm import retry as retry_mod
 from common.llm.retry import call_with_fallback, call_with_retry
+from tests._scoped_module import scoped
 
 
 def _rate_limited(**headers: str) -> openai.RateLimitError:
@@ -71,10 +73,60 @@ def clock(monkeypatch):
             self.now += seconds
 
     c = _Clock()
-    monkeypatch.setattr(retry_mod.time, "monotonic", c.monotonic)
-    monkeypatch.setattr(retry_mod.asyncio, "sleep", c.sleep)
+    # Both scoped to ``retry_mod``'s own view — see ``tests/_scoped_module``.
+    # Patching the shared modules would hand this clock to the whole process:
+    # every ``time.monotonic()`` anywhere would return 1000-and-change, and
+    # any other task's sleep would ADVANCE the clock these budget assertions
+    # are computed from. That is worse than the mis-attribution that caught
+    # ``test_llm_retry_after`` in caura#863 — a stray 0.74s here does not add
+    # a list entry, it silently spends 0.74s of the budget under test.
+    monkeypatch.setattr(retry_mod, "time", scoped(time, monotonic=c.monotonic))
+    monkeypatch.setattr(retry_mod, "asyncio", scoped(asyncio, sleep=c.sleep))
     monkeypatch.setattr(retry_mod, "LLM_RETRY_JITTER_FRACTION", 0.0)
     return c
+
+
+@pytest.mark.unit
+class TestTheClockIsOursAlone:
+    """Every budget assertion in this file is arithmetic on ``clock.now``.
+
+    A clock the rest of the process can move is not a clock. caura#863
+    showed a leaked background task reaching ``asyncio.sleep`` inside a
+    sibling fixture's window; the same intrusion here would have spent
+    part of the budget under test, and the test would have failed — or
+    quietly passed — for a reason found nowhere in its own code.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_sleep_taken_elsewhere_does_not_spend_the_budget(self, clock):
+        before = clock.now
+
+        await asyncio.sleep(0)
+
+        assert clock.now == before
+        assert clock.slept == []
+
+    def test_the_real_clock_still_runs_for_everybody_else(self, clock):
+        """The fake is 1000-and-change; real monotonic time is not."""
+        assert time.monotonic() != clock.now
+
+    @pytest.mark.asyncio
+    async def test_the_retry_loop_does_still_move_it(self, clock):
+        """The inverse: scoped to the wrong module, this file tests nothing."""
+
+        async def _always():
+            raise _rate_limited()
+
+        with pytest.raises(openai.RateLimitError):
+            await call_with_retry(
+                _always,
+                label="t",
+                max_attempts=2,
+                base_delay=1.0,
+                budget_s=30.0,
+            )
+
+        assert clock.slept == [1.0]
 
 
 @pytest.mark.unit
