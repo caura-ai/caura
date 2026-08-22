@@ -45,7 +45,7 @@ router = APIRouter(tags=["Document Store"])
 SKILLS_COLLECTION = "skills"
 # Optional ``forge/`` or ``agent/`` prefix supports the Skill Factory's
 # doc_id namespacing (plan §3): Forge candidates land as ``forge/<slug>``
-# and synchronous agent-direct writes via ``memclaw_doc`` land as
+# and synchronous agent-direct writes via ``caura_doc`` land as
 # ``agent/<slug>``. Without this, Forge's own writes 422 themselves at
 # the route boundary. ``manual``/``imported`` rows keep the plain
 # ``<slug>`` shape — the prefix is opt-in, not required.
@@ -122,7 +122,7 @@ class InstallableSkillsRequest(BaseModel):
 class DocSearchRequest(BaseModel):
     """Vector search over indexed documents.
 
-    Mirrors MCP ``memclaw_doc op=search``: when ``collection`` is omitted,
+    Mirrors MCP ``caura_doc op=search``: when ``collection`` is omitted,
     search spans every collection in the tenant (broad strategy); when
     supplied, search is restricted to that collection (narrow strategy).
     Only documents written with a ``data["summary"]`` (i.e. with a
@@ -143,14 +143,36 @@ class DocOut(BaseModel):
     collection: str
     doc_id: str
     data: dict
-    created_at: datetime
-    updated_at: datetime
+    # NULLABLE because the columns are. ``documents.created_at`` / ``updated_at``
+    # carry ``server_default=now()`` but were never declared ``nullable=False``
+    # (001_initial_schema, never tightened since), so a NULL is representable. This
+    # model previously required a ``datetime``, which meant such a row could not be
+    # serialised at all — the read raised ValidationError and the route 500'd. No
+    # client can be relying on non-null for those rows, because they were never
+    # served; ``null`` strictly widens what this endpoint can return.
+    created_at: datetime | None
+    updated_at: datetime | None
 
 
 # ── Helpers ──
 
 
 def _dict_to_out(d: dict) -> DocOut:
+    # ``.get(key, datetime.min)`` covered only the MISSING-KEY case and left the
+    # present-but-None one, which is the one the schema actually permits — so the
+    # default never fired where it mattered and the route 500'd instead. And where
+    # it did fire it served year 1 (naive, in a tz-aware field) to a caller with no
+    # way to recognise it as a sentinel. Pass the value through and let ``null``
+    # mean unknown.
+    if d.get("created_at") is None or d.get("updated_at") is None:
+        # Identifier only, never ``data`` — that is caller-supplied document content.
+        logger.warning(
+            "document_timestamp_null id=%s collection=%s created_at_null=%s updated_at_null=%s",
+            d.get("id"),
+            d.get("collection"),
+            d.get("created_at") is None,
+            d.get("updated_at") is None,
+        )
     return DocOut(
         id=str(d.get("id", "")),
         tenant_id=d.get("tenant_id", ""),
@@ -158,8 +180,8 @@ def _dict_to_out(d: dict) -> DocOut:
         collection=d.get("collection", ""),
         doc_id=d.get("doc_id", ""),
         data=d.get("data", {}),
-        created_at=d.get("created_at", datetime.min),
-        updated_at=d.get("updated_at", datetime.min),
+        created_at=d.get("created_at"),
+        updated_at=d.get("updated_at"),
     )
 
 
@@ -267,8 +289,10 @@ async def upsert_document(
     # back-compat. See core_api.services.doc_indexing for the contract.
     from core_api.services.doc_indexing import (
         InvalidDocIndexingError,
+        resolve_doc_memory,
         resolve_embed_source,
     )
+    from core_api.services.doc_memory import safe_sync_doc_memory
 
     try:
         source = resolve_embed_source(body.collection, body.data)
@@ -277,7 +301,10 @@ async def upsert_document(
 
     embedding: list[float] | None = None
     if source is not None:
-        embedding = await get_embedding(source)
+        # Synchronous write: the client blocks on this and gets the 502
+        # below if it returns None, so it must not sit on the reduced
+        # deferred budget. See EMBEDDING_INTERACTIVE_RESERVED_SLOTS.
+        embedding = await get_embedding(source, background=False)
         if embedding is None:
             raise HTTPException(
                 status_code=502,
@@ -321,6 +348,28 @@ async def upsert_document(
         )
     if doc is None:
         raise HTTPException(status_code=500, detail="Document upsert returned no rows")
+    # Mint a memory carrying the document body so the BODY becomes reachable by
+    # meaning (only data["summary"] is embedded on the doc row, and
+    # ``caura_recall`` never returns documents). Both upsert branches above
+    # converge here, so this one call covers indexed and unindexed writes.
+    # Never raises: the doc is already committed and is the source of truth.
+    try:
+        doc_memory_spec = resolve_doc_memory(
+            body.collection, body.doc_id, body.data, updated_at=doc.get("updated_at")
+        )
+        if doc_memory_spec is not None:
+            await safe_sync_doc_memory(
+                doc_memory_spec,
+                tenant_id=body.tenant_id,
+                fleet_id=body.fleet_id,
+                agent_id=getattr(auth, "agent_id", None),
+            )
+    except Exception:
+        # Belt-and-braces over ``safe_sync_doc_memory``'s own non-raising
+        # contract. The document is committed; without this, a regression in the
+        # mint path would surface to the caller as a FAILED doc write, which is
+        # the one outcome this feature must never cause.
+        logger.exception("doc memory mint failed for %s/%s", body.collection, body.doc_id)
     await log_action(
         tenant_id=body.tenant_id,
         action="doc_upsert",
@@ -349,7 +398,7 @@ async def list_collections(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Enumerate document collections in the tenant. Mirror of MCP
-    ``memclaw_doc op=list_collections``. Returns one row per collection
+    ``caura_doc op=list_collections``. Returns one row per collection
     with the per-collection document count.
 
     Cross-tenant credentials see collections across every tenant in their
@@ -402,7 +451,7 @@ async def query_documents(
 
     Cross-tenant credentials may pass any tenant in their readable set
     as ``body.tenant_id`` (one-tenant-at-a-time scope; aggregate-across
-    widening lives on the direct-DB ``memclaw_doc`` MCP path).
+    widening lives on the direct-DB ``caura_doc`` MCP path).
     """
     auth.enforce_readable_tenant(body.tenant_id)
 
@@ -538,7 +587,7 @@ async def delete_document(
 
 # ── Vector search + collections enumeration ──
 #
-# These two endpoints mirror MCP ``memclaw_doc op=search`` and
+# These two endpoints mirror MCP ``caura_doc op=search`` and
 # ``op=list_collections``. Per the "all DB access via core-storage-api"
 # rule, they route through the storage-api HTTP hop (``sc.search_documents_vector`` /
 # ``sc.list_document_collections``). core-api still owns the embedding step
@@ -551,7 +600,7 @@ async def search_documents(
     body: DocSearchRequest,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Vector search over indexed documents. Mirror of MCP ``memclaw_doc op=search``.
+    """Vector search over indexed documents. Mirror of MCP ``caura_doc op=search``.
 
     Embeds ``body.query`` via the configured embedding provider, then ranks
     documents by cosine similarity. ``collection=None`` searches across all
@@ -564,7 +613,9 @@ async def search_documents(
         # the search-budget cost for the widened query.
         await check_and_increment(auth.tenant_id, "search")
 
-    query_embedding = await get_embedding(body.query)
+    # A user is waiting on this search: keep it off the background budget
+    # so a bulk-ingest flood can't throttle it into the 503 below.
+    query_embedding = await get_embedding(body.query, background=False)
     if query_embedding is None:
         raise HTTPException(
             status_code=503,

@@ -262,7 +262,7 @@ async def _backfill_one_table(
                 # Count what would have been done without calling out.
                 embedded += 1
                 return
-            vec = await get_embedding(content)
+            vec = await get_embedding(content, background=True)
             if vec is None:
                 async with none_lock:
                     none_returns += 1

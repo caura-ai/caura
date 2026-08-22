@@ -19,9 +19,10 @@ cases for the publish path.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -29,6 +30,7 @@ from core_api.constants import VECTOR_DIM
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.steps.write.parallel_embed_enrich import ParallelEmbedEnrich
 from core_api.schemas import MemoryCreate
+from tests._scoped_module import scoped
 
 pytestmark = pytest.mark.asyncio
 
@@ -211,7 +213,7 @@ async def test_reembed_skips_initial_sleep_when_flag_off() -> None:
             new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.memory_service.asyncio.sleep", new=_fake_sleep),
+        patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_fake_sleep)),
         patch.object(memory_service, "track_task"),
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -250,7 +252,7 @@ async def test_reembed_sleeps_on_failure_path_when_flag_on() -> None:
             new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.memory_service.asyncio.sleep", new=_fake_sleep),
+        patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_fake_sleep)),
         patch.object(memory_service, "track_task"),
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -295,7 +297,7 @@ async def test_reembed_schedules_contradiction_after_success() -> None:
             new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.memory_service.asyncio.sleep", new=_noop_sleep),
+        patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_noop_sleep)),
         patch.object(memory_service, "track_task"),
         patch.object(
             memory_service,
@@ -350,7 +352,7 @@ async def test_reembed_race_guard_fires_with_flag_on_too() -> None:
             new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.memory_service.asyncio.sleep", new=_noop_sleep),
+        patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_noop_sleep)),
         patch.object(memory_service, "track_task"),
         patch.object(
             memory_service,
@@ -417,7 +419,7 @@ async def test_reembed_respects_existing_embedding_from_enrich_race() -> None:
             new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.memory_service.asyncio.sleep", new=_noop_sleep),
+        patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_noop_sleep)),
         patch(
             "core_api.services.contradiction_detector.detect_contradictions_async",
             new=_fake_detect,
@@ -461,7 +463,7 @@ async def test_bulk_reembed_preserves_batching() -> None:
     # all N items arrive in a single provider roundtrip.
     batch_calls: list[int] = []
 
-    async def _fake_batch(texts, _cfg):
+    async def _fake_batch(texts, _cfg, *, budget_s=None, **_kwargs):
         batch_calls.append(len(texts))
         return [[0.1] * VECTOR_DIM for _ in texts]
 
@@ -636,7 +638,7 @@ async def test_reembed_is_failure_fallback_triggers_backoff() -> None:
             new=AsyncMock(return_value=[0.1] * VECTOR_DIM),
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch("core_api.services.memory_service.asyncio.sleep", new=_fake_sleep),
+        patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_fake_sleep)),
         patch.object(memory_service, "track_task"),
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -650,9 +652,15 @@ async def test_reembed_is_failure_fallback_triggers_backoff() -> None:
 
 
 async def test_bulk_reembed_fallback_passes_is_failure_fallback() -> None:
-    """Batch-call failure must fan out to per-item _reembed_memory with
-    is_failure_fallback=True, otherwise the per-items skip their sleep
-    and thunder onto the failing provider."""
+    """Batch-call failure must fan out per-item through
+    _schedule_embed_or_reembed with is_failure_fallback=True.
+
+    The fan-out goes through the inline/deferred router (not _reembed_memory
+    directly) so the retry is DURABLE in deferred mode — one EMBED_REQUESTED
+    publish per item, retried by Pub/Sub. The flag still matters: it is what
+    gives the INLINE branch its backoff, without which the per-items skip
+    their sleep and thunder onto the failing provider. See
+    tests/test_durable_reembed_fallback.py for the per-branch behaviour."""
     from core_api.services import memory_service
 
     called_with: list[dict] = []
@@ -668,7 +676,7 @@ async def test_bulk_reembed_fallback_passes_is_failure_fallback() -> None:
 
         return _noop()
 
-    async def _failing_batch(_texts, _cfg):
+    async def _failing_batch(_texts, _cfg, *, budget_s=None, **_kwargs):
         raise RuntimeError("simulated provider outage")
 
     def _stub_tracked_task(coro, _name, *_a, **_k):
@@ -677,7 +685,7 @@ async def test_bulk_reembed_fallback_passes_is_failure_fallback() -> None:
 
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_failing_batch),
-        patch.object(memory_service, "_reembed_memory", new=_capture),
+        patch.object(memory_service, "_schedule_embed_or_reembed", new=_capture),
         patch.object(memory_service, "track_task"),
         patch.object(
             memory_service,
@@ -708,7 +716,7 @@ async def test_bulk_reembed_fallback_catches_unexpected_exception_types() -> Non
         """Stands in for e.g. google.auth.exceptions.RefreshError —
         NOT in the original narrow exception list."""
 
-    async def _failing_batch(_texts, _cfg):
+    async def _failing_batch(_texts, _cfg, *, budget_s=None, **_kwargs):
         raise _MockAuthError("token refresh failed")
 
     called: list[dict] = []
@@ -727,7 +735,7 @@ async def test_bulk_reembed_fallback_catches_unexpected_exception_types() -> Non
 
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_failing_batch),
-        patch.object(memory_service, "_reembed_memory", new=_capture),
+        patch.object(memory_service, "_schedule_embed_or_reembed", new=_capture),
         patch.object(memory_service, "track_task"),
         patch.object(
             memory_service,
@@ -768,7 +776,7 @@ async def test_bulk_reembed_reschedules_items_whose_get_memory_failed() -> None:
     sc.get_memory = AsyncMock(side_effect=_get_memory)
     sc.update_embedding = AsyncMock()
 
-    async def _batch(_texts, _cfg):
+    async def _batch(_texts, _cfg, *, budget_s=None, **_kwargs):
         return [[0.1] * VECTOR_DIM, [0.2] * VECTOR_DIM]
 
     def _fake_detect(*args, **_kwargs):
@@ -807,7 +815,9 @@ async def test_bulk_reembed_reschedules_items_whose_get_memory_failed() -> None:
         )
 
     # Item B went through the normal write pass.
-    sc.update_embedding.assert_awaited_once_with(str(mem_b_id), TENANT_ID, [0.2] * VECTOR_DIM)
+    sc.update_embedding.assert_awaited_once_with(
+        str(mem_b_id), TENANT_ID, [0.2] * VECTOR_DIM, embedded_content_hash=ANY
+    )
     # Item A was rescheduled as a per-item retry (reembed task) AND
     # item B scheduled contradiction detection — both tracked.
     names = [call.args[1] for call in tracked.call_args_list]
@@ -832,7 +842,10 @@ async def test_bulk_reembed_patch_failure_reschedules_item() -> None:
     async def _get_memory(mid: str):
         return {"id": mid, "deleted_at": None, "fleet_id": "f", "embedding": None}
 
-    async def _update_embedding(mid: str, _tenant, _emb):
+    # Accepts ``embedded_content_hash``: the re-embed paths now record which
+    # text each vector came from, so a fake that rejects it would fail on the
+    # kwarg rather than on the behaviour under test.
+    async def _update_embedding(mid: str, _tenant, _emb, embedded_content_hash=None):
         if mid == str(mem_a_id):
             raise _MockHTTPError("connection pool exhausted for item A")
 
@@ -840,7 +853,7 @@ async def test_bulk_reembed_patch_failure_reschedules_item() -> None:
     sc.get_memory = AsyncMock(side_effect=_get_memory)
     sc.update_embedding = AsyncMock(side_effect=_update_embedding)
 
-    async def _batch(_texts, _cfg):
+    async def _batch(_texts, _cfg, *, budget_s=None, **_kwargs):
         return [[0.1] * VECTOR_DIM, [0.2] * VECTOR_DIM]
 
     def _fake_detect(*args, **_kwargs):
@@ -913,7 +926,7 @@ async def test_bulk_reembed_respects_existing_embedding_per_item() -> None:
     sc.get_memory = AsyncMock(side_effect=_get_memory)
     sc.update_embedding = AsyncMock()
 
-    async def _batch(_texts, _cfg):
+    async def _batch(_texts, _cfg, *, budget_s=None, **_kwargs):
         return [fresh, fresh]
 
     detect_calls: list[tuple] = []
@@ -954,7 +967,9 @@ async def test_bulk_reembed_respects_existing_embedding_per_item() -> None:
 
     # mem_a: race guard → no PATCH, contradiction on the EXISTING embedding
     # mem_b: normal path → PATCH fresh, contradiction on the fresh embedding
-    sc.update_embedding.assert_awaited_once_with(str(mem_b_id), TENANT_ID, fresh)
+    sc.update_embedding.assert_awaited_once_with(
+        str(mem_b_id), TENANT_ID, fresh, embedded_content_hash=ANY
+    )
     assert len(detect_calls) == 2
     # Order matches the input order; arg[0]=memory_id, arg[4]=embedding
     by_id = {args[0]: args[4] for args in detect_calls}
@@ -969,7 +984,7 @@ async def test_bulk_reembed_falls_back_on_length_mismatch() -> None:
     unembedded."""
     from core_api.services import memory_service
 
-    async def _short_batch(texts, _cfg):
+    async def _short_batch(texts, _cfg, *, budget_s=None, **_kwargs):
         # Provider returned 2 embeddings for 5 inputs — real-world shape
         # when a provider partial-fails mid-batch.
         return [[0.1] * VECTOR_DIM for _ in texts[:2]]

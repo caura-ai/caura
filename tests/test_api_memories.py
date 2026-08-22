@@ -55,6 +55,50 @@ async def test_write_memory(client):
     assert data["memory_type"] == "fact"
 
 
+async def test_reserved_main_episode_rejected_under_reject(client, monkeypatch):
+    """Regression: the episode auto-persist path (POST /memories,
+    memory_type=episode — how the plugin persists user turns) is covered by the
+    reserved-id guard. Under policy=reject a bare-"main" episode is 409'd, while
+    the de-collapsed main-<install_id> form (#507) still writes.
+
+    Guards the eToro "firehose": 353 bare-"main" episodes leaked ONLY during a
+    window when reject was transiently unset (deploy churn) — never a guard
+    bypass. This locks the episode path to the guard so a future refactor can't
+    quietly reopen it.
+    """
+    from core_api.config import settings
+
+    monkeypatch.setattr(settings, "reserved_agent_id_policy", "reject")
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+
+    rejected = await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant_id,
+            "content": f"firehose episode [{tag}]",
+            "agent_id": "main",
+            "memory_type": "episode",
+        },
+        headers=headers,
+    )
+    assert rejected.status_code == 409, rejected.text
+    assert "reserved" in rejected.text.lower()
+
+    allowed = await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant_id,
+            "content": f"install-scoped episode [{tag}]",
+            "agent_id": f"main-inst{tag}",
+            "memory_type": "episode",
+        },
+        headers=headers,
+    )
+    assert allowed.status_code == 201, allowed.text
+    assert allowed.json()["agent_id"] == f"main-inst{tag}"
+
+
 async def test_memory_count(client):
     """GET /memories/count returns the active count (F-16). 'count' must resolve
     as a literal route, not be parsed as a {memory_id} UUID (which 422'd)."""

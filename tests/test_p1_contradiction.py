@@ -14,17 +14,16 @@ Integration tests verify:
 
 import hashlib
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
-
 from core_api.constants import (
     CONTRADICTION_CANDIDATE_MAX,
     CONTRADICTION_SIMILARITY_THRESHOLD,
 )
-from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
+from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 # ---------------------------------------------------------------------------
 # Unit tests
@@ -315,10 +314,17 @@ class TestSupersessionSemantics:
                 return_value=mock_sc,
             ),
             patch(
-                "core_api.services.contradiction_detector._llm_contradiction_check",
+                "core_api.services.contradiction_detector._llm_contradiction_check_batch",
                 new_callable=AsyncMock,
-                # A4 #12 — judge returns (verdict, confidence) tuple.
-                return_value=(True, 0.90),
+                # A61 — batched judge; both candidates contradict.
+                return_value=[
+                    {
+                        "same_subject": True,
+                        "contradicts": True,
+                        "non_conflict_reason": "none",
+                    }
+                ]
+                * 2,
             ),
         ):
             contradictions = await _detect(new_memory, [0.1] * 10)
@@ -453,7 +459,6 @@ class TestContradictionIntegration:
 
     async def _insert_memory(
         self,
-        db,
         tenant_id,
         content,
         *,
@@ -467,6 +472,7 @@ class TestContradictionIntegration:
     ):
         """Insert a memory with fake embedding via storage client."""
         from core_api.clients.storage_client import get_storage_client
+
         from common.embedding import fake_embedding
 
         ch = hashlib.sha256(f"{tenant_id}:{fleet_id}:{content}".encode()).hexdigest()
@@ -488,7 +494,7 @@ class TestContradictionIntegration:
         }
         return await sc.create_memory(payload)
 
-    async def test_rdf_contradiction_correct_supersession(self, db, tenant_id):
+    async def test_rdf_contradiction_correct_supersession(self, tenant_id):
         """RDF conflict: new memory's supersedes_id → old memory's id."""
         from core_api.clients.storage_client import get_storage_client
         from core_api.services.contradiction_detector import detect_contradictions
@@ -504,7 +510,6 @@ class TestContradictionIntegration:
         entity_id = entity["id"]
 
         old = await self._insert_memory(
-            db,
             tenant_id,
             "Alice lives in Tel Aviv",
             subject_entity_id=entity_id,
@@ -512,7 +517,6 @@ class TestContradictionIntegration:
             object_value="Tel Aviv",
         )
         new = await self._insert_memory(
-            db,
             tenant_id,
             "Alice lives in Haifa",
             subject_entity_id=entity_id,
@@ -533,18 +537,17 @@ class TestContradictionIntegration:
         refreshed_old = await sc.get_memory(old["id"])
         assert refreshed_old["status"] == "outdated"
 
-    async def test_semantic_contradiction_with_fake_llm(self, db, tenant_id):
+    async def test_semantic_contradiction_with_fake_llm(self, tenant_id):
         """Semantic conflict using fake LLM heuristic."""
         from core_api.services.contradiction_detector import detect_contradictions
+
         from common.embedding import fake_embedding
 
         old = await self._insert_memory(
-            db,
             tenant_id,
             "The deployment pipeline is running correctly today",
         )
         new = await self._insert_memory(
-            db,
             tenant_id,
             "The deployment pipeline is not running correctly today",
         )
@@ -560,13 +563,14 @@ class TestContradictionIntegration:
         assert len(contradictions) >= 1
         assert contradictions[0].reason == "semantic_conflict"
 
-    async def test_no_false_positive_on_different_topics(self, db, tenant_id):
+    async def test_no_false_positive_on_different_topics(self, tenant_id):
         """Different topics should not trigger contradiction."""
         from core_api.services.contradiction_detector import detect_contradictions
+
         from common.embedding import fake_embedding
 
-        await self._insert_memory(db, tenant_id, "Python is a programming language")
-        new = await self._insert_memory(db, tenant_id, "The weather is sunny today")
+        await self._insert_memory(tenant_id, "Python is a programming language")
+        new = await self._insert_memory(tenant_id, "The weather is sunny today")
         emb = fake_embedding(new["content"])
 
         with patch(

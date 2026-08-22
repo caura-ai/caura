@@ -28,6 +28,12 @@ _TEST_DEFAULTS = {
     # silently break tests; flag-off / deferred-path tests override
     # this to ``"deferred"``.
     "DEPLOYMENT_MODE": "inline",
+    # Interviewer async submit (#665) defaults ON in prod, but the legacy
+    # route tests (tests/test_api_interview.py) assert the inline path's
+    # response shape (committed/memories_written/504-on-timeout), so tests
+    # pin the flag OFF here; tests/test_interview_async_submit.py flips it
+    # on explicitly per-test to exercise the async path.
+    "INTERVIEW_ASYNC_SUBMIT": "false",
 }
 for _k, _v in _TEST_DEFAULTS.items():
     os.environ.setdefault(_k, _v)
@@ -42,7 +48,7 @@ for _k, _v in _TEST_DEFAULTS.items():
 # itself (e.g. test_rate_limit's auth-gated burst test, which gets all
 # 401s instead of the expected 200/429 mix). Unset rather than
 # setdefault — setdefault doesn't override an existing env value.
-for _leaky in ("MEMCLAW_API_KEY", "MEMCLAW_KEY"):
+for _leaky in ("MEMCLAW_API_KEY", "MEMCLAW_KEY", "CAURA_API_KEY", "CAURA_KEY"):
     os.environ.pop(_leaky, None)
 
 # ruff: noqa: E402 — these imports MUST stay below the env defaults above;
@@ -62,7 +68,18 @@ TEST_DB_URL = os.environ.get(
     "postgresql+asyncpg://memclaw:changeme@127.0.0.1:5432/memclaw",
 )
 
-TENANT_ID = f"test-tenant-{uuid.uuid4().hex[:8]}"
+# NOT what the ``tenant_id`` fixture returns — that mints a fresh id per test. This
+# is one id per RUN, kept for the modules whose module-level seed helpers need a
+# tenant without taking a fixture argument. None of them relies on cross-test
+# sharing, so they could each mint their own; threading a tenant through those
+# helpers is the follow-up that would let this go away.
+# The prefix the end-of-run sweep matches on, and the only place it is written.
+# The two sides that must agree — every minter here and the DELETE in
+# ``_setup_schema`` — were previously coupled by a note in a docstring, which is
+# what #858 cost: a file minting its own prefix leaked every row it ever wrote.
+SWEEP_TENANT_PREFIX = "test-tenant-"
+
+TENANT_ID = f"{SWEEP_TENANT_PREFIX}{uuid.uuid4().hex[:8]}"
 FLEET_ID = "test-fleet"
 AGENT_ID = "test-agent"
 
@@ -88,8 +105,26 @@ def get_admin_headers() -> dict:
 
 
 def uid() -> str:
-    """Short unique suffix to avoid duplicate-content 409s across test runs."""
+    """Short unique suffix — for distinct content (409s) and distinct tenant ids."""
     return uuid.uuid4().hex[:8]
+
+
+def new_tenant_id() -> str:
+    """A tenant id unique to one test AND visible to the end-of-run sweep.
+
+    The prefix is not cosmetic: ``_setup_schema`` cleans with
+    ``tenant_id LIKE 'test-tenant-%'``, so a tenant minted with any other prefix
+    is never reclaimed and its committed rows outlive the run. That is how #858
+    happened — two interview files minted ``t-`` tenants, their job documents
+    accumulated across every local run, and a cross-tenant sweep endpoint under
+    test started reading other runs' residue.
+
+    Defined here rather than repeated at call sites so the prefix and the DELETE
+    that depends on it stay in one file. The ``tenant_id`` fixture is the same
+    value for tests that can take a fixture; this is for the ones that mint
+    several per test.
+    """
+    return f"{SWEEP_TENANT_PREFIX}{uid()}"
 
 
 # ---------------------------------------------------------------------------
@@ -140,21 +175,45 @@ async def _setup_schema(_engine):
             "entities",
             "memories",
             "audit_log",
+            # One genesis row per tenant (``_audit_chain_one_tenant``), so a
+            # per-test tenant leaves one per test rather than one per run. It was
+            # never swept: a local DB had 9,186 ``test-tenant-`` rows here from
+            # earlier runs. Other tenant-scoped tables (recall_event,
+            # memory_conflicts, dedup_reviews, agents, session_traces) leak the
+            # same way but per-write, so they are a separate cleanup.
+            "audit_chain_head",
             "agent_activity_digests",
+            # Keystones and other docs live here. Written through the API's own
+            # committed transaction, so the per-test session rollback never
+            # reaches them — without this they survive every run. That is not
+            # only untidy: the keystone listing is capped at 50 and ordered by
+            # weight, so accumulated rules eventually push a freshly-written one
+            # out of the response and a round-trip test fails for reasons that
+            # look nothing like accumulated state.
+            "documents",
         ):
             try:
                 await conn.execute(
-                    text(f"DELETE FROM {table} WHERE tenant_id LIKE 'test-tenant-%'")
+                    text(f"DELETE FROM {table} WHERE tenant_id LIKE :prefix"),
+                    {"prefix": f"{SWEEP_TENANT_PREFIX}%"},
                 )
             except Exception:
-                pass  # Best-effort cleanup; per-test rollback is the primary isolation
+                # Best-effort, and the ONLY thing that ever removes rows written
+                # through the service layer — not a backstop behind the ``db``
+                # fixture's rollback. Most tests here write via ``sc``, which
+                # commits on its own connections, so that rollback never sees
+                # those rows. Per-test isolation comes from the unique
+                # ``tenant_id``; this sweep is end-of-run cleanup, so the table
+                # doesn't grow without bound.
+                pass
         # memory_entity_links doesn't have tenant_id — clean via memory join
         try:
             await conn.execute(
                 text(
                     "DELETE FROM memory_entity_links WHERE memory_id IN "
-                    "(SELECT id FROM memories WHERE tenant_id LIKE 'test-tenant-%')"
-                )
+                    "(SELECT id FROM memories WHERE tenant_id LIKE :prefix)"
+                ),
+                {"prefix": f"{SWEEP_TENANT_PREFIX}%"},
             )
         except Exception:
             pass
@@ -264,8 +323,17 @@ def storage_http(_patch_storage_client):
 
 @pytest.fixture
 def tenant_id():
-    """Unique tenant ID per test module."""
-    return TENANT_ID
+    """A tenant ID unique to THIS test.
+
+    It used to be one constant for the whole run, which let any test's committed
+    rows satisfy a later test's ``len(results) >= 1`` — passing for the wrong
+    reason, or failing only when the run order changed. Nothing removes those rows
+    mid-run; see the sweep in ``_setup_schema`` for why.
+
+    Keep the ``test-tenant-`` prefix: that sweep matches on it — see
+    :func:`new_tenant_id`, which owns it.
+    """
+    return new_tenant_id()
 
 
 @pytest.fixture
@@ -338,9 +406,11 @@ from tests._mcp_test_helpers import mcp_env, parse_envelope, strip_latency  # no
 def _reset_hooks():
     """Ensure hooks are wired for integration tests.
 
-    In production, hooks are configured at app startup (lifespan).  Tests that
-    use the ``db`` fixture bypass the app lifespan, so we wire hooks here to
-    guarantee audit logging behaves identically to the running server.
+    In production, hooks are configured at app startup (lifespan). Tests that
+    exercise the services directly bypass that lifespan, so we wire hooks here
+    to guarantee audit logging behaves identically to the running server. This
+    is autouse because that covers nearly every test in this tree, not only the
+    ones holding a ``db`` session.
     """
     from core_api.services.audit_service import log_action
     from core_api.services.hooks import ServiceHooks, configure_hooks, reset_hooks

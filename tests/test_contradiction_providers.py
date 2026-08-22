@@ -188,40 +188,52 @@ class TestFallbackChain:
         assert verdict is False
 
     @pytest.mark.asyncio
-    async def test_fake_provider_triggers_heuristic_via_fallback(self):
-        """When provider resolves to FakeLLMProvider, call_with_fallback skips to fake_fn."""
+    async def test_missing_credentials_abstains_instead_of_guessing(self):
+        """A configured REAL provider with no key is a misconfigured deployment, not
+        a request for heuristics — so the judge must abstain.
 
-        from core_api.services.contradiction_detector import _llm_contradiction_check
+        This assertion used to be ``verdict is True``: it pinned the negation-word
+        heuristic returning a contradiction verdict on exactly the production-outage
+        path. That verdict is acted on — ``detect_contradictions`` marks the older
+        memory ``conflicted`` on the boolean alone — so the old test was pinning the
+        mechanism. See ``_skip_contradiction_pairwise`` for what that costs.
+        """
+        from core_api.services.contradiction_detector import _CONF_FALLBACK, _llm_contradiction_check
 
         config = MagicMock()
         config.entity_extraction_provider = "openai"
         config.openai_api_key = None  # no credentials -> FakeLLMProvider
 
-        # Negation difference → heuristic returns True
+        # Content the heuristic WOULD flag: negation on one side, 3+ shared words.
+        verdict, conf = await _llm_contradiction_check(
+            "the system is not running and it crashed",
+            "the system is running and it works fine",
+            config,
+        )
+        assert verdict is False
+        assert conf == _CONF_FALLBACK
+
+    @pytest.mark.asyncio
+    async def test_deliberate_fake_provider_still_exercises_the_heuristic(self):
+        """The counterpart: an explicitly requested ``fake`` provider KEEPS the
+        heuristic, because it is the only way the detect -> mark -> conflicted
+        pipeline gets end-to-end coverage without an API key
+        (``test_p1_contradiction.py::test_semantic_contradiction_with_fake_llm``).
+
+        Same inputs as the test above, opposite expectation — that is the whole
+        point of the split, and why one blanket abstain would not have done.
+        """
+        from core_api.services.contradiction_detector import _llm_contradiction_check
+
+        config = MagicMock()
+        config.entity_extraction_provider = "fake"
+
         verdict, _conf = await _llm_contradiction_check(
             "the system is not running and it crashed",
             "the system is running and it works fine",
             config,
         )
         assert verdict is True
-
-    @pytest.mark.asyncio
-    async def test_no_credentials_heuristic_returns_false(self):
-        """When no credentials and no negation difference, heuristic returns False."""
-
-        from core_api.services.contradiction_detector import _llm_contradiction_check
-
-        config = MagicMock()
-        config.entity_extraction_provider = "openai"
-        config.openai_api_key = None
-        config.anthropic_api_key = None
-        config.openrouter_api_key = None
-
-        # No negation → heuristic returns False
-        verdict, _conf = await _llm_contradiction_check(
-            "the system works", "the system is fine", config
-        )
-        assert verdict is False
 
 
 # ---------------------------------------------------------------------------

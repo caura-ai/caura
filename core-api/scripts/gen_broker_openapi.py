@@ -2,17 +2,28 @@
 """Generate / verify the frozen v1 broker OpenAPI contract for core-api.
 
 The baseline (``core-api/openapi.broker.json``) is the FROZEN v1 contract for
-the four broker-facing gateway endpoints that memclawd (the on-prem broker)
-calls against Caura cloud. It is a *subset* of core-api's full ~91-path
-OpenAPI surface: only the four broker paths plus the schema / security
-components those operations reach (transitively).
+the broker-facing gateway operations that memclawd (the on-prem broker) calls
+against Caura cloud. It is a *subset* of core-api's full ~91-path OpenAPI
+surface: only the broker operations plus the schema / security components
+those operations reach (transitively).
 
-Broker endpoints (gateway paths):
+Broker operations (gateway paths), all of them called by ``internal/cloud``
+in caura-ai/memclawd:
 
-    POST /api/v1/memories/bulk
-    POST /api/v1/search
-    GET  /api/v1/health
-    GET  /api/v1/version
+    POST   /api/v1/memories/bulk
+    POST   /api/v1/search
+    GET    /api/v1/health
+    GET    /api/v1/version
+    GET    /api/v1/memories                  (memory_list)
+    GET    /api/v1/memories/{memory_id}      (memory_recall)
+    PATCH  /api/v1/memories/{memory_id}      (memory_update)
+    DELETE /api/v1/memories/{memory_id}      (memory_delete)
+
+The last four were added once the broker's MCP dispatcher was wired to serve
+``memory_list`` / ``memory_recall`` / ``memory_update`` / ``memory_delete``.
+The tools shipped; the contract baseline was not widened with them, so a
+breaking change to those operations passed this gate. That is the same
+undeclared-contract failure mode as the #723-#736 series, one layer out.
 
 ``info`` is normalized to a fixed contract identity (``CONTRACT_VERSION``)
 rather than core-api's rolling package version, so the baseline only changes
@@ -41,14 +52,40 @@ import json
 import sys
 from pathlib import Path
 
-# The four broker-facing gateway paths that make up the frozen v1 contract.
-# Adding or removing an entry is itself a contract change -- keep in sync with
-# the broker<->cloud API-versioning RFC.
-BROKER_PATHS: tuple[str, ...] = (
-    "/api/v1/memories/bulk",
-    "/api/v1/search",
-    "/api/v1/health",
-    "/api/v1/version",
+# The broker-facing gateway OPERATIONS that make up the frozen v1 contract,
+# as ``path -> methods``. Removing an entry, or renaming a path/method the
+# broker calls, is itself a breaking contract change -- keep in sync with the
+# broker<->cloud API-versioning RFC. ADDING an entry is additive: it only
+# widens what the oasdiff gate protects, so it does not move CONTRACT_VERSION.
+#
+# METHOD-level, not path-level. ``/api/v1/memories`` also serves POST and
+# DELETE, which the broker never calls; gating the whole path item would fail
+# this PR's own gate on unrelated changes to those operations and train people
+# to ignore it.
+#
+# Each entry must correspond to something memclawd actually calls -- see the
+# ``internal/cloud`` client in caura-ai/memclawd:
+#
+#   /memories/bulk        POST    cloud.Client.SaveMemory  (memory_save, mirror)
+#   /search               POST    cloud.Client.Search      (memory_search)
+#   /health               GET     health probe
+#   /version              GET     version handshake
+#   /memories             GET     cloud.Client.ListMemories   (memory_list)
+#   /memories/{memory_id} GET     cloud.Client.GetMemory      (memory_recall)
+#                         PATCH   cloud.Client.UpdateMemory   (memory_update)
+#                         DELETE  cloud.Client.DeleteMemory   (memory_delete)
+BROKER_OPERATIONS: dict[str, tuple[str, ...]] = {
+    "/api/v1/memories/bulk": ("post",),
+    "/api/v1/search": ("post",),
+    "/api/v1/health": ("get",),
+    "/api/v1/version": ("get",),
+    "/api/v1/memories": ("get",),
+    "/api/v1/memories/{memory_id}": ("get", "patch", "delete"),
+}
+
+# Path-item keys that are not operations and must survive filtering.
+_NON_OPERATION_KEYS = frozenset(
+    {"summary", "description", "servers", "parameters", "$ref"}
 )
 
 # Frozen broker-contract version, deliberately decoupled from core-api's
@@ -57,6 +94,11 @@ CONTRACT_VERSION = "v1"
 CONTRACT_TITLE = "MemClaw core-api broker contract"
 
 BASELINE_PATH = Path(__file__).resolve().parent.parent / "openapi.broker.json"
+
+
+def _operation_count() -> int:
+    """Total operations in the contract, for the CLI summary line."""
+    return sum(len(methods) for methods in BROKER_OPERATIONS.values())
 
 
 def _collect_refs(node: object) -> set[str]:
@@ -111,16 +153,31 @@ def build_broker_spec() -> dict:
     full = app.openapi()
     all_paths = full.get("paths", {})
 
-    missing = [p for p in BROKER_PATHS if p not in all_paths]
+    # Verify at METHOD granularity: a path that survives while the operation
+    # the broker calls is renamed or dropped is exactly as breaking as losing
+    # the path, and a path-only check would sail past it.
+    missing = [
+        f"{method.upper()} {path}"
+        for path, methods in BROKER_OPERATIONS.items()
+        for method in methods
+        if method not in all_paths.get(path, {})
+    ]
     if missing:
         raise SystemExit(
-            "gen_broker_openapi: broker path(s) missing from core-api OpenAPI: "
-            + ", ".join(missing)
+            "gen_broker_openapi: broker operation(s) missing from core-api OpenAPI: "
+            + ", ".join(sorted(missing))
             + "\nA broker endpoint was renamed or removed -- that is itself a "
-            "breaking contract change. Update BROKER_PATHS and the RFC."
+            "breaking contract change. Update BROKER_OPERATIONS and the RFC."
         )
 
-    paths = {p: all_paths[p] for p in BROKER_PATHS}
+    paths = {
+        path: {
+            key: value
+            for key, value in all_paths[path].items()
+            if key in methods or key in _NON_OPERATION_KEYS
+        }
+        for path, methods in BROKER_OPERATIONS.items()
+    }
 
     # Transitive closure of components (any type) reachable from the broker
     # paths via ``$ref``, so every reference in the baseline resolves.
@@ -211,12 +268,12 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        print(f"broker OpenAPI baseline up to date ({len(BROKER_PATHS)} paths).")
+        print(f"broker OpenAPI baseline up to date ({_operation_count()} operations).")
         return 0
 
     out = args.out or BASELINE_PATH
     out.write_text(rendered, encoding="utf-8")
-    print(f"wrote {out} ({len(BROKER_PATHS)} broker paths)")
+    print(f"wrote {out} ({_operation_count()} broker operations)")
     return 0
 
 

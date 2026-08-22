@@ -19,12 +19,14 @@ from core_storage_api.routers.reports import router as reports_router
 from core_storage_api.routers.skill_factory import router as skill_factory_router
 from core_storage_api.routers.tasks import router as tasks_router
 from core_storage_api.routers.tenant_suppression import router as tenant_suppression_router
+from core_storage_api.routers.tenant_usage import router as tenant_usage_router
 from core_storage_api.routers.tenants import router as tenants_router
 
 __all__ = [
     "agents_router",
     "audit_router",
     "capability_usage_router",
+    "tenant_usage_router",
     "debug_router",
     "documents_router",
     "entities_router",

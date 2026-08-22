@@ -104,6 +104,35 @@ class _CoreApiLifecycleAdapter:
         report_id = await run_crystallization(tenant_id=org_id, fleet_id=fleet_id, trigger="lifecycle")
         return 1 if report_id is not None else 0
 
+    async def crystallize_reserved_report(
+        self,
+        *,
+        tenant_id: str,
+        report_id: str,
+        fleet_id: str | None,
+        auto_crystallize: bool,
+    ) -> None:
+        """OSS #817: run an API-triggered crystallization for a reserved report.
+
+        No gates here, unlike ``crystallize`` above. The flag and the
+        active-memory threshold are the NIGHTLY sweep's economics — they exist so
+        a blanket fanout does not pay for reports nobody asked for. This path
+        exists because somebody asked, and the caller already holds the report id;
+        silently no-oping it would leave them polling a row that never finishes.
+
+        ``auto_crystallize`` still rides the payload and is honoured, because it
+        governs whether the run CURATES (writes new memories) or only reports —
+        which is a different question from whether to run at all.
+        """
+        from core_api.services.crystallizer_service import execute_reserved_report
+
+        await execute_reserved_report(
+            report_id=report_id,
+            tenant_id=tenant_id,
+            fleet_id=fleet_id,
+            auto_crystallize=auto_crystallize,
+        )
+
     async def insights(self, *, org_id: str, fleet_id: str | None) -> int:
         """Lifecycle-driven insights discovery (focus='discover') for one org.
 

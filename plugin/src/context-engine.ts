@@ -119,11 +119,11 @@ export function _resetBootstrapForTests(): void {
  * 409 (5xx, network, auth) still routes to the normal error logger.
  *
  * Matches the error message format from ``transport.ts:82``:
- *   ``new Error("MemClaw API " + status + ": " + body)``
+ *   ``new Error("Caura API " + status + ": " + body)`` (legacy "MemClaw API" matched too)
  */
 export function isDuplicateMemoryError(e: unknown): boolean {
   if (!(e instanceof Error)) return false;
-  return /\bMemClaw API 409\b/.test(e.message);
+  return /\b(?:MemClaw|Caura) API 409\b/.test(e.message);
 }
 
 function pushToBuffer(sessionKey: string, message: IngestMessage): void {
@@ -714,7 +714,7 @@ export class MemClawContextEngine {
    *
    * Recall is gated by `shouldRecall()`. On skip we return the static
    * education + identity block only — no `/search` HTTP call. The
-   * model can still call `memclaw_recall` explicitly when it judges it
+   * model can still call `caura_recall` explicitly when it judges it
    * needs LTM on a short turn.
    */
   async assemble(
@@ -1052,7 +1052,7 @@ export class MemClawContextEngine {
    *      before invoking us) as a MemClaw episode memory tagged
    *      ``auto-compaction``. This is the long-standing
    *      observability side-effect — surviving summaries get
-   *      recallable later via ``memclaw_recall``.
+   *      recallable later via ``caura_recall``.
    *
    *   2. **Delegate** the actual transcript-reduction work to
    *      ``delegateCompactionToRuntime`` from
@@ -1075,7 +1075,7 @@ export class MemClawContextEngine {
    * WhatsApp group chats (transcript-per-participant pushes them
    * past the 272k token budget); direct chats stayed under budget
    * and never tripped the wedge. Agent looped on
-   * ``memclaw_keystones`` calls trying to make any progress, and
+   * ``caura_keystones`` calls trying to make any progress, and
    * eventual final replies were silently dropped (``Skipping
    * auto-reply: final-only`` runtime warning).
    *

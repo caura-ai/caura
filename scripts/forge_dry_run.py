@@ -237,7 +237,7 @@ async def _wire_poison_checker(db, tenant_id: str, fleet_id: str | None):
 
 async def _wire_candidate_writer(db):
     """Persist a Forge-generated candidate via the SF-002
-    ``memclaw_doc`` write path so all 7 adjustments + Sentinel scan
+    ``caura_doc`` write path so all 7 adjustments + Sentinel scan
     + audit fire as they would for an external write."""
     # We use the underlying storage client directly here because the
     # Forge worker is internal (not an HTTP caller); the SF-002
@@ -340,6 +340,7 @@ async def _run(args: argparse.Namespace) -> int:
             "candidates_skipped_sentinel": result.candidates_skipped_sentinel,
             "candidates_skipped_distill_error": result.candidates_skipped_distill_error,
             "candidates_skipped_io_error": result.candidates_skipped_io_error,
+            "candidates_skipped_internal_error": result.candidates_skipped_internal_error,
             "candidates_skipped_existing": result.candidates_skipped_existing,
             "candidate_doc_ids": result.candidate_doc_ids,
         }
@@ -362,6 +363,7 @@ async def _run(args: argparse.Namespace) -> int:
             f"sentinel={result.candidates_skipped_sentinel} "
             f"distill_errors={result.candidates_skipped_distill_error} "
             f"io_errors={result.candidates_skipped_io_error} "
+            f"internal_errors={result.candidates_skipped_internal_error} "
             f"existing={result.candidates_skipped_existing}"
         )
         if result.candidate_doc_ids:

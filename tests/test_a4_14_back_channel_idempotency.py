@@ -25,9 +25,11 @@ line. Falls back gracefully (allow detection) when Redis is
 unavailable, preserving current behaviour rather than silently
 blocking detection.
 
-Lock keys (separate per path so Path A and Path C don't block each other):
-  ``contradiction:path_a:<memory_id>``
-  ``contradiction:path_c:<memory_id>``
+Lock keys (separate per path so Path A and Path C don't block each other,
+and per content so an EDIT is not deduped against the run that checked the
+previous text — H-06, see ``test_h06_contradiction_lock.py``):
+  ``contradiction:path_a:<memory_id>:<content fingerprint>``
+  ``contradiction:path_c:<memory_id>:<content fingerprint>``
 
 TTL: 3600s (1h). Long enough for any detection to complete (worst
 case ~10s × N candidates); short enough that a process crash holding
@@ -140,8 +142,13 @@ async def test_path_a_first_call_runs_when_lock_acquired():
 
 @pytest.mark.asyncio
 async def test_path_c_second_call_skips_when_lock_already_held():
-    """When the first Path C call has the lock, the second skips
-    without fetching the new memory or running detection."""
+    """When the first Path C call has the lock, the second skips detection.
+
+    It DOES still fetch the row: since H-06 the lock key carries a fingerprint
+    of the content to be examined, and Path C is not handed that content by its
+    caller, so the fetch necessarily precedes the lock. The expensive work —
+    candidate search and the LLM judgements — is what the skip must avoid.
+    """
     from core_api.services.contradiction_detector import (
         detect_contradictions_by_entities_async,
     )
@@ -242,8 +249,8 @@ async def test_path_a_and_path_c_use_independent_locks():
         new=fake_set_nx,
         create=True,
     ):
-        await _acquire_path_a_lock(mid)
-        await _acquire_path_c_lock(mid)
+        await _acquire_path_a_lock(mid, "memory content", "tok")
+        await _acquire_path_c_lock(mid, "memory content", "tok")
 
     assert len(captured) == 2
     assert captured[0] != captured[1], (
@@ -276,7 +283,7 @@ async def test_path_a_runs_when_redis_unavailable():
         new=redis_down,
         create=True,
     ):
-        assert await _acquire_path_a_lock(uuid4()) is True
+        assert await _acquire_path_a_lock(uuid4(), "memory content", "tok") is True
 
 
 # ---------------------------------------------------------------------------

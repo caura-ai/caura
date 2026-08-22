@@ -1,0 +1,25 @@
+# The legacy distribution name, from 0.5.0 an empty shell that installs
+# caura-client (which itself ships the permanent `memclaw_client` import
+# alias). Existing `pip install memclaw-client` users transparently get the
+# renamed package; 0.4.0 is never yanked — lockfiles reference it.
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memclaw-client"
+version = "0.5.0"
+description = "MemClaw is now Caura. This package now installs caura-client; the memclaw_client import keeps working forever."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Caura", email = "hello@caura.ai" }]
+dependencies = ["caura-client>=1.0.0"]
+
+[project.urls]
+Homepage = "https://caura.ai"
+Documentation = "https://caura.ai/docs"
+Repository = "https://github.com/caura-ai/caura"
+
+[tool.setuptools]
+py-modules = []

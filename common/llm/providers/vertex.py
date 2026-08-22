@@ -7,6 +7,28 @@ the event loop.
 CAURA-333: ``VertexEmbeddingProvider`` was removed (broken — never passed
 ``output_dimensionality`` to the SDK, so writes failed against pgvector's
 1024-dim column). Only the LLM-side provider remains.
+
+⚠ THE SDK IMPORTS IN THIS MODULE ARE DEFERRED ON PURPOSE, against the
+repo's top-level-imports rule. Stated here because this file is cited as
+the precedent for the pattern (``gemini.py``: "same pattern as
+VertexLLMProvider with vertexai") and was the one copy that never said
+why — so it reads as an oversight and gets re-flagged.
+
+The reason is optional dependencies, not circular imports.
+``google-cloud-aiplatform`` is an EXTRA for core-worker
+(``vertex = [...]`` in its ``pyproject.toml``), and only a hard dependency
+for core-api. Hoisting these to module scope makes
+``common.llm.providers.vertex`` unimportable wherever the extra is absent
+— verified by blocking ``vertexai`` and ``google.cloud.aiplatform`` on the
+import path: the module still imports cleanly today and
+``VertexLLMProvider`` is still reachable, while a top-level import raises
+``ModuleNotFoundError``. Deferred, an install without Vertex fails only if
+it actually CALLS Vertex, which is what an optional provider should do.
+
+``_platform.py`` imports this module lazily too, inside a ``try``, for the
+same reason — and ``registry.py`` deliberately omits it from the top-level
+provider imports it does for fake/gemini/openai. All three are one
+decision; changing any of them alone breaks it.
 """
 
 from __future__ import annotations
@@ -74,6 +96,8 @@ class VertexLLMProvider:
         temperature: float = 0.0,
     ) -> dict:
         """Synchronous JSON completion via Vertex AI GenerativeModel."""
+        # Lazy on purpose — see the module docstring. NOT an oversight
+        # against the top-level-imports rule.
         from google.cloud import aiplatform
         from vertexai.generative_models import GenerationConfig, GenerativeModel
 
@@ -117,6 +141,7 @@ class VertexLLMProvider:
         max_tokens: int = 1000,
     ) -> str:
         """Synchronous text completion via Vertex AI GenerativeModel."""
+        # Lazy on purpose — see the module docstring.
         from google.cloud import aiplatform
         from vertexai.generative_models import GenerationConfig, GenerativeModel
 

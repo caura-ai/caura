@@ -1,6 +1,6 @@
 """Composite partial index for cursor-paginated memory listing (CAURA-595).
 
-Backs ``list_by_filters`` and the ``memclaw_list`` MCP tool. The
+Backs ``list_by_filters`` and the ``caura_list`` MCP tool. The
 hot-path query is::
 
     SELECT ... FROM memories

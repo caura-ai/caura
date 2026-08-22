@@ -2,22 +2,53 @@
 
 ## `gen_broker_openapi.py` — frozen v1 broker OpenAPI contract
 
-`../openapi.broker.json` is the **frozen v1 contract** for the four
-broker-facing gateway endpoints that memclawd (the on-prem broker) calls
-against Caura cloud:
+`../openapi.broker.json` is the **frozen v1 contract** for the broker-facing
+gateway operations that memclawd (the on-prem broker) calls against Caura
+cloud:
 
-| Method | Path                     |
-| ------ | ------------------------ |
-| POST   | `/api/v1/memories/bulk`  |
-| POST   | `/api/v1/search`         |
-| GET    | `/api/v1/health`         |
-| GET    | `/api/v1/version`        |
+| Method | Path                            | Broker caller (`internal/cloud`) |
+| ------ | ------------------------------- | -------------------------------- |
+| POST   | `/api/v1/memories/bulk`         | `SaveMemory` (`memory_save`, audit mirror) |
+| POST   | `/api/v1/search`                | `Search` (`memory_search`)       |
+| GET    | `/api/v1/health`                | health probe                     |
+| GET    | `/api/v1/version`               | version handshake                |
+| GET    | `/api/v1/memories`              | `ListMemories` (`memory_list`)   |
+| GET    | `/api/v1/memories/{memory_id}`  | `GetMemory` (`memory_recall`)    |
+| PATCH  | `/api/v1/memories/{memory_id}`  | `UpdateMemory` (`memory_update`) |
+| DELETE | `/api/v1/memories/{memory_id}`  | `DeleteMemory` (`memory_delete`) |
+
+Selection is **method-level** (`BROKER_OPERATIONS` in
+`gen_broker_openapi.py`), not path-level: `/api/v1/memories` also serves POST
+and DELETE, which the broker never calls, and gating those would fail this gate
+on unrelated changes.
 
 The baseline is a **subset** of core-api's full (~91-path) OpenAPI surface:
-only these four paths plus the schema / security components they reach. Its
+only these operations plus the schema / security components they reach. Its
 `info` is normalized to a fixed contract identity (`CONTRACT_VERSION = "v1"`,
 not core-api's rolling package version), so it changes **only when a broker
 endpoint's shape changes** — not on every release.
+
+### Adding a broker endpoint — the cross-repo obligation
+
+**Nothing in this repo can detect that the broker started calling a new cloud
+endpoint.** The gate only protects operations listed in `BROKER_OPERATIONS`;
+one that is missing is simply unguarded, silently. That is how the last four
+rows above went unprotected — the broker's MCP dispatcher was wired to serve
+`memory_recall` / `memory_list` / `memory_update` / `memory_delete`, and the
+baseline was never widened to match.
+
+So when a new `internal/cloud` client method lands in memclawd against a
+core-api endpoint, add it here in the same change. Adding a row is **additive**
+— it only widens what the gate protects, so it does not move
+`CONTRACT_VERSION`. Removing one, or renaming a path/method the broker calls,
+is a breaking contract change and does.
+
+Endpoints the broker calls that live in the **enterprise** stack
+(`/api/v1/installs/*` in platform-auth-api, `POST /api/v1/audit-log` in
+platform-audit-api) have their own per-service baselines in that repo. As of
+2026-08-11 those cover claim / heartbeat / policy-stream / register and the
+audit-log write, but **not** `POST /api/v1/installs/leave` or
+`POST /api/v1/installs/commands/ack`, which the broker also calls.
 
 ### Regenerate
 

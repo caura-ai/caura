@@ -185,6 +185,7 @@ async def update_memory_embedding(
     memory_id: UUID,
     tenant_id: str,
     embedding: list[float],
+    embedded_content_hash: str | None = None,
 ) -> None:
     """PATCH the embedding onto the memory row.
 
@@ -202,15 +203,36 @@ async def update_memory_embedding(
     deferring the embed; clear it via ``metadata_patch`` on the same
     PATCH so a read-after-success returns clean state instead of
     confusingly claiming the row is still pending.
+
+    ``embedded_content_hash`` records WHICH text this vector came from
+    (migration 037). This is the deferred/SaaS write path, so without it
+    every row embedded here would sit at ``unknown_provenance`` forever
+    and the staleness detector would be blind to exactly the deployment
+    mode that does the embedding.
+
+    Sent as its own key rather than as ``content_hash``: storage stamps
+    provenance from ``content_hash`` only when it is patching ``content``
+    too, and ``content_hash`` is a real column — sending it here would
+    WRITE it, overwriting the row's hash with a value from an event that
+    may already be stale. The explicit key sets provenance alone and
+    touches nothing else.
+
+    Stays on ``PATCH /memories/{id}`` rather than the dedicated
+    ``/embedding`` route: that route replaces ``metadata`` wholesale,
+    which would clobber every key the ``metadata_patch`` merge above
+    exists to preserve.
     """
+    body: dict = {
+        "tenant_id": tenant_id,
+        "embedding": embedding,
+        "metadata_patch": {"embedding_pending": False},
+    }
+    if embedded_content_hash is not None:
+        body["embedded_content_hash"] = embedded_content_hash
     resp = await _signed_call(
         client.patch,
         f"{_PREFIX}/memories/{memory_id}",
-        json={
-            "tenant_id": tenant_id,
-            "embedding": embedding,
-            "metadata_patch": {"embedding_pending": False},
-        },
+        json=body,
     )
     if resp.status_code == 404:
         # Row was deleted after the event was published — common-enough

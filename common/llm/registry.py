@@ -6,7 +6,7 @@ Constructs LLM providers by name with three-tier credential resolution:
     Tenant key  →  Platform singleton  →  FakeLLMProvider
 
 Infrastructure backend factories (storage, job queue, identity, conflict,
-STM) stay in ``core_api.providers._registry`` — those are core-api–only
+STM) stay in ``core_api.providers._registry`` — those are core-api-only
 concerns. core-worker only needs LLM construction, so this module is the
 narrow public surface both processes share.
 """

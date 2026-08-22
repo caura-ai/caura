@@ -1,9 +1,10 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, create_model, model_validator
 
+from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
 from core_api.constants import (
     BULK_MAX_ITEMS,
     DEFAULT_MEMORY_TYPE,
@@ -61,8 +62,19 @@ class MemoryCreate(BaseModel):
     visibility: str | None = Field(default=None, pattern=MEMORY_VISIBILITIES_PATTERN)
     # Extract-only mode: run enrichment + embedding but skip DB insert
     persist: bool = True
-    # Write-mode dial: "fast" (embed-only → background enrich), "strong" (full pipeline), "auto" (system picks)
-    write_mode: Literal["fast", "strong", "auto", "stm"] | None = None
+    write_mode: Literal["fast", "strong", "auto", "stm"] | None = Field(
+        default=None,
+        description=(
+            "Write-mode dial. 'fast' = embed-only, LLM enrichment deferred to the "
+            "background; 'strong' = full pipeline inline; 'auto' = the system picks. "
+            "'strong' also embeds inline regardless of the deployment's embedding "
+            "mode, which makes it the supported opt-out when a caller must search "
+            "for what it just wrote — see `MemoryOut.metadata.embedding_pending`. "
+            "It costs the embedding provider call on the request path, which is "
+            "exactly what fast mode's sub-2s p99 visibility SLA exists to avoid, so "
+            "it is a per-write choice rather than a default to flip."
+        ),
+    )
 
 
 class BulkMemoryItem(BaseModel):
@@ -98,6 +110,30 @@ class BulkMemoryItem(BaseModel):
     ts_valid_end: datetime | None = None
     reference_datetime: datetime | None = None
     status: str | None = Field(default=None)  # validated per-item (status_errors); see note above
+    # Per ITEM, not per batch, deliberately: callers that funnel through the bulk
+    # endpoint may coalesce writes from unrelated sources into one request (the
+    # broker's durable queue does exactly this), so one item asking for 'strong'
+    # must not force inline embedding on everything batched alongside it.
+    #
+    # Untyped ``str`` rather than a Literal, per this model's additive-tolerance
+    # policy above: a Literal would 422 the WHOLE batch over one item's unknown
+    # value (e.g. 'stm' copied from a single-write payload). Only 'strong' has an
+    # effect; every other value, known or not, behaves as 'fast'.
+    write_mode: str | None = Field(
+        default=None,
+        description=(
+            "Per-item write mode. 'strong' embeds this item inline, so it is "
+            "searchable as soon as the write is persisted rather than after the "
+            "background backfill — at the cost of an embedding provider call on "
+            "the request path. Any other value behaves as 'fast': the item follows "
+            "the deployment's embedding mode. On a deployment that already embeds "
+            "inline this has no effect, since every item is embedded inline anyway. "
+            "Narrower than MemoryCreate.write_mode: on the bulk path 'strong' "
+            "affects only the embedding — LLM enrichment defers either way — and "
+            "the tenant's default_write_mode is not consulted, so only an explicit "
+            "per-item opt-in embeds inline."
+        ),
+    )
 
 
 class BulkMemoryCreate(BaseModel):
@@ -256,6 +292,27 @@ class MemoryOut(BaseModel):
     weight: float
     source_uri: str | None
     run_id: str | None
+    # Two flags here tell a caller the write is not fully settled yet:
+    #
+    #   embedding_pending: true   — the row was stored without an embedding and a
+    #     background backfill is scheduled. Until it lands the memory is reachable
+    #     by keyword (FTS) and by the non-semantic `GET /memories` list, but it
+    #     does not compete on semantic similarity, so a `search` for a paraphrase
+    #     of it can come back empty. Observed time-to-searchable: ~15-20s on
+    #     production, and over 10 minutes on staging, whose backfill is slower —
+    #     so do not treat it as "a moment".
+    #   enrichment_pending: true  — title/memory_type/weight/status/ts_valid_* are
+    #     still the caller-supplied or default values; the LLM pass will PATCH them.
+    #
+    # Absent (or false) means that stage ran inline. On the single-write path
+    # `write_mode="strong"` embeds and enriches inline, so neither flag appears —
+    # that is the supported read-your-own-write opt-out, at the cost of the
+    # provider calls on the request path. A deployment running embedding inline
+    # (OSS local default) never sets embedding_pending, even in fast mode.
+    #
+    # `BulkMemoryItem.write_mode` is narrower: there 'strong' governs the
+    # embedding only, enrichment defers either way, and the bulk path sets neither
+    # flag — so a bulk caller cannot read pendingness off its own write response.
     metadata: dict | None
     created_at: datetime
     expires_at: datetime | None
@@ -278,10 +335,77 @@ class MemoryOut(BaseModel):
     # Contradiction tracking
     supersedes_id: UUID | None = None
     superseded_by: list["ContradictionInfo"] | None = None
+    # Unified contradiction model (A55) — system-populated, read-only on the API.
+    # confidence: confidence in this memory's claim (None = unknown/legacy).
+    # is_inferred: True when the system materialised this memory by inference.
+    # scope: structured validity qualifiers (role/task/location).
+    confidence: float | None = None
+    is_inferred: bool = False
+    scope: dict | None = None
     # Usage info (populated on write responses)
     usage: UsageSummary | None = None
 
     model_config = {"from_attributes": True}
+
+
+# Kept to ONE line, because a model docstring becomes the schema's public
+# ``description`` in ``openapi.broker.json`` — maintainer rationale belongs here, in a
+# comment, not in the frozen contract. Three things about this model are load-bearing:
+#
+# FIELD ORDER IS THE CONTRACT. FastAPI serialises in model-field order, not dict
+# order, and this endpoint has always emitted these 29 keys in this order. Reordering
+# them changes the response bytes for every caller;
+# ``tests/test_memory_get_serialization_contract.py`` pins it.
+#
+# THE TIMESTAMPS ARE ``str``, NOT ``datetime``, ON PURPOSE. They arrive as ISO strings
+# — the route reads them out of core-storage-api's JSON and passes them through — and
+# ``datetime`` would not merely annotate, it re-serialises: pydantic v2 renders
+# ``2026-08-13T18:52:48.040997+00:00`` as ``...040997Z``. Measured, not assumed. That
+# is a wire change on a live endpoint, not a side effect to take on while adding a
+# schema. The fleet is already inconsistent here: ``MemoryOut`` (the POST/PATCH model)
+# types them as ``datetime`` and emits the ``Z`` form for the same row. Aligning the
+# two is an API decision with its own migration story; ``str`` documents what ships.
+#
+# NULLABILITY MIRRORS THE TABLE, plus the two computed fields that are ``None`` for an
+# un-embedded row. A field marked required here that is NULL in practice turns a 200
+# into a 500 via ``ResponseValidationError``, so this errs toward optional wherever the
+# column is nullable.
+class MemoryDetailResponse(BaseModel):
+    """Full detail for one memory: row fields, entity links, embedding stats."""
+
+    id: str
+    tenant_id: str
+    fleet_id: str | None = None
+    agent_id: str
+    agent_display_name: str | None = None
+    memory_type: str
+    title: str | None = None
+    content: str
+    weight: float | None = None
+    source_uri: str | None = None
+    run_id: str | None = None
+    # Exposed as ``metadata``; storage serialises the JSONB column as ``metadata_``
+    # and the route renames it on the way out.
+    metadata: dict | None = None
+    content_hash: str | None = None
+    created_at: str | None = None
+    expires_at: str | None = None
+    deleted_at: str | None = None
+    subject_entity_id: str | None = None
+    predicate: str | None = None
+    object_value: str | None = None
+    ts_valid_start: str | None = None
+    ts_valid_end: str | None = None
+    status: str
+    visibility: str
+    recall_count: int
+    last_recalled_at: str | None = None
+    supersedes_id: str | None = None
+    entity_links: list[dict] = []
+    # Both None unless the row has a non-empty embedding: the raw pgvector never
+    # crosses the wire, only a first-20 preview and the server-computed stats.
+    embedding_preview: list[float] | None = None
+    embedding_stats: dict | None = None
 
 
 class ContradictionInfo(BaseModel):
@@ -481,18 +605,32 @@ class AgentTrustUpdate(BaseModel):
     fleet_id: str | None = None
 
 
-class SearchProfileUpdate(BaseModel):
-    """Per-agent search tuning knobs. All fields optional — only override what you set."""
+# Derived from ``SEARCH_KNOBS`` rather than written out. The fields and their
+# bounds were hand-maintained here, in the MCP ``caura_tune`` signature and in
+# the knob table, and they had already drifted: ``graph_max_hops`` was capped at 3
+# here while the table allowed 5, so a tenant-wide default could hold a depth no
+# agent profile could set (#730). One declaration removes the class of drift
+# rather than testing for it.
+#
+# ``agent_tunable`` is what selects the nine; the three A/B knobs
+# (``fts_rank_scale``, ``candidate_pool_size``, ``score_formula``) stay off this
+# surface deliberately — they are tenant-level A/B levers, not per-agent tuning.
+# ``dict[str, Any]`` explicitly: ``create_model``'s overloads take
+# ``**field_definitions: Any | tuple[Any, Any]``, and mypy will not match a
+# comprehension it infers as ``dict[Any, tuple[Any, None]]`` against them.
+_PROFILE_FIELDS: dict[str, Any] = {
+    name: (
+        SEARCH_KNOBS[name].value_type | None,
+        Field(default=None, ge=SEARCH_KNOBS[name].bounds[0], le=SEARCH_KNOBS[name].bounds[1]),
+    )
+    for name in AGENT_TUNABLE_KEYS
+}
 
-    top_k: int | None = Field(default=None, ge=1, le=20)
-    min_similarity: float | None = Field(default=None, ge=0.1, le=0.9)
-    fts_weight: float | None = Field(default=None, ge=0.0, le=1.0)
-    freshness_floor: float | None = Field(default=None, ge=0.0, le=1.0)
-    freshness_decay_days: int | None = Field(default=None, ge=7, le=730)
-    recall_boost_cap: float | None = Field(default=None, ge=1.0, le=3.0)
-    recall_decay_window_days: int | None = Field(default=None, ge=7, le=365)
-    graph_max_hops: int | None = Field(default=None, ge=0, le=3)
-    similarity_blend: float | None = Field(default=None, ge=0.0, le=1.0)
+SearchProfileUpdate = create_model(
+    "SearchProfileUpdate",
+    __doc__="Per-agent search tuning knobs. All fields optional — only override what you set.",
+    **_PROFILE_FIELDS,
+)
 
 
 # --- Background Task ---

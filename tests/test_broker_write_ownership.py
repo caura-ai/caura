@@ -10,7 +10,7 @@ write surface. This module tests:
   ``broker:`` id), first-touch owner stamp, post-create TOCTOU re-check,
   non-broker passthrough, ``require_approval`` passthrough.
 - End-to-end that ``_write_memory_inner`` (REST single), ``_write_memories_bulk_inner``
-  (REST bulk), and ``memclaw_write`` (MCP) all route attribution through it, so a
+  (REST bulk), and ``caura_write`` (MCP) all route attribution through it, so a
   broker naming another install's agent is degraded to ``broker:<install>`` before
   the memory is written.
 
@@ -300,7 +300,7 @@ async def test_bulk_write_broker_foreign_agent_degraded(monkeypatch):
     assert agent_id == "broker:install-1"
 
 
-# ── MCP end-to-end: memclaw_write attributes through resolve_write_agent ─
+# ── MCP end-to-end: caura_write attributes through resolve_write_agent ─
 
 
 @contextlib.contextmanager
@@ -343,7 +343,7 @@ async def test_mcp_write_broker_foreign_agent_degraded(mcp_env, monkeypatch):
     cm.return_value = _OutStub()
 
     with _mcp_credential("install_credential", "install-1"):
-        await mcp_server.memclaw_write(content="x", agent_id="victim-agent")
+        await mcp_server.caura_write(content="x", agent_id="victim-agent")
     assert cm.await_args.args[0].agent_id == "broker:install-1"
 
 
@@ -367,7 +367,7 @@ async def test_mcp_write_non_broker_passthrough(mcp_env, monkeypatch):
     cm.return_value = _OutStub()
 
     with _mcp_credential(None, None):  # not a broker
-        await mcp_server.memclaw_write(content="x", agent_id="dash-agent")
+        await mcp_server.caura_write(content="x", agent_id="dash-agent")
     assert cm.await_args.args[0].agent_id == "dash-agent"
 
 
@@ -396,6 +396,6 @@ async def test_mcp_write_passes_credential_identity(mcp_env, monkeypatch):
     mcp_env["service"]("create_memory").return_value = _OutStub()
 
     with _mcp_credential("install_credential", "install-7"):
-        await mcp_server.memclaw_write(content="x", agent_id="a1")
+        await mcp_server.caura_write(content="x", agent_id="a1")
     assert captured["is_install"] is True
     assert captured["install_uuid"] == "install-7"

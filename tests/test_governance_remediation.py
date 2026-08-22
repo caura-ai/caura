@@ -64,8 +64,8 @@ def _mem(**kw) -> dict:
 
 
 async def test_disabled_is_noop(emitted, storage):
-    dropped = await governance_remediation.remediate_after_enrichment(_mem(), _cfg())
-    assert dropped is False
+    outcome = await governance_remediation.remediate_after_enrichment(_mem(), _cfg())
+    assert outcome.dropped is False
     assert emitted == []
     assert storage == []
 
@@ -75,8 +75,8 @@ async def test_missing_id_skips_without_side_effects(emitted, storage):
     # literal "None" or stamp resource_id="None" on an audit row.
     cfg = _cfg(pii={"enabled": True, "action": "drop"})
     mem = _mem(id=None, metadata={"contains_pii": True})
-    dropped = await governance_remediation.remediate_after_enrichment(mem, cfg)
-    assert dropped is False
+    outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
+    assert outcome.dropped is False
     assert storage == []
     assert emitted == []
 
@@ -84,8 +84,8 @@ async def test_missing_id_skips_without_side_effects(emitted, storage):
 async def test_pii_drop_soft_deletes_and_audits(emitted, storage):
     cfg = _cfg(pii={"enabled": True, "action": "drop"})
     mem = _mem(metadata={"contains_pii": True, "pii_types": ["health"]})
-    dropped = await governance_remediation.remediate_after_enrichment(mem, cfg)
-    assert dropped is True
+    outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
+    assert outcome.dropped is True
     assert ("soft_delete", "m1") in storage
     assert any(c["action"] == "pii_drop" for c in emitted)
 
@@ -95,8 +95,8 @@ async def test_pii_mask_config_flags_but_records_intent(emitted, storage):
     # but stays distinguishable from a genuine flag policy in the audit.
     cfg = _cfg(pii={"enabled": True, "action": "mask"})
     mem = _mem(metadata={"contains_pii": True, "pii_types": ["health"]})
-    dropped = await governance_remediation.remediate_after_enrichment(mem, cfg)
-    assert dropped is False
+    outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
+    assert outcome.dropped is False
     assert storage == []  # nothing redacted/dropped
     flag = next(c for c in emitted if c["action"] == "pii_flag")
     assert flag["detail"]["configured_action"] == "pii_mask"
@@ -113,8 +113,8 @@ async def test_pii_flag_config_records_no_configured_action(emitted, storage):
 async def test_nonbusiness_keep_private_updates_visibility(emitted, storage):
     cfg = _cfg(nb={"enabled": True, "disposition": "keep_private"})
     mem = _mem(metadata={"business_relevance": "personal"})
-    dropped = await governance_remediation.remediate_after_enrichment(mem, cfg)
-    assert dropped is False
+    outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
+    assert outcome.dropped is False
     assert ("update", "m1", "t1", {"visibility": "scope_agent"}) in storage
     assert any(c["action"] == "nonbusiness_keep_private" for c in emitted)
 
@@ -122,8 +122,8 @@ async def test_nonbusiness_keep_private_updates_visibility(emitted, storage):
 async def test_nonbusiness_drop_soft_deletes(emitted, storage):
     cfg = _cfg(nb={"enabled": True, "disposition": "drop"})
     mem = _mem(metadata={"business_relevance": "personal"})
-    dropped = await governance_remediation.remediate_after_enrichment(mem, cfg)
-    assert dropped is True
+    outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
+    assert outcome.dropped is True
     assert ("soft_delete", "m1") in storage
     assert any(c["action"] == "nonbusiness_drop" for c in emitted)
 
@@ -131,8 +131,8 @@ async def test_nonbusiness_drop_soft_deletes(emitted, storage):
 async def test_business_content_is_noop(emitted, storage):
     cfg = _cfg(nb={"enabled": True, "disposition": "drop"})
     mem = _mem(metadata={"business_relevance": "business"})
-    dropped = await governance_remediation.remediate_after_enrichment(mem, cfg)
-    assert dropped is False
+    outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
+    assert outcome.dropped is False
     assert storage == []
     assert emitted == []
 
@@ -171,8 +171,8 @@ async def test_drop_audits_before_soft_delete(
     monkeypatch.setattr(governance_remediation, "emit_governance_audit", _audit)
     monkeypatch.setattr(governance_remediation, "get_storage_client", lambda: _SC())
 
-    dropped = await governance_remediation.remediate_after_enrichment(
+    outcome = await governance_remediation.remediate_after_enrichment(
         _mem(metadata=metadata), _cfg(**cfg_kwargs)
     )
-    assert dropped is True
+    assert outcome.dropped is True
     assert order == [f"audit:{drop_action}", "soft_delete"]

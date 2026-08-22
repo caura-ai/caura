@@ -10,16 +10,19 @@ Unit tests validate:
   - "fake" and "none" short-circuit without calling LLM
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from common.llm import retry as retry_mod
 from core_api.constants import (
     LLM_FALLBACK_MODEL_OPENAI,
     LLM_RETRY_ATTEMPTS,
     LLM_RETRY_DELAY_S,
 )
+from tests._scoped_module import scoped
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +162,7 @@ class TestCallWithRetry:
             side_effect=[RuntimeError("fail")] * (LLM_RETRY_ATTEMPTS - 1)
             + [MemoryEnrichment()],
         )
-        with patch("common.llm.retry.asyncio.sleep", new_callable=AsyncMock):
+        with patch.object(retry_mod, "asyncio", scoped(asyncio, sleep=AsyncMock())):
             result = await _call_with_retry(fn, "test")
         assert isinstance(result, MemoryEnrichment)
         assert fn.call_count == LLM_RETRY_ATTEMPTS
@@ -169,7 +172,7 @@ class TestCallWithRetry:
         from core_api.services.memory_enrichment import _call_with_retry
 
         fn = AsyncMock(side_effect=RuntimeError("permanent"))
-        with patch("common.llm.retry.asyncio.sleep", new_callable=AsyncMock):
+        with patch.object(retry_mod, "asyncio", scoped(asyncio, sleep=AsyncMock())):
             with pytest.raises(RuntimeError, match="permanent"):
                 await _call_with_retry(fn, "test")
         assert fn.call_count == LLM_RETRY_ATTEMPTS
@@ -196,7 +199,7 @@ class TestCallExtractWithRetry:
         from core_api.services.entity_extraction import _call_extract_with_retry
 
         fn = AsyncMock(side_effect=RuntimeError("permanent"))
-        with patch("common.llm.retry.asyncio.sleep", new_callable=AsyncMock):
+        with patch.object(retry_mod, "asyncio", scoped(asyncio, sleep=AsyncMock())):
             with pytest.raises(RuntimeError, match="permanent"):
                 await _call_extract_with_retry(fn, "test")
         assert fn.call_count == LLM_RETRY_ATTEMPTS
@@ -595,6 +598,28 @@ class TestFakeExtract:
         result = _fake_extract("John Smith manages the Auth Team")
         assert result.relations == []
 
+    def test_never_claims_a_type_it_did_not_establish(self):
+        """A capitalised-bigram regex cannot classify, so it must not assert a class.
+
+        Every match used to be typed ``person`` — including "Helios Migration" and
+        "Last Tuesday". This output is PERSISTED to the entity graph on a provider
+        outage, so the wrong type reaches a real tenant.
+        """
+        from core_api.services.entity_extraction import _fake_extract
+
+        result = _fake_extract(
+            "Anna Bergstrom shipped the Helios Migration on Last Tuesday"
+        )
+        types = {e.entity_type for e in result.entities}
+
+        assert result.entities, "expected the regex to find the capitalised phrases"
+        assert types == {"unknown"}, (
+            f"the heuristic must report an undetermined type, not guess; got {types!r}"
+        )
+        # The point is not that 'person' is banned but that nothing is asserted:
+        # 'helios migration' is not a person and neither is 'last tuesday'.
+        assert "person" not in types
+
 
 # ---------------------------------------------------------------------------
 # Unit tests: call_with_fallback max_attempts (recall latency lever)
@@ -624,7 +649,7 @@ class TestCallWithFallbackMaxAttempts:
             calls += 1
             raise RuntimeError("slow/hung")
 
-        with patch("common.llm.retry.asyncio.sleep", new_callable=AsyncMock):
+        with patch.object(retry_mod, "asyncio", scoped(asyncio, sleep=AsyncMock())):
             result = await call_with_fallback(
                 primary_provider_name="openai",
                 call_fn=call_fn,
@@ -649,7 +674,7 @@ class TestCallWithFallbackMaxAttempts:
             calls += 1
             raise RuntimeError("transient")
 
-        with patch("common.llm.retry.asyncio.sleep", new_callable=AsyncMock):
+        with patch.object(retry_mod, "asyncio", scoped(asyncio, sleep=AsyncMock())):
             result = await call_with_fallback(
                 primary_provider_name="openai",
                 call_fn=call_fn,

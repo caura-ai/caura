@@ -20,7 +20,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from common.models.base import Base
 
-
 # Status lifecycle:
 #   pending → confirmed_duplicate (reviewer agreed; no-op as the
 #             reject already happened OR the user accepts the

@@ -203,7 +203,7 @@ class TestExpandGraphRelationWeights:
         })
         return rel
 
-    async def test_strong_relation_returns_high_weight(self, db, tenant_id, fleet_id):
+    async def test_strong_relation_returns_high_weight(self, tenant_id, fleet_id):
         from core_api.clients.storage_client import get_storage_client
         from core_api.services.memory_service import expand_graph
 
@@ -223,7 +223,7 @@ class TestExpandGraphRelationWeights:
         assert hop == 1
         assert weight == RELATION_TYPE_WEIGHTS["manages"]
 
-    async def test_weak_relation_returns_low_weight(self, db, tenant_id, fleet_id):
+    async def test_weak_relation_returns_low_weight(self, tenant_id, fleet_id):
         from core_api.clients.storage_client import get_storage_client
         from core_api.services.memory_service import expand_graph
 
@@ -241,7 +241,7 @@ class TestExpandGraphRelationWeights:
         assert hop == 1
         assert weight == RELATION_TYPE_WEIGHTS["located_in"]
 
-    async def test_multiple_relations_keeps_strongest(self, db, tenant_id, fleet_id):
+    async def test_multiple_relations_keeps_strongest(self, tenant_id, fleet_id):
         """If two relations connect the same entities, keep the strongest."""
         from core_api.clients.storage_client import get_storage_client
         from core_api.services.memory_service import expand_graph
@@ -262,7 +262,7 @@ class TestExpandGraphRelationWeights:
         _, weight = result[person_id]
         assert weight == RELATION_TYPE_WEIGHTS["manages"]
 
-    async def test_seed_entities_have_weight_1(self, db, tenant_id, fleet_id):
+    async def test_seed_entities_have_weight_1(self, tenant_id, fleet_id):
         from core_api.clients.storage_client import get_storage_client
         from core_api.services.memory_service import expand_graph
 
@@ -275,7 +275,7 @@ class TestExpandGraphRelationWeights:
         assert hop == 0
         assert weight == 1.0
 
-    async def test_db_weight_multiplies_type_weight(self, db, tenant_id, fleet_id):
+    async def test_db_weight_multiplies_type_weight(self, tenant_id, fleet_id):
         """Relation.weight column (DB) multiplies the type-based weight."""
         from core_api.clients.storage_client import get_storage_client
         from core_api.services.memory_service import expand_graph

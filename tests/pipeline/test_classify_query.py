@@ -32,8 +32,15 @@ _DEFAULT_SEARCH_PARAMS = {
 }
 
 
-def _make_ctx(query: str, *, fts_weight: float = 0.3, **extra_data) -> PipelineContext:
+def _make_ctx(
+    query: str, *, fts_weight: float = 0.3, top_k: int | None = None, **extra_data
+) -> PipelineContext:
+    # top_k is a seam because H-03 gated the ENTITY_LOOKUP short-circuit on the
+    # entity pool being able to fill it: a test that wants the short-circuit to
+    # fire has to ask for no more rows than its fixture links.
     sp = {**_DEFAULT_SEARCH_PARAMS, "fts_weight": fts_weight}
+    if top_k is not None:
+        sp["top_k"] = top_k
     data = {
         "query": query,
         "tenant_id": "t1",
@@ -101,7 +108,7 @@ async def test_keyword_for_specific_query(mock_get_sc):
 @patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
 async def test_entity_lookup_with_match(mock_get_sc):
     """Entity match triggers ENTITY_LOOKUP with skip flags and populated filtered_rows."""
-    ctx = _make_ctx("Alice")
+    ctx = _make_ctx("Alice", top_k=1)
 
     entity_id = uuid.uuid4()
     memory_id = uuid.uuid4()
@@ -312,7 +319,7 @@ async def test_entity_lookup_takes_priority_over_temporal(mock_get_sc):
     )
     mock_get_sc.return_value = sc
 
-    ctx = _make_ctx("Alice", temporal_window=timedelta(days=7))
+    ctx = _make_ctx("Alice", temporal_window=timedelta(days=7), top_k=1)
 
     step = ClassifyQuery()
     await step.execute(ctx)
@@ -416,7 +423,7 @@ async def test_entity_lookup_takes_priority_over_recent(mock_get_sc):
     )
     mock_get_sc.return_value = sc
 
-    ctx = _make_ctx("what was I doing with Alice")
+    ctx = _make_ctx("what was I doing with Alice", top_k=1)
 
     step = ClassifyQuery()
     await step.execute(ctx)

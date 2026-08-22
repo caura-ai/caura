@@ -501,7 +501,7 @@ EMBEDDING_SAMPLES = [
         "Agent trust levels range from 0 (restricted) to 3 (admin).",
         "The crystallizer merges near-duplicate memories into atomic facts.",
         "Alembic manages database migrations for the schema.",
-        "The OpenClaw plugin exposes memclaw_write, memclaw_recall, memclaw_entity_get.",
+        "The OpenClaw plugin exposes caura_write, caura_recall, caura_entity_get.",
     ]},
 ]
 

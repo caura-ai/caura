@@ -80,6 +80,14 @@ for i in $(seq 1 10); do
   sleep 1
 done
 [ "$EN" = "false" ] || { echo "ABORT: tenant still enabled after disable"; exit 1; }
+# get-enabled=false only proves ONE worker sees the flip: core-api runs 2
+# uvicorn workers with independent 5-min settings caches, and the submit
+# may hit the other one (observed 2026-07-28: a stale-cache worker accepted
+# the submit, pruned the buffer, and broke this invariant's assertions).
+# Wait out the TTL so BOTH workers are guaranteed to enforce the disable.
+: "${SETTINGS_CACHE_TTL_WAIT:=310}"
+say "waiting ${SETTINGS_CACHE_TTL_WAIT}s for the per-worker settings-cache TTL"
+sleep "$SETTINGS_CACHE_TTL_WAIT"
 SINCE=$((W2 + 1))
 H queue-cmd "$SINCE" >/dev/null
 R=$(H heartbeat)          # command fails server-side (403)
@@ -96,11 +104,18 @@ for i in $(seq 1 8); do
   H heartbeat >/dev/null
   SUBMITTED=$(H commands | jq -r '.latest.result.submitted // false')
   [ "$SUBMITTED" = "true" ] && break
-  sleep 2
+  # 45s between retries: 8 tries must span the 5-min per-worker cache
+  # TTL, or a stale-cache worker can refuse all 8 quick attempts.
+  sleep 45
 done
 R=$(H commands);           need '.latest.result.submitted' true "$R" "retry submitted after re-enable (eventual, per-worker cache)"
 W3=$(echo "$R" | jq -r '.latest.result.watermark // empty'); [ -n "$W3" ] || { echo "ABORT: no watermark after P3"; exit 1; }
 R=$(H count);              need '.count' 0 "$R" "buffer pruned after recovery"
+# The retry loop exits as soon as ONE worker accepts; the other worker's
+# cache may still say "disabled" for up to the TTL and 403 the next
+# phase's submit (observed 2026-07-28 in P5). Wait for convergence.
+say "waiting ${SETTINGS_CACHE_TTL_WAIT}s for both workers to see the re-enable"
+sleep "$SETTINGS_CACHE_TTL_WAIT"
 
 say "P4 kill -9 durability: hard-kill mid-append, then verify + continue"
 node e2e/interviewer-wet.mjs append-loop > /tmp/killer.log 2>&1 &

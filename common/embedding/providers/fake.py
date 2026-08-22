@@ -45,6 +45,23 @@ class FakeEmbeddingProvider:
         return "fake"
 
     @property
+    def dedup_scope(self) -> str:
+        """Namespace for per-backend failure stats — see ``_stats_by_scope``.
+
+        Model-scoped like the local provider. ``model`` is a constant for
+        the stock fake, so every stock instance shares one scope — correct,
+        they are one backend. Reading ``self.model`` rather than hardcoding
+        it means a subclass that overrides the model (test doubles standing
+        in for distinct backends) scopes distinctly too.
+        """
+        return f"fake:{self.model}"
+
+    @property
+    def backend_label(self) -> str:
+        """Human-facing identity for log lines — see the OpenAI provider."""
+        return f"fake model={self.model}"
+
+    @property
     def model(self) -> str:
         return "fake"
 

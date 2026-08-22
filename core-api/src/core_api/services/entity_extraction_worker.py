@@ -161,7 +161,7 @@ async def process_entity_extraction(
             # entity that fails to embed becomes ``None`` in its slot
             # rather than aborting the whole batch.
             embed_results = await asyncio.gather(
-                *(get_embedding(name) for name, _et, _role in filtered),
+                *(get_embedding(name, background=True) for name, _et, _role in filtered),
                 return_exceptions=True,
             )
             name_embeddings: dict[str, list[float] | None] = {}
@@ -434,12 +434,13 @@ async def process_entity_extraction(
 
         # Trigger entity-based contradiction detection now that entity links exist
         if name_to_id:
-            from core_api.services.contradiction_detector import (
-                detect_contradictions_by_entities_async,
+            from core_api.services.contradiction import (
+                Trigger,
+                run_contradiction_detection,
             )
             from core_api.tasks import track_task
 
-            track_task(detect_contradictions_by_entities_async(memory_id, tenant_id, fleet_id))
+            track_task(run_contradiction_detection(memory_id, tenant_id, fleet_id, trigger=Trigger.ENTITY))
 
         # Cross-link discovery (non-fatal)
         if tenant_cfg.auto_entity_linking_enabled:

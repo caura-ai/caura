@@ -362,7 +362,15 @@ async def find_relation(
 @router.post("/links")
 async def create_memory_entity_link(request: Request) -> dict:
     body: dict = await request.json()
-    link = await _svc.entity_add_entity_link(body)
+    try:
+        link = await _svc.entity_add_entity_link(body)
+    except ValueError as e:
+        # H-05 follow-up: a caller-supplied memory_id/entity_id that does not
+        # exist, or a pair already linked, is a client error. It used to escape as
+        # an IntegrityError → 500, which core-api could not tell apart from
+        # storage being unreachable — so a bad id and an outage degraded
+        # identically. Same 409 mapping ``create_entity`` above already uses.
+        raise HTTPException(status_code=409, detail=str(e))
     return orm_to_dict(link, MEMORY_ENTITY_LINK_FIELDS)
 
 

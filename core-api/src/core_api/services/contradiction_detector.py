@@ -7,21 +7,24 @@ P1 fixes:
 
 Multi-provider support:
 - Vertex AI, OpenAI, Anthropic, OpenRouter via provider layer
-- Automatic fallback chain: configured provider -> fallback -> heuristic
+- Automatic fallback chain: configured provider -> fallback -> abstain
+  (heuristic only when the ``fake`` provider was explicitly asked for; see
+  ``common.llm.retry.deliberate_fake_provider``)
 """
 
 import asyncio
+import hashlib
 import logging
 import time
 import uuid as _uuid
 from datetime import datetime
 from uuid import UUID
 
-from core_api.cache import cache_set_nx
+from core_api.cache import cache_delete_if, cache_set_nx
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.constants import SINGLE_VALUE_PREDICATES
-from core_api.providers._retry import call_with_fallback
+from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
 from core_api.schemas import ContradictionInfo
 from core_api.services.subject_preflight import _subjects_differ_with_certainty
 
@@ -39,22 +42,82 @@ logger = logging.getLogger(__name__)
 _DETECTION_LOCK_TTL_SECONDS = 3600
 
 
-async def _acquire_path_a_lock(memory_id) -> bool:
+def _content_fingerprint(content: str) -> str:
+    """Short stable digest of the text a detection run examined.
+
+    Part of the lock key (H-06). Keyed on ``memory_id`` alone, the lock also
+    deduped runs that were checking DIFFERENT text: ``update_memory`` clears
+    supersession state and re-fires detection on a content edit, but a memory
+    corrected within the TTL — the normal case for a quick fix — still held the
+    write-time lock, so the edited content was never checked and no later
+    trigger re-fired. Including the content makes an edit a different lock.
+
+    Hashed rather than embedded: memory content is unbounded and Redis keys are
+    values. Truncated because this only has to separate versions of ONE
+    memory's text, not resist collision across a corpus.
+    """
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:32]
+
+
+def _path_a_lock_key(memory_id, content: str) -> str:
+    return f"contradiction:path_a:{memory_id}:{_content_fingerprint(content)}"
+
+
+def _path_c_lock_key(memory_id, content: str) -> str:
+    return f"contradiction:path_c:{memory_id}:{_content_fingerprint(content)}"
+
+
+def _lock_token() -> str:
+    """A fresh per-acquisition owner token — see ``_release_lock``."""
+    return _uuid.uuid4().hex
+
+
+async def _acquire_path_a_lock(memory_id, content: str, token: str) -> bool:
     """Try to acquire the Path A (semantic + RDF) idempotency lock for
-    ``memory_id``. Returns True iff this caller owns the lock and should
-    proceed; False if another caller already holds it and we should skip.
+    ``memory_id`` at this ``content``. Returns True iff this caller owns the
+    lock and should proceed; False if another caller already holds it and we
+    should skip.
 
     Lock is keyed per-path so Path A and Path C run independently for
-    the same memory.
+    the same memory, and per-content so an edit is not deduped against the
+    run that checked the previous text. ``token`` identifies THIS acquisition
+    so the release can tell its own lock from a successor's.
     """
-    return await cache_set_nx(f"contradiction:path_a:{memory_id}", "1", _DETECTION_LOCK_TTL_SECONDS)
+    return await cache_set_nx(_path_a_lock_key(memory_id, content), token, _DETECTION_LOCK_TTL_SECONDS)
 
 
-async def _acquire_path_c_lock(memory_id) -> bool:
+async def _acquire_path_c_lock(memory_id, content: str, token: str) -> bool:
     """Try to acquire the Path C (entity-overlap) idempotency lock for
-    ``memory_id``. Returns True iff this caller owns the lock; False
-    means another caller already ran detection for this memory."""
-    return await cache_set_nx(f"contradiction:path_c:{memory_id}", "1", _DETECTION_LOCK_TTL_SECONDS)
+    ``memory_id`` at this ``content``. Returns True iff this caller owns the
+    lock; False means another caller already ran detection for this memory at
+    this content."""
+    return await cache_set_nx(_path_c_lock_key(memory_id, content), token, _DETECTION_LOCK_TTL_SECONDS)
+
+
+async def _release_lock(key: str, token: str) -> None:
+    """Drop a detection lock so the next trigger can retry.
+
+    Released ONLY when a run did not reach a verdict — it threw, or it exited
+    before examining anything (a missing / soft-deleted row). A run that
+    concluded keeps its lock for the full TTL, INCLUDING the "no candidates"
+    and "preflight dropped them all" outcomes, which are results rather than
+    failures. Collapsing the back-to-back ENRICHED and EMBEDDED deliveries is
+    the entire point of the lock: releasing on success would let the second
+    delivery re-run every LLM judgement whenever it landed more than one
+    detection apart from the first.
+
+    Compare-and-delete on ``token``, never a bare DEL. A run whose work outran
+    the 3600s TTL no longer owns the key: by then the lock may have expired and
+    been re-taken by a NEW run, and an unconditional delete would take that
+    successor's lock away and hand it a duplicate detection — the exact
+    guarantee this lock exists to provide. Releasing by token makes a late
+    release a no-op instead.
+
+    ``cache_delete_if`` is total — it swallows both a missing Redis and a
+    failed EVAL — so this cannot break the never-raises contract that lets the
+    Pub/Sub consumers ack unconditionally.
+    """
+    await cache_delete_if(key, token)
 
 
 def _parse_dt(value) -> datetime | None:
@@ -181,7 +244,18 @@ async def detect_contradictions_async(
     t_start = time.monotonic()
     n_conflicts = 0
     skipped = False
+    lock_held = False
+    concluded = False
+    lock_key = None
+    lock_token = ""
     try:
+        if new_memory is None:
+            sc = get_storage_client()
+            new_memory = await sc.get_memory(str(memory_id))
+        if not new_memory or new_memory.get("deleted_at") is not None:
+            # Resolved before the lock is taken, so a gone row never holds one.
+            return
+
         # A4 #14 — back-channel idempotency. Both the ENRICHED and
         # EMBEDDED handlers fire ``detect_contradictions_async`` for
         # the same memory; whichever arrives first owns the lock and
@@ -189,18 +263,37 @@ async def detect_contradictions_async(
         # unavailable, ``_acquire_path_a_lock`` returns True and we
         # fall back to the prior double-detection behaviour (storage
         # CAS still keeps writes idempotent).
-        if not await _acquire_path_a_lock(memory_id):
+        # H-06: keyed on the CONTENT as well as the memory, so an edit
+        # re-fired by ``update_memory`` is not deduped against the run that
+        # checked the previous text.
+        #
+        # Fingerprint the text detection will ACTUALLY examine — ``_detect``
+        # reads ``new_memory``, not the ``content`` parameter. The parameter is
+        # the caller's copy: the back-channel consumers pass the write-time
+        # payload, which a mid-flight update leaves stale. Keying on it would
+        # put a lock on text nobody looked at, and would make the fix depend on
+        # every future caller keeping the two in step. ``content`` remains the
+        # fallback for a row with no content at all.
+        # ``is None``, not ``or``: an EMPTY row content is a real value, and
+        # ``_detect`` reads it as one (``new_memory.get("content", "")``).
+        # Falling back to the caller's copy for it would key the lock on text
+        # detection never looks at — the very divergence this line exists to
+        # close. The caller's ``content`` is only a stand-in for a row that has
+        # no content field at all, and the final ``or ""`` keeps a str reaching
+        # the fingerprint: an AttributeError there lands in the outer handler
+        # and silently costs that memory its detection.
+        raw_content = new_memory.get("content")
+        examined = raw_content if raw_content is not None else (content or "")
+        lock_key = _path_a_lock_key(memory_id, examined)
+        lock_token = _lock_token()
+        if not await _acquire_path_a_lock(memory_id, examined, lock_token):
             skipped = True
             return
-
-        if new_memory is None:
-            sc = get_storage_client()
-            new_memory = await sc.get_memory(str(memory_id))
-        if not new_memory or new_memory.get("deleted_at") is not None:
-            return
+        lock_held = True
 
         tenant_config = await resolve_config(tenant_id)
         contradictions = await _detect(new_memory, embedding, tenant_config)
+        concluded = True
         n_conflicts = len(contradictions) if contradictions else 0
 
         if contradictions:
@@ -212,6 +305,14 @@ async def detect_contradictions_async(
     except Exception:
         logger.exception("Async contradiction detection failed for memory %s", memory_id)
     finally:
+        # H-06: keep the lock only for a run that reached a verdict. The lock
+        # is taken BEFORE detection, so without this one transient LLM or
+        # storage failure suppressed every later trigger for this memory for a
+        # full hour, with nothing scheduled to retry. A run that concluded
+        # keeps its lock — that is the duplicate-delivery collapse the lock
+        # exists for. Mirrors the Path C block below.
+        if lock_held and not concluded and lock_key is not None:
+            await _release_lock(lock_key, lock_token)
         elapsed_ms = round((time.monotonic() - t_start) * 1000)
         logger.info(
             "path_a_completed for memory %s n_conflicts=%d skipped=%s elapsed_ms=%d tenant_id=%s",
@@ -280,6 +381,9 @@ async def _detect(
     """
     sc = get_storage_client()
     contradictions: list[ContradictionInfo] = []
+    # A55 1d — (candidate_row, kind, confidence) pairs to persist as
+    # memory_conflicts records after the effect is applied (flag-gated below).
+    _record_pairs: list[tuple[dict, str, float | None]] = []
 
     memory_id = new_memory.get("id")
     subject_entity_id = new_memory.get("subject_entity_id")
@@ -412,6 +516,7 @@ async def _detect(
                     direction=direction,
                 )
             )
+            _record_pairs.append((old, "rdf", None))
             logger.info(
                 "RDF contradiction: memory %s outdated by %s "
                 "(subject=%s predicate=%s old_value=%s new_value=%s direction=%s)",
@@ -471,15 +576,19 @@ async def _detect(
             len(candidates) if candidates else 0,
         )
         if candidates:
-            # Fire all LLM checks concurrently instead of serially
-            tasks = [
-                asyncio.wait_for(
-                    _llm_contradiction_check(content, c.get("content", ""), tenant_config),
-                    timeout=10.0,
+            # A61 — batch the LLM judge. A single candidate keeps the direct
+            # per-candidate call; multiple candidates (the prod cost driver, up
+            # to 20) are judged in ONE batched call instead of N. Both feed the
+            # SAME _judge_contradiction gates below. ``judged`` is
+            # (verdict, confidence, raw|None).
+            if len(candidates) == 1:
+                _v, _c = await _llm_contradiction_check(
+                    content, candidates[0].get("content", ""), tenant_config
                 )
-                for c in candidates
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+                judged: list[tuple[bool, float, dict | None]] = [(_v, _c, None)]
+            else:
+                raws = await _llm_contradiction_check_batch(content, candidates, tenant_config)
+                judged = [(*_judge_contradiction(raw), raw) for raw in raws]
 
             # CAURA-125 — state-corruption guard, same rationale as the
             # RDF path above.
@@ -493,19 +602,7 @@ async def _detect(
             # ``updates`` is empty. Keyed by ``memory_id`` — see
             # ``_merge_status_update`` for the dedupe rationale.
             updates: dict[str, dict] = {}
-            for candidate, result in zip(candidates, results):
-                if isinstance(result, Exception):
-                    logger.warning(
-                        "Contradiction check failed for candidate %s: %s",
-                        candidate.get("id"),
-                        result,
-                    )
-                    continue
-                # A4 #12 — judge now returns (verdict, confidence).
-                # Path A continues to gate only on verdict at this site;
-                # A4 #13 will introduce confidence-weighted vetoes on
-                # Path C's else-branch.
-                verdict, _confidence = result  # type: ignore[misc]
+            for candidate, (verdict, _confidence, _raw) in zip(candidates, judged):
                 # CAURA-132 diag — Path A semantic per-candidate verdict.
                 logger.info(
                     "PATH_A_SEMANTIC verdict memory=%s candidate=%s verdict=%s confidence=%.2f",
@@ -577,6 +674,7 @@ async def _detect(
                             direction=direction,
                         )
                     )
+                    _record_pairs.append((candidate, "semantic", _confidence))
                     logger.info(
                         "Semantic contradiction: memory %s conflicted by %s direction=%s",
                         older_id,
@@ -596,6 +694,22 @@ async def _detect(
                         memory_id,
                         sem_result["skipped"],
                     )
+
+    # A55 1d — additionally persist a memory_conflicts classification record for
+    # each confirmed conflict. Flag-gated (default off); never touches the
+    # status/supersedes effect above, so retrieval behaviour is unchanged.
+    if _record_pairs and settings.contradiction_write_conflict_record:
+        from core_api.services.contradiction.resolver import (
+            record_detected_conflicts,
+        )
+
+        await record_detected_conflicts(
+            new_memory,
+            _record_pairs,
+            tenant_id=tenant_id,
+            fleet_id=new_memory.get("fleet_id"),
+            tenant_config=tenant_config,
+        )
 
     return contradictions
 
@@ -993,7 +1107,8 @@ async def _llm_contradiction_check(
     Uses the standard 3-tier fallback chain:
     1. Try the configured provider (with retry)
     2. Try the configured fallback provider (via resolve_fallback)
-    3. Fall back to negation-word heuristic
+    3. Abstain — or, when the operator ASKED for the fake provider, the
+       negation-word heuristic. See :func:`common.llm.retry.deliberate_fake_provider`.
     """
     provider_name = (
         tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
@@ -1008,7 +1123,7 @@ async def _llm_contradiction_check(
     return await call_with_fallback(
         primary_provider_name=provider_name,
         call_fn=_do_check,
-        fake_fn=lambda: (_fake_contradiction_check(new_content, old_content), _CONF_FALLBACK),
+        fake_fn=_pairwise_fake_fn(provider_name, new_content, old_content),
         tenant_config=tenant_config,
         service_label="contradiction",
         model_attr="entity_extraction_model",
@@ -1016,8 +1131,199 @@ async def _llm_contradiction_check(
     )
 
 
+# A61 — batched contradiction judge. The semantic path used to fire one
+# ``_llm_contradiction_check`` (one ``complete_json``) PER candidate, up to the
+# candidate cap (20). This judges ALL candidates against the new statement in a
+# single call (~Nx fewer LLM calls, the prod cost driver). The per-candidate raw
+# output is fed through the SAME ``_judge_contradiction`` gates by the caller, so
+# verdict semantics — Gate 1 (cross-subject), Gate 2 (non_conflict_reason),
+# ``_pick_older`` direction — are unchanged. It also emits ``relationship`` /
+# ``diagnosis`` per candidate so a downstream conflict-record write (A55 engine
+# path) can reuse it with no second LLM call.
+BATCH_CONTRADICTION_PROMPT = """\
+You are a contradiction detector for a business memory system.
+
+A NEW statement is compared against several EXISTING candidate statements.
+Judge EACH candidate INDEPENDENTLY against the NEW statement — one candidate's
+verdict must NOT influence another's.
+
+Two statements contradict ONLY IF they make incompatible claims about the SAME
+real-world subject. Different subjects -> NOT a contradiction, even if the
+predicates look opposite.
+
+NEW statement:
+{new_content}
+
+Candidate statements (judge each, by index):
+{candidates_block}
+
+For EACH candidate index decide, applying the rules in order:
+1. same_subject (bool): true ONLY when the candidate and the NEW statement refer
+   to the SAME real-world entity (exact name / known alias / role+name in
+   context / unambiguously resolved pronoun). false for two people sharing a
+   name, different companies/products/projects/teams, or any uncertainty.
+2. non_conflict_reason (exactly one): "none"; "temporal_supersession"
+   (sequential lifecycle states of the same subject, both true in order);
+   "list_valued_predicate" (a multi-valued predicate or two different attributes
+   that both hold); "refinement" (one is a more specific version of the other);
+   "scope_mismatch" (same subject under different implicit qualifiers — time
+   window / whole vs part / context; both hold); "same_name_distinct_subject"
+   (same surface name, plausibly different instances); "conditional_unrealized"
+   (one is hypothetical/irrealis); "event_restatement" (same event restated).
+3. contradicts (bool): true ONLY when same_subject is true AND
+   non_conflict_reason is "none" AND the two assert mutually exclusive states in
+   the same time frame. Updates / corrections about the same subject ARE
+   contradictions ("X lives in Tel Aviv" vs "X lives in Haifa").
+4. relationship (exactly one): "exact_value" (same attribute, different single
+   value); "negation" (asserts P vs not-P); "entailed" (one implies or restates
+   the other); "constraint" (multi-valued predicate, both hold); "probabilistic"
+   (hedged/uncertain); "scope_apparent" (same attribute, different implicit
+   qualifiers); "refinement" (one more specific).
+5. diagnosis (exactly one): "correction" (old was wrong); "temporal_change"
+   (state changed over time); "scope_difference"; "entity_mismatch" (actually
+   different entities); "write_error"; "unresolved".
+
+Reply with ONLY a JSON object mapping each candidate index (as a STRING) to its
+judgment, no prose, no markdown fences:
+{{"0": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true, "relationship": "exact_value", "diagnosis": "temporal_change"}}, "1": {{...}}}}
+"""
+
+
+async def _llm_contradiction_check_batch(
+    new_content: str,
+    candidates: list[dict],
+    tenant_config=None,
+) -> list[dict]:
+    """Judge ALL ``candidates`` against ``new_content`` in ONE ``complete_json``
+    call (A61). Returns one raw judgment dict per candidate, aligned to input
+    order; a missing / malformed entry defaults to a safe non-contradiction
+    (``{"contradicts": False}``) so a partial response never fabricates or drops
+    a contradiction. The caller runs each raw through ``_judge_contradiction``,
+    so the safety gates are identical to the per-candidate path."""
+    provider_name = (
+        tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
+    )
+    candidates_block = "\n".join(f"[{i}] {c.get('content', '')[:500]}" for i, c in enumerate(candidates))
+    prompt = BATCH_CONTRADICTION_PROMPT.format(
+        new_content=new_content[:500], candidates_block=candidates_block
+    )
+
+    def _align(obj: object) -> list[dict]:
+        by_index = obj if isinstance(obj, dict) else {}
+        out: list[dict] = []
+        for i in range(len(candidates)):
+            entry = by_index.get(str(i))
+            if entry is None:
+                entry = by_index.get(i)  # tolerate int keys
+            out.append(entry if isinstance(entry, dict) else {"contradicts": False})
+        return out
+
+    async def _do_check(llm) -> list[dict]:
+        raw = await llm.complete_json(prompt)
+        return _align(raw)
+
+    return await call_with_fallback(
+        primary_provider_name=provider_name,
+        call_fn=_do_check,
+        fake_fn=_batch_fake_fn(provider_name, new_content, candidates),
+        tenant_config=tenant_config,
+        service_label="contradiction_batch",
+        model_attr="entity_extraction_model",
+        timeout=15.0,
+    )
+
+
+def _skip_contradiction_pairwise() -> tuple[bool, float]:
+    """The no-LLM verdict for the per-candidate path: abstain.
+
+    ``(False, _CONF_FALLBACK)`` is not a new convention — it is exactly what
+    ``_judge_contradiction`` returns for a malformed response, and per the rubric
+    above 0.50 means "could not tell, parser conservative-default". With no LLM we
+    are in precisely that position.
+
+    This replaced ``_fake_contradiction_check``'s verdict on the production
+    fallback, because a ``True`` here is not advisory. ``detect_contradictions``
+    acts on the boolean ALONE — the confidence is unpacked as ``_confidence`` and
+    only logged, since A4 #13's confidence-weighted veto is still deferred (the
+    only live threshold, ``RETRACTION_CONFIDENCE_THRESHOLD``, gates retraction and
+    not marking) — so it sets the older memory's ``status`` to ``"conflicted"``.
+
+    What that costs, stated precisely rather than dramatically:
+
+    * ``memory_scored_search`` does NOT drop every conflicted row. It keeps one that
+      is an exact lexical match, un-demoted; otherwise the row is demoted and falls
+      out of non-exact-match recall. So the damage is to semantic/vector recall,
+      which is the path that matters for a memory product, not to lookup-by-phrasing.
+    * Recovery exists but is narrow. No sweep re-checks the status, and Path C's
+      retraction judge (:func:`_attempt_path_c_retraction`) only restores the
+      canonical direction, needs resolved entities on both sides, needs confidence
+      ≥ ``RETRACTION_CONFIDENCE_THRESHOLD`` (0.90), and is tenant kill-switchable.
+      A flipped-direction mark is never revisited.
+
+    Abstaining instead loses a real contradiction during an outage, which leaves a
+    memory retrievable that should have been superseded — the recoverable direction,
+    and the same stance ``_fake_dedup_check`` takes when it errs toward keeping a
+    duplicate rather than dropping data.
+    """
+    logger.warning("contradiction_check_skipped candidates=1 reason=no_llm_abstained")
+    return False, _CONF_FALLBACK
+
+
+def _skip_contradiction_batch(count: int) -> list[dict]:
+    """The no-LLM verdict for the batch path: abstain for every candidate.
+
+    An EMPTY dict per candidate, deliberately — not ``_align``'s
+    ``{"contradicts": False}``. Every batch raw is fed straight to
+    ``_judge_contradiction``, and the two shapes score differently there:
+    ``{"contradicts": False}`` is a non-empty dict, so it misses the malformed
+    branch, trips no gate, and comes back ``(False, _CONF_CLEAN)`` — 0.90, which
+    reads as "confidently no contradiction". ``{}`` returns
+    ``(False, _CONF_FALLBACK)`` — 0.50, "could not tell" — matching
+    :func:`_skip_contradiction_pairwise` for the identical situation. Verdict is
+    ``False`` either way, so this is inert today; it stops being inert the moment
+    A4 #13 gates on confidence, when an abstain would otherwise present as a
+    high-confidence clean verdict.
+
+    (``_align`` is right to use ``{"contradicts": False}``: there the model DID
+    answer, just not for that index. This path has no answer at all.)
+
+    The previous fallback hardcoded ``same_subject: True`` for every candidate,
+    which contradicted the batch prompt's own rule — "Set true ONLY when subject_a
+    and subject_b refer to the SAME real-world entity", and "If same_subject is
+    false, contradicts MUST be false". See ``_skip_contradiction_pairwise`` for
+    what acting on that costs.
+    """
+    logger.warning("contradiction_check_skipped candidates=%d reason=no_llm_abstained", count)
+    return [{} for _ in range(count)]
+
+
+def _pairwise_fake_fn(provider_name, new_content: str, old_content: str):
+    """The ``fake_fn`` for a per-candidate judge: heuristic if the operator asked
+    for the fake provider, abstain otherwise. One place so a new call site cannot
+    pick the wrong side of :func:`deliberate_fake_provider` by omission."""
+    if deliberate_fake_provider(provider_name):
+        return lambda: (_fake_contradiction_check(new_content, old_content), _CONF_FALLBACK)
+    return _skip_contradiction_pairwise
+
+
+def _batch_fake_fn(provider_name, new_content: str, candidates: list[dict]):
+    """The ``fake_fn`` for the batch judge. See :func:`_pairwise_fake_fn`."""
+    if deliberate_fake_provider(provider_name):
+        return lambda: [
+            {
+                "same_subject": True,
+                "contradicts": _fake_contradiction_check(new_content, c.get("content", "")),
+            }
+            for c in candidates
+        ]
+    return lambda: _skip_contradiction_batch(len(candidates))
+
+
 def _fake_contradiction_check(new_content: str, old_content: str) -> bool:
-    """Simple heuristic for testing: flag if negation words differ."""
+    """Simple negation-word heuristic. TEST UTILITY ONLY — deliberately NOT wired
+    to the production fallback; see ``_skip_contradiction_pairwise`` for why a
+    heuristic verdict here is not survivable. Exercised directly by
+    ``tests/test_p1_contradiction.py``."""
     negations = {
         "not",
         "no",
@@ -1333,11 +1639,135 @@ async def _llm_entity_aware_contradiction_check(
     return await call_with_fallback(
         primary_provider_name=provider_name,
         call_fn=_do_check,
-        fake_fn=lambda: (_fake_contradiction_check(new_content, old_content), _CONF_FALLBACK),
+        fake_fn=_pairwise_fake_fn(provider_name, new_content, old_content),
         tenant_config=tenant_config,
         service_label="contradiction-entity-aware",
         model_attr="entity_extraction_model",
         timeout=10.0,
+    )
+
+
+# A61 — batched entity-aware judge. Path C's forward-detection loop
+# previously fanned out one ``_llm_entity_aware_contradiction_check`` call
+# per candidate (mirroring the Path A semantic fan-out that #770 batched).
+# For a high-fanout subject (a popular entity referenced by many memories)
+# that is up to ``_ENTITY_LINKS_DETECTION_FETCH_MAX_CANDIDATES`` LLM calls
+# per newly-written memory. This variant judges the whole entity-aware
+# group in ONE ``complete_json`` call, carrying each candidate's OWN
+# resolved entity context so the authoritative same-subject grounding is
+# preserved per candidate.
+BATCH_ENTITY_AWARE_CONTRADICTION_PROMPT = """\
+You are a contradiction detector for a business memory system, running
+the second-pass judgement AFTER entity resolution has already linked every
+statement to its canonical entities.
+
+A NEW statement is compared against several EXISTING candidate statements.
+Judge EACH candidate INDEPENDENTLY against the NEW statement — one
+candidate's verdict must NOT influence another's.
+
+CRITICAL: the RESOLVED ENTITIES blocks are AUTHORITATIVE. The subject of
+each statement has ALREADY been resolved to a specific entity row
+(identified by ``entity_id``) by upstream entity extraction. Do NOT re-do
+that resolution from raw text; use the resolved entities as ground truth
+and decide whether the two statements' CLAIMS about those entities are
+mutually exclusive.
+  * Same subject-role ``entity_id`` on both sides -> same_subject MUST be
+    true (surface qualifiers like "from X", "at Y", possessives, employer /
+    team / location prefixes are extra context about the ONE subject, NOT
+    evidence of different subjects).
+  * Different subject-role ``entity_id`` -> same_subject MUST be false
+    regardless of surface-name similarity (set
+    non_conflict_reason="same_name_distinct_subject" when the canonical
+    names happen to match).
+  * ``entity_id`` starting with "<none-" on either side, or a side missing
+    a subject-role entity -> same_subject=false.
+
+NEW statement: {new_content}
+RESOLVED ENTITIES for the NEW statement:
+{new_entities}
+
+Candidate statements (judge each, by index):
+{candidates_block}
+
+For EACH candidate index decide, applying the rules in order:
+1. same_subject (bool): decided MECHANICALLY by comparing subject-role
+   ``entity_id`` values per the CRITICAL rules above.
+2. non_conflict_reason (exactly one): "none"; "temporal_supersession"
+   (sequential lifecycle states of the same subject, both true in order);
+   "list_valued_predicate" (multi-valued predicate or two different
+   attributes that both hold); "refinement" (one more specific than the
+   other); "scope_mismatch" (same subject, different implicit qualifiers;
+   both hold); "same_name_distinct_subject" (surface names match, resolved
+   entities differ); "conditional_unrealized" (one is hypothetical /
+   irrealis); "event_restatement" (same event restated).
+3. contradicts (bool): true ONLY when same_subject is true AND
+   non_conflict_reason is "none" AND the two assert mutually exclusive
+   states in the same time frame. Corrections / updates about the same
+   subject ARE contradictions.
+4. relationship (exactly one): "exact_value"; "negation"; "entailed";
+   "constraint"; "probabilistic"; "scope_apparent"; "refinement".
+5. diagnosis (exactly one): "correction"; "temporal_change";
+   "scope_difference"; "entity_mismatch"; "write_error"; "unresolved".
+
+Reply with ONLY a JSON object mapping each candidate index (as a STRING)
+to its judgment, no prose, no markdown fences:
+{{"0": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true, "relationship": "exact_value", "diagnosis": "temporal_change"}}, "1": {{...}}}}
+"""
+
+
+async def _llm_entity_aware_contradiction_check_batch(
+    new_content: str,
+    new_entities: list[dict],
+    candidates: list[dict],
+    tenant_config=None,
+) -> list[dict]:
+    """Entity-aware variant of ``_llm_contradiction_check_batch`` (A61 Path C).
+
+    Judge ALL ``candidates`` against ``new_content`` + ``new_entities`` in ONE
+    ``complete_json`` call. Each candidate dict MUST carry ``content`` and its
+    OWN resolved ``entities`` list (the caller assembles these from the
+    per-candidate context fetch). Returns one raw judgment dict per candidate,
+    aligned to input order; a missing / malformed entry defaults to a safe
+    non-contradiction (``{"contradicts": False}``). The caller runs each raw
+    through ``_judge_contradiction`` so the safety gates are identical to the
+    per-candidate entity-aware path.
+    """
+    provider_name = (
+        tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
+    )
+    candidates_block = "\n".join(
+        f"[{i}] {c.get('content', '')[:500]}\n    RESOLVED ENTITIES: "
+        f"{_format_entity_context(c.get('entities', []))}"
+        for i, c in enumerate(candidates)
+    )
+    prompt = BATCH_ENTITY_AWARE_CONTRADICTION_PROMPT.format(
+        new_content=new_content[:500],
+        new_entities=_format_entity_context(new_entities),
+        candidates_block=candidates_block,
+    )
+
+    def _align(obj: object) -> list[dict]:
+        by_index = obj if isinstance(obj, dict) else {}
+        out: list[dict] = []
+        for i in range(len(candidates)):
+            entry = by_index.get(str(i))
+            if entry is None:
+                entry = by_index.get(i)  # tolerate int keys
+            out.append(entry if isinstance(entry, dict) else {"contradicts": False})
+        return out
+
+    async def _do_check(llm) -> list[dict]:
+        raw = await llm.complete_json(prompt)
+        return _align(raw)
+
+    return await call_with_fallback(
+        primary_provider_name=provider_name,
+        call_fn=_do_check,
+        fake_fn=_batch_fake_fn(provider_name, new_content, candidates),
+        tenant_config=tenant_config,
+        service_label="contradiction-entity-aware_batch",
+        model_attr="entity_extraction_model",
+        timeout=15.0,
     )
 
 
@@ -1373,7 +1803,8 @@ async def _llm_entity_aware_contradiction_check(
 #   0.85 — gate 2 fired (model named a non_conflict_reason)
 #   0.60 — gate 1 fired (model said contradicts=True same_subject=False;
 #          parser overrode). THIS IS THE STOCHASTIC FLIP CASE.
-#   0.50 — malformed / heuristic fallback
+#   0.50 — malformed response, or a no-LLM abstain (``_skip_contradiction_*``).
+#          NOT a heuristic verdict any more: the production fallback abstains.
 #
 # Raising the floor to 0.90 means retraction only fires on clean
 # agreement — both gates of the parser say "not a contradiction" with
@@ -1527,8 +1958,8 @@ async def _attempt_path_c_retraction(
         # Below the CAURA-128 floor (0.90). Covers gate-1 (0.60, the
         # stochastic-flip case where parser overrode ``contradicts=True
         # same_subject=False`` to False), gate-2 (0.85, single-gate
-        # ``non_conflict_reason``), and the heuristic / malformed
-        # fallback (0.50). None are trustworthy enough on their own —
+        # ``non_conflict_reason``), and the malformed / no-LLM-abstain
+        # case (0.50). None are trustworthy enough on their own —
         # the judge call is the same prompt + same inputs as Path A's
         # semantic judge, so a single-gate disagreement is just an
         # independent LLM roll flipping. Leave Path A's verdict in
@@ -1619,19 +2050,35 @@ async def detect_contradictions_by_entities_async(
     n_conflicts = 0
     n_retractions = 0
     skipped = False
+    lock_held = False
+    concluded = False
+    lock_key = None
+    lock_token = ""
     try:
-        # A4 #14 — back-channel idempotency. Entity extraction can
-        # complete more than once per memory (delta re-extraction,
-        # partial retry), each completion firing Path C. First caller
-        # wins the lock; the rest skip. Fail-open on Redis outage.
-        if not await _acquire_path_c_lock(memory_id):
-            skipped = True
-            return
-
+        # The row is fetched BEFORE the lock is taken, unlike Path A. The lock
+        # key carries a fingerprint of the content this run will examine (H-06)
+        # and Path C — unlike Path A — is not handed that content by its
+        # caller. The extra GET on a duplicate delivery is cheap beside the LLM
+        # work the lock protects, and fetching first also means a soft-deleted
+        # row no longer burns a lock for the rest of the TTL.
         sc = get_storage_client()
         new_memory = await sc.get_memory(str(memory_id))
         if not new_memory or new_memory.get("deleted_at") is not None:
             return
+
+        # A4 #14 — back-channel idempotency. Entity extraction can
+        # complete more than once per memory (delta re-extraction,
+        # partial retry), each completion firing Path C. First caller
+        # wins the lock; the rest skip. Fail-open on Redis outage.
+        # H-06: per-content, so entity re-extraction after a content edit is
+        # not deduped against the run that examined the previous text.
+        content = new_memory.get("content") or ""
+        lock_key = _path_c_lock_key(memory_id, content)
+        lock_token = _lock_token()
+        if not await _acquire_path_c_lock(memory_id, content, lock_token):
+            skipped = True
+            return
+        lock_held = True
 
         tenant_config = await resolve_config(tenant_id)
 
@@ -1673,6 +2120,7 @@ async def detect_contradictions_by_entities_async(
             n_candidates,
         )
         if not candidates:
+            concluded = True
             return
 
         # A1 #17 — subject preflight. Drop candidates whose
@@ -1706,6 +2154,7 @@ async def detect_contradictions_by_entities_async(
                 n_preflight_skipped,
                 memory_id,
             )
+            concluded = True
             return
 
         # CAURA-130 (L3.4) — entity-links subject preflight. The A1 #17
@@ -1879,6 +2328,7 @@ async def detect_contradictions_by_entities_async(
                 n_entity_links_skipped,
                 memory_id,
             )
+            concluded = True
             return
 
         # CAURA-131 — entity-aware judge for each surviving candidate
@@ -1888,31 +2338,13 @@ async def detect_contradictions_by_entities_async(
         # entity_links yet — e.g. entity-extraction hasn't completed
         # for the candidate at the time Path C runs).
         new_content = new_memory.get("content", "")
-        tasks = []
         # CAURA-132 diag — record which judge was selected for each
         # candidate so the post-hoc analysis can correlate
         # judge_kind → verdict.
         judge_kinds: list[str] = []
         for c in candidates:
             cand_ctx = contexts.get(str(c.get("id")), []) if contexts_fetched else []
-            if contexts_fetched and new_ctx and cand_ctx:
-                judge_kinds.append("entity_aware")
-                tasks.append(
-                    asyncio.wait_for(
-                        _llm_entity_aware_contradiction_check(
-                            new_content, c.get("content", ""), new_ctx, cand_ctx, tenant_config
-                        ),
-                        timeout=10.0,
-                    )
-                )
-            else:
-                judge_kinds.append("base")
-                tasks.append(
-                    asyncio.wait_for(
-                        _llm_contradiction_check(new_content, c.get("content", ""), tenant_config),
-                        timeout=10.0,
-                    )
-                )
+            judge_kinds.append("entity_aware" if (contexts_fetched and new_ctx and cand_ctx) else "base")
         logger.info(
             "PATH_C_DETECTION judge_selection memory=%s candidates=%d entity_aware=%d base=%d",
             memory_id,
@@ -1920,7 +2352,70 @@ async def detect_contradictions_by_entities_async(
             judge_kinds.count("entity_aware"),
             judge_kinds.count("base"),
         )
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # A61 — batch the per-candidate judge fan-out. Path C's forward
+        # detection previously issued ONE LLM call per candidate (up to
+        # ``_ENTITY_LINKS_DETECTION_FETCH_MAX_CANDIDATES``); for a popular
+        # subject that is the same per-write cost blow-up #770 fixed on the
+        # Path A semantic path. We now collapse the fan-out into at most TWO
+        # LLM calls — one batched entity-aware call for the candidates whose
+        # context is populated on both sides, one batched base call for the
+        # rest — while keeping the exact judge-selection semantics above.
+        #
+        # A single candidate keeps the direct per-candidate call (mirrors the
+        # Path A ``len == 1`` special case; leaves the large single-candidate
+        # test corpus untouched). ``results`` stays aligned to ``candidates``
+        # and preserves the ``(verdict, confidence)`` / ``Exception`` shape the
+        # downstream loop already handles — a whole-batch failure defaults its
+        # group to ``Exception`` so those candidates are skipped, never
+        # fabricated.
+        results: list = [None] * len(candidates)
+        if len(candidates) == 1:
+            c = candidates[0]
+            try:
+                if judge_kinds[0] == "entity_aware":
+                    cand_ctx = contexts.get(str(c.get("id")), [])
+                    results[0] = await asyncio.wait_for(
+                        _llm_entity_aware_contradiction_check(
+                            new_content, c.get("content", ""), new_ctx, cand_ctx, tenant_config
+                        ),
+                        timeout=10.0,
+                    )
+                else:
+                    results[0] = await asyncio.wait_for(
+                        _llm_contradiction_check(new_content, c.get("content", ""), tenant_config),
+                        timeout=10.0,
+                    )
+            except Exception as e:  # mirror gather(return_exceptions=True)
+                results[0] = e
+        else:
+            ea_idx = [i for i, k in enumerate(judge_kinds) if k == "entity_aware"]
+            base_idx = [i for i, k in enumerate(judge_kinds) if k == "base"]
+            if ea_idx:
+                ea_cands = [
+                    {
+                        "content": candidates[i].get("content", ""),
+                        "entities": contexts.get(str(candidates[i].get("id")), []),
+                    }
+                    for i in ea_idx
+                ]
+                try:
+                    ea_raws = await _llm_entity_aware_contradiction_check_batch(
+                        new_content, new_ctx, ea_cands, tenant_config
+                    )
+                    for j, i in enumerate(ea_idx):
+                        results[i] = _judge_contradiction(ea_raws[j])
+                except Exception as e:
+                    for i in ea_idx:
+                        results[i] = e
+            if base_idx:
+                base_cands = [candidates[i] for i in base_idx]
+                try:
+                    base_raws = await _llm_contradiction_check_batch(new_content, base_cands, tenant_config)
+                    for j, i in enumerate(base_idx):
+                        results[i] = _judge_contradiction(base_raws[j])
+                except Exception as e:
+                    for i in base_idx:
+                        results[i] = e
         found = False
         # CAURA-125 — state-corruption guard; mirrors the RDF and
         # semantic paths in ``_detect()``.
@@ -2026,9 +2521,17 @@ async def detect_contradictions_by_entities_async(
                     memory_id,
                     path_c_result["skipped"],
                 )
+        concluded = True
     except Exception:
         logger.exception("Entity-based contradiction detection failed for %s", memory_id)
     finally:
+        # H-06 — see the matching block in ``detect_contradictions_async``.
+        # ``concluded`` is set at each legitimate exit rather than once early,
+        # so a throw ANYWHERE in the judging loop still releases: a failure
+        # half way through must not block the retry for the rest of the TTL.
+        # The storage writes are CAS-guarded, so re-running is safe.
+        if lock_held and not concluded and lock_key is not None:
+            await _release_lock(lock_key, lock_token)
         elapsed_ms = round((time.monotonic() - t_start) * 1000)
         logger.info(
             "path_c_completed for memory %s n_candidates=%d n_conflicts=%d "

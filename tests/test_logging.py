@@ -614,3 +614,27 @@ def test_stdlib_logger_emits_datadog_status_alongside_severity(
         assert len(records) == 1, f"expected one record for {needle}, got: {lines}"
         assert records[0]["severity"] == severity
         assert records[0]["status"] == status
+
+
+def test_uvicorn_error_lifecycle_line_emits_info_status(_json_log_buffer) -> None:
+    """The uvicorn *parent supervisor* logs its lifecycle lines ("Started
+    parent process", "Received SIGTERM, exiting.", ...) via the
+    ``uvicorn.error`` logger at INFO. When the server is launched via
+    ``common.serve`` (which calls ``configure_logging()`` in the parent, then
+    ``uvicorn.run(log_config=None)`` so uvicorn installs no handlers of its
+    own), that logger stays pristine and propagates to the structlog root
+    handler — so the line emits as JSON with ``status:info``, not the plain
+    ``INFO:`` text that was reaching Datadog as ``status:error``.
+
+    This pins the classification: an INFO record on a pristine ``uvicorn.error``
+    logger renders through our pipeline as ``severity:INFO`` / ``status:info``.
+    """
+    logging.getLogger("uvicorn.error").info("Started parent process [8]")
+    lines = _json_log_buffer.getvalue().strip().splitlines()
+    # Filter on the quoted message so only the JSON handler's line matches — the
+    # buffer also holds pytest's plain-format capture-handler copies (same
+    # buffer, swapped by the fixture), which lack the surrounding quotes.
+    records = [json.loads(line) for line in lines if '"Started parent process [8]"' in line]
+    assert len(records) == 1, f"expected one uvicorn.error JSON record, got: {lines}"
+    assert records[0]["severity"] == "INFO"
+    assert records[0]["status"] == "info"

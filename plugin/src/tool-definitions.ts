@@ -7,7 +7,7 @@
  *   - Parameter JSON Schema                        ← `PARAM_SCHEMAS` below
  *   - HTTP dispatch (method/URL/body/validation)   ← `ENDPOINT_DISPATCH` below
  *
- * Op-dispatched tools (memclaw_manage, memclaw_doc) branch inside their
+ * Op-dispatched tools (caura_manage, caura_doc) branch inside their
  * dispatch entry on `params.op`. Tool descriptions come from the
  * server's SoT registry (via `/tool-descriptions` →
  * `getToolDescription`), falling back to the description baked into
@@ -61,13 +61,13 @@ async function enrichBody(
 }
 
 function labelFor(name: string): string {
-  const rest = name.replace(/^memclaw_?/, "");
+  const rest = name.replace(/^caura_?/, "");
   const titled = rest
     .split("_")
     .filter(Boolean)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ");
-  return titled ? `MemClaw ${titled}` : "MemClaw";
+  return titled ? `Caura ${titled}` : "Caura";
 }
 
 // Keep in sync with core-api/src/core_api/constants.py::MEMORY_TYPES
@@ -96,7 +96,7 @@ const STATUS_SCHEMA = {
 // --- Parameter JSON Schemas ---
 
 const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
-  memclaw_recall: {
+  caura_recall: {
     type: "object",
     required: ["query"],
     properties: {
@@ -111,7 +111,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     },
   },
 
-  memclaw_write: {
+  caura_write: {
     type: "object",
     required: ["agent_id"],
     properties: {
@@ -145,7 +145,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     },
   },
 
-  memclaw_manage: {
+  caura_manage: {
     type: "object",
     required: ["op", "memory_id"],
     properties: {
@@ -162,7 +162,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     },
   },
 
-  memclaw_doc: {
+  caura_doc: {
     type: "object",
     required: ["op"],
     properties: {
@@ -185,7 +185,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
         // ``additionalProperties: true`` is JSON Schema's default but OpenClaw's
         // gateway-side AJV validator runs in strict mode (which silently flips
         // it to false for any object schema lacking explicit ``properties``).
-        // Without this, every plugin-routed ``memclaw_doc op=write`` call from
+        // Without this, every plugin-routed ``caura_doc op=write`` call from
         // an agent fails with "data: must not have additional properties" —
         // surfaced wet-testing the Phase B skill-share flow on memclaw.dev
         // (2026-05-06).
@@ -203,7 +203,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     },
   },
 
-  memclaw_list: {
+  caura_list: {
     type: "object",
     required: [],
     properties: {
@@ -225,7 +225,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     },
   },
 
-  memclaw_entity_get: {
+  caura_entity_get: {
     type: "object",
     required: ["entity_id"],
     properties: {
@@ -233,7 +233,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     },
   },
 
-  memclaw_tune: {
+  caura_tune: {
     type: "object",
     required: [],
     properties: {
@@ -249,7 +249,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     },
   },
 
-  memclaw_insights: {
+  caura_insights: {
     type: "object",
     required: ["focus"],
     properties: {
@@ -264,7 +264,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     },
   },
 
-  memclaw_evolve: {
+  caura_evolve: {
     type: "object",
     required: ["outcome", "outcome_type"],
     properties: {
@@ -281,7 +281,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     },
   },
 
-  memclaw_stats: {
+  caura_stats: {
     type: "object",
     required: [],
     properties: {
@@ -293,7 +293,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     },
   },
 
-  memclaw_keystones: {
+  caura_keystones: {
     type: "object",
     required: [],
     properties: {
@@ -327,7 +327,7 @@ function searchBody(params: Record<string, unknown>): Record<string, unknown> {
 }
 
 const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
-  memclaw_recall: async (params, signal) => {
+  caura_recall: async (params, signal) => {
     const body = await enrichBody(searchBody(params));
     const includeBrief = Boolean(params.include_brief);
     const results = await apiCall("POST", "/search", body, undefined, signal);
@@ -336,7 +336,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     return { results, brief };
   },
 
-  memclaw_write: async (params, signal) => {
+  caura_write: async (params, signal) => {
     const isBatch = Array.isArray(params.items);
     const body = await enrichBody(params);
     // Write-scoped identity default: never send an empty agent_id, which on the
@@ -362,7 +362,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     return apiCall("POST", "/memories", body, undefined, signal);
   },
 
-  memclaw_manage: async (params, signal) => {
+  caura_manage: async (params, signal) => {
     const enriched = await enrichBody(params);
     const op = enriched.op as string;
     const memory_id = enriched.memory_id as string;
@@ -401,7 +401,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     );
   },
 
-  memclaw_doc: async (params, signal) => {
+  caura_doc: async (params, signal) => {
     const enriched = await enrichBody(params);
     const op = enriched.op as string;
     const collection = enriched.collection as string | undefined;
@@ -463,7 +463,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     );
   },
 
-  memclaw_list: async (params, signal) => {
+  caura_list: async (params, signal) => {
     const enriched = await enrichBody(params);
     const query: Record<string, string> = {};
     for (const [k, v] of Object.entries(enriched)) {
@@ -473,7 +473,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     return apiCall("GET", "/memories", undefined, query, signal);
   },
 
-  memclaw_entity_get: async (params, signal) => {
+  caura_entity_get: async (params, signal) => {
     const enriched = await enrichBody(params);
     const entity_id = enriched.entity_id as string;
     assertSafePathSegment(entity_id, "entity_id");
@@ -487,7 +487,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     );
   },
 
-  memclaw_tune: async (params, signal) => {
+  caura_tune: async (params, signal) => {
     const enriched = await enrichBody(params);
     const tenant_id = enriched.tenant_id as string;
     const agent_id = (enriched.agent_id as string) || "unknown-agent";
@@ -506,17 +506,17 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     );
   },
 
-  memclaw_insights: async (params, signal) => {
+  caura_insights: async (params, signal) => {
     const body = await enrichBody(params);
     return apiCall("POST", "/insights/generate", body, undefined, signal);
   },
 
-  memclaw_evolve: async (params, signal) => {
+  caura_evolve: async (params, signal) => {
     const body = await enrichBody(params);
     return apiCall("POST", "/evolve/report", body, undefined, signal);
   },
 
-  memclaw_stats: async (params, signal) => {
+  caura_stats: async (params, signal) => {
     const enriched = await enrichBody(params);
     const query: Record<string, string> = {};
     for (const [k, v] of Object.entries(enriched)) {
@@ -531,7 +531,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   // the result to the system prompt (see ``plugin/src/keystones.ts``).
   // Exposing it as a callable tool too gives agents a way to re-fetch
   // mid-session when they suspect rules have changed.
-  memclaw_keystones: async (params, signal) => {
+  caura_keystones: async (params, signal) => {
     const enriched = await enrichBody(params);
     const query: Record<string, string> = {};
     for (const [k, v] of Object.entries(enriched)) {

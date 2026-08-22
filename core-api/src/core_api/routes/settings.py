@@ -46,8 +46,13 @@ async def update_tenant_settings(
     Regular user requests always use ``auth.user_id`` regardless of the header.
     """
     tid = _resolve_tenant(auth, tenant_id)
-    if auth.is_demo:
-        raise HTTPException(status_code=403, detail="Demo sandbox is read-only")
+    # ``enforce_read_only`` rather than the ``is_demo`` check this replaced: that
+    # check caught the demo sandbox but NOT a credential minted read-only by
+    # construction (capabilities={'read'}), so a viewer/reporting key could
+    # rewrite tenant settings. Both signals live behind this one gate, which is
+    # why write-shaped endpoints are supposed to call it instead of testing
+    # individual flags.
+    auth.enforce_read_only()
     # Tenant settings include security-relevant toggles (e.g. require_agent_approval,
     # which governs whether new agents start quarantined). An agent-scoped
     # credential must not be able to flip them.

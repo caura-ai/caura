@@ -53,6 +53,17 @@ RUN EXTRAS="--extra pubsub"; \
       --directory core-api -o /tmp/reqs.txt \
     && uv pip install --system --no-cache -r /tmp/reqs.txt
 
+# Opt-in in-process reranker (RANK_PROVIDER=local). torch + sentence-transformers
+# are ~2GB and deliberately NOT in the frozen lock — installed here only when a
+# build wants the local cross-encoder path (local dev, or a deployment that
+# reranks inside core-api), so the DEFAULT image stays lean and prod-unaffected.
+# Unpinned by design: a dev/opt-in convenience, not a prod-critical pinned dep.
+# Prod should prefer RANK_PROVIDER=remote (a /rerank sidecar) — no torch here.
+ARG WITH_RERANK_LOCAL=0
+RUN if [ "$WITH_RERANK_LOCAL" = "1" ]; then \
+      uv pip install --system --no-cache torch sentence-transformers; \
+    fi
+
 # Stamp the service version into a file the app reads at runtime. Source of
 # truth is pyproject.toml; an optional MEMCLAW_VERSION build-arg (e.g. the
 # release tag) overrides it. Deterministic and independent of installed-
@@ -112,4 +123,8 @@ USER appuser
 EXPOSE 8000
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-CMD ["uvicorn", "core_api.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "65"]
+# Launch via common.serve (not the uvicorn CLI directly) so the multiprocess
+# supervisor/parent configures structlog before starting — otherwise its
+# lifecycle lines ("Started parent process", "Received SIGTERM", ...) bypass
+# the JSON pipeline and land in Datadog as status:error. See common/serve.py.
+CMD ["python", "-m", "common.serve", "core_api.app:app", "--settings", "core_api.config:settings", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "65"]

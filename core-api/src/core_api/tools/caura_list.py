@@ -1,0 +1,31 @@
+"""ToolSpec for caura_list — non-semantic memory enumeration.
+
+Filter, sort, and paginate memories by metadata. NOT semantic search
+(use ``caura_recall``). scope='agent' at trust ≥ 1; scope='fleet' reads
+your OWN fleet at trust ≥ 1, a different fleet at trust ≥ 2; scope='all'
+(tenant-wide) requires trust ≥ 2. Trust 3 unlocks ``include_deleted``.
+"""
+
+from core_api import mcp_server
+
+from ._builders import mcp_register
+from ._registry import register
+from ._types import ToolSpec
+
+_DESCRIPTION = (
+    "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, "
+    "status, weight, created-at. scope='agent' (default) lists your memories at trust ≥ 1; "
+    "scope='fleet' reads your OWN fleet at trust ≥ 1, a different fleet at trust ≥ 2; "
+    "scope='all' (tenant-wide) requires trust ≥ 2. Trust 3 unlocks include_deleted. "
+    "Cursor pagination requires sort=created_at order=desc. For semantic search use caura_recall."
+)
+
+_SPEC = ToolSpec(
+    name="caura_list",
+    description=_DESCRIPTION,
+    handler=mcp_server.caura_list,
+    plugin_exposed=True,
+    trust_required=1,
+)
+register(_SPEC)
+mcp_register(mcp_server.mcp, _SPEC)

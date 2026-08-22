@@ -319,7 +319,7 @@ describe("writeEducationFiles", () => {
     for (const wsPath of [ws.main, ws.hyphen, ws.customFromConfig, ws.subdir]) {
       const tools = readFileSync(join(wsPath, "TOOLS.md"), "utf-8");
       const agents = readFileSync(join(wsPath, "AGENTS.md"), "utf-8");
-      assert.ok(tools.includes("MemClaw"), `TOOLS.md missing MemClaw section in ${wsPath}`);
+      assert.ok(tools.includes("Caura"), `TOOLS.md missing MemClaw section in ${wsPath}`);
       assert.ok(agents.includes("## Memory V2"), `AGENTS.md missing '## Memory V2' anchor in ${wsPath}`);
     }
   });
@@ -333,7 +333,7 @@ describe("writeEducationFiles", () => {
 
     assert.equal(result.toolsUpdated, 1);
     assert.equal(result.agentsUpdated, 1);
-    assert.ok(readFileSync(join(subdir, "TOOLS.md"), "utf-8").includes("MemClaw"));
+    assert.ok(readFileSync(join(subdir, "TOOLS.md"), "utf-8").includes("Caura"));
     assert.ok(readFileSync(join(subdir, "AGENTS.md"), "utf-8").includes("## Memory V2"));
   });
 
@@ -379,9 +379,9 @@ describe("writeEducationFiles", () => {
 
     assert.equal(result.toolsUpdated, 1);
     assert.equal(result.agentsUpdated, 1);
-    assert.ok(readFileSync(join(base, "workspaces", "agent2", "TOOLS.md"), "utf-8").includes("MemClaw"));
-    assert.ok(!existsSync(join(base, "workspace", "TOOLS.md")) || !readFileSync(join(base, "workspace", "TOOLS.md"), "utf-8").includes("MemClaw"));
-    assert.ok(!existsSync(join(base, "workspaces", "agent3", "TOOLS.md")) || !readFileSync(join(base, "workspaces", "agent3", "TOOLS.md"), "utf-8").includes("MemClaw"));
+    assert.ok(readFileSync(join(base, "workspaces", "agent2", "TOOLS.md"), "utf-8").includes("Caura"));
+    assert.ok(!existsSync(join(base, "workspace", "TOOLS.md")) || !readFileSync(join(base, "workspace", "TOOLS.md"), "utf-8").includes("Caura"));
+    assert.ok(!existsSync(join(base, "workspaces", "agent3", "TOOLS.md")) || !readFileSync(join(base, "workspaces", "agent3", "TOOLS.md"), "utf-8").includes("Caura"));
   });
 
   test("cleans up pre-existing phantom MemClaw files at <baseDir>/workspaces/", () => {
@@ -418,7 +418,7 @@ describe("writeEducationFiles", () => {
 
   // ── Fenced-block migration (A1) ──
   //
-  // Pre-A1 idempotency was substring-based (`includes("MemClaw")` /
+  // Pre-A1 idempotency was substring-based (`includes("Caura")` /
   // `includes("## Memory V2")`), so once a workspace had any MemClaw
   // content, plugin upgrades never refreshed it. Below: every behaviour
   // the new versioned-fence implementation must guarantee.
@@ -539,15 +539,15 @@ describe("writeEducationFiles", () => {
         "\n---\n\n" +
         "## MemClaw — Long-Term Agent Memory (auto-added by plugin)\n\n" +
         "13 tools:\n" +
-        "| `memclaw_write_bulk` | Store multiple memories at once |\n" +
-        "| `memclaw_search` | Semantic search, returns raw results |\n";
+        "| `caura_write_bulk` | Store multiple memories at once |\n" +
+        "| `caura_search` | Semantic search, returns raw results |\n";
       writeFileSync(join(wsDir, "TOOLS.md"), userBefore + legacy_v0_98, "utf-8");
 
       const result = writeEducationFiles(buildToolsMd(), buildAgentsMd(), undefined, base);
 
       assert.equal(result.toolsUpdated, 1, "legacy v0.98.5 heading must be detected and spliced");
       const tools = readFile(join(wsDir, "TOOLS.md"));
-      assert.ok(!tools.includes("memclaw_write_bulk"), "stale 0.98.5 tool name must be replaced");
+      assert.ok(!tools.includes("caura_write_bulk"), "stale 0.98.5 tool name must be replaced");
       assert.ok(!tools.includes("Long-Term Agent Memory"), "stale 0.98.5 heading must be gone");
       assert.match(tools, /<!-- memclaw:tools v=[a-f0-9]{8} -->/);
       assert.ok(tools.startsWith(userBefore), "user content above legacy block preserved");
@@ -563,8 +563,8 @@ describe("writeEducationFiles", () => {
       const legacy_v0_98 =
         "\n---\n\n" +
         "## Memory V2 (auto-added by MemClaw plugin — replaces any earlier memory section above)\n\n" +
-        "**Layer 1:** Per-turn write-back — `memclaw_write` after every meaningful outcome\n" +
-        "- Update > Create — prefer `memclaw_update` over duplicates\n";
+        "**Layer 1:** Per-turn write-back — `caura_write` after every meaningful outcome\n" +
+        "- Update > Create — prefer `caura_update` over duplicates\n";
       writeFileSync(join(wsDir, "AGENTS.md"), userBefore + legacy_v0_98, "utf-8");
 
       const result = writeEducationFiles(buildToolsMd(), buildAgentsMd(), undefined, base);
@@ -572,7 +572,7 @@ describe("writeEducationFiles", () => {
       assert.equal(result.agentsUpdated, 1);
       const agents = readFile(join(wsDir, "AGENTS.md"));
       assert.ok(!agents.includes("auto-added by MemClaw plugin"), "stale 0.98.5 heading must be gone");
-      assert.ok(!agents.includes("memclaw_update"), "stale 0.98.5 body must be replaced");
+      assert.ok(!agents.includes("caura_update"), "stale 0.98.5 body must be replaced");
       assert.match(agents, /<!-- memclaw:agents v=[a-f0-9]{8} -->/);
       assert.ok(agents.startsWith(userBefore), "user content above legacy block preserved");
     });
@@ -614,14 +614,14 @@ describe("writeEducationFiles", () => {
       const userBefore = "# Tools\r\n\r\n";
       const legacy =
         "---\r\n\r\n## MemClaw — Tools Available\r\n\r\n" +
-        "Obsolete CRLF body with memclaw_write_bulk reference.\r\n";
+        "Obsolete CRLF body with caura_write_bulk reference.\r\n";
       writeFileSync(join(wsDir, "TOOLS.md"), userBefore + legacy, "utf-8");
 
       const result = writeEducationFiles(buildToolsMd(), buildAgentsMd(), undefined, base);
 
       assert.equal(result.toolsUpdated, 1, "CRLF legacy heading must still be detected");
       const tools = readFile(join(wsDir, "TOOLS.md"));
-      assert.ok(!tools.includes("memclaw_write_bulk"), "stale CRLF content must be replaced");
+      assert.ok(!tools.includes("caura_write_bulk"), "stale CRLF content must be replaced");
       assert.ok(tools.startsWith(userBefore), "user content above legacy block preserved (with original CRLF)");
       assert.match(tools, /<!-- memclaw:tools v=[a-f0-9]{8} -->/);
     });
@@ -636,7 +636,7 @@ describe("writeEducationFiles", () => {
       const userBefore = "# Tools notes\n\nMy tools notes.\n";
       const legacy =
         "\n---\n\n## MemClaw — Tools Available\n\n" +
-        "Obsolete 13-tool listing including memclaw_write_bulk and memclaw_search.\n";
+        "Obsolete 13-tool listing including caura_write_bulk and caura_search.\n";
       const userAfter = "\n## Other\n\nMy other section.\n";
       const original = userBefore + legacy + userAfter;
       writeFileSync(join(wsDir, "TOOLS.md"), original, "utf-8");
@@ -645,8 +645,8 @@ describe("writeEducationFiles", () => {
 
       assert.equal(result.toolsUpdated, 1);
       const tools = readFile(join(wsDir, "TOOLS.md"));
-      assert.ok(!tools.includes("memclaw_write_bulk"), "legacy stale tool name must be gone");
-      assert.ok(!tools.includes("memclaw_search"), "legacy stale tool name must be gone");
+      assert.ok(!tools.includes("caura_write_bulk"), "legacy stale tool name must be gone");
+      assert.ok(!tools.includes("caura_search"), "legacy stale tool name must be gone");
       assert.match(tools, /<!-- memclaw:tools v=[a-f0-9]{8} -->/);
       assert.ok(tools.startsWith(userBefore), "content above the legacy block must be preserved");
       assert.ok(tools.includes("## Other"), "content below the legacy block must be preserved");
@@ -666,7 +666,7 @@ describe("writeEducationFiles", () => {
         // Body must include a `memclaw_` token so the content-shape
         // check in findLegacyRange treats this as our block (and not
         // a coincidental user heading with the same prefix).
-        "user\n\n---\n\n## MemClaw — Tools Available\n\nold body referencing memclaw_write_bulk.\n";
+        "user\n\n---\n\n## MemClaw — Tools Available\n\nold body referencing caura_write_bulk.\n";
       writeFileSync(join(wsDir, "TOOLS.md"), original, "utf-8");
 
       writeEducationFiles(buildToolsMd(), buildAgentsMd(), undefined, base);
@@ -779,7 +779,7 @@ describe("writeEducationFiles", () => {
       // Body must include a `memclaw_` token so the content-shape
       // check in findLegacyRange treats this as our block.
       const legacy =
-        "\n---\n\n## Memory V2 — MemClaw Protocol (mandatory)\n\nObsolete agent rules using memclaw_write.\n";
+        "\n---\n\n## Memory V2 — MemClaw Protocol (mandatory)\n\nObsolete agent rules using caura_write.\n";
       writeFileSync(join(wsDir, "AGENTS.md"), userBefore + legacy, "utf-8");
 
       const result = writeEducationFiles(buildToolsMd(), buildAgentsMd(), undefined, base);
@@ -1145,9 +1145,9 @@ describe("shared SKILL.md (plugin/skills/memclaw/SKILL.md)", () => {
     // knows the surface. Signatures live in the MCP schemas + injected
     // TOOLS.md, so we assert names, not signature cards.
     for (const tool of [
-      "memclaw_recall", "memclaw_write", "memclaw_manage", "memclaw_list",
-      "memclaw_doc", "memclaw_entity_get", "memclaw_tune",
-      "memclaw_insights", "memclaw_evolve", "memclaw_stats", "memclaw_keystones",
+      "caura_recall", "caura_write", "caura_manage", "caura_list",
+      "caura_doc", "caura_entity_get", "caura_tune",
+      "caura_insights", "caura_evolve", "caura_stats", "caura_keystones",
     ]) {
       assert.ok(skill.includes(tool), `SKILL.md does not mention ${tool}`);
     }
@@ -1155,7 +1155,7 @@ describe("shared SKILL.md (plugin/skills/memclaw/SKILL.md)", () => {
     // tools.ts) — it must NOT appear as a callable tool, only as the
     // "not available to plugin agents" note.
     assert.ok(
-      !/`memclaw_keystones_set\(/.test(skill),
+      !/`caura_keystones_set\(/.test(skill),
       "plugin SKILL.md must not present keystones_set as a callable tool",
     );
   });
@@ -1176,16 +1176,16 @@ describe("shared SKILL.md (plugin/skills/memclaw/SKILL.md)", () => {
 
 describe("buildToolsMd", () => {
   const ALL_TOOLS = [
-    "memclaw_recall",
-    "memclaw_write",
-    "memclaw_manage",
-    "memclaw_list",
-    "memclaw_doc",
-    "memclaw_entity_get",
-    "memclaw_tune",
-    "memclaw_insights",
-    "memclaw_evolve",
-    "memclaw_stats",
+    "caura_recall",
+    "caura_write",
+    "caura_manage",
+    "caura_list",
+    "caura_doc",
+    "caura_entity_get",
+    "caura_tune",
+    "caura_insights",
+    "caura_evolve",
+    "caura_stats",
   ];
 
   test("lists every plugin-exposed tool", () => {
@@ -1426,8 +1426,8 @@ describe("buildAgentsMd", () => {
       "AGENTS.md must explicitly tell the agent not to filesystem-search for the skill",
     );
     assert.ok(
-      /before your first MemClaw/i.test(flat),
-      "AGENTS.md must carry a 'before your first MemClaw call' nudge",
+      /before your first Caura/i.test(flat),
+      "AGENTS.md must carry a 'before your first Caura call' nudge",
     );
   });
 
