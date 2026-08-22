@@ -33,7 +33,7 @@ croniter>=2.0
 aiosqlite>=0.19,<1
 
 # Redis cache (optional — falls back to in-memory if not configured)
-redis[hiredis]>=5.0,<6
+redis[hiredis]>=8.1.0,<9
 
 # Rate limiting — backed by Redis when REDIS_URL is set, in-memory otherwise
 slowapi>=0.1.9,<1.0
