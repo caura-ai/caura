@@ -1,0 +1,175 @@
+name: Publish caura to npm
+
+# Publishes `clients/npm-caura` — the bare `caura` name on npm, a thin
+# re-export of the scoped TypeScript client.
+#
+# WHY THIS EXISTS AS ITS OWN WORKFLOW. The package had none, so the name was
+# never claimed: `npm install caura` 404s today while `README.md` and
+# `clients/npm-caura/README.md` both instruct people to run it. That is worse
+# than an unshipped package — it is a live instruction pointing at a slot
+# anyone can take, and whoever takes it inherits the traffic and the two
+# README citations.
+#
+# The precedent is ours. The old brand's bare name is third-party-held on BOTH
+# registries — npm by `deshrajdry`, PyPI by `emanuilo` — and one of the two
+# describes itself as a memory layer for OpenClaw. Installing either by that
+# name fetches foreign code today. Both were lost by not claiming them and
+# neither is recoverable; `caura` on npm is the equivalent door still open.
+#
+# ORDERING. This package depends on the scoped client at `^1.0.0`, so that
+# package must exist on the registry at a matching version first — it does
+# (1.0.0, and 1.0.1 once `publish-npm-client.yml` runs). npm does not verify
+# dependencies at publish time, so publishing this against a missing version
+# would succeed and produce a package nobody can install.
+#
+# One-time setup by a maintainer:
+#   1. Add an `NPM_TOKEN` repository secret — an npm automation token with
+#      publish rights. Automation tokens are exempt from 2FA/OTP prompts by
+#      design; an OTP is never entered in CI.
+#   2. Nothing else. The name is unscoped, so no npm org is required.
+#
+# Release: push a tag `caura-npm-v<version>` matching the version in
+# clients/npm-caura/package.json, or run this workflow manually.
+
+on:
+  push:
+    tags:
+      - "caura-npm-v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      # Both, and `contents: read` is not redundant: declaring a permissions
+      # block sets every scope NOT listed to `none`, so naming only id-token
+      # leaves `contents: none` and `actions/checkout` authenticating with a
+      # token that cannot read the repo.
+      contents: read
+      id-token: write # npm provenance
+    defaults:
+      run:
+        working-directory: clients/npm-caura
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # Checked explicitly because the failure it prevents is a confusing one.
+      # Without the secret, `npm publish` authenticates as nobody and fails
+      # with a 401 or ENEEDAUTH that reads like an npm-side problem rather
+      # than a missing repository secret. This has already cost a debugging
+      # round once.
+      - name: The publish credential must exist
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -z "${NPM_TOKEN}" ]]; then
+            echo "::error::NPM_TOKEN repository secret is not set. Add an npm automation token with publish rights; nothing here can publish without it."
+            exit 1
+          fi
+
+      # A tag that disagrees with package.json does not fail — it publishes
+      # whatever package.json says, under a tag claiming otherwise. The
+      # release then looks done and the registry serves a different version.
+      - name: The tag must agree with package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#caura-npm-v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} says ${TAG_VERSION} but package.json says ${PKG_VERSION}"
+            exit 1
+          fi
+          echo "publishing $(node -p "require('./package.json').name")@${PKG_VERSION}"
+
+      # The ORDERING note in the header is the one risk here with no natural
+      # symptom: npm does not resolve dependencies at publish time, so
+      # publishing this against a client version that is not on the registry
+      # SUCCEEDS, and produces a package that fails for the first person who
+      # installs it. Every other risk named in this file has a check; this one
+      # was described and left to the operator, which is the shape of comment
+      # that goes stale and is worth even less than no comment.
+      #
+      # Every dependency is checked, not just the one that exists today, so
+      # adding a second cannot quietly skip it.
+      - name: Every dependency must already be on the registry
+        run: |
+          node -p "Object.entries(require('./package.json').dependencies || {}).map(([n, r]) => n + '@' + r).join('\n')" \
+            > /tmp/deps.txt
+          # Retried on the same schedule as the post-publish check below, and
+          # for the same reason: the expected release order is client then
+          # metapackage, minutes apart, so this lookup runs exactly when the
+          # dependency is newest and least likely to have propagated. A single
+          # attempt would turn npm's own CDN lag into a failed release.
+          while read -r SPEC; do
+            [[ -z "$SPEC" ]] && continue
+            RESOLVED=""
+            for attempt in 1 2 3 4 5; do
+              # `--json`, not the human-readable form. `npm view <spec> <field>`
+              # prints `pkg@ver 'ver'` per match, which parses correctly today
+              # but is presentation output with no stability contract; `--json`
+              # is a string for one match and an array for several, and both
+              # are contractual. Same reason the collaborators lookup below
+              # uses it.
+              #
+              # `|| true` is load-bearing, not defensive noise. Actions runs
+              # steps under `bash -eo pipefail`, so an unresolvable spec makes
+              # `npm view` exit non-zero, pipefail propagates it, and `set -e`
+              # aborts the whole step on attempt 1 — silently, before the
+              # diagnostic below ever prints. That is the exact case this loop
+              # exists for, so without this the retry is decorative.
+              RESOLVED=$(npm view "$SPEC" version --json 2>/dev/null | node -e '
+                let s = "";
+                process.stdin.on("data", d => s += d).on("end", () => {
+                  try {
+                    const j = JSON.parse(s);
+                    const a = Array.isArray(j) ? j : [j];
+                    const last = a[a.length - 1];
+                    // A string, or nothing. npm prints its E404 as VALID JSON
+                    // on stdout when --json is set — an object with an "error"
+                    // key — so JSON.parse succeeding proves nothing about
+                    // whether the package exists. Without this type check that
+                    // error object itself becomes a non-empty RESOLVED, and a
+                    // missing dependency silently PASSES the gate. Verified:
+                    // it did exactly that before the check was added.
+                    console.log(typeof last === "string" ? last : "");
+                  } catch { console.log(""); }
+                });' || true)
+              [[ -n "$RESOLVED" ]] && break
+              echo "attempt ${attempt}: ${SPEC} not visible yet, waiting"
+              sleep 10
+            done
+            if [[ -z "$RESOLVED" ]]; then
+              echo "::error::${SPEC} is not on the registry. Publish it first (publish-npm-client.yml) — npm would accept this package anyway and it would be uninstallable."
+              exit 1
+            fi
+            echo "${SPEC} -> ${RESOLVED}"
+          done < /tmp/deps.txt
+
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # A green publish step is not evidence the registry serves it. Today
+      # `#870` merged a version bump, every check passed, and both registries
+      # went on serving the old build because no tag had been pushed — the
+      # tick meant "nothing went wrong", not "it shipped". Ask the registry.
+      - name: The registry must actually serve it
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          for attempt in 1 2 3 4 5; do
+            PUBLISHED=$(npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null || true)
+            if [[ "$PUBLISHED" == "$PKG_VERSION" ]]; then
+              echo "registry serves ${PKG_NAME}@${PUBLISHED}"
+              exit 0
+            fi
+            echo "attempt ${attempt}: registry does not serve ${PKG_VERSION} yet, waiting"
+            sleep 10
+          done
+          echo "::error::published without error but the registry does not serve ${PKG_NAME}@${PKG_VERSION}"
+          exit 1
