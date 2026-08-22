@@ -126,7 +126,11 @@ permissions:
 env:
   EXTRA_PROMPT: "This is a FastAPI + PostgreSQL (pgvector) backend with a TypeScript OpenClaw plugin. Uses requirements.txt (not uv/pyproject.toml). Tests are in tests/ directory."
   REVIEW_PROMPT: |
-    Do NOT review files under tests/ or test_* files. Focus only on source code.
+    Do NOT review files under tests/ or test_* files — EXCEPT conftest.py
+    and tests/_*.py shared fixtures/helpers, which you MUST review like
+    source code: they are the highest-fan-in files in the suite, and the
+    Aug 22 handover recorded a PR where "No issues found" actually meant
+    "diff was excluded". Focus otherwise on source code.
 
     Review this PR for real issues only — not style preferences.
 
