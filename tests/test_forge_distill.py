@@ -508,6 +508,21 @@ def _passing_traces(n: int) -> list[SessionTraceRow]:
     ]
 
 
+def _two_eligible_clusters() -> list:
+    """Two clusters that both clear the volume + diversity gates.
+
+    Module-level because two test classes need it: TestForgeRunResilience (one
+    seam fails, the others still run) and TestInternalErrorBucket (the same shape
+    for programming errors rather than I/O).
+    """
+    return [
+        _trace(run_id=f"r{i}", agent_id=f"a{i}", entity_ids=["e1", "e2", "e3"]) for i in range(4)
+    ] + [
+        _trace(run_id=f"r{i + 10}", agent_id=f"b{i}", entity_ids=["x1", "x2", "x3"])
+        for i in range(4)
+    ]
+
+
 async def _llm_returns_golden(_prompt: str) -> str:
     return json.dumps(_golden_llm_response())
 
@@ -825,18 +840,10 @@ class TestForgeRunResilience:
         import core_api.services.forge.forge_service as svc
         monkeypatch.setattr(svc, "build_session_traces", fake_build)
 
-    def _two_eligible_clusters(self):
-        return (
-            [_trace(run_id=f"r{i}", agent_id=f"a{i}", entity_ids=["e1", "e2", "e3"])
-             for i in range(4)]
-            +
-            [_trace(run_id=f"r{i+10}", agent_id=f"b{i}", entity_ids=["x1", "x2", "x3"])
-             for i in range(4)]
-        )
 
     @pytest.mark.asyncio
     async def test_llm_timeout_on_one_cluster_skips_it(self, monkeypatch):
-        self._patch_build(monkeypatch, self._two_eligible_clusters())
+        self._patch_build(monkeypatch, _two_eligible_clusters())
 
         call = {"n": 0}
         async def llm(_prompt: str) -> str:
@@ -867,7 +874,7 @@ class TestForgeRunResilience:
 
     @pytest.mark.asyncio
     async def test_memory_fetcher_error_skips_cluster(self, monkeypatch):
-        self._patch_build(monkeypatch, self._two_eligible_clusters())
+        self._patch_build(monkeypatch, _two_eligible_clusters())
 
         call = {"n": 0}
         async def fetcher(mids):
@@ -893,7 +900,7 @@ class TestForgeRunResilience:
 
     @pytest.mark.asyncio
     async def test_poison_checker_error_skips_cluster(self, monkeypatch):
-        self._patch_build(monkeypatch, self._two_eligible_clusters())
+        self._patch_build(monkeypatch, _two_eligible_clusters())
 
         call = {"n": 0}
         async def poisoner(_fp):
@@ -925,7 +932,7 @@ class TestForgeRunResilience:
         smuggle a malformed doc past Sentinel into the inbox.
         Treat as a distill error so the cluster is skipped and
         counted, not silently written."""
-        self._patch_build(monkeypatch, self._two_eligible_clusters())
+        self._patch_build(monkeypatch, _two_eligible_clusters())
 
         call = {"n": 0}
         async def llm(_prompt: str) -> str:
@@ -954,7 +961,7 @@ class TestForgeRunResilience:
         # Two eligible clusters; the first WRITE fails (e.g. UNIQUE
         # violation, schema validator hiccup). The second cluster
         # must still get persisted.
-        self._patch_build(monkeypatch, self._two_eligible_clusters())
+        self._patch_build(monkeypatch, _two_eligible_clusters())
 
         # Unique slug per LLM call so we can tell them apart in the
         # writer.
@@ -1311,3 +1318,149 @@ class TestForgeDeterminism:
         fp1 = cap1[0]["data"]["cluster_fingerprint"]
         fp2 = cap2[0]["data"]["cluster_fingerprint"]
         assert fp1 == fp2  # cluster identity is stable across runs
+
+
+# ── Programming errors are their own bucket, not I/O (#818 follow-up) ──
+
+
+@pytest.mark.unit
+class TestInternalErrorBucket:
+    """H-08 was invisible for two months because a ``TypeError`` from a
+    wrongly-wired injectable landed in ``candidates_skipped_io_error`` — the same
+    bucket as a storage hiccup. The two need opposite responses: I/O says look at
+    storage and maybe retry, this says look at the code. These tests pin the split
+    using the actual shape of that bug.
+    """
+
+    def _patch_build(self, monkeypatch, traces):
+        async def fake_build(*_args, **_kwargs):
+            return list(traces)
+
+        import core_api.services.forge.forge_service as svc
+
+        monkeypatch.setattr(svc, "build_session_traces", fake_build)
+
+    @pytest.mark.asyncio
+    async def test_the_h08_wiring_bug_lands_in_internal_not_io(self, monkeypatch):
+        """The exact H-08 shape: a 3-arg poison checker in the 1-arg seam."""
+        self._patch_build(monkeypatch, _two_eligible_clusters())
+
+        async def three_arg_checker(tenant_id, fleet_id, fingerprint) -> bool:
+            return False  # never reached — the call itself raises
+
+        captured, writer = _capture_writer()
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+            llm_fn=_llm_returns_golden,
+            memory_fetcher=_memory_fetcher_always,
+            poison_checker=three_arg_checker,
+            candidate_writer=writer,
+        )
+
+        assert result.clusters_eligible == 2
+        assert result.candidates_written == 0
+        # The whole point of the split: this must NOT read as storage trouble.
+        assert result.candidates_skipped_internal_error == 2
+        assert result.candidates_skipped_io_error == 0
+        assert captured == []
+
+    @pytest.mark.asyncio
+    async def test_one_bad_cluster_does_not_cost_the_others(self, monkeypatch):
+        """These are not always deterministic, so a single bad cluster must still
+        only cost itself — the tick keeps going."""
+        self._patch_build(monkeypatch, _two_eligible_clusters())
+
+        call = {"n": 0}
+
+        async def flaky_checker(fp: str) -> bool:
+            call["n"] += 1
+            if call["n"] == 1:
+                raise AttributeError("simulated shape bug on one cluster")
+            return False
+
+        captured, writer = _capture_writer()
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+            llm_fn=_llm_returns_golden,
+            memory_fetcher=_memory_fetcher_always,
+            poison_checker=flaky_checker,
+            candidate_writer=writer,
+        )
+
+        assert result.candidates_skipped_internal_error == 1
+        assert result.candidates_written == 1
+        assert result.candidates_skipped_io_error == 0
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_wrote_nothing_says_so_at_error_level(self, monkeypatch, caplog):
+        """The signal H-08 never produced. Per-cluster tracebacks already existed;
+        what was missing was one line saying the run as a whole was broken."""
+        import logging
+
+        self._patch_build(monkeypatch, _two_eligible_clusters())
+        caplog.set_level(logging.ERROR, logger="core_api.services.forge.forge_service")
+
+        async def three_arg_checker(tenant_id, fleet_id, fingerprint) -> bool:
+            return False
+
+        _captured, writer = _capture_writer()
+        await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+            llm_fn=_llm_returns_golden,
+            memory_fetcher=_memory_fetcher_always,
+            poison_checker=three_arg_checker,
+            candidate_writer=writer,
+        )
+
+        errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+        summary = [m for m in errors if "wrote NOTHING" in m]
+        assert summary, f"expected a run-level ERROR summary; got {errors}"
+        # It has to name the cause and the counter, or it is just noise.
+        assert "code/wiring bug" in summary[0]
+        assert "candidates_skipped_internal_error" in summary[0]
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_wrote_something_does_not_page_anyone(self, monkeypatch, caplog):
+        """One malformed cluster among successes is routine. If this summary fired
+        there too it would be ignored within a week, which is how alerts die."""
+        import logging
+
+        self._patch_build(monkeypatch, _two_eligible_clusters())
+        caplog.set_level(logging.ERROR, logger="core_api.services.forge.forge_service")
+
+        call = {"n": 0}
+
+        async def flaky_checker(fp: str) -> bool:
+            call["n"] += 1
+            if call["n"] == 1:
+                raise TypeError("simulated shape bug on one cluster")
+            return False
+
+        _captured, writer = _capture_writer()
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+            llm_fn=_llm_returns_golden,
+            memory_fetcher=_memory_fetcher_always,
+            poison_checker=flaky_checker,
+            candidate_writer=writer,
+        )
+
+        assert result.candidates_written == 1
+        assert result.candidates_skipped_internal_error == 1
+        assert not [r for r in caplog.records if "wrote NOTHING" in r.getMessage()]

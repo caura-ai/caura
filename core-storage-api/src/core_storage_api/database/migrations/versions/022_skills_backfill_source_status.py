@@ -5,7 +5,7 @@ collection with two lifecycle fields every doc is expected to carry:
 
   - ``source`` — the producer that minted the doc. Canonical values:
                  ``forge`` (Forge resident), ``agent`` (synchronous
-                 agent write via ``memclaw_doc``), ``manual`` (a human
+                 agent write via ``caura_doc``), ``manual`` (a human
                  authored it), or ``imported`` (bulk import / external
                  producer).
   - ``status`` — lifecycle state. Pre-existing docs are already in

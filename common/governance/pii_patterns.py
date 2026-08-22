@@ -4,7 +4,7 @@ Seeded from the 4 high-frequency patterns in the Skill-Factory Sentinel scanner
 (``core_api.services.forge.sentinel_scan``) and extended to 60+ patterns across
 emails, phones, payment cards (Luhn-validated), IBANs (mod-97-validated),
 national IDs, and provider API keys / secrets (high-entropy-validated). The
-validators are the whole point — a bare "13–19 digits" regex flags every order
+validators are the whole point — a bare "13-19 digits" regex flags every order
 number; gating it on the Luhn checksum cuts the false-positive rate hard.
 
 ``scan`` returns :class:`Finding` objects that carry only category + offsets +

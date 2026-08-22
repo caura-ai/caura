@@ -49,6 +49,7 @@ from core_storage_api.routers import (
     skill_factory_router,
     tasks_router,
     tenant_suppression_router,
+    tenant_usage_router,
     tenants_router,
 )
 
@@ -180,6 +181,7 @@ def create_app() -> FastAPI:
     # one flush batch carries many tenants' counters. core-api's in-process
     # aggregator POSTs here on its flush interval via the storage_client.
     app.include_router(capability_usage_router, prefix=prefix)
+    app.include_router(tenant_usage_router, prefix=prefix)
 
     return app
 

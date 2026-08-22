@@ -1,4 +1,4 @@
-"""Insights REST endpoints — mirrors memclaw_insights MCP tool."""
+"""Insights REST endpoints — mirrors caura_insights MCP tool."""
 
 from __future__ import annotations
 

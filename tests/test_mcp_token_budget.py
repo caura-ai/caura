@@ -20,7 +20,7 @@ tiktoken = pytest.importorskip("tiktoken")
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
-# Measured count after adding memclaw_keystones / memclaw_keystones_set
+# Measured count after adding caura_keystones / caura_keystones_set
 # (12 tools, CAURA-000): 4906 cl100k. Was 4796 with the 12 tools before
 # Phase B's skills migration trimmed it to 10.
 #

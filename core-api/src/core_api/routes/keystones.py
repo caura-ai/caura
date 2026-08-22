@@ -1,14 +1,14 @@
 """Keystone rules — REST surface (CAURA-000).
 
-Public mirror of the ``memclaw_keystones`` / ``memclaw_keystones_set``
+Public mirror of the ``caura_keystones`` / ``caura_keystones_set``
 MCP tools. Thin proxy over core-storage's ``/api/v1/storage/keystones``;
 tiered trust enforcement (see the matrix below) and audit live in
 core-api so the storage layer can stay a dumb CRUD service.
 
 Endpoints (under ``/api/v1``):
-* ``GET    /memclaw/keystones`` — list scope-merged rules
-* ``POST   /memclaw/keystones`` — upsert a rule (tiered trust; see below)
-* ``DELETE /memclaw/keystones/{doc_id}`` — remove a rule (tiered trust)
+* ``GET    /keystones`` — list scope-merged rules
+* ``POST   /keystones`` — upsert a rule (tiered trust; see below)
+* ``DELETE /keystones/{doc_id}`` — remove a rule (tiered trust)
 
 Trust gating is dynamic per the targeted rule's scope:
 
@@ -39,7 +39,7 @@ from core_api.trust_utils import effective_keystone_min_trust, keystone_min_trus
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/memclaw/keystones", tags=["Keystones"])
+router = APIRouter(prefix="/keystones", tags=["Keystones"])
 
 
 # ── Schemas ──
@@ -53,7 +53,7 @@ class KeystoneSetRequest(BaseModel):
     tenant_id: str
     fleet_id: str | None = None
     agent_id: str | None = None
-    # Slug shape mirrors ``memclaw_doc`` collection=skills (filesystem-safe
+    # Slug shape mirrors ``caura_doc`` collection=skills (filesystem-safe
     # identifier) so keystone ``doc_id`` values stay greppable in audit
     # logs and safe to render in dashboards. The pattern already pins
     # length (1 leading char + up to 99 trailing), so explicit ``min_length``

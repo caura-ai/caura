@@ -49,6 +49,30 @@ class CircularPublishChainError(RuntimeError):
     """
 
 
+class PermanentOpError(RuntimeError):
+    """A lifecycle op failed in a way redelivering it cannot fix.
+
+    Raise this instead of a generic exception when the op can tell the fault is
+    not worth retrying — a wiring or shape bug rather than a flaky dependency.
+    The lifecycle runner records the ``failure`` row exactly as it would for any
+    other exception, marks it ``stats={"terminal": True}``, and then ACKS.
+
+    Named to match :class:`common.ranking.errors.PermanentRankError`, which is the
+    same idea one layer over; keeping one word for one concept means a grep for
+    either finds both.
+
+    SCOPE: only ``lifecycle_handlers``' shared runner honours this. Handlers
+    registered directly on the bus (see ``core_worker.consumer``) get no special
+    treatment — neither bus inspects the exception type, so raising it there nacks
+    like anything else. Such a handler owns its own audit row and should write the
+    failure row and return, rather than raise.
+
+    Prefer a plain raise when the op is cheap and idempotent. Suppressing a retry
+    is only worth it where redelivery costs something real; for archive/purge a
+    nack is nearly free, so the extra retry is better than the extra machinery.
+    """
+
+
 class EventBus(ABC):
     """Abstract event bus. Concrete implementations: `InProcessEventBus`,
     `PubSubEventBus`.

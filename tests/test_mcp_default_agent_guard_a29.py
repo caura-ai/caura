@@ -6,16 +6,16 @@ gateway path when the caller relies on the literal ``"mcp-agent"`` default
 (i.e. the gateway resolved a tenant credential but did NOT inject an
 ``X-Agent-ID`` header):
 
-    memclaw_recall, memclaw_list, memclaw_stats, memclaw_insights,
-    memclaw_keystones, and every op of memclaw_doc (read, query,
+    caura_recall, caura_list, caura_stats, caura_insights,
+    caura_keystones, and every op of caura_doc (read, query,
     search, list_collections, write, delete).
 
 What stays un-guarded (per the A14 scope decision):
-    memclaw_manage op=lineage / op=read.
+    caura_manage op=lineage / op=read.
 
 What was already guarded by A14 and MUST still refuse (regression guard):
-    memclaw_write — kept here as a sanity ping that the broader edit
-    on memclaw_doc didn't accidentally drop the existing write guard.
+    caura_write — kept here as a sanity ping that the broader edit
+    on caura_doc didn't accidentally drop the existing write guard.
 """
 
 from __future__ import annotations
@@ -38,17 +38,17 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 @pytest.mark.parametrize(
     "tool_name,kwargs",
     [
-        # memclaw_recall: query is the only required kwarg.
-        ("memclaw_recall", {"query": "anything"}),
-        # memclaw_list: scope defaults to "agent" which passes pre-validation.
-        ("memclaw_list", {}),
-        # memclaw_stats: every param optional.
-        ("memclaw_stats", {}),
-        # memclaw_insights: focus is required and must be one of the allowed
+        # caura_recall: query is the only required kwarg.
+        ("caura_recall", {"query": "anything"}),
+        # caura_list: scope defaults to "agent" which passes pre-validation.
+        ("caura_list", {}),
+        # caura_stats: every param optional.
+        ("caura_stats", {}),
+        # caura_insights: focus is required and must be one of the allowed
         # slugs to clear pre-validation before the guard fires.
-        ("memclaw_insights", {"focus": "contradictions"}),
-        # memclaw_keystones: every param optional.
-        ("memclaw_keystones", {}),
+        ("caura_insights", {"focus": "contradictions"}),
+        # caura_keystones: every param optional.
+        ("caura_keystones", {}),
     ],
 )
 async def test_read_tool_refuses_default_agent_on_gateway(mcp_env, tool_name, kwargs):
@@ -74,7 +74,7 @@ async def test_read_tool_refuses_default_agent_on_gateway(mcp_env, tool_name, kw
 
 
 # ---------------------------------------------------------------------------
-# 2. memclaw_doc — guard fires on every op (A29 closes the delete gap, and
+# 2. caura_doc — guard fires on every op (A29 closes the delete gap, and
 #    write was already covered by A14; included as a regression guard).
 # ---------------------------------------------------------------------------
 
@@ -92,20 +92,20 @@ async def test_read_tool_refuses_default_agent_on_gateway(mcp_env, tool_name, kw
         ("delete", {"collection": "skills", "doc_id": "rule-1"}),
     ],
 )
-async def test_memclaw_doc_refuses_default_agent_on_gateway(mcp_env, op, extra_kwargs):
-    """memclaw_doc must refuse the default identity on every op when
+async def test_caura_doc_refuses_default_agent_on_gateway(mcp_env, op, extra_kwargs):
+    """caura_doc must refuse the default identity on every op when
     gateway-routed. Storage helpers don't need to succeed — the guard
     is the first non-validation step, so we only need the kwargs to
     clear per-op argument validation."""
     token = mcp_server._via_gateway_var.set(True)
     try:
-        out = await mcp_server.memclaw_doc(op=op, **extra_kwargs)
+        out = await mcp_server.caura_doc(op=op, **extra_kwargs)
     finally:
         mcp_server._via_gateway_var.reset(token)
 
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "MISSING_AGENT_ID", (
-        f"memclaw_doc op={op!r} did not refuse the default identity on "
+        f"caura_doc op={op!r} did not refuse the default identity on "
         f"gateway path; got {payload!r}"
     )
 
@@ -127,7 +127,7 @@ async def test_read_default_agent_in_standalone_does_not_trigger_guard(mcp_env):
     short-circuits to an envelope, never raises)."""
     # Don't flip _via_gateway_var — standalone is the default in tests.
     try:
-        out = await mcp_server.memclaw_recall(query="anything")
+        out = await mcp_server.caura_recall(query="anything")
     except Exception:
         # The call reached past the guard and crashed downstream
         # (no storage mock) — that itself proves the guard did not fire.
@@ -157,7 +157,7 @@ async def test_read_explicit_agent_on_gateway_bypasses_guard(mcp_env):
     token = mcp_server._via_gateway_var.set(True)
     try:
         try:
-            out = await mcp_server.memclaw_recall(
+            out = await mcp_server.caura_recall(
                 query="anything", agent_id="real-agent"
             )
         except Exception:
@@ -176,17 +176,17 @@ async def test_read_explicit_agent_on_gateway_bypasses_guard(mcp_env):
 
 
 # ---------------------------------------------------------------------------
-# 5. A14 contract still holds — memclaw_write regression guard.
+# 5. A14 contract still holds — caura_write regression guard.
 # ---------------------------------------------------------------------------
 
 
 async def test_a14_write_guard_still_holds(mcp_env):
     """Sanity ping: the A29 extension did not regress the A14 write guard
-    on memclaw_write itself. If this fails, the broader edit on the read
+    on caura_write itself. If this fails, the broader edit on the read
     surfaces likely also broke the write surface."""
     token = mcp_server._via_gateway_var.set(True)
     try:
-        out = await mcp_server.memclaw_write(content="anything")
+        out = await mcp_server.caura_write(content="anything")
     finally:
         mcp_server._via_gateway_var.reset(token)
 
@@ -195,12 +195,12 @@ async def test_a14_write_guard_still_holds(mcp_env):
 
 
 # ---------------------------------------------------------------------------
-# 6. Out-of-scope guard — memclaw_manage op=lineage stays un-guarded.
+# 6. Out-of-scope guard — caura_manage op=lineage stays un-guarded.
 # ---------------------------------------------------------------------------
 
 
 async def test_manage_lineage_is_not_guarded_by_a29(mcp_env):
-    """memclaw_manage op=lineage is a *read* on memclaw_manage. The A14
+    """caura_manage op=lineage is a *read* on caura_manage. The A14
     PR deliberately scoped manage's guard to its write ops (delete /
     update / transition / bulk_delete), and A29 did NOT extend the guard
     to manage's read ops. This test pins that intentional gap so a
@@ -213,7 +213,7 @@ async def test_manage_lineage_is_not_guarded_by_a29(mcp_env):
     token = mcp_server._via_gateway_var.set(True)
     try:
         try:
-            out = await mcp_server.memclaw_manage(
+            out = await mcp_server.caura_manage(
                 op="lineage", memory_id=str(uuid.uuid4())
             )
         except Exception:
@@ -226,7 +226,7 @@ async def test_manage_lineage_is_not_guarded_by_a29(mcp_env):
     err = payload.get("error") if isinstance(payload, dict) else None
     if err is not None:
         assert err.get("code") != "MISSING_AGENT_ID", (
-            "memclaw_manage op=lineage MUST NOT be guarded by the A14/A29 "
+            "caura_manage op=lineage MUST NOT be guarded by the A14/A29 "
             "default-identity refusal — manage's read ops are out of scope; "
             f"got {payload!r}"
         )

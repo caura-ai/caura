@@ -19,6 +19,62 @@ from core_api.config import settings
 
 logger = logging.getLogger(__name__)
 
+_DUPLICATE_FALLBACK_DETAIL = "Duplicate memory exists"
+
+
+class DuplicateMemoryError(Exception):
+    """Storage refused a memory insert: a live row already holds this content.
+
+    Only raisable since migration 040 gave ``(tenant, fleet, agent,
+    content_hash)`` a partial unique index. Before it, an insert of duplicate
+    content succeeded and quietly created a second row.
+
+    Carries storage's ``detail`` verbatim, which names the winning row's id — an
+    agent told "duplicate" without being told *which* row cannot use the one it
+    should have got. Callers that own an HTTP contract map this to 409, matching
+    ``CheckExactDuplicate``: that gate answers the duplicate it can see before
+    the write, this answers the race it cannot, and callers should not have to
+    tell the two apart.
+    """
+
+
+def _storage_detail(response: httpx.Response) -> str:
+    """Storage's ``detail`` string, or a safe stand-in.
+
+    Defensive about the body because this runs on an error path: a 409 whose body
+    is not JSON, or is JSON without ``detail``, must not turn a clean 409 into a
+    JSONDecodeError from inside the exception handler.
+    """
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return _DUPLICATE_FALLBACK_DETAIL
+    return detail if isinstance(detail, str) and detail else _DUPLICATE_FALLBACK_DETAIL
+
+
+def _reject_reserved_write_id(agent_id: str | None) -> None:
+    """Storage-boundary reserved-id backstop. No-op under ``allow``/``warn``;
+    only under ``reject`` does it raise ``ReservedAgentIdError`` for a reserved
+    id (the service maps it to HTTP 409).
+
+    Gated on ``reject`` on purpose: this runs on the normal service→storage
+    path, and the service layer has *already* called ``enforce_reserved_write_id``
+    (which logs one ``reserved_agent_write`` event under warn/reject). Calling it
+    again here would emit a duplicate log on every write, inflating the counter
+    ops uses to decide when to flip warn→reject. Under ``reject`` the service
+    path 409s before reaching storage, so this only fires for a *direct-storage*
+    caller that skipped the service guard — exactly the bypass we defend against,
+    and the single log/raise there is correct. ``main-<install_id>`` and named
+    ids are never reserved, so they pass.
+    """
+    from core_api.config import settings
+
+    if settings.reserved_agent_id_policy != "reject":
+        return
+    from core_api.services.agent_identity import enforce_reserved_write_id
+
+    enforce_reserved_write_id(agent_id)
+
 
 # Retry policy (F5 + the 2026-06-11 connect-timeout incident) lives in
 # ``common/http_retry.py``, shared with core-worker's storage client:
@@ -408,7 +464,33 @@ class CoreStorageClient:
     # =====================================================================
 
     async def create_memory(self, data: dict) -> dict:
-        return await self._post("/memories", data)
+        # Defense-in-depth reserved-id chokepoint. The service layer
+        # (memory_service.create_memory / create_memories_bulk) already rejects
+        # bare reserved "main" under policy=reject and is the path every current
+        # caller takes. Re-asserting it here — the single boundary EVERY memory
+        # insert funnels through — guarantees no present or future caller can
+        # persist a bare-"main" firehose row by reaching storage directly,
+        # skipping the service guard. Only exact ALWAYS_RESERVED_AGENT_IDS
+        # ({"main"}) reject; the de-collapsed main-<install_id> form (#507) and
+        # every named id pass untouched.
+        _reject_reserved_write_id(data.get("agent_id"))
+        try:
+            return await self._post("/memories", data)
+        except httpx.HTTPStatusError as exc:
+            # Migration 040's unique index can now REJECT this insert, which
+            # storage maps to 409. Recognised here, at the single boundary every
+            # memory insert funnels through, so no caller has to know that a
+            # storage 409 is a thing this endpoint does.
+            #
+            # A TYPED error rather than ``HTTPException``: nothing else in
+            # ``core_api/clients/`` raises a FastAPI type, and the app-level
+            # ``httpx.HTTPStatusError`` handler documents the reason it cannot do
+            # this job either — it deliberately re-raises 4xx as "a bug in OUR
+            # request shape", which a legitimate duplicate is not. Callers that
+            # own an HTTP contract translate it; see ``WriteMemoryRow``.
+            if exc.response.status_code != 409:
+                raise
+            raise DuplicateMemoryError(_storage_detail(exc.response)) from exc
 
     async def create_memories(self, data: list[dict]) -> list[dict]:
         """Bulk-insert memories with per-attempt idempotency (CAURA-602).
@@ -428,10 +510,35 @@ class CoreStorageClient:
         (concurrent soft-delete or a torn write); the upstream caller
         treats it as a per-item error.
         """
-        return await self._post("/memories/bulk", data)
+        # Defense-in-depth reserved-id chokepoint (see create_memory).
+        for item in data:
+            _reject_reserved_write_id(item.get("agent_id"))
+        try:
+            return await self._post("/memories/bulk", data)
+        except httpx.HTTPStatusError as exc:
+            # Same translation as ``create_memory``, for the same reason — and it
+            # has to be here too, not only there: migration 040's constraint can
+            # abort a whole batch, and ON CONFLICT cannot arbitrate a second
+            # index, so the bulk route answers 409 as well. Without this the two
+            # endpoints would disagree about what a duplicate looks like to a
+            # core-api caller.
+            #
+            # NOTE the batch is all-or-nothing: a 409 here means NOTHING in the
+            # batch was written, unlike the per-item outcomes a success returns.
+            if exc.response.status_code != 409:
+                raise
+            raise DuplicateMemoryError(_storage_detail(exc.response)) from exc
 
-    async def get_memory(self, memory_id: str) -> dict | None:
-        return await self._get(f"/memories/{memory_id}")
+    async def get_memory(self, memory_id: str, *, read: bool = True) -> dict | None:
+        """Fetch one memory by id.
+
+        ``read=False`` routes to the WRITER. Pass it for a read-your-write — a
+        read-back of a row this request (or an event's producer) just wrote, where
+        replica lag would make the row or the freshly-PATCHed column invisible.
+        Same reasoning as the write-path dedup gate below, which passes it for the
+        same reason.
+        """
+        return await self._get(f"/memories/{memory_id}", read=read)
 
     async def get_memory_for_tenant(self, tenant_id: str, memory_id: str) -> dict | None:
         return await self._get(f"/memories/{memory_id}", tenant_id=tenant_id)
@@ -601,6 +708,12 @@ class CoreStorageClient:
         queue's failure modes."""
         return await self._post("/memories/dedup-reviews", payload, read=False)  # type: ignore[return-value]
 
+    async def record_memory_conflict(self, payload: dict) -> dict:
+        """A55 — persist a ``memory_conflicts`` classification record. Additive:
+        the memory-row status/supersedes effect is applied separately, so this
+        never changes retrieval behaviour."""
+        return await self._post("/memories/conflicts", payload, read=False)  # type: ignore[return-value]
+
     async def list_dedup_reviews(self, params: dict) -> list[dict]:
         """List reviews for a tenant, default ``status='pending'``."""
         return await self._get(  # type: ignore[return-value]
@@ -764,14 +877,22 @@ class CoreStorageClient:
         memory_id: str,
         tenant_id: str,
         embedding: list[float],
+        embedded_content_hash: str | None = None,
     ) -> dict | None:
         # ``tenant_id`` (the row's home tenant) scopes the by-id embedding
         # write so a worker/backfill can't overwrite a foreign tenant's
         # vector.
-        return await self._patch(
-            f"/memories/{memory_id}/embedding",
-            {"embedding": embedding, "tenant_id": tenant_id},
-        )
+        #
+        # ``embedded_content_hash`` is the hash of the text this caller
+        # embedded. Pass it whenever the content is in hand: it is what makes
+        # a later content change detectable as a stale vector. Omitting it
+        # records provenance as unknown rather than guessing — storage will
+        # NOT infer it from the row, because the row can move between the
+        # caller's read and this write.
+        payload: dict[str, Any] = {"embedding": embedding, "tenant_id": tenant_id}
+        if embedded_content_hash is not None:
+            payload["embedded_content_hash"] = embedded_content_hash
+        return await self._patch(f"/memories/{memory_id}/embedding", payload)
 
     async def update_memory_entities(
         self,
@@ -808,6 +929,14 @@ class CoreStorageClient:
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
         return await self._get("/memories/embedding-coverage", **params) or {}
+
+    async def get_embedding_coverage_all(self) -> dict:
+        """Embedding coverage for every tenant (operator view, one query).
+
+        No ``tenant_id``: this is the cross-tenant aggregate, so callers must
+        gate it on the admin key. Counts only.
+        """
+        return await self._get("/memories/embedding-coverage-all") or {}
 
     async def get_type_distribution(
         self,
@@ -983,7 +1112,7 @@ class CoreStorageClient:
         return (result or {}).get("deleted", 0)  # type: ignore[union-attr]
 
     async def list_memories_by_filters(self, data: dict) -> list[dict]:
-        """Non-admin memory list WITH visibility scoping (MCP ``memclaw_list``).
+        """Non-admin memory list WITH visibility scoping (MCP ``caura_list``).
 
         ``data`` carries the filter/sort/cursor params (incl. ``caller_agent_id``
         for the scope_agent visibility gate and an optional ``readable_tenant_ids``
@@ -998,7 +1127,7 @@ class CoreStorageClient:
         return result  # type: ignore[return-value]
 
     async def memory_stats_breakdown(self, data: dict) -> dict:
-        """Visibility-scoped stats breakdown (MCP ``memclaw_stats``).
+        """Visibility-scoped stats breakdown (MCP ``caura_stats``).
 
         ``data`` carries ``{tenant_id?, fleet_id?, agent_id?, memory_type?,
         status?, include_deleted?, readable_tenant_ids?}``. Returns
@@ -1094,6 +1223,18 @@ class CoreStorageClient:
         """
         result = await self._post("/capability-usage", {"rows": rows})
         return result.get("inserted", 0)  # type: ignore[union-attr]
+
+    async def increment_tenant_usage(self, rows: list[dict]) -> int:
+        """ADD to per-tenant, per-period counters in ``tenant_usage_counters``.
+
+        Cross-tenant by design (each row carries its own ``tenant_id``).
+        ``period_start`` must be an ISO string. Additive and applied in the
+        database, so concurrent core-api instances metering one tenant all
+        land — unlike ``flush_capability_usage``, which appends rows for
+        consumers to SUM. Returns the rows-touched count.
+        """
+        result = await self._post("/tenant-usage/increment", {"rows": rows})
+        return result.get("updated", 0)  # type: ignore[union-attr]
 
     # =====================================================================
     # Entities
@@ -1812,8 +1953,18 @@ class CoreStorageClient:
         )
 
     async def insights_query_failures(
-        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        agent_id: str,
+        scope: str,
+        max_memories: int,
+        window_start: datetime | None = None,
     ) -> list[dict]:
+        """``window_start`` bounds the title-dedup scan (see
+        ``INSIGHTS_FAILURES_WINDOW_DAYS``); ``None`` keeps the legacy
+        unbounded read."""
         return await self._post(  # type: ignore[return-value]
             "/insights/failures",
             {
@@ -1822,6 +1973,7 @@ class CoreStorageClient:
                 "agent_id": agent_id,
                 "scope": scope,
                 "max_memories": max_memories,
+                "window_start": window_start.isoformat() if window_start else None,
             },
             read=True,
         )
@@ -1836,7 +1988,12 @@ class CoreStorageClient:
         thirty_days_ago: datetime,
         fourteen_days_ago: datetime,
         max_memories: int,
+        window_start: datetime | None = None,
     ) -> list[dict]:
+        """``window_start`` bounds the title-dedup scan (see
+        ``INSIGHTS_STALE_WINDOW_DAYS`` — wider than the 30-day age threshold
+        rows must exceed to qualify); ``None`` keeps the legacy unbounded
+        read."""
         return await self._post(  # type: ignore[return-value]
             "/insights/stale",
             {
@@ -1847,6 +2004,7 @@ class CoreStorageClient:
                 "thirty_days_ago": thirty_days_ago.isoformat(),
                 "fourteen_days_ago": fourteen_days_ago.isoformat(),
                 "max_memories": max_memories,
+                "window_start": window_start.isoformat() if window_start else None,
             },
             read=True,
         )
@@ -1867,8 +2025,18 @@ class CoreStorageClient:
         )
 
     async def insights_query_patterns(
-        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        agent_id: str,
+        scope: str,
+        max_memories: int,
+        window_start: datetime | None = None,
     ) -> list[dict]:
+        """``window_start`` bounds the title-dedup scan to a trailing window
+        (see ``INSIGHTS_PATTERNS_WINDOW_DAYS``); ``None`` keeps the legacy
+        unbounded read."""
         return await self._post(  # type: ignore[return-value]
             "/insights/patterns",
             {
@@ -1877,14 +2045,25 @@ class CoreStorageClient:
                 "agent_id": agent_id,
                 "scope": scope,
                 "max_memories": max_memories,
+                "window_start": window_start.isoformat() if window_start else None,
             },
             read=True,
         )
 
     async def insights_discover_sample(
-        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, sample_size: int
+        self,
+        *,
+        tenant_id: str,
+        fleet_id: str | None,
+        agent_id: str,
+        scope: str,
+        sample_size: int,
+        window_start: datetime | None = None,
     ) -> list[dict]:
-        """Sample active memories WITH embeddings for client-side k-means."""
+        """Sample active memories WITH embeddings for client-side k-means.
+
+        ``window_start`` bounds + spreads the draw over a trailing window
+        (see the storage router); ``None`` keeps the legacy newest-first."""
         return await self._post(  # type: ignore[return-value]
             "/insights/discover-sample",
             {
@@ -1893,6 +2072,7 @@ class CoreStorageClient:
                 "agent_id": agent_id,
                 "scope": scope,
                 "sample_size": sample_size,
+                "window_start": window_start.isoformat() if window_start else None,
             },
             read=True,
         )
@@ -2441,8 +2621,18 @@ class CoreStorageClient:
     async def create_report(self, data: dict) -> dict:
         return await self._post("/reports", data)  # type: ignore[return-value]
 
-    async def get_report(self, report_id: str) -> dict | None:
-        return await self._get(f"/reports/{report_id}")
+    async def get_report(self, report_id: str, *, read: bool = True) -> dict | None:
+        """Fetch one analysis report.
+
+        ``read`` defaults to True — the replica is right for the read paths that
+        display a report. Pass ``read=False`` for a read-your-write, where replica
+        lag would answer with a state the writer has already moved past: the
+        crystallize-on-demand idempotency check does, because it is asking
+        "did a previous delivery already finish this?" and a stale 'running'
+        there re-runs a multi-minute LLM job. Same reason
+        ``find_by_content_hash`` pins the writer.
+        """
+        return await self._get(f"/reports/{report_id}", read=read)
 
     async def update_report(self, report_id: str, data: dict) -> dict | None:
         return await self._patch(f"/reports/{report_id}", data)

@@ -38,6 +38,24 @@ def build_enrichment_pipeline() -> Pipeline:
     )
 
 
+def build_auto_chunk_governance_pipeline() -> Pipeline:
+    """The LLM verdict gate for the auto-chunk branch (#852).
+
+    ``GovernanceDecision`` cannot simply be appended to
+    ``build_enrichment_pipeline``: that composition is shared with the
+    extract-only branch (``persist=False``), which writes nothing and returns a
+    preview of content the caller already holds. Rejecting there would refuse a
+    request that leaks nothing. So the step is applied only on the branch that
+    goes on to persist.
+
+    A composition rather than a bare ``GovernanceDecision().execute(ctx)`` call
+    so that "which write paths enforce the LLM verdict?" stays answerable by
+    reading this module — the question that got the wrong answer when the
+    auto-chunk branch was written.
+    """
+    return Pipeline("write_auto_chunk_governance", [GovernanceDecision()])
+
+
 def build_persist_pipeline() -> Pipeline:
     """Only for persist=True, non-chunked memories."""
     return Pipeline(

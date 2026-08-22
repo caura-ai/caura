@@ -23,7 +23,7 @@ from core_api.constants import (
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
 from core_api.services.entity_tokens import extract_entity_tokens
-from core_api.services.memory_service import _get_or_cache_embedding
+from core_api.services.memory_service import BlankQuery, _get_or_cache_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -177,13 +177,29 @@ class ParallelEmbedAndEntityBoost:
         emb_task = asyncio.ensure_future(
             _get_or_cache_embedding(data["query"], data["tenant_id"], data["tenant_config"])
         )
-        # ClassifyQuery already ran the same tokenizer + entity FTS and
-        # declined the match as over-broad (CAURA-698). Re-deriving it here
-        # would hand GRAPH_HOP_BOOST to an arbitrary GRAPH_MAX_BOOSTED_MEMORIES
-        # subset of the sibling pool, outranking rows the scorer puts first.
+        # Two independent reasons to skip the entity boost entirely:
+        #
+        # 1. ``search.entity_retrieval`` is off for the tenant — the org-level
+        #    switch for query-time entity/graph retrieval. ClassifyQuery already
+        #    skipped its own entity block, so this leaves the read on pure
+        #    keyword/semantic scoring. Default True: an absent key means enabled.
+        # 2. ClassifyQuery ran the same tokenizer + entity FTS and declined the
+        #    match as over-broad (CAURA-698). Re-deriving it here would hand
+        #    GRAPH_HOP_BOOST to an arbitrary GRAPH_MAX_BOOSTED_MEMORIES subset of
+        #    the sibling pool, outranking rows the scorer puts first.
+        #
+        # Kept as distinct log reasons so ops can tell a deliberate org-level
+        # disable from the precision heuristic firing.
+        if not data.get("entity_retrieval", True):
+            ent_skip_reason = "disabled by org setting search.entity_retrieval"
+        elif data.get("entity_match_declined"):
+            ent_skip_reason = "entity match declined as over-broad in classify_query"
+        else:
+            ent_skip_reason = None
+
         ent_task = (
             None
-            if data.get("entity_match_declined")
+            if ent_skip_reason
             else asyncio.ensure_future(
                 _entity_boost_via_storage(
                     data["query"],
@@ -210,6 +226,16 @@ class ParallelEmbedAndEntityBoost:
             if ent_task is not None:
                 ent_task.cancel()
             raise HTTPException(status_code=504, detail="Search embedding timed out")
+        except BlankQuery as exc:
+            # 400, not 503. A query with nothing in it is the caller's to
+            # fix, and answering 503 puts it in the 5xx rate that pages an
+            # on-call — which is how a week of blank-query rejections read
+            # as an embedding outage while the backend served in ~7 ms.
+            # Ordered before the ``ValueError`` arm below because BlankQuery
+            # subclasses it and ``except`` matches top-down.
+            if ent_task is not None:
+                ent_task.cancel()
+            raise HTTPException(status_code=400, detail=str(exc))
         except ValueError as exc:
             if ent_task is not None:
                 ent_task.cancel()
@@ -227,8 +253,8 @@ class ParallelEmbedAndEntityBoost:
         try:
             if ent_task is None:
                 logger.info(
-                    "parallel_embed_entity_boost: entity boost skipped "
-                    "(entity match declined as over-broad in classify_query)"
+                    "parallel_embed_entity_boost: entity boost skipped (%s)",
+                    ent_skip_reason,
                 )
                 boosted_memory_ids, memory_boost_factor = set(), {}
             else:

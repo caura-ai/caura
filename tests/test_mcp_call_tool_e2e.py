@@ -3,7 +3,7 @@ surface used by every real MCP client.
 
 These tests close the gap that let the structured-output-schema bug ship:
 the rest of the unit suite invokes handler coroutines directly (e.g.
-``await mcp_server.memclaw_write(...)``), which skips
+``await mcp_server.caura_write(...)``), which skips
 ``FuncMetadata.convert_result`` and never exercises FastMCP's output-schema
 validation. The bug lived there: when a tool registered with
 ``structured_output`` enabled returned a ``CallToolResult`` on its error
@@ -32,8 +32,8 @@ async def test_auth_error_returns_clean_envelope(monkeypatch):
 
     ``_check_auth`` returns a pre-baked ``CallToolResult(isError=True)``
     on auth failure. Pre-fix, ``mcp.call_tool`` raised
-    ``ToolError("Error executing tool memclaw_write: 1 validation error
-    for memclaw_writeOutput ... input_value=None")`` and the legitimate
+    ``ToolError("Error executing tool caura_write: 1 validation error
+    for caura_writeOutput ... input_value=None")`` and the legitimate
     UNAUTHORIZED envelope was lost. Post-fix
     (``structured_output=False`` on registration), the CallToolResult
     flows through ``convert_result`` untouched.
@@ -41,7 +41,7 @@ async def test_auth_error_returns_clean_envelope(monkeypatch):
     monkeypatch.setattr(mcp_server, "_check_auth", lambda: mcp_server._AUTH_ERROR)
 
     result = await mcp_server.mcp.call_tool(
-        "memclaw_write",
+        "caura_write",
         {"content": "test memory body", "agent_id": "claude-eldad"},
     )
 
@@ -62,7 +62,7 @@ async def test_admin_key_refusal_returns_clean_envelope(monkeypatch):
     monkeypatch.setattr(mcp_server, "_check_auth", lambda: mcp_server._ADMIN_ERROR)
 
     result = await mcp_server.mcp.call_tool(
-        "memclaw_keystones_set",
+        "caura_keystones_set",
         {
             "op": "set",
             "doc_id": "probe",
@@ -83,12 +83,12 @@ async def test_admin_key_refusal_returns_clean_envelope(monkeypatch):
 async def test_invalid_args_returns_clean_envelope(monkeypatch):
     """The ``_with_latency(_error_response(...))`` → ``_as_error_result``
     path is the other major source of CallToolResult returns. Calling
-    ``memclaw_write`` with neither ``content`` nor ``items`` triggers it
+    ``caura_write`` with neither ``content`` nor ``items`` triggers it
     via the in-handler INVALID_ARGUMENTS branch.
     """
     monkeypatch.setattr(mcp_server, "_check_auth", lambda: None)
 
-    result = await mcp_server.mcp.call_tool("memclaw_write", {})
+    result = await mcp_server.mcp.call_tool("caura_write", {})
 
     assert "validation error" not in as_text(result)
     envelope = parse_envelope(result)

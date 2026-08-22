@@ -76,13 +76,20 @@ class Settings(BaseSettings):
     # (typical p95 ~6-12s, plus 2 retries x 1s linear backoff) without
     # breaching the 45s outer request budget. Must stay below
     # ``request_timeout_seconds`` so this fires first.
+    #
+    # That derivation counts ONE request per attempt, which only became
+    # true with ``LLM_PROVIDER_MAX_RETRIES``: the SDK's own default of 2
+    # made an attempt up to three requests, each with the per-request
+    # budget below, plus its own exponential backoff — so the worst case
+    # exceeded this ceiling on the first attempt rather than the third.
     enrichment_inline_timeout_seconds: float = 35.0
     # Per-call timeout passed to the AsyncOpenAI client (covers both LLM
     # enrichment and embedding providers). Without an explicit value the
     # SDK rides httpx's default — long enough that a single hung upstream
     # call eats the whole enrichment budget silently. 25s gives the
     # provider room to respond while still leaving budget for one retry
-    # under the inline ceiling.
+    # under the inline ceiling. Per REQUEST, not per attempt — see
+    # ``LLM_PROVIDER_MAX_RETRIES`` for why that distinction mattered.
     openai_request_timeout_seconds: float = 25.0
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
@@ -90,6 +97,12 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     entity_extraction_provider: str = "openai"  # none | fake | openai | anthropic | openrouter | gemini
     entity_extraction_model: str = "gpt-5.4-nano"
+    # Default for the ``search.entity_retrieval`` org setting: query-time entity
+    # lookup + graph search. A tenant override wins; this is the fleet-wide
+    # fallback so an operator can disable entity/graph reads on a whole box
+    # (env / compose override) without editing every tenant's settings.
+    # Read-side only — the write path keeps building the entity graph.
+    entity_retrieval_enabled: bool = True
     use_llm_for_memory_creation: bool = True
     sentry_dsn: str = ""  # Set to enable Sentry error tracking
     redis_url: str = ""  # e.g. redis://localhost:6379/0. Empty = in-memory fallback.
@@ -139,6 +152,18 @@ class Settings(BaseSettings):
     # raise the platform timeout BEFORE raising this budget (the
     # startup validator enforces the ceiling).
     interview_request_timeout_seconds: float = 90.0
+    # Async interview submit (#665). When True (default), the submit route
+    # persists the masked window as a durable ``interview_jobs`` doc,
+    # advances the watermark, and returns 200 ``accepted`` immediately;
+    # synthesis runs off the request path (fire-and-forget task + the
+    # hourly scheduler sweep). False is the escape hatch back to the
+    # legacy inline path, whose 60-90s synthesis intermediate proxies
+    # (on-prem nginx default 60s) 504'd mid-flight while the server
+    # committed anyway.
+    interview_async_submit: bool = True
+    # Max synthesis attempts per persisted interview job before it is
+    # parked as ``failed_permanent`` instead of retried by the sweep (#665).
+    interview_job_max_attempts: int = 3
     # Per-phase cap on the storage roundtrip inside
     # ``create_memories_bulk`` (CAURA-599). Embedding and enrichment
     # already enforce their own 30s caps; storage was the only phase
@@ -273,6 +298,17 @@ class Settings(BaseSettings):
     log_file: str = ""
     # Default False: standalone=True bypasses tenant auth, so it must be an explicit opt-in.
     is_standalone: bool = False
+    # A55 contradiction-engine seam. False (default) => legacy detector call
+    # sites (today's behaviour, unchanged). True => route contradiction
+    # detection through ContradictionEngine.evaluate_async. Phase 1 the two
+    # paths are behaviourally identical (the engine delegates to the same
+    # detector); the flag exists so the old arch can be retired later.
+    contradiction_engine_enabled: bool = False
+    # A55 1d — when True, the detector additionally writes a memory_conflicts
+    # classification record for each confirmed conflict (via the resolver).
+    # Additive: it never changes the status/supersedes effect, so retrieval is
+    # unaffected. Default False; enable to start populating conflict records.
+    contradiction_write_conflict_record: bool = False
     crystallizer_enabled: bool = True
     crystallizer_stale_days: int = 180
     crystallizer_dedup_sample_size: int = 1000
@@ -339,9 +375,14 @@ class Settings(BaseSettings):
     def _validate_timeout_ordering(self) -> "Settings":
         # Local import avoids a circular: constants → common.constants,
         # but this file is imported by constants.py's dependents.
+        from common.embedding.constants import (
+            EMBEDDING_BUDGET_MARGIN_S,
+            EMBEDDING_GATE_TIMEOUT_SECONDS,
+        )
         from core_api.constants import (
             BULK_EMBEDDING_TIMEOUT_SECONDS,
             BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS,
+            BULK_STRONG_EMBED_TIMEOUT_SECONDS,
         )
 
         if self.request_timeout_seconds < BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS:
@@ -402,6 +443,62 @@ class Settings(BaseSettings):
                 f"bulk_request_timeout_seconds "
                 f"({self.bulk_request_timeout_seconds}s) so the storage-phase "
                 f"cap fires before the umbrella."
+            )
+        if EMBEDDING_GATE_TIMEOUT_SECONDS >= BULK_STRONG_EMBED_TIMEOUT_SECONDS:
+            # The opportunistic ``write_mode="strong"`` embed must be able to
+            # outwait the concurrency gate. The gate timeout sits deliberately
+            # below callers' deadlines so a saturated gate surfaces as
+            # attributable backpressure rather than an anonymous caller timeout;
+            # invert that and every gate-saturated strong write is reported as a
+            # generic embed failure instead. Checked here because the gate value
+            # is read from an env var at import, so the ordering is an operator's
+            # to break, not a constant's.
+            raise ValueError(
+                f"EMBEDDING_GATE_TIMEOUT_SECONDS ({EMBEDDING_GATE_TIMEOUT_SECONDS}s) must be < "
+                f"BULK_STRONG_EMBED_TIMEOUT_SECONDS ({BULK_STRONG_EMBED_TIMEOUT_SECONDS}s) so a "
+                "saturated embedding gate stays attributable on the opportunistic "
+                "bulk strong-embed path. Lower the gate timeout, or raise "
+                "BULK_STRONG_EMBED_TIMEOUT_SECONDS (keeping it under "
+                "BULK_EMBEDDING_TIMEOUT_SECONDS)."
+            )
+        if BULK_STRONG_EMBED_TIMEOUT_SECONDS - EMBEDDING_BUDGET_MARGIN_S <= EMBEDDING_GATE_TIMEOUT_SECONDS:
+            # The gate check above is necessary but no longer sufficient. The
+            # embed layer now caps the provider call at
+            # ``budget_s - EMBEDDING_BUDGET_MARGIN_S`` — a bound that sits
+            # INSIDE the window the gate's own timeout lives in — so a margin
+            # large enough to pull that cap under the gate timeout means the
+            # budget cap always fires first and a gate-saturation event is
+            # reported as a generic "embed exceeded its budget" instead of the
+            # gate's dedicated warning. That inverts precisely the attribution
+            # the check above exists to guarantee, and it would do so silently.
+            #
+            # Both operands are env-overridable, so like the gate ordering this
+            # is an operator's to break rather than a constant's. Defaults leave
+            # real room: 8 - 1 = 7 > 5.
+            raise ValueError(
+                f"BULK_STRONG_EMBED_TIMEOUT_SECONDS ({BULK_STRONG_EMBED_TIMEOUT_SECONDS}s) minus "
+                f"EMBEDDING_BUDGET_MARGIN_S ({EMBEDDING_BUDGET_MARGIN_S}s) must be > "
+                f"EMBEDDING_GATE_TIMEOUT_SECONDS ({EMBEDDING_GATE_TIMEOUT_SECONDS}s), so a "
+                "saturated embedding gate still reports itself rather than being "
+                "pre-empted by the embed budget cap. Lower EMBEDDING_BUDGET_MARGIN_S, "
+                "lower the gate timeout, or raise BULK_STRONG_EMBED_TIMEOUT_SECONDS "
+                "(keeping it under BULK_EMBEDDING_TIMEOUT_SECONDS)."
+            )
+        if BULK_STRONG_EMBED_TIMEOUT_SECONDS >= BULK_EMBEDDING_TIMEOUT_SECONDS:
+            # The other half of the bound the message above already tells the
+            # operator to respect. The derived default clamps here, so only an
+            # explicit env override can reach this — and it must not, twice over:
+            # an opportunistic embed allowed to run as long as a required one stops
+            # being opportunistic and can hold a whole batch for that budget, for
+            # one item's opt-in; and the additive ordering check above assumes the
+            # embed phase never exceeds BULK_EMBEDDING_TIMEOUT_SECONDS, so letting
+            # it through would silently invalidate that proof rather than just
+            # degrade this path.
+            raise ValueError(
+                f"BULK_STRONG_EMBED_TIMEOUT_SECONDS ({BULK_STRONG_EMBED_TIMEOUT_SECONDS}s) must be < "
+                f"BULK_EMBEDDING_TIMEOUT_SECONDS ({BULK_EMBEDDING_TIMEOUT_SECONDS}s): the "
+                "opportunistic bulk strong-embed budget cannot exceed the required embed cap, "
+                "which the storage-phase ordering check above is proved against."
             )
         return self
 

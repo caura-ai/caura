@@ -57,12 +57,12 @@ def required_trust(tool_name: str, op: str | None = None) -> int:
 
 
 def _autoload_specs() -> None:
-    """Import every `memclaw_*` module in this package; each registers its spec."""
+    """Import every `caura_*` module in this package; each registers its spec."""
     package_name = __name__.rsplit(".", 1)[0]  # "core_api.tools"
     package = importlib.import_module(package_name)
     for mod_info in pkgutil.iter_modules(package.__path__):
         name = mod_info.name
-        if not name.startswith("memclaw_"):
+        if not name.startswith("caura_"):
             continue  # skip _types, _builders, etc.
         importlib.import_module(f"{package_name}.{name}")
 

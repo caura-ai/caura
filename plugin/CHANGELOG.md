@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.16.1](https://github.com/caura-ai/caura/compare/plugin-v2.16.0...plugin-v2.16.1) (2026-08-13)
+
+
+### Dependencies
+
+* **plugin:** bump @types/node from 26.1.1 to 26.2.0 in /plugin in the npm-minor-patch group across 1 directory ([#688](https://github.com/caura-ai/caura/issues/688)) ([a40ca4a](https://github.com/caura-ai/caura/commit/a40ca4ab6b7e8f2b9cf9f9aa7c5e16af0092c232))
+
+
+### Documentation
+
+* **write:** document embedding_pending and the strong-mode opt-out ([#706](https://github.com/caura-ai/caura/issues/706)) ([187b5b5](https://github.com/caura-ai/caura/commit/187b5b5465d7659624e13f455e662c9fce67c483))
+
+## [2.16.0](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.15.2...plugin-v2.16.0) (2026-07-28)
+
+
+### Features
+
+* **plugin:** interviewer task-trail capture — mirror OpenClaw task_runs into the interview buffer ([#658](https://github.com/caura-ai/caura-memclaw/issues/658)) ([ba5f4b7](https://github.com/caura-ai/caura-memclaw/commit/ba5f4b76a6a261f3c8884f6bcf624be7e5ea8951))
+
 ## [2.15.2](https://github.com/caura-ai/caura-memclaw/compare/plugin-v2.15.1...plugin-v2.15.2) (2026-07-26)
 
 

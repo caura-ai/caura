@@ -76,6 +76,18 @@ class Settings(BaseSettings):
     # its trigger POST can take minutes — a generous timeout, not the 30s default.
     agent_digest_http_timeout_s: float = 600.0
 
+    # NULL-embedding re-embed sweep. DEFAULT OFF: the topic, durable
+    # subscription and dead-letter topic are Terraform-provisioned (the bus
+    # only auto-creates broadcast subscriptions), so until infra lands, a fire
+    # would publish into a topic nothing consumes. Flip this on after
+    # provisioning ``memclaw.lifecycle.embed-backfill-requested``.
+    embed_backfill_enabled: bool = False
+    # 04:00, deliberately NOT the 02:00 slot every other lifecycle tick
+    # defaults to. That window is already congested enough that the nightly
+    # cross-link call runs into the 120s Cloud Run request ceiling, and this
+    # sweep feeds the same embedding backend those ticks compete for.
+    embed_backfill_run_at_hour: int = 4
+
     @field_validator(
         "lifecycle_archive_run_at_hour",
         "lifecycle_purge_run_at_hour",
@@ -83,6 +95,7 @@ class Settings(BaseSettings):
         "lifecycle_insights_run_at_hour",
         "agent_digest_run_at_hour",
         "agent_digest_weekly_run_at_hour",
+        "embed_backfill_run_at_hour",
     )
     @classmethod
     def _validate_run_at_hour(cls, v: int, info: ValidationInfo) -> int:

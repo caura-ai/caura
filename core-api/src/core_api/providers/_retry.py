@@ -7,6 +7,6 @@ sites (``core_api.services.*``, tests) working unchanged.
 
 from __future__ import annotations
 
-from common.llm.retry import call_with_fallback, call_with_retry
+from common.llm.retry import call_with_fallback, call_with_retry, deliberate_fake_provider
 
-__all__ = ["call_with_fallback", "call_with_retry"]
+__all__ = ["call_with_fallback", "call_with_retry", "deliberate_fake_provider"]

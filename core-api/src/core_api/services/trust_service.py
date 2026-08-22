@@ -56,7 +56,7 @@ async def require_trust(
        DEFAULT_TRUST_LEVEL`` — ``error_str`` is ``None`` so a caller
        that only gates on ``terr`` will let an unregistered, fabricated
        ``agent_id`` through. The soft-pass exists for read-only
-       ergonomics (``memclaw_list``, recall) where attribution is
+       ergonomics (``caura_list``, recall) where attribution is
        cosmetic. On any path that persists records keyed to the caller-
        supplied ``agent_id`` (memories, audit-log rows, evolve
        outcomes, insights), an unregistered name corrupts the audit
@@ -74,8 +74,8 @@ async def require_trust(
                raise HTTPException(status_code=403, detail=parse_trust_error(terr))
 
        The same pattern is in ``routes/insights.py`` and the MCP
-       handlers ``memclaw_evolve`` / ``memclaw_insights`` in
-       ``mcp_server.py``. ``memclaw_list`` (read-only) intentionally
+       handlers ``caura_evolve`` / ``caura_insights`` in
+       ``mcp_server.py``. ``caura_list`` (read-only) intentionally
        does NOT check ``not_found`` and is the canonical "soft-pass
        OK" call site.
     """

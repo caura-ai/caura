@@ -179,17 +179,17 @@ class TestToolDescriptions:
     """Verify tool descriptions in the SoT registry reference visibility guidance."""
 
     def test_write_tool_mentions_visibility(self):
-        desc = get_spec("memclaw_write").description
+        desc = get_spec("caura_write").description
         assert "visibility" in desc.lower()
 
     def test_write_tool_encourages_sharing(self):
-        desc = get_spec("memclaw_write").description.lower()
+        desc = get_spec("caura_write").description.lower()
         assert "scope_team" in desc or "scope_org" in desc
 
     def test_recall_tool_mentions_fleet_filter(self):
-        # `memclaw_recall` advertises cross-fleet filtering via its parameter
+        # `caura_recall` advertises cross-fleet filtering via its parameter
         # list rather than prose.
-        spec = get_spec("memclaw_recall")
+        spec = get_spec("caura_recall")
         param_names = {p["name"] for p in __import__("core_api.tools", fromlist=["extract_param_descriptors"]).extract_param_descriptors(spec.handler)}
         assert "fleet_ids" in param_names
 
@@ -234,7 +234,6 @@ class TestVisibilityFiltering:
 
     async def test_private_invisible_to_other_agents(
         self,
-        db,
         sc,
         tenant_id,
         fleet_id,
@@ -260,7 +259,6 @@ class TestVisibilityFiltering:
 
     async def test_private_visible_to_owner(
         self,
-        db,
         sc,
         tenant_id,
         fleet_id,
@@ -286,7 +284,6 @@ class TestVisibilityFiltering:
 
     async def test_fleet_visible_in_same_fleet(
         self,
-        db,
         sc,
         tenant_id,
         fleet_id,
@@ -311,7 +308,6 @@ class TestVisibilityFiltering:
 
     async def test_fleet_invisible_in_other_fleet(
         self,
-        db,
         sc,
         tenant_id,
     ):
@@ -335,7 +331,6 @@ class TestVisibilityFiltering:
 
     async def test_tenant_visible_across_fleets(
         self,
-        db,
         sc,
         tenant_id,
     ):
@@ -359,7 +354,6 @@ class TestVisibilityFiltering:
 
     async def test_tenant_visible_in_tenant_wide_search(
         self,
-        db,
         sc,
         tenant_id,
     ):
@@ -382,7 +376,6 @@ class TestVisibilityFiltering:
 
     async def test_multi_fleet_search(
         self,
-        db,
         sc,
         tenant_id,
     ):
@@ -415,7 +408,6 @@ class TestVisibilityFiltering:
 
     async def test_multi_fleet_excludes_other_fleets(
         self,
-        db,
         sc,
         tenant_id,
     ):
@@ -474,7 +466,6 @@ class TestVisibilityFiltering:
 
     async def test_admin_sees_team_and_org_not_agent_scoped(
         self,
-        db,
         sc,
         tenant_id,
         fleet_id,
@@ -546,10 +537,8 @@ class TestBackwardCompatibility:
         await db.refresh(mem)
         assert mem.visibility == "scope_team"
 
-    @pytest.mark.xfail(reason="Fake embeddings produce low similarity — search returns empty. Works with real embeddings.")
     async def test_search_without_visibility_params_unchanged(
         self,
-        db,
         sc,
         tenant_id,
         fleet_id,
@@ -611,7 +600,6 @@ class TestDedupWithVisibility:
 
     async def test_dedup_within_same_visibility(
         self,
-        db,
         tenant_id,
         fleet_id,
         agent_id,
@@ -647,7 +635,6 @@ class TestDedupWithVisibility:
     )
     async def test_no_cross_visibility_dedup(
         self,
-        db,
         tenant_id,
         fleet_id,
         agent_id,

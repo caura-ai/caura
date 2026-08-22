@@ -24,15 +24,22 @@ class TestEnrichmentPromptSignalPhrases:
         return ENRICHMENT_PROMPT
 
     def test_decision_has_signal_phrases(self):
+        """CAURA-717 V2.2 sharpened decision around the deliberation markers
+        (reasoning / alternatives / group framing) and removed the plain
+        "opted for" / "selected" verb list, so approval-deeds without any
+        visible deliberation stop being mislabelled as decisions."""
         prompt = self._get_prompt()
         assert "decided to" in prompt
-        assert "going with" in prompt
-        assert "opted for" in prompt
+        assert "chose X over Y" in prompt
+        assert "the team concluded" in prompt
 
-    def test_commitment_has_signal_phrases(self):
+    def test_commitment_signal_phrases_absent(self):
+        """CAURA-717: ``commitment`` is now classifier-deprecated and its
+        bullet is filtered out of the prompt (mirrors the CAURA-699 handling
+        of the reserved ``rule`` type), so its cue phrases must not appear."""
         prompt = self._get_prompt()
-        assert "committed to" in prompt
-        assert "pledged" in prompt
+        assert "committed to" not in prompt
+        assert "pledged" not in prompt
 
     def test_rule_signal_phrases_absent(self):
         """CAURA-699: ``rule`` is server-reserved and no longer offered to the
@@ -51,10 +58,16 @@ class TestEnrichmentPromptSignalPhrases:
         Raised to 1500 (2026-07-06) for CAURA-701's V2.1 taxonomy —
         expanded fact/episode/action descriptions and the 3-way
         action-vs-episode-vs-fact contrastive block.
+        Raised to 1800 (2026-08-19) for CAURA-717's V2.2 taxonomy —
+        added the action-vs-decision resolver, refined decision/action/
+        plan/preference/task definitions, and expanded the contrastive
+        example block from 10 to ~18 lines. Deprecating three types
+        (intention/commitment/cancellation) subtracted three bullets
+        but the resolver + examples net-added more words.
         """
         prompt = self._get_prompt()
         word_count = len(prompt.split())
-        assert word_count < 1500, (
+        assert word_count < 1800, (
             f"Prompt is {word_count} words — too long, will increase cost"
         )
 

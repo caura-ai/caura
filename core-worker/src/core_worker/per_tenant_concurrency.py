@@ -1,10 +1,14 @@
 """Per-tenant in-flight cap on the worker's storage PATCH-back calls.
 
-The worker consumes ``embed-requested`` and ``enrich-requested`` events
-in batches sized by ``EVENT_BUS_PUBSUB_MAX_MESSAGES`` (default 25). With
-no per-tenant gate, a tenant-A storm fans out into 2 PATCHes per write
-(embed + enrich), all hammering the storage-writer pool while tenant B's
-single PATCH queues behind. That's the 12.7x ``noisy-neighbor-write``
+The worker consumes ``embed-requested`` and ``enrich-requested`` events.
+With no per-tenant gate, a tenant-A storm fans out into 2 PATCHes per
+write (embed + enrich), hammering the storage-writer pool while tenant
+B's single PATCH queues behind. Note the burst is sustained rather than
+wide: ``EVENT_BUS_PUBSUB_MAX_MESSAGES`` (default 25) sizes a PULL, not
+in-flight work — ``_pull_loop`` drains a batch one event at a time, so a
+single instance holds one event's PATCHes per subscription, not 25. An
+earlier version of this docstring read the batch size as the fan-out
+width; the per-tenant burst it describes is real either way. That's the 12.7x ``noisy-neighbor-write``
 regression CAURA-636 ran loadtest 1777538050 against — Option 2 (drop
 ``max_messages`` to 10) confirmed in 1777548665 that aggregate throttling
 is the wrong knob; the issue is per-tenant burst.

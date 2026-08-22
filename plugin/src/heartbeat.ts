@@ -32,6 +32,7 @@ import {
   MEMCLAW_FLEET_ID,
   MEMCLAW_REQUIRE_SIGNED_COMMANDS,
   MEMCLAW_INTERVIEWER,
+  MEMCLAW_INTERVIEWER_TASKS,
   INTERVIEW_SUBMIT_MAX_EVENTS,
   INTERVIEW_SUBMIT_TIMEOUT_MS,
   BUILD_TIMEOUT_MS,
@@ -39,6 +40,7 @@ import {
   ensureTenantId,
 } from "./env.js";
 import { readInterviewEvents, pruneInterviewBuffer } from "./interview-buffer.js";
+import { syncTaskTrail } from "./task-trail.js";
 import { resolveAgentIdQuiet } from "./resolve-agent.js";
 import { PLUGIN_VERSION } from "./version.js";
 import { MEMCLAW_TOOLS } from "./tools.js";
@@ -1127,12 +1129,27 @@ async function processCommand(cmd: {
         status = "failed";
         result = { error: "interview_request payload missing node_id" };
       } else {
+        // Phase 1.5 (#654): mirror the OpenClaw task-trail delta into the
+        // buffer BEFORE reading the window, so task/sub-agent-driven work
+        // is interviewed too — the chat stream alone misses it entirely.
+        // syncTaskTrail never throws; a degraded sync (db missing/locked)
+        // is reported via ``task_trail`` so operators can tell "idle"
+        // from "not captured" instead of a silent no-op.
+        const taskSync = MEMCLAW_INTERVIEWER_TASKS
+          ? await syncTaskTrail()
+          : { synced: 0, note: "task capture disabled (MEMCLAW_INTERVIEWER_TASKS=false)" };
         const events = await readInterviewEvents(sinceSeq, INTERVIEW_SUBMIT_MAX_EVENTS);
         if (events.length === 0) {
           // Nothing new since the cursor: done, nothing submitted. The
           // server watermark is untouched, so the node stays "due" and
           // will simply be asked again next period.
-          result = { ok: true, submitted: false, reason: "no new events since cursor" };
+          result = {
+            ok: true,
+            submitted: false,
+            reason: "no new events since cursor",
+            synced_tasks: taskSync.synced,
+            ...(taskSync.note ? { task_trail: taskSync.note } : {}),
+          };
         } else {
           const tenantId = await ensureTenantId();
           // Phase-1 grain is per-node (matches the server watermark):
@@ -1173,6 +1190,8 @@ async function processCommand(cmd: {
             ok: true,
             submitted: true,
             events: events.length,
+            synced_tasks: taskSync.synced,
+            ...(taskSync.note ? { task_trail: taskSync.note } : {}),
             watermark: resp.watermark,
             server_status: resp.status,
             memories_written: resp.memories_written,

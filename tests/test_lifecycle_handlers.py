@@ -14,7 +14,7 @@ from functools import partial
 
 import pytest
 
-from common.events.base import Event
+from common.events.base import Event, PermanentOpError
 from common.events.lifecycle_archive_request import LifecycleArchiveRequest
 from common.events.lifecycle_handlers import _run_action
 from common.events.lifecycle_purge_request import LifecyclePurgeRequest
@@ -443,3 +443,82 @@ async def test_archive_op_does_not_invoke_dedup_gate():
     handler = _bind(adapter, action="archive-expired")  # no dedup_window
     await handler(_archive_event(Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED))
     assert adapter.dedup_calls == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_op_error_marks_failure_but_does_not_reraise():
+    """A ``PermanentOpError`` means "failed, and a retry cannot help".
+
+    The runner previously had one failure path, which always re-raised so the bus
+    nacked. That conflates "did it succeed?" with "should it be retried?" — for a
+    deterministic bug (a wrongly-shaped injectable hitting every cluster, every
+    tick) the honest answers differ, and each redelivery of the Forge tick pays for
+    an LLM call per cluster before failing identically.
+
+    So: same durable ``failure`` row as any other exception, but ACK.
+    """
+
+    err = PermanentOpError("wrote nothing; 2 programming errors — code/wiring bug")
+    adapter = _FakeAdapter(raise_on_op=err)
+    handler = _bind(adapter, action="archive-expired")
+
+    # No pytest.raises: propagating is exactly what must NOT happen here.
+    await handler(_archive_event(Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED))
+
+    statuses = [c[1] for c in adapter.audit_calls]
+    assert statuses == ["in_progress", "failure"], statuses
+    final = adapter.audit_calls[-1]
+    assert final[3] == "wrote nothing; 2 programming errors — code/wiring bug"
+    # ``stats`` is what makes the two failure classes distinguishable in the
+    # DURABLE record. Without it, "a human must act" and "four more attempts are
+    # coming" are byte-identical rows and nobody can query or alert on the
+    # difference — which would undercut the point of fixing the verdict at all.
+    assert final[2] == {"terminal": True}
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_is_not_recorded_as_a_recent_success():
+    """The reason the verdict matters: ``has_recent_lifecycle_success`` gates
+    re-runs on a SUCCESS row. A terminal failure must leave that gate open so the
+    operator can re-run to reproduce — the bug this whole change exists to stop is
+    a false success blocking its own diagnosis."""
+
+    adapter = _FakeAdapter(raise_on_op=PermanentOpError("terminal"))
+    handler = _bind(adapter, action="archive-expired")
+
+    await handler(_archive_event(Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED))
+
+    assert "success" not in [c[1] for c in adapter.audit_calls]
+
+
+@pytest.mark.asyncio
+async def test_permanent_error_still_reraises_when_the_failure_row_could_not_be_written():
+    """Acking a permanent failure is only defensible because the ``failure`` row is
+    the durable record. When that write fails there IS no record, so this path must
+    fall through to the raise and let redelivery try again to produce one.
+
+    Otherwise the ack makes a row stuck in ``in_progress`` permanent — exactly the
+    state indistinguishable from a crashed worker that the generic path's guard
+    exists to avoid. One wasted retry is the cheaper trade.
+    """
+
+    class _FlakyAuditAdapter(_FakeAdapter):
+        async def update_lifecycle_audit_row(
+            self,
+            audit_id: int,
+            *,
+            status: str,
+            stats: dict | None = None,
+            error_message: str | None = None,
+        ) -> None:
+            self.audit_calls.append((audit_id, status, stats, error_message))
+            if status == "failure":
+                raise RuntimeError("audit endpoint down")
+
+    adapter = _FlakyAuditAdapter(raise_on_op=PermanentOpError("wiring bug"))
+    handler = _bind(adapter, action="archive-expired")
+
+    # The ORIGINAL error propagates, not the audit flake — the bus must see why
+    # the op failed, and the audit error would be a misleading substitute.
+    with pytest.raises(PermanentOpError, match="wiring bug"):
+        await handler(_archive_event(Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED))

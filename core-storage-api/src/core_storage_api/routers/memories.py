@@ -9,14 +9,19 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 
+from common.constants import CRYSTALLIZER_SHORT_CONTENT_CHARS, SQL_SCORING_REQUIRED_KEYS
 from common.events.lifecycle_purge_request import (
     MEMORY_RETENTION_MAX_DAYS,
     MEMORY_RETENTION_MIN_DAYS,
 )
 from core_storage_api.observability import bind_timer, log_request
-from core_storage_api.routers._validation import _require
+from core_storage_api.routers._validation import _require, _require_dict
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
-from core_storage_api.services.postgres_service import BulkValidationError, PostgresService
+from core_storage_api.services.postgres_service import (
+    BulkValidationError,
+    DuplicateContentHashError,
+    PostgresService,
+)
 
 router = APIRouter(prefix="/memories", tags=["Memories"])
 _svc = PostgresService()
@@ -80,7 +85,20 @@ def _validate_pg_regex(value: str | None, field: str) -> None:
 async def create_memory(request: Request) -> dict:
     body: dict = await request.json()
     _parse_datetimes(body)
-    memory = await _svc.memory_add(body)
+    try:
+        memory = await _svc.memory_add(body)
+    except DuplicateContentHashError as exc:
+        # Migration 040's unique index rejected the insert. 409, not 500: the
+        # dedup contract already promises this code — ``CheckExactDuplicate``
+        # raises it upstream when the duplicate is visible before the write, and
+        # this is the same answer for the race it cannot see. The detail carries
+        # the winning row's id, so a caller can use the row it should have got.
+        #
+        # Catches the dedicated subclass, NOT bare ``ValueError``, for the reason
+        # spelled out on ``BulkValidationError`` below: the try spans a call that
+        # opens a session, so a broad catch would relabel a server fault as a
+        # client error.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return orm_to_dict(memory, MEMORY_FIELDS)
 
 
@@ -102,6 +120,13 @@ async def create_memories_bulk(request: Request) -> list[dict]:
         _parse_datetimes(item)
     try:
         return await _svc.memory_add_all(body)
+    except DuplicateContentHashError as exc:
+        # Migration 040's constraint aborted the batch. 409 for the same reason
+        # the single-row route gives it: the content is already stored, and
+        # nothing here was written. Listed BEFORE ``BulkValidationError`` only
+        # for readability — the two are siblings under ``ValueError``, neither is
+        # a subclass of the other, so the order does not affect which one runs.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except BulkValidationError as exc:
         # Malformed batch (an item missing ``client_request_id``, or mixed
         # ``tenant_id`` / ``fleet_id``). Unwrapped it escaped as a 500 — a
@@ -126,16 +151,34 @@ async def create_memories_bulk(request: Request) -> list[dict]:
 @router.post("/scored-search")
 async def scored_search(request: Request) -> list[dict]:
     body: dict = await request.json()
-    # Build search_params from top-level body keys (client sends them flat)
-    _SEARCH_PARAM_KEYS = {
-        "fts_weight",
-        "freshness_floor",
-        "freshness_decay_days",
-        "recall_boost_cap",
-        "recall_decay_window_days",
-        "similarity_blend",
-    }
-    search_params = body.get("search_params") or {k: body[k] for k in _SEARCH_PARAM_KEYS if k in body}
+    # ``search_params`` arrives nested, from every caller. THE rationale for the
+    # whole change lives here, because the code it replaces lived here:
+    #
+    # This used to fall back to rebuilding the dict from top-level body keys
+    # named in a hardcoded allowlist, for callers that sent the scoring knobs
+    # flat. That allowlist was a third place every knob had to be registered —
+    # after the pipeline's builder and the legacy path's — and the only one no
+    # test could observe, because the nesting happens here, server-side, past
+    # the boundary a client-side assertion can see. Two ranking features
+    # (``candidate_pool_size``, ``score_formula``) shipped applying to the
+    # pipeline search path only as a result, which also meant the documented
+    # ``_USE_PIPELINE_SEARCH = False`` rollback lever silently reverted them.
+    # Both core-api builders send nested now, so the fallback is gone and the
+    # SQL reads what the caller actually sent.
+    #
+    # Fail-closed rather than defaulting: ``memory_scored_search`` reads
+    # ``SQL_SCORING_REQUIRED_KEYS`` with INDEXED access, so a payload without them
+    # is a malformed request, and 4xx at the edge beats the KeyError 500 it would
+    # otherwise raise from inside the session. #723 stated that and only checked
+    # the dict was non-empty; naming the keys is what actually enforces it, and
+    # the same shared tuple is what core-api's builders project through.
+    search_params = _require_dict(body, "search_params")
+    missing = [k for k in SQL_SCORING_REQUIRED_KEYS if k not in search_params]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"search_params is missing required scoring keys: {', '.join(missing)}",
+        )
 
     # Parse temporal_window from days (legacy) or seconds (pipeline path)
     temporal_window = None
@@ -744,12 +787,51 @@ async def get_embedding_coverage(
     and made coverage read high on any tenant with more missing rows than
     that.
     """
-    missing = await _svc.memory_count_missing_embeddings(tenant_id, fleet_id)
-    total = await _svc.memory_count_active(tenant_id, fleet_id)
+    # One statement for all four counts, mirroring /embedding-coverage-all.
+    # Separate queries would not only cost extra round trips on a route ops
+    # tooling polls — they cannot see a consistent snapshot, so a concurrent
+    # write could leave the buckets failing to add up to the total they are
+    # reported against.
+    #
+    # The provenance counts are reported here as well as in the cross-tenant
+    # view: omitting them would make this route read as "no stale rows" for a
+    # tenant the aggregate flags, and absence is indistinguishable from zero.
+    total, missing, stale, unknown = await _svc.memory_embedding_coverage_for_tenant(tenant_id, fleet_id)
     return {
         "total_active": total,
         "missing_embeddings": missing,
+        "stale_embeddings": stale,
+        "unknown_provenance": unknown,
         "coverage_pct": round((total - missing) / total * 100, 1) if total > 0 else 0.0,
+    }
+
+
+@router.get("/embedding-coverage-all")
+async def get_embedding_coverage_all() -> dict:
+    """Embedding coverage for every tenant — the operator-facing view.
+
+    Cross-tenant by design, which is why it takes no ``tenant_id`` and why the
+    only caller is core-api's admin route (admin key, ``is_admin``). Counts and
+    tenant ids only; no memory content crosses this boundary.
+
+    Declared ABOVE the ``/{memory_id}`` routes on purpose — FastAPI matches in
+    declaration order, so registering it later would let the path-param route
+    swallow "embedding-coverage-all" and answer 422 on a bad UUID.
+    """
+    rows = await _svc.memory_embedding_coverage_by_tenant()
+    return {
+        "tenants": rows,
+        "total_active": sum(r["total_active"] for r in rows),
+        "missing_embeddings": sum(r["missing_embeddings"] for r in rows),
+        "tenants_with_missing": sum(1 for r in rows if r["missing_embeddings"]),
+        # Vectors computed from text the row no longer holds. Reported
+        # separately from ``missing`` because the repair differs: a missing
+        # vector is swept automatically, a stale one is invisible to that
+        # sweep and needs a re-embed of the row as it stands now.
+        "stale_embeddings": sum(r["stale_embeddings"] for r in rows),
+        "tenants_with_stale": sum(1 for r in rows if r["stale_embeddings"]),
+        # Embedded before provenance was recorded — undetermined, not damaged.
+        "unknown_provenance": sum(r["unknown_provenance"] for r in rows),
     }
 
 
@@ -792,11 +874,20 @@ async def get_recent_memories(
 
 @router.get("/lifecycle-candidates")
 async def get_lifecycle_candidates(tenant_id: str) -> dict:
+    """Id lists for the crystallizer's lifecycle hygiene checks.
+
+    Every list is bare stringified ids, not row dicts — callers index them
+    directly. ``short_content`` completes the set: the query behind it existed
+    but was never exposed, so ``_check_short_content`` read a key that was
+    never returned and reported zero for every tenant.
+    """
     expired = await _svc.memory_find_expired_still_active(tenant_id, None)
     stale = await _svc.memory_find_stale_count(tenant_id, None, stale_days=90, max_weight=0.3)
+    short = await _svc.memory_find_short_content(tenant_id, None, CRYSTALLIZER_SHORT_CONTENT_CHARS)
     return {
         "expired_still_active": [str(r[0]) for r in expired],
         "stale_low_weight": [str(r[0]) for r in stale],
+        "short_content": [str(r[0]) for r in short],
     }
 
 
@@ -949,6 +1040,37 @@ _DEDUP_REVIEW_FIELDS = [
 ]
 
 
+_MEMORY_CONFLICT_FIELDS = [
+    "id",
+    "tenant_id",
+    "fleet_id",
+    "new_memory_id",
+    "old_memory_id",
+    "relationship",
+    "relationship_confidence",
+    "diagnosis",
+    "diagnosis_confidence",
+    "evidence_strength",
+    "action",
+    "audit_reason",
+    "created_by",
+    "created_at",
+    "metadata_",
+]
+
+
+@router.post("/conflicts")
+async def record_memory_conflict(request: Request) -> dict:
+    """A55 — persist a memory_conflicts classification record (additive; the
+    memory-row status/supersedes effect is applied separately)."""
+    body: dict = await request.json()
+    try:
+        row = await _svc.memory_conflict_record(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return orm_to_dict(row, _MEMORY_CONFLICT_FIELDS)
+
+
 @router.post("/dedup-reviews")
 async def enqueue_dedup_review(request: Request) -> dict:
     body: dict = await request.json()
@@ -1063,7 +1185,7 @@ async def admin_list(request: Request) -> list[dict]:
 
 @router.post("/list")
 async def list_by_filters(request: Request) -> list[dict]:
-    """Non-admin memory list WITH visibility scoping (MCP ``memclaw_list``).
+    """Non-admin memory list WITH visibility scoping (MCP ``caura_list``).
 
     Body: ``{tenant_id, caller_agent_id?, fleet_id?, written_by?, memory_type?,
     status?, run_id?, weight_min?, weight_max?, created_after?, created_before?,
@@ -1138,7 +1260,7 @@ async def list_by_filters(request: Request) -> list[dict]:
 
 @router.post("/stats-breakdown")
 async def stats_breakdown(request: Request) -> dict:
-    """Visibility-scoped stats breakdown (MCP ``memclaw_stats``).
+    """Visibility-scoped stats breakdown (MCP ``caura_stats``).
 
     Body: ``{tenant_id?, fleet_id?, agent_id?, memory_type?, status?,
     include_deleted?, readable_tenant_ids?}``. Returns ``{total, by_type,
@@ -1646,6 +1768,11 @@ async def update_embedding(memory_id: UUID, request: Request) -> dict:
         tenant_id=tenant_id,
         embedding=body["embedding"],
         metadata=body.get("metadata"),
+        # Optional: the hash of the text the caller actually embedded. Absent
+        # leaves provenance NULL ("unknown"), which is honest — the service
+        # deliberately does not infer it from the row, since the row may have
+        # moved on while the caller was embedding.
+        embedded_content_hash=body.get("embedded_content_hash"),
     )
     if not updated:
         # No row for this (id, tenant) — surface 404 rather than a silent

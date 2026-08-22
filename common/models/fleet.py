@@ -49,7 +49,7 @@ class FleetCommand(Base):
         # is a tiny fraction of all fleet commands) and lets Postgres
         # seek straight to a node's deploy rows; the JSONB
         # ``payload->>'target_version'`` predicate is then applied on the
-        # O(1)–O(10) rows that survive, so it doesn't need to be in the
+        # O(1)-O(10) rows that survive, so it doesn't need to be in the
         # index. Bare column names (not ``.desc()``) so Alembic autogen
         # can reflect/compare — matches the style in ``memory.py``.
         Index(

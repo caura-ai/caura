@@ -15,7 +15,7 @@
  *     process serves one tenant/agent, so caching by ``tenant:agent:fleet``
  *     mirrors the existing ``recallCache`` shape and gives a cheap reuse
  *     across all sessions. Invalidation clears the whole cache (small,
- *     bounded) on a ``memclaw_keystones_set`` dispatch — see
+ *     bounded) on a ``caura_keystones_set`` dispatch — see
  *     ``invalidateKeystoneCache``.
  *   * **Fail-open.** Any network / auth / 5xx error logs and returns
  *     ``""``. Keystones are additive — losing them is bad, but blocking
@@ -100,7 +100,7 @@ function _cacheKey(tenantId: string, fleetId: string | undefined, agentId: strin
  * Drop every cached keystone block.
  *
  * Exported for future wiring: once the plugin gains a path that
- * dispatches ``memclaw_keystones_set`` (it currently doesn't — the
+ * dispatches ``caura_keystones_set`` (it currently doesn't — the
  * write tool is MCP-only with ``plugin_exposed=false``), the dispatch
  * site should call this so a freshly-authored rule takes effect on the
  * next ``assemble`` turn instead of waiting out the cache TTL. Until

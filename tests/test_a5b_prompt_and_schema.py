@@ -311,6 +311,43 @@ def test_extracted_graph_parses_without_mentions_field() -> None:
     )
 
 
+def test_extracted_graph_parses_mention_with_null_cluster_id() -> None:
+    """A null ``cluster_id`` must parse, not raise.
+
+    No provider enforces the ``response_schema`` ``_do_extract`` sends, so this
+    parse is the only guardrail — and while ``cluster_id`` was a bare ``int``,
+    one null failed the ENTIRE graph rather than the single mention carrying
+    it. Prod, 2026-08-16: ``mentions.10.cluster_id  Input should be a valid
+    integer``.
+
+    The surface form is the salvageable part of an unclustered mention, so it
+    must survive rather than take the whole graph down with it.
+    """
+    from core_api.services.entity_extraction import ExtractedGraph
+
+    raw = {
+        "entities": [
+            {"canonical_name": "anna", "entity_type": "person", "role": "subject"},
+        ],
+        "relations": [],
+        "mentions": [
+            {"surface": "Anna", "cluster_id": 0, "entity_canonical": "anna"},
+            # The deviation the provider actually emits.
+            {"surface": "She", "cluster_id": None, "entity_canonical": None},
+        ],
+    }
+
+    graph = ExtractedGraph(**raw)
+
+    assert len(graph.mentions) == 2, (
+        f"a null cluster_id must not drop the mention; got {graph.mentions!r}"
+    )
+    assert graph.mentions[1].cluster_id is None
+    # The clustered sibling must still round-trip as an int — tolerating null
+    # must not silently coerce real cluster ids.
+    assert graph.mentions[0].cluster_id == 0
+
+
 # ---------------------------------------------------------------------------
 # Change 5 — prompt-level role-vs-person distinction
 # ---------------------------------------------------------------------------

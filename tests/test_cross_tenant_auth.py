@@ -219,7 +219,7 @@ async def test_log_cross_tenant_read_noop_for_single_tenant():
         await log_cross_tenant_read(            home_tenant_id="home",
             home_agent_id="agent-1",
             source_tenants=[],
-            surface="memclaw_recall",
+            surface="caura_recall",
         )
         mock.assert_not_called()
 
@@ -238,7 +238,7 @@ async def test_log_cross_tenant_read_emits_per_source_tenant():
         await log_cross_tenant_read(            home_tenant_id="home",
             home_agent_id="agent-1",
             source_tenants=["src-a", "src-b"],
-            surface="memclaw_recall",
+            surface="caura_recall",
             result_count_by_tenant={"src-a": 3, "src-b": 0},
             query_summary="how do we handle X",
         )
@@ -246,7 +246,7 @@ async def test_log_cross_tenant_read_emits_per_source_tenant():
         first_call = mock.await_args_list[0].kwargs
         assert first_call["tenant_id"] == "src-a"
         assert first_call["action"] == "cross_tenant_read"
-        assert first_call["resource_type"] == "memclaw_recall"
+        assert first_call["resource_type"] == "caura_recall"
         assert first_call["detail"]["home_tenant_id"] == "home"
         assert first_call["detail"]["home_agent_id"] == "agent-1"
         assert first_call["detail"]["result_count_from_this_tenant"] == 3

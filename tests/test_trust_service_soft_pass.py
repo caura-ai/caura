@@ -7,7 +7,7 @@ allowed any tool the tenant's default policy permits.
 
 Pre-fix, ``require_trust`` returned ``(0, True, "Error (403): Agent 'X'
 not found ...")``: any read tool gated at ``min_level >= 1`` (e.g.
-``memclaw_list`` with ``scope='agent'``) 403'd a brand-new agent until
+``caura_list`` with ``scope='agent'``) 403'd a brand-new agent until
 they happened to write something first to register themselves.
 
 Post-fix:

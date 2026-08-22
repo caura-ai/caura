@@ -1,4 +1,4 @@
-"""Unit tests for ``memclaw_keystones`` and ``memclaw_keystones_set`` (CAURA-000).
+"""Unit tests for ``caura_keystones`` and ``caura_keystones_set`` (CAURA-000).
 
 Covers:
 - Read: auth, payload shape, truncation flag pass-through, fleet/agent scoping.
@@ -42,7 +42,7 @@ def _stub_storage_client(monkeypatch, **method_returns):
 
 
 # ---------------------------------------------------------------------------
-# memclaw_keystones (read)
+# caura_keystones (read)
 # ---------------------------------------------------------------------------
 
 
@@ -52,7 +52,7 @@ async def test_keystones_read_returns_rules(mcp_env, monkeypatch):
         {"doc_id": "use-feature-x", "data": {"scope": "fleet", "weight": 50}},
     ]
     _stub_storage_client(monkeypatch, list_keystones=(rows, False))
-    out = await mcp_server.memclaw_keystones(fleet_id="fleet-A")
+    out = await mcp_server.caura_keystones(fleet_id="fleet-A")
     payload = parse_envelope(out)
     assert payload["count"] == 2
     assert payload["truncated"] is False
@@ -61,7 +61,7 @@ async def test_keystones_read_returns_rules(mcp_env, monkeypatch):
 
 async def test_keystones_read_propagates_truncation(mcp_env, monkeypatch):
     _stub_storage_client(monkeypatch, list_keystones=([{"doc_id": "a"}], True))
-    out = await mcp_server.memclaw_keystones(fleet_id="fleet-A")
+    out = await mcp_server.caura_keystones(fleet_id="fleet-A")
     assert parse_envelope(out)["truncated"] is True
 
 
@@ -70,7 +70,7 @@ async def test_keystones_read_drops_agent_id_when_no_fleet(mcp_env, monkeypatch)
     must NOT forward agent_id under that shape (would silently miss them at
     the storage layer anyway, but defence in depth)."""
     sc = _stub_storage_client(monkeypatch, list_keystones=([], False))
-    await mcp_server.memclaw_keystones(agent_id="agent-Z", fleet_id=None)
+    await mcp_server.caura_keystones(agent_id="agent-Z", fleet_id=None)
     sc.list_keystones.assert_awaited_once()
     kwargs = sc.list_keystones.await_args.kwargs
     assert kwargs["agent_id"] is None
@@ -78,19 +78,19 @@ async def test_keystones_read_drops_agent_id_when_no_fleet(mcp_env, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
-# memclaw_keystones_set (write/delete)
+# caura_keystones_set (write/delete)
 # ---------------------------------------------------------------------------
 
 
 async def test_keystones_set_unknown_op(mcp_env):
-    out = await mcp_server.memclaw_keystones_set(op="oops", doc_id="x")
+    out = await mcp_server.caura_keystones_set(op="oops", doc_id="x")
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INVALID_ARGUMENTS"
     assert "set|delete" in payload["error"]["message"]
 
 
 async def test_keystones_set_missing_doc_id(mcp_env):
-    out = await mcp_server.memclaw_keystones_set(op="set", doc_id="")
+    out = await mcp_server.caura_keystones_set(op="set", doc_id="")
     assert "doc_id is required" in strip_latency(out)
 
 
@@ -106,7 +106,7 @@ async def test_keystones_set_trust_denied(mcp_env, monkeypatch):
     # effective floor can combine new + stored shapes. ``None`` means
     # "no existing rule, this is a create".
     _stub_storage_client(monkeypatch, get_document=None)
-    out = await mcp_server.memclaw_keystones_set(
+    out = await mcp_server.caura_keystones_set(
         op="set",
         doc_id="no-secrets",
         title="No secrets",
@@ -130,7 +130,7 @@ async def test_keystones_set_happy_path(mcp_env, monkeypatch):
             "doc_id": "no-secrets",
         },
     )
-    out = await mcp_server.memclaw_keystones_set(
+    out = await mcp_server.caura_keystones_set(
         op="set",
         doc_id="no-secrets",
         title="No secrets",
@@ -160,7 +160,7 @@ async def test_keystones_delete_happy_path(mcp_env, monkeypatch):
         get_document={"data": {"scope": "tenant"}},
         delete_keystone=True,
     )
-    out = await mcp_server.memclaw_keystones_set(op="delete", doc_id="no-secrets")
+    out = await mcp_server.caura_keystones_set(op="delete", doc_id="no-secrets")
     payload = parse_envelope(out)
     assert payload["ok"] is True
     assert payload["action"] == "delete"
@@ -170,7 +170,7 @@ async def test_keystones_delete_not_found(mcp_env, monkeypatch):
     # The pre-lookup returns None now, so ``not found`` lands BEFORE
     # the delete call instead of after — same envelope.
     _stub_storage_client(monkeypatch, get_document=None)
-    out = await mcp_server.memclaw_keystones_set(op="delete", doc_id="ghost")
+    out = await mcp_server.caura_keystones_set(op="delete", doc_id="ghost")
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "NOT_FOUND"
 
@@ -213,7 +213,7 @@ async def test_set_agent_scope_self_succeeds_at_trust_1(mcp_env, monkeypatch):
         get_document=None,  # create — no stored shape competes with new
         upsert_keystone={"id": "11111111-1111-4111-8111-111111111111", "doc_id": "r"},
     )
-    out = await mcp_server.memclaw_keystones_set(
+    out = await mcp_server.caura_keystones_set(
         op="set",
         doc_id="r",
         title="T",
@@ -242,7 +242,7 @@ async def test_set_agent_scope_other_rejected_at_trust_1(mcp_env, monkeypatch):
         get_document=None,
         upsert_keystone={"id": "11111111-1111-4111-8111-111111111111", "doc_id": "r"},
     )
-    out = await mcp_server.memclaw_keystones_set(
+    out = await mcp_server.caura_keystones_set(
         op="set",
         doc_id="r",
         title="T",
@@ -267,7 +267,7 @@ async def test_set_fleet_scope_rejected_at_trust_1(mcp_env, monkeypatch):
         get_document=None,
         upsert_keystone={"id": "11111111-1111-4111-8111-111111111111", "doc_id": "r"},
     )
-    out = await mcp_server.memclaw_keystones_set(
+    out = await mcp_server.caura_keystones_set(
         op="set",
         doc_id="r",
         title="T",
@@ -294,7 +294,7 @@ async def test_delete_own_agent_rule_succeeds_at_trust_1(mcp_env, monkeypatch):
         get_document={"data": {"scope": "agent", "agent_id": "agent-A"}},
         delete_keystone=True,
     )
-    out = await mcp_server.memclaw_keystones_set(op="delete", doc_id="r")
+    out = await mcp_server.caura_keystones_set(op="delete", doc_id="r")
     assert parse_envelope(out)["ok"] is True
     # One DB round-trip (was two pre-consolidation). The explicit
     # min_level is the anti-probing floor (1); the rule-shape floor is
@@ -318,7 +318,7 @@ async def test_set_overwrite_fleet_with_self_agent_uses_stored_floor(
         get_document={"data": {"scope": "fleet"}},
         upsert_keystone={"id": "11111111-1111-4111-8111-111111111111", "doc_id": "r"},
     )
-    out = await mcp_server.memclaw_keystones_set(
+    out = await mcp_server.caura_keystones_set(
         op="set",
         doc_id="r",
         title="T",
@@ -348,7 +348,7 @@ async def test_delete_fleet_rule_rejected_at_trust_1(mcp_env, monkeypatch):
         get_document={"data": {"scope": "fleet"}},
         delete_keystone=True,
     )
-    out = await mcp_server.memclaw_keystones_set(op="delete", doc_id="r")
+    out = await mcp_server.caura_keystones_set(op="delete", doc_id="r")
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "FORBIDDEN"
     # Still one DB round-trip — the floor failure is detected in-memory
@@ -384,7 +384,7 @@ async def test_set_aborts_when_stored_scope_changes_between_reads(
     )
     monkeypatch.setattr("core_api.mcp_server.get_storage_client", lambda: sc)
 
-    out = await mcp_server.memclaw_keystones_set(
+    out = await mcp_server.caura_keystones_set(
         op="set",
         doc_id="r",
         title="T",
@@ -425,7 +425,7 @@ async def test_delete_aborts_when_stored_scope_changes_between_reads(
     sc.delete_keystone = AsyncMock(return_value=True)
     monkeypatch.setattr("core_api.mcp_server.get_storage_client", lambda: sc)
 
-    out = await mcp_server.memclaw_keystones_set(op="delete", doc_id="r")
+    out = await mcp_server.caura_keystones_set(op="delete", doc_id="r")
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "CONFLICT", payload
     # Delete must NOT have fired against the storage layer.

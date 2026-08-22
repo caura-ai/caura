@@ -2,7 +2,7 @@
 
 Covers Option B of the currency redesign:
   - Episodes never carry ts_valid_end (stripped by the validator).
-  - Non-episode types (fact, intention, commitment, …) preserve LLM-provided
+  - Non-episode types (fact, plan, commitment, …) preserve LLM-provided
     ts_valid_end so explicit deadlines / expiries still work.
   - The enrichment prompt contains the episode rule.
 """
@@ -82,6 +82,10 @@ class TestNonEpisodePreservesTsValidEnd:
         assert out.ts_valid_end == "2024-12-31T23:59:59+00:00"
 
     def test_intention_preserves_end(self):
+        """CAURA-717 deprecated `intention` and now demotes it to
+        `DEFAULT_MEMORY_TYPE` (`fact`). The demotion must not clobber
+        ts_valid_end — a caller-supplied deprecated type still contributes
+        its temporal bounds to the stored row."""
         raw = {
             "memory_type": "intention",
             "weight": 0.7,
@@ -95,7 +99,7 @@ class TestNonEpisodePreservesTsValidEnd:
             "pii_types": [],
         }
         out = _validate_enrichment(raw, llm_ms=0)
-        assert out.memory_type == "intention"
+        assert out.memory_type == "fact"  # demoted per CAURA-717
         assert out.ts_valid_end == "2024-07-01T00:00:00+00:00"
 
     def test_commitment_preserves_end(self):

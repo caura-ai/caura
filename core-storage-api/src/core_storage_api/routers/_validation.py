@@ -18,6 +18,20 @@ def _require(body: dict, key: str) -> str:
     return val
 
 
+def _require_dict(body: dict, key: str) -> dict:
+    """Fail-closed object guard — 422 on missing / non-dict / empty.
+
+    ``_require`` is not enough for a nested params object: it admits any truthy
+    value, so a list or a string would pass and then fail deeper in as a type
+    error. Empty is rejected too — callers pass these dicts to be read key by
+    key, so ``{}`` is the same malformed request as a missing key.
+    """
+    val = body.get(key)
+    if not isinstance(val, dict) or not val:
+        raise HTTPException(status_code=422, detail=f"{key} (non-empty object) is required")
+    return val
+
+
 def _require_number(body: dict, key: str) -> float:
     """Fail-closed numeric guard — 422 on missing / non-numeric.
 

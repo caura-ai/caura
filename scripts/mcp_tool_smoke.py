@@ -128,7 +128,7 @@ def seed_fleet_and_memories() -> dict:
         body={"trust_level": 3},
         headers={"X-Tenant-ID": TENANT},
     )
-    # Seed one entity so memclaw_entity_get has something to find.
+    # Seed one entity so caura_entity_get has something to find.
     _, ent = http(
         "POST",
         f"{CORE_API}/api/v1/entities/upsert",
@@ -140,7 +140,7 @@ def seed_fleet_and_memories() -> dict:
         headers={"X-Tenant-ID": TENANT},
     )
     entity_id = ent.get("id") or ent.get("entity_id") or ""
-    # Seed one doc so memclaw_doc read/query hits data.
+    # Seed one doc so caura_doc read/query hits data.
     http(
         "POST",
         f"{CORE_API}/api/v1/documents",
@@ -153,7 +153,7 @@ def seed_fleet_and_memories() -> dict:
         },
         headers={"X-Tenant-ID": TENANT},
     )
-    # Capture a seeded memory_id for memclaw_manage.
+    # Capture a seeded memory_id for caura_manage.
     _, listing = http(
         "GET",
         f"{CORE_API}/api/v1/memories?tenant_id={TENANT}&agent_id={agent}&limit=1",
@@ -176,7 +176,7 @@ def main():
 
     tests = [
         (
-            "memclaw_write",
+            "caura_write",
             {
                 "agent_id": agent,
                 "fleet_id": FLEET,
@@ -185,15 +185,15 @@ def main():
             },
         ),
         (
-            "memclaw_recall",
+            "caura_recall",
             {"agent_id": agent, "fleet_id": FLEET, "query": "what database do we use"},
         ),
         (
-            "memclaw_list",
+            "caura_list",
             {"agent_id": agent, "fleet_id": FLEET, "scope": "agent", "limit": 10},
         ),
         (
-            "memclaw_manage",
+            "caura_manage",
             {
                 "agent_id": agent,
                 "fleet_id": FLEET,
@@ -202,7 +202,7 @@ def main():
             },
         ),
         (
-            "memclaw_doc",
+            "caura_doc",
             {
                 "agent_id": agent,
                 "fleet_id": FLEET,
@@ -212,15 +212,15 @@ def main():
             },
         ),
         (
-            "memclaw_entity_get",
+            "caura_entity_get",
             {"agent_id": agent, "fleet_id": FLEET, "entity_id": ctx["entity_id"]},
         ),
         (
-            "memclaw_tune",
+            "caura_tune",
             {"agent_id": agent, "fleet_id": FLEET, "op": "get"},
         ),
         (
-            "memclaw_insights",
+            "caura_insights",
             {
                 "agent_id": agent,
                 "fleet_id": FLEET,
@@ -229,7 +229,7 @@ def main():
             },
         ),
         (
-            "memclaw_evolve",
+            "caura_evolve",
             {
                 "agent_id": agent,
                 "fleet_id": FLEET,
@@ -238,13 +238,13 @@ def main():
             },
         ),
         (
-            "memclaw_stats",
+            "caura_stats",
             {"agent_id": agent, "fleet_id": FLEET, "scope": "agent"},
         ),
         (
             # Skills now live in the generic ``skills`` document collection.
-            # Upsert via memclaw_doc op=write, then delete via op=delete.
-            "memclaw_doc",
+            # Upsert via caura_doc op=write, then delete via op=delete.
+            "caura_doc",
             {
                 "agent_id": agent,
                 "fleet_id": FLEET,
@@ -253,13 +253,13 @@ def main():
                 "doc_id": "smoke-skill",
                 "data": {
                     "name": "smoke-skill",
-                    "summary": "Smoke-test skill — published via memclaw_doc.",
+                    "summary": "Smoke-test skill — published via caura_doc.",
                     "content": "# smoke-skill\n\nProbe content.\n",
                 },
             },
         ),
         (
-            "memclaw_doc",
+            "caura_doc",
             {
                 "agent_id": agent,
                 "op": "delete",

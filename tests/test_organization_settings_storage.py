@@ -118,12 +118,12 @@ def test_resolved_config_tenant_override_wins():
 # ── Storage: get_raw_settings / update_settings ───────────────────────────
 
 
-async def test_get_empty_returns_empty_dict(db):
+async def test_get_empty_returns_empty_dict():
     raw = await get_raw_settings(_tid())
     assert raw == {}
 
 
-async def test_get_display_empty_returns_schema_with_nulls(db):
+async def test_get_display_empty_returns_schema_with_nulls():
     display = await get_settings_for_display(_tid())
     # Every schema key from DEFAULT_SETTINGS should be present
     for key in DEFAULT_SETTINGS:
@@ -132,7 +132,7 @@ async def test_get_display_empty_returns_schema_with_nulls(db):
     assert display["enrichment"]["provider"] is None
 
 
-async def test_update_persists_overrides(db):
+async def test_update_persists_overrides():
     tid = _tid()
     await update_settings(tid,
         {"enrichment": {"provider": "vertex", "model": "gemini-2.0-flash"}},
@@ -143,7 +143,7 @@ async def test_update_persists_overrides(db):
     assert raw["enrichment"]["model"] == "gemini-2.0-flash"
 
 
-async def test_update_merges_nested_keys(db):
+async def test_update_merges_nested_keys():
     """Partial update of one nested key doesn't wipe sibling keys in the same block."""
     tid = _tid()
     await update_settings(tid, {"enrichment": {"provider": "openai", "model": "gpt-4"}}
@@ -156,7 +156,7 @@ async def test_update_merges_nested_keys(db):
     assert raw["enrichment"]["model"] == "gpt-4"  # preserved
 
 
-async def test_update_partial_preserves_other_features(db):
+async def test_update_partial_preserves_other_features():
     """Updating security_audit doesn't clear a previously-set enrichment override."""
     tid = _tid()
     await update_settings(tid, {"enrichment": {"provider": "openai"}})
@@ -210,7 +210,7 @@ async def test_audit_no_row_on_noop(db):
     assert after_count == before_count
 
 
-async def test_resolve_config_reads_from_db(db):
+async def test_resolve_config_reads_from_db():
     tid = _tid()
     await update_settings(tid, {"security_audit": {"schedule_enabled": True}})
     invalidate_cache(tid)
@@ -222,7 +222,7 @@ async def test_resolve_config_reads_from_db(db):
 # ── Cache semantics ───────────────────────────────────────────────────────
 
 
-async def test_cache_hit_avoids_storage_fetch(db, monkeypatch):
+async def test_cache_hit_avoids_storage_fetch(monkeypatch):
     """Second call to get_raw_settings for the same tenant should not re-fetch
     from core-storage-api — the TTL cache short-circuits before the HTTP call."""
     tid = _tid()
@@ -243,7 +243,7 @@ async def test_cache_hit_avoids_storage_fetch(db, monkeypatch):
     assert calls["n"] == 0, "Cache hits should not fetch from storage"
 
 
-async def test_update_invalidates_local_cache(db):
+async def test_update_invalidates_local_cache():
     """After update_settings, the next read returns the new value without waiting for TTL."""
     tid = _tid()
     # Prime cache with empty
@@ -264,7 +264,7 @@ async def test_update_invalidates_local_cache(db):
 # short-circuits the storage fetch entirely.
 
 
-async def test_get_raw_settings_works_when_db_is_none(db):
+async def test_get_raw_settings_works_when_db_is_none():
     """Cold-cache call with ``db=None`` must resolve via the storage client
     (no DB session needed) and land the result in the cache for next time."""
     tid = _tid()
@@ -280,7 +280,7 @@ async def test_get_raw_settings_works_when_db_is_none(db):
     assert tid in ts_svc._settings_cache
 
 
-async def test_resolve_config_works_without_db_session(db):
+async def test_resolve_config_works_without_db_session():
     """End-to-end: ``resolve_config(tenant_id)`` (the path the
     fire-and-forget contradiction detector + the CAURA-595 Phase 5a
     consumer take) must return a usable ``ResolvedConfig`` without a

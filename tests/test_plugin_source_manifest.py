@@ -218,14 +218,14 @@ def test_install_script_alsoAllow_lockstep():
 
     Drift this guards: pre-fix the install script's ``alsoAllow`` was
     written by hand at ``plugin.py:506`` and shipped 10 entries — missing
-    ``memclaw_keystones``. Every fresh ``curl /api/install-plugin | bash``
+    ``caura_keystones``. Every fresh ``curl /api/install-plugin | bash``
     install wrote that 10-tool list into ``~/.openclaw/openclaw.json``, and
-    OpenClaw silently refused every ``memclaw_keystones`` invocation
+    OpenClaw silently refused every ``caura_keystones`` invocation
     because it wasn't in the allowed set. The plugin's boot log emitted a
     warning, but operators don't read gateway.log, so the keystone tool
     was effectively disabled on every fresh-installed node.
 
-    ``memclaw_keystones_set`` is intentionally NOT in the install-script's
+    ``caura_keystones_set`` is intentionally NOT in the install-script's
     ``alsoAllow`` because ``tools.json`` marks it ``plugin_exposed: false``
     — it is the admin authoring path, served only via MCP (memclaw_server)
     and never exposed to OpenClaw-side agents. The two sides of this test
@@ -294,7 +294,7 @@ def test_install_script_claims_both_slots():
     engine and our plugin's ``assemble()`` is never called.
 
     Symptom: a customer running plugin v2.6.0 reported via WhatsApp that
-    the agent could fetch keystones via the ``memclaw_keystones`` tool
+    the agent could fetch keystones via the ``caura_keystones`` tool
     but the ``<keystone_rules>`` block never appeared in the system
     prompt. Tool surface works (slot-independent); dynamic injection
     silently disabled. This test pins both slot lines in the install

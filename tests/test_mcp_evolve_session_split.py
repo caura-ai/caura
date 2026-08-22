@@ -1,4 +1,4 @@
-"""Audit P3 regression test for ``memclaw_evolve``.
+"""Audit P3 regression test for ``caura_evolve``.
 
 The handler previously held a single ``_mcp_session()`` open across
 the rule-generation LLM round-trip in ``_generate_rule``, pinning a
@@ -46,7 +46,7 @@ _APPLY_OUTCOME_RESULT = {
 
 
 async def _run_evolve_capturing_apply_kwargs(monkeypatch, *, related_ids, filter_result):
-    """Drive memclaw_evolve with mocked collaborators, returning the kwargs
+    """Drive caura_evolve with mocked collaborators, returning the kwargs
     the handler passed to ``_apply_outcome_to_db``."""
     captured: dict = {}
 
@@ -75,7 +75,7 @@ async def _run_evolve_capturing_apply_kwargs(monkeypatch, *, related_ids, filter
     )
     monkeypatch.setattr("core_api.services.evolve_service._apply_outcome_to_db", _spy_apply)
 
-    await mcp_server.memclaw_evolve(
+    await mcp_server.caura_evolve(
         outcome="a thing happened",
         outcome_type="failure",
         related_ids=related_ids,
@@ -86,7 +86,7 @@ async def _run_evolve_capturing_apply_kwargs(monkeypatch, *, related_ids, filter
 
 
 async def test_evolve_passes_all_required_apply_outcome_kwargs(mcp_env, monkeypatch):
-    """memclaw_evolve must pass every required kwarg of _apply_outcome_to_db.
+    """caura_evolve must pass every required kwarg of _apply_outcome_to_db.
 
     The handler patches _apply_outcome_to_db with a mock that swallows any
     signature, so a missing required kwarg (e.g. weight_adjustment_skipped_reason)
@@ -197,7 +197,7 @@ async def test_evolve_closes_first_session_before_llm(mcp_env, monkeypatch):
         ),
     )
 
-    await mcp_server.memclaw_evolve(
+    await mcp_server.caura_evolve(
         outcome="a thing happened",
         outcome_type="failure",
         related_ids=["11111111-1111-1111-1111-111111111111"],
@@ -268,7 +268,7 @@ async def test_evolve_uses_two_distinct_sessions(mcp_env, monkeypatch):
         ),
     )
 
-    await mcp_server.memclaw_evolve(
+    await mcp_server.caura_evolve(
         outcome="all good",
         outcome_type="success",
         related_ids=["11111111-1111-1111-1111-111111111111"],

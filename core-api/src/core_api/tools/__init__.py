@@ -1,6 +1,6 @@
 """Tool-spec single source of truth for the MCP surface.
 
-Importing this package autoloads every `memclaw_*.py` spec module and
+Importing this package autoloads every `caura_*.py` spec module and
 populates `REGISTRY`. Use `get_spec(name)` for typed lookup.
 """
 

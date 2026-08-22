@@ -13,6 +13,23 @@ Public surface:
   falls back to :func:`get_embedding`'s symmetric behaviour. Backwards-
   compatible with the prior ``core_api.services.embedding`` module.
 * :func:`get_embedding_provider` — factory.
+* :func:`is_blank_text` — the predicate the entrypoints above use to reject
+  unembeddable input. Public so callers can apply the SAME definition of
+  blank when they need to answer differently (e.g. a 400 rather than a
+  degraded result) instead of re-implementing it.
+* :func:`call_embedding_gated` — runs a caller-supplied embed under the
+  process-wide concurrency gate, for the one caller that holds a provider
+  directly instead of going through the entrypoints above. Never nest it
+  inside them; see its docstring for why that deadlocks.
+* :class:`EmbeddingGateTimeout` — raised when the concurrency gate, not the
+  backend, is what stopped an embed. A ``TimeoutError`` subclass, so
+  existing handlers are unaffected; catch it only to tell saturation apart
+  from provider failure.
+* :class:`EmbeddingBackendBusy` — the same distinction for the SHARED
+  backend: raised on a 429, meaning capacity ran out across every calling
+  instance rather than in this process. Not a ``TimeoutError`` (the
+  refusal is immediate). Catch it to tell aggregate saturation apart from
+  a provider fault; the concurrency cap is per process and cannot see it.
 * :func:`init_platform_embedding` / :func:`get_platform_embedding` —
   platform-tier singleton, initialised once at service startup from
   ``PLATFORM_EMBEDDING_*`` env vars.
@@ -39,9 +56,13 @@ from common.embedding._platform import (
 )
 from common.embedding._registry import get_embedding_provider
 from common.embedding._service import (
+    EmbeddingBackendBusy,
+    EmbeddingGateTimeout,
+    call_embedding_gated,
     get_embedding,
     get_embeddings_batch,
     get_query_embedding,
+    is_blank_text,
 )
 from common.embedding.protocols import EmbeddingProvider, InstructionAwareEmbedder
 from common.embedding.providers.fake import (
@@ -50,9 +71,12 @@ from common.embedding.providers.fake import (
 )
 
 __all__ = [
+    "EmbeddingBackendBusy",
+    "EmbeddingGateTimeout",
     "EmbeddingProvider",
     "FakeEmbeddingProvider",
     "InstructionAwareEmbedder",
+    "call_embedding_gated",
     "fake_embedding",
     "get_embedding",
     "get_embedding_provider",
@@ -60,5 +84,6 @@ __all__ = [
     "get_platform_embedding",
     "get_platform_init_errors",
     "get_query_embedding",
+    "is_blank_text",
     "init_platform_embedding",
 ]
