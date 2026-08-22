@@ -2,7 +2,17 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, Text, func, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -32,6 +42,25 @@ class Memory(Base):
     )
     title: Mapped[str | None] = mapped_column(Text)
     content_hash: Mapped[str | None] = mapped_column(Text)
+    # Provenance for ``embedding``: the ``content_hash`` of the text the
+    # vector was actually computed from. Without it a vector left over
+    # from earlier content is byte-identical to a correct one, so a
+    # mis-embedded row is undetectable — ``embedding IS NOT NULL`` says
+    # only that *something* was embedded, never *what*.
+    #
+    # Staleness is then expressible:
+    #     embedding IS NOT NULL
+    #     AND embedded_content_hash IS NOT NULL      -- provenance known
+    #     AND embedded_content_hash IS DISTINCT FROM content_hash
+    #
+    # NULL means "provenance unknown", NOT "stale": every row written
+    # before migration 037 has no recorded hash, and calling those stale
+    # would report the entire historical corpus as damaged.
+    #
+    # Which is why the second line is load-bearing rather than redundant:
+    # ``NULL IS DISTINCT FROM <hash>`` is TRUE, so dropping it silently
+    # folds every unknown row into the stale count.
+    embedded_content_hash: Mapped[str | None] = mapped_column(Text)
     # Per-attempt idempotency token (CAURA-602). Server-derived from
     # ``X-Bulk-Attempt-Id + ":" + index`` on the bulk path; NULL for
     # single-write and pre-rollout rows. The partial unique index
@@ -83,6 +112,21 @@ class Memory(Base):
         ForeignKey("memories.id", ondelete="SET NULL"),
     )
 
+    # Unified contradiction model (A55) — see benchmark/A55-schema-design.md.
+    # ``confidence``: confidence in this memory's CLAIM (extraction + assertion),
+    # NULL = unknown/legacy. Guards invariant 5 — weak evidence must not delete
+    # strong. ``is_inferred``: True when the system materialised this memory by
+    # inference (not directly stated), so it never silently overrides an explicit
+    # fact; lineage lives in ``memory_derivations``. ``scope``: structured validity
+    # qualifiers (role/task/location); two memories conflict only if scopes overlap.
+    confidence: Mapped[float | None] = mapped_column(Float)
+    is_inferred: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), nullable=False
+    )
+    scope: Mapped[dict | None] = mapped_column(
+        JSONB, server_default=text("'{}'::jsonb"), nullable=False
+    )
+
     __table_args__ = (
         Index("ix_memories_tenant_type", "tenant_id", "memory_type"),
         Index("ix_memories_tenant_agent", "tenant_id", "agent_id"),
@@ -104,12 +148,49 @@ class Memory(Base):
                 "deleted_at IS NULL AND client_request_id IS NOT NULL"
             ),
         ),
+        # Enforces the dedup contract the write path advertises: one LIVE row
+        # per (tenant, fleet, agent, content_hash). Created ``CONCURRENTLY`` in
+        # migration 040 with the same key and predicate; declared here so
+        # reflection / autogen round-trip against the live schema, and so the
+        # suites that build a schema from this metadata rather than from the
+        # migration chain (``tests/conftest.py`` uses
+        # ``Base.metadata.create_all``) exercise the constraint too.
+        #
+        # ``ix_memories_content_hash`` above is NOT a substitute: it is
+        # non-unique and keyed on ``(tenant_id, content_hash)`` only — it makes
+        # the lookup fast, it never made it correct.
+        #
+        # ``agent_id`` is in the key because two agents recording identical
+        # content are two independent observations, which is the same scope
+        # ``memory_find_by_content_hash`` dedups on. ``COALESCE(fleet_id, '')``
+        # for the reason 007 needs it: PostgreSQL treats NULLs as distinct, so
+        # without it fleetless rows would escape the constraint entirely.
+        Index(
+            "uq_memories_live_content_hash",
+            "tenant_id",
+            func.coalesce(text("fleet_id"), ""),
+            "agent_id",
+            "content_hash",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL AND content_hash IS NOT NULL"),
+        ),
         Index("ix_memories_valid_range", "ts_valid_start", "ts_valid_end"),
         Index("ix_memories_subject_entity", "subject_entity_id"),
+        # For DELETEs, not reads — grep will find no query using it. This is the
+        # referencing side of a SET NULL self-FK, which PostgreSQL enforces once
+        # per deleted parent row. Partial because the RI check only ever looks
+        # for a non-NULL match, and almost every row here is NULL (232 kB -> 16 kB).
+        # Created CONCURRENTLY in migration 035, which carries the measurements;
+        # declared here so reflection / autogen round-trip against the live schema.
+        Index(
+            "ix_memories_supersedes_id",
+            "supersedes_id",
+            postgresql_where=text("supersedes_id IS NOT NULL"),
+        ),
         Index("ix_memories_recall_count", "recall_count"),
         Index("ix_memories_tenant_fleet", "tenant_id", "fleet_id"),
         # Backs the cursor-paginated list path (``list_by_filters`` +
-        # the ``memclaw_list`` MCP tool) which orders by
+        # the ``caura_list`` MCP tool) which orders by
         # ``(created_at DESC, id DESC)`` under ``tenant_id = ?`` and
         # ``deleted_at IS NULL``. Partial WHERE keeps the index small
         # since soft-deleted rows are never read on the hot path.

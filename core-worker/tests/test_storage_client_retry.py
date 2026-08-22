@@ -28,6 +28,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from common.http_retry import CONNECT_PHASE_MAX_ATTEMPTS
 from core_worker.clients import identity_token, storage_client
 
 pytestmark = pytest.mark.asyncio
@@ -85,13 +86,22 @@ async def test_post_retries_on_connect_timeout_then_succeeds() -> None:
 
 
 async def test_post_gives_up_after_max_attempts_on_connect_timeout() -> None:
+    """Gives up after ``CONNECT_PHASE_MAX_ATTEMPTS``, whatever that is.
+
+    Asserted against the constant rather than a literal. This test hardcoded 3
+    and silently rotted when the connect-phase budget was raised to 5 after the
+    2026-06-16 prod incident ("3 attempts (~0.6s of backoff) is too short to
+    ride out a cold start"). Nothing caught it because core-worker had no CI —
+    the gap this suite is being wired into CI to close. Pinning the constant
+    means a future change to the budget moves the expectation with it.
+    """
     client = MagicMock(spec=httpx.AsyncClient)
     client.post = AsyncMock(side_effect=httpx.ConnectTimeout("storage unreachable"))
 
     with pytest.raises(httpx.ConnectTimeout):
         await storage_client.archive_stale(client, tenant_id="t1", fleet_id=None)
 
-    assert client.post.await_count == 3
+    assert client.post.await_count == CONNECT_PHASE_MAX_ATTEMPTS
 
 
 async def test_post_does_not_retry_on_read_timeout() -> None:

@@ -323,7 +323,7 @@ export const INTERVIEW_TASK_SIDECAR_RETENTION_MS = 8 * 24 * 60 * 60_000;
 //   models can lower it. Previously 500 — bumped after a customer
 //   with 16 rules saw 4 dropped at every turn (CAURA-000).
 // - ``MEMCLAW_KEYSTONES_CACHE_TTL_MS`` (default 5 minutes) — per-identity
-//   cache TTL. ``memclaw_keystones_set`` invocations bust the cache for
+//   cache TTL. ``caura_keystones_set`` invocations bust the cache for
 //   the current session so a freshly authored rule takes effect on the
 //   next turn.
 function _readBoolEnv(name: string, defaultValue: boolean): boolean {

@@ -1,6 +1,6 @@
 # Local Embedder (TEI sidecar)
 
-MemClaw can serve embeddings from a self-hosted [HuggingFace Text Embeddings
+Caura can serve embeddings from a self-hosted [HuggingFace Text Embeddings
 Inference](https://github.com/huggingface/text-embeddings-inference) (TEI)
 container instead of OpenAI's hosted API. **Default model: `BAAI/bge-m3`**
 (1024-dim, MIT-licensed, multilingual, no instruction prefix needed) — matches
@@ -358,5 +358,5 @@ docker compose up -d   # no profile = no TEI sidecar
   cover most differences between back-ends. TEI is the recommended default
   because it's the most mature open-source option for the bge-m3 default.
 * **The OpenClaw plugin works transparently** regardless of which embedder
-  is configured — it talks to MemClaw's REST API, which doesn't expose
+  is configured — it talks to Caura's REST API, which doesn't expose
   the embedder choice. No plugin-side configuration needed.

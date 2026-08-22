@@ -10,8 +10,8 @@
  * Current surface: 11 tools — LTM (write/recall/list/manage), doc,
  * entity_get, tune, insights, evolve, stats, plus keystones (read-only
  * governance rules surfaced to agents at session start). Skill sharing
- * is done via memclaw_doc with collection="skills". STM tools and
- * memclaw_keystones_set (admin authoring path, ``plugin_exposed=false``)
+ * is done via caura_doc with collection="skills". STM tools and
+ * caura_keystones_set (admin authoring path, ``plugin_exposed=false``)
  * are not surfaced via the plugin.
  *
  * A boot-time drift check throws if this list and tools.json disagree.
@@ -19,17 +19,17 @@
 import { TOOL_SPECS } from "./tool-specs.js";
 
 export const MEMCLAW_TOOLS = [
-  "memclaw_recall",
-  "memclaw_write",
-  "memclaw_manage",
-  "memclaw_doc",
-  "memclaw_list",
-  "memclaw_entity_get",
-  "memclaw_tune",
-  "memclaw_insights",
-  "memclaw_evolve",
-  "memclaw_stats",
-  "memclaw_keystones",
+  "caura_recall",
+  "caura_write",
+  "caura_manage",
+  "caura_doc",
+  "caura_list",
+  "caura_entity_get",
+  "caura_tune",
+  "caura_insights",
+  "caura_evolve",
+  "caura_stats",
+  "caura_keystones",
 ] as const;
 
 // --- Boot-time drift check ---

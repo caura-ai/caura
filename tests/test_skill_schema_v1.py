@@ -8,9 +8,9 @@ SF-002 + SF-006.
 
 Maps to plan §15 Phase 0 acceptance criteria:
 
-  - ``memclaw_doc`` ``op=write`` against ``skills`` with
+  - ``caura_doc`` ``op=write`` against ``skills`` with
     ``description > 160 bytes`` returns 422
-  - ``memclaw_doc`` ``op=write`` against ``skills`` without
+  - ``caura_doc`` ``op=write`` against ``skills`` without
     ``name``/``slug``/``description``/``domain``/``kind``/``source``
     returns 422
   - ``kind='update'`` rejects on hash mismatch (409) and on missing
@@ -643,6 +643,53 @@ class TestRouteSlugRegex:
 
 
 @pytest.mark.unit
+def _strip_docstrings_and_comments(src: str) -> str:
+    """Source with comments and docstrings removed, everything else verbatim.
+
+    A migration guard that greps raw source can be satisfied by a COMMENT, which
+    makes it documentation-checking rather than code-checking. Found by mutation:
+    stripping the real ``autocommit_block`` from 038 still passed, because the
+    module docstring named it.
+
+    Line-based on purpose. Rebuilding from ``tokenize`` output re-spaces the source
+    (``op . get_context ( )``) and, on 3.12+, splits f-strings into parts — either
+    of which silently breaks a literal substring check, which is the same class of
+    bug this helper exists to catch. Ordinary string literals are KEPT: the guarded
+    statements are themselves strings (``op.execute("ALTER TABLE ...")``).
+    """
+    import ast
+    import io
+    import tokenize
+
+    lines = src.splitlines()
+
+    drop: set[int] = set()
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+        body = getattr(node, "body", [])
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            drop.update(range(body[0].lineno, (body[0].end_lineno or body[0].lineno) + 1))
+
+    # Truncate each line at its comment, if any (1-indexed rows, 0-indexed cols).
+    cut: dict[int, int] = {}
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type == tokenize.COMMENT:
+            cut.setdefault(tok.start[0], tok.start[1])
+
+    kept = [
+        line[: cut[i]] if i in cut else line
+        for i, line in enumerate(lines, start=1)
+        if i not in drop
+    ]
+    return "\n".join(kept)
+
+
 class TestMigrationChain:
     """Sanity check that the Phase 0 migrations (020 / 021 / 022) chain
     correctly off the prior head (019). Detects accidental down_revision
@@ -650,6 +697,7 @@ class TestMigrationChain:
 
     def _load(self) -> dict[str, str | None]:
         chain: dict[str, str | None] = {}
+        declared_by: dict[str, str] = {}
         versions = pathlib.Path(
             "core-storage-api/src/core_storage_api/database/migrations/versions"
         )
@@ -658,13 +706,32 @@ class TestMigrationChain:
             assert spec is not None and spec.loader is not None
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
+            # Keyed by revision, so a duplicate id would overwrite rather than
+            # fork — and every assertion below would read a chain that looks
+            # fine. Two branches numbering a migration the same is the common
+            # way this happens (it happened on #828), and alembic answers it
+            # with "Multiple head revisions are present", at deploy time.
+            assert mod.revision not in chain, (
+                f"revision {mod.revision!r} is declared twice: "
+                f"{declared_by[mod.revision]} and {f.name} — "
+                "renumber the newer one onto the current head"
+            )
             chain[mod.revision] = mod.down_revision
+            declared_by[mod.revision] = f.name
         return chain
 
     def test_single_head(self):
+        """One head, and it is the newest migration.
+
+        The expected value is pinned rather than derived, so adding a migration
+        is a deliberate edit here — that is what catches a second head created
+        by two branches both claiming the same ``down_revision``. Bump it when
+        you add one; do not compute it, or the test stops detecting the fork it
+        exists for.
+        """
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"034"}, f"Expected single head '034', got {sorted(heads)}"
+        assert heads == {"040"}, f"Expected single head '040', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -694,6 +761,93 @@ class TestMigrationChain:
         assert chain.get("033") == "032", "033 must follow 032"
         # 034: title into memories.search_vector, weighted A over content B
         assert chain.get("034") == "033", "034 must follow 033"
+        # 035: index the FK columns referencing memories.id (bulk-delete cost)
+        assert chain.get("035") == "034", "035 must follow 034"
+        # 036: unified contradiction model (A55) — conflict/derivation tables + columns
+        assert chain.get("036") == "035", "036 must follow 035"
+        # 037: memories.embedded_content_hash — embedding provenance, so a
+        # vector computed from superseded text becomes detectable
+        assert chain.get("037") == "036", "037 must follow 036"
+        # 038: documents.created_at/updated_at NOT NULL — the columns were always
+        # nullable, so a NULL row 500'd the documents read path (OSS #826)
+        assert chain.get("038") == "037", "038 must follow 037"
+        # 039: tenant_usage_counters — durable per-tenant, per-period counts
+        assert chain.get("039") == "038", "039 must follow 038"
+        # 040: one LIVE memory per (tenant, fleet, agent, content_hash) — the
+        # dedup contract had no schema behind it (OSS #814)
+        assert chain.get("040") == "039", "040 must follow 039"
+
+    def test_no_plain_set_not_null_on_large_tables(self):
+        """Tightening a column to NOT NULL on a large table must not full-scan
+        under an AccessExclusive lock.
+
+        Same hazard as the CREATE INDEX guard below, different statement: a bare
+        ``SET NOT NULL`` scans the whole table to verify while holding
+        AccessExclusive, blocking writes and pinning the migration advisory lock.
+        The safe shape adds a ``CHECK (col IS NOT NULL) NOT VALID``, VALIDATEs it
+        (ShareUpdateExclusive — does not block reads or writes), and only then sets
+        NOT NULL, which PG12+ satisfies from the validated constraint without a
+        second scan. Each step needs its own transaction, hence ``autocommit_block``.
+
+        Catches BOTH spellings, because the existing index guard learned this the
+        hard way: it originally checked only raw SQL, and ``op.create_index(...)``
+        carried the identical defect straight past it.
+        """
+        import re
+
+        large_tables = {
+            "audit_log",
+            "memories",
+            "entities",
+            "documents",
+            "memory_entity_links",
+            "relations",
+        }
+        # ALTER TABLE <table> ALTER COLUMN <col> SET NOT NULL
+        #
+        # The column position accepts ``{...}`` as well as a bare name, because
+        # ``ruff format`` collapses these statements into f-strings and a ``\w+``
+        # column would then match nothing — the guard would go SILENT on the very
+        # file it is meant to check, which is the documented blind spot that leaves
+        # 007 and 026 outside the CREATE INDEX guard below. Verified by mutation
+        # both ways.
+        #
+        # KNOWN GAP, same as that guard: an interpolated TABLE name cannot be
+        # classified against ``large_tables``, so ``f"ALTER TABLE {tbl} ..."`` is
+        # not caught. Keep the table literal in migrations.
+        raw_pat = re.compile(
+            r"ALTER\s+TABLE\s+(\w+)\s+ALTER\s+COLUMN\s+[\w{}]+\s+SET\s+NOT\s+NULL",
+            re.IGNORECASE,
+        )
+        # op.alter_column("<table>", "<col>", ..., nullable=False)
+        api_pat = re.compile(
+            r"op\.alter_column\(\s*[\"\'](\w+)[\"\'][^)]*nullable\s*=\s*False",
+            re.DOTALL,
+        )
+        versions = pathlib.Path(
+            "core-storage-api/src/core_storage_api/database/migrations/versions"
+        )
+        violations: list[str] = []
+        for f in sorted(versions.glob("*.py")):
+            prefix = f.stem.split("_")[0]
+            if not prefix.isdigit() or int(prefix) < 5:
+                continue
+            src = f.read_text()
+            tables = set(raw_pat.findall(src)) | set(api_pat.findall(src))
+            hit = {t for t in tables if t.lower() in large_tables}
+            if not hit:
+                continue
+            # Look at CODE, not prose. Checking the raw source let a migration
+            # satisfy this by DESCRIBING the safe pattern in its docstring while
+            # not doing it — caught by mutation: stripping the real
+            # ``autocommit_block`` still passed, because the docstring named it.
+            code = _strip_docstrings_and_comments(src)
+            if "VALIDATE CONSTRAINT" not in code.upper() or ".autocommit_block()" not in code:
+                violations.append(
+                    f"{f.name}: SET NOT NULL on {sorted(hit)} without the "
+                    "CHECK-NOT-VALID / VALIDATE / autocommit_block pattern"
+                )
+        assert not violations, "unsafe NOT NULL tightening:\n" + "\n".join(violations)
 
     def test_no_plain_create_index_on_large_tables(self):
         """Indexes on large, pre-existing tables MUST be built ``CONCURRENTLY``
@@ -728,6 +882,11 @@ class TestMigrationChain:
             r"(?:IF\s+NOT\s+EXISTS\s+)?\w+\s+ON\s+(\w+)",
             re.IGNORECASE,
         )
+        # op.create_index("<name>", "<table>", ...) — the Alembic API form.
+        api_pat = re.compile(
+            r"op\.create_index\(\s*[\"'][^\"']+[\"']\s*,\s*[\"'](\w+)[\"']",
+            re.DOTALL,
+        )
         versions = pathlib.Path(
             "core-storage-api/src/core_storage_api/database/migrations/versions"
         )
@@ -740,15 +899,73 @@ class TestMigrationChain:
                 or int(prefix) in applied_debt
             ):
                 continue
-            for concurrently, table in pat.findall(f.read_text()):
+            src = f.read_text()
+            for concurrently, table in pat.findall(src):
                 if table.lower() in large_tables and not concurrently:
                     violations.append(f"{f.name}: plain CREATE INDEX on '{table}'")
+            # ``op.create_index(...)`` is the SAME hazard via Alembic's API
+            # rather than raw SQL: it emits a plain, in-transaction CREATE
+            # INDEX. The raw-SQL regex above cannot see it, so migration 037
+            # originally shipped a plain index build on ``memories`` and this
+            # guard passed. Alembic has no CONCURRENTLY option on
+            # ``create_index``, so on a large table the API form is always
+            # wrong — flag every occurrence.
+            for table in api_pat.findall(src):
+                if table.lower() in large_tables:
+                    violations.append(
+                        f"{f.name}: op.create_index() on '{table}' "
+                        "(no CONCURRENTLY option — use op.execute in an autocommit_block)"
+                    )
         assert not violations, (
             "Plain (non-CONCURRENTLY) CREATE INDEX on a large table blocks writes "
             "and holds the migration advisory lock for the whole build (crashed "
             "storage-writer boots on 2026-06-16). Use CREATE INDEX CONCURRENTLY in "
             "an op.get_context().autocommit_block() — see migration 007 / 026. "
             f"Violations: {'; '.join(violations)}"
+        )
+
+    def test_every_fk_referencing_column_is_index_leading(self):
+        """Every FK's referencing column(s) must be usable as an index prefix.
+
+        PostgreSQL enforces a foreign key from the REFERENCING side once per
+        deleted parent row, so an unindexed referencing column turns each delete
+        into a full scan of that table — across ALL tenants, since the scan is
+        not tenant-scoped. Migration 035 landed after this cost 15.3 s of a
+        15.5 s bulk delete (98.7%) on one unindexed self-FK.
+
+        Declaration-level check, so it catches a new FK added without an index
+        at PR time. It cannot catch an index declared here but never migrated —
+        the CONCURRENTLY guard above and the chain tests cover the migration
+        side.
+        """
+        import common.models  # noqa: F401 — registers every mapper on Base
+        from common.models.base import Base
+
+        def prefixes(table):
+            """Column lists some btree on ``table`` can serve as a prefix of."""
+            out = []
+            if len(table.primary_key.columns):
+                out.append([c.name for c in table.primary_key.columns])
+            for ix in table.indexes:
+                # getattr for expression indexes (e.g. func.coalesce): a SQL
+                # expression must not be mistaken for a column of that name.
+                out.append([getattr(e, "name", None) for e in ix.expressions])
+            return out
+
+        missing = []
+        for table in Base.metadata.sorted_tables:
+            available = prefixes(table)
+            for fk in table.foreign_key_constraints:
+                cols = [c.name for c in fk.columns]
+                if not any(p[: len(cols)] == cols for p in available):
+                    target = next(iter(fk.elements)).target_fullname
+                    missing.append(f"{table.name}({', '.join(cols)}) -> {target}")
+        assert not missing, (
+            "Foreign key(s) whose referencing column is not the leading column of "
+            "any index. Deleting a referenced row will scan the whole referencing "
+            "table once per deleted row — see migration 035 for the measured cost. "
+            "Add an Index(...) here and a CONCURRENTLY index in a migration: "
+            f"{'; '.join(missing)}"
         )
 
 
@@ -964,7 +1181,9 @@ class TestBackfill034MatchesMigration:
         """Both directions: ``--revert`` must undo exactly what the forward pass did."""
         import re
 
-        src = pathlib.Path("core-storage-api/src/core_storage_api/scripts/backfill_034_search_vector.py").read_text()
+        src = pathlib.Path(
+            "core-storage-api/src/core_storage_api/scripts/backfill_034_search_vector.py"
+        ).read_text()
         m = re.search(rf'^{const} = "(.+)"$', src, re.M)
         assert m, f"backfill_034_search_vector.py no longer defines {const} on one line"
 

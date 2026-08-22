@@ -1,5 +1,5 @@
 /**
- * HTTP transport layer for MemClaw API communication.
+ * HTTP transport layer for Caura API communication.
  *
  * Security fixes:
  * - Default 15s timeout on all requests via AbortController
@@ -86,7 +86,7 @@ export async function apiCall(
       const text = await res.text();
       // Truncate server error body to avoid leaking internal details
       const safeText = text.length > 200 ? text.slice(0, 200) + "..." : text;
-      throw new Error(`MemClaw API ${res.status}: ${safeText}`);
+      throw new Error(`Caura API ${res.status}: ${safeText}`);
     }
 
     // 204 No Content (e.g. DELETE)
@@ -112,7 +112,7 @@ export async function apiCall(
  * Extract the memory array from a ``POST /search`` response.
  *
  * The REST search endpoint returns ``{ items: [...] }`` (core-api
- * ``SearchResponse(items=...)``), while the MCP ``memclaw_recall`` path
+ * ``SearchResponse(items=...)``), while the MCP ``caura_recall`` path
  * returns ``{ results: [...] }`` and some legacy/test shims return a bare
  * array. Reading only ``.results`` (as we did pre-fix) silently yielded
  * ``[]`` against the REST backend — breaking context-engine auto-recall

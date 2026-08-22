@@ -80,7 +80,7 @@ export function isMemorySlotClaimed(config: Record<string, any>): boolean {
  * code path that injects ``<keystone_rules>`` into the system prompt
  * on every turn. Without this slot, OpenClaw falls back to the default
  * "legacy" engine and our ``assemble()`` never runs. The tool surface
- * (``memclaw_keystones``) still works because tool registration is
+ * (``caura_keystones``) still works because tool registration is
  * slot-independent — but the dynamic keystone injection silently dies.
  *
  * Confirmed against OpenClaw 2026.5.4
@@ -273,7 +273,7 @@ export function getMissingTools(config: Record<string, any>): string[] {
  * Pure so it can be unit-tested. The original gate ran auto-fix exactly
  * once (guarded by the ``.allowlist-applied`` flag file), which meant a
  * plugin upgrade that ADDED a tool to ``MEMCLAW_TOOLS`` (e.g.
- * ``memclaw_keystones``) never got that tool into ``tools.alsoAllow`` on
+ * ``caura_keystones``) never got that tool into ``tools.alsoAllow`` on
  * an existing install — so a later OpenClaw ``tools.profile`` (which only
  * grants core tools + ``alsoAllow``) silently stripped it. We now also
  * re-run when there is drift: a missing tool or an unclaimed contextEngine

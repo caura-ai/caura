@@ -11,8 +11,11 @@ import openai
 from common.constants import VECTOR_DIM
 from common.embedding.constants import (
     EMBEDDING_HOSTED_MAX_BATCH,
+    EMBEDDING_HTTPX_CONNECT_TIMEOUT_SECONDS,
     EMBEDDING_HTTPX_MAX_CONNECTIONS,
     EMBEDDING_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
+    EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS,
+    EMBEDDING_PROVIDER_MAX_RETRIES,
     EMBEDDING_REMOTE_MAX_BATCH,
     OPENAI_EMBEDDING_MODEL,
     OPENAI_REQUEST_TIMEOUT_SECONDS,
@@ -111,9 +114,29 @@ class OpenAIEmbeddingProvider:
         # ``OpenAILLMProvider``: the SDK's default httpx pool (100 max
         # / 20 keepalive) saturates under storm load and queues other
         # tenants' embed calls at the pool layer.
+        #
+        # ``max_retries`` is pinned rather than left at the SDK's default
+        # 2, which would put a silent 3x multiplier under every retry the
+        # service layer already performs — and under the per-request
+        # timeout that the bulk budgets are derived from. See
+        # ``EMBEDDING_PROVIDER_MAX_RETRIES``.
         client_kwargs: dict = {
             "api_key": api_key,
-            "timeout": OPENAI_REQUEST_TIMEOUT_SECONDS,
+            "max_retries": EMBEDDING_PROVIDER_MAX_RETRIES,
+            "timeout": httpx.Timeout(
+                connect=EMBEDDING_HTTPX_CONNECT_TIMEOUT_SECONDS,
+                # read AND write keep the full request budget — the bare float
+                # this replaces set every phase to it.
+                read=OPENAI_REQUEST_TIMEOUT_SECONDS,
+                write=OPENAI_REQUEST_TIMEOUT_SECONDS,
+                # Pool tracks the request budget unless explicitly decoupled,
+                # preserving the previous behaviour for every configuration.
+                pool=(
+                    EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS
+                    if EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS is not None
+                    else OPENAI_REQUEST_TIMEOUT_SECONDS
+                ),
+            ),
             "http_client": httpx.AsyncClient(
                 limits=httpx.Limits(
                     max_connections=EMBEDDING_HTTPX_MAX_CONNECTIONS,
@@ -245,7 +268,7 @@ class OpenAIEmbeddingProvider:
 
         SEQUENTIAL, unlike the reranker's concurrent ``asyncio.gather``.
         Two reasons, both about not undoing work this module already did:
-        ``_call_gated`` holds ONE ``EMBEDDING_MAX_CONCURRENCY`` slot for
+        ``call_embedding_gated`` holds ONE ``EMBEDDING_MAX_CONCURRENCY`` slot for
         this whole call, so fanning out inside it would multiply the real
         provider concurrency by the chunk count and defeat a cap that
         exists because of the 2026-07-27 connection-pool exhaustion. And

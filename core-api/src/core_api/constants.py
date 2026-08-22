@@ -8,6 +8,7 @@ from pathlib import Path
 from common.constants import (  # noqa: F401
     CONTRADICTION_CANDIDATE_MAX,
     CONTRADICTION_SIMILARITY_THRESHOLD,
+    CRYSTALLIZER_SHORT_CONTENT_CHARS,
     DEFAULT_RELATION_TYPE_WEIGHT,
     ENTITY_RESOLUTION_CANDIDATE_LIMIT,
     GRAPH_MAX_EXPANDED_ENTITIES,
@@ -170,8 +171,39 @@ MAX_CONTENT_LENGTH = 10000
 CHUNKING_THRESHOLD_CHARS = 2000  # content above this triggers auto-chunking
 MAX_QUERY_LENGTH = 5000
 
+# ── Doc-derived memories ──
+# ``caura_doc(op="write")`` mints a memory carrying the document body so the
+# body becomes reachable by MEANING (recall / recall-brief read
+# ``memories.content`` directly). Docs themselves are only searchable via their
+# ``data["summary"]`` embedding, and ``caura_recall`` never returns documents.
+#
+# The memory content is the doc body VERBATIM, so the cutoff is simply the
+# memory schema ceiling: mint whenever the body fits in a memory at all.
+# Over-cutoff bodies are SKIPPED rather than truncated — a truncated body reads
+# as complete and would produce confidently wrong downstream conclusions.
+DOC_MEMORY_MAX_CHARS = MAX_CONTENT_LENGTH
+
+# NOTE: there is deliberately no ``DOC_MEMORY_TYPE``. Doc-derived memories pass
+# no ``memory_type`` at all, so the enrichment classifier assigns one per
+# document — a decision record becomes ``decision``, a runbook ``rule``, an
+# incident writeup ``episode``. Pinning every document to a single type would
+# throw that away. (And ``reference`` was never an option: it is not a
+# MemoryType, and the ``memories_memory_type_check`` CHECK constraint from
+# migration 013 would reject it.)
+
+# Provenance only — written to ``memories.source_uri`` as
+# ``memclaw-doc://<collection>/<doc_id>``. Nothing queries it yet (that would
+# need a storage-side filter + index); it exists so a later reconciliation
+# mechanism has a stable key to match a doc to the memories minted from it.
+DOC_MEMORY_URI_SCHEME = "memclaw-doc"
+
+assert DOC_MEMORY_MAX_CHARS <= MAX_CONTENT_LENGTH, (
+    "DOC_MEMORY_MAX_CHARS must not exceed MemoryCreate.content max_length "
+    f"({MAX_CONTENT_LENGTH}) — an over-cap spec would fail schema validation."
+)
+
 # ── Tool surface bookkeeping ──
-# Tool descriptions live inline in `core_api/tools/memclaw_*.py` spec
+# Tool descriptions live inline in `core_api/tools/caura_*.py` spec
 # modules (the SoT). Nothing else should hold a copy.
 # STM tools were dropped in 6fea229; STM_ONLY_TOOLS constant removed.
 
@@ -626,7 +658,7 @@ INSIGHTS_FAILURES_WINDOW_DAYS = 90
 INSIGHTS_STALE_WINDOW_DAYS = 90
 INSIGHTS_FOCUS_MODES = ("contradictions", "failures", "stale", "divergence", "patterns", "discover")
 
-# Shared scope enum used by memclaw_list, memclaw_insights, memclaw_evolve and
+# Shared scope enum used by caura_list, caura_insights, caura_evolve and
 # their REST counterparts. Trust-level gating per scope lives in the individual
 # handlers (trust_service.require_trust); this tuple is the single source of
 # truth for "what values are accepted".
@@ -701,7 +733,8 @@ NODE_OFFLINE_SECONDS = 300
 CRYSTALLIZER_STALE_DAYS = 180
 CRYSTALLIZER_STALE_MAX_WEIGHT = 0.3
 CRYSTALLIZER_DEDUP_THRESHOLD = 0.95
-CRYSTALLIZER_SHORT_CONTENT_CHARS = 10
+# CRYSTALLIZER_SHORT_CONTENT_CHARS now lives in common/ (re-exported above) —
+# core-storage-api needs the same bound to list short-content candidates.
 CRYSTALLIZER_LOW_EMBEDDING_COVERAGE_PCT = 90
 CRYSTALLIZER_HIGH_PENDING_PCT = 20
 CRYSTALLIZER_HIGH_PII_COUNT = 10

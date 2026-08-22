@@ -4,7 +4,7 @@
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Use [GitHub Private Vulnerability Reporting](https://github.com/caura-ai/caura-memclaw/security/advisories/new) — the **"Report a vulnerability"** button on the repo's Security tab. Reports are private to maintainers until a coordinated disclosure.
+Use [GitHub Private Vulnerability Reporting](https://github.com/caura-ai/caura/security/advisories/new) — the **"Report a vulnerability"** button on the repo's Security tab. Reports are private to maintainers until a coordinated disclosure.
 
 Please include:
 

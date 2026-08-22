@@ -198,10 +198,10 @@ def test_search_profile_update_is_derived_from_the_knob_table():
         assert (lo, hi) == SEARCH_KNOBS[name].bounds, f"{name}: {(lo, hi)} != {SEARCH_KNOBS[name].bounds}"
 
 
-def test_memclaw_tune_signature_matches_the_knob_table():
+def test_caura_tune_signature_matches_the_knob_table():
     """The MCP tool is the LAST hand-written copy of this surface — pin it.
 
-    ``memclaw_tune`` declares its knobs as named parameters, which a reusable
+    ``caura_tune`` declares its knobs as named parameters, which a reusable
     model cannot express: the signature IS the tool schema that ships to clients
     in ``plugin/tools.json``. So it stays hand-written, and this is what stops it
     drifting from the table the way ``SearchProfileUpdate`` did.
@@ -215,15 +215,15 @@ def test_memclaw_tune_signature_matches_the_knob_table():
     import re
 
     from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
-    from core_api.mcp_server import memclaw_tune
+    from core_api.mcp_server import caura_tune
 
-    params = [p for p in inspect.signature(memclaw_tune).parameters if p != "agent_id"]
+    params = [p for p in inspect.signature(caura_tune).parameters if p != "agent_id"]
     assert set(params) == set(AGENT_TUNABLE_KEYS), (
-        f"memclaw_tune exposes {sorted(set(params) ^ set(AGENT_TUNABLE_KEYS))} "
+        f"caura_tune exposes {sorted(set(params) ^ set(AGENT_TUNABLE_KEYS))} "
         f"differently from the knob table"
     )
 
-    hints = inspect.get_annotations(memclaw_tune, eval_str=True)
+    hints = inspect.get_annotations(caura_tune, eval_str=True)
     checked = 0
     for name in params:
         meta = getattr(hints[name], "__metadata__", ())
@@ -234,7 +234,7 @@ def test_memclaw_tune_signature_matches_the_knob_table():
             continue
         lo, hi = SEARCH_KNOBS[name].bounds
         assert (float(m.group(1)), float(m.group(2))) == (float(lo), float(hi)), (
-            f"memclaw_tune documents {name} as {desc!r} but the knob table says {(lo, hi)}"
+            f"caura_tune documents {name} as {desc!r} but the knob table says {(lo, hi)}"
         )
         checked += 1
     assert checked >= 6, f"only {checked} descriptions parsed as ranges — the format changed"

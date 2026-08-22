@@ -1460,6 +1460,58 @@ def _clean_finding(**kw):
     return base
 
 
+class TestInsightStatusPinned:
+    """Insights are born ``active`` and the supersede sweeps ``pending``.
+
+    The enrichment status classifier reads the finding's imperative
+    "Action:" line as a not-yet-started plan and filed 70-80% of
+    post-clarity insights as ``pending`` on the eToro fleet — and pending
+    escaped the active-only supersede forever. Two-sided fix: pin
+    ``status="active"`` at persist (caller status wins over the
+    classifier), and widen the supersede to sweep already-accumulated
+    pending zombies organically.
+    """
+
+    @pytest.mark.asyncio
+    async def test_new_insights_born_active_and_pending_priors_swept(self, monkeypatch):
+        tag = _uid()
+        tenant_id = f"test-tenant-{tag}"
+        agent_id = f"a-{tag}"
+        from core_api.services import insights_service
+
+        async def fake_run(prompt, config):
+            return {"findings": [_clean_finding()], "summary": "s"}
+
+        monkeypatch.setattr(insights_service, "_run_llm_analysis", fake_run)
+        try:
+            # A pending zombie from a prior run (same focus/scope/agent slice).
+            zombie = await _seed_memory(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                memory_type="insight",
+                status="pending",
+                content="old plan-phrased finding misfiled as pending",
+                metadata={"insight_focus": "patterns", "insight_scope": "agent"},
+            )
+            # A corpus memory for the analysis to read.
+            await _seed_memory(
+                tenant_id=tenant_id, agent_id=agent_id, content=f"work happened [{tag}]"
+            )
+            from core_api.services.insights_service import generate_insights
+
+            result = await generate_insights(
+                tenant_id=tenant_id, focus="patterns", scope="agent", agent_id=agent_id
+            )
+            assert len(result["insight_memory_ids"]) == 1
+            new_id = result["insight_memory_ids"][0]
+            # Born active — never at the mercy of the enrichment classifier.
+            assert await _status_of(new_id) == "active"
+            # The pending zombie was swept by the widened supersede.
+            assert await _status_of(zombie) == "outdated"
+        finally:
+            await _cleanup_tenant(tenant_id)
+
+
 class TestClarityPersist:
     @pytest.mark.asyncio
     async def test_content_rendered_as_labeled_lines_with_method(self, monkeypatch):

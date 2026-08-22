@@ -56,7 +56,7 @@ logger = logging.getLogger("core_api.access")
 # REST route-template → (capability, op) for the adoption signal. Keyed by
 # (METHOD, templated path) so the same path under different verbs maps to the
 # right capability/op. Capability + op names are kept aligned with the MCP
-# tool vocabulary (mcp_server tool names minus the ``memclaw_`` prefix, and
+# tool vocabulary (mcp_server tool names minus the ``caura_`` prefix, and
 # the manage/doc sub-ops) so REST and MCP roll up together in the report.
 #
 # Routes NOT in this map are simply not recorded as capability usage (admin,
@@ -86,6 +86,10 @@ _REST_CAPABILITY: dict[tuple[str, str], tuple[str, str | None]] = {
     ("POST", "/api/v1/documents/search"): ("doc", "search"),
     ("DELETE", "/api/v1/documents/{doc_id}"): ("doc", "delete"),
     # keystones (router prefix /memclaw/keystones)
+    # Canonical brand-neutral paths (2026-08-14) + the permanent legacy alias.
+    ("GET", "/api/v1/keystones"): ("keystones", None),
+    ("POST", "/api/v1/keystones"): ("keystones_set", "set"),
+    ("DELETE", "/api/v1/keystones/{doc_id}"): ("keystones_set", "delete"),
     ("GET", "/api/v1/memclaw/keystones"): ("keystones", None),
     ("POST", "/api/v1/memclaw/keystones"): ("keystones_set", "set"),
     ("DELETE", "/api/v1/memclaw/keystones/{doc_id}"): ("keystones_set", "delete"),

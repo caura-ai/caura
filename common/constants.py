@@ -7,6 +7,7 @@ bounds into core-api and the flags into here would put the knob NAME in two
 files, which is the drift it exists to remove.
 """
 
+from datetime import timedelta
 from typing import NamedTuple
 
 # ── Memory liveness ──
@@ -408,6 +409,14 @@ SINGLE_VALUE_PREDICATES: frozenset[str] = frozenset(
 # across the two deployment modes.
 LIFECYCLE_STALE_ARCHIVE_WEIGHT: float = 0.3
 
+# Minimum content length for a memory to be considered worth keeping. Two
+# services must agree on it: core-api rejects shorter writes at the quality
+# gate, and core-storage-api uses the same bound when listing existing rows
+# that fall below it for the crystallizer's short-content hygiene check. A
+# divergence would let the hygiene report flag rows the write path would have
+# accepted, or miss rows it would have rejected.
+CRYSTALLIZER_SHORT_CONTENT_CHARS: int = 10
+
 
 # ── Search tuning knobs (#723 / #725 / #727) ──
 # The declaration of each search knob's type, accepted range, and whether it
@@ -416,7 +425,7 @@ LIFECYCLE_STALE_ARCHIVE_WEIGHT: float = 0.3
 # derive the wire contract below.
 #
 # NOT yet the declaration the request SCHEMAS derive from: ``SearchProfileUpdate``
-# and the ``memclaw_tune`` MCP signature still enumerate their own subset (9 of
+# and the ``caura_tune`` MCP signature still enumerate their own subset (9 of
 # these 12 — the three A/B knobs are deliberately not agent-tunable) with their
 # own bounds. Those bounds now AGREE with this table, and
 # ``test_agent_tunable_bounds_match_the_knob_table`` fails if they drift again —
@@ -452,7 +461,7 @@ class SearchKnob(NamedTuple):
     # letting it surface as a KeyError 500 from inside the session.
     sql_required: bool = False
     # Exposed on the agent-facing tuning surface (``SearchProfileUpdate``, and the
-    # ``memclaw_tune`` MCP tool). False for the A/B knobs, which are held at their
+    # ``caura_tune`` MCP tool). False for the A/B knobs, which are held at their
     # global defaults until the offline comparison validates them and are flipped
     # per TENANT via ``search.default_profile``, not per agent.
     agent_tunable: bool = False
@@ -463,7 +472,7 @@ SEARCH_KNOBS: dict[str, SearchKnob] = {
     "top_k": SearchKnob(int, (1, 20), agent_tunable=True),
     "min_similarity": SearchKnob(float, (0.1, 0.9), agent_tunable=True),
     # Ceiling 3, matching the agent-facing ingress (``SearchProfileUpdate`` and
-    # the ``memclaw_tune`` MCP signature). It read 5 here until 2026-08-07 while
+    # the ``caura_tune`` MCP signature). It read 5 here until 2026-08-07 while
     # both of those said 3, so a tenant-wide default could hold a depth no agent
     # profile could ever set. Depth drives graph expansion cost, so 3 is the
     # deliberate ceiling rather than the widest of the three.
@@ -493,5 +502,25 @@ SEARCH_KNOBS: dict[str, SearchKnob] = {
 SQL_SCORING_PARAM_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.sql)
 SQL_SCORING_REQUIRED_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.sql_required)
 # The agent-facing tuning surface, derived the same way: ``SearchProfileUpdate``
-# and the ``memclaw_tune`` MCP tool expose exactly these.
+# and the ``caura_tune`` MCP tool expose exactly these.
 AGENT_TUNABLE_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.agent_tunable)
+
+
+# ---------------------------------------------------------------------------
+# Analysis reports
+# ---------------------------------------------------------------------------
+
+# H-07: how long a report row may sit in ``status='running'`` before
+# ``report_find_running`` stops treating it as in flight.
+#
+# NOT a timeout — nothing is cancelled, and no run is shortened. It bounds how
+# long an ORPHANED row (one whose run died without writing a terminal status) can
+# suppress future runs, which used to be forever: ``run_crystallization``
+# short-circuits on whatever that lookup returns, so a single crashed run
+# disabled crystallization for the tenant until someone edited the row by hand.
+#
+# One hour is a ceiling on a plausible run, not a typical one: a run does an LLM
+# call per selected cluster, so minutes is normal and an hour is far outside it.
+# Raising this lengthens the outage a crash causes; lowering it risks two
+# concurrent runs, whose only consequence is a second report row.
+REPORT_RUNNING_STALE_AFTER = timedelta(hours=1)

@@ -402,7 +402,7 @@ const memclawPlugin = {
     const flagExists = existsSync(allowlistFlagPath);
     // Read config once to detect drift so auto-fix re-runs even when the
     // one-time flag is already present: a plugin upgrade that ADDS a tool
-    // to MEMCLAW_TOOLS (e.g. memclaw_keystones) would otherwise never land
+    // to MEMCLAW_TOOLS (e.g. caura_keystones) would otherwise never land
     // in tools.alsoAllow on an existing install, and a later OpenClaw
     // tools.profile (core tools + alsoAllow only) silently strips it.
     // autoFixAllowlist is idempotent (writes only on change), so a clean
@@ -508,7 +508,7 @@ const memclawPlugin = {
     // relativePath is the workspace-relative scratch file the
     // compaction sub-agent has append-only write access to during the
     // flush turn. MemClaw's server-side persistence is orthogonal — the
-    // sub-agent still calls memclaw_write to capture salient
+    // sub-agent still calls caura_write to capture salient
     // context, but it ALSO needs the file to exist because that's the
     // only filesystem write surface OpenClaw exposes to it. Mirror
     // memory-core's memory/YYYY-MM-DD.md layout but namespace under
@@ -535,14 +535,14 @@ const memclawPlugin = {
       reserveTokensFloor: 20000,
       prompt:
         "Before this conversation is compacted, save any important context to MemClaw. " +
-        "Call memclaw_write with a summary of: decisions made, tasks completed, bugs found, " +
+        "Call caura_write with a summary of: decisions made, tasks completed, bugs found, " +
         "configuration changes, and any commitments or deadlines discovered in this session. " +
         "Include your agent_id, specific names, dates, paths, and outcomes. " +
         "Use memory_type 'episode' and tag with 'pre-compaction'. " +
         "Do NOT reply to the user from this turn.",
       systemPrompt:
         "You are running inside an OpenClaw memory-flush turn. Your only job is to " +
-        "persist salient context to MemClaw via memclaw_write before this conversation " +
+        "persist salient context to MemClaw via caura_write before this conversation " +
         "is compacted. Do not call any other tools. Do not produce a user-visible reply.",
       relativePath: `memclaw/flush-${dateStamp}.md`,
     });
@@ -620,7 +620,7 @@ const memclawPlugin = {
             if (!MEMCLAW_API_URL) {
               return {
                 manager: null,
-                error: "MemClaw plugin unconfigured: MEMCLAW_API_URL not set",
+                error: "Caura plugin unconfigured: MEMCLAW_API_URL not set",
               };
             }
             const health = getReachability();
@@ -635,7 +635,7 @@ const memclawPlugin = {
               // problem is auth / config.
               return {
                 manager: null,
-                error: `MemClaw backend unavailable: ${health.reason ?? "unknown reason"}`,
+                error: `Caura backend unavailable: ${health.reason ?? "unknown reason"}`,
               };
             }
 

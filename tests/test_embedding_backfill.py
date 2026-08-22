@@ -243,3 +243,351 @@ async def test_backfill_propagates_non_404_http_errors() -> None:
     ):
         with pytest.raises(httpx.HTTPStatusError):
             await run_embedding_backfill(tenant_id="t-1")
+
+
+# ---------------------------------------------------------------------------
+# Scheduled sweep — the consumer that drives the backfill per org
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_embed_backfill_handler_sweeps_the_orgs_tenant() -> None:
+    """The lifecycle event's ``org_id`` is what gets swept.
+
+    Registered in core-worker rather than routed through the shared lifecycle
+    adapter because ``run_embedding_backfill`` lives here and core-api — which
+    implements the same adapter protocol — cannot run it.
+    """
+    from common.events.base import Event
+    from common.events.topics import Topics
+    from core_worker import consumer
+
+    event = Event(
+        event_type=Topics.Lifecycle.EMBED_BACKFILL_REQUESTED,
+        tenant_id="org-42",
+        payload={"audit_id": 7, "org_id": "org-42", "triggered_by": "core-operations"},
+    )
+    report = MagicMock(scanned=9, published=8, skipped_missing=1, elapsed_s=1.25)
+    with (
+        patch.object(
+            consumer, "run_embedding_backfill", AsyncMock(return_value=report)
+        ) as swept,
+        patch.object(consumer, "get_storage_client", MagicMock()),
+        patch.object(consumer, "update_lifecycle_audit_row", AsyncMock()),
+    ):
+        await consumer.handle_embed_backfill_request(event)
+
+    swept.assert_awaited_once()
+    assert swept.await_args.kwargs["tenant_id"] == "org-42"
+    # Conservative publish cap, env-tunable so a sweep competing with live
+    # load can be throttled without a deploy. Must not enqueue at the
+    # library default of 100.
+    from core_worker.config import settings
+
+    assert swept.await_args.kwargs["max_inflight"] == settings.embed_backfill_max_inflight
+    assert settings.embed_backfill_max_inflight < 100
+
+
+@pytest.mark.asyncio
+async def test_embed_backfill_handler_logs_the_counts(caplog) -> None:
+    """Emit per-org counts — before this, "how many rows are unembedded" was
+    only answerable by querying AlloyDB directly, because the coverage
+    endpoint is internal-ingress and no metric carried it."""
+    import logging
+
+    from common.events.base import Event
+    from common.events.topics import Topics
+    from core_worker import consumer
+
+    event = Event(
+        event_type=Topics.Lifecycle.EMBED_BACKFILL_REQUESTED,
+        tenant_id="org-42",
+        payload={"audit_id": 7, "org_id": "org-42", "triggered_by": "core-operations"},
+    )
+    report = MagicMock(scanned=9, published=8, skipped_missing=1, elapsed_s=1.25)
+    with (
+        caplog.at_level(logging.INFO, logger="core_worker.consumer"),
+        patch.object(consumer, "run_embedding_backfill", AsyncMock(return_value=report)),
+        patch.object(consumer, "get_storage_client", MagicMock()),
+        patch.object(consumer, "update_lifecycle_audit_row", AsyncMock()),
+    ):
+        await consumer.handle_embed_backfill_request(event)
+
+    rec = next(r for r in caplog.records if r.getMessage() == "embed-backfill sweep processed")
+    assert rec.org_id == "org-42"
+    assert rec.scanned == 9
+    assert rec.published == 8
+    assert rec.skipped_missing == 1
+
+
+@pytest.mark.asyncio
+async def test_embed_backfill_handler_ack_drops_malformed_payload() -> None:
+    """A malformed payload is permanent, so ack-drop rather than raise.
+
+    Raising would nack and redeliver the same poison message until the DLQ
+    took it — the same guard ``handle_embed_request`` already has.
+    """
+    from common.events.base import Event
+    from common.events.topics import Topics
+    from core_worker import consumer
+
+    event = Event(
+        event_type=Topics.Lifecycle.EMBED_BACKFILL_REQUESTED,
+        tenant_id="org-42",
+        payload={"not": "a lifecycle request"},
+    )
+    with patch.object(consumer, "run_embedding_backfill", AsyncMock()) as swept:
+        await consumer.handle_embed_backfill_request(event)  # must not raise
+
+    swept.assert_not_awaited()
+
+
+def test_embed_backfill_topic_is_subscribed() -> None:
+    """Registration must happen in ``register_consumers``.
+
+    The Pub/Sub backend spawns its pull loops in ``start()`` from the handler
+    registry as it stands then, so a handler defined but never subscribed is
+    silently orphaned.
+    """
+    import inspect
+
+    from core_worker import consumer
+
+    source = inspect.getsource(consumer.register_consumers)
+    assert "EMBED_BACKFILL_REQUESTED" in source
+    assert "handle_embed_backfill_request" in source
+
+
+def _backfill_event():
+    from common.events.base import Event
+    from common.events.topics import Topics
+
+    return Event(
+        event_type=Topics.Lifecycle.EMBED_BACKFILL_REQUESTED,
+        tenant_id="org-42",
+        payload={"audit_id": 7, "org_id": "org-42", "triggered_by": "core-operations"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_embed_backfill_handler_finalises_the_audit_row() -> None:
+    """The fanout pre-creates the row as ``pending`` on purpose, so that a row
+    which never advances reads as a publish failure. A successful sweep that
+    left it pending would be indistinguishable from an undelivered message."""
+    from core_worker import consumer
+
+    report = MagicMock(scanned=9, published=8, skipped_missing=1, elapsed_s=1.25)
+    with (
+        patch.object(consumer, "run_embedding_backfill", AsyncMock(return_value=report)),
+        patch.object(consumer, "get_storage_client", MagicMock()),
+        patch.object(consumer, "update_lifecycle_audit_row", AsyncMock()) as audit,
+    ):
+        await consumer.handle_embed_backfill_request(_backfill_event())
+
+    # Two PATCHes: in_progress on entry, then the finalising one asserted here.
+    assert audit.await_count == 2, [c.kwargs for c in audit.await_args_list]
+    final = audit.await_args_list[-1]
+    assert final.args[1] == 7, "must patch the audit_id from the payload"
+    from core_storage_api.routers.lifecycle_audit import _VALID_STATUSES
+
+    assert final.kwargs["status"] in _VALID_STATUSES
+    assert final.kwargs["status"] == "success"
+    assert final.kwargs["stats"] == {
+        "scanned": 9,
+        "published": 8,
+        "skipped_missing": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_embed_backfill_handler_marks_audit_failed_then_reraises() -> None:
+    """On a sweep failure the row must say ``failure`` — and the exception must
+    still propagate so Pub/Sub redelivers. Recording the outcome and retrying
+    are both wanted; swallowing to write the row would lose the retry."""
+    from core_worker import consumer
+
+    boom = RuntimeError("storage exploded")
+    with (
+        patch.object(consumer, "run_embedding_backfill", AsyncMock(side_effect=boom)),
+        patch.object(consumer, "get_storage_client", MagicMock()),
+        patch.object(consumer, "update_lifecycle_audit_row", AsyncMock()) as audit,
+    ):
+        with pytest.raises(RuntimeError, match="storage exploded"):
+            await consumer.handle_embed_backfill_request(_backfill_event())
+
+    # Pinned against the route's own allow-list, not a literal. The first draft
+    # of this test asserted ``"failed"`` — the same wrong string the handler
+    # used — so it passed while the real PATCH would have 422'd, masked the
+    # original error, and left the row pending. Asserting my own value proved
+    # nothing; asserting the contract does.
+    from core_storage_api.routers.lifecycle_audit import _VALID_STATUSES
+
+    assert audit.await_count == 2, [c.kwargs for c in audit.await_args_list]
+    final = audit.await_args_list[-1]
+    status = final.kwargs["status"]
+    assert status in _VALID_STATUSES, f"{status!r} would 422; valid: {sorted(_VALID_STATUSES)}"
+    assert status == "failure"
+    assert "storage exploded" in final.kwargs["error_message"]
+
+
+@pytest.mark.unit
+def test_embed_backfill_is_a_registered_lifecycle_action() -> None:
+    """The fanout route must know the action, or the nightly tick 404s.
+
+    core-operations POSTs ``/admin/lifecycle/fanout/embed-backfill``; an
+    unregistered action returns 404 from ``_resolve_publisher`` and the tick
+    logs-and-returns, so the sweep would silently never run.
+    """
+    from common.events.lifecycle_publishers import publish_embed_backfill_request
+    from core_api.routes.lifecycle import _ACTION_PUBLISHERS
+
+    assert _ACTION_PUBLISHERS["embed-backfill"] is publish_embed_backfill_request
+
+
+@pytest.mark.unit
+def test_embed_backfill_topic_string() -> None:
+    """Pinned like its siblings — the wire name is infra's contract too.
+
+    The topic and its durable subscription are Terraform-provisioned (the bus
+    only auto-creates broadcast subscriptions), so renaming this constant
+    silently detaches the publisher from the provisioned topic.
+    """
+    from common.events.topics import Topics
+
+    assert (
+        Topics.Lifecycle.EMBED_BACKFILL_REQUESTED
+        == "memclaw.lifecycle.embed-backfill-requested"
+    )
+
+
+@pytest.mark.asyncio
+async def test_embed_backfill_handler_refuses_a_fleet_scoped_request() -> None:
+    """A fleet-scoped request must fail loudly, not sweep the whole org.
+
+    ``fleet_id`` is a real field on the shared lifecycle payload and the manual
+    trigger route forwards it, but nothing on this path can honour it:
+    ``run_embedding_backfill`` takes no fleet parameter and
+    ``GET /memories/null-embedding-ids`` filters by tenant only. Silently
+    proceeding would re-embed the entire org for an operator who asked for one
+    fleet — exceeding the requested blast radius on a write-generating path.
+    The scheduled fanout never sets ``fleet_id``, so only deliberate manual
+    triggers reach this.
+    """
+    from common.events.base import Event
+    from common.events.topics import Topics
+    from core_storage_api.routers.lifecycle_audit import _VALID_STATUSES
+    from core_worker import consumer
+
+    event = Event(
+        event_type=Topics.Lifecycle.EMBED_BACKFILL_REQUESTED,
+        tenant_id="org-42",
+        payload={
+            "audit_id": 7,
+            "org_id": "org-42",
+            "triggered_by": "operator",
+            "fleet_id": "fleet-a",
+        },
+    )
+    with (
+        patch.object(consumer, "run_embedding_backfill", AsyncMock()) as swept,
+        patch.object(consumer, "get_storage_client", MagicMock()),
+        patch.object(consumer, "update_lifecycle_audit_row", AsyncMock()) as audit,
+    ):
+        await consumer.handle_embed_backfill_request(event)
+
+    swept.assert_not_awaited(), "must not sweep wider than requested"
+    audit.assert_awaited_once()
+    assert audit.await_args.kwargs["status"] in _VALID_STATUSES
+    assert audit.await_args.kwargs["status"] == "failure"
+    assert "fleet" in audit.await_args.kwargs["error_message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_embed_backfill_audit_failure_does_not_mask_the_real_error() -> None:
+    """A bookkeeping failure must not replace the cause.
+
+    An unguarded PATCH in the except-block would raise its own exception in
+    place of the sweep's, losing the real cause while still leaving the row
+    unfinalised — the same ambiguity the finalisation exists to remove.
+    """
+    from core_worker import consumer
+
+    boom = RuntimeError("the real cause")
+    with (
+        patch.object(consumer, "run_embedding_backfill", AsyncMock(side_effect=boom)),
+        patch.object(consumer, "get_storage_client", MagicMock()),
+        patch.object(
+            consumer,
+            "update_lifecycle_audit_row",
+            AsyncMock(side_effect=[None, RuntimeError("storage blip")]),
+        ),
+    ):
+        # The sweep's error propagates, not the PATCH's.
+        with pytest.raises(RuntimeError, match="the real cause"):
+            await consumer.handle_embed_backfill_request(_backfill_event())
+
+
+@pytest.mark.asyncio
+async def test_embed_backfill_marks_in_progress_before_sweeping() -> None:
+    """Mid-run, the row must read ``in_progress``, not the fanout's ``pending``.
+
+    A per-org sweep is not instant, and without this transition an operator
+    cannot tell "actively sweeping" from "never picked up". Matches the shared
+    ``_run_action``.
+    """
+    from core_storage_api.routers.lifecycle_audit import _VALID_STATUSES
+    from core_worker import consumer
+
+    report = MagicMock(scanned=9, published=8, skipped_missing=1, elapsed_s=1.25)
+    with (
+        patch.object(consumer, "run_embedding_backfill", AsyncMock(return_value=report)),
+        patch.object(consumer, "get_storage_client", MagicMock()),
+        patch.object(consumer, "update_lifecycle_audit_row", AsyncMock()) as audit,
+    ):
+        await consumer.handle_embed_backfill_request(_backfill_event())
+
+    statuses = [c.kwargs["status"] for c in audit.await_args_list]
+    assert statuses == ["in_progress", "success"], statuses
+    assert all(s in _VALID_STATUSES for s in statuses)
+
+
+def test_embed_backfill_inflight_cap_rejects_zero() -> None:
+    """0 would make the publish semaphore block forever — a hang, not an error.
+
+    Same trap the per-tenant storage cap guards against, so it is rejected at
+    config load rather than discovered as a sweep that never finishes.
+    """
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    from core_worker.config import Settings
+
+    with _pytest.raises(ValidationError, match="must be >= 1"):
+        Settings(embed_backfill_max_inflight=0)
+
+
+@pytest.mark.asyncio
+async def test_embed_backfill_sweeps_even_if_in_progress_update_fails() -> None:
+    """Bookkeeping must not decide whether the work happens.
+
+    ``_run_action`` marks ``in_progress`` best-effort for this reason: letting
+    it raise would nack before the sweep started, skipping an op the operator
+    asked for because a status write failed. The sweep is idempotent, so
+    running it against a stale row beats not running it.
+    """
+    from core_worker import consumer
+
+    report = MagicMock(scanned=3, published=3, skipped_missing=0, elapsed_s=0.5)
+    with (
+        patch.object(consumer, "run_embedding_backfill", AsyncMock(return_value=report)) as swept,
+        patch.object(consumer, "get_storage_client", MagicMock()),
+        patch.object(
+            consumer,
+            "update_lifecycle_audit_row",
+            # in_progress raises; the finalising call succeeds.
+            AsyncMock(side_effect=[RuntimeError("status write blip"), None]),
+        ),
+    ):
+        await consumer.handle_embed_backfill_request(_backfill_event())
+
+    swept.assert_awaited_once(), "a failed status write must not skip the sweep"

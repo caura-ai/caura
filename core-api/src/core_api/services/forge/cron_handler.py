@@ -34,9 +34,15 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from common.events.base import PermanentOpError
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.forge.forge_service import (
+    CandidateWriter,
     ForgeConfig,
+    LlmFn,
+    MemoryFetcher,
+    PoisonChecker,
+    StatusChecker,
     run_forge_distill,
 )
 from core_api.services.forge.poison import is_fingerprint_poisoned
@@ -107,7 +113,7 @@ async def _resolve_auto_promote_clean(org_id: str) -> bool:
 # ── Injectable factories ──────────────────────────────────────────
 
 
-def _make_memory_fetcher(tenant_id: str):
+def _make_memory_fetcher(tenant_id: str) -> MemoryFetcher:
     """Bulk-load ``memories.content`` by id via core-storage-api.
 
     Mirrors the dry-run CLI's fetcher. NULL-safe (storage coerces a NULL
@@ -125,12 +131,26 @@ def _make_memory_fetcher(tenant_id: str):
     return _fetch
 
 
-def _make_poison_checker():
+def _make_poison_checker(tenant_id: str, fleet_id: str | None) -> PoisonChecker:
     """Adapt :func:`is_fingerprint_poisoned` (storage-backed) to the
-    ``(tenant, fleet, fp) → bool`` shape the gate evaluator expects.
+    ``PoisonChecker`` seam ``run_forge_distill`` actually calls:
+    ``(fingerprint) → bool``, with the tenant and fleet closed over.
+
+    H-08: this used to take ``(tenant_id, fleet_id, fingerprint)`` — the shape
+    ``evaluate_auto_gates`` wants — while its only caller feeds
+    ``run_forge_distill``, which invokes ``await poison_checker(fingerprint.fp)``
+    with one argument. Every cluster therefore raised ``TypeError`` after the LLM
+    distill call, ``run_forge_distill``'s broad ``except Exception`` counted it as
+    ``skipped_io_error``, and the tick reported success having written nothing.
+
+    The gate-evaluator shape was never needed here: ``promote_pending_candidates``
+    is handed :func:`make_db_poison_checker` (skill_promoter), which is the
+    three-arg wrapper for that path. Closing over the identifiers instead mirrors
+    ``scripts/forge_dry_run.py``'s ``_wire_poison_checker``, which is why the
+    dry-run CLI was never affected.
     """
 
-    async def _check(tenant_id: str, fleet_id: str | None, fingerprint: str) -> bool:
+    async def _check(fingerprint: str) -> bool:
         return await is_fingerprint_poisoned(
             tenant_id=tenant_id,
             fleet_id=fleet_id,
@@ -140,7 +160,7 @@ def _make_poison_checker():
     return _check
 
 
-def _make_candidate_writer():
+def _make_candidate_writer() -> CandidateWriter:
     """Persist a fresh Forge candidate via the storage HTTP client.
 
     Uses ``upsert_document`` so re-running the same cluster (same
@@ -154,7 +174,7 @@ def _make_candidate_writer():
     return _write
 
 
-def _make_status_checker():
+def _make_status_checker() -> StatusChecker:
     """Existence check used to skip writes against already-active /
     rejected / quarantined docs. Returns the live ``data.status`` or
     ``None`` if the slug doesn't exist yet.
@@ -171,7 +191,7 @@ def _make_status_checker():
     return _check
 
 
-async def _wire_llm_fn():
+async def _wire_llm_fn() -> LlmFn:
     """Resolve a working LLM callable from the project's existing
     provider plumbing. Falls back to a structured ``RuntimeError`` if
     the provider chain isn't importable — the cron should NEVER
@@ -223,13 +243,18 @@ async def run_forge_cron_tick(
         in this tick (matches ``ForgeRunResult.candidates_written``).
       * ``promoted`` — number of candidates that flowed
         ``candidate → staged`` in the same tick.
-      * ``scanned``, ``held``, plus the 5 Forge skip counters — so an
+      * ``scanned``, ``held``, plus the 6 Forge skip counters — so an
         operator inspecting an audit row can see exactly what the
         tick did without running the dry-run CLI to reproduce.
 
     Exceptions propagate so the shared lifecycle handler marks the
     audit row ``failure`` with the exception text; the next tick
     retries on its normal schedule.
+
+    Raises :class:`PermanentOpError` when the mining half wrote nothing
+    and hit programming errors — a deterministic wiring failure, which
+    the runner records as ``failure`` WITHOUT redelivering. Anything
+    else raised here is treated as retryable in the usual way.
     """
     cfg = await _resolve_forge_config(tenant_id)
     auto_promote_clean = await _resolve_auto_promote_clean(tenant_id)
@@ -239,7 +264,7 @@ async def run_forge_cron_tick(
 
     llm_fn = await _wire_llm_fn()
     memory_fetcher = _make_memory_fetcher(tenant_id)
-    poison_checker = _make_poison_checker()
+    poison_checker = _make_poison_checker(tenant_id, fleet_id)
     candidate_writer = _make_candidate_writer()
     status_checker = _make_status_checker()
 
@@ -287,13 +312,24 @@ async def run_forge_cron_tick(
         "auto_approved": promote_result.auto_approved,
         "scanned": promote_result.scanned,
         "held": promote_result.held,
-        # Surface the 5 Forge skip buckets so audit rows are
-        # actionable — "3 io_errors" vs "1 sentinel block" vs
-        # "5 poisoned" tells an operator very different stories.
+        # Surface the 6 Forge skip buckets so the structured log line below is
+        # actionable — "3 io_errors" vs "1 sentinel block" vs "5 poisoned" tells
+        # an operator very different stories.
+        #
+        # These reach the LOG, not the audit row: ``lifecycle_audit`` reduces this
+        # whole dict to ``candidates_written + promoted`` and stores that single
+        # int as ``stats.candidates_produced``. So a log-based alert can key on
+        # these; an audit-row query cannot. (The previous wording claimed audit
+        # rows, for five buckets — it was wrong then too.)
         "skipped_poisoned": forge_result.candidates_skipped_poisoned,
         "skipped_sentinel": forge_result.candidates_skipped_sentinel,
         "skipped_distill_error": forge_result.candidates_skipped_distill_error,
         "skipped_io_error": forge_result.candidates_skipped_io_error,
+        # Non-zero here means a bug in our code, not a bad day for storage — the
+        # distinction H-08 (#818) did not have. Unlike every other bucket, a
+        # healthy deployment never produces this one, which makes it the one worth
+        # alerting on.
+        "skipped_internal_error": forge_result.candidates_skipped_internal_error,
         "skipped_existing": forge_result.candidates_skipped_existing,
     }
     logger.info(
@@ -304,4 +340,31 @@ async def run_forge_cron_tick(
         window_end.isoformat(),
         stats,
     )
+
+    # A mining half that wrote nothing AND hit programming errors is a broken
+    # deployment, not a quiet day — so the tick must not report success. Permanent
+    # rather than a generic raise because the failure is deterministic; see
+    # ``PermanentOpError``.
+    #
+    # Raised AFTER the log above, deliberately: the audit row carries only
+    # ``candidates_written + promoted``, and this path forfeits even that, so the
+    # log line is the sole record of what actually happened.
+    #
+    # The condition is about the MINING half only. ``promote_result.promoted`` is
+    # not consulted, so a tick that promoted earlier candidates and then failed to
+    # mine still fails — that promotion work survives in the log line above but not
+    # in the audit row. Deliberate: a wiring bug that silences mining is the more
+    # important signal, and it is what went unnoticed for months. What the guard
+    # does protect is the common case — ``candidates_written`` non-zero means one
+    # malformed cluster among successes, which is routine and must not fail a tick
+    # or page anyone.
+    if forge_result.candidates_skipped_internal_error and not forge_result.candidates_written:
+        raise PermanentOpError(
+            f"forge tick wrote no candidates and hit "
+            f"{forge_result.candidates_skipped_internal_error} programming error(s) "
+            f"across {forge_result.clusters_eligible} eligible cluster(s) "
+            f"(tenant={tenant_id} fleet={fleet_id} run={run_label}) — a code/wiring "
+            f"bug; see candidates_skipped_internal_error and the tracebacks above"
+        )
+
     return stats

@@ -98,6 +98,47 @@ def test_base_url_omitted_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-phase timeouts (parity with the LLM client)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_timeout_sets_connect_phase_not_bare_float(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``timeout`` must be an ``httpx.Timeout``, not a bare float.
+
+    A bare float looks like it sets the whole budget but leaves httpx's
+    default 5 s CONNECT phase in place. Cloud Run VPC egress intermittently
+    exceeds 5 s, so connects failed well inside the nominal request budget
+    and surfaced as ``httpcore.ConnectTimeout`` — which on the worker's
+    embed handler becomes a nack-and-redeliver loop. The LLM provider
+    already sets per-phase timeouts; this asserts the embedding provider
+    does too, so the two cannot drift apart again.
+    """
+    import httpx
+
+    from common.embedding.constants import (
+        EMBEDDING_HTTPX_CONNECT_TIMEOUT_SECONDS,
+        OPENAI_REQUEST_TIMEOUT_SECONDS,
+    )
+
+    _, async_openai_ctor, _ = _patched_provider(monkeypatch)
+    timeout = async_openai_ctor.call_args.kwargs["timeout"]
+
+    assert isinstance(timeout, httpx.Timeout), (
+        f"expected httpx.Timeout so the connect phase is explicit, got {type(timeout).__name__}"
+    )
+    assert timeout.connect == EMBEDDING_HTTPX_CONNECT_TIMEOUT_SECONDS
+    assert timeout.connect > 5.0, "must beat httpx's 5s default — the whole point"
+    # Read/write/pool keep the request budget, matching the bare float this
+    # replaced so no existing deployment sees a shorter budget.
+    assert timeout.read == OPENAI_REQUEST_TIMEOUT_SECONDS
+    assert timeout.write == OPENAI_REQUEST_TIMEOUT_SECONDS
+    assert timeout.pool == OPENAI_REQUEST_TIMEOUT_SECONDS
+
+
+# ---------------------------------------------------------------------------
 # A.5 — send_dimensions toggle
 # ---------------------------------------------------------------------------
 
@@ -509,7 +550,9 @@ async def test_embed_query_constructor_default_instruction(
         query_instruction="Default task",
     )
     await provider.embed_query("query body")
-    assert create.call_args.kwargs["input"] == "Instruct: Default task\nQuery: query body"
+    assert (
+        create.call_args.kwargs["input"] == "Instruct: Default task\nQuery: query body"
+    )
 
 
 @pytest.mark.unit
@@ -844,9 +887,9 @@ def test_registry_no_warning_when_send_dimensions_false(
     with caplog.at_level(logging.WARNING, logger="common.embedding._registry"):
         get_embedding_provider("openai")
 
-    assert not any(
-        "SEND_DIMENSIONS" in rec.getMessage() for rec in caplog.records
-    ), "no SEND_DIMENSIONS warning expected when correctly set to false"
+    assert not any("SEND_DIMENSIONS" in rec.getMessage() for rec in caplog.records), (
+        "no SEND_DIMENSIONS warning expected when correctly set to false"
+    )
 
 
 # ---------------------------------------------------------------------------

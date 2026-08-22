@@ -13,7 +13,7 @@ shape can now read either key and get the same data.
 The canonical source of the recall summary dict is
 ``core_api.services.recall_service.summarize_memories``. The REST
 ``/api/v1/recall`` endpoint wraps it directly; the MCP
-``memclaw_recall(include_brief=True)`` tool surfaces it as
+``caura_recall(include_brief=True)`` tool surfaces it as
 ``payload["brief"]``. After C4, every dict produced by
 ``summarize_memories`` carries both keys.
 
@@ -22,7 +22,7 @@ These tests pin the contract at all three layers:
 1. Service: ``summarize_memories`` itself, across all three branches
    (empty input, recall disabled, normal LLM brief).
 2. REST: ``POST /api/v1/recall`` surfaces the alias to the wire.
-3. MCP: ``memclaw_recall(include_brief=True)`` surfaces it under
+3. MCP: ``caura_recall(include_brief=True)`` surfaces it under
    ``brief``.
 """
 
@@ -278,12 +278,12 @@ async def test_rest_recall_response_carries_both_memories_and_items(
 
 
 # ---------------------------------------------------------------------------
-# MCP: memclaw_recall(include_brief=True) surfaces the alias under `brief`
+# MCP: caura_recall(include_brief=True) surfaces the alias under `brief`
 # ---------------------------------------------------------------------------
 
 
 async def test_mcp_recall_brief_contains_both_keys(mcp_env, monkeypatch):
-    """``memclaw_recall(include_brief=True)`` wraps the
+    """``caura_recall(include_brief=True)`` wraps the
     ``summarize_memories`` dict at ``payload["brief"]``. After C4 that
     dict carries both ``memories`` and ``items``.
 
@@ -302,7 +302,7 @@ async def test_mcp_recall_brief_contains_both_keys(mcp_env, monkeypatch):
 
     from core_api import mcp_server
 
-    out = await mcp_server.memclaw_recall(query="status?", include_brief=True)
+    out = await mcp_server.caura_recall(query="status?", include_brief=True)
     payload = parse_envelope(out)
 
     assert "brief" in payload, "MCP recall did not surface a brief"

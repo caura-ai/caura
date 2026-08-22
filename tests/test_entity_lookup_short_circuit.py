@@ -18,6 +18,12 @@ selects the ENTITY_LOOKUP strategy end-to-end. ``scored_search`` is
 mocked to return memory rows directly, isolating this test from the
 separate ``_collect_memories`` payload-contract bug (omitted
 ``embedding``/``query``/``search_params``) that is tracked as a follow-up.
+
+H-03 gated the short-circuit on the entity pool being able to fill ``top_k``.
+Fixtures below that link a single memory therefore ask for ``top_k`` 1, so the
+exclusive route stays legitimate and each test keeps testing its own subject
+rather than pool sizing.  The pool-adequacy rule itself is covered by the
+dedicated tests at the end of this file.
 """
 
 from __future__ import annotations
@@ -88,7 +94,11 @@ async def test_entity_lookup_short_circuit_fires_with_dict_shaped_expand_graph()
         "search_params": {
             "fts_weight": 0.3,
             "graph_max_hops": 2,
-            "top_k": 5,
+            # H-03: the short-circuit now requires the entity pool to satisfy the
+            # request. This fixture links one memory, so top_k=1 is what makes the
+            # exclusive route legitimate here; the subject of the test is still the
+            # dict-shaped expand_graph parse.
+            "top_k": 1,
         },
         "temporal_window": None,
     }
@@ -197,7 +207,7 @@ async def test_collect_memories_forwards_valid_at_and_readable_tenant_ids():
     ctx.data = {
         "query": "central control",
         "tenant_id": "home-tenant",
-        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": 5},
+        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": 1},
         "temporal_window": None,
         "valid_at": valid_at_dt,
         "readable_tenant_ids": ["home-tenant", "source-tenant-a"],
@@ -273,7 +283,7 @@ async def test_collect_memories_omits_readable_tenant_ids_when_single_tenant():
     ctx.data = {
         "query": "central control",
         "tenant_id": "home-tenant",
-        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": 5},
+        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": 1},
         "temporal_window": None,
         # Single-tenant: readable_tenant_ids unset OR equals [tenant_id]
         "readable_tenant_ids": ["home-tenant"],
@@ -342,7 +352,7 @@ async def test_collect_memories_forwards_single_element_when_different_from_home
     ctx.data = {
         "query": "central control",
         "tenant_id": "home-tenant",
-        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": 5},
+        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": 1},
         "temporal_window": None,
         # Single element, but NOT the home tenant — must still be forwarded.
         "readable_tenant_ids": ["source-tenant"],
@@ -416,7 +426,7 @@ async def test_entity_lookup_fires_when_match_count_at_threshold():
     ctx.data = {
         "query": "ZenithCorp",
         "tenant_id": "t1",
-        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": 5},
+        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": 1},
         "temporal_window": None,
     }
 
@@ -594,3 +604,217 @@ async def test_collect_memories_cap_prefers_multi_matched_entity_gold_over_hub_s
         "A30 regression: the multi-matched-entity gold was dropped by the "
         "fan-out cap — match-count must rank ahead of near-uniform hop-boost."
     )
+
+
+# ── H-03: the short-circuit must not replace scoring it cannot substitute for ──
+
+
+def _entity_fixture(
+    entity_id, memory_ids: list[str], *, loaded_ids: list[str] | None = None
+) -> AsyncMock:
+    """Storage double: one matched entity linking ``memory_ids``.
+
+    ``loaded_ids`` defaults to all of them. Pass a shorter list to model
+    storage's visibility filtering (caller_agent_id / status / valid_at) dropping
+    rows the link table still points at — that is how a pool can look adequate
+    before the load and come back short after it.
+    """
+    fake_storage = AsyncMock()
+    fake_storage.fts_search_entities = AsyncMock(return_value=[str(entity_id)])
+    fake_storage.expand_graph = AsyncMock(
+        return_value={str(entity_id): {"hop": 0, "weight": 1.0}}
+    )
+    fake_storage.get_memory_ids_by_entity_ids = AsyncMock(
+        return_value=[
+            {"memory_id": mid, "entity_id": str(entity_id), "role": "subject"}
+            for mid in memory_ids
+        ]
+    )
+    fake_storage.load_memories_by_ids = AsyncMock(
+        return_value=[
+            {
+                "id": mid,
+                "tenant_id": "tenant-test",
+                "content": f"linked memory {i}",
+                "memory_type": "task",
+                "weight": 0.5,
+                "status": "active",
+                "ts_valid_start": None,
+                "ts_valid_end": None,
+                "metadata_": {},
+                "fleet_id": None,
+            }
+            for i, mid in enumerate(memory_ids if loaded_ids is None else loaded_ids)
+        ]
+    )
+    return fake_storage
+
+
+async def _classify(fake_storage, top_k: int):
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.search.classify_query import ClassifyQuery
+
+    ctx = PipelineContext()
+    ctx.data = {
+        "query": "central control heartbeat",
+        "tenant_id": "tenant-test",
+        "search_params": {"fts_weight": 0.3, "graph_max_hops": 2, "top_k": top_k},
+        "temporal_window": None,
+    }
+    with patch(
+        "core_api.pipeline.steps.search.classify_query.get_storage_client",
+        return_value=fake_storage,
+    ):
+        await ClassifyQuery().execute(ctx)
+    return ctx
+
+
+async def test_under_filled_entity_pool_falls_through_to_scored_search():
+    """H-03, the production symptom: 3 linked memories answered top_k=20 with 3
+    rows, every similarity None, and nothing outside the link set reachable at
+    any top_k.
+
+    The short-circuit does not re-rank, it REPLACES scoring — so when the pool
+    cannot fill the request it must not take the exclusive route.
+    """
+    from core_api.pipeline.steps.search.retrieval_types import RetrievalStrategy
+
+    eid = uuid4()
+    sc = _entity_fixture(eid, [str(uuid4()) for _ in range(3)])
+    ctx = await _classify(sc, top_k=20)
+
+    plan = ctx.data["retrieval_plan"]
+    assert plan.strategy != RetrievalStrategy.ENTITY_LOOKUP, (
+        "a 3-memory pool must not be allowed to answer top_k=20 exclusively"
+    )
+    assert plan.skip_scored_search is not True, "scored search has to actually run"
+    assert not ctx.data.get("filtered_rows"), (
+        "falling through must leave row selection to the scored pipeline"
+    )
+    # And it must not pay for rows it throws away. Pool size is knowable from the
+    # link query alone, so the content load — which pulls full rows including the
+    # embedding, and holds one of only four per-tenant storage permits — is
+    # skipped. It also must not set _storage_slot_acquired, or the scored search
+    # that DOES run would slip past the bulkhead unmetered.
+    sc.load_memories_by_ids.assert_not_awaited()
+    assert ctx.data.get("_storage_slot_acquired") is not True
+    # The marker the decline log reads is consumed, not left for the next step.
+    assert "_entity_pool_size" not in ctx.data
+
+
+async def test_falling_through_on_under_fill_keeps_the_entity_signal_as_a_boost():
+    """Falling through must not throw the entity match away.
+
+    The hops are handed to ParallelEmbedAndEntityBoost, which boosts those
+    memories over real scores — the merge this strategy should always have been.
+    Distinct from the >20 over-broad decline, which deliberately sets
+    ``entity_match_declined`` to SUPPRESS boosting because an arbitrary-50
+    lottery buries better-scoring rows. Here the match is narrow and useful, so
+    that flag must stay unset or the fall-through would be a downgrade.
+    """
+    eid = uuid4()
+    ctx = await _classify(_entity_fixture(eid, [str(uuid4()), str(uuid4())]), top_k=10)
+
+    assert ctx.data.get("_classified_entity_hops"), (
+        "entity hops must be preserved so the boost step need not re-expand"
+    )
+    assert eid in ctx.data["_classified_entity_hops"]
+    assert not ctx.data.get("entity_match_declined"), (
+        "under-fill is not the over-broad decline — boosting must stay enabled"
+    )
+
+
+async def test_an_adequate_entity_pool_still_short_circuits():
+    """The strategy is gated, not removed: a pool that can fill the request
+    keeps the exclusive route, which is what makes entity lookup cheap."""
+    from core_api.pipeline.steps.search.retrieval_types import RetrievalStrategy
+
+    eid = uuid4()
+    memory_ids = [str(uuid4()) for _ in range(5)]
+    ctx = await _classify(_entity_fixture(eid, memory_ids), top_k=5)
+
+    plan = ctx.data["retrieval_plan"]
+    assert plan.strategy == RetrievalStrategy.ENTITY_LOOKUP
+    assert plan.skip_scored_search is True
+    assert len(ctx.data["filtered_rows"]) == 5
+
+
+async def test_post_load_shortfall_declines_and_says_why(caplog) -> None:
+    """The case the post-load re-check exists for, and the reason it cannot be
+    folded into the pre-load one.
+
+    The link table points at 5 memories, so the pre-load pool looks adequate for
+    top_k=5 and the load runs. Storage then returns only 2 — visibility filtering
+    dropped the rest — so the request still cannot be answered exclusively. It
+    must decline, and it must not report itself as the empty case: there ARE
+    linked memories, just too few, and on-call reads these lines.
+    """
+    import logging
+
+    from core_api.pipeline.steps.search.retrieval_types import RetrievalStrategy
+
+    caplog.set_level(logging.INFO, logger="core_api.pipeline.steps.search.classify_query")
+    eid = uuid4()
+    linked = [str(uuid4()) for _ in range(5)]
+    sc = _entity_fixture(eid, linked, loaded_ids=linked[:2])
+
+    ctx = await _classify(sc, top_k=5)
+
+    # The load DID run — this is not the pre-load exit.
+    sc.load_memories_by_ids.assert_awaited_once()
+    assert ctx.data["retrieval_plan"].strategy != RetrievalStrategy.ENTITY_LOOKUP
+    assert not ctx.data.get("filtered_rows")
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("after visibility filtering" in m for m in messages), messages
+    assert not any("no linked memories" in m for m in messages), (
+        "two rows came back — reporting this as the empty case misleads on-call"
+    )
+
+
+async def test_a_wholly_filtered_pool_is_not_reported_as_no_links(caplog) -> None:
+    """The fourth decline state: links existed, the load ran, and visibility
+    filtering dropped EVERY row.
+
+    An empty result is ambiguous on its own — it is also what "no linked memories
+    at all" produces — so this used to log the graph-shaped message for a
+    permission-shaped cause, sending on-call after the wrong thing.
+    """
+    import logging
+
+    from core_api.pipeline.steps.search.retrieval_types import RetrievalStrategy
+
+    caplog.set_level(logging.INFO, logger="core_api.pipeline.steps.search.classify_query")
+    eid = uuid4()
+    linked = [str(uuid4()) for _ in range(5)]
+    sc = _entity_fixture(eid, linked, loaded_ids=[])  # storage admitted nothing
+
+    ctx = await _classify(sc, top_k=5)
+
+    # The load must have run — otherwise this would be the pre-load exit and the
+    # test would pass for the wrong reason.
+    sc.load_memories_by_ids.assert_awaited_once()
+    assert ctx.data["retrieval_plan"].strategy != RetrievalStrategy.ENTITY_LOOKUP
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("dropped every row" in m for m in messages), messages
+    assert any("pool of 5" in m for m in messages), messages
+    assert not any("no linked memories" in m for m in messages), (
+        "five links existed — this is a visibility-filter cause, not a graph one"
+    )
+
+
+async def test_the_genuinely_empty_case_still_says_no_linked_memories(caplog) -> None:
+    """And the message it was borrowing must still be reachable, or the fix would
+    just have moved the inaccuracy."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="core_api.pipeline.steps.search.classify_query")
+    eid = uuid4()
+    sc = _entity_fixture(eid, [])  # entity matched, links none
+
+    await _classify(sc, top_k=5)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("no linked memories" in m for m in messages), messages
+    sc.load_memories_by_ids.assert_not_awaited()

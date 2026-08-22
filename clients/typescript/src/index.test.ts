@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { MemClaw, MemClawApiError, AuthError, NotFoundError } from "./index.js";
+import { Caura, CauraApiError, AuthError, NotFoundError } from "./index.js";
 
 type Handler = (url: string, init: RequestInit) => Response | Promise<Response>;
 
@@ -12,8 +12,8 @@ function jsonResponse(status: number, data: unknown): Response {
   });
 }
 
-function makeClient(handler: Handler, options: Record<string, unknown> = {}): MemClaw {
-  return new MemClaw("mc_test", {
+function makeClient(handler: Handler, options: Record<string, unknown> = {}): Caura {
+  return new Caura("mc_test", {
     tenantId: "t1",
     baseUrl: "https://example.test",
     fetch: ((url: string, init: RequestInit) => Promise.resolve(handler(url, init))) as typeof fetch,
@@ -62,9 +62,9 @@ test("search posts to /search and returns a list", async () => {
 test("search throws when 200 body lacks items", async () => {
   const client = makeClient(() => jsonResponse(200, { error: "quota exceeded" }));
   await assert.rejects(client.search("q"), (err: unknown) => {
-    assert.ok(err instanceof MemClawApiError);
-    assert.equal((err as MemClawApiError).statusCode, 200);
-    assert.equal((err as MemClawApiError).message, '[200] search response missing "items" list');
+    assert.ok(err instanceof CauraApiError);
+    assert.equal((err as CauraApiError).statusCode, 200);
+    assert.equal((err as CauraApiError).message, '[200] search response missing "items" list');
     return true;
   });
 });
@@ -72,21 +72,65 @@ test("search throws when 200 body lacks items", async () => {
 test("search throws when 200 items is not a list", async () => {
   const client = makeClient(() => jsonResponse(200, { items: "not-a-list" }));
   await assert.rejects(client.search("q"), (err: unknown) => {
-    assert.ok(err instanceof MemClawApiError);
-    assert.equal((err as MemClawApiError).statusCode, 200);
-    assert.equal((err as MemClawApiError).message, '[200] search response "items" must be a list');
+    assert.ok(err instanceof CauraApiError);
+    assert.equal((err as CauraApiError).statusCode, 200);
+    assert.equal((err as CauraApiError).message, '[200] search response "items" must be a list');
     return true;
   });
 });
 
+// The exact top-level key set POST /api/v1/recall returns, per
+// core_api.services.recall_service.summarize_memories — pinned server-side by
+// tests/test_c4_recall_items_alias.py::_EXPECTED_TOP_LEVEL_KEYS. Note what is NOT
+// here: `supporting_memories`. H-01 was this SDK reading that invented key with a
+// fixture that mocked it, so CI passed while every live recall() returned nothing.
+function liveRecallBody(memories: Array<Record<string, unknown>>) {
+  return {
+    query: "q",
+    summary: "S",
+    memory_count: memories.length,
+    memories,
+    items: memories, // server aliases the identical list
+    recall_ms: 12,
+  };
+}
+
 test("recall returns the summary and supporting memories", async () => {
   const client = makeClient((url) => {
     assert.equal(new URL(url).pathname, "/api/v1/recall");
-    return jsonResponse(200, { summary: "S", supporting_memories: [{ id: "m1", content: "a" }] });
+    return jsonResponse(200, liveRecallBody([{ id: "m1", content: "a" }]));
   });
   const result = await client.recall("q");
   assert.equal(result.summary, "S");
   assert.equal(result.supportingMemories[0].id, "m1");
+});
+
+test("recall accepts the items alias alone", async () => {
+  const client = makeClient(() =>
+    jsonResponse(200, { summary: "S", items: [{ id: "m2", content: "b" }] }),
+  );
+  const result = await client.recall("q");
+  assert.deepEqual(
+    result.supportingMemories.map((m) => m.id),
+    ["m2"],
+  );
+});
+
+test("recall with no memories is empty, not an error", async () => {
+  const client = makeClient(() => jsonResponse(200, liveRecallBody([])));
+  const result = await client.recall("q");
+  assert.deepEqual(result.supportingMemories, []);
+  assert.equal(result.summary, "S");
+});
+
+test("recall ignores the key the server never sends", async () => {
+  // Guard against the regression: a body carrying ONLY the invented key must
+  // yield no memories, so nobody "fixes" this by reinstating it.
+  const client = makeClient(() =>
+    jsonResponse(200, { summary: "S", supporting_memories: [{ id: "ghost" }] }),
+  );
+  const result = await client.recall("q");
+  assert.deepEqual(result.supportingMemories, []);
 });
 
 test("health hits /health", async () => {
@@ -112,12 +156,12 @@ test("404 maps to NotFoundError", async () => {
   await assert.rejects(client.search("q"), NotFoundError);
 });
 
-test("500 maps to MemClawApiError", async () => {
+test("500 maps to CauraApiError", async () => {
   const client = makeClient(() => jsonResponse(500, { message: "boom" }));
-  await assert.rejects(client.recall("q"), MemClawApiError);
+  await assert.rejects(client.recall("q"), CauraApiError);
 });
 
 test("constructor validates apiKey and tenantId", () => {
-  assert.throws(() => new MemClaw("", { tenantId: "t" }));
-  assert.throws(() => new MemClaw("k", { tenantId: "" } as never));
+  assert.throws(() => new Caura("", { tenantId: "t" }));
+  assert.throws(() => new Caura("k", { tenantId: "" } as never));
 });

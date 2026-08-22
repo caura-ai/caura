@@ -53,7 +53,7 @@ system is deployable inside a company:
 None of this moves a `recall@k` number; all of it moves whether you can deploy.
 MemClaw is built around these — scoped memory (agent / fleet / cross-fleet),
 per-agent trust tiers, keystone policies, PII quarantine before cross-fleet
-exposure, a full audit log, and the `memclaw_evolve` → `memclaw_insights`
+exposure, a full audit log, and the `caura_evolve` → `caura_insights`
 outcome-propagation loop. The field still needs a benchmark for the
 fleet-shaped problem; we're working toward one.
 
@@ -162,6 +162,6 @@ in the README.
 
 ## Sources
 
-- **Blog write-up (canonical, current):** [Fast, Token-Efficient, and Built for Fleets](https://memclaw.net/blog/memclaw-benchmarks) (2026-04-19)
+- **Blog write-up (canonical, current):** [Fast, Token-Efficient, and Built for Fleets](https://caura.ai/blog/memclaw-benchmarks) (2026-04-19)
 - **Operator companion:** [`docs/performance.md`](docs/performance.md)
 - **Public benchmarks:** [LoCoMo](https://arxiv.org/abs/2402.17753) · [LongMemEval](https://arxiv.org/abs/2410.10813)

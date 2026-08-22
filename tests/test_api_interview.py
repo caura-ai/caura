@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 import core_api.services.interview_service as interview_service
-from tests.conftest import get_test_auth, uid
+from tests.conftest import get_test_auth, new_tenant_id, uid
 
 
 # ── helpers ──
@@ -100,7 +100,7 @@ def canned_llm(monkeypatch):
 
 
 async def test_submit_rejected_when_interviewer_disabled(client):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     resp = await client.post(
         "/api/v1/interview/submit",
         json=_payload(tenant_id, f"node-{uid()}", f"agent-{uid()}"),
@@ -111,7 +111,7 @@ async def test_submit_rejected_when_interviewer_disabled(client):
 
 
 async def test_submit_rejects_reversed_cursor(client):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     resp = await client.post(
         "/api/v1/interview/submit",
@@ -124,7 +124,7 @@ async def test_submit_rejects_reversed_cursor(client):
 
 
 async def test_submit_rejects_events_outside_window(client):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     resp = await client.post(
         "/api/v1/interview/submit",
@@ -143,7 +143,7 @@ async def test_submit_rejects_events_outside_window(client):
 
 
 async def test_submit_rejects_unsorted_events(client):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     events = _events(3)
     events[0], events[2] = events[2], events[0]
@@ -162,7 +162,7 @@ async def test_submit_rejects_unsorted_events(client):
 async def test_submit_happy_path_writes_typed_memories_and_watermark(
     client, canned_llm
 ):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
 
@@ -198,7 +198,7 @@ async def test_submit_happy_path_writes_typed_memories_and_watermark(
 
 
 async def test_submit_retry_is_idempotent(client, canned_llm):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     payload = _payload(tenant_id, node_id, agent_id)
@@ -221,7 +221,7 @@ async def test_submit_retry_is_idempotent(client, canned_llm):
 
 
 async def test_watermark_is_forward_only(client, canned_llm):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
 
@@ -352,7 +352,7 @@ async def test_schedule_queues_once_then_respects_pending_and_dueness(
 ):
     from tests.conftest import get_admin_headers
 
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     await _seed_live_node(client, tenant_id, headers, f"node-{uid()}")
 
@@ -406,7 +406,7 @@ async def test_schedule_next_window_resumes_from_watermark(
 ):
     from tests.conftest import get_admin_headers
 
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     await _seed_live_node(client, tenant_id, headers, f"node-{uid()}")
 
@@ -446,7 +446,7 @@ async def test_schedule_survives_per_node_storage_failure(client, monkeypatch):
     """One node's storage failure must not abort the whole schedule run."""
     from tests.conftest import get_admin_headers
 
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     await _seed_live_node(client, tenant_id, headers, f"node-{uid()}")
 
@@ -484,7 +484,7 @@ def test_mask_events_preserves_absent_optional_fields():
 
 
 async def test_submit_rejects_duplicate_seqs(client):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     events = _events(3)
     events[1]["seq"] = events[0]["seq"]  # duplicate
@@ -502,7 +502,7 @@ async def test_submit_rejects_oversized_event_content(client):
     is a 422, never a silent truncation of the LLM prompt."""
     from core_api.constants import INTERVIEW_EVENT_MAX_CHARS
 
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     events = _events(1)
     events[0]["content"] = "x" * (INTERVIEW_EVENT_MAX_CHARS + 1)
@@ -536,7 +536,7 @@ async def test_submit_times_out_with_504_and_unconsumed_window(client, monkeypat
 
     import core_api.routes.interview as interview_route
 
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
 
     async def _slow_interview(**kwargs):

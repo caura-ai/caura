@@ -38,16 +38,23 @@ MANIFEST_PATH = (
     / "events_manifest.json"
 )
 
-# Memory-pipeline subscriptions are registered by each service's own
-# ``register_consumers()`` (core-api/src/core_api/consumer.py and
-# core-worker/src/core_worker/consumer.py). They are listed explicitly here
-# rather than captured dynamically because OSS CI does not install the worker
-# package, so it cannot be imported in this generator. This set is stable; if
-# you add a direct ``bus.subscribe`` in a service's register_consumers(), add it
-# here too.
-_MEMORY_DIRECT: dict[str, list[str]] = {
+# Subscriptions registered by each service's own ``register_consumers()``
+# (core-api/src/core_api/consumer.py and core-worker/src/core_worker/consumer.py)
+# rather than by a shared helper in ``common.events.lifecycle_handlers``. They are
+# listed explicitly here rather than captured dynamically because OSS CI does not
+# install the worker package, so it cannot be imported in this generator. If you
+# add a direct ``bus.subscribe`` in a service's register_consumers(), add it here
+# too — ``test_direct_subscribes_match_consumer_files`` enforces that.
+#
+# Mostly memory-pipeline topics, but not exclusively: a LIFECYCLE topic lands here
+# when its consumer is registered directly instead of through a helper. The
+# embed-backfill sweep is registered in core-worker because the work lives in
+# ``core_worker.backfill``, which core-api — implementing the same lifecycle
+# adapter protocol — cannot run.
+_DIRECT_SUBSCRIBES: dict[str, list[str]] = {
     "core-api": [str(Topics.Memory.ENRICHED), str(Topics.Memory.EMBEDDED)],
     "core-worker": [
+        str(Topics.Lifecycle.EMBED_BACKFILL_REQUESTED),
         str(Topics.Memory.EMBED_REQUESTED),
         str(Topics.Memory.ENRICH_REQUESTED),
     ],
@@ -88,8 +95,8 @@ def build_manifest() -> dict:
     services: dict[str, list[str]] = {}
     # Union both keysets so each dict is independently authoritative — a service
     # added to one but not the other must not be silently dropped.
-    for service in sorted(set(_LIFECYCLE_HELPERS) | set(_MEMORY_DIRECT)):
-        topics: set[str] = set(_MEMORY_DIRECT.get(service, []))
+    for service in sorted(set(_LIFECYCLE_HELPERS) | set(_DIRECT_SUBSCRIBES)):
+        topics: set[str] = set(_DIRECT_SUBSCRIBES.get(service, []))
         for register in _LIFECYCLE_HELPERS.get(service, []):
             topics.update(_capture_helper_topics(register))
         services[service] = sorted(topics)

@@ -525,7 +525,7 @@ if (!config.plugins.load.paths.includes(pluginDir)) config.plugins.load.paths.pu
 
 if (!config.tools) config.tools = {{}};
 if (!Array.isArray(config.tools.alsoAllow)) config.tools.alsoAllow = [];
-const tools = ['memclaw_recall','memclaw_write','memclaw_manage','memclaw_doc','memclaw_list','memclaw_entity_get','memclaw_tune','memclaw_insights','memclaw_evolve','memclaw_stats','memclaw_keystones'];
+const tools = ['caura_recall','caura_write','caura_manage','caura_doc','caura_list','caura_entity_get','caura_tune','caura_insights','caura_evolve','caura_stats','caura_keystones'];
 for (const t of tools) {{
   if (!config.tools.alsoAllow.includes(t)) config.tools.alsoAllow.push(t);
 }}
@@ -686,8 +686,8 @@ def _derive_api_url_from_request(request: Request) -> str:
     When the endpoint sits behind a proxy (nginx, Cloud Run, etc.) the
     reverse proxy forwards the original scheme and host via
     ``X-Forwarded-Proto`` and ``X-Forwarded-Host``. We prefer those — that
-    way a ``curl https://memclaw.net/api/v1/install-skill | bash`` yields a
-    script that keeps fetching from ``https://memclaw.net``, not from the
+    way a ``curl https://caura.ai/api/v1/install-skill | bash`` yields a
+    script that keeps fetching from ``https://caura.ai``, not from the
     internal ``http://127.0.0.1:8000`` the upstream service sees.
     """
     scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
@@ -797,7 +797,7 @@ async def install_skill_script(
         description=(
             "Override the server URL the script will install from. Auto-derived "
             "from the request Host (and X-Forwarded-Proto) when omitted — so "
-            "``curl https://memclaw.net/api/v1/install-skill | bash`` just works."
+            "``curl https://caura.ai/api/v1/install-skill | bash`` just works."
         ),
     ),
 ):
@@ -831,6 +831,12 @@ async def install_skill_script(
         api_url=resolved_api_url, agent=agent, api_key=api_key, skill=skill
     )
     return PlainTextResponse(script, media_type="text/plain")
+
+
+@router.get("/skill/caura", response_class=PlainTextResponse)
+async def skill_caura():
+    """Rebrand alias for /skill/memclaw — same content, new name."""
+    return await skill_memclaw()
 
 
 @router.get("/skill/memclaw", response_class=PlainTextResponse)

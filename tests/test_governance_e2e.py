@@ -81,7 +81,6 @@ def _make_input(tenant_id: str, content: str, **kwargs) -> MemoryCreate:
 
 
 async def _seed_governance(
-    db,
     tenant_id: str,
     *,
     pii: dict | None = None,
@@ -157,9 +156,9 @@ async def _assert_chain_valid(tenant_id: str) -> None:
 # ── PII deterministic gate (GovernanceScanContent) through a real write ──────
 
 
-async def test_pii_mask_stores_redacted_content_and_audits(db):
+async def test_pii_mask_stores_redacted_content_and_audits():
     tenant = _tenant()
-    await _seed_governance(db, tenant, pii={"enabled": True, "action": "mask"})
+    await _seed_governance(tenant, pii={"enabled": True, "action": "mask"})
     content = f"Reach me at john.doe@example.com or card 4111 1111 1111 1111.{_PADDING}"
     result = await create_memory(_make_input(tenant, content))
 
@@ -180,9 +179,9 @@ async def test_pii_mask_stores_redacted_content_and_audits(db):
     await _assert_chain_valid(tenant)
 
 
-async def test_pii_drop_rejects_write_and_persists_nothing(db):
+async def test_pii_drop_rejects_write_and_persists_nothing():
     tenant = _tenant()
-    await _seed_governance(db, tenant, pii={"enabled": True, "action": "drop"})
+    await _seed_governance(tenant, pii={"enabled": True, "action": "drop"})
     content = f"My card is 4111 1111 1111 1111, please remember it.{_PADDING}"
     with pytest.raises(HTTPException) as exc:
         await create_memory(_make_input(tenant, content))
@@ -201,9 +200,9 @@ async def test_pii_drop_rejects_write_and_persists_nothing(db):
     await _assert_chain_valid(tenant)
 
 
-async def test_pii_flag_keeps_content_and_marks_metadata(db):
+async def test_pii_flag_keeps_content_and_marks_metadata():
     tenant = _tenant()
-    await _seed_governance(db, tenant, pii={"enabled": True, "action": "flag"})
+    await _seed_governance(tenant, pii={"enabled": True, "action": "flag"})
     content = f"Ping me on john.doe@example.com about the rollout.{_PADDING}"
     result = await create_memory(_make_input(tenant, content))
 
@@ -215,10 +214,9 @@ async def test_pii_flag_keeps_content_and_marks_metadata(db):
     assert any(r["action"] == "pii_flag" for r in rows), rows
 
 
-async def test_pii_category_toggle_limits_scope(db):
+async def test_pii_category_toggle_limits_scope():
     tenant = _tenant()
     await _seed_governance(
-        db,
         tenant,
         pii={"enabled": True, "action": "mask", "categories": {"email": True}},
     )
@@ -228,7 +226,7 @@ async def test_pii_category_toggle_limits_scope(db):
     assert "4111 1111 1111 1111" in result.content  # card not in scope
 
 
-async def test_governance_disabled_is_a_noop(db):
+async def test_governance_disabled_is_a_noop():
     tenant = _tenant()
     # No governance seeded at all → gate skips, content untouched, no audit.
     content = f"Email john.doe@example.com, card 4111 1111 1111 1111.{_PADDING}"
@@ -239,13 +237,13 @@ async def test_governance_disabled_is_a_noop(db):
 
 
 @pytest.mark.parametrize("write_mode", ["fast", "strong"])
-async def test_pii_mask_runs_in_every_write_mode(db, write_mode):
+async def test_pii_mask_runs_in_every_write_mode(write_mode):
     # The deterministic scan is wired into all write-mode compositions; a real
     # write in each LTM mode must redact and record the mode in the audit detail.
     # (STM is covered by test_governance_scan_wired_into_stm — driving it here
     # would require the global USE_STM flag, which the default test env leaves off.)
     tenant = _tenant()
-    await _seed_governance(db, tenant, pii={"enabled": True, "action": "mask"})
+    await _seed_governance(tenant, pii={"enabled": True, "action": "mask"})
     content = f"Contact john.doe@example.com for access.{_PADDING}"
     result = await create_memory(_make_input(tenant, content, write_mode=write_mode)
     )
@@ -267,10 +265,9 @@ _NEUTRAL = (
 )
 
 
-async def test_personal_content_kept_private(db, monkeypatch):
+async def test_personal_content_kept_private(monkeypatch):
     tenant = _tenant()
     await _seed_governance(
-        db,
         tenant,
         non_business={"enabled": True, "disposition": "keep_private"},
     )
@@ -281,10 +278,9 @@ async def test_personal_content_kept_private(db, monkeypatch):
     assert any(r["action"] == "nonbusiness_keep_private" for r in rows), rows
 
 
-async def test_personal_content_dropped(db, monkeypatch):
+async def test_personal_content_dropped(monkeypatch):
     tenant = _tenant()
     await _seed_governance(
-        db,
         tenant,
         non_business={"enabled": True, "disposition": "drop"},
     )
@@ -296,10 +292,9 @@ async def test_personal_content_dropped(db, monkeypatch):
     assert any(r["action"] == "nonbusiness_drop" for r in rows), rows
 
 
-async def test_business_content_flows_through(db, monkeypatch):
+async def test_business_content_flows_through(monkeypatch):
     tenant = _tenant()
     await _seed_governance(
-        db,
         tenant,
         non_business={"enabled": True, "disposition": "drop"},
     )
@@ -313,10 +308,9 @@ async def test_business_content_flows_through(db, monkeypatch):
     )
 
 
-async def test_non_business_store_disposition_is_noop(db, monkeypatch):
+async def test_non_business_store_disposition_is_noop(monkeypatch):
     tenant = _tenant()
     await _seed_governance(
-        db,
         tenant,
         non_business={"enabled": True, "disposition": "store"},
     )
@@ -327,10 +321,9 @@ async def test_non_business_store_disposition_is_noop(db, monkeypatch):
     assert (result.metadata or {}).get("business_relevance") == "personal"
 
 
-async def test_llm_pii_signal_drops(db, monkeypatch):
+async def test_llm_pii_signal_drops(monkeypatch):
     tenant = _tenant()
     await _seed_governance(
-        db,
         tenant,
         pii={"enabled": True, "action": "drop"},
     )
@@ -344,12 +337,11 @@ async def test_llm_pii_signal_drops(db, monkeypatch):
     assert drop is not None and drop["detail"].get("source") == "llm", rows
 
 
-async def test_both_gates_act_on_one_memory(db, monkeypatch):
+async def test_both_gates_act_on_one_memory(monkeypatch):
     # A memory the LLM flags as BOTH PII-bearing and personal: PII flag (mask
     # config can't redact a free-form span) + non-business keep_private both fire.
     tenant = _tenant()
     await _seed_governance(
-        db,
         tenant,
         pii={"enabled": True, "action": "flag"},
         non_business={"enabled": True, "disposition": "keep_private"},
@@ -382,9 +374,9 @@ def _bulk(tenant: str, contents: list[str]) -> BulkMemoryCreate:
     )
 
 
-async def test_bulk_drop_rejects_only_the_pii_item(db):
+async def test_bulk_drop_rejects_only_the_pii_item():
     tenant = _tenant()
-    await _seed_governance(db, tenant, pii={"enabled": True, "action": "drop"})
+    await _seed_governance(tenant, pii={"enabled": True, "action": "drop"})
     clean = f"Quarterly planning notes for the team.{_PADDING}"
     dirty = f"Customer card 4111 1111 1111 1111 is on file.{_PADDING}"
     resp = await create_memories_bulk(_bulk(tenant, [clean, dirty]), bulk_attempt_id=uuid.uuid4().hex
@@ -397,9 +389,9 @@ async def test_bulk_drop_rejects_only_the_pii_item(db):
     assert drop is not None and drop["detail"]["write_mode"] == "bulk", rows
 
 
-async def test_bulk_mask_redacts_stored_item(db):
+async def test_bulk_mask_redacts_stored_item():
     tenant = _tenant()
-    await _seed_governance(db, tenant, pii={"enabled": True, "action": "mask"})
+    await _seed_governance(tenant, pii={"enabled": True, "action": "mask"})
     dirty = f"Reach me at jane.roe@example.com about the deal.{_PADDING}"
     resp = await create_memories_bulk(_bulk(tenant, [dirty]), bulk_attempt_id=uuid.uuid4().hex
     )
@@ -412,9 +404,9 @@ async def test_bulk_mask_redacts_stored_item(db):
     ), rows
 
 
-async def test_bulk_flag_marks_stored_metadata(db):
+async def test_bulk_flag_marks_stored_metadata():
     tenant = _tenant()
-    await _seed_governance(db, tenant, pii={"enabled": True, "action": "flag"})
+    await _seed_governance(tenant, pii={"enabled": True, "action": "flag"})
     dirty = f"Ping jane.roe@example.com for the rollout plan.{_PADDING}"
     resp = await create_memories_bulk(_bulk(tenant, [dirty]), bulk_attempt_id=uuid.uuid4().hex
     )

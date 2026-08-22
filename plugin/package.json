@@ -1,6 +1,6 @@
 {
   "name": "@caura/memclaw",
-  "version": "2.16.0",
+  "version": "2.16.1",
   "description": "OpenClaw plugin for MemClaw central memory",
   "license": "Apache-2.0",
   "private": true,
@@ -20,7 +20,7 @@
     "check:version": "bash -c 'V=$(node -p \"require(\\\"./package.json\\\").version\"); grep -qF \"PLUGIN_VERSION = \\\"$V\\\"\" src/version.ts || (echo \"version.ts out of sync with package.json ($V): run bash ../scripts/gen-version.sh\" >&2 && exit 1) && echo \"check:version ok: $V\"'"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1",
+    "@types/node": "^26.2.0",
     "typescript": "^7.0"
   }
 }

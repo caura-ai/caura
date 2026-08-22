@@ -5,8 +5,8 @@ from __future__ import annotations
 import builtins
 import subprocess
 
-from memclaw_client.interviewer import machine
-from memclaw_client.interviewer.cli import _acquire_lock
+from caura_client.interviewer import machine
+from caura_client.interviewer.cli import _acquire_lock
 
 
 def test_acquire_lock_proceeds_when_fcntl_unavailable(monkeypatch):
@@ -53,7 +53,7 @@ def test_get_document_percent_encodes_doc_id():
     """A doc_id with '/' or '?' must stay ONE path segment."""
     import httpx
 
-    from memclaw_client import MemClaw
+    from caura_client import Caura
 
     seen = {}
 
@@ -63,7 +63,7 @@ def test_get_document_percent_encodes_doc_id():
         seen["params"] = dict(request.url.params)
         return httpx.Response(200, json={"doc_id": "x", "data": {}})
 
-    mc = MemClaw("mc_test", tenant_id="t", transport=httpx.MockTransport(handler))
+    mc = Caura("mc_test", tenant_id="t", transport=httpx.MockTransport(handler))
     mc.get_document("a/b?c=d", collection="col")
     assert seen["raw_path"].startswith("/api/v1/documents/a%2Fb%3Fc%3Dd")
     assert seen["params"] == {"tenant_id": "t", "collection": "col"}
@@ -73,7 +73,7 @@ def test_pem_scrub_terminates_fast_on_begin_without_end():
     """A large input with a BEGIN marker but no END must not blow up."""
     import time
 
-    from memclaw_client.interviewer.scrub import scrub
+    from caura_client.interviewer.scrub import scrub
 
     text = "-----BEGIN RSA PRIVATE KEY-----\n" + ("A" * 200_000)
     start = time.monotonic()
@@ -86,7 +86,7 @@ def test_acquire_lock_closes_fd_when_flock_fails(monkeypatch):
     """A flock failure must not leak the just-opened file handle."""
     import fcntl as real_fcntl
 
-    from memclaw_client.interviewer import cli as cli_mod
+    from caura_client.interviewer import cli as cli_mod
 
     import errno as errno_mod
 
@@ -109,7 +109,7 @@ def test_acquire_lock_closes_fd_when_flock_fails(monkeypatch):
 
 def test_run_transcript_respects_allowlist(tmp_path):
     """--transcript must not bypass the project allowlist."""
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
 
     project_dir = tmp_path / "secret-project"
     project_dir.mkdir()
@@ -166,7 +166,7 @@ def test_run_transcript_respects_allowlist(tmp_path):
 
 def test_run_closes_lock_handle_deterministically(tmp_path, monkeypatch):
     """The lock handle must be closed by the caller, not left to GC."""
-    from memclaw_client.interviewer import cli as cli_mod
+    from caura_client.interviewer import cli as cli_mod
 
     lock_file = tmp_path / "test.lock"
     handle = open(lock_file, "w")
@@ -194,7 +194,7 @@ def test_run_closes_lock_handle_deterministically(tmp_path, monkeypatch):
 def test_status_survives_vanished_transcript(tmp_path, monkeypatch):
     """A transcript deleted between discovery and count_lines must not
     crash status — per-file isolation covers the whole loop body."""
-    from memclaw_client.interviewer import cli as cli_mod
+    from caura_client.interviewer import cli as cli_mod
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -249,7 +249,7 @@ def test_watermark_doc_id_digest_unchanged_by_fips_kwarg():
     server compute the SAME watermark doc id."""
     import hashlib
 
-    from memclaw_client.interviewer.runner import watermark_doc_id
+    from caura_client.interviewer.runner import watermark_doc_id
 
     node = "cc:abcdef123456:some-file"
     expected = f"wm_{hashlib.sha1(node.encode()).hexdigest()[:40]}"
@@ -262,7 +262,7 @@ def test_acquire_lock_proceeds_lockless_on_permission_error(monkeypatch, capsys)
     import errno as errno_mod
     import fcntl as real_fcntl
 
-    from memclaw_client.interviewer import cli as cli_mod
+    from caura_client.interviewer import cli as cli_mod
 
     def denied_flock(handle, flags):
         raise OSError(errno_mod.EACCES, "permission denied")

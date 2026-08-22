@@ -84,7 +84,11 @@ CREATE TABLE IF NOT EXISTS memories (
     predicate TEXT,
     object_value TEXT,
     supersedes_id TEXT,
-    last_dedup_checked_at TEXT
+    last_dedup_checked_at TEXT,
+    -- Unified contradiction model (A55) — system-populated, surfaced on read.
+    confidence REAL,
+    is_inferred INTEGER DEFAULT 0,
+    scope TEXT DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_tenant
@@ -161,6 +165,12 @@ def _row_to_dict(
     if d.get("metadata") is not None:
         try:
             d["metadata"] = json.loads(d["metadata"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # Deserialise scope JSON (A55) — stored as a TEXT column like metadata.
+    if d.get("scope") is not None:
+        try:
+            d["scope"] = json.loads(d["scope"])
         except (json.JSONDecodeError, TypeError):
             pass
     # Optionally unpack embedding

@@ -76,13 +76,20 @@ class Settings(BaseSettings):
     # (typical p95 ~6-12s, plus 2 retries x 1s linear backoff) without
     # breaching the 45s outer request budget. Must stay below
     # ``request_timeout_seconds`` so this fires first.
+    #
+    # That derivation counts ONE request per attempt, which only became
+    # true with ``LLM_PROVIDER_MAX_RETRIES``: the SDK's own default of 2
+    # made an attempt up to three requests, each with the per-request
+    # budget below, plus its own exponential backoff — so the worst case
+    # exceeded this ceiling on the first attempt rather than the third.
     enrichment_inline_timeout_seconds: float = 35.0
     # Per-call timeout passed to the AsyncOpenAI client (covers both LLM
     # enrichment and embedding providers). Without an explicit value the
     # SDK rides httpx's default — long enough that a single hung upstream
     # call eats the whole enrichment budget silently. 25s gives the
     # provider room to respond while still leaving budget for one retry
-    # under the inline ceiling.
+    # under the inline ceiling. Per REQUEST, not per attempt — see
+    # ``LLM_PROVIDER_MAX_RETRIES`` for why that distinction mattered.
     openai_request_timeout_seconds: float = 25.0
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
@@ -291,6 +298,17 @@ class Settings(BaseSettings):
     log_file: str = ""
     # Default False: standalone=True bypasses tenant auth, so it must be an explicit opt-in.
     is_standalone: bool = False
+    # A55 contradiction-engine seam. False (default) => legacy detector call
+    # sites (today's behaviour, unchanged). True => route contradiction
+    # detection through ContradictionEngine.evaluate_async. Phase 1 the two
+    # paths are behaviourally identical (the engine delegates to the same
+    # detector); the flag exists so the old arch can be retired later.
+    contradiction_engine_enabled: bool = False
+    # A55 1d — when True, the detector additionally writes a memory_conflicts
+    # classification record for each confirmed conflict (via the resolver).
+    # Additive: it never changes the status/supersedes effect, so retrieval is
+    # unaffected. Default False; enable to start populating conflict records.
+    contradiction_write_conflict_record: bool = False
     crystallizer_enabled: bool = True
     crystallizer_stale_days: int = 180
     crystallizer_dedup_sample_size: int = 1000

@@ -23,7 +23,7 @@ from core_api.constants import (
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
 from core_api.services.entity_tokens import extract_entity_tokens
-from core_api.services.memory_service import _get_or_cache_embedding
+from core_api.services.memory_service import BlankQuery, _get_or_cache_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +226,16 @@ class ParallelEmbedAndEntityBoost:
             if ent_task is not None:
                 ent_task.cancel()
             raise HTTPException(status_code=504, detail="Search embedding timed out")
+        except BlankQuery as exc:
+            # 400, not 503. A query with nothing in it is the caller's to
+            # fix, and answering 503 puts it in the 5xx rate that pages an
+            # on-call — which is how a week of blank-query rejections read
+            # as an embedding outage while the backend served in ~7 ms.
+            # Ordered before the ``ValueError`` arm below because BlankQuery
+            # subclasses it and ``except`` matches top-down.
+            if ent_task is not None:
+                ent_task.cancel()
+            raise HTTPException(status_code=400, detail=str(exc))
         except ValueError as exc:
             if ent_task is not None:
                 ent_task.cancel()

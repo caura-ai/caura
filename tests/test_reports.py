@@ -6,14 +6,35 @@ Real FastAPI app + in-process storage (see conftest). Validates:
 - period validation.
 """
 
+import uuid
+
 import pytest
 
 from core_api.app import app
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
-from tests.conftest import get_test_auth, uid as _uid
+from tests.conftest import get_test_auth
 
 pytestmark = pytest.mark.asyncio
+
+
+def _uid() -> str:
+    """Decimal-only unique suffix — deliberately NOT ``conftest.uid()``.
+
+    Same job (a unique tail so seeded content can't 409 against an earlier
+    run), but digits instead of hex. This module seeds the suffix into memory
+    CONTENT, and the report's working-on lanes keyword-match content, so a
+    suffix that happens to spell a lane keyword silently moves a memory out of
+    the lane a test asserts on. ``conftest.uid()`` is ``uuid4().hex``, and d, b
+    and a are all hex digits, so ~0.15% of ids contain "dba" — an Operating
+    keyword. That is what made test_report_internal_group_durable_filter fail
+    on CI run 31636233722 with Governing 1 instead of 2.
+
+    Digits cannot spell any lane keyword, so classification in this module no
+    longer depends on random data. The word-start anchoring in reports.py fixes
+    the substring collision itself; this keeps the tests independent of it.
+    """
+    return f"{uuid.uuid4().int % 10**12:012d}"
 
 
 async def _register(tenant_id, fleet, *agents):
@@ -90,6 +111,63 @@ async def test_report_internal_group_durable_filter(client):
         "working_on"
     ]  # 2 decisions
     assert body["working_on"]["Building"]["count"] == 1, body["working_on"]  # 1 fact
+
+
+async def test_report_lane_keywords_do_not_match_inside_words(client):
+    """A lane keyword buried inside an unrelated word must not classify.
+
+    Lane matching runs BEFORE the memory-type fallback, so a substring hit
+    silently outranks the type. These three contents each contain a lane
+    keyword inside a longer token and nothing else a lane matches, so under
+    bare substring matching every one of them left Governing:
+
+      "feedback"  contains "dba"  -> Operating
+      "ownership" contains "ship" -> Building
+      "a1dba234"  contains "dba"  -> Operating  (a hex id, which is how this
+                                     reached CI as a ~0.6%-per-run flake in
+                                     test_report_internal_group_durable_filter)
+
+    All three are `decision`, so all three belong in Governing via _TYPE_LANE.
+    """
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fleet, a1 = f"rep-fleet-{tag}", f"rep-a1-{tag}"
+    await _register(tenant_id, fleet, a1)
+
+    for content in (
+        f"customer feedback reviewed {_uid()}",
+        f"ownership of the account {_uid()}",
+        f"correlation id a1dba234 noted {_uid()}",
+    ):
+        r = await client.post(
+            "/api/v1/memories",
+            json={
+                "tenant_id": tenant_id,
+                "agent_id": a1,
+                "fleet_id": fleet,
+                "memory_type": "decision",
+                "visibility": "scope_team",
+                "content": content,
+            },
+            headers=headers,
+        )
+        assert r.status_code == 201, r.text
+
+    resp = await client.get(
+        "/api/v1/reports",
+        params={
+            "tenant_id": tenant_id,
+            "period": "week",
+            "destination": "internal_group",
+            "agent_id": a1,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    lanes = resp.json()["working_on"]
+    assert lanes["Governing"]["count"] == 3, lanes
+    assert lanes["Operating"]["count"] == 0, lanes
+    assert lanes["Building"]["count"] == 0, lanes
 
 
 async def test_report_owner_1to1_is_self(client):

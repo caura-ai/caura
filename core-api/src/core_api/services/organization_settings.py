@@ -149,7 +149,7 @@ DEFAULT_SETTINGS: dict = {
         "auto_insights_enabled": None,
     },
     "observability": {
-        # Opt-in (default off). When on, each agent-chosen ``memclaw_recall``
+        # Opt-in (default off). When on, each agent-chosen ``caura_recall``
         # call is logged (query + scope + candidate scores + below-floor
         # near-misses) to ``recall_event`` / ``recall_candidate`` for "why
         # aren't good memories recalled?" analysis.
@@ -223,7 +223,7 @@ DEFAULT_SETTINGS: dict = {
     # by writing a partial dict (existing _deep_merge + _check_keys
     # plumbing). See docs/live-memory-pitch/skill-factory-implementation-plan.md §12.
     "skills_factory": {
-        # Feature flag gating the SF-002 ``memclaw_doc`` skills-write
+        # Feature flag gating the SF-002 ``caura_doc`` skills-write
         # adjustments. OSS default ``False`` so existing eToro and
         # caura-dev-fleet tenants see ZERO behavior change until they
         # explicitly opt in. Phase 0 ships the plumbing; per-tenant
@@ -956,7 +956,7 @@ class ResolvedConfig:
         return val if val is not None else False
 
     # Recall logging — opt-in (default False). When on, agent-chosen
-    # ``memclaw_recall`` calls are logged to recall_event / recall_candidate.
+    # ``caura_recall`` calls are logged to recall_event / recall_candidate.
     @property
     def recall_logging_enabled(self) -> bool:
         val = self._ts.get("observability", {}).get("recall_logging_enabled")
