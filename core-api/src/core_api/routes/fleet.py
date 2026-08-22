@@ -949,10 +949,18 @@ async def create_command(
 ):
     """Queue a command for a fleet node."""
     sc = get_storage_client()
-    # We need to verify node exists and get its tenant_id
-    # The storage client get_node takes tenant_id + node_name, but we have node_id
-    # Create the command via the storage client
+    # Queueing a command is a write, and the tenant it lands in comes from the
+    # REQUEST BODY. Both gates are required, and the order matters: resolve the
+    # target tenant first, then enforce against the resolved value.
+    #
+    # Without ``enforce_tenant`` any authenticated caller could set
+    # ``body.tenant_id`` to a victim tenant and queue commands into their fleet
+    # — the GET sibling immediately below has always enforced this, so the write
+    # was the weaker of the pair. Without ``enforce_read_only`` a
+    # capabilities={'read'} credential could do the same.
+    auth.enforce_read_only()
     tenant_id = body.tenant_id or auth.tenant_id
+    auth.enforce_tenant(tenant_id)
     cmd = await sc.create_command(
         {
             "tenant_id": tenant_id,

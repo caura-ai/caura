@@ -1,4 +1,4 @@
-"""Unit tests for ``memclaw_write`` (single OR batch).
+"""Unit tests for ``caura_write`` (single OR batch).
 
 Covers:
 - Single-write happy path.
@@ -37,21 +37,21 @@ class _OutStub:
 async def test_write_single_happy_path(mcp_env):
     mcp_env["service"]("create_memory").return_value = _OutStub("m-1")
 
-    out = await mcp_server.memclaw_write(content="a fact I remembered")
+    out = await mcp_server.caura_write(content="a fact I remembered")
     payload = parse_envelope(out)
     assert payload["id"] == "m-1"
     mcp_env["service_mocks"]["create_memory"].assert_awaited_once()
 
 
 async def test_write_registers_agent(mcp_env):
-    # memclaw_write must lazy-create the Agent row (REST parity). Without this,
+    # caura_write must lazy-create the Agent row (REST parity). Without this,
     # an agent-scoped credential holder's first MCP write succeeds but
     # PATCH /agents/{id}/trust 404s because no Agent row exists.
     enforce = mcp_env["service"]("enforce_fleet_write")
     enforce.return_value = {"agent_id": "a1", "trust_level": 0}
     mcp_env["service"]("create_memory").return_value = _OutStub("m-2")
 
-    await mcp_server.memclaw_write(content="first write", agent_id="a1", fleet_id="f1")
+    await mcp_server.caura_write(content="first write", agent_id="a1", fleet_id="f1")
     enforce.assert_awaited_once()
     args = enforce.await_args.args
     # Signature: (db, tenant_id, agent_id, fleet_id)
@@ -64,7 +64,7 @@ async def test_write_batch_registers_agent(mcp_env):
     enforce = mcp_env["service"]("enforce_fleet_write")
     mcp_env["service"]("create_memories_bulk").return_value = _OutStub("batch-2")
 
-    await mcp_server.memclaw_write(
+    await mcp_server.caura_write(
         items=[{"content": "one"}, {"content": "two"}],
         agent_id="a2",
         fleet_id="f2",
@@ -78,14 +78,14 @@ async def test_write_batch_registers_agent(mcp_env):
 async def test_write_batch_happy_path(mcp_env):
     mcp_env["service"]("create_memories_bulk").return_value = _OutStub("batch-1")
 
-    out = await mcp_server.memclaw_write(items=[{"content": "one"}, {"content": "two"}])
+    out = await mcp_server.caura_write(items=[{"content": "one"}, {"content": "two"}])
     payload = parse_envelope(out)
     assert payload["id"] == "batch-1"
     mcp_env["service_mocks"]["create_memories_bulk"].assert_awaited_once()
 
 
 async def test_write_neither_content_nor_items_errors(mcp_env):
-    out = await mcp_server.memclaw_write()
+    out = await mcp_server.caura_write()
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INVALID_ARGUMENTS"
     assert "exactly one of" in payload["error"]["message"]
@@ -94,7 +94,7 @@ async def test_write_neither_content_nor_items_errors(mcp_env):
 
 
 async def test_write_both_content_and_items_errors(mcp_env):
-    out = await mcp_server.memclaw_write(
+    out = await mcp_server.caura_write(
         content="a fact", items=[{"content": "conflicting"}]
     )
     payload = parse_envelope(out)
@@ -105,7 +105,7 @@ async def test_write_both_content_and_items_errors(mcp_env):
 
 async def test_write_batch_too_large(mcp_env):
     too_many = [{"content": f"m{i}"} for i in range(101)]
-    out = await mcp_server.memclaw_write(items=too_many)
+    out = await mcp_server.caura_write(items=too_many)
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "BATCH_TOO_LARGE"
     assert payload["error"]["details"]["received"] == 101
@@ -114,7 +114,7 @@ async def test_write_batch_too_large(mcp_env):
 
 async def test_write_invalid_batch_item(mcp_env):
     """Item without ``content`` trips BulkMemoryItem validation → INVALID_BATCH_ITEM."""
-    out = await mcp_server.memclaw_write(items=[{"content": "good"}, {"weight": 0.5}])
+    out = await mcp_server.caura_write(items=[{"content": "good"}, {"weight": 0.5}])
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INVALID_BATCH_ITEM"
     assert payload["error"]["details"]["received_count"] == 2
@@ -125,7 +125,7 @@ async def test_write_service_http_exception_becomes_envelope(mcp_env):
     mcp_env["service"]("create_memory").side_effect = HTTPException(
         status_code=409, detail="some other conflict"
     )
-    out = await mcp_server.memclaw_write(content="dup")
+    out = await mcp_server.caura_write(content="dup")
     assert "CONFLICT" in as_text(out)
     assert "some other conflict" in as_text(out)
 
@@ -138,7 +138,7 @@ async def test_write_exact_duplicate_returns_idempotent_envelope(mcp_env):
     mcp_env["service"]("create_memory").side_effect = HTTPException(
         status_code=409, detail=f"Duplicate memory exists: {existing_id}"
     )
-    out = await mcp_server.memclaw_write(content="same content", agent_id="a1")
+    out = await mcp_server.caura_write(content="same content", agent_id="a1")
     payload = parse_envelope(out)
     assert payload["status"] == "duplicate"
     assert payload["existing_id"] == existing_id
@@ -152,14 +152,14 @@ async def test_write_near_duplicate_still_errors(mcp_env):
         status_code=409,
         detail="Near-duplicate memory exists: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     )
-    out = await mcp_server.memclaw_write(content="paraphrase")
+    out = await mcp_server.caura_write(content="paraphrase")
     assert "CONFLICT" in as_text(out)
     assert "Near-duplicate" in as_text(out)
 
 
 async def test_write_auth_failure_shortcircuits(monkeypatch):
     monkeypatch.setattr(mcp_server, "_check_auth", lambda: mcp_server._AUTH_ERROR)
-    out = await mcp_server.memclaw_write(content="hello")
+    out = await mcp_server.caura_write(content="hello")
     assert out == mcp_server._AUTH_ERROR
 
 
@@ -168,7 +168,7 @@ async def test_write_passes_visibility_through(mcp_env):
     mock = mcp_env["service"]("create_memory")
     mock.return_value = _OutStub()
 
-    await mcp_server.memclaw_write(content="shared fact", visibility="scope_org")
+    await mcp_server.caura_write(content="shared fact", visibility="scope_org")
     kwargs = mock.await_args.kwargs
     model = kwargs.get("__self__", None) or mock.await_args.args[0]
     assert model.visibility == "scope_org"
@@ -178,7 +178,7 @@ async def test_write_passes_fleet_id_kwarg_through(mcp_env):
     """``fleet_id`` kwarg reaches the persisted ``MemoryCreate`` model.
 
     Regression guard for the finding
-    ``memclaw_write_fleet_id_not_propagated_from_url``: the MCP URL
+    ``caura_write_fleet_id_not_propagated_from_url``: the MCP URL
     query ``?fleet_id=…`` is NOT applied to memory rows on write, so
     the only path that reliably tags a memory with a fleet is the
     explicit kwarg. If someone ever refactors the handler in a way
@@ -188,7 +188,7 @@ async def test_write_passes_fleet_id_kwarg_through(mcp_env):
     mock = mcp_env["service"]("create_memory")
     mock.return_value = _OutStub()
 
-    await mcp_server.memclaw_write(
+    await mcp_server.caura_write(
         content="memo for caura-rnd-fleet", fleet_id="caura-rnd-fleet"
     )
     kwargs = mock.await_args.kwargs
@@ -205,7 +205,7 @@ async def test_write_refuses_default_agent_on_gateway(mcp_env):
 
     token = mcp_server._via_gateway_var.set(True)
     try:
-        out = await mcp_server.memclaw_write(content="anything")
+        out = await mcp_server.caura_write(content="anything")
     finally:
         mcp_server._via_gateway_var.reset(token)
     payload = parse_envelope(out)
@@ -222,7 +222,7 @@ async def test_write_explicit_agent_on_gateway_allowed(mcp_env):
 
     token = mcp_server._via_gateway_var.set(True)
     try:
-        out = await mcp_server.memclaw_write(content="hi", agent_id="real-agent")
+        out = await mcp_server.caura_write(content="hi", agent_id="real-agent")
     finally:
         mcp_server._via_gateway_var.reset(token)
     payload = parse_envelope(out)
@@ -232,7 +232,7 @@ async def test_write_explicit_agent_on_gateway_allowed(mcp_env):
 async def test_write_default_agent_in_standalone_ok(mcp_env):
     # Standalone (no gateway) keeps the default-identity ergonomics.
     mcp_env["service"]("create_memory").return_value = _OutStub("m-z")
-    out = await mcp_server.memclaw_write(content="hi")
+    out = await mcp_server.caura_write(content="hi")
     payload = parse_envelope(out)
     assert payload["id"] == "m-z"
 
@@ -246,7 +246,7 @@ async def test_write_without_fleet_id_no_home_fleet_persists_null(mcp_env):
     mock = mcp_env["service"]("create_memory")
     mock.return_value = _OutStub()
 
-    await mcp_server.memclaw_write(content="no fleet")
+    await mcp_server.caura_write(content="no fleet")
     model = mock.await_args.args[0]
     assert model.fleet_id is None
 
@@ -259,7 +259,7 @@ async def test_write_omitted_fleet_resolves_home_fleet(mcp_env):
     cm = mcp_env["service"]("create_memory")
     cm.return_value = _OutStub("m-hf")
 
-    await mcp_server.memclaw_write(content="x", agent_id="a1")  # fleet_id omitted
+    await mcp_server.caura_write(content="x", agent_id="a1")  # fleet_id omitted
 
     # The trust gate still saw the ORIGINAL (None) fleet_id — backfill happens
     # after enforcement, so cross-fleet gating is unchanged.
@@ -274,7 +274,7 @@ async def test_write_explicit_fleet_id_not_overridden(mcp_env):
     cm = mcp_env["service"]("create_memory")
     cm.return_value = _OutStub("m-x")
 
-    await mcp_server.memclaw_write(content="x", agent_id="a1", fleet_id="explicit-f")
+    await mcp_server.caura_write(content="x", agent_id="a1", fleet_id="explicit-f")
 
     assert enforce.await_args.args[2] == "explicit-f"
     assert cm.await_args.args[0].fleet_id == "explicit-f"
@@ -288,7 +288,7 @@ async def test_write_batch_omitted_fleet_resolves_home_fleet(mcp_env):
     cmb = mcp_env["service"]("create_memories_bulk")
     cmb.return_value = _OutStub("batch-hf")
 
-    await mcp_server.memclaw_write(
+    await mcp_server.caura_write(
         items=[{"content": "one"}, {"content": "two"}], agent_id="a2"
     )
 
@@ -320,7 +320,7 @@ async def test_write_unapproved_agent_blocked(mcp_env, monkeypatch):
     monkeypatch.setattr(mcp_server, "resolve_write_agent", _resolve)
     cm = mcp_env["service"]("create_memory")
 
-    out = await mcp_server.memclaw_write(content="x", agent_id="new-agent")
+    out = await mcp_server.caura_write(content="x", agent_id="new-agent")
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "AGENT_NOT_APPROVED"
     cm.assert_not_awaited()
@@ -352,6 +352,6 @@ async def test_write_threads_require_approval_to_resolver(mcp_env, monkeypatch):
     monkeypatch.setattr(mcp_server, "resolve_write_agent", _resolve)
     mcp_env["service"]("create_memory").return_value = _OutStub("m-1")
 
-    out = await mcp_server.memclaw_write(content="x", agent_id="a1")
+    out = await mcp_server.caura_write(content="x", agent_id="a1")
     assert parse_envelope(out)["id"] == "m-1"
     assert captured["require_approval"] is True

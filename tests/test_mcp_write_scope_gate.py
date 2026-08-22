@@ -69,9 +69,9 @@ def _force_read_only(monkeypatch):
     monkeypatch.setattr(mcp_server, "_get_scopes", lambda: {"read"})
 
 
-async def test_memclaw_write_blocked_for_read_only(mcp_env, monkeypatch):
+async def test_caura_write_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
-    out = await mcp_server.memclaw_write(content="should never persist")
+    out = await mcp_server.caura_write(content="should never persist")
     assert is_error_envelope(out)
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "FORBIDDEN"
@@ -79,32 +79,32 @@ async def test_memclaw_write_blocked_for_read_only(mcp_env, monkeypatch):
     assert "create_memory" not in mcp_env["service_mocks"]
 
 
-async def test_memclaw_write_batch_blocked_for_read_only(mcp_env, monkeypatch):
+async def test_caura_write_batch_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
-    out = await mcp_server.memclaw_write(items=[{"content": "x"}, {"content": "y"}])
+    out = await mcp_server.caura_write(items=[{"content": "x"}, {"content": "y"}])
     assert is_error_envelope(out)
     assert "create_memories_bulk" not in mcp_env["service_mocks"]
 
 
-async def test_memclaw_evolve_blocked_for_read_only(mcp_env, monkeypatch):
+async def test_caura_evolve_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
-    out = await mcp_server.memclaw_evolve(outcome="x", outcome_type="success")
+    out = await mcp_server.caura_evolve(outcome="x", outcome_type="success")
     assert is_error_envelope(out)
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "FORBIDDEN"
 
 
-async def test_memclaw_tune_blocked_for_read_only(mcp_env, monkeypatch):
+async def test_caura_tune_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
-    out = await mcp_server.memclaw_tune(top_k=10)
+    out = await mcp_server.caura_tune(top_k=10)
     assert is_error_envelope(out)
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "FORBIDDEN"
 
 
-async def test_memclaw_keystones_set_blocked_for_read_only(mcp_env, monkeypatch):
+async def test_caura_keystones_set_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
-    out = await mcp_server.memclaw_keystones_set(
+    out = await mcp_server.caura_keystones_set(
         op="set", doc_id="rule-1", title="t", content="c", scope="tenant", weight="low"
     )
     assert is_error_envelope(out)
@@ -112,9 +112,9 @@ async def test_memclaw_keystones_set_blocked_for_read_only(mcp_env, monkeypatch)
     assert payload["error"]["code"] == "FORBIDDEN"
 
 
-async def test_memclaw_manage_delete_blocked_for_read_only(mcp_env, monkeypatch):
+async def test_caura_manage_delete_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
-    out = await mcp_server.memclaw_manage(
+    out = await mcp_server.caura_manage(
         op="delete", memory_id="11111111-1111-1111-1111-111111111111"
     )
     assert is_error_envelope(out)
@@ -122,18 +122,18 @@ async def test_memclaw_manage_delete_blocked_for_read_only(mcp_env, monkeypatch)
     assert payload["error"]["code"] == "FORBIDDEN"
 
 
-async def test_memclaw_manage_bulk_delete_blocked_for_read_only(mcp_env, monkeypatch):
+async def test_caura_manage_bulk_delete_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
-    out = await mcp_server.memclaw_manage(
+    out = await mcp_server.caura_manage(
         op="bulk_delete",
         memory_ids=["11111111-1111-1111-1111-111111111111"],
     )
     assert is_error_envelope(out)
 
 
-async def test_memclaw_manage_update_blocked_for_read_only(mcp_env, monkeypatch):
+async def test_caura_manage_update_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
-    out = await mcp_server.memclaw_manage(
+    out = await mcp_server.caura_manage(
         op="update",
         memory_id="11111111-1111-1111-1111-111111111111",
         content="new content",
@@ -141,9 +141,9 @@ async def test_memclaw_manage_update_blocked_for_read_only(mcp_env, monkeypatch)
     assert is_error_envelope(out)
 
 
-async def test_memclaw_manage_transition_blocked_for_read_only(mcp_env, monkeypatch):
+async def test_caura_manage_transition_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
-    out = await mcp_server.memclaw_manage(
+    out = await mcp_server.caura_manage(
         op="transition",
         memory_id="11111111-1111-1111-1111-111111111111",
         status="archived",
@@ -151,17 +151,17 @@ async def test_memclaw_manage_transition_blocked_for_read_only(mcp_env, monkeypa
     assert is_error_envelope(out)
 
 
-async def test_memclaw_doc_write_blocked_for_read_only(mcp_env, monkeypatch):
+async def test_caura_doc_write_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
-    out = await mcp_server.memclaw_doc(
+    out = await mcp_server.caura_doc(
         op="write", collection="things", doc_id="d1", data={"k": "v"}
     )
     assert is_error_envelope(out)
 
 
-async def test_memclaw_doc_delete_blocked_for_read_only(mcp_env, monkeypatch):
+async def test_caura_doc_delete_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
-    out = await mcp_server.memclaw_doc(op="delete", collection="things", doc_id="d1")
+    out = await mcp_server.caura_doc(op="delete", collection="things", doc_id="d1")
     assert is_error_envelope(out)
 
 
@@ -170,7 +170,7 @@ async def test_memclaw_doc_delete_blocked_for_read_only(mcp_env, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_memclaw_manage_read_does_not_invoke_write_gate(mcp_env, monkeypatch):
+async def test_caura_manage_read_does_not_invoke_write_gate(mcp_env, monkeypatch):
     """``op=read`` is a query path — the gate should never fire here.
     We assert by spying on ``_check_write_scope`` and confirming it
     was not called. The handler may still fail downstream (mocked DB
@@ -184,7 +184,7 @@ async def test_memclaw_manage_read_does_not_invoke_write_gate(mcp_env, monkeypat
 
     monkeypatch.setattr(mcp_server, "_check_write_scope", _spy)
     try:
-        await mcp_server.memclaw_manage(
+        await mcp_server.caura_manage(
             op="read", memory_id="11111111-1111-1111-1111-111111111111"
         )
     except Exception:
@@ -195,7 +195,7 @@ async def test_memclaw_manage_read_does_not_invoke_write_gate(mcp_env, monkeypat
     assert calls == [], "write-scope gate fired on a read op"
 
 
-async def test_memclaw_doc_read_does_not_invoke_write_gate(mcp_env, monkeypatch):
+async def test_caura_doc_read_does_not_invoke_write_gate(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
     calls: list[None] = []
 
@@ -205,13 +205,13 @@ async def test_memclaw_doc_read_does_not_invoke_write_gate(mcp_env, monkeypatch)
 
     monkeypatch.setattr(mcp_server, "_check_write_scope", _spy)
     try:
-        await mcp_server.memclaw_doc(op="read", collection="things", doc_id="d1")
+        await mcp_server.caura_doc(op="read", collection="things", doc_id="d1")
     except Exception:
         pass
     assert calls == [], "write-scope gate fired on a doc-read op"
 
 
-async def test_memclaw_doc_query_does_not_invoke_write_gate(mcp_env, monkeypatch):
+async def test_caura_doc_query_does_not_invoke_write_gate(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
     calls: list[None] = []
 
@@ -221,7 +221,7 @@ async def test_memclaw_doc_query_does_not_invoke_write_gate(mcp_env, monkeypatch
 
     monkeypatch.setattr(mcp_server, "_check_write_scope", _spy)
     try:
-        await mcp_server.memclaw_doc(op="query", collection="things", where={"k": "v"})
+        await mcp_server.caura_doc(op="query", collection="things", where={"k": "v"})
     except Exception:
         pass
     assert calls == [], "write-scope gate fired on a doc-query op"

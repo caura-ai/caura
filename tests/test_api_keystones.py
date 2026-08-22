@@ -96,7 +96,7 @@ async def test_list_keystones_empty(client):
     """GET returns an empty list for a tenant with no keystones — no 500."""
     tenant_id, headers = get_test_auth(_ks_tenant())
     resp = await client.get(
-        f"/api/v1/memclaw/keystones?tenant_id={tenant_id}", headers=headers
+        f"/api/v1/keystones?tenant_id={tenant_id}", headers=headers
     )
     assert resp.status_code == 200
     # Genuinely empty, now the tenant is this test's own. Asserting only
@@ -218,7 +218,7 @@ async def test_set_then_list_round_trip(client):
     assert set_resp.status_code == 200, set_resp.text
 
     get_resp = await client.get(
-        f"/api/v1/memclaw/keystones?tenant_id={tenant_id}", headers=headers
+        f"/api/v1/keystones?tenant_id={tenant_id}", headers=headers
     )
     assert get_resp.status_code == 200
     # The listing is capped and weight-ordered, so "my rule is missing" and "the
@@ -246,7 +246,7 @@ async def test_set_invalid_scope_surfaces_as_422(client):
 
     # `scope=tenant` with a fleet_id is rejected at the storage validator.
     resp = await client.post(
-        "/api/v1/memclaw/keystones",
+        "/api/v1/keystones",
         json={
             "tenant_id": tenant_id,
             "fleet_id": f"fleet-{tag}",
@@ -283,7 +283,7 @@ async def test_delete_round_trip(client):
     assert set_resp.status_code == 200, set_resp.text
 
     del_resp = await client.delete(
-        f"/api/v1/memclaw/keystones/{doc_id}?tenant_id={tenant_id}",
+        f"/api/v1/keystones/{doc_id}?tenant_id={tenant_id}",
         headers=_author_headers(headers, agent_id),
     )
     assert del_resp.status_code == 200
@@ -291,7 +291,7 @@ async def test_delete_round_trip(client):
 
     # Second delete is a clean 404 (not 500).
     del_resp2 = await client.delete(
-        f"/api/v1/memclaw/keystones/{doc_id}?tenant_id={tenant_id}",
+        f"/api/v1/keystones/{doc_id}?tenant_id={tenant_id}",
         headers=_author_headers(headers, agent_id),
     )
     assert del_resp2.status_code == 404
@@ -315,7 +315,7 @@ async def test_delete_requires_trust(client):
 
     # Unseeded ``ghost`` agent tries to delete the existing rule.
     resp = await client.delete(
-        f"/api/v1/memclaw/keystones/{doc_id}?tenant_id={tenant_id}",
+        f"/api/v1/keystones/{doc_id}?tenant_id={tenant_id}",
         headers=_author_headers(headers, f"ghost-{tag}"),
     )
     assert resp.status_code == 403, resp.text
@@ -487,7 +487,7 @@ async def test_delete_own_agent_rule_unverified_rejected(client):
     member = f"self-{tag}"
     await _seed_default_trust_agent(client, tenant_id, headers, member, fleet_id)
     del_resp = await client.delete(
-        f"/api/v1/memclaw/keystones/{doc_id}?tenant_id={tenant_id}",
+        f"/api/v1/keystones/{doc_id}?tenant_id={tenant_id}",
         headers=_author_headers(headers, member),
     )
     # Member isn't the rule's owner (admin is) AND the path is unverified
@@ -560,7 +560,7 @@ async def test_delete_fleet_rule_at_trust_1_rejected(client):
     member = f"member-{tag}"
     await _seed_default_trust_agent(client, tenant_id, headers, member, fleet_id)
     del_resp = await client.delete(
-        f"/api/v1/memclaw/keystones/{doc_id}?tenant_id={tenant_id}",
+        f"/api/v1/keystones/{doc_id}?tenant_id={tenant_id}",
         headers=_author_headers(headers, member),
     )
     assert del_resp.status_code == 403, del_resp.text

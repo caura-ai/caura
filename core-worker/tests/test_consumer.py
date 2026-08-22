@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import httpx
 import pytest
 
+import common.embedding._service as embedding_service
 import core_worker.consumer as consumer
 from common.events.base import Event
 from core_worker.config import Settings
@@ -298,3 +300,158 @@ def test_register_consumers_subscribes_to_topic(monkeypatch):
     bus = get_event_bus()
     assert Topics.Memory.EMBED_REQUESTED in bus._handlers
     assert consumer.handle_embed_request in bus._handlers[Topics.Memory.EMBED_REQUESTED]
+
+
+@pytest.mark.asyncio
+async def test_embed_request_forwards_content_hash_as_provenance(
+    monkeypatch, settings, mock_provider, mock_storage_client
+):
+    """The deferred path must stamp provenance (migration 037).
+
+    This is the production write path in SaaS/deferred mode, so if it does not
+    forward the hash, every row it embeds sits at ``unknown_provenance``
+    permanently and the staleness detector is blind to precisely the mode that
+    does the embedding.
+    """
+    consumer.configure(mock_storage_client)
+    monkeypatch.setattr(consumer, "find_embedding_by_content_hash", AsyncMock(return_value=None))
+    patch_call = AsyncMock(return_value=None)
+    monkeypatch.setattr(consumer, "update_memory_embedding", patch_call)
+
+    event = _make_event(
+        {
+            "memory_id": str(uuid4()),
+            "tenant_id": "tenant-A",
+            "content": "hello async world",
+            "content_hash": "h1",
+        }
+    )
+    await consumer.handle_embed_request(event)
+
+    assert patch_call.await_args.kwargs["embedded_content_hash"] == "h1"
+
+
+@pytest.mark.asyncio
+async def test_embed_request_forwards_provenance_on_cache_hit_too(
+    monkeypatch, settings, mock_provider, mock_storage_client
+):
+    """A cached vector was found BY this hash, so it belongs to content hashing
+    to it — the cache branch must stamp provenance just like a fresh embed."""
+    consumer.configure(mock_storage_client)
+    monkeypatch.setattr(consumer, "find_embedding_by_content_hash", AsyncMock(return_value=[0.5] * 768))
+    patch_call = AsyncMock(return_value=None)
+    monkeypatch.setattr(consumer, "update_memory_embedding", patch_call)
+
+    event = _make_event(
+        {
+            "memory_id": str(uuid4()),
+            "tenant_id": "tenant-A",
+            "content": "cached content",
+            "content_hash": "h-cached",
+        }
+    )
+    await consumer.handle_embed_request(event)
+
+    mock_provider.embed.assert_not_awaited()
+    assert patch_call.await_args.kwargs["embedded_content_hash"] == "h-cached"
+
+
+@pytest.mark.asyncio
+async def test_update_memory_embedding_sends_provenance_key():
+    """Sent as ``embedded_content_hash``, NOT ``content_hash``.
+
+    ``content_hash`` is a real column: sending it would WRITE it, overwriting
+    the row's hash with a value from an event that may already be stale. The
+    explicit key sets provenance alone.
+    """
+    from core_worker.clients.storage_client import update_memory_embedding
+
+    response = MagicMock(status_code=200)
+    response.raise_for_status = MagicMock(return_value=None)
+    client = MagicMock(spec=httpx.AsyncClient)
+    client.patch = AsyncMock(return_value=response)
+
+    await update_memory_embedding(
+        client,
+        memory_id=uuid4(),
+        tenant_id="tenant-A",
+        embedding=[0.1] * 768,
+        embedded_content_hash="h1",
+    )
+
+    body = client.patch.await_args.kwargs["json"]
+    assert body["embedded_content_hash"] == "h1"
+    assert "content_hash" not in body, body
+    # The metadata merge must survive alongside it.
+    assert body["metadata_patch"] == {"embedding_pending": False}
+
+
+@pytest.mark.asyncio
+async def test_update_memory_embedding_omits_provenance_when_unknown():
+    """No hash → key absent, leaving provenance NULL. Honest beats guessed."""
+    from core_worker.clients.storage_client import update_memory_embedding
+
+    response = MagicMock(status_code=200)
+    response.raise_for_status = MagicMock(return_value=None)
+    client = MagicMock(spec=httpx.AsyncClient)
+    client.patch = AsyncMock(return_value=response)
+
+    await update_memory_embedding(client, memory_id=uuid4(), tenant_id="tenant-A", embedding=[0.1] * 768)
+
+    assert "embedded_content_hash" not in client.patch.await_args.kwargs["json"]
+
+
+@pytest.mark.asyncio
+async def test_embed_request_is_held_to_the_embedding_concurrency_gate(
+    monkeypatch, settings, mock_provider, mock_storage_client
+):
+    """8 concurrent embed-requests against a background cap of 2 never exceed 2.
+
+    Ungated — ``provider.embed`` called straight on the platform singleton —
+    peak in-flight equals the number of callers instead.
+    """
+    cap = 2
+    callers = 8
+
+    # Only the background cap: this path passes ``background=True``, so that
+    # is the binding one, and leaving the shared cap alone keeps
+    # ``EMBEDDING_INTERACTIVE_RESERVED_SLOTS`` non-zero the way it is in a
+    # real process. The per-loop gate cache rebinds on its own because
+    # pytest-asyncio gives each test a fresh event loop.
+    monkeypatch.setattr(embedding_service, "EMBEDDING_BACKGROUND_MAX_CONCURRENCY", cap)
+
+    in_flight = 0
+    peak = 0
+
+    async def _embed(_text: str) -> list[float]:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0)  # yield so overlap is observable without wall-clock
+        in_flight -= 1
+        return [0.1] * 768
+
+    mock_provider.embed = AsyncMock(side_effect=_embed)
+
+    consumer.configure(mock_storage_client)
+    monkeypatch.setattr(consumer, "find_embedding_by_content_hash", AsyncMock(return_value=None))
+    monkeypatch.setattr(consumer, "update_memory_embedding", AsyncMock(return_value=None))
+
+    await asyncio.gather(
+        *(
+            consumer.handle_embed_request(
+                _make_event(
+                    {
+                        "memory_id": str(uuid4()),
+                        "tenant_id": "tenant-A",
+                        "content": f"content {i}",
+                    }
+                )
+            )
+            for i in range(callers)
+        )
+    )
+
+    # Every request still embedded — the gate serialises, it does not drop.
+    assert mock_provider.embed.await_count == callers
+    assert peak <= cap, f"peak in-flight {peak} exceeded the gate cap {cap}"

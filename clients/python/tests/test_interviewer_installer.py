@@ -7,8 +7,8 @@ import stat
 
 import pytest
 
-from memclaw_client.interviewer import installer
-from memclaw_client.interviewer.installer import (
+from caura_client.interviewer import installer
+from caura_client.interviewer.installer import (
     CRON_MARKER,
     build_cron_line,
     build_run_command,
@@ -161,7 +161,7 @@ def _patch(monkeypatch, tmp_path, cron, available=True):
 
 
 def test_install_writes_cron_and_env_then_uninstall_removes(monkeypatch, tmp_path, capsys):
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
 
@@ -226,7 +226,7 @@ def test_read_crontab_converts_oserror_to_runtimeerror(monkeypatch):
 def test_install_cleans_up_on_crontab_oserror(monkeypatch, tmp_path, capsys):
     """write_crontab raising OSError (un-executable binary) must hit the clean
     path AND remove the orphaned 0600 env file — not escape as a traceback."""
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
 
@@ -243,7 +243,7 @@ def test_install_cleans_up_on_crontab_oserror(monkeypatch, tmp_path, capsys):
 def test_install_removes_orphaned_env_file_on_crontab_failure(monkeypatch, tmp_path, capsys):
     """If the crontab write fails, no job is scheduled — the 0600 env file
     (with the API key) must not be left orphaned."""
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
 
@@ -260,7 +260,7 @@ def test_install_removes_orphaned_env_file_on_crontab_failure(monkeypatch, tmp_p
 
 def test_uninstall_survives_unremovable_env_file(monkeypatch, tmp_path, capsys):
     """An OSError removing the env file must warn, not crash with a traceback."""
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
     main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "u"])
@@ -282,7 +282,7 @@ def test_uninstall_survives_unremovable_env_file(monkeypatch, tmp_path, capsys):
 def test_install_env_file_write_failure_is_clean(monkeypatch, tmp_path, capsys):
     """An OSError writing the env file must exit 1 cleanly (no traceback) and
     leave the crontab untouched — it's written before the crontab call."""
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
 
@@ -297,7 +297,7 @@ def test_install_env_file_write_failure_is_clean(monkeypatch, tmp_path, capsys):
 
 
 def test_install_refuses_without_allowlist(monkeypatch, tmp_path, capsys):
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
     rc = main(["install", "--base-url", "u", "--api-key", "k", "--tenant-id", "t"])
@@ -306,7 +306,7 @@ def test_install_refuses_without_allowlist(monkeypatch, tmp_path, capsys):
 
 
 def test_install_refuses_without_credentials(monkeypatch, tmp_path):
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
     rc = main(["install", "--all-projects", "--tenant-id", "t"])  # no api-key
@@ -315,7 +315,7 @@ def test_install_refuses_without_credentials(monkeypatch, tmp_path):
 
 
 def test_install_no_cron_binary_is_clean_error(monkeypatch, tmp_path, capsys):
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron, available=False)
     rc = main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t"])
@@ -324,7 +324,7 @@ def test_install_no_cron_binary_is_clean_error(monkeypatch, tmp_path, capsys):
 
 
 def test_uninstall_keep_env(monkeypatch, tmp_path, capsys):
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
     main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "u"])
@@ -339,7 +339,7 @@ def test_uninstall_keep_env(monkeypatch, tmp_path, capsys):
 def test_install_locks_config_dir_to_0700(monkeypatch, tmp_path):
     """The config dir holds the world-readable cron log, so it must be owner-
     only (0700) — not the default 0755."""
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
     main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "u"])
@@ -350,7 +350,7 @@ def test_install_locks_config_dir_to_0700(monkeypatch, tmp_path):
 def test_install_tightens_preexisting_loose_config_dir(monkeypatch, tmp_path):
     """mkdir(exist_ok) won't change an existing dir's mode — the explicit
     chmod must still lock a pre-existing 0755 config dir down to 0700."""
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
     cfg = tmp_path / "cfg"
     cfg.mkdir(mode=0o755)
     os.chmod(cfg, 0o755)  # ensure loose regardless of umask
@@ -363,7 +363,7 @@ def test_install_tightens_preexisting_loose_config_dir(monkeypatch, tmp_path):
 
 def test_uninstall_keep_env_silent_when_no_env_file(monkeypatch, tmp_path, capsys):
     """--keep-env must not claim 'env file kept' when there is no env file."""
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
     # Nothing installed → no env file exists.
@@ -375,7 +375,7 @@ def test_uninstall_keep_env_silent_when_no_env_file(monkeypatch, tmp_path, capsy
 
 def test_uninstall_reports_deleted_only_when_a_file_existed(monkeypatch, tmp_path, capsys):
     """Wording must reflect reality: don't claim 'deleted' with no file."""
-    from memclaw_client.interviewer.cli import main
+    from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
 

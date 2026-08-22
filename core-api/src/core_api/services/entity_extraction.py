@@ -4,13 +4,33 @@ import logging
 import re
 import zlib
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from core_api.config import settings
 from core_api.protocols import LLMProvider
 from core_api.providers._retry import call_with_fallback
 
 logger = logging.getLogger(__name__)
+
+
+class ExtractionShapeError(ValueError):
+    """Provider output could not yield a usable graph.
+
+    Subclasses ``ValueError`` so ``call_with_retry``'s broad ``except`` still
+    routes it to the fallback chain unchanged, while giving the pending #788
+    follow-up — classifying shape failures as non-retryable in
+    ``common/llm/retry.py`` — one narrow type to mark rather than a bare
+    ``ValueError`` that shared infra cannot safely single out.
+
+    Deliberately NOT ``common.llm.providers.ProviderResponseShapeError``, which
+    is a transport-layer error: its contract is ``(provider, content,
+    parsed_type)`` and it STORES and renders ``content`` (1 KiB) in ``__str__``.
+    Passing this payload through it would put memory content, and any PII in
+    it, into every traceback that error reaches. This condition is a domain
+    one — the response parsed fine, it just held nothing usable — so it carries
+    diagnostic counts only and never the payload.
+    """
+
 
 EXTRACTION_PROMPT = """\
 Extract named entities, their relations, and surface-form mentions from the following memory content.
@@ -22,7 +42,7 @@ Rules:
 - relation_type: short verb phrase like works_on, uses, belongs_to, created_by, depends_on, manages, located_in
 - Extract every distinct named subject. Include identifiers (PR-2025-A, build-734), product codes (Vermillion-7), model names (gpt-5.4-nano), and version strings as entity_type=identifier or entity_type=artifact when they refer to a specific named thing.
 - Job titles (ceo, engineer, manager, director, officer) classify as entity_type=role — NOT person. Use entity_type=person only when a named individual is referenced (e.g., "Anna Bergstrom"). "the CEO" alone is a role; "Anna, the CEO" is one person entity plus one role entity.
-- mentions: list every surface form referring to an entity in the content, including pronouns. Assign coreferring mentions the same cluster_id integer (0, 1, 2, ...). Link each mention to its entity_canonical when known; use null for unresolved pronouns.
+- mentions: list every surface form referring to an entity in the content, including pronouns. Assign coreferring mentions the same cluster_id integer (0, 1, 2, ...) — cluster_id is never null. Set entity_canonical to the referenced entity, or null if unresolved.
 - If no entities found, return empty lists
 
 Return ONLY valid JSON matching this schema (no markdown fences):
@@ -52,7 +72,14 @@ class ExtractedRelation(BaseModel):
 
 class Mention(BaseModel):
     surface: str
-    cluster_id: int
+    # Nullable because nothing enforces the schema ``_do_extract`` sends (see
+    # there): while this was a bare ``int``, one null cluster_id failed the
+    # WHOLE ``ExtractedGraph``, burning the primary provider's retry budget and
+    # dropping through to the regex heuristic (prod, 2026-08-16). ``None``
+    # means "no coreference cluster assigned" — the surface form is still worth
+    # keeping. Nothing reads ``cluster_id`` today; it stays for the coreference
+    # work A5b (#169) added it for.
+    cluster_id: int | None = None
     entity_canonical: str | None = None
 
 
@@ -62,14 +89,107 @@ class ExtractedGraph(BaseModel):
     mentions: list[Mention] = []
 
 
+# Item model per ``ExtractedGraph`` list field. A field missing from here is
+# simply never walked — it defaults to empty and nothing complains — so the
+# coverage is pinned by a test rather than by this comment
+# (``test_registry_covers_every_graph_list_field``).
+_GRAPH_ITEM_MODELS: dict[str, type[BaseModel]] = {
+    "entities": ExtractedEntity,
+    "relations": ExtractedRelation,
+    "mentions": Mention,
+}
+
+
+def _parse_graph_lenient(raw: dict) -> tuple[ExtractedGraph, dict[str, int]]:
+    """Build an ``ExtractedGraph``, dropping malformed items instead of failing.
+
+    ``ExtractedGraph(**raw)`` validates the whole payload atomically, so ONE
+    bad item discarded every good one alongside it. That is not hypothetical:
+    a null ``cluster_id`` on mention 10 of 15 took out the entire extraction in
+    prod on 2026-08-16 (#788), and every remaining non-optional field here —
+    ``canonical_name``, ``entity_type``, ``role``, ``from_entity``,
+    ``relation_type``, ``to_entity``, ``surface`` — carries the identical
+    exposure. Fixing them one nullable field at a time is whack-a-mole; the
+    parse boundary is where the blast radius is set.
+
+    Mirrors the ``atomic_facts`` loop in
+    ``common/enrichment/service.py::_validate_enrichment``, which walks that
+    provider output item-by-item and ``continue``s past entries it cannot use.
+    That function's outer ``EnrichmentResult(**raw)`` used to be atomic and so
+    carried this same exposure one level up; its two unguarded fields now have
+    model-level ``mode="before"`` validators, so both layers are covered.
+
+    A relation whose endpoint entity was dropped is not a dangling reference —
+    ``entity_extraction_worker`` only writes an edge when both ids resolve, the
+    same cascade it already documents for blocklisted nodes.
+
+    Returns the graph plus a per-field count of what was dropped. The caller
+    owns the logging so this stays a pure function.
+
+    NOTE it deliberately does NOT swallow a total loss — see
+    ``_do_extract`` for why an all-items-dropped payload still raises.
+    """
+    dropped: dict[str, int] = {}
+    fields: dict[str, list] = {}
+    for field, model in _GRAPH_ITEM_MODELS.items():
+        items = raw.get(field)
+        if items is None:
+            continue
+        if not isinstance(items, list):
+            # A non-list where a list belongs is a shape error for the whole
+            # field, not a per-item one; treat it as "nothing usable here"
+            # rather than guessing at a coercion. Counted as 1 because there
+            # are no items to count.
+            dropped[field] = 1
+            continue
+        kept: list[BaseModel] = []
+        for item in items:
+            try:
+                # ``model_validate`` rather than ``model(**item)``: it raises
+                # ValidationError for a non-mapping item too, so one narrow
+                # except covers junk of every shape. ``**`` on a str/int/None
+                # would raise TypeError and force a broader catch that would
+                # also swallow unrelated errors.
+                kept.append(model.model_validate(item))
+            except ValidationError:
+                dropped[field] = dropped.get(field, 0) + 1
+        fields[field] = kept
+    return ExtractedGraph(**fields), dropped
+
+
+# What the regex heuristic declares instead of guessing. NOT one of the ten types
+# the prompt above offers, deliberately: those are classifications, and this path
+# performed no classification. Free-form ``str`` on ``ExtractedEntity`` and no code
+# branches on the value (it is stored by ``entity_service`` and displayed), so this
+# is a change to what we ASSERT, not to what works.
+_UNCLASSIFIED_ENTITY_TYPE = "unknown"
+
+
 def _fake_extract(content: str) -> ExtractedGraph:
-    """Regex-based: extract capitalized multi-word phrases as person entities."""
+    """Regex heuristic: capitalised multi-word phrases, left deliberately untyped.
+
+    This is the last tier of the extraction chain, so its output is not a
+    throwaway — ``entity_extraction_worker`` persists these rows to the entity
+    graph and embeds every name.
+
+    It used to stamp ``entity_type="person"`` on every match, which contradicts
+    the extraction prompt's own rule twelve lines up ("Use entity_type=person only
+    when a named individual is referenced") and is wrong for most of what a
+    capitalised-bigram regex finds: "Helios Migration", "Last Tuesday" and "Good
+    Morning" all became people. On a provider outage that wrong type is what
+    reaches a real tenant's graph.
+
+    A regex cannot classify, so it no longer pretends to. The NAMES are still
+    worth keeping — "Anna Bergstrom" and "Acme Corp" are genuine entities, and
+    when every provider is down this is the only path that catches them — but the
+    type is reported as undetermined rather than invented.
+    """
     pattern = r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b"
     matches = list(set(re.findall(pattern, content)))
     entities = [
         ExtractedEntity(
             canonical_name=m.lower(),
-            entity_type="person",
+            entity_type=_UNCLASSIFIED_ENTITY_TYPE,
             role="mentioned",
         )
         for m in matches
@@ -157,16 +277,59 @@ async def extract_entities_from_content(
         # integer that survives process restarts — unlike ``hash()`` which
         # is salted per-process for str inputs.
         seed = zlib.crc32(prompt.encode("utf-8"))
-        # A5b #3 — pin the output shape server-side via response_schema.
-        # ExtractedGraph.model_json_schema() encodes the entities /
-        # relations / mentions structure. Providers that don't support
-        # structured outputs ignore this kwarg.
+        # A5b #3 — declare the expected shape via response_schema. It is a
+        # HINT, not the server-side guarantee A5b originally claimed: the
+        # OpenAI provider sends it with ``strict=False`` (see
+        # ``common/llm/providers/openai.py``) and gemini/vertex accept and
+        # ignore it outright, so the provider can and does return values the
+        # schema forbids. ``_parse_graph_lenient`` below is the only real
+        # enforcement, and it enforces PER ITEM — malformed entries are dropped
+        # and counted rather than failing the payload. See
+        # ``Mention.cluster_id`` for the prod failure that established this.
         raw = await llm.complete_json(
             prompt,
             seed=seed,
             response_schema=ExtractedGraph.model_json_schema(),
         )
-        return ExtractedGraph(**raw)
+        if not isinstance(raw, dict):
+            # Not a per-item problem — there is no payload to salvage items
+            # from. Raise so the fallback chain gets its turn.
+            raise ExtractionShapeError(f"entity extraction returned {type(raw).__name__}, expected dict")
+        graph, dropped = _parse_graph_lenient(raw)
+        if dropped:
+            # Counts only, never the items: the payload is memory content plus
+            # any PII in it, and this is a WARNING bound for log storage. Flat
+            # key=value with a stable leading slug so a plain grep finds it
+            # regardless of how the structlog renderer handles ``extra`` —
+            # same shape as ``contradiction_detector``'s skip logs.
+            #
+            # ``kept`` is read off the parsed graph, NOT re-derived from
+            # ``raw``: a non-list field has no ``len()``, and computing it here
+            # would raise INSIDE the salvage branch, discarding the very graph
+            # this function just rescued.
+            logger.warning(
+                "entity_extraction_items_dropped dropped=%s kept=%s",
+                dropped,
+                {f: len(getattr(graph, f)) for f in dropped},
+            )
+            # A total loss is NOT salvage: returning an empty graph would
+            # silently assert "no entities in this content", indistinguishable
+            # from a legitimately entity-free memory, and rob the fallback
+            # chain of its turn — the alternative provider is a different model
+            # and may well parse.
+            #
+            # Keyed on entities/relations and an empty ``entities``, NOT on all
+            # three lists. ``mentions`` has no consumer that persists anything,
+            # so a surviving mention must not suppress the fallback (the worker
+            # early-returns on an entity-less graph, losing the extraction with
+            # no audit row), and a malformed mention alone must not trigger it
+            # (that would let the regex fallback invent entities the LLM
+            # correctly reported as absent).
+            if (dropped.keys() & {"entities", "relations"}) and not graph.entities:
+                raise ExtractionShapeError(
+                    f"entity extraction produced no usable entities (dropped={dropped})"
+                )
+        return graph
 
     extraction_model = (
         (getattr(tenant_config, "entity_extraction_model", None) if tenant_config else None)
@@ -181,6 +344,17 @@ async def extract_entities_from_content(
         service_label="entity-extraction",
         model_override=extraction_model,
         model_attr="entity_extraction_model",
+        # This caller is the one that can honestly declare a shape failure
+        # non-retryable: ``_do_extract`` pins ``seed`` to a CRC32 of the prompt
+        # SPECIFICALLY so retries reproduce byte-identical output, which means a
+        # second attempt is guaranteed to fail the same way. Only shape types
+        # are listed — a transport failure (timeout, 5xx) stays retryable, seed
+        # or no seed.
+        #
+        # This does NOT skip the fallback provider, only the wasted re-ask
+        # within each one. The alternative model still gets its turn, which is
+        # the whole reason a total loss raises rather than returning empty.
+        non_retryable=(ExtractionShapeError, ValidationError),
     )
     # A33 ①: undo the split-discriminator pattern before resolution.
     return _reattach_subject_discriminators(graph, content)

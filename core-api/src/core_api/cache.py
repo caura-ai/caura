@@ -78,6 +78,42 @@ async def cache_delete(key: str) -> bool:
         return False
 
 
+# Release-if-owner. GET-then-DEL from the client would be two round trips with a
+# window in between, which is the whole bug this guards against; the compare and
+# the delete have to be one atomic step, so they run server-side.
+_DELETE_IF_SCRIPT = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+
+async def cache_delete_if(key: str, expected: str) -> bool:
+    """Delete ``key`` only while it still holds ``expected``. Returns True iff
+    this call deleted it.
+
+    For releasing a ``cache_set_nx`` lock. An unconditional ``DEL`` is the
+    classic distributed-lock footgun: a holder whose work outruns the lock's
+    TTL no longer owns the key, and deleting it then destroys a SUCCESSOR's
+    lock rather than its own. Pairing SET NX with a per-acquisition token and
+    releasing through this compare-and-delete makes a release a no-op once the
+    lock has moved on.
+
+    Same fail-quiet contract as its neighbours: no Redis, or a failed EVAL,
+    returns False rather than raising. Callers release inside ``finally``
+    blocks on paths whose never-raises property is load-bearing.
+    """
+    r = await _get_redis()
+    if r is None:
+        return False
+    try:
+        return bool(await r.eval(_DELETE_IF_SCRIPT, 1, key, expected))
+    except Exception:
+        logger.debug("cache_delete_if failed for key=%s", key, exc_info=True)
+        return False
+
+
 async def cache_set_nx(key: str, value: str, ttl: int) -> bool:
     """Atomic SET-if-not-exists with TTL. Returns True iff we newly set
     the key (i.e. the caller "owns" the lock); False if the key already

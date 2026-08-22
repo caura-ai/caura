@@ -24,7 +24,7 @@ from core_api.services.interview_service import (
     process_interview_job,
     process_pending_interview_jobs,
 )
-from tests.conftest import get_admin_headers, get_test_auth, uid
+from tests.conftest import get_admin_headers, get_test_auth, new_tenant_id, uid
 from tests.test_api_interview import (
     _CANNED_REPORT,
     _enable_interviewer,
@@ -115,7 +115,7 @@ def _enqueue_kwargs(tenant_id: str, node_id: str, agent_id: str, **kw) -> dict:
 async def test_async_submit_accepts_with_watermark_and_masked_job(
     client, canned_llm, async_submit
 ):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     events = _events()
@@ -150,7 +150,7 @@ async def test_async_submit_accepts_with_watermark_and_masked_job(
 
 
 async def test_processing_writes_typed_memories_and_marks_done(client, canned_llm, async_submit):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
 
@@ -184,7 +184,7 @@ async def test_processing_writes_typed_memories_and_marks_done(client, canned_ll
 
 
 async def test_resubmit_same_window_is_idempotent(client, canned_llm, async_submit):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     payload = _payload(tenant_id, node_id, agent_id)
@@ -218,7 +218,7 @@ async def test_resubmit_same_window_is_idempotent(client, canned_llm, async_subm
 
 
 async def test_enqueue_over_processing_job_does_not_downgrade(client, canned_llm):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
@@ -239,7 +239,7 @@ async def test_enqueue_over_processing_job_does_not_downgrade(client, canned_llm
 
 
 async def test_duplicate_enqueue_preserves_attempts(client, monkeypatch):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
@@ -270,7 +270,7 @@ async def test_enqueue_prior_read_failure_raises_and_leaves_done_job_untouched(
     submit would lose the window, see the round-5 test below) and must
     NOT upsert (writing "pending" over a "done" job would re-open the
     consumed window and reset the retry budget) (#667)."""
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
@@ -305,7 +305,7 @@ async def test_first_submit_prior_read_failure_500s_without_advancing_watermark(
     the plugin prunes its buffer and the window is permanently lost. The
     enqueue must raise → route 500s → the plugin keeps the window and
     resubmits next tick."""
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     doc_id = interview_job_doc_id(node_id, 0, 10)
@@ -357,7 +357,7 @@ async def test_first_submit_prior_read_failure_500s_without_advancing_watermark(
 
 
 async def test_failed_synthesis_returns_to_pending_then_retry_succeeds(client, monkeypatch):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
@@ -386,7 +386,7 @@ async def test_failed_synthesis_returns_to_pending_then_retry_succeeds(client, m
 
 
 async def test_job_attempts_exhaustion_parks_as_failed_permanent(client, monkeypatch):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
@@ -415,7 +415,7 @@ async def test_concurrent_processors_increment_attempts_from_fresh_base(client, 
     a job exceed interview_job_max_attempts (#667). Simulated by doctoring
     the second run's top-level fetch to return the pre-increment snapshot
     while _set_state's fresh re-fetch sees the real doc."""
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
@@ -460,7 +460,7 @@ async def test_pending_reset_retry_survives_one_write_failure(client, monkeypatc
     """Synthesis fails AND the first pending-reset upsert fails: the reset's
     extra best-effort attempt must still land the job in "pending" — a job
     left in "processing" waits on the (slower) stale sweep."""
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
@@ -498,7 +498,7 @@ async def test_pending_reset_does_not_overwrite_concurrent_done(client, monkeypa
     this run was in flight (flipping the doc to "done"): the finally
     pending-reset must detect the terminal status and back off — writing
     "pending" over it would re-open a consumed window (#667)."""
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
@@ -534,7 +534,7 @@ async def test_pending_reset_guard_uses_the_merge_base_fetch(client, monkeypatch
     fetch happens after the synthesis failure — pinning the collapsed
     single fetch-write gap (a reintroduced pre-check would make it two,
     re-opening the gap between check and merge base)."""
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
@@ -594,7 +594,7 @@ async def test_direct_processor_skips_processing_unless_stale_and_allowed(client
     process_interview_job call skips it, flag or not, while it is FRESH;
     only allow_stale_processing=True on a STALE doc (the sweep's reclaim
     path) reprocesses it (#667)."""
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
@@ -625,7 +625,7 @@ async def test_direct_processor_skips_processing_unless_stale_and_allowed(client
 
 
 async def test_done_job_is_a_noop_for_the_processor(client, canned_llm):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
@@ -640,7 +640,7 @@ async def test_done_job_is_a_noop_for_the_processor(client, canned_llm):
 
 
 async def test_schedule_sweep_processes_pending_jobs(client, canned_llm, async_submit, monkeypatch):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
 
@@ -674,7 +674,7 @@ async def test_sweep_recovers_stale_processing_but_not_fresh(client, canned_llm)
     """A job stranded in "processing" past the staleness cutoff (its task
     hard-crashed mid-run) is re-swept and completed; a fresh "processing"
     job (a live concurrent run) is left alone."""
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     now = datetime.now(UTC)
 
@@ -713,9 +713,9 @@ async def test_sweep_bounded_concurrency_completes_all_jobs(client, canned_llm, 
     (7 pending jobs across 2 tenants > INTERVIEW_SWEEP_CONCURRENCY=5)
     completes every job with the same summary semantics as the old
     sequential drain, while never exceeding the bound in flight."""
-    tenant_a, headers_a = get_test_auth(f"t-{uid()}")
+    tenant_a, headers_a = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_a, headers_a)
-    tenant_b, headers_b = get_test_auth(f"t-{uid()}")
+    tenant_b, headers_b = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_b, headers_b)
 
     seeded: list[tuple[str, str]] = []
@@ -753,7 +753,7 @@ async def test_sweep_bounded_concurrency_completes_all_jobs(client, canned_llm, 
 
 
 async def test_process_pending_jobs_returns_counts_summary(client, canned_llm):
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
     await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
@@ -777,7 +777,7 @@ async def test_process_pending_jobs_returns_counts_summary(client, canned_llm):
 
 async def test_flag_off_runs_legacy_inline_path(client, canned_llm, monkeypatch):
     monkeypatch.setattr(interview_route.app_settings, "interview_async_submit", False)
-    tenant_id, headers = get_test_auth(f"t-{uid()}")
+    tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
 

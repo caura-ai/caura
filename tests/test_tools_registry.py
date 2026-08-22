@@ -22,34 +22,34 @@ pytestmark = pytest.mark.unit
 
 
 EXPECTED_PLUGIN_EXPOSED = {
-    "memclaw_recall",
-    "memclaw_write",
-    "memclaw_manage",
-    "memclaw_doc",
-    "memclaw_list",
-    "memclaw_entity_get",
-    "memclaw_tune",
-    "memclaw_insights",
-    "memclaw_evolve",
-    "memclaw_stats",
+    "caura_recall",
+    "caura_write",
+    "caura_manage",
+    "caura_doc",
+    "caura_list",
+    "caura_entity_get",
+    "caura_tune",
+    "caura_insights",
+    "caura_evolve",
+    "caura_stats",
     # Read tool is plugin-exposed so the plugin can auto-inject keystone
     # rules at session start (CAURA-000). The write tool
-    # (``memclaw_keystones_set``) is MCP-only — authoring is an
+    # (``caura_keystones_set``) is MCP-only — authoring is an
     # admin/governance path, not an agent path.
-    "memclaw_keystones",
+    "caura_keystones",
 }
 
-# MCP-only tools — not surfaced through the plugin. ``memclaw_keystones_set``
+# MCP-only tools — not surfaced through the plugin. ``caura_keystones_set``
 # is the write half of the keystone pair; admins/governance use it from
 # REST/MCP, agents do not.
 EXPECTED_MCP_ONLY = {
-    "memclaw_keystones_set",
+    "caura_keystones_set",
 }
 
 EXPECTED_PLACEHOLDERS: set[str] = set()
 
 
-# memclaw_insights and memclaw_evolve landed in d6f212b as live MCP-only
+# caura_insights and caura_evolve landed in d6f212b as live MCP-only
 # tools — implementation is real, but they stay plugin_exposed=False until
 # REST endpoints land (the plugin dispatches via REST).
 
@@ -58,7 +58,7 @@ def test_all_specs_have_memclaw_prefix():
     from core_api.tools import REGISTRY
 
     for name in REGISTRY:
-        assert name.startswith("memclaw_"), f"Spec name '{name}' lacks memclaw_ prefix"
+        assert name.startswith("caura_"), f"Spec name '{name}' lacks caura_ prefix"
 
 
 def test_all_trust_values_in_0_3():
@@ -135,8 +135,8 @@ def test_placeholders_are_reserved_set():
 def test_op_dispatched_tools_have_expected_op_sets():
     from core_api.tools import REGISTRY
 
-    manage_ops = {op.name for op in REGISTRY["memclaw_manage"].ops}
-    doc_ops = {op.name for op in REGISTRY["memclaw_doc"].ops}
+    manage_ops = {op.name for op in REGISTRY["caura_manage"].ops}
+    doc_ops = {op.name for op in REGISTRY["caura_doc"].ops}
     assert manage_ops == {"read", "update", "transition", "delete"}
     assert doc_ops == {"write", "read", "query", "delete", "list_collections", "search"}
 

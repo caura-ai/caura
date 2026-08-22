@@ -232,15 +232,15 @@ def run_benchmark(base_url: str, api_key: str | None, runs: int, fleet_id: str |
             print(f"    P95:     {percentile(server_times, 95):>7.0f} ms")
         print()
 
-    report_section("WRITE (memclaw_write)", write_times, server_write_times)
-    report_section("RECALL (memclaw_recall)", search_times, server_search_times)
-    report_section("RECALL+BRIEF (memclaw_recall, include_brief=true)", recall_times)
+    report_section("WRITE (caura_write)", write_times, server_write_times)
+    report_section("RECALL (caura_recall)", search_times, server_search_times)
+    report_section("RECALL+BRIEF (caura_recall, include_brief=true)", recall_times)
 
     # ── Summary table ──
     print("  " + "-" * 60)
     print(f"  {'Tool':<25} {'Mean':>8} {'P50':>8} {'P95':>8} {'P99':>8}")
     print("  " + "-" * 60)
-    for name, times in [("memclaw_write", write_times), ("memclaw_recall", search_times), ("memclaw_recall+brief", recall_times)]:
+    for name, times in [("caura_write", write_times), ("caura_recall", search_times), ("caura_recall+brief", recall_times)]:
         if times:
             print(f"  {name:<25} {statistics.mean(times):>7.0f}ms {statistics.median(times):>7.0f}ms {percentile(times, 95):>7.0f}ms {percentile(times, 99):>7.0f}ms")
     print("  " + "-" * 60)

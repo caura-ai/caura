@@ -36,7 +36,7 @@
  *   anything it withholds (a sibling fleet's skill, or a candidate /
  *   staged / quarantined skill on an opted-in tenant) → never on disk.
  *   This is the SAME gate the MCP pull surface enforces (PR #315), so
- *   push (this reconciler) and pull (memclaw_doc) agree on what an agent
+ *   push (this reconciler) and pull (caura_doc) agree on what an agent
  *   may see. A skill flipping active→rejected/quarantined drops out of
  *   the catalog and is removed from disk on the next tick (owned mode).
  *
@@ -568,7 +568,7 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   // 2. Build the desired state from the catalog (target-independent).
   //    Skip rows missing doc_id or content — they can't be materialised.
   //    Slug validation (filesystem-safe) was enforced server-side by the
-  //    Phase B ``memclaw_doc op=write collection=skills`` rule, so every
+  //    Phase B ``caura_doc op=write collection=skills`` rule, so every
   //    doc_id we see here should already be safe — but defense in depth:
   //    re-validate before touching the filesystem.
   //
@@ -576,7 +576,7 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   //    frontmatter declaring ``name`` and ``description`` (it returns
   //    null in ``loadSingleSkillDirectory`` when either is missing,
   //    silently filtering the skill out of the agent's tool palette).
-  //    Skills uploaded via ``memclaw_doc op=write collection=skills``
+  //    Skills uploaded via ``caura_doc op=write collection=skills``
   //    typically supply ``data.{name, description, content}`` as separate
   //    fields with the content being plain markdown — so the reconciler
   //    synthesises frontmatter from ``data.name`` and ``data.description``
@@ -706,7 +706,7 @@ const FRONTMATTER_FENCE_RE = /^---\r?\n/;
  * Authors who upload skills with their own frontmatter in
  * ``data.content`` get pass-through (we detect the leading ``---``
  * fence and don't touch the body). Authors who upload plain markdown
- * (the common case for ``memclaw_doc op=write collection=skills``) get
+ * (the common case for ``caura_doc op=write collection=skills``) get
  * frontmatter prepended from ``data.name`` and ``data.description``.
  *
  * Description is YAML-escaped — wrapped in double quotes with embedded

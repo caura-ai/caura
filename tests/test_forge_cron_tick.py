@@ -18,11 +18,13 @@ adapter wires them up correctly.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from common.events.base import PermanentOpError
 from core_api.services.forge.cron_handler import _resolve_forge_config
 from core_api.services.forge.forge_service import ForgeConfig, ForgeRunResult
 from core_api.services.lifecycle_audit import resolve_publisher_kwargs
@@ -184,6 +186,7 @@ class TestRunForgeCronTick:
             candidates_skipped_sentinel=0,
             candidates_skipped_distill_error=0,
             candidates_skipped_io_error=0,
+            candidates_skipped_internal_error=0,
             candidates_skipped_existing=0,
             started_at=None,
             run_label="forge-cron-t1-20260608T2100",
@@ -254,6 +257,9 @@ class TestRunForgeCronTick:
         # Skip counters surface from the Forge result.
         assert stats["skipped_poisoned"] == 1
         assert stats["skipped_sentinel"] == 0
+        # The bucket that means "we shipped a bug" has to reach the stats dict,
+        # since that is the structured line an alert would key on.
+        assert stats["skipped_internal_error"] == 0
         # auto_approved surfaces from the promoter result (0 here — the
         # flag defaults off because the patched settings omit it).
         assert stats["auto_approved"] == 0
@@ -278,6 +284,7 @@ class TestRunForgeCronTick:
             candidates_skipped_sentinel=0,
             candidates_skipped_distill_error=0,
             candidates_skipped_io_error=0,
+            candidates_skipped_internal_error=0,
             candidates_skipped_existing=0,
             started_at=None,
             run_label="forge-cron-t1-20260610T0000",
@@ -376,3 +383,297 @@ class TestRunForgeCronTick:
                 # Replace common with a stub missing ``llm``.
                 with patch.dict(sys.modules, {"common.llm": None}):
                     await _wire_llm_fn()
+
+
+# ── H-08: the injected callables must match the seams that call them ──
+
+
+@pytest.mark.unit
+class TestInjectedCallableArity:
+    """The cron adapter's whole job is wiring, and a shape mismatch here is
+    invisible to every other suite.
+
+    ``run_forge_distill`` swallows exceptions from ``_distill_cluster`` into
+    ``skipped_io_error`` so one bad cluster cannot abort a tick. That also means a
+    ``TypeError`` from a wrongly-shaped injectable looks exactly like a storage
+    hiccup: the tick returns success with zero candidates written. H-08 was that
+    bug — the poison checker took ``(tenant, fleet, fp)`` while
+    ``_distill_cluster`` calls ``await poison_checker(fingerprint.fp)`` — and it
+    survived because the test above stubs ``run_forge_distill``, so nothing ever
+    called what the cron handed it.
+
+    These tests call the injectables through the same seam the service does.
+    """
+
+    @pytest.mark.asyncio
+    async def test_make_poison_checker_takes_only_a_fingerprint(self):
+        """The ``PoisonChecker`` seam is ``Callable[[str], Awaitable[bool]]``."""
+        from core_api.services.forge.cron_handler import _make_poison_checker
+
+        checker = _make_poison_checker("t1", "fleet-a")
+
+        with patch(
+            "core_api.services.forge.cron_handler.is_fingerprint_poisoned",
+            new=AsyncMock(return_value=True),
+        ) as is_poisoned:
+            # Exactly how forge_service._distill_cluster invokes it.
+            assert await checker("fp-abc123") is True
+
+        # The identifiers must survive being closed over, or the check would
+        # silently consult the wrong tenant's cooloff rows.
+        is_poisoned.assert_awaited_once_with(
+            tenant_id="t1", fleet_id="fleet-a", cluster_fingerprint="fp-abc123"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cron_hands_run_forge_distill_a_checker_it_can_actually_call(self):
+        """The regression guard for H-08.
+
+        Captures the callable the cron passes and invokes it the way the service
+        does. Pre-fix this raised ``TypeError: _check() missing 2 required
+        positional arguments``, which the service would have buried in
+        ``skipped_io_error``.
+        """
+        from core_api.services.forge.cron_handler import run_forge_cron_tick
+
+        fake_forge_result = ForgeRunResult(
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=None,
+            window_end=None,
+            total_traces=0,
+            labeled_traces=0,
+            clusters_total=0,
+            clusters_eligible=0,
+            candidates_written=0,
+            candidates_skipped_poisoned=0,
+            candidates_skipped_sentinel=0,
+            candidates_skipped_distill_error=0,
+            candidates_skipped_io_error=0,
+            candidates_skipped_internal_error=0,
+            candidates_skipped_existing=0,
+            started_at=None,
+            run_label="forge-cron-t1-20260819T1200",
+            candidate_doc_ids=[],
+        )
+        fake_promote_result = PromoterRunResult(
+            tenant_id="t1", fleet_id=None, scanned=0, promoted=0, held=0, auto_approved=0
+        )
+
+        with (
+            patch(
+                "core_api.services.forge.cron_handler.get_settings_for_display",
+                new=AsyncMock(return_value={"skills_factory": {"forge": {}}}),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler._wire_llm_fn",
+                new=AsyncMock(return_value=AsyncMock()),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler._make_candidate_writer",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler._make_status_checker",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler.run_forge_distill",
+                new=AsyncMock(return_value=fake_forge_result),
+            ) as run_forge,
+            patch(
+                "core_api.services.forge.cron_handler.promote_pending_candidates",
+                new=AsyncMock(return_value=fake_promote_result),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler.make_db_poison_checker",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler.make_db_live_data_fetcher",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "core_api.services.forge.cron_handler.make_db_status_updater",
+                return_value=AsyncMock(),
+            ),
+        ):
+            await run_forge_cron_tick(
+                tenant_id="t1", fleet_id=None, run_label="forge-cron-t1-20260819T1200"
+            )
+
+            injected = run_forge.await_args.kwargs["poison_checker"]
+
+            with patch(
+                "core_api.services.forge.cron_handler.is_fingerprint_poisoned",
+                new=AsyncMock(return_value=False),
+            ) as is_poisoned:
+                assert await injected("fp-from-the-seam") is False
+
+        is_poisoned.assert_awaited_once_with(
+            tenant_id="t1", fleet_id=None, cluster_fingerprint="fp-from-the-seam"
+        )
+
+
+# ── The tick's verdict must be truthful (#818 follow-up, round 2) ──
+
+
+@pytest.mark.unit
+class TestTickVerdict:
+    """A tick that mined nothing because of a wiring bug used to return normally,
+    so the shared lifecycle runner wrote ``status="success"``.
+
+    That is not only dishonest: ``has_recent_lifecycle_success`` gates re-runs on a
+    recent SUCCESS, so the false verdict also blocked the operator's next attempt
+    for the 23h dedup window. Re-curling the fanout to reproduce H-08 would have
+    returned "skipped: recent_success" and not run at all — the false success
+    obstructed its own diagnosis.
+    """
+
+    @staticmethod
+    def _forge_result(**over):
+        base = dict(
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=None,
+            window_end=None,
+            total_traces=0,
+            labeled_traces=0,
+            clusters_total=0,
+            clusters_eligible=2,
+            candidates_written=0,
+            candidates_skipped_poisoned=0,
+            candidates_skipped_sentinel=0,
+            candidates_skipped_distill_error=0,
+            candidates_skipped_io_error=0,
+            candidates_skipped_internal_error=0,
+            candidates_skipped_existing=0,
+            started_at=None,
+            run_label="forge-cron-t1-20260820T0900",
+            candidate_doc_ids=[],
+        )
+        base.update(over)
+        return ForgeRunResult(**base)
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _patched(forge_result, promote_result):
+        """Patch every dependency the tick touches; yields the two op mocks.
+
+        Yielding them (rather than swallowing the handles) is what lets this stand
+        in for the hand-rolled ``with (...)`` blocks the other classes in this file
+        use — those assert on ``run_forge.await_args`` / ``run_promote.await_args``.
+        """
+        P = "core_api.services.forge.cron_handler."
+        with (
+            patch(
+                P + "get_settings_for_display",
+                new=AsyncMock(return_value={"skills_factory": {"forge": {}}}),
+            ),
+            patch(P + "_wire_llm_fn", new=AsyncMock(return_value=AsyncMock())),
+            patch(P + "_make_candidate_writer", return_value=AsyncMock()),
+            patch(P + "_make_status_checker", return_value=AsyncMock()),
+            patch(P + "run_forge_distill", new=AsyncMock(return_value=forge_result)) as run_forge,
+            patch(
+                P + "promote_pending_candidates",
+                new=AsyncMock(return_value=promote_result),
+            ) as run_promote,
+            patch(P + "make_db_poison_checker", return_value=AsyncMock()),
+            patch(P + "make_db_live_data_fetcher", return_value=AsyncMock()),
+            patch(P + "make_db_status_updater", return_value=AsyncMock()),
+        ):
+            yield run_forge, run_promote
+
+    async def _tick(self, forge_result, promote_result):
+        from core_api.services.forge.cron_handler import run_forge_cron_tick
+
+        with self._patched(forge_result, promote_result):
+            return await run_forge_cron_tick(
+                tenant_id="t1", fleet_id=None, run_label="forge-cron-t1-20260820T0900"
+            )
+
+    _NO_PROMOTIONS = PromoterRunResult(
+        tenant_id="t1", fleet_id=None, scanned=0, promoted=0, held=0, auto_approved=0
+    )
+
+    @pytest.mark.asyncio
+    async def test_wrote_nothing_with_programming_errors_fails_the_tick(self):
+
+        with pytest.raises(PermanentOpError) as exc:
+            await self._tick(
+                self._forge_result(candidates_skipped_internal_error=2), self._NO_PROMOTIONS
+            )
+
+        # The message has to name the counter and the scope, or the failure row's
+        # error_message (truncated to 500 chars) tells on-call nothing actionable.
+        assert "candidates_skipped_internal_error" in str(exc.value)
+        assert "code/wiring bug" in str(exc.value)
+        assert "t1" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_it_is_terminal_so_the_runner_will_not_redeliver(self):
+        """Not a generic exception: a deterministic bug hits every cluster every
+        tick, so redelivery only repeats the LLM spend before failing the same
+        way. ``PermanentOpError`` is what tells the runner to ack."""
+
+        with pytest.raises(PermanentOpError):
+            await self._tick(
+                self._forge_result(candidates_skipped_internal_error=1), self._NO_PROMOTIONS
+            )
+
+    @pytest.mark.asyncio
+    async def test_internal_errors_alongside_a_written_candidate_do_not_fail_it(self):
+        """One malformed cluster among successes is routine. Failing the tick over
+        it would discard real work from the audit row and page someone nightly."""
+        stats = await self._tick(
+            self._forge_result(candidates_written=1, candidates_skipped_internal_error=1),
+            self._NO_PROMOTIONS,
+        )
+        assert stats["candidates_written"] == 1
+        assert stats["skipped_internal_error"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_genuinely_quiet_tick_still_succeeds(self):
+        """Nothing to mine is not a failure — otherwise every idle tenant would
+        fail its tick nightly and the signal would be worthless."""
+        stats = await self._tick(self._forge_result(clusters_eligible=0), self._NO_PROMOTIONS)
+        assert stats["candidates_written"] == 0
+        assert stats["skipped_internal_error"] == 0
+
+    @pytest.mark.asyncio
+    async def test_io_errors_alone_do_not_fail_the_tick(self):
+        """Storage having a bad day is exactly what the tick is meant to survive —
+        and unlike a wiring bug, a retry genuinely might help."""
+        stats = await self._tick(
+            self._forge_result(candidates_skipped_io_error=2), self._NO_PROMOTIONS
+        )
+        assert stats["skipped_io_error"] == 2
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_permanent_error_survives_the_adapter_seam():
+    """The raise has to cross ``_CoreApiLifecycleAdapter.forge_distill`` to reach
+    the runner that acts on it.
+
+    Worth its own test because that adapter is pure wiring, and pure wiring is
+    exactly what went unwatched in H-08: the cron tests stubbed the seam, so a
+    shape mismatch inside it was invisible to every suite. A stray ``try/except``
+    added there later would silently restore the false-success behaviour this
+    change exists to remove, and nothing else would notice.
+    """
+    from core_api.services.lifecycle_audit import _CoreApiLifecycleAdapter
+
+    adapter = _CoreApiLifecycleAdapter(AsyncMock())
+    boom = PermanentOpError("wrote nothing; wiring bug")
+
+    with patch(
+        "core_api.services.forge.cron_handler.run_forge_cron_tick",
+        new=AsyncMock(side_effect=boom),
+    ):
+        with pytest.raises(PermanentOpError) as exc:
+            await adapter.forge_distill(org_id="t1", fleet_id=None, run_label="r1")
+
+    # Identity, not just type: a re-wrapped exception would lose the message the
+    # failure row stores, and would no longer be the class the runner acks on.
+    assert exc.value is boom

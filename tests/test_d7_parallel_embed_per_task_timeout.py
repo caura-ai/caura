@@ -25,16 +25,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
-from fastapi import HTTPException
-
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.steps.search import parallel_embed_entity_boost as mod
 from core_api.pipeline.steps.search.parallel_embed_entity_boost import (
     ParallelEmbedAndEntityBoost,
 )
+from core_api.services.memory_service import BlankQuery
+from fastapi import HTTPException
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -341,3 +341,66 @@ async def test_wall_clock_bounded_by_overall_timeout(monkeypatch):
     )
     # Sanity: embedding still made it through.
     assert ctx.data["embedding"] == _DUMMY_EMBED
+
+
+# ---------------------------------------------------------------------------
+# Blank query — 400, not 503
+# ---------------------------------------------------------------------------
+
+
+async def test_blank_query_is_400_not_503(monkeypatch):
+    """A query with nothing to embed is the caller's fault, not an outage.
+
+    The regression this pins: every ValueError out of the embed task became
+    ``HTTPException(503)``, so blank-query rejections landed in the 5xx rate
+    that pages an on-call. Prod spent 2026-08-18 17:00-18:59Z doing exactly
+    that — 138 "Embedding service unavailable" responses while the embedding
+    backend answered in ~7 ms.
+    """
+    _shrink_budgets(monkeypatch)
+
+    async def blank(*_a, **_k):
+        raise BlankQuery("Search query must not be blank")
+
+    async def fast_boost(*_a, **_k):
+        return (set(), 1.0)
+
+    with (
+        patch(_EMBED_PATH, side_effect=blank),
+        patch(_BOOST_PATH, side_effect=fast_boost),
+    ):
+        step = ParallelEmbedAndEntityBoost()
+        with pytest.raises(HTTPException) as ei:
+            await step.execute(_make_ctx())
+
+    assert ei.value.status_code == 400, (
+        f"blank query answered {ei.value.status_code}; a 503 pages an on-call "
+        "for a healthy backend"
+    )
+    assert "blank" in str(ei.value.detail).lower()
+
+
+async def test_real_embedding_failure_is_still_503(monkeypatch):
+    """The control: a genuine provider failure must NOT be downgraded to 400."""
+    _shrink_budgets(monkeypatch)
+
+    async def dead(*_a, **_k):
+        raise ValueError("Embedding service unavailable")
+
+    async def fast_boost(*_a, **_k):
+        return (set(), 1.0)
+
+    with (
+        patch(_EMBED_PATH, side_effect=dead),
+        patch(_BOOST_PATH, side_effect=fast_boost),
+    ):
+        step = ParallelEmbedAndEntityBoost()
+        with pytest.raises(HTTPException) as ei:
+            await step.execute(_make_ctx())
+
+    assert ei.value.status_code == 503
+
+
+def test_blank_query_stays_catchable_as_valueerror():
+    """Handlers that don't know the type must keep working, not 500."""
+    assert issubclass(BlankQuery, ValueError)

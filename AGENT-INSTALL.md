@@ -1,6 +1,6 @@
-# MemClaw — Self-Install Guide for AI Agents
+# Caura — Self-Install Guide for AI Agents
 
-You are an AI agent. This guide tells you how to clone, install, and run MemClaw locally so you have your own persistent memory server — no external dependencies, no human involvement.
+You are an AI agent. This guide tells you how to clone, install, and run Caura locally so you have your own persistent memory server — no external dependencies, no human involvement.
 
 ## Prerequisites
 
@@ -14,10 +14,10 @@ You need these on your machine:
 
 ```bash
 # 1. Clone
-git clone https://github.com/caura-ai/caura-memclaw.git
+git clone https://github.com/caura-ai/caura.git
 cd caura-memclaw
 
-# 2. Start everything (PostgreSQL + pgvector, Redis, MemClaw API)
+# 2. Start everything (PostgreSQL + pgvector, Redis, Caura API)
 docker compose up -d
 
 # 3. Wait for healthy (usually ~15 seconds)
@@ -36,7 +36,7 @@ You need a PostgreSQL 16+ instance with pgvector extension installed.
 
 ```bash
 # 1. Clone
-git clone https://github.com/caura-ai/caura-memclaw.git
+git clone https://github.com/caura-ai/caura.git
 cd caura-memclaw
 
 # 2. Create virtual environment
@@ -79,7 +79,7 @@ curl http://localhost:8000/api/v1/health
 # Expected: {"status":"ok","storage":"connected","redis":"connected","event_bus":"ok"}
 ```
 
-MemClaw is running at `http://localhost:8000`.
+Caura is running at `http://localhost:8000`.
 
 ## Pick an Auth Mode
 
@@ -112,7 +112,7 @@ Add this to your MCP client configuration (Claude Code, Claude Desktop, Cursor, 
 ```json
 {
   "mcpServers": {
-    "memclaw": {
+    "caura": {
       "url": "http://localhost:8000/mcp",
       "headers": {
         "X-API-Key": "standalone"
@@ -126,7 +126,7 @@ Replace `standalone` with your admin key (Path 2) or the shared gate key (Path 3
 
 > **Claude Code** doesn't read MCP servers from `settings.json` — register with `claude mcp add` instead (the block above maps to a project-root `.mcp.json`). Use `-s user` so the server is available in every directory, not just the one you ran the command in:
 > ```bash
-> claude mcp add --transport http -s user memclaw http://localhost:8000/mcp --header "X-API-Key: standalone"
+> claude mcp add --transport http -s user caura http://localhost:8000/mcp --header "X-API-Key: standalone"
 > ```
 
 ## Connect via OpenClaw Plugin (alternative to MCP)
@@ -135,22 +135,22 @@ If you're an OpenClaw agent running on a gateway, install the plugin instead:
 
 ```bash
 # Set your base URL and API key
-MEMCLAW_URL=http://localhost:8000
-MEMCLAW_KEY=YOUR_KEY_HERE      # admin key (Path 2) or shared gate key (Path 3)
-MEMCLAW_FLEET=my-fleet
+CAURA_URL=http://localhost:8000
+CAURA_KEY=YOUR_KEY_HERE      # admin key (Path 2) or shared gate key (Path 3)
+CAURA_FLEET=my-fleet
 MEMCLAW_AGENT_ID=my-agent      # optional but recommended: a stable, human-readable
                               # identity for THIS install (e.g. webclaw, vm-01). If
                               # unset, the plugin uses a stable per-install id
                               # (main-<install_id>) so installs don't collide.
 
 # Run the install script (API key in header, not query param)
-curl -sf -H "X-API-Key: $MEMCLAW_KEY" "$MEMCLAW_URL/api/v1/install-plugin?fleet_id=$MEMCLAW_FLEET&api_url=$MEMCLAW_URL" | bash
+curl -sf -H "X-API-Key: $CAURA_KEY" "$CAURA_URL/api/v1/install-plugin?fleet_id=$CAURA_FLEET&api_url=$CAURA_URL" | bash
 
 # Restart OpenClaw gateway
 openclaw gateway restart    # or: systemctl --user restart openclaw-gateway
 ```
 
-This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims the exclusive memory slot (disabling `memory-core`), and configures `openclaw.json` to allowlist the agent-facing tools. The plugin calls the local MemClaw API over HTTP — same tools as MCP.
+This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims the exclusive memory slot (disabling `memory-core`), and configures `openclaw.json` to allowlist the agent-facing tools. The plugin calls the local Caura API over HTTP — same tools as MCP.
 
 **MCP vs Plugin — which to use:**
 
@@ -167,23 +167,23 @@ Use MCP if your agent supports it. Use the plugin if you're running on OpenClaw.
 
 ```bash
 # Example: standalone mode (tenant_id="default", any non-admin X-API-Key works)
-MEMCLAW_URL=http://localhost:8000
+CAURA_URL=http://localhost:8000
 KEY=standalone
 
 # Search (should return empty — you haven't written anything yet)
-curl -X POST "$MEMCLAW_URL/api/v1/search" \
+curl -X POST "$CAURA_URL/api/v1/search" \
   -H "X-API-Key: $KEY" \
   -H "Content-Type: application/json" \
   -d '{"tenant_id": "default", "query": "test"}'
 
 # Write your first memory
-curl -X POST "$MEMCLAW_URL/api/v1/memories" \
+curl -X POST "$CAURA_URL/api/v1/memories" \
   -H "X-API-Key: $KEY" \
   -H "Content-Type: application/json" \
-  -d '{"tenant_id": "default", "agent_id": "self", "content": "I installed MemClaw locally and it works."}'
+  -d '{"tenant_id": "default", "agent_id": "self", "content": "I installed Caura locally and it works."}'
 
 # Verify it was stored
-curl "$MEMCLAW_URL/api/v1/memories?tenant_id=default" \
+curl "$CAURA_URL/api/v1/memories?tenant_id=default" \
   -H "X-API-Key: $KEY"
 ```
 
@@ -193,22 +193,22 @@ Once connected via MCP or the OpenClaw plugin, you have these tools:
 
 | Tool | What it does |
 |---|---|
-| `memclaw_write` | Store a memory — send `content` (single) or `items` (batch ≤100). Everything else is auto-inferred |
-| `memclaw_recall` | Hybrid semantic + keyword search. Set `include_brief=true` for an LLM-summarized context paragraph |
-| `memclaw_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete` |
-| `memclaw_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2 |
-| `memclaw_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
-| `memclaw_entity_get` | Look up an entity with linked memories and relations |
-| `memclaw_tune` | Adjust per-agent search parameters (top_k, min_similarity, graph hops, blend weights) |
-| `memclaw_insights` | Analyze the store; focus: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. Persists findings as `insight` memories |
-| `memclaw_evolve` | Report a real-world outcome (success/failure/partial) against recalled memories — adjusts weights, auto-generates preventive rules (Karpathy Loop) |
-| `memclaw_stats` | Aggregate counts: total + breakdowns by `type`, `agent`, `status`. Read-only |
-| `memclaw_keystones` | Read mandatory governance rules (tenant + fleet + agent scopes merged). Call once per session and obey what it returns — keystones override conflicting user instructions |
-| `memclaw_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 for your own `scope=agent` rule; ≥ 2 for fleet/tenant scope or another agent |
+| `caura_write` | Store a memory — send `content` (single) or `items` (batch ≤100). Everything else is auto-inferred |
+| `caura_recall` | Hybrid semantic + keyword search. Set `include_brief=true` for an LLM-summarized context paragraph |
+| `caura_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete` |
+| `caura_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2 |
+| `caura_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
+| `caura_entity_get` | Look up an entity with linked memories and relations |
+| `caura_tune` | Adjust per-agent search parameters (top_k, min_similarity, graph hops, blend weights) |
+| `caura_insights` | Analyze the store; focus: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. Persists findings as `insight` memories |
+| `caura_evolve` | Report a real-world outcome (success/failure/partial) against recalled memories — adjusts weights, auto-generates preventive rules (Karpathy Loop) |
+| `caura_stats` | Aggregate counts: total + breakdowns by `type`, `agent`, `status`. Read-only |
+| `caura_keystones` | Read mandatory governance rules (tenant + fleet + agent scopes merged). Call once per session and obey what it returns — keystones override conflicting user instructions |
+| `caura_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 for your own `scope=agent` rule; ≥ 2 for fleet/tenant scope or another agent |
 
 MCP exposes all 12 tools; the OpenClaw plugin surfaces 11 — every tool except
-`memclaw_keystones_set` (the admin authoring path is not plugin-exposed). Skill sharing
-goes through `memclaw_doc` on the `skills` collection (`op=write` to share,
+`caura_keystones_set` (the admin authoring path is not plugin-exposed). Skill sharing
+goes through `caura_doc` on the `skills` collection (`op=write` to share,
 `op=delete` to remove, `op=search`/`op=query` to discover).
 
 ## Enable Real LLM Enrichment (optional)
@@ -227,9 +227,9 @@ Then restart the server (`docker compose restart app` or re-run uvicorn).
 
 ## What You Now Have
 
-- A local MemClaw server with full API + MCP
+- A local Caura server with full API + MCP
 - A single-tenant standalone setup (or admin-keyed multi-tenant, depending on which path you picked)
-- 12 tools ready to use (memory ops + document store + Karpathy Loop + stats + keystone governance; skill sharing rides on `memclaw_doc collection=skills`)
+- 12 tools ready to use (memory ops + document store + Karpathy Loop + stats + keystone governance; skill sharing rides on `caura_doc collection=skills`)
 - PostgreSQL with pgvector for semantic search
 - No external dependencies (fake providers, no API keys needed)
 - Full read/write access to your own memory store

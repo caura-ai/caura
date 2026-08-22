@@ -67,6 +67,24 @@ async def _seed_memory(
     if embedding is not None:
         emb_literal = "[" + ",".join(str(float(x)) for x in embedding) + "]"
     async with get_session() as session:
+        if subject_entity_id is not None:
+            # memories.subject_entity_id now carries an FK to entities —
+            # seed a minimal entity row (idempotent: divergence tests reuse
+            # one entity id across several memories).
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO entities (id, tenant_id, entity_type, canonical_name)
+                    VALUES (CAST(:id AS uuid), :tenant_id, 'test', :name)
+                    ON CONFLICT (id) DO NOTHING
+                    """
+                ),
+                {
+                    "id": subject_entity_id,
+                    "tenant_id": tenant_id,
+                    "name": f"entity-{subject_entity_id[:8]}",
+                },
+            )
         await session.execute(
             text(
                 """
@@ -423,6 +441,48 @@ async def test_supersede_priors_selects_by_jsonb_metadata(sc):
     assert result["outdated_count"] == 1
     assert await _status(match) == "outdated"
     assert await _status(other_focus) == "active"
+
+
+async def test_supersede_priors_covers_pending_but_not_confirmed(sc):
+    """Pending insights (historically misfiled by the enrichment status
+    classifier) must be swept by the supersede alongside active ones — they
+    were escaping forever and accumulating as recallable zombies. ``confirmed``
+    is the operator's deliberate keep signal and stays exempt."""
+    tenant = _t()
+    agent = "a1"
+    meta = {"insight_focus": "discover", "insight_scope": "all"}
+    pending_zombie = await _seed_memory(
+        tenant_id=tenant,
+        agent_id=agent,
+        memory_type="insight",
+        status="pending",
+        content="plan-phrased finding misfiled as pending",
+        metadata=meta,
+    )
+    active_prior = await _seed_memory(
+        tenant_id=tenant,
+        agent_id=agent,
+        memory_type="insight",
+        status="active",
+        content="normal prior finding",
+        metadata=meta,
+    )
+    confirmed_keeper = await _seed_memory(
+        tenant_id=tenant,
+        agent_id=agent,
+        memory_type="insight",
+        status="confirmed",
+        content="operator-kept finding",
+        metadata=meta,
+    )
+    result = await sc.insights_supersede_priors(
+        tenant_id=tenant, agent_id=agent, focus="discover", scope="all", fleet_id=None
+    )
+    assert set(result["prior_ids"]) == {pending_zombie, active_prior}
+    assert result["outdated_count"] == 2
+    assert await _status(pending_zombie) == "outdated"
+    assert await _status(active_prior) == "outdated"
+    assert await _status(confirmed_keeper) == "confirmed"
 
 
 async def test_supersede_priors_fleet_arm(sc):

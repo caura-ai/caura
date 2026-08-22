@@ -1,0 +1,24 @@
+# Metapackage holding the bare `caura` name on PyPI. Not a stub: it installs
+# the real client and re-exports it, so `pip install caura` +
+# `from caura import Caura` genuinely work.
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "caura"
+version = "1.0.0"
+description = "Caura — governed shared memory for AI agent fleets. Metapackage for caura-client."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Caura", email = "hello@caura.ai" }]
+dependencies = ["caura-client>=1.0.0"]
+
+[project.urls]
+Homepage = "https://caura.ai"
+Documentation = "https://caura.ai/docs"
+Repository = "https://github.com/caura-ai/caura"
+
+[tool.setuptools.packages.find]
+where = ["src"]

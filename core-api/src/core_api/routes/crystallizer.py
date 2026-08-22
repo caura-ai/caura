@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
-from core_api.services.crystallizer_service import run_crystallization
+from core_api.services.crystallizer_service import start_crystallization
 
 router = APIRouter(tags=["Memory Crystallizer"])
 
@@ -54,7 +54,11 @@ async def trigger_crystallization(
     from core_api.services.organization_settings import resolve_config
 
     config = await resolve_config(body.tenant_id)
-    report_id = await run_crystallization(
+    # H-07: the run is scheduled, not awaited. This response has always said
+    # ``status="running"``; awaiting the run made that false, and — once the run
+    # stopped aborting on the first duplicate — made the request exceed its
+    # timeout on any non-trivial tenant. Poll ``GET /crystallize/reports``.
+    report_id = await start_crystallization(
         body.tenant_id,
         body.fleet_id,
         trigger="manual",
@@ -78,7 +82,10 @@ async def trigger_crystallization_all(
         from core_api.services.organization_settings import resolve_config
 
         config = await resolve_config(tid)
-        report_id = await run_crystallization(
+        # Scheduled per tenant for the same reason, and more so: this endpoint
+        # fans out, so awaiting each run in turn makes the request's cost the SUM
+        # of them.
+        report_id = await start_crystallization(
             tid,
             fleet_id=None,
             trigger="scheduled",

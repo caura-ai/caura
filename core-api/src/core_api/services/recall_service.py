@@ -81,7 +81,7 @@ async def summarize_memories(
 ) -> dict:
     """LLM-only summarization step. No DB access.
 
-    Audit finding P3: ``memclaw_recall`` previously held the
+    Audit finding P3: ``caura_recall`` previously held the
     ``_mcp_session()`` open across the multi-second LLM round-trip,
     pinning a pooled DB connection. This helper takes already-fetched
     memories + the resolved tenant config and produces the same dict
@@ -171,8 +171,23 @@ async def summarize_memories(
     )
 
     def _fake_recall() -> str:
-        """No-LLM fallback: join top memory contents."""
-        return " ".join(m.content[:100] for m in memories[:3])
+        """No-LLM fallback: the top memory contents, labelled as unsynthesized.
+
+        Unlike the other fallbacks in this sweep this one is a READ path — the
+        string lands in the response's ``summary`` and is never persisted — so
+        returning something beats returning nothing. What it must not do is pass
+        three truncated memory fragments off as a synthesised answer, which is what
+        an unlabelled join did.
+
+        Marked in the text rather than via a side-channel field because the caller
+        surfaces ``summary`` verbatim to whoever asked; a flag they don't read is
+        the same as no flag. Same shape as ``interview_service._fake_report``'s
+        "(LLM unavailable; unsynthesized)".
+        """
+        joined = " ".join(m.content[:100] for m in memories[:3])
+        if not joined:
+            return "No summary available (no LLM provider answered)."
+        return f"(LLM unavailable; top {min(len(memories), 3)} memories unsynthesized) {joined}"
 
     async def _do_recall(llm) -> str:
         return await llm.complete_text(
@@ -197,6 +212,14 @@ async def summarize_memories(
         # keeps the worst case ~30s and fails fast instead of hanging.
         timeout=15.0,
         max_attempts=1,
+        # The same 15s, declared as a budget rather than implied by the two
+        # values above. That arithmetic held only while ``max_attempts`` stayed
+        # 1: restoring the default — an entirely reasonable-looking change —
+        # silently doubled the worst case to ~60s, with nothing but this
+        # comment to say otherwise. ``budget_s`` bounds the wall clock per
+        # provider whatever the attempt count is, so the ~30s promise is now
+        # structural.
+        budget_s=15.0,
     )
 
     recall_ms = int((time.perf_counter() - t0) * 1000)

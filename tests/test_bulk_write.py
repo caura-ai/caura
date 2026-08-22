@@ -180,7 +180,7 @@ class TestBatchEmbedding:
         texts = ["hello", "world", "test"]
         config = MagicMock()
         config.embedding_provider = "fake"
-        results = await get_embeddings_batch(texts, config)
+        results = await get_embeddings_batch(texts, config, background=False)
         assert len(results) == 3
         assert all(len(e) == VECTOR_DIM for e in results)
 
@@ -192,7 +192,7 @@ class TestBatchEmbedding:
         texts = ["alpha", "beta"]
         config = MagicMock()
         config.embedding_provider = "fake"
-        batch = await get_embeddings_batch(texts, config)
+        batch = await get_embeddings_batch(texts, config, background=False)
         singles = [fake_embedding(t) for t in texts]
         assert batch[0] == singles[0]
         assert batch[1] == singles[1]
@@ -203,7 +203,7 @@ class TestBatchEmbedding:
 
         config = MagicMock()
         config.embedding_provider = "fake"
-        results = await get_embeddings_batch([], config)
+        results = await get_embeddings_batch([], config, background=False)
         assert results == []
 
 

@@ -7,13 +7,13 @@ MCP — and the rule that gates it.
 
 For MCP clients, **"delivery" is a read, not a push.** A skill lives as
 a doc in the `skills` collection; the agent pulls it on demand through
-the `memclaw_doc` tool it already has. There is no filesystem install,
+the `caura_doc` tool it already has. There is no filesystem install,
 no plugin runtime, no registration step.
 
 ```
 1. Skill becomes status='active'   (approve, or auto_promote_clean)
 2. Agent asks: "is there a skill for X?"
-3. memclaw_doc op=search collection=skills query="…"
+3. caura_doc op=search collection=skills query="…"
 4. Server returns the matching ACTIVE skill; agent reads
    data.content (the SKILL.md body) and follows it
 ```
@@ -21,11 +21,11 @@ no plugin runtime, no registration step.
 ## The rule this PR adds: agents see only `active`
 
 The Skill Factory lifecycle is `candidate → staged → active`. Before
-this change, `memclaw_doc` returned skills regardless of status — so a
+this change, `caura_doc` returned skills regardless of status — so a
 `candidate` (Forge just minted it) or `staged` (awaiting human review)
 or `quarantined` (Sentinel blocked it) skill could surface to an agent.
 
-Now, for the agent-facing `memclaw_doc` surface, **only `status='active'`
+Now, for the agent-facing `caura_doc` surface, **only `status='active'`
 skills are discoverable**:
 
 | op | behavior on `collection='skills'` |
@@ -107,7 +107,7 @@ reach an agent: it doesn't.
 ## The hard ceiling (why this is the baseline, not the whole story)
 
 MCP delivery is **pull** — the agent must *decide* to call
-`memclaw_doc`. We can raise that probability (tool-description framing,
+`caura_doc`. We can raise that probability (tool-description framing,
 keystones, folding skill-search into the recall agents already do) but
 never guarantee it: anything reached through a tool is an agent
 decision.
@@ -115,7 +115,7 @@ decision.
 To make skill use *reliable* rather than probabilistic, a skill must be
 installed into the harness's own startup surface (its skill registry /
 filesystem / system-prompt) so it's present before the model thinks —
-which is necessarily per-harness and can't be done from the MemClaw
+which is necessarily per-harness and can't be done from the Caura
 side alone.
 
 So the tiers are:
@@ -126,7 +126,7 @@ So the tiers are:
   integrate deeply (writing `<harness>/skills/<slug>/SKILL.md` so the
   skill is present before the model thinks). Guarantees presence;
   requires a harness-specific adapter. **OpenClaw is the first such
-  harness** (the MemClaw plugin reconciles the catalog to disk every
+  harness** (the Caura plugin reconciles the catalog to disk every
   heartbeat).
 
 They're complementary: MCP-direct is the floor that works everywhere;
@@ -154,7 +154,7 @@ The policy lives entirely server-side — the plugin sends no `status`
 filter and carries no opt-in flag, so it can't be made to pull a
 non-active skill. A skill flipping `active → rejected/quarantined` drops
 out of `installable` and the reconciler removes it from disk on the next
-tick. Push (OpenClaw) and pull (`memclaw_doc`) now agree on exactly what
+tick. Push (OpenClaw) and pull (`caura_doc`) now agree on exactly what
 an agent may see.
 
 ### Verifying installs reached the fleet
@@ -179,7 +179,7 @@ arrays are deduped *across* targets. The summary also carries a
 (`{ dir, mode, installed, added, removed, collisions, protected }`) — so
 an operator can see exactly *which* dir a skill landed in or collided in.
 For the default single-target case it's one entry mirroring the top-level
-arrays. A `registeredDirs[]` array lists the target dirs MemClaw has
+arrays. A `registeredDirs[]` array lists the target dirs Caura has
 ensured are on OpenClaw's skill load path this tick (the `register: true`
 opt-in below); it's empty unless a target opts in.
 
@@ -190,9 +190,9 @@ By default the reconciler manages one **`owned`** dir — the plugin's own
 catalog is pruned. Operators can add extra target dirs via the
 `MEMCLAW_SKILL_TARGETS` env var (JSON array of `{ dir, mode, register? }`):
 
-- **`owned`** — fully MemClaw-managed (destructive prune). Use only for
-  dirs MemClaw exclusively controls.
-- **`additive`** — a **shared/foreign** dir. MemClaw writes its active
+- **`owned`** — fully Caura-managed (destructive prune). Use only for
+  dirs Caura exclusively controls.
+- **`additive`** — a **shared/foreign** dir. Caura writes its active
   skills there but **only ever touches entries it wrote**, tracked by a
   per-skill `.memclaw-owned` marker file:
   - a slug already occupied by an *unowned* skill is a **collision** —
@@ -202,7 +202,7 @@ catalog is pruned. Operators can add extra target dirs via the
   - only marker-bearing entries are updated/pruned.
 
 This makes the "empty catalog / wrong tenant wipes the dir" hazard apply
-only to `owned` dirs — `additive` dirs lose only MemClaw's own entries,
+only to `owned` dirs — `additive` dirs lose only Caura's own entries,
 never the client's.
 
 #### Reaching agents: `register`
@@ -235,7 +235,7 @@ read like a trigger ("Use when deploying to eu-west…"), not a label
 
 ## Related
 
-- `core-api/src/core_api/mcp_server.py` — `memclaw_doc` handler (the pull filter)
+- `core-api/src/core_api/mcp_server.py` — `caura_doc` handler (the pull filter)
 - `core-api/src/core_api/routes/documents.py` — `POST /skills/installable` (the push filter)
 - `plugin/src/reconcile-skills.ts` — the OpenClaw reconciler that consumes it
 - `core-api/src/core_api/repositories/document_repository.py` — `search(status=…)` mechanism

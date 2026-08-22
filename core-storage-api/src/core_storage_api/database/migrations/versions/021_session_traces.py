@@ -8,7 +8,7 @@ clusters.
 
 A session-trace is the unit Forge mines. It groups the memories an
 agent wrote during one run/task into a single object tagged with an
-outcome label inferred without any ``memclaw_evolve`` call. Multiple
+outcome label inferred without any ``caura_evolve`` call. Multiple
 traces sharing a goal + entity overlap become a skill cluster.
 
 Shape:

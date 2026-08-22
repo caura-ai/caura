@@ -7,26 +7,26 @@ requires-python = ">=3.12"
 dependencies = [
     # FastAPI 0.137+ OK since #364 (core-api startup guard reads app.openapi()).
     # The committed uv.lock pins the exact version; this range only bounds re-locks.
-    "fastapi>=0.140.0,<1",
+    "fastapi>=0.141.1,<1",
     "uvicorn[standard]>=0.51.0,<1",
     "pydantic>=2.0,<3",
-    "pydantic-settings>=2.14.2,<3",
+    "pydantic-settings>=2.15.0,<3",
     "httpx>=0.27,<1",
     "structlog>=25.4,<27",
     "python-dateutil>=2.8,<3",
-    "cachetools>=7.1.6,<8",
+    "cachetools>=7.1.7,<8",
 ]
 
 [project.optional-dependencies]
-pubsub = ["google-cloud-pubsub>=2.23,<3"]
+pubsub = ["google-cloud-pubsub>=2.39.1,<3"]
 # Datadog APM tracer (CAURA-0000). Opt-in: installed only in SaaS builds via
 # --build-arg DD_APM_ENABLED=true (--extra datadog); OSS/on-prem carry no
 # Datadog code. Auto-instruments FastAPI/httpx/pubsub.
-datadog = ["ddtrace>=4.11.1"]
+datadog = ["ddtrace>=4.12.2"]
 dev = [
     "core-operations[test,pubsub]",
     "mypy>=2.3.0,<3.0",
-    "ruff>=0.16.0,<1.0",
+    "ruff>=0.16.2,<1.0",
 ]
 test = [
     "pytest>=9.1.1,<10.0",

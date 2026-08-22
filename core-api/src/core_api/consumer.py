@@ -37,7 +37,7 @@ from common.events.memory_enriched import MemoryEnriched
 from common.events.org_settings_changed_event import OrgSettingsChangedEvent
 from common.events.topics import Topics
 from core_api.clients.storage_client import get_storage_client
-from core_api.services.contradiction_detector import detect_contradictions_async
+from core_api.services.contradiction import Trigger, run_contradiction_detection
 from core_api.services.governance_remediation import remediate_after_enrichment
 from core_api.services.organization_settings import invalidate_cache, resolve_config
 
@@ -79,11 +79,16 @@ async def handle_memory_enriched(event: Event) -> None:
         return
 
     sc = get_storage_client()
-    memory = await sc.get_memory(str(payload.memory_id))
+    # H-02: ``read=False`` (WRITER). This is a read-your-write — the worker PATCHes
+    # the enrichment and publishes immediately after, and Pub/Sub delivery is
+    # typically sub-second, so a replica read races replication. On the replica the
+    # miss lands in the ack-drop below, which never redelivers, and this handler is
+    # one of only two contradiction-detection triggers on the deferred path.
+    memory = await sc.get_memory(str(payload.memory_id), read=False)
     if memory is None:
-        # Row was deleted between the worker's PATCH and our handler
-        # picking up the event. Common-enough race to ack-drop without
-        # noise; matches the worker's 404 handling.
+        # Genuinely deleted between the worker's PATCH and this handler — which the
+        # writer read makes true. Read from the replica it was not: an unreplicated
+        # row is also absent, so this branch silently absorbed lag as deletion.
         logger.info(
             "memory-enriched: target row missing; ack-dropping",
             extra={
@@ -99,7 +104,7 @@ async def handle_memory_enriched(event: Event) -> None:
     # counterpart to the synchronous GovernanceDecision step. ``resolve_config``
     # tolerates a None session (cache-first; cold-miss opens its own).
     gov_cfg = await resolve_config(payload.tenant_id)
-    if await remediate_after_enrichment(memory, gov_cfg):
+    if (await remediate_after_enrichment(memory, gov_cfg)).dropped:
         # Row was dropped by policy — skip contradiction detection on it.
         logger.info(
             "memory-enriched: row dropped by governance policy; ack",
@@ -129,12 +134,13 @@ async def handle_memory_enriched(event: Event) -> None:
     # Pass the already-fetched row through so the detector skips a
     # redundant ``sc.get_memory`` (it still re-checks ``deleted_at``
     # for the soft-delete-during-detection race).
-    await detect_contradictions_async(
+    await run_contradiction_detection(
         payload.memory_id,
         payload.tenant_id,
         fleet_id,
-        payload.content,
-        embedding,
+        trigger=Trigger.EMBED,
+        content=payload.content,
+        embedding=embedding,
         new_memory=memory,
     )
 
@@ -181,11 +187,16 @@ async def handle_memory_embedded(event: Event) -> None:
         return
 
     sc = get_storage_client()
-    memory = await sc.get_memory(str(payload.memory_id))
+    # H-02: ``read=False`` (WRITER) — see handle_memory_enriched. The embed path is
+    # the sharper case: on the deferred-embed path this back-channel is the SOLE
+    # Path A contradiction trigger, and with tenant enrichment disabled no ENRICHED
+    # event ever fires to cover for it, so a lagged read dropped detection
+    # unconditionally. Contradictory memories then both stay ``active`` and recall
+    # keeps returning the stale one.
+    memory = await sc.get_memory(str(payload.memory_id), read=False)
     if memory is None:
-        # Row was deleted between the worker's PATCH and our handler
-        # picking up the event. Common-enough race to ack-drop without
-        # noise; matches the worker's 404 handling.
+        # Genuinely deleted — true against the writer, not against a replica, where
+        # an unreplicated row is indistinguishable from a deleted one.
         logger.info(
             "memory-embedded: target row missing; ack-dropping",
             extra={
@@ -197,10 +208,15 @@ async def handle_memory_embedded(event: Event) -> None:
 
     embedding = memory.get("embedding")
     if not embedding:
-        # Should not happen — the embed worker just PATCHed it before
-        # publishing — but guard against a soft-delete or column
-        # rewrite race rather than passing None into the detector.
-        logger.warning(
+        # Now genuinely "should not happen": the worker PATCHes the embedding, waits
+        # for it, and only then publishes, so the writer has it. Reading the replica
+        # this fired routinely under lag while claiming to be impossible.
+        #
+        # ERROR, not warning: the only remaining causes are a real invariant
+        # violation (a column rewrite, a soft-delete racing the PATCH), and the cost
+        # is a silently-missed contradiction check. Still ack — a retry would read
+        # the same writer row and reach the same branch.
+        logger.error(
             "memory-embedded: embedding missing on read-back; ack-dropping",
             extra={
                 "memory_id": str(payload.memory_id),
@@ -211,12 +227,13 @@ async def handle_memory_embedded(event: Event) -> None:
 
     fleet_id = memory.get("fleet_id")
 
-    await detect_contradictions_async(
+    await run_contradiction_detection(
         payload.memory_id,
         payload.tenant_id,
         fleet_id,
-        payload.content,
-        embedding,
+        trigger=Trigger.EMBED,
+        content=payload.content,
+        embedding=embedding,
         new_memory=memory,
     )
 

@@ -1,10 +1,10 @@
 """A14: every MCP write tool must refuse the literal ``"mcp-agent"`` default
 on gateway-routed requests (tenant-key holder, no X-Agent-ID injection).
 
-The existing memclaw_write coverage lives in tests/test_mcp_write.py;
+The existing caura_write coverage lives in tests/test_mcp_write.py;
 this file extends the policy to the remaining write surfaces that
-were missed by PR #139 — memclaw_manage, memclaw_tune, memclaw_evolve,
-and the internal caller-identity fallback in memclaw_keystones_set.
+were missed by PR #139 — caura_manage, caura_tune, caura_evolve,
+and the internal caller-identity fallback in caura_keystones_set.
 """
 
 from __future__ import annotations
@@ -22,16 +22,16 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 @pytest.mark.parametrize(
     "tool_name,kwargs",
     [
-        # memclaw_manage: write op (delete) with a valid UUID so we reach the guard.
-        ("memclaw_manage", {"op": "delete", "memory_id": str(uuid.uuid4())}),
-        # memclaw_tune: every param optional; guard is the first business logic step.
-        ("memclaw_tune", {}),
-        # memclaw_evolve: outcome + outcome_type required for arg validation.
-        ("memclaw_evolve", {"outcome": "any", "outcome_type": "success"}),
-        # memclaw_keystones_set: op + doc_id required to clear arg validation;
+        # caura_manage: write op (delete) with a valid UUID so we reach the guard.
+        ("caura_manage", {"op": "delete", "memory_id": str(uuid.uuid4())}),
+        # caura_tune: every param optional; guard is the first business logic step.
+        ("caura_tune", {}),
+        # caura_evolve: outcome + outcome_type required for arg validation.
+        ("caura_evolve", {"outcome": "any", "outcome_type": "success"}),
+        # caura_keystones_set: op + doc_id required to clear arg validation;
         # the guard fires on the internal caller-identity fallback, not the
         # schema param (which is the TARGET agent and defaults to None).
-        ("memclaw_keystones_set", {"op": "delete", "doc_id": "any-rule"}),
+        ("caura_keystones_set", {"op": "delete", "doc_id": "any-rule"}),
     ],
 )
 async def test_write_tool_refuses_default_agent_on_gateway(mcp_env, tool_name, kwargs):

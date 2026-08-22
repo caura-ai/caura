@@ -33,7 +33,7 @@ A tenant connects MemClaw and runs agents normally. Then:
 
 ---
 
-## 3. Outcome inference signals (no `memclaw_evolve` required)
+## 3. Outcome inference signals (no `caura_evolve` required)
 
 The memory stream **is** the feedback signal. Six free signals mined passively:
 
@@ -44,7 +44,7 @@ The memory stream **is** the feedback signal. Six free signals mined passively:
 5. **Cross-agent reuse depth** — recalled by N agents with healthy terminal states = load-bearing.
 6. **External hooks** — git commits, PR merges, CI pass/fail tied to `session_id` when available.
 
-Optional soft-force layer: `memclaw_recall` returns a `recall_id`; subsequent writes auto-attach it. No new tool, no new requirement.
+Optional soft-force layer: `caura_recall` returns a `recall_id`; subsequent writes auto-attach it. No new tool, no new requirement.
 
 ---
 
@@ -148,7 +148,7 @@ The card is the entire HITL UX — no separate review console.
 
 ## 11. Canonical worked example
 
-> A small platform fleet (Sasha, Mira, Kai). Nobody coordinates. Nobody calls `memclaw_evolve`.
+> A small platform fleet (Sasha, Mira, Kai). Nobody coordinates. Nobody calls `caura_evolve`.
 
 | Date | Agent | Session memories |
 |---|---|---|

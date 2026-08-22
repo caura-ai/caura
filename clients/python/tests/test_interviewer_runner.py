@@ -14,9 +14,9 @@ import json
 import httpx
 import pytest
 
-from memclaw_client import MemClaw
-from memclaw_client.interviewer.discovery import Transcript
-from memclaw_client.interviewer.runner import (
+from caura_client import Caura
+from caura_client.interviewer.discovery import Transcript
+from caura_client.interviewer.runner import (
     RunConfig,
     node_id_for,
     run_all,
@@ -74,7 +74,7 @@ def server():
 
 @pytest.fixture
 def mc(server):
-    return MemClaw(
+    return Caura(
         "mc_test",
         tenant_id="t-test",
         transport=httpx.MockTransport(server.handler),

@@ -115,6 +115,80 @@ class SecurityHeadersMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 
+def _validate_production_settings(app_settings) -> None:  # type: ignore[no-untyped-def]
+    """Refuse to boot a production deployment that is missing a safety control.
+
+    Extracted from ``lifespan`` so these guards are reachable by tests. Buried in
+    the lifespan they were untestable in practice, which is why a block whose
+    entire job is to prevent unsafe production boots had no tests of its own.
+
+    No-op outside ``ENVIRONMENT=production``.
+    """
+    if app_settings.environment != "production":
+        return
+    if app_settings.is_standalone:
+        raise RuntimeError(
+            "IS_STANDALONE=true is not allowed in production. "
+            "Set IS_STANDALONE=false for production deployments."
+        )
+    if not app_settings.settings_encryption_key:
+        raise RuntimeError(
+            "SETTINGS_ENCRYPTION_KEY must be set when ENVIRONMENT=production. "
+            'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
+        )
+    _dangerous = {
+        "jwt_secret": "change-me-in-production",
+    }
+    for var, bad_val in _dangerous.items():
+        val = getattr(app_settings, var, None)
+        # A SecretStr field wraps its value, so compare against the unwrapped
+        # one or the guard is silently bypassed — `SecretStr("x") == "x"` is
+        # False. Kept generic on purpose: nothing in ``_dangerous`` is SecretStr
+        # today (the only ones are platform_llm_api_key /
+        # platform_embedding_api_key), so this exists for whatever gets added
+        # next. The example that used to be here, postgres_password, no longer
+        # exists — core-api dropped its DB engine.
+        if hasattr(val, "get_secret_value"):
+            val = val.get_secret_value()
+        if val == bad_val:
+            raise RuntimeError(f"{var.upper()} must be changed from default for production")
+    if not app_settings.admin_api_key:
+        raise RuntimeError("ADMIN_API_KEY must be set for production")
+    if not app_settings.gateway_shared_secret and not app_settings.memclaw_api_key:
+        # What production actually requires is A PERIMETER — not specifically the
+        # gateway one. ``MEMCLAW_API_KEY`` is the other way to have one: when it
+        # is set, auth.py's "Path 2" either authenticates the request against
+        # that key or raises 401 for everything else, so "Path 4" below it is
+        # UNREACHABLE and there is no header-trust surface left to protect. That
+        # is the documented network-exposed OSS pattern, and such a deployment
+        # legitimately sets ENVIRONMENT=production for JSON logging and Sentry.
+        # Demanding a gateway secret it has no gateway for would be a boot
+        # failure with no security value.
+        #
+        # The X-Tenant-ID auth path (auth.py "Path 4") carries NO credential of
+        # its own — it trusts the gateway to have authenticated the caller and
+        # injected the identity headers. Its perimeter check reads
+        # ``if gw_secret and not compare_digest(...)``, which is a NO-OP when the
+        # secret is unset. So an unset secret does not weaken that path, it
+        # DISABLES it: anyone able to reach this service directly (its public
+        # run.app URL, a sidecar, anything inside the VPC) becomes any tenant by
+        # setting a header.
+        #
+        # Refusing to boot is deliberately louder than 401ing the path per
+        # request. A silently-open perimeter is indistinguishable from a working
+        # one from the outside — which is how it would reach production
+        # unnoticed in the first place — whereas a service that will not start
+        # gets caught at deploy.
+        raise RuntimeError(
+            "GATEWAY_SHARED_SECRET (or MEMCLAW_API_KEY) must be set when "
+            "ENVIRONMENT=production. With neither, the X-Tenant-ID header-trust "
+            "auth path accepts caller-supplied identity headers from anyone who "
+            "can reach this service directly. Set GATEWAY_SHARED_SECRET to the "
+            "same value the gateway injects as X-Gateway-Secret, or set "
+            "MEMCLAW_API_KEY if this deployment is not fronted by the gateway."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app):
     # Re-route third-party loggers (uvicorn / fastmcp / mcp / slowapi) to the
@@ -168,30 +242,7 @@ async def lifespan(app):
     init_platform_providers()
 
     # Fail-fast: validate production environment
-    if app_settings.environment == "production":
-        if app_settings.is_standalone:
-            raise RuntimeError(
-                "IS_STANDALONE=true is not allowed in production. "
-                "Set IS_STANDALONE=false for production deployments."
-            )
-        if not app_settings.settings_encryption_key:
-            raise RuntimeError(
-                "SETTINGS_ENCRYPTION_KEY must be set when ENVIRONMENT=production. "
-                'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
-            )
-        _dangerous = {
-            "jwt_secret": "change-me-in-production",
-        }
-        for var, bad_val in _dangerous.items():
-            val = getattr(app_settings, var, None)
-            # SecretStr fields (e.g. postgres_password) wrap the value;
-            # unwrap before comparing so the guard isn't silently bypassed.
-            if hasattr(val, "get_secret_value"):
-                val = val.get_secret_value()
-            if val == bad_val:
-                raise RuntimeError(f"{var.upper()} must be changed from default for production")
-        if not app_settings.admin_api_key:
-            raise RuntimeError("ADMIN_API_KEY must be set for production")
+    _validate_production_settings(app_settings)
 
     async with mcp_lifespan():
         # Standalone mode: initialise fixed tenant id
@@ -217,8 +268,16 @@ async def lifespan(app):
         # hook was removed with core-api's repositories/DB pool.
         from core_api.services.audit_service import log_action
         from core_api.services.hooks import ServiceHooks, configure_hooks
+        from core_api.services.usage_meter import UsageMeter
 
-        configure_hooks(ServiceHooks(audit_log=log_action))
+        # caura-ai/caura-enterprise#83. Wired unconditionally: the counters are
+        # written through core-api's own storage client, so there is no
+        # platform dependency to gate on, and a standalone deployment gets
+        # accurate usage numbers for free. It still enforces nothing — limits
+        # arrive out-of-band via ``x-org-read-only`` (see ``usage_service``).
+        usage_meter = UsageMeter()
+        usage_meter.start()
+        configure_hooks(ServiceHooks(audit_log=log_action, usage_meter=usage_meter.record))
 
         # CAURA-628: bind + start the audit batch flusher. ``log_action``
         # checks for an active queue and falls back to a synchronous
@@ -455,6 +514,10 @@ async def lifespan(app):
             # rationale as the audit queue (the flush writes via the DB
             # session, which must still be live).
             shutdown_steps.append(capability_usage_agg.stop(timeout=5.0))
+        # Same ordering rationale: the final flush writes through the storage
+        # client, so it has to run before that client closes below. Without it
+        # a clean shutdown would discard up to one flush interval of counts.
+        shutdown_steps.append(usage_meter.stop(timeout=5.0))
         shutdown_steps.extend(
             [
                 event_bus.stop(),
@@ -683,6 +746,11 @@ app.include_router(reports_router, prefix="/api/v1")
 # change until they explicitly enable the feature.
 app.include_router(skills_inbox_router, prefix="/api/v1")
 app.include_router(keystones_router, prefix="/api/v1")
+# PERMANENT legacy alias (rebrand, 2026-08-14): the keystones REST surface
+# shipped as /api/v1/memclaw/keystones and customer scripts call it. The
+# canonical path is now the brand-neutral /api/v1/keystones (matching every
+# other route); the old prefix keeps serving forever, hidden from the schema.
+app.include_router(keystones_router, prefix="/api/v1/memclaw", include_in_schema=False)
 app.include_router(crystallizer_router, prefix="/api/v1")
 app.include_router(plugin_router, prefix="/api/v1")
 # Bootstrap aliases — see plugin.py:plugin_bootstrap_router for rationale.

@@ -23,6 +23,7 @@ import httpx
 import openai
 
 from common.llm.constants import (
+    LLM_PROVIDER_MAX_RETRIES,
     OPENAI_CHAT_BASE_URL,
     OPENAI_HTTPX_CONNECT_TIMEOUT_SECONDS,
     OPENAI_HTTPX_MAX_CONNECTIONS,
@@ -92,9 +93,15 @@ class OpenAILLMProvider:
         # tenant's traffic queueing at the pool layer. Sizing the pool
         # 2x the worst-case fan-out keeps headroom; values are env-
         # tunable for incident-time adjustment.
+        #
+        # ``max_retries`` is pinned rather than left at the SDK's default
+        # 2, which put a silent 3x multiplier under ``call_with_retry``
+        # AND under the per-request timeout that the inline and bulk
+        # ceilings are derived from. See ``LLM_PROVIDER_MAX_RETRIES``.
         self._client = openai.AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
+            max_retries=LLM_PROVIDER_MAX_RETRIES,
             timeout=httpx.Timeout(
                 connect=OPENAI_HTTPX_CONNECT_TIMEOUT_SECONDS,
                 # read AND write keep the full request budget — the bare

@@ -288,16 +288,16 @@ class SmokeTest:
         r = self.client.get(f"{self.api}/tool-descriptions")
         data = r.json()
         expected_tools = {
-            "memclaw_recall",
-            "memclaw_write",
-            "memclaw_manage",
-            "memclaw_list",
-            "memclaw_doc",
-            "memclaw_entity_get",
-            "memclaw_tune",
-            "memclaw_insights",
-            "memclaw_evolve",
-            "memclaw_stats",
+            "caura_recall",
+            "caura_write",
+            "caura_manage",
+            "caura_list",
+            "caura_doc",
+            "caura_entity_get",
+            "caura_tune",
+            "caura_insights",
+            "caura_evolve",
+            "caura_stats",
         }
         self.check(
             "Tool descriptions: 200", r.status_code == 200, f"status={r.status_code}"
@@ -1208,7 +1208,7 @@ class SmokeTest:
         )
 
     def test_tune(self):
-        """Test memclaw_tune: set search profile, verify stored, confirm search respects it."""
+        """Test caura_tune: set search profile, verify stored, confirm search respects it."""
         tune_agent = f"tune-agent-{uuid.uuid4().hex[:6]}"
 
         # 1. Write a memory so the agent is auto-registered

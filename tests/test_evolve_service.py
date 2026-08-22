@@ -259,7 +259,7 @@ async def _outcome_memories(tenant_id):
 
 
 @pytest.mark.asyncio
-async def test_evolve_success_increases_weight(db, sc):
+async def test_evolve_success_increases_weight(sc):
     """Report success on a memory → weight increases by SUCCESS_DELTA."""
     from core_api.constants import EVOLVE_SUCCESS_DELTA
 
@@ -281,7 +281,7 @@ async def test_evolve_success_increases_weight(db, sc):
 
 
 @pytest.mark.asyncio
-async def test_evolve_failure_decreases_weight(db, sc):
+async def test_evolve_failure_decreases_weight(sc):
     """Report failure on a memory → weight decreases by FAILURE_DELTA."""
     from core_api.constants import EVOLVE_FAILURE_DELTA
 
@@ -302,7 +302,7 @@ async def test_evolve_failure_decreases_weight(db, sc):
 
 
 @pytest.mark.asyncio
-async def test_evolve_partial_slight_increase(db, sc):
+async def test_evolve_partial_slight_increase(sc):
     """Report partial on a memory → weight increases by PARTIAL_DELTA."""
     from core_api.constants import EVOLVE_PARTIAL_DELTA
 
@@ -322,7 +322,7 @@ async def test_evolve_partial_slight_increase(db, sc):
 
 
 @pytest.mark.asyncio
-async def test_evolve_weight_floor(db, sc):
+async def test_evolve_weight_floor(sc):
     """Weight never goes below EVOLVE_WEIGHT_FLOOR."""
     from core_api.constants import EVOLVE_WEIGHT_FLOOR
 
@@ -340,7 +340,7 @@ async def test_evolve_weight_floor(db, sc):
 
 
 @pytest.mark.asyncio
-async def test_evolve_weight_cap(db, sc):
+async def test_evolve_weight_cap(sc):
     """Weight never goes above EVOLVE_WEIGHT_CAP."""
     from core_api.constants import EVOLVE_WEIGHT_CAP
 
@@ -358,7 +358,7 @@ async def test_evolve_weight_cap(db, sc):
 
 
 @pytest.mark.asyncio
-async def test_evolve_nonexistent_memory_skipped(db):
+async def test_evolve_nonexistent_memory_skipped():
     """Non-existent memory UUID is skipped gracefully."""
     tag = _uid()
     tenant_id = f"test-tenant-{tag}"
@@ -372,7 +372,7 @@ async def test_evolve_nonexistent_memory_skipped(db):
 
 
 @pytest.mark.asyncio
-async def test_evolve_invalid_uuid_skipped(db):
+async def test_evolve_invalid_uuid_skipped():
     """Invalid UUID string is skipped gracefully."""
     tag = _uid()
     tenant_id = f"test-tenant-{tag}"
@@ -385,7 +385,7 @@ async def test_evolve_invalid_uuid_skipped(db):
 
 
 @pytest.mark.asyncio
-async def test_evolve_truncates_related_ids_above_cap(db, caplog):
+async def test_evolve_truncates_related_ids_above_cap(caplog):
     """related_ids longer than EVOLVE_MAX_RELATED_IDS are truncated with a warning."""
     import logging
 
@@ -486,13 +486,18 @@ async def test_evolve_generate_rule_returns_valid_structure(sc):
     mid, _ = await _create_test_memory_via_sc(sc, tenant_id, weight=0.5)
 
     from core_api.services.evolve_service import _generate_rule
-    from core_api.services.organization_settings import resolve_config
+    from core_api.services.organization_settings import ResolvedConfig
 
     # Audit P3 (evolve): ``_generate_rule`` no longer takes ``db`` —
     # callers resolve the tenant config first and pass it in. This
     # lets the MCP tool close its session before the LLM round-trip.
-    # Fix 2 Ph5b (PR2): resolve_config is storage-routed; db=None.
-    config = await resolve_config(tenant_id)
+    #
+    # Asks for ``fake`` EXPLICITLY rather than using ``resolve_config``, which
+    # would inherit the suite's ``ENTITY_EXTRACTION_PROVIDER=none``. ``none`` now
+    # means the feature is off and the generator abstains, so relying on it to
+    # hand back a stub is what this test used to do by accident. ``_generate_rule``
+    # reads only ``enrichment_provider`` and ``enrichment_model`` off the config.
+    config = ResolvedConfig({"enrichment": {"provider": "fake"}})
 
     # A10: _generate_rule now returns (skip_reason, rule_dict) tuple.
     reason, rule = await _generate_rule(
@@ -517,8 +522,39 @@ async def test_evolve_generate_rule_returns_valid_structure(sc):
     assert 0.0 <= rule["confidence"] <= 1.0
 
 
+@pytest.mark.asyncio
+async def test_evolve_generates_no_rule_when_provider_is_none(sc):
+    """``none`` means the feature is off: abstain, do not invent a rule.
+
+    The result is persisted as a ``memory_type="rule"`` memory, and ``rule`` is
+    server-reserved — the classifier may not emit it, so it carries the provenance
+    "an internal flow authored this". ``_fake_rule`` returns a generic rule at
+    confidence 0.6 that borrows that authority. See ``_skip_rule``.
+    """
+    tag = _uid()
+    tenant_id = f"test-tenant-{tag}"
+    mid, _ = await _create_test_memory_via_sc(sc, tenant_id, weight=0.5)
+
+    from core_api.services.evolve_service import _generate_rule
+    from core_api.services.organization_settings import ResolvedConfig
+
+    reason, rule = await _generate_rule(
+        tenant_id=tenant_id,
+        outcome=f"Failed because of bad info [{tag}]",
+        outcome_type="failure",
+        related_ids=[mid],
+        config=ResolvedConfig({"enrichment": {"provider": "none"}}),
+        agent_id="evolve-test-agent",
+        fleet_id=None,
+    )
+
+    assert rule is None, f"a disabled provider must not fabricate a rule; got {rule!r}"
+    assert reason == "llm_failed"
+
+
 class TestFakeRuleFallback:
-    """Test _fake_rule (used when ALL LLM providers fail, not when fake is primary)."""
+    """Test _fake_rule — reachable only via an explicitly configured ``fake``
+    provider now, NOT when a real provider fails or the feature is off."""
 
     def test_fake_rule_has_sufficient_confidence(self):
         from core_api.constants import EVOLVE_RULE_CONFIDENCE_THRESHOLD
@@ -870,7 +906,7 @@ async def test_evolve_outcome_memory_visibility_matches_scope():
 
 
 class TestMCPHandlerTrustGating:
-    """memclaw_evolve handler must call _require_trust with scope-derived min_level."""
+    """caura_evolve handler must call _require_trust with scope-derived min_level."""
 
     @pytest.mark.asyncio
     async def test_scope_agent_requires_trust_1(self, monkeypatch, mcp_env):
@@ -904,7 +940,7 @@ class TestMCPHandlerTrustGating:
             AsyncMock(return_value={"outcome_id": "x"}),
         )
 
-        await mcp_server.memclaw_evolve(
+        await mcp_server.caura_evolve(
             outcome="ok",
             outcome_type="success",
             scope="agent",
@@ -932,7 +968,7 @@ class TestMCPHandlerTrustGating:
             AsyncMock(return_value={"outcome_id": "x"}),
         )
 
-        await mcp_server.memclaw_evolve(
+        await mcp_server.caura_evolve(
             outcome="ok",
             outcome_type="failure",
             scope="fleet",
@@ -961,7 +997,7 @@ class TestMCPHandlerTrustGating:
             AsyncMock(return_value={"outcome_id": "x"}),
         )
 
-        await mcp_server.memclaw_evolve(
+        await mcp_server.caura_evolve(
             outcome="ok",
             outcome_type="success",
             scope="all",
@@ -984,7 +1020,7 @@ class TestMCPHandlerTrustGating:
         service_spy = AsyncMock(return_value={"outcome_id": "x"})
         monkeypatch.setattr(evolve_service, "report_outcome", service_spy)
 
-        out = await mcp_server.memclaw_evolve(
+        out = await mcp_server.caura_evolve(
             outcome="ok",
             outcome_type="failure",
             scope="all",
@@ -1000,7 +1036,7 @@ class TestMCPHandlerScopeValidation:
     async def test_invalid_scope_rejected(self, mcp_env):
         from core_api import mcp_server
 
-        out = await mcp_server.memclaw_evolve(
+        out = await mcp_server.caura_evolve(
             outcome="ok",
             outcome_type="success",
             scope="bogus",
@@ -1013,7 +1049,7 @@ class TestMCPHandlerScopeValidation:
     async def test_scope_fleet_without_fleet_id_rejected(self, mcp_env):
         from core_api import mcp_server
 
-        out = await mcp_server.memclaw_evolve(
+        out = await mcp_server.caura_evolve(
             outcome="ok",
             outcome_type="failure",
             scope="fleet",
@@ -1069,7 +1105,7 @@ class TestEvolveRequestValidation:
 async def test_evolve_rest_rejects_unknown_agent(client):
     """A previously-unseen ``body.agent_id`` from a tenant-key caller
     must 403 on the WRITE path. The trust soft-pass closes a usability
-    gap on read-only callers (memclaw_list, recall) but write paths
+    gap on read-only callers (caura_list, recall) but write paths
     persist memories + audit-log rows keyed to ``caller_agent_id``, so
     identity needs to be a real registered row before the audit trail
     can be trusted. Operators register agents by writing one memory
@@ -1205,7 +1241,7 @@ async def test_evolve_rest_translates_service_valueerror_to_422(monkeypatch, cli
 
 
 def test_mcp_session_helper_is_deleted():
-    """``memclaw_evolve`` was the final ``_mcp_session()`` consumer; once it
+    """``caura_evolve`` was the final ``_mcp_session()`` consumer; once it
     migrated to ``_no_db()`` the RLS-GUC session helper + its ``async_session``
     import were deleted. Guard against a reintroduction: the symbol must be
     gone from mcp_server, and the source must not redefine it."""

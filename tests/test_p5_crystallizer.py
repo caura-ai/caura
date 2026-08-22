@@ -206,7 +206,7 @@ class TestBatchANNIntegration:
         return [v / norm for v in noisy]
 
     @pytest.mark.asyncio
-    async def test_finds_near_duplicates(self, db, tenant_id, fleet_id):
+    async def test_finds_near_duplicates(self, tenant_id, fleet_id):
         """Batch ANN should find near-duplicate pairs above threshold."""
         from core_api.services.crystallizer_service import _check_near_duplicates
 
@@ -225,7 +225,7 @@ class TestBatchANNIntegration:
         assert result["pairs"][0]["similarity"] >= CRYSTALLIZER_DEDUP_THRESHOLD
 
     @pytest.mark.asyncio
-    async def test_skips_already_checked(self, db, tenant_id, fleet_id):
+    async def test_skips_already_checked(self, tenant_id, fleet_id):
         """Memories with last_dedup_checked_at set should be skipped."""
         from core_api.services.crystallizer_service import _check_near_duplicates
 
@@ -251,7 +251,7 @@ class TestBatchANNIntegration:
         assert result["count"] == 0, "Already-checked memories should be skipped"
 
     @pytest.mark.asyncio
-    async def test_updates_dedup_timestamp(self, db, tenant_id, fleet_id):
+    async def test_updates_dedup_timestamp(self, tenant_id, fleet_id):
         """After processing, memories should have last_dedup_checked_at set."""
         from core_api.clients.storage_client import get_storage_client
         from core_api.services.crystallizer_service import _check_near_duplicates
@@ -269,7 +269,7 @@ class TestBatchANNIntegration:
         )
 
     @pytest.mark.asyncio
-    async def test_no_false_positives_different_topics(self, db, tenant_id, fleet_id):
+    async def test_no_false_positives_different_topics(self, tenant_id, fleet_id):
         """Unrelated memories should not appear as near-duplicates."""
         from core_api.services.crystallizer_service import _check_near_duplicates
 
@@ -371,3 +371,214 @@ class TestCrystallizeCluster:
         assert result[0]["memory_type"] == "fact"
         assert result[1]["memory_type"] == "fact"  # INVALID -> fact
         assert result[2]["weight"] == 1.0  # 5.0 clamped to 1.0
+
+
+class TestMissingEmbeddingsCheck:
+    """``_check_missing_embeddings`` must read the keys the endpoint returns.
+
+    It previously read ``missing_count`` / ``missing_ids``, neither of which
+    ``GET /memories/embedding-coverage`` has ever returned, so both ``.get()``
+    calls fell through to their defaults and every tenant reported
+    ``count: 0`` — a silent all-clear while prod was logging "Storing memory
+    without embedding; deferred backfill scheduled" hundreds of times a day.
+    """
+
+    #: Exactly what the storage endpoint returns — see
+    #: core-storage-api/src/core_storage_api/routers/memories.py::get_embedding_coverage.
+    COVERAGE_RESPONSE = {
+        "total_active": 10,
+        "missing_embeddings": 4,
+        "coverage_pct": 60.0,
+    }
+
+    @pytest.mark.asyncio
+    async def test_reports_missing_embeddings_count(self):
+        """4 missing out of 10 is reported as 4, not 0."""
+        from unittest.mock import AsyncMock, patch
+
+        from core_api.services.crystallizer_service import _check_missing_embeddings
+
+        sc = AsyncMock()
+        sc.get_embedding_coverage.return_value = dict(self.COVERAGE_RESPONSE)
+        with patch(
+            "core_api.services.crystallizer_service.get_storage_client",
+            return_value=sc,
+        ):
+            result = await _check_missing_embeddings("tenant-1", None)
+
+        assert result["count"] == 4
+
+    @pytest.mark.asyncio
+    async def test_clean_tenant_reports_zero(self):
+        """Full coverage still reports zero — guards against inverting the read."""
+        from unittest.mock import AsyncMock, patch
+
+        from core_api.services.crystallizer_service import _check_missing_embeddings
+
+        sc = AsyncMock()
+        sc.get_embedding_coverage.return_value = {
+            "total_active": 10,
+            "missing_embeddings": 0,
+            "coverage_pct": 100.0,
+        }
+        with patch(
+            "core_api.services.crystallizer_service.get_storage_client",
+            return_value=sc,
+        ):
+            result = await _check_missing_embeddings("tenant-1", None)
+
+        assert result["count"] == 0
+
+    def test_endpoint_contract_is_pinned(self):
+        """The endpoint's response keys, asserted against the endpoint itself.
+
+        The bug was a silent key mismatch across a service boundary, so pin the
+        contract here: if the endpoint's keys change, this fails rather than the
+        check quietly returning 0 again.
+        """
+        import inspect
+
+        from core_storage_api.routers.memories import get_embedding_coverage
+
+        source = inspect.getsource(get_embedding_coverage)
+        for key in self.COVERAGE_RESPONSE:
+            assert f'"{key}"' in source, f"endpoint no longer returns {key!r}"
+        assert '"missing_count"' not in source
+        assert '"missing_ids"' not in source
+
+
+class TestLifecycleCandidatesConsumers:
+    """Every crystallizer consumer of ``/lifecycle-candidates`` must match it.
+
+    Three consumers all disagreed with the endpoint at once, in three
+    different ways, and each failed toward a reassuring value:
+
+    * ``_check_stale_memories`` read ``stale_memories``; the key is
+      ``stale_low_weight`` — reported 0 for every tenant.
+    * ``_check_expired_still_active`` read the right key but treated the
+      values as row dicts (``r.get("id")``) when they are bare UUID
+      strings — raised ``AttributeError`` for any tenant with an expired
+      memory, which ``run_crystallization`` swallowed into
+      ``{"error": True}``.
+    * ``_remediate_missing_embeddings`` read ``missing_embeddings``, which
+      this endpoint has never returned — a permanent no-op, now deleted
+      (repair belongs in ``core_worker.backfill``).
+    """
+
+    #: Exactly what the endpoint returns — bare UUID strings, not row dicts.
+    #: See core-storage-api/.../routers/memories.py::get_lifecycle_candidates.
+    CANDIDATES_RESPONSE = {
+        "expired_still_active": ["11111111-1111-1111-1111-111111111111"],
+        "stale_low_weight": ["22222222-2222-2222-2222-222222222222"],
+        "short_content": ["33333333-3333-3333-3333-333333333333"],
+    }
+
+    def _patched_sc(self):
+        from unittest.mock import AsyncMock
+
+        sc = AsyncMock()
+        sc.get_lifecycle_candidates.return_value = dict(self.CANDIDATES_RESPONSE)
+        return sc
+
+    @pytest.mark.asyncio
+    async def test_expired_check_counts_string_ids_without_raising(self):
+        """One expired row is counted, not turned into an AttributeError."""
+        from unittest.mock import patch
+
+        from core_api.services.crystallizer_service import _check_expired_still_active
+
+        with patch(
+            "core_api.services.crystallizer_service.get_storage_client",
+            return_value=self._patched_sc(),
+        ):
+            result = await _check_expired_still_active("tenant-1", None)
+
+        assert result["count"] == 1
+        assert result["affected_ids"] == ["11111111-1111-1111-1111-111111111111"]
+
+    @pytest.mark.asyncio
+    async def test_stale_check_reads_stale_low_weight(self):
+        """One stale row is reported as 1, not 0."""
+        from unittest.mock import patch
+
+        from core_api.services.crystallizer_service import _check_stale_memories
+
+        with patch(
+            "core_api.services.crystallizer_service.get_storage_client",
+            return_value=self._patched_sc(),
+        ):
+            result = await _check_stale_memories("tenant-1", None)
+
+        assert result["count"] == 1
+        assert result["affected_ids"] == ["22222222-2222-2222-2222-222222222222"]
+
+    @pytest.mark.asyncio
+    async def test_short_content_check_reads_short_content(self):
+        """One short-content row is reported as 1, not 0.
+
+        The key didn't exist on the endpoint until it was added alongside the
+        two lists already there, using the ``memory_find_short_content`` query
+        that had been written for this and left unexposed.
+        """
+        from unittest.mock import patch
+
+        from core_api.services.crystallizer_service import _check_short_content
+
+        with patch(
+            "core_api.services.crystallizer_service.get_storage_client",
+            return_value=self._patched_sc(),
+        ):
+            result = await _check_short_content("tenant-1", None)
+
+        assert result["count"] == 1
+        assert result["affected_ids"] == ["33333333-3333-3333-3333-333333333333"]
+
+    def test_endpoint_contract_is_pinned(self):
+        """Pin the endpoint's keys, and that it yields strings rather than dicts.
+
+        This is the guard that makes the whole class non-recurring: a
+        hand-written mock proves nothing here, because the original mocks
+        would have been written from the same wrong assumption as the
+        callers.
+        """
+        import inspect
+
+        from core_storage_api.routers.memories import get_lifecycle_candidates
+
+        source = inspect.getsource(get_lifecycle_candidates)
+        for key in self.CANDIDATES_RESPONSE:
+            assert f'"{key}"' in source, f"endpoint no longer returns {key!r}"
+        # Keys the crystallizer used to read, none of which exist here.
+        assert '"stale_memories"' not in source
+        assert '"missing_embeddings"' not in source
+        # Values are stringified ids, not row dicts — the shape that made
+        # ``r.get("id")`` raise.
+        assert "str(r[0])" in source
+
+    def test_short_content_threshold_is_shared_not_duplicated(self):
+        """One threshold, both services.
+
+        core-api rejects short writes at the quality gate and core-storage-api
+        lists rows below the same bound; a duplicated literal would let the
+        hygiene report disagree with what the write path accepts.
+        """
+        from common.constants import CRYSTALLIZER_SHORT_CONTENT_CHARS as shared
+        from core_api.constants import CRYSTALLIZER_SHORT_CONTENT_CHARS as via_core_api
+
+        assert via_core_api == shared
+
+    def test_inline_remediation_is_gone(self):
+        """Repair must not run inline in a crystallization pass.
+
+        Inline embedding would draw from the same process-wide embedding gate
+        that write traffic already oversubscribes, so a hygiene report could
+        stall the write path it reports on. ``core_worker.backfill`` does this
+        job through the event bus instead.
+        """
+        import inspect
+
+        from core_api.services import crystallizer_service
+
+        assert not hasattr(crystallizer_service, "_remediate_missing_embeddings")
+        source = inspect.getsource(crystallizer_service.run_crystallization)
+        assert "remediate" not in source.lower().replace("remediating", "")

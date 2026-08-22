@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from memclaw_client.interviewer.scrub import REDACTED, scrub
+from caura_client.interviewer.scrub import REDACTED, scrub
 
 
 def test_scrubs_common_token_shapes():

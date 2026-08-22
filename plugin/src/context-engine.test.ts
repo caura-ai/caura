@@ -321,20 +321,20 @@ describe("getRecallMetrics", () => {
 // real outage from the operator log; misclassifying a 409 as a 5xx would
 // flood the log with ~5/hr noise (observed pre-fix on goodclaw). The
 // shape of the matched error message is pinned by ``transport.ts:82``
-// (``"MemClaw API " + status + ": " + body``) — if that ever changes,
+// (``"Caura API " + status + ": " + body``) — if that ever changes,
 // this test fails loudly and forces the catch site to be updated too.
 
 describe("isDuplicateMemoryError — afterTurn 409 swallow gate", () => {
   test("matches the dedup error shape thrown by transport.ts on HTTP 409", () => {
     const e = new Error(
-      'MemClaw API 409: {"detail":"Duplicate memory exists: 9eea03d6-be61-456b-bf67-06ace594cf43","error":{"code":"CONFLICT","message":"Duplicate memory exists: 9eea03d6-be61-456b-bf67-06ace594cf43"}}',
+      'Caura API 409: {"detail":"Duplicate memory exists: 9eea03d6-be61-456b-bf67-06ace594cf43","error":{"code":"CONFLICT","message":"Duplicate memory exists: 9eea03d6-be61-456b-bf67-06ace594cf43"}}',
     );
     assert.equal(isDuplicateMemoryError(e), true);
   });
 
   test("does NOT match a 500 / 502 / 4xx-other — non-409 errors must still surface", () => {
     for (const status of [400, 401, 403, 404, 422, 500, 502, 503]) {
-      const e = new Error(`MemClaw API ${status}: {"detail":"x"}`);
+      const e = new Error(`Caura API ${status}: {"detail":"x"}`);
       assert.equal(
         isDuplicateMemoryError(e),
         false,
@@ -346,16 +346,16 @@ describe("isDuplicateMemoryError — afterTurn 409 swallow gate", () => {
   test("does NOT match arbitrary errors or non-Error inputs", () => {
     assert.equal(isDuplicateMemoryError(new TypeError("fetch failed")), false);
     assert.equal(isDuplicateMemoryError(new Error("something else 409")), false); // word-boundary guard: '409' alone is not enough
-    assert.equal(isDuplicateMemoryError("MemClaw API 409: string"), false); // must be an Error instance
+    assert.equal(isDuplicateMemoryError("Caura API 409: string"), false); // must be an Error instance
     assert.equal(isDuplicateMemoryError(null), false);
     assert.equal(isDuplicateMemoryError(undefined), false);
-    assert.equal(isDuplicateMemoryError({ message: "MemClaw API 409: x" }), false);
+    assert.equal(isDuplicateMemoryError({ message: "Caura API 409: x" }), false);
   });
 
   test("matches even when the 409 message has additional context appended", () => {
-    // transport.ts truncates the body to 200 chars; the ``MemClaw API 409``
+    // transport.ts truncates the body to 200 chars; the ``Caura API 409``
     // prefix is always present at the start.
-    const e = new Error('MemClaw API 409: ...truncated...');
+    const e = new Error('Caura API 409: ...truncated...');
     assert.equal(isDuplicateMemoryError(e), true);
   });
 });

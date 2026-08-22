@@ -184,6 +184,11 @@ async def test_atomic_fact_children_embed_raw_fact_content() -> None:
     install_batch_status_replay_shim(sc)
     sc.create_memory = AsyncMock()
     sc.update_memory = AsyncMock()
+    # The fan-out consults the dedup lookup before writing children (OSS #814).
+    # Empty: this test is about which TEXT gets embedded, so every fact must
+    # reach ``create_memory`` — a non-empty return would skip one and the
+    # assertions below would be checking a shorter list than they think.
+    sc.bulk_find_by_content_hashes = AsyncMock(return_value={})
 
     def _stub_tracked_task(coro, _name, *_a, **_k):
         coro.close()

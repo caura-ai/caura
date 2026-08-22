@@ -25,7 +25,7 @@ _SEED_CONTENTS = [
 ]
 
 
-async def _seed_memories(db, count: int = 3) -> list[MemoryOut]:
+async def _seed_memories(count: int = 3) -> list[MemoryOut]:
     """Insert test memories via the legacy write path and return them."""
     from core_api.services.memory_service import create_memory
 
@@ -460,11 +460,11 @@ async def test_parallel_embed_gather_has_timeout():
 
 
 @pytest.mark.asyncio
-async def test_pipeline_search_returns_results(db):
+async def test_pipeline_search_returns_results():
     """Pipeline search path returns MemoryOut results for seeded memories."""
     from core_api.services import memory_service
 
-    seeded = await _seed_memories(db, count=2)
+    seeded = await _seed_memories(count=2)
     tid = seeded[0].tenant_id
 
     original = memory_service._USE_PIPELINE_SEARCH
@@ -485,11 +485,11 @@ async def test_pipeline_search_returns_results(db):
 
 
 @pytest.mark.asyncio
-async def test_legacy_search_returns_results(db):
+async def test_legacy_search_returns_results():
     """Legacy search path returns results (baseline)."""
     from core_api.services import memory_service
 
-    seeded = await _seed_memories(db, count=2)
+    seeded = await _seed_memories(count=2)
     tid = seeded[0].tenant_id
 
     original = memory_service._USE_PIPELINE_SEARCH
@@ -509,7 +509,7 @@ async def test_legacy_search_returns_results(db):
 
 
 @pytest.mark.asyncio
-async def test_search_pipeline_equivalence(db):
+async def test_search_pipeline_equivalence():
     """Pipeline and legacy paths produce equivalent results (order, scores to 4 decimals, entity links)."""
     from core_api.services import memory_service
     from core_api.services.memory_service import (
@@ -517,7 +517,7 @@ async def test_search_pipeline_equivalence(db):
         _search_memories_pipeline,
     )
 
-    seeded = await _seed_memories(db, count=3)
+    seeded = await _seed_memories(count=3)
     tid = seeded[0].tenant_id
 
     query = "quick brown fox sunny afternoon"
@@ -553,7 +553,7 @@ async def test_search_pipeline_equivalence(db):
 
 
 @pytest.mark.asyncio
-async def test_search_pipeline_empty_results(db):
+async def test_search_pipeline_empty_results():
     """Pipeline search returns empty list for no-match query."""
     from core_api.services import memory_service
 

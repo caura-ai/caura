@@ -100,3 +100,74 @@ def tenant_id() -> str:
 @pytest.fixture
 def fleet_id() -> str:
     return f"test-fleet-{_session_suffix}"
+
+
+# ---------------------------------------------------------------------------
+# Duplicate content_hash — the constraint has to come off to fabricate one
+# ---------------------------------------------------------------------------
+
+UQ_LIVE_CONTENT_HASH = "uq_memories_live_content_hash"
+
+# Mirrors migration 040's index. Rebuilt (not CONCURRENTLY — a plain session is
+# in a transaction) after each test that drops it.
+UQ_LIVE_CONTENT_HASH_SQL = (
+    f"CREATE UNIQUE INDEX {UQ_LIVE_CONTENT_HASH} ON memories "
+    "(tenant_id, COALESCE(fleet_id, ''), agent_id, content_hash) "
+    "WHERE deleted_at IS NULL AND content_hash IS NOT NULL"
+)
+
+
+def load_migration_040():
+    """Load migration 040 as a module.
+
+    By path because the versions directory is not an importable package and the
+    filename starts with a digit. Shared so the fixture below and the migration's
+    own tests both execute the REAL ``CLEANUP_SQL`` — a re-typed copy in either
+    place could drift from the migration and still pass.
+    """
+    import importlib.util
+    import pathlib
+
+    path = (
+        pathlib.Path("core-storage-api/src/core_storage_api/database/migrations/versions")
+        / "040_memories_content_hash_unique.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_040", path)
+    assert spec is not None and spec.loader is not None, f"cannot load {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+async def without_content_hash_index(_ensure_schema):
+    """Drop migration 040's unique index for the duration of a test.
+
+    Shared because two kinds of test need it, and both are legitimate: the
+    migration's own cleanup tests, which must create the duplicates the cleanup
+    resolves, and the dedup-gate tests, which assert what the LOOKUPS do when a
+    pre-existing duplicate group is present. Neither state is creatable while the
+    constraint stands — that is the point of the constraint.
+
+    Teardown runs the migration's own ``CLEANUP_SQL`` before rebuilding, because
+    a test that fabricated duplicates has by definition left the table
+    un-indexable; without that step the rebuild raises and every such test ends
+    in a teardown ERROR. Using the migration's statement rather than an ad-hoc
+    DELETE also means the fixture restores the invariant the same way production
+    does.
+
+    Uses the service's transactional ``get_session`` so the DDL commits; the
+    FastAPI dependency generator in ``database.init`` does not commit.
+    """
+    from sqlalchemy import text
+
+    from core_storage_api.services.postgres_service import get_session
+
+    async with get_session() as session:
+        await session.execute(text(f"DROP INDEX IF EXISTS {UQ_LIVE_CONTENT_HASH}"))
+    yield
+    cleanup_sql = load_migration_040().CLEANUP_SQL
+    async with get_session() as session:
+        await session.execute(text(f"DROP INDEX IF EXISTS {UQ_LIVE_CONTENT_HASH}"))
+        await session.execute(text(cleanup_sql))
+        await session.execute(text(UQ_LIVE_CONTENT_HASH_SQL))

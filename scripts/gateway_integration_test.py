@@ -333,18 +333,18 @@ class GatewayIntegrationTest:
         config = json.loads(config_path.read_text())
         also_allow = config.get("tools", {}).get("alsoAllow", [])
         expected_tools = [
-            "memclaw_recall",
-            "memclaw_write",
-            "memclaw_manage",
-            "memclaw_doc",
-            "memclaw_list",
-            "memclaw_entity_get",
-            "memclaw_tune",
-            "memclaw_insights",
-            "memclaw_evolve",
-            "memclaw_stats",
-            "memclaw_keystones",
-            "memclaw_keystones_set",
+            "caura_recall",
+            "caura_write",
+            "caura_manage",
+            "caura_doc",
+            "caura_list",
+            "caura_entity_get",
+            "caura_tune",
+            "caura_insights",
+            "caura_evolve",
+            "caura_stats",
+            "caura_keystones",
+            "caura_keystones_set",
         ]
         missing = [t for t in expected_tools if t not in also_allow]
         self.check(
@@ -445,15 +445,15 @@ class GatewayIntegrationTest:
             "hostname": "gateway-integration-test",
             "plugin_version": "0.9.10-test",
             "tools": [
-                "memclaw_recall",
-                "memclaw_write",
-                "memclaw_manage",
-                "memclaw_doc",
-                "memclaw_list",
-                "memclaw_entity_get",
-                "memclaw_tune",
-                "memclaw_insights",
-                "memclaw_evolve",
+                "caura_recall",
+                "caura_write",
+                "caura_manage",
+                "caura_doc",
+                "caura_list",
+                "caura_entity_get",
+                "caura_tune",
+                "caura_insights",
+                "caura_evolve",
             ],
             "metadata": {
                 "setup_status": {
@@ -662,7 +662,7 @@ class GatewayIntegrationTest:
             )
             self.check(
                 "Education: SKILL.md has tool table",
-                "memclaw_write" in content and "memclaw_recall" in content,
+                "caura_write" in content and "caura_recall" in content,
                 "expected tool names in skill doc",
             )
             self.check(
@@ -742,7 +742,7 @@ class GatewayIntegrationTest:
             content = prompt_js.read_text()
             self.check(
                 "Prompt section: has memory rules",
-                "memclaw_write" in content and "memclaw_recall" in content,
+                "caura_write" in content and "caura_recall" in content,
                 "expected tool names in prompt section builder",
             )
             self.check(
@@ -822,7 +822,7 @@ class GatewayIntegrationTest:
             self.check("Context engine: result has content", bool(top.get("content")))
 
     def test_context_engine_recall_endpoint(self):
-        """Hit recall endpoint — validates memclaw_recall(include_brief=true) / assemble() recall path."""
+        """Hit recall endpoint — validates caura_recall(include_brief=true) / assemble() recall path."""
         r = self.client.post(
             f"{self.api}/recall",
             json={

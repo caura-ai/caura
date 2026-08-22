@@ -5,7 +5,7 @@
 **Tenant of record (design memories):** `arkash24-4d270c` / `caura-dev-fleet` (re-log post-finalization).
 **DO NOT START** any coding until Ran's explicit green light on this plan.
 
-> **One paragraph.** Forge — a new lake-side resident — passively mines outcome-tagged session clusters from MemClaw's memory stream, distills them into proposed skills (with content body, frontmatter, provenance, scan, hashes), drops them into the existing `skills` collection with `status: staged`, surfaces them in a HITL Skills Inbox, and on approval installs to Claude Code / OpenClaw plugin / direct-MCP via the existing distribution layer. Same `skills` collection holds Forge-generated *and* manually-authored skills, distinguished by a `source` discriminator. Agents can also write skills directly via `memclaw_doc` (no new MCP tool). OpenClaw's Skill Workshop conventions (hash-binding, quarantine, rollback, caps, frontmatter strip-on-apply) are adopted; OpenClaw's *origin signal* (single-conversation) is not — Forge's fleet-collective mining stays the moat.
+> **One paragraph.** Forge — a new lake-side resident — passively mines outcome-tagged session clusters from MemClaw's memory stream, distills them into proposed skills (with content body, frontmatter, provenance, scan, hashes), drops them into the existing `skills` collection with `status: staged`, surfaces them in a HITL Skills Inbox, and on approval installs to Claude Code / OpenClaw plugin / direct-MCP via the existing distribution layer. Same `skills` collection holds Forge-generated *and* manually-authored skills, distinguished by a `source` discriminator. Agents can also write skills directly via `caura_doc` (no new MCP tool). OpenClaw's Skill Workshop conventions (hash-binding, quarantine, rollback, caps, frontmatter strip-on-apply) are adopted; OpenClaw's *origin signal* (single-conversation) is not — Forge's fleet-collective mining stays the moat.
 
 ---
 
@@ -13,7 +13,7 @@
 
 ### Goals (MVP)
 
-1. A tenant connects MemClaw and runs agents normally. Forge accumulates skill candidates without anyone calling `memclaw_evolve` or any new tool.
+1. A tenant connects MemClaw and runs agents normally. Forge accumulates skill candidates without anyone calling `caura_evolve` or any new tool.
 2. One click in the Skills Inbox approves a candidate; one more installs it to Claude Code / OpenClaw / Direct-MCP.
 3. Installed skills produce outcomes that flow back; v2 update proposals are auto-generated when behavior drifts.
 4. Same `skills` collection holds both Forge-generated and human-authored skills; `source` + `status` fields keep them distinguishable.
@@ -27,7 +27,7 @@
 - Auto-promote tier (skip HITL on gold candidates). (Phase 5+.)
 - Custom Concierge residents. (Phase 5+.)
 - Migration of eToro's 1,402 existing pointer-only skills. (Out of scope; Ran will work with eToro to adjust their import to full-content shape.)
-- A separate `memclaw_skill_workshop` MCP tool. (Rejected; `memclaw_doc` is the agent surface.)
+- A separate `memclaw_skill_workshop` MCP tool. (Rejected; `caura_doc` is the agent surface.)
 
 ---
 
@@ -42,7 +42,7 @@ Components:
 | # | Component | Status | Lives in |
 |---|---|---|---|
 | 1 | Memory store (lake) | existing | `caura-memclaw` `common/` + storage-api |
-| 2 | `memclaw_doc` MCP tool | existing | `caura-memclaw` `core-api/src/core_api/routes/documents.py` |
+| 2 | `caura_doc` MCP tool | existing | `caura-memclaw` `core-api/src/core_api/routes/documents.py` |
 | 3 | `skills` collection | existing | DB table `documents` with `collection='skills'` |
 | 4 | Plugin reconciliation → `plugin/skills/<slug>/SKILL.md` | existing | `core-api/routes/plugin.py` |
 | 5 | Direct-MCP skill adapter → `static/skills/memclaw/SKILL.md` | existing | served from `static/` |
@@ -68,7 +68,7 @@ Components:
 
 Stored in `documents.data` (jsonb), `collection='skills'`, `doc_id` namespaced by source:
 - Forge-generated: `forge/<slug>` (e.g. `forge/deploy-eu-west-dns`)
-- Agent-direct via `memclaw_doc`: `agent/<slug>` (or plain `<slug>` for backwards compat)
+- Agent-direct via `caura_doc`: `agent/<slug>` (or plain `<slug>` for backwards compat)
 - Hand-authored / bulk-imported: plain `<slug>` (existing convention)
 
 ```jsonc
@@ -168,9 +168,9 @@ Stored in `documents.data` (jsonb), `collection='skills'`, `doc_id` namespaced b
 
 ---
 
-## 4. Direct authorship via `memclaw_doc` (no new tool)
+## 4. Direct authorship via `caura_doc` (no new tool)
 
-Agents who want to draft a skill *synchronously* use the existing `memclaw_doc` MCP with `op=write`, `collection=skills`, `data=<schema above>`. **Required adjustments to `memclaw_doc` for the skills collection (Phase 0):**
+Agents who want to draft a skill *synchronously* use the existing `caura_doc` MCP with `op=write`, `collection=skills`, `data=<schema above>`. **Required adjustments to `caura_doc` for the skills collection (Phase 0):**
 
 1. **Schema validator hook.** When `collection='skills'` and write_mode='strong', validate the doc against the schema (required: `name`, `slug`, `description`, `domain`, `kind`, `source`). Reject with 422 if any required field missing.
 2. **`description` cap enforcement.** Default 160 bytes; tenant-configurable via `org_settings.skills.description_max_bytes`. Reject with 422 on over-cap.
@@ -180,7 +180,7 @@ Agents who want to draft a skill *synchronously* use the existing `memclaw_doc` 
 6. **Auto-trigger Sentinel scan** on every skills-collection write (sync; reject if `critical > 0`).
 7. **`kind: update` hash-binding.** When `kind: "update"`, require `target.target_content_hash` and reject if it doesn't match the live skill's current hash.
 
-**This means: an agent writing via `memclaw_doc` goes through the SAME lifecycle as a Forge-generated candidate.** Same Inbox card, same approval gate, same install path. Forge is just the autonomous producer alongside human-curated ones.
+**This means: an agent writing via `caura_doc` goes through the SAME lifecycle as a Forge-generated candidate.** Same Inbox card, same approval gate, same install path. Forge is just the autonomous producer alongside human-curated ones.
 
 ---
 
@@ -217,7 +217,7 @@ Agents who want to draft a skill *synchronously* use the existing `memclaw_doc` 
 
 | From → | candidate | staged | active | rejected | quarantined | stale | deprecated |
 |---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| (new write) | ✓ (Forge) | ✓ (`memclaw_doc`, admin) | ✓ (admin only) | — | — | — | — |
+| (new write) | ✓ (Forge) | ✓ (`caura_doc`, admin) | ✓ (admin only) | — | — | — | — |
 | candidate | — | auto-gate pass | — | — | scan critical | — | — |
 | staged | — | — | HITL Approve | HITL Reject | scan rerun fail | live target changed | — |
 | active | — | — | — | — | — | — | superseded / utilization drop |
@@ -242,7 +242,7 @@ Patterns failing any gate stay `candidate` and keep accruing signal silently.
 
 ## 6. Outcome inference — the 6 signals
 
-No `memclaw_evolve` requirement. Each signal is mined from data MemClaw already writes.
+No `caura_evolve` requirement. Each signal is mined from data MemClaw already writes.
 
 | # | Signal | Source (existing code) | Indicates |
 |---|---|---|---|
@@ -253,7 +253,7 @@ No `memclaw_evolve` requirement. Each signal is mined from data MemClaw already 
 | 5 | Cross-agent reuse depth | recall counter on memory × agent | Load-bearing memory; promotes to skill candidate |
 | 6 | External hooks | git commits / PR merges / CI pass-fail tied to `run_id` | Ground-truth outcome (where available) |
 
-**Optional soft-force**: `memclaw_recall` returns a `recall_id`; subsequent writes auto-attach it. No new tool, no new agent requirement. Lifts inference precision from ~75% (typical for passive) to ~95% (with attached recall_id) per our planning estimates — **internal eval harness in Phase 1 will measure the real number.**
+**Optional soft-force**: `caura_recall` returns a `recall_id`; subsequent writes auto-attach it. No new tool, no new agent requirement. Lifts inference precision from ~75% (typical for passive) to ~95% (with attached recall_id) per our planning estimates — **internal eval harness in Phase 1 will measure the real number.**
 
 ---
 
@@ -406,7 +406,7 @@ All defaults; tenant-overridable via `org_settings.skills_factory.*`:
 
 | Setting | Default | Where it applies |
 |---|---|---|
-| `description_max_bytes` | 160 | Write validation (`memclaw_doc` skills writes + Forge distill) |
+| `description_max_bytes` | 160 | Write validation (`caura_doc` skills writes + Forge distill) |
 | `body_max_bytes` | 40 000 | Same |
 | `inbox_max_pending` | 50 | Auto-defer oldest beyond cap |
 | `forge.cron_interval_hours` | 6 | Forge schedule |
@@ -467,7 +467,7 @@ LLM token cost in OSS = on the user's own provider keys (existing MemClaw patter
 
 **Scope:**
 - Migration: add `source` and `status` (+ all new schema fields) to all existing `skills` docs in the DB. Existing manual docs → `source: manual, status: active`. Bulk-imported pointer-only docs → `source: imported, status: active`.
-- Extend `memclaw_doc` skills-collection writes with the 7 adjustments in §4.
+- Extend `caura_doc` skills-collection writes with the 7 adjustments in §4.
 - Build `org_settings.skills_factory.*` config plumbing.
 - Add `publish_forge_distill_request` to `lifecycle_publishers.py`; wire a no-op handler (just logs).
 - New collection `skills_rollback` (for rollback metadata).
@@ -475,12 +475,12 @@ LLM token cost in OSS = on the user's own provider keys (existing MemClaw patter
 - New table `session_traces` (for outcome-labeled traces; populated in Phase 1).
 
 **Prereqs:** none (after rebases).
-**Deliverable:** an admin can write a `source:agent, status:staged` skill via `memclaw_doc`, it lands in the Inbox-shaped query, but no UI yet.
+**Deliverable:** an admin can write a `source:agent, status:staged` skill via `caura_doc`, it lands in the Inbox-shaped query, but no UI yet.
 **Acceptance:**
 - `pytest tests/test_skill_schema_v1.py` passes (new file)
-- existing eToro 1,402 docs still readable via `memclaw_doc` op=read after migration
-- `memclaw_doc` `op=write` against `skills` with `description` > 160 bytes returns 422
-- `memclaw_doc` `op=write` against `skills` without `name`/`slug`/`description`/`domain` returns 422
+- existing eToro 1,402 docs still readable via `caura_doc` op=read after migration
+- `caura_doc` `op=write` against `skills` with `description` > 160 bytes returns 422
+- `caura_doc` `op=write` against `skills` without `name`/`slug`/`description`/`domain` returns 422
 **Estimated agents:** 1-2 backend engineers · ~3-4 days
 
 ### Phase 1 — Outcome inference + Forge dry-run (parallel internal track)
@@ -621,14 +621,14 @@ Phase 1 tasks issued after Phase 0 lands.
 ## 19. Validation checklist (re-run before finalizing)
 
 - [x] **Decision: Option B (full content)** — `content` field in schema (§3); flat-procedure MVP (§1 non-goal); content shown in inbox card (§10).
-- [x] **Decision: no extra MCP tool** — `memclaw_doc` adjustments in §4 + §15 Phase 0 task SF-002.
+- [x] **Decision: no extra MCP tool** — `caura_doc` adjustments in §4 + §15 Phase 0 task SF-002.
 - [x] **Decision: OpenClaw bridge if not too complex** — §13 explicitly gated at ≤ 1 engineer-week; default `openclaw_bridge.enabled=false` (§12).
 - [x] **Decision: 160-byte description default but configurable** — §3 schema + §12 caps table + §15 SF-002 acceptance criterion.
 - [x] **Reuse existing primitives** — components table §2 lists all 9 existing pieces with file paths.
 - [x] **Same `skills` collection + `source` discriminator** — §3, §11 plugin path filters by status.
 - [x] **Session-bounded clusters, ≥3 sessions / ≥2 agents** — §5 auto-gates table, §12 config defaults.
 - [x] **Cluster fingerprint design proposed** — §8 with stability acceptance criterion in Phase 1.
-- [x] **Outcome inference passive (no `memclaw_evolve` required)** — §6 with 6 signals + their existing code sources.
+- [x] **Outcome inference passive (no `caura_evolve` required)** — §6 with 6 signals + their existing code sources.
 - [x] **Sentinel scanner pulled into MVP** — §9 + Phase 2 deliverable.
 - [x] **Hash-binding + stale state from OpenClaw** — §3 `target.target_content_hash`, §5 lifecycle, Phase 4 stale detection.
 - [x] **Rollback metadata from OpenClaw** — §11 schema + Phase 3 deliverable.

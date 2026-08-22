@@ -47,6 +47,14 @@ class Relation(Base):
     __table_args__ = (
         Index("ix_relations_from", "from_entity_id"),
         Index("ix_relations_to", "to_entity_id"),
+        # For DELETEs on ``memories``, not reads here — the referencing side of
+        # a SET NULL FK. Partial because the RI check never looks for NULL.
+        # See migration 035.
+        Index(
+            "ix_relations_evidence_memory",
+            "evidence_memory_id",
+            postgresql_where=text("evidence_memory_id IS NOT NULL"),
+        ),
     )
 
 
@@ -60,3 +68,11 @@ class MemoryEntityLink(Base):
         ForeignKey("entities.id", ondelete="CASCADE"), primary_key=True
     )
     role: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        # The PK ``(memory_id, entity_id)`` covers the memories-side FK on its
+        # leading column, but a btree cannot serve ``entity_id`` as a prefix —
+        # so deleting an entity scanned this whole table, across every tenant.
+        # See migration 035.
+        Index("ix_memory_entity_links_entity_id", "entity_id"),
+    )

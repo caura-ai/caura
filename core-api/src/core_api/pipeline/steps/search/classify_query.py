@@ -1,10 +1,13 @@
 """ClassifyQuery — classify incoming query into a retrieval strategy.
 
 Examines the query tokens against the entity full-text index.  When entity
-matches are found the step short-circuits to an *entity_lookup* strategy
+matches are found the step MAY short-circuit to an *entity_lookup* strategy
 (graph-expanded, scored by hop distance) so downstream embedding and scored
-search can be skipped.  Otherwise the query is routed to keyword or semantic
-search based on the adaptive FTS weight.
+search can be skipped — but only when the linked-memory pool can fill the
+caller's ``top_k``.  That route replaces scoring rather than re-ranking it, so
+an under-filled pool falls through instead and the entity hits are applied as a
+hop boost over real scores (H-03).  Otherwise the query is routed to keyword or
+semantic search based on the adaptive FTS weight.
 """
 
 from __future__ import annotations
@@ -144,7 +147,25 @@ class ClassifyQuery:
                         slot_acquired_marker=ctx.data,
                     )
 
-                    if filtered_rows:
+                    # H-03: the short-circuit REPLACES scoring rather than
+                    # re-ranking it, so it is only defensible while the entity
+                    # pool can answer the request on its own. Below top_k it made
+                    # the result strictly worse than never matching an entity:
+                    # memories outside the link set were unreachable at ANY top_k,
+                    # and the pool is itself cut to GRAPH_MAX_BOOSTED_MEMORIES
+                    # before content loads, so the relevant memory could be
+                    # dropped before top_k was even applied.
+                    #
+                    # ``filtered_rows`` is already ``rows[:top_k]``, so this can
+                    # only ever be equality — the real gate is the pre-load pool
+                    # check in _collect_memories, and this re-checks it because
+                    # visibility filtering there can still return short. Keep the
+                    # two in step if _collect_memories ever gains an overfetch
+                    # bound, or this silently becomes always-true.
+                    #
+                    # The truthiness term is not redundant: it keeps a zero-row
+                    # pool from short-circuiting were top_k ever 0.
+                    if filtered_rows and len(filtered_rows) >= top_k:
                         plan = RetrievalPlan(
                             strategy=RetrievalStrategy.ENTITY_LOOKUP,
                             matched_entity_ids=matched_ids,
@@ -159,14 +180,56 @@ class ClassifyQuery:
                         ctx.data["filtered_rows"] = filtered_rows
                         ctx.data["retrieval_plan"] = plan
                         logger.info(
-                            "classify_query: entity_lookup (%d entities)",
+                            "classify_query: entity_lookup (%d entities, pool filled top_k=%d)",
                             len(matched_ids),
+                            top_k,
                         )
                         return None
+                    # Distinct wording from the over-broad decline logged above,
+                    # deliberately: the two have opposite downstream effects (that
+                    # one sets entity_match_declined to SUPPRESS hop-boosting, this
+                    # one must not), so ops has to be able to grep them apart. Same
+                    # reasoning as parallel_embed_entity_boost's distinct reasons.
+                    # Four reachable declines, four messages — ordered so each is
+                    # reached only in its own state. An empty result is ambiguous
+                    # on its own (never loaded vs loaded and wholly filtered), so
+                    # _collect_memories reports both the pool size and whether it
+                    # got as far as the load.
+                    pool_size = ctx.data.pop("_entity_pool_size", None)
+                    pool_loaded = ctx.data.pop("_entity_pool_loaded", False)
+                    if filtered_rows:
+                        # Pool looked adequate before the load and came back short
+                        # anyway — visibility filtering (caller_agent_id / status /
+                        # valid_at) dropped rows. This is the case the post-load
+                        # re-check exists for, so it must not be reported as the
+                        # empty one.
+                        logger.info(
+                            "classify_query: entity_lookup declined as under-filled after "
+                            "visibility filtering (%d rows < top_k=%d), falling through",
+                            len(filtered_rows),
+                            top_k,
+                        )
+                    elif pool_loaded:
+                        # Links existed and the load ran, but visibility filtering
+                        # (caller_agent_id / status / valid_at) dropped every row.
+                        # A permission or lifecycle cause, not a graph one.
+                        logger.info(
+                            "classify_query: entity_lookup declined — loaded a pool of %d "
+                            "but visibility filtering dropped every row, falling through",
+                            pool_size or 0,
+                        )
+                    elif pool_size:
+                        logger.info(
+                            "classify_query: entity_lookup declined as under-filled "
+                            "(pool %d < top_k=%d), falling through",
+                            pool_size,
+                            top_k,
+                        )
+                    else:
+                        logger.info("classify_query: entity matched but no linked memories, falling through")
                     # Preserve entity_hops so _entity_boost_pipeline can skip
                     # re-expansion on the keyword/semantic fallthrough path.
                     ctx.data["_classified_entity_hops"] = entity_hops
-                    logger.info("classify_query: entity matched but no linked memories, falling through")
             except Exception:
                 logger.warning(
                     "classify_query: entity lookup failed, falling back to search",
@@ -367,6 +430,27 @@ class ClassifyQuery:
             )[:GRAPH_MAX_BOOSTED_MEMORIES]
             memory_boost = {mid: memory_boost[mid] for mid in memory_ids_sorted}
 
+        # H-03: stop here when the pool cannot fill top_k. The caller only takes
+        # the exclusive route when it can, and the row build below can never
+        # produce more rows than ``memory_boost`` has entries — so an under-sized
+        # pool cannot pass that gate whatever the load returns. Loading anyway
+        # spent a per-tenant storage permit and pulled full rows (embedding and
+        # tsvector included) for a result the caller discards, and worse, left
+        # ``_storage_slot_acquired`` set so the scored search that does run
+        # skipped the bulkhead. Reporting the pool size lets the caller say why
+        # it declined, since ``[]`` alone cannot distinguish "under-filled" from
+        # "no linked memories at all" (the ``not memory_boost`` return above).
+        #
+        # One-directional on purpose. The converse is NOT decidable here: the
+        # load applies visibility filters (caller_agent_id / status / valid_at)
+        # and rows whose memory did not come back are dropped, so a pool that
+        # looks adequate can still return short. That is why the caller re-checks
+        # after the load rather than trusting this count.
+        if len(memory_boost) < top_k:
+            if slot_acquired_marker is not None:
+                slot_acquired_marker["_entity_pool_size"] = len(memory_boost)
+            return []
+
         # CAURA-687: load memories by ID via the dedicated short-circuit
         # endpoint. Pre-CAURA-687 this POSTed to /memories/scored-search
         # with a ``memory_ids`` key + ``entity_lookup: True`` flag that
@@ -408,6 +492,14 @@ class ClassifyQuery:
         # logical search. Same key as scored-search, intentional —
         # the bucket counts request-level storage pressure, not
         # call-level.
+        # Record that the load ran, and against what size of pool. Without this
+        # the caller cannot tell "no links at all" from "links existed, the load
+        # ran, and visibility filtering dropped every row" — both arrive as an
+        # empty list, and reporting the second as the first would send on-call
+        # looking for a graph problem when the cause is a permission filter.
+        if slot_acquired_marker is not None:
+            slot_acquired_marker["_entity_pool_size"] = len(memory_boost)
+            slot_acquired_marker["_entity_pool_loaded"] = True
         async with per_tenant_storage_slot("storage_search", tenant_id):
             memories = await sc.load_memories_by_ids(search_data)
         if slot_acquired_marker is not None:

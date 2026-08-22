@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 
-from core_api.clients.storage_client import get_storage_client
+from core_api.clients.storage_client import DuplicateMemoryError, get_storage_client
 from core_api.config import settings
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot, per_tenant_storage_slot
 from core_api.services.agent_identity import ReservedAgentIdError, enforce_reserved_write_id
@@ -35,7 +35,12 @@ except ImportError:
 
 
 from common.constants import VECTOR_DIM
-from common.embedding import get_embedding, get_embeddings_batch, get_query_embedding
+from common.embedding import (
+    get_embedding,
+    get_embeddings_batch,
+    get_query_embedding,
+    is_blank_text,
+)
 from common.events import publish_memory_embed_request, publish_memory_enrich_request
 from common.governance import mask, scan
 from core_api.constants import (
@@ -113,7 +118,22 @@ logger = logging.getLogger(__name__)
 # instead of degrading it. Rolling storage back is not the fix — a storage
 # revision predating that commit reads nested params fine.
 _USE_PIPELINE_WRITE = True
+
+
 _USE_PIPELINE_SEARCH = True
+
+
+class BlankQuery(ValueError):
+    """A search query with nothing in it to embed.
+
+    Subclasses ``ValueError`` deliberately: the search paths funnel
+    ``ValueError`` into ``HTTPException(503)``, so a handler that does not
+    know this type keeps the pre-existing behaviour rather than escaping as
+    a 500. The two handlers that DO know it answer 400 — a blank query is
+    the caller's to fix, and a 503 pages an on-call for a backend that is
+    healthy, which is what happened for the whole 2026-08-18 17:00-18:59
+    window.
+    """
 
 
 def _content_hash(tenant_id: str, fleet_id: str | None, content: str) -> str:
@@ -128,6 +148,244 @@ def _auto_chunk_request_id() -> str:
     real client-side bulk attempts (``f"{X-Bulk-Attempt-Id}:{idx}"``).
     """
     return f"auto-chunk:{uuid4()}"
+
+
+def _enrichment_backfill_needed(enrichment, tenant_config) -> bool:
+    """Does this row still owe an LLM enrichment pass?
+
+    The condition ``ScheduleBackgroundTasks`` applies on its strong / no-mode
+    branch, lifted so the auto-chunk handler — which never runs that step — can
+    ask the same question rather than approximate it. All four clauses matter:
+    an inline deployment already enriched, and a tenant with enrichment off or
+    on the ``none`` provider will never be enriched by anyone, so claiming a
+    pending pass for either would be a marker that never clears.
+    """
+    return bool(
+        enrichment is None
+        and not settings.inline_enrichment
+        and tenant_config.enrichment_enabled
+        and tenant_config.enrichment_provider != "none"
+    )
+
+
+# The LLM governance verdict, as ``MergeEnrichmentFields`` / the enrichment
+# worker record it on the parent's metadata.
+_GOVERNANCE_SIGNAL_KEYS = ("contains_pii", "pii_types", "business_relevance")
+
+
+def _inherit_governance_signals(child_meta: dict, parent_meta: dict) -> None:
+    """Copy the parent's governance verdict onto a row derived from its content.
+
+    Derived rows — atomic facts (#808), auto-chunk children (#852) — are built
+    out of the parent's text, so a finding about that content is a finding about
+    them. Without the copy a child reads as clean to every later consumer (an
+    audit query, any future remediation pass) while being made of the flagged
+    text.
+
+    Only ever called on rows the policy allowed to live: a ``drop`` verdict
+    stops both fan-outs before they reach their children.
+
+    Shared by the two fan-outs rather than repeated, because that repetition is
+    exactly the shape #847 is about — the first of the pair got this in #808 and
+    the second did not.
+    """
+    for key in _GOVERNANCE_SIGNAL_KEYS:
+        if key in parent_meta:
+            child_meta[key] = parent_meta[key]
+
+
+async def _live_duplicate_hashes(
+    sc,
+    *,
+    tenant_id: str,
+    fleet_id: str | None,
+    agent_id: str,
+    hashes: list[str],
+) -> set[str]:
+    """Which of ``hashes`` already have a LIVE row, in dedup scope.
+
+    The server-internal write paths — auto-chunk children (both the pipeline
+    and legacy handlers) and the atomic-fact fanout — attach a ``content_hash``
+    to every child and then insert it without ever consulting a dedup lookup.
+    The public bulk path does consult one (``existing_hashes`` +
+    ``seen_hashes`` in ``create_memories_bulk``), and the single-write path has
+    ``CheckExactDuplicate``; these three had neither. That is why prod carries
+    duplicate content-hash groups with no concurrency involved at all: the same
+    document re-chunked, or an LLM emitting the same fact twice, minted a fresh
+    row every time.
+
+    ``_auto_chunk_request_id()`` cannot substitute for this. It mints a fresh
+    UUID per item per call, so the attempt-idempotency index
+    (``ix_memories_attempt_unique``) sees every re-run as a brand-new attempt —
+    it makes a *retried* batch idempotent only when the caller replays the same
+    ids, which these callers never do.
+
+    Scope is ``(tenant, fleet, agent, content_hash)`` over live rows, matching
+    ``memory_find_by_content_hash`` exactly, so a child is judged a duplicate by
+    the same rule the single-write gate would apply to it.
+
+    WHAT THIS DOES NOT CLOSE. It is check-then-insert, so two concurrent runs can
+    both pass the check and both insert — two overlapping redeliveries enriching
+    the same parent, or two racing auto-chunk requests for the same document.
+    Nothing here can prevent that; only a unique constraint can, and adding one
+    is the second half of #814. So this closes the source that needs NO
+    concurrency to fire — which is the source prod's duplicate groups actually
+    came from — and leaves the race for the index. Do not read a green here as
+    "duplicates are impossible"; read it as "duplicates now require a race".
+    """
+    if not hashes:
+        return set()
+    existing = await sc.bulk_find_by_content_hashes(
+        tenant_id,
+        hashes,
+        fleet_id=fleet_id,
+        agent_id=agent_id,
+    )
+    return set(existing)
+
+
+def _drop_duplicate_facts(
+    facts: list[dict],
+    *,
+    tenant_id: str,
+    fleet_id: str | None,
+    live_hashes: set[str],
+    source: str,
+) -> list[dict]:
+    """Return the chunker's facts minus the ones already recorded.
+
+    Drops two kinds of duplicate, which have to be handled separately because
+    no index can collapse the first:
+
+    * **already live** — the content exists from an earlier call, per
+      ``live_hashes``.
+    * **repeated within this batch** — two children of the SAME call carrying
+      identical content. A unique index cannot resolve this one: the conflict is
+      between two rows of a single INSERT, so it has to be collapsed before the
+      statement runs.
+
+    Applied to the FACTS, before the parent insert and before the batch embed,
+    rather than to the finished child payloads. Two things fall out of that
+    ordering, and both matter more than the slightly earlier call site:
+
+    * the parent's ``child_count`` is the number of children that will exist,
+      not the number the chunker proposed — otherwise this change would make
+      that field silently wrong;
+    * a dropped child never costs an embedding. The embed is the expensive part
+      of this path, and it is a batch call, so paying for text we are about to
+      discard would be the dominant cost of deduping at all.
+
+    Dropping rather than collapsing-and-reporting is deliberate: these children
+    are derived rows, not caller-submitted items. Nothing upstream holds an
+    index into them — both auto-chunk handlers discard ``create_memories``'
+    return value entirely — so there is no per-item result to point at a
+    survivor, and the parent memory is what the caller gets back either way.
+    """
+    kept: list[dict] = []
+    seen: set[str] = set()
+    dropped_live = 0
+    dropped_repeat = 0
+    for fact in facts:
+        content = fact.get("content")
+        if not content:
+            # Outside the dedup contract: an unhashable fact cannot collide.
+            kept.append(fact)
+            continue
+        content_hash = _content_hash(tenant_id, fleet_id, content)
+        if content_hash in live_hashes:
+            dropped_live += 1
+            continue
+        if content_hash in seen:
+            dropped_repeat += 1
+            continue
+        seen.add(content_hash)
+        kept.append(fact)
+
+    if dropped_live or dropped_repeat:
+        # INFO, not WARNING: a re-chunked document hitting this is the feature
+        # working. Logged at all because it is the only account of why a
+        # document that produced N chunks has fewer than N children.
+        logger.info(
+            "dedup dropped %d duplicate auto-chunk children before insert",
+            dropped_live + dropped_repeat,
+            extra={
+                "source": source,
+                "dropped_already_live": dropped_live,
+                "dropped_repeated_in_batch": dropped_repeat,
+                "kept": len(kept),
+                "submitted": len(facts),
+            },
+        )
+    return kept
+
+
+async def _insert_children_or_degrade(
+    payloads: list[dict],
+    *,
+    tenant_id: str,
+    parent_id: str,
+    source: str,
+) -> None:
+    """Insert auto-chunk children; a duplicate refusal degrades, never raises.
+
+    The parent row is ALREADY COMMITTED by the time this runs. Raising here would
+    hand the caller a 500 for a write that persisted, and leave the parent
+    childless with nothing recording why — the H-05 shape (#815), for which the
+    established answer is to degrade and report rather than abort.
+
+    Only ``DuplicateMemoryError`` is degraded, and it is the one exception where
+    degrading loses nothing: migration 040's constraint refuses the batch only
+    when the content is already stored, so the children this call would have
+    written already exist. Every other failure still propagates, because for
+    those the rows genuinely are missing.
+
+    The batch is all-or-nothing — ON CONFLICT cannot arbitrate a second index, so
+    one refused row aborts the statement. So this can drop children that were NOT
+    duplicates, which is why it logs at WARNING with the count: the parent's
+    ``child_count`` will overstate what exists, and this line is the only record
+    of the gap.
+
+    Empty list short-circuits: dedup can empty it (a document re-chunked with
+    every fact already live), ``create_memories([])`` is a pointless roundtrip,
+    and the storage-side statement would build an INSERT with no VALUES.
+    """
+    if not payloads:
+        return
+    async with per_tenant_storage_slot("storage_write", tenant_id):
+        try:
+            await get_storage_client().create_memories(payloads)
+        except DuplicateMemoryError:
+            logger.warning(
+                "auto-chunk children refused as duplicates; parent kept without them",
+                extra={
+                    "source": source,
+                    "parent_memory_id": parent_id,
+                    "children_dropped": len(payloads),
+                },
+            )
+
+
+async def _create_memory_or_409(payload: dict) -> dict:
+    """``create_memory``, with migration 040's duplicate rejection mapped to 409.
+
+    Since 040 the insert can be REFUSED where it previously duplicated silently.
+    Untranslated that is a 500 — the pipeline marks the step FAILED and the caller
+    reads "write pipeline failed unexpectedly" — for what is an ordinary race, and
+    an outcome the dedup contract already has a code for.
+
+    409 with the winning row's id, matching ``CheckExactDuplicate`` exactly: that
+    gate answers the duplicate visible before the write, this answers the race it
+    cannot see, and a caller should not have to tell the two apart.
+
+    A helper rather than a try at each site because there are three of them (the
+    auto-chunk parent on both handlers, plus the legacy single write) and each
+    passes a long inline dict; wrapping them individually would re-indent all
+    three for no gain. It fetches the client itself so the swap is call-for-call.
+    """
+    try:
+        return await get_storage_client().create_memory(payload)
+    except DuplicateMemoryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 async def _find_semantic_duplicate(
@@ -271,6 +529,26 @@ async def create_memory(data: MemoryCreate) -> MemoryOut:
     return await _create_memory_legacy(data)
 
 
+def _memory_out_with_created_links(ctx, memory: dict) -> MemoryOut:
+    """Build the response echoing the links that PERSISTED, not the requested ones.
+
+    H-05: ``WriteMemoryRow`` degrades a failed entity link instead of failing the
+    write, so "requested" and "created" can differ. Reporting a link that does not
+    exist would be a quieter wrong answer than the 500 this replaces.
+
+    Shared because BOTH callers of the persist pipeline return from here — the main
+    create path and the auto-chunk fall-through — and only one of them was fixed
+    first. A third caller would have drifted the same way.
+    """
+    return _memory_to_out(
+        memory,
+        entity_links=[
+            EntityLinkOut(entity_id=link.entity_id, role=link.role)
+            for link in ctx.data["entity_links_created"]
+        ],
+    )
+
+
 async def _create_memory_pipeline(data: MemoryCreate) -> MemoryOut:
     """Pipeline-based create_memory — same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.write import (
@@ -287,8 +565,6 @@ async def _create_memory_pipeline(data: MemoryCreate) -> MemoryOut:
         from core_api.config import settings as _stm_settings
 
         if not _stm_settings.use_stm:
-            from fastapi import HTTPException
-
             raise HTTPException(
                 status_code=422,
                 detail="STM is not enabled. Set USE_STM=true to enable short-term memory.",
@@ -408,12 +684,7 @@ async def _create_memory_pipeline(data: MemoryCreate) -> MemoryOut:
             raise _exc
 
         memory = ctx.data["memory"]
-        return _memory_to_out(
-            memory,
-            entity_links=[
-                EntityLinkOut(entity_id=link.entity_id, role=link.role) for link in data.entity_links
-            ],
-        )
+        return _memory_out_with_created_links(ctx, memory)
     finally:
         timings = ctx.data.get("phase_timings", {})
         # Defensive ``.get`` — when the pipeline raised, ``ctx.data["memory"]``
@@ -450,6 +721,14 @@ async def _create_memory_pipeline(data: MemoryCreate) -> MemoryOut:
                 "embedding_pending": bool(memory_metadata.get("embedding_pending")),
                 "enrichment_pending": bool(memory_metadata.get("enrichment_pending")),
                 "cached_embedding": ctx.data.get("cached_embedding") is not None,
+                # H-05: how many caller-supplied entity links were dropped. The
+                # write still succeeds, so ``success`` alone cannot show it, and a
+                # link that was never created leaves no row for
+                # ``GET /entities/broken-links`` to find later — the per-link ERROR
+                # log and this count are the only traces. Sits beside the
+                # ``*_pending`` flags because it is the same kind of statement:
+                # the row is real, one aspect of it is not settled.
+                "entity_links_failed": len(ctx.data.get("entity_link_failures") or ()),
                 "success": _exc is None,
             },
         )
@@ -457,7 +736,36 @@ async def _create_memory_pipeline(data: MemoryCreate) -> MemoryOut:
 
 async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> MemoryOut:
     """Auto-chunking branch using pipeline context enrichment results."""
+    from core_api.pipeline.compositions.write import (
+        build_auto_chunk_governance_pipeline,
+        build_persist_pipeline,
+    )
     from core_api.services.ingest_service import _chunk_content
+
+    # #852: apply the LLM's free-form verdict, which this branch had computed
+    # and then discarded. It belongs HERE rather than at the one call site so
+    # that the enforcement travels with the function that does the writing.
+    #
+    # First statement in the function, ahead of the chunking call, for two
+    # reasons: a rejected write should not pay for the chunking LLM round-trip,
+    # and a policy that could not be applied must not be followed by rows it
+    # might have forbidden.
+    #
+    # The step mutates in place — ``fields["metadata"]`` for the PII flag,
+    # ``data.visibility`` for a ``keep_private`` downgrade — and both the parent
+    # payload and every child payload below read those. That is what makes the
+    # downgrade cascade rather than needing to be threaded through by hand, and
+    # it is why this runs before either payload is built.
+    governance = await build_auto_chunk_governance_pipeline().run(ctx)
+    if governance.failed:
+        # Not optional, and not merely tidy: the runner CATCHES a non-HTTP
+        # exception and returns ``failed`` instead of raising. Without this
+        # check a governance step that blew up would return here as an ordinary
+        # ``None`` result and the write would proceed ungoverned — the exact
+        # defect this function is being fixed for, reintroduced one level up.
+        # (An ``HTTPException`` — the 422 a ``drop`` policy raises — is
+        # re-raised by the runner and never reaches this line.)
+        raise HTTPException(status_code=500, detail="Memory governance pipeline failed unexpectedly")
 
     sc = get_storage_client()
     fields = ctx.data["memory_fields"]
@@ -479,10 +787,47 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
 
     if len(facts) > 1:
         ch = _content_hash(data.tenant_id, data.fleet_id, data.content)
+        # Give the children the dedup lookup every other write path already has
+        # (OSS #814). Inside the ``len(facts) > 1`` branch rather than above it:
+        # dedup can reduce the count to 1 or 0, and falling out of the branch on
+        # that would write the WHOLE document as a single memory instead — a
+        # different row than either outcome the caller asked for.
+        #
+        # Ahead of ``child_count`` and the batch embed, both deliberately: see
+        # ``_drop_duplicate_facts``.
+        facts = _drop_duplicate_facts(
+            facts,
+            tenant_id=data.tenant_id,
+            fleet_id=data.fleet_id,
+            live_hashes=await _live_duplicate_hashes(
+                sc,
+                tenant_id=data.tenant_id,
+                fleet_id=data.fleet_id,
+                agent_id=data.agent_id,
+                hashes=[
+                    _content_hash(data.tenant_id, data.fleet_id, f["content"])
+                    for f in facts
+                    if f.get("content")
+                ],
+            ),
+            source="auto_chunk",
+        )
         parent_metadata = dict(fields["metadata"])
         parent_metadata["auto_chunked"] = True
         parent_metadata["child_count"] = len(facts)
         parent_metadata["write_latency_ms"] = round((time.perf_counter() - t0) * 1000)
+        # #856: in a deferred deployment ``ParallelEmbedEnrich`` skipped both
+        # provider calls, so this row is incomplete. ``MemoryOut.metadata``
+        # documents absent flags as "that stage ran inline", which for this row
+        # is the opposite of the truth — so say so, on the same conditions the
+        # backfills below are scheduled on. The other exit of this function gets
+        # both flags for free: ``write_memory_row`` sets ``embedding_pending``
+        # and ``MergeEnrichmentFields`` sets ``enrichment_pending``.
+        defer_enrichment = _enrichment_backfill_needed(ctx.data.get("enrichment"), tenant_config)
+        if embedding is None:
+            parent_metadata["embedding_pending"] = True
+        if defer_enrichment:
+            parent_metadata["enrichment_pending"] = True
 
         # Auto-chunk parent insert — wrapped in the storage bulkhead
         # like the regular single-write path. Auto-chunk fires two
@@ -491,7 +836,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         # tenant doing heavy auto-chunking can't park more storage
         # connections than the cap allows.
         async with per_tenant_storage_slot("storage_write", data.tenant_id):
-            parent = await sc.create_memory(
+            parent = await _create_memory_or_409(
                 {
                     "tenant_id": data.tenant_id,
                     "fleet_id": data.fleet_id,
@@ -545,11 +890,21 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
 
         # Batch embeddings — single API call instead of N sequential calls
         child_texts = [fact["content"] for fact in facts]
-        child_embeddings = await get_embeddings_batch(child_texts, tenant_config)
+        # Auto-chunk children of a synchronous create: same priority as the
+        # parent embed, which is already background=False.
+        child_embeddings = await get_embeddings_batch(child_texts, tenant_config, background=False)
 
         child_payloads = []
         for fact, child_embedding in zip(facts, child_embeddings):
             child_ch = _content_hash(data.tenant_id, data.fleet_id, fact["content"])
+            child_meta = {
+                "parent_memory_id": str(parent_id),
+                "source": "auto_chunk",
+            }
+            # Read off ``parent_metadata``, the dict actually written to the
+            # parent row, so the children cannot end up labelled differently
+            # from the row they were cut out of.
+            _inherit_governance_signals(child_meta, parent_metadata)
             child_payloads.append(
                 {
                     "tenant_id": data.tenant_id,
@@ -561,10 +916,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                     "weight": fields["weight"],
                     "source_uri": data.source_uri,
                     "run_id": data.run_id,
-                    "metadata_": {
-                        "parent_memory_id": str(parent_id),
-                        "source": "auto_chunk",
-                    },
+                    "metadata_": child_meta,
                     "content_hash": child_ch,
                     "client_request_id": _auto_chunk_request_id(),
                     "expires_at": data.expires_at.isoformat() if data.expires_at else None,
@@ -572,11 +924,62 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                     "visibility": data.visibility or "scope_team",
                 }
             )
-        # Auto-chunk children — second storage roundtrip in this
-        # request after the parent insert above. Same per-tenant cap
-        # applies; held only across the bulk call itself.
-        async with per_tenant_storage_slot("storage_write", data.tenant_id):
-            await sc.create_memories(child_payloads)
+        # Auto-chunk children — second storage roundtrip in this request after
+        # the parent insert above. The parent is committed, so a refusal here
+        # degrades rather than raising; see ``_insert_children_or_degrade``.
+        await _insert_children_or_degrade(
+            child_payloads,
+            tenant_id=data.tenant_id,
+            parent_id=str(parent_id),
+            source="auto_chunk",
+        )
+
+        # #856: the two deferred-path backfills. Until this, the multi-fact exit
+        # scheduled nothing but the entity extraction below, so on a deferred
+        # deployment the parent stayed unembedded and unenriched forever — while
+        # the OTHER exit of this very function, the 0-1-fact fall-through, got
+        # both for free from ``ScheduleBackgroundTasks`` (whose strong branch is
+        # commented "Strong mode (or no mode set)" — this branch's exact case).
+        # Inert inline: both values are present there, so neither fires.
+        #
+        # Not reusing that step: it reads ``ctx.data["memory"]``, which this
+        # branch never populates, and it also schedules Path A contradiction
+        # detection, which auto-chunk parents have never had and which is not
+        # this fix's to add. A test pins the two exits at parity instead.
+        if defer_enrichment:
+            track_task(
+                tracked_task(
+                    _schedule_enrich_or_inline(
+                        parent_id,
+                        data.content,
+                        data.tenant_id,
+                        data.fleet_id,
+                        data.agent_id,
+                        tenant_config,
+                        agent_provided_fields=_agent_provided_enrichment_fields(data),
+                        reference_datetime=getattr(data, "reference_datetime", None),
+                        # ``_schedule_enrich_or_inline`` warns that a THIRD call
+                        # site must pass this unless ``GovernanceDecision`` has
+                        # already applied the verdict synchronously — the H-18
+                        # shape. This is that third call site, and the answer is
+                        # True: the step did run (#852), but ``defer_enrichment``
+                        # implies ``enrichment is None``, which is precisely when
+                        # it takes its "uncertain signal" branch and enforces
+                        # nothing. So it holds whenever this line can be reached,
+                        # not merely today.
+                        #
+                        # Inert in practice — the flag is read only on the inline
+                        # arm, which ``not settings.inline_enrichment`` in
+                        # ``defer_enrichment`` makes unreachable from here. The
+                        # deferred arm publishes, and ``core_api.consumer``
+                        # remediates when the ENRICHED back-channel returns.
+                        run_governance_remediation=True,
+                    ),
+                    "enrich_or_publish",
+                    parent_id,
+                    data.tenant_id,
+                )
+            )
 
         if tenant_config.entity_extraction_enabled:
             track_task(
@@ -595,21 +998,43 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                 )
             )
 
+        if embedding is None:
+            # ``ch`` rather than ``ctx.data["content_hash"]``: this branch
+            # computed its own hash for the parent above, and they are the same
+            # value only because both hash ``data.content``. Passing the one
+            # this row was actually written with keeps the shim's dedup lookup
+            # keyed on the row it is repairing.
+            track_task(
+                tracked_task(
+                    _schedule_embed_or_reembed(
+                        parent_id,
+                        data.content,
+                        data.tenant_id,
+                        content_hash=ch,
+                    ),
+                    "embed_or_publish",
+                    parent_id,
+                    data.tenant_id,
+                )
+            )
+
         return _dict_to_memory_out(parent)
 
-    # Chunking produced 0-1 facts: fall through to persist pipeline
-    from core_api.pipeline.compositions.write import build_persist_pipeline
-
+    # Chunking produced 0-1 facts: fall through to persist pipeline. Governed
+    # by the gate at the top of this function — ``build_persist_pipeline`` has
+    # no ``GovernanceDecision`` of its own, and the fast-mode fan-out in
+    # ``ScheduleBackgroundTasks`` (which is what would otherwise request
+    # post-write remediation) is keyed on a ``resolved_write_mode`` this branch
+    # never sets.
     persist_pipeline = build_persist_pipeline()
     persist_result = await persist_pipeline.run(ctx)
     if persist_result.failed:
         raise HTTPException(status_code=500, detail="Memory write pipeline failed unexpectedly")
 
     memory = ctx.data["memory"]
-    return _memory_to_out(
-        memory,
-        entity_links=[EntityLinkOut(entity_id=link.entity_id, role=link.role) for link in data.entity_links],
-    )
+    # Same persist pipeline as the main path, so the same truthful echo. This site
+    # is reachable when auto-chunking extracts 0-1 facts and falls through.
+    return _memory_out_with_created_links(ctx, memory)
 
 
 async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
@@ -648,7 +1073,8 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
 
         embedding_task = _return_cached()
     else:
-        embedding_task = get_embedding(data.content, tenant_config)
+        # Inline create: the request awaits this before responding.
+        embedding_task = get_embedding(data.content, tenant_config, background=False)
 
     enrichment_task = None
     if tenant_config.enrichment_enabled and tenant_config.enrichment_provider != "none":
@@ -756,6 +1182,27 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
 
         if len(facts) > 1:
             ch = _content_hash(data.tenant_id, data.fleet_id, data.content)
+            # Same dedup as the pipeline handler, at the same point in the
+            # branch. Applied here too rather than only on the pipeline path:
+            # this is its sibling, and on two of this audit's last three
+            # findings the filed location was only half the problem.
+            facts = _drop_duplicate_facts(
+                facts,
+                tenant_id=data.tenant_id,
+                fleet_id=data.fleet_id,
+                live_hashes=await _live_duplicate_hashes(
+                    sc,
+                    tenant_id=data.tenant_id,
+                    fleet_id=data.fleet_id,
+                    agent_id=data.agent_id,
+                    hashes=[
+                        _content_hash(data.tenant_id, data.fleet_id, f["content"])
+                        for f in facts
+                        if f.get("content")
+                    ],
+                ),
+                source="auto_chunk_legacy",
+            )
             parent_metadata = dict(metadata)
             parent_metadata["auto_chunked"] = True
             parent_metadata["child_count"] = len(facts)
@@ -764,7 +1211,7 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
             # Legacy-path auto-chunk parent insert. Mirrors the
             # pipeline-path coverage in ``_handle_auto_chunk_from_ctx``.
             async with per_tenant_storage_slot("storage_write", data.tenant_id):
-                parent = await sc.create_memory(
+                parent = await _create_memory_or_409(
                     {
                         "tenant_id": data.tenant_id,
                         "fleet_id": data.fleet_id,
@@ -814,7 +1261,9 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
 
             # Batch embeddings — single API call instead of N sequential calls
             child_texts = [fact["content"] for fact in facts]
-            child_embeddings = await get_embeddings_batch(child_texts, tenant_config)
+            # Auto-chunk children of a synchronous create — see the sibling
+            # call in the ctx-based auto-chunk handler.
+            child_embeddings = await get_embeddings_batch(child_texts, tenant_config, background=False)
 
             child_payloads = []
             for fact, child_embedding in zip(facts, child_embeddings):
@@ -841,11 +1290,15 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
                         "visibility": data.visibility or "scope_team",
                     }
                 )
-            # Legacy-path auto-chunk children — same bulkhead key as
-            # the parent insert above. See ``_handle_auto_chunk_from_ctx``
-            # for the pipeline-path equivalent.
-            async with per_tenant_storage_slot("storage_write", data.tenant_id):
-                await sc.create_memories(child_payloads)
+            # Legacy-path auto-chunk children. See
+            # ``_handle_auto_chunk_from_ctx`` for the pipeline-path equivalent;
+            # the parent is committed here too, so the same degrade applies.
+            await _insert_children_or_degrade(
+                child_payloads,
+                tenant_id=data.tenant_id,
+                parent_id=str(parent_id),
+                source="auto_chunk_legacy",
+            )
 
             if tenant_config.entity_extraction_enabled:
                 track_task(
@@ -924,7 +1377,7 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
     # route-entry slot (``per_tenant_slot("write", ...)``) was already
     # held; this slot is held only across the storage call.
     async with per_tenant_storage_slot("storage_write", data.tenant_id):
-        created = await sc.create_memory(
+        created = await _create_memory_or_409(
             {
                 "tenant_id": data.tenant_id,
                 "fleet_id": data.fleet_id,
@@ -1029,16 +1482,17 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
         )
     else:
         # P1-1: Contradiction detection moved to post-commit async
-        from core_api.services.contradiction_detector import detect_contradictions_async
+        from core_api.services.contradiction import Trigger, run_contradiction_detection
 
         track_task(
             tracked_task(
-                detect_contradictions_async(
+                run_contradiction_detection(
                     memory_id,
                     data.tenant_id,
                     data.fleet_id,
-                    data.content,
-                    embedding,
+                    trigger=Trigger.WRITE,
+                    content=data.content,
+                    embedding=embedding,
                 ),
                 "contradiction_detection",
                 memory_id,
@@ -1160,7 +1614,10 @@ async def create_memories_bulk(
     # -- Deterministic governance gate (eToro). Runs BEFORE embeddings +
     # content-hash so masked content flows through dedup + storage, and dropped
     # items never get embedded/enriched/written. The LLM free-form signal is
-    # applied post-persist via the enriched-consumer remediation (deferred bulk).
+    # applied post-persist instead: by the enriched-consumer remediation on a
+    # deferred deployment, and by the per-row ``remediate_after_enrichment`` in
+    # the fan-out loop below on an inline one (H-18 — the inline half used to be
+    # missing, so the verdict was computed and discarded).
     governance_errors: dict[int, str] = {}
     gov_pii = tenant_config.governance_pii
     if gov_pii.enabled:
@@ -1240,6 +1697,14 @@ async def create_memories_bulk(
                     [items[i].content for i in embed_indices],
                     tenant_config,
                     budget_s=embed_timeout,
+                    # Reached only when inline_embedding is on or the item is
+                    # write_mode="strong". The caller synchronously awaits this
+                    # batch in BOTH cases, which is what makes background=False
+                    # correct. The consequence of failure differs, though: under
+                    # inline_embedding the handler below fails the request
+                    # outright, while a deferred deployment with a strong item
+                    # logs and falls through to the backfill path.
+                    background=False,
                 )
         except Exception as exc:
             # Inline deployments: this is the only place a row gets its vector, so
@@ -1551,7 +2016,21 @@ async def create_memories_bulk(
             asyncio.timeout(settings.storage_bulk_timeout_seconds),
             per_tenant_storage_slot("storage_write", data.tenant_id),
         ):
-            storage_results = await sc.create_memories([d for _, d in pending])
+            try:
+                storage_results = await sc.create_memories([d for _, d in pending])
+            except DuplicateMemoryError as exc:
+                # Migration 040's constraint aborted the batch. 409, not the 500
+                # an untranslated error would give: nothing was written, and the
+                # cause is a duplicate rather than a fault.
+                #
+                # Whole-request rather than per-item, unlike everything else this
+                # function returns, because the INSERT is one statement — there is
+                # no per-item outcome to report when none of them landed. This
+                # path is reachable only by a race: the loop above already
+                # resolved every duplicate it could see, through
+                # ``existing_hashes`` and ``seen_hashes``. A retry re-runs those
+                # against the now-committed winner and succeeds.
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         # Map each storage result back to its source item via
         # ``client_request_id``. Postgres ``RETURNING`` order is
@@ -1682,7 +2161,8 @@ async def create_memories_bulk(
         # ``duplicate_attempt`` rows skip these — the original attempt
         # already enqueued them (and re-running would double-bill the
         # LLM provider for entity extraction + enrichment).
-        from core_api.services.contradiction_detector import detect_contradictions_async
+        from core_api.services.contradiction import Trigger, run_contradiction_detection
+        from core_api.services.governance_remediation import remediate_after_enrichment
 
         # CAURA-595: per-row enrich publishes when deployment_mode is deferred.
         defer_enrich_publish = (
@@ -1705,6 +2185,40 @@ async def create_memories_bulk(
                             mem_data["memory_type"],
                         ),
                         "entity_extraction",
+                        mem_id,
+                        data.tenant_id,
+                    )
+                )
+            if enrichments[orig_idx] is not None:
+                # H-18, bulk/ingest half. This path enriches SYNCHRONOUSLY
+                # above and persists ``contains_pii`` / ``business_relevance``
+                # into the row's metadata, then had nothing act on them — the
+                # same defect as the single-write inline path, on a second
+                # entry point. The deterministic gate near the top of this
+                # function already rejected pattern-detectable PII pre-write;
+                # what was discarded here is the LLM's free-form judgement.
+                #
+                # A non-None enrichment is exactly "an LLM verdict exists for
+                # this row", which can only happen under
+                # ``settings.inline_enrichment`` — so it is also mutually
+                # exclusive with ``defer_enrich_publish`` below, where the
+                # worker's consumer owns remediation instead. Bulk never runs
+                # ``GovernanceDecision`` (it does not go through the write
+                # pipeline), so there is no strong-mode double-apply to guard
+                # against here as there is in ``_schedule_enrich_or_inline``.
+                track_task(
+                    tracked_task(
+                        remediate_after_enrichment(
+                            {
+                                "id": mem_id,
+                                "content": items[orig_idx].content,
+                                "tenant_id": data.tenant_id,
+                                "agent_id": data.agent_id,
+                                "metadata_": mem_data["metadata_"],
+                            },
+                            tenant_config,
+                        ),
+                        "governance_remediation",
                         mem_id,
                         data.tenant_id,
                     )
@@ -1735,12 +2249,13 @@ async def create_memories_bulk(
             else:
                 track_task(
                     tracked_task(
-                        detect_contradictions_async(
+                        run_contradiction_detection(
                             mem_id,
                             data.tenant_id,
                             data.fleet_id,
-                            items[orig_idx].content,
-                            embeddings[orig_idx],
+                            trigger=Trigger.BULK,
+                            content=items[orig_idx].content,
+                            embedding=embeddings[orig_idx],
                         ),
                         "contradiction_detection",
                         mem_id,
@@ -1896,6 +2411,7 @@ async def _schedule_enrich_or_inline(
     *,
     agent_provided_fields: list[str] | None = None,
     reference_datetime: datetime | None = None,
+    run_governance_remediation: bool = False,
 ) -> None:
     """Enrichment counterpart of :func:`_schedule_embed_or_reembed`.
 
@@ -1914,22 +2430,74 @@ async def _schedule_enrich_or_inline(
     those columns on every redelivery.
     """
     if settings.inline_enrichment:
-        # NOTE: ``agent_provided_fields`` and ``reference_datetime``
-        # are intentionally NOT forwarded to ``_enrich_memory_background``.
-        # The inline path pre-dates these concepts and uses an
-        # equivalent gate by reading the row's current value vs the
-        # schema default (``if mem.get("memory_type") == "fact" and
-        # enrichment.memory_type:`` etc., see the body of
-        # ``_enrich_memory_background``). When the agent set
-        # ``memory_type="rule"`` the column already reads ``"rule"``
-        # not ``"fact"``, and the inline gate skips.
+        # CAURA-716: ``agent_provided_fields`` IS now forwarded here.
         #
-        # The two paths converge on the same agent-wins outcome via
-        # different mechanisms; unifying them on
-        # ``agent_provided_fields`` is a reasonable cleanup but out of
-        # scope for CAURA-595 — there's no observable behavioural
-        # delta between the gates today.
-        await _enrich_memory_background(memory_id, content, tenant_id, fleet_id, agent_id)
+        # It previously was not, on the reasoning that the inline path's
+        # value-vs-schema-default comparison was an equivalent gate — "when the
+        # agent set ``memory_type="rule"`` the column already reads ``"rule"``
+        # not ``"fact"``, and the inline gate skips" — and therefore that there
+        # was "no observable behavioural delta between the gates".
+        #
+        # There is one, and it is silent: the comparison cannot distinguish
+        # "caller pinned this to the default" from "caller said nothing". A
+        # write passing ``memory_type="fact", status="active"`` landed as
+        # ``fact``/``active`` and was rewritten to ``decision``/``confirmed``
+        # by this background task seconds later. ``fact`` and ``active`` are the
+        # schema defaults precisely because they are the neutral choices, which
+        # is exactly why a caller pins them.
+        #
+        # ``reference_datetime`` is still not forwarded — the inline path
+        # resolves relative dates against the enrichment call's own clock, and
+        # that is a separate concern.
+        await _enrich_memory_background(
+            memory_id,
+            content,
+            tenant_id,
+            fleet_id,
+            agent_id,
+            agent_provided_fields=agent_provided_fields,
+            governance_config=tenant_config,
+            run_governance_remediation=run_governance_remediation,
+        )
+        # H-18 governance (the LLM verdict) is applied INSIDE
+        # ``_enrich_memory_background``, not here.
+        #
+        # It ran here originally, and #808 is why it moved: by the time this
+        # function regained control, the atomic-fact fan-out had already
+        # written a child memory per claim extracted from the parent's
+        # content. A DROP then removed the parent and left the children — same
+        # text, no governance metadata, no audit trail. Governance has to
+        # happen before anything derived from the row exists, and only the
+        # enrichment function knows where that boundary is.
+        #
+        # ``run_governance_remediation`` is still the caller's to set, for the
+        # original reason: strong mode already enforces the same policy
+        # synchronously via ``GovernanceDecision`` and would double-apply —
+        # duplicate audit rows and a second drop on a row policy already acted
+        # on. Only the caller knows the resolved write mode, and that is what
+        # decides whether the synchronous step ran. Its call site cannot reach
+        # this branch today (``not settings.inline_enrichment`` guards it), so
+        # the flag is defence against that guard being relaxed.
+        #
+        # ⚠ The default is OFF, which means a new caller that reaches this
+        # branch without passing the flag silently skips governance — the exact
+        # shape of H-18. If you add a third call site, it MUST pass
+        # ``run_governance_remediation=True`` unless it has already applied
+        # ``GovernanceDecision`` synchronously for the same write.
+        #
+        # ``tenant_config`` is forwarded as ``governance_config``: it is the
+        # snapshot the pipeline resolved for this write, while
+        # ``_enrich_memory_background`` re-resolves its own to decide whether to
+        # enrich at all. With a 5-minute TTL cache they are the same object in
+        # practice; if an org toggles governance in the window between pipeline
+        # start and enrichment completing, the enrich decision and the policy
+        # decision can come from different snapshots. Deliberate — the write
+        # stays governed by the config it started under, not one that changed
+        # underneath it.
+        #
+        # The return value is deliberately discarded. It used to be the
+        # governance hook; it is diagnostics only now, and treating it as one
+        # again would re-apply a policy that has already run.
     else:
         await publish_memory_enrich_request(
             memory_id=memory_id,
@@ -1976,7 +2544,8 @@ async def _reembed_memory(
 
     embedding = None
     for attempt in range(1, _REEMBED_MAX_RETRIES + 1):
-        embedding = await get_embedding(content, tenant_config=tenant_config)
+        # Background re-embed (already delayed above): nobody is waiting.
+        embedding = await get_embedding(content, tenant_config=tenant_config, background=True)
         if embedding is not None:
             break
         delay = _REEMBED_BACKOFF_BASE_S * attempt
@@ -2012,16 +2581,17 @@ async def _reembed_memory(
         # queue BOTH _reembed and _enrich_memory_background, so enrich
         # can beat us to the row regardless of the deploy mode.
         if mem.get("embedding") is not None:
-            from core_api.services.contradiction_detector import detect_contradictions_async
+            from core_api.services.contradiction import Trigger, run_contradiction_detection
 
             track_task(
                 tracked_task(
-                    detect_contradictions_async(
+                    run_contradiction_detection(
                         memory_id,
                         tenant_id,
                         mem.get("fleet_id"),
-                        content,
-                        mem.get("embedding"),
+                        trigger=Trigger.REEMBED,
+                        content=content,
+                        embedding=mem.get("embedding"),
                     ),
                     "contradiction_detection_post_reembed",
                     memory_id,
@@ -2029,7 +2599,16 @@ async def _reembed_memory(
                 )
             )
             return
-        await sc.update_embedding(str(memory_id), tenant_id, embedding)
+        # Record WHICH text this vector came from. ``content`` is the string
+        # just embedded above, so hashing it here — rather than letting
+        # storage read the row's current hash — keeps the record accurate
+        # even if a content PATCH landed while we were embedding.
+        await sc.update_embedding(
+            str(memory_id),
+            tenant_id,
+            embedding,
+            embedded_content_hash=_content_hash(tenant_id, mem.get("fleet_id"), content),
+        )
         logger.info("Background re-embed succeeded for memory %s", memory_id)
     except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
         logger.exception("Background re-embed error for memory %s", memory_id)
@@ -2038,16 +2617,17 @@ async def _reembed_memory(
     # Contradiction coverage: the write path only fires contradiction
     # detection when an embedding is present at write-time. Deferred items
     # would silently skip it unless we fire it here.
-    from core_api.services.contradiction_detector import detect_contradictions_async
+    from core_api.services.contradiction import Trigger, run_contradiction_detection
 
     track_task(
         tracked_task(
-            detect_contradictions_async(
+            run_contradiction_detection(
                 memory_id,
                 tenant_id,
                 mem.get("fleet_id"),
-                content,
-                embedding,
+                trigger=Trigger.REEMBED,
+                content=content,
+                embedding=embedding,
             ),
             "contradiction_detection_post_reembed",
             memory_id,
@@ -2067,7 +2647,7 @@ async def _reembed_memories_bulk(
     falls back to ``_reembed_memory`` so a partial batch doesn't leave
     some rows without embeddings forever.
     """
-    from core_api.services.contradiction_detector import detect_contradictions_async
+    from core_api.services.contradiction import Trigger, run_contradiction_detection
     from core_api.services.organization_settings import resolve_config
 
     if not items:
@@ -2095,6 +2675,8 @@ async def _reembed_memories_bulk(
                 [content for _, content in items],
                 tenant_config,
                 budget_s=BULK_EMBEDDING_TIMEOUT_SECONDS,
+                # Background re-embed job: nobody is waiting on it.
+                background=True,
             ),
             timeout=BULK_EMBEDDING_TIMEOUT_SECONDS,
         )
@@ -2207,12 +2789,13 @@ async def _reembed_memories_bulk(
         if mem.get("embedding") is not None:
             track_task(
                 tracked_task(
-                    detect_contradictions_async(
+                    run_contradiction_detection(
                         memory_id,
                         tenant_id,
                         mem.get("fleet_id"),
-                        content,
-                        mem.get("embedding"),
+                        trigger=Trigger.REEMBED,
+                        content=content,
+                        embedding=mem.get("embedding"),
                     ),
                     "contradiction_detection_post_reembed",
                     memory_id,
@@ -2221,7 +2804,14 @@ async def _reembed_memories_bulk(
             )
             continue
         try:
-            await sc.update_embedding(str(memory_id), tenant_id, embedding)
+            # Same provenance stamp as the single-row path above: hash the
+            # text we embedded, not whatever the row says now.
+            await sc.update_embedding(
+                str(memory_id),
+                tenant_id,
+                embedding,
+                embedded_content_hash=_content_hash(tenant_id, mem.get("fleet_id"), content),
+            )
         except Exception:
             # Broad match for the same reason as the outer batch-call
             # except: httpx-layer errors, pool exhaustion, auth, etc.
@@ -2245,12 +2835,13 @@ async def _reembed_memories_bulk(
             continue
         track_task(
             tracked_task(
-                detect_contradictions_async(
+                run_contradiction_detection(
                     memory_id,
                     tenant_id,
                     mem.get("fleet_id"),
-                    content,
-                    embedding,
+                    trigger=Trigger.REEMBED,
+                    content=content,
+                    embedding=embedding,
                 ),
                 "contradiction_detection_post_reembed",
                 memory_id,
@@ -2280,45 +2871,112 @@ async def _enrich_memory_background(
     tenant_id: str,
     fleet_id: str | None,
     agent_id: str,
-) -> None:
+    *,
+    agent_provided_fields: list[str] | None = None,
+    governance_config: object | None = None,
+    run_governance_remediation: bool = False,
+) -> dict | None:
     """Background task: run LLM enrichment on a fast-path memory, then patch the row.
 
     After enrichment completes, fires entity extraction and contradiction detection
     as sub-tasks.
+
+    Returns the enriched row as governance needs to see it — ``id``, ``content``,
+    ``tenant_id``, ``agent_id`` and the merged ``metadata_`` — or ``None`` when
+    there is no live governed row to describe: enrichment disabled, the call
+    failed, the row went away, or governance DROPPED it. See the assembly site
+    below for why it is not re-read.
+
+    Non-``None`` therefore means "this row exists and has been governed", which
+    is the reading a caller is most likely to assume. Returning the pre-drop
+    snapshot instead would hand the next caller a dict for a row that had just
+    been soft-deleted. The value is diagnostics only — the sole caller discards
+    it — and it is NOT a governance hook; remediation runs inside this function.
+
+    ``governance_config`` is REQUIRED when ``run_governance_remediation`` is set,
+    and passing the flag without it raises rather than crashing downstream on an
+    attribute of ``None``.
+
+    ``agent_provided_fields`` names the enrichment columns the caller set
+    EXPLICITLY at write time (computed by ``_agent_provided_enrichment_fields``
+    from ``model_fields_set``); those are left untouched. It is the same list
+    the deferred/worker path already receives via
+    ``publish_memory_enrich_request``.
+
+    CAURA-716: this parameter previously did not exist, and the inline path
+    instead inferred caller intent by comparing the row's current value against
+    the schema default (``mem["memory_type"] == "fact"``, ``mem["status"] ==
+    "active"``, ``mem["weight"] == 0.5``). That heuristic silently loses any
+    value a caller pins TO its own default — and ``fact`` / ``active`` are
+    defaults precisely because they are the sensible neutral choices, so they
+    are exactly what a caller pins. Passing ``memory_type="fact",
+    status="active"`` produced a row that read ``fact``/``active`` at insert and
+    ``decision``/``confirmed`` seconds later. The default-comparison is retained
+    as a fallback for callers that pass no list (``None``), so behaviour is
+    unchanged for them.
     """
     from core_api.services.memory_enrichment import enrich_memory
     from core_api.services.organization_settings import resolve_config
     from core_api.services.task_tracker import tracked_task
 
+    if run_governance_remediation and governance_config is None:
+        # Programming error, raised before any work: the two parameters are
+        # independent, and ``remediate_after_enrichment`` dereferences
+        # ``cfg.governance_pii`` immediately. Without this a call site that set
+        # the flag but forgot the config would fail safe (no derived rows) but
+        # opaquely, as an AttributeError on ``None`` from two modules away —
+        # and the caller-side ⚠ note about adding a third call site is exactly
+        # the scenario in which that happens.
+        raise ValueError("run_governance_remediation=True requires governance_config")
+
     try:
         tenant_config = await resolve_config(tenant_id)
     except Exception:
         logger.exception("Background enrichment: failed to resolve config for memory %s", memory_id)
-        return
+        return None
 
     if not tenant_config.enrichment_enabled:
-        return
+        return None
 
     try:
         enrichment = await enrich_memory(content, tenant_config)
     except (ValueError, RuntimeError, OpenAIError, GoogleAPIError):
         logger.exception("Background enrichment LLM call failed for memory %s", memory_id)
-        return
+        return None
 
     if enrichment is None:
-        return
+        return None
+
+    # Returned even if the fan-out below then fails: an unrelated atomic-fact or
+    # extraction failure must not decide whether the tenant's PII policy runs.
+    governed_row: dict | None = None
 
     try:
         sc = get_storage_client()
         mem = await sc.get_memory(str(memory_id))
         if mem is None or mem.get("deleted_at") is not None:
-            return
+            return None
 
-        # Build update patch
+        # Build update patch.
+        #
+        # CAURA-716: ``_agent_pinned`` is the authoritative "the caller set this
+        # explicitly" test when the caller supplied a list. The
+        # ``value == default`` comparisons that follow it are the legacy
+        # fallback, used only when no list was passed (``agent_provided_fields
+        # is None``) — see this function's docstring for why the comparison
+        # alone is not sufficient.
+        pinned = set(agent_provided_fields or ())
+
+        def _agent_pinned(field: str, legacy_default_matches: bool) -> bool:
+            """True when the caller owns ``field`` and enrichment must not touch it."""
+            if agent_provided_fields is not None:
+                return field in pinned
+            return not legacy_default_matches
+
         patch: dict = {}
-        if mem.get("memory_type") == "fact" and enrichment.memory_type:
+        if not _agent_pinned("memory_type", mem.get("memory_type") == "fact") and enrichment.memory_type:
             patch["memory_type"] = enrichment.memory_type
-        if mem.get("weight") == 0.5 and enrichment.weight is not None:
+        if not _agent_pinned("weight", mem.get("weight") == 0.5) and enrichment.weight is not None:
             patch["weight"] = enrichment.weight
         if enrichment.title:
             patch["title"] = enrichment.title
@@ -2337,17 +2995,32 @@ async def _enrich_memory_background(
             meta["contains_pii"] = True
             if enrichment.pii_types:
                 meta["pii_types"] = enrichment.pii_types
+        # H-18: this was MISSING here, and wiring up the verdict is not enough
+        # without it. ``remediate_after_enrichment`` keys its non-business branch
+        # on ``md["business_relevance"] == "personal"``, so while the field went
+        # unpersisted the non-business DROP and KEEP_PRIVATE dispositions could
+        # not fire on an inline deployment however the tenant configured them —
+        # only the PII branch, keyed on ``contains_pii``, worked. The synchronous
+        # path and core-worker both persist it, so the modes also disagreed about
+        # what an enriched row contains. ``getattr`` defaults to the schema's own
+        # "business", as ``GovernanceDecision`` does for this field.
+        meta["business_relevance"] = getattr(enrichment, "business_relevance", "business")
         if enrichment.retrieval_hint:
             # Persisted for debugging / auditability only; no longer used
             # to shape the embedding (see CAURA-222).
             meta["retrieval_hint"] = enrichment.retrieval_hint
-        # Temporal resolution
-        if mem.get("ts_valid_start") is None and enrichment.ts_valid_start:
+        # Temporal resolution. ``None`` is not a settable value, so the legacy
+        # is-None check cannot suffer the pin-to-default problem — but route it
+        # through the same gate so all five override fields behave uniformly.
+        if (
+            not _agent_pinned("ts_valid_start", mem.get("ts_valid_start") is None)
+            and enrichment.ts_valid_start
+        ):
             patch["ts_valid_start"] = enrichment.ts_valid_start
-        if mem.get("ts_valid_end") is None and enrichment.ts_valid_end:
+        if not _agent_pinned("ts_valid_end", mem.get("ts_valid_end") is None) and enrichment.ts_valid_end:
             patch["ts_valid_end"] = enrichment.ts_valid_end
-        # Status: only upgrade from default "active"
-        if mem.get("status") == "active" and enrichment.status:
+        # Status: enrichment may set it only when the caller did not.
+        if not _agent_pinned("status", mem.get("status") == "active") and enrichment.status:
             patch["status"] = enrichment.status
 
         meta.pop("enrichment_pending", None)
@@ -2366,6 +3039,59 @@ async def _enrich_memory_background(
             if status_val:
                 await sc.update_memory_status(str(memory_id), status_val, tenant_id=tenant_id)
 
+        # The enrichment signal is persisted, so the verdict now exists. These
+        # are the five keys ``remediate_after_enrichment`` reads, assembled from
+        # this frame rather than re-read: a re-read goes through ``get_memory``,
+        # which routes to the READ REPLICA when ``CORE_STORAGE_READ_URL`` is set,
+        # and a replica even briefly behind the PATCH above returns the
+        # pre-enrichment row with ``contains_pii`` / ``business_relevance`` unset.
+        # Governance would then silently no-op on exactly the content it exists
+        # to catch, on exactly the deployments large enough to run a read split.
+        governed_row = {
+            "id": str(memory_id),
+            "content": content,
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "metadata_": meta,
+        }
+
+    except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError):
+        logger.exception("Background enrichment error for memory %s", memory_id)
+        return governed_row
+
+    # ── Govern, between enriching and deriving ────────────────────────────────
+    #
+    # #808: the verdict is applied HERE, before anything derived from this row
+    # exists. It used to run in the CALLER, after this function returned — by
+    # which time the atomic-fact fan-out below had already written a child
+    # memory per claim extracted from this same content. On a DROP the parent
+    # was then soft-deleted and the children survived it: same text, no
+    # governance metadata, no audit row tying them to the drop. A policy that
+    # says this row must not exist must not first spawn rows derived from it.
+    # The early return also skips the entity extraction scheduled at the end —
+    # entities mined out of dropped content are the same leak in another table.
+    #
+    # Deliberately OUTSIDE both ``try`` blocks, and that is why this function
+    # has two of them. The enclosing ``tracked_task`` turns an exception here
+    # into a ``BackgroundTaskLog`` row; letting the enrichment handler catch it
+    # would downgrade an unenforced governance policy to a log line among
+    # ordinary enrichment errors — the property
+    # ``test_remediation_failure_surfaces_to_the_task_tracker`` pins. Raising
+    # also skips the fan-out, which is the fail-safe order: a policy that could
+    # not be applied must not be followed by rows it might have forbidden.
+    effective_visibility: str | None = None
+    if run_governance_remediation and governed_row is not None:
+        from core_api.services.governance_remediation import remediate_after_enrichment
+
+        outcome = await remediate_after_enrichment(governed_row, governance_config)
+        if outcome.dropped:
+            # ``None``: the row no longer exists, and the return value's whole
+            # meaning is "here is the live governed row".
+            return None
+        effective_visibility = outcome.visibility
+
+    # ── Derive: rows and links built out of the governed content ──────────────
+    try:
         memory_type = patch.get("memory_type") or mem.get("memory_type")
 
         # Hint-based re-embed removed (CAURA-222): the hot path embeds raw
@@ -2388,28 +3114,95 @@ async def _enrich_memory_background(
         atomic_facts = getattr(enrichment, "atomic_facts", None) or []
         if len(atomic_facts) >= 1:
             parent_ts_start = mem.get("ts_valid_start")
-            parent_visibility = mem.get("visibility") or "scope_team"
+            # ``effective_visibility`` when remediation downgraded the parent:
+            # ``mem`` was read before the PATCH and still holds the pre-policy
+            # value, so reading it here would hand the children the visibility
+            # keep_private just took away (#808). Not re-fetched — the row read
+            # can route to a replica, which is the H-02 shape the governed_row
+            # assembly above documents.
+            parent_visibility = effective_visibility or mem.get("visibility") or "scope_team"
             parent_weight = patch.get("weight") or mem.get("weight") or 0.5
             fanout_created = 0
+            fanout_unembedded = 0
+            # The fanout's dedup lookup (OSS #814), batched once for every fact
+            # rather than per-fact: this loop calls ``create_memory`` (singular)
+            # per child, so a per-fact lookup would double the roundtrips on a
+            # path that already runs one write each.
+            fanout_live_hashes = await _live_duplicate_hashes(
+                sc,
+                tenant_id=tenant_id,
+                fleet_id=fleet_id,
+                agent_id=agent_id,
+                hashes=[_content_hash(tenant_id, fleet_id, f.content) for f in atomic_facts],
+            )
+            # Repeats within this fanout. The live set cannot cover them: those
+            # rows do not exist yet at lookup time, and each is written by its
+            # own ``create_memory`` call, so the second one would land as a
+            # duplicate of a row this very loop just created.
+            fanout_seen_hashes: set[str] = set()
+            fanout_deduped = 0
             for fact in atomic_facts:
                 fact_content = fact.content
+                child_ch = _content_hash(tenant_id, fleet_id, fact_content)
+                if child_ch in fanout_live_hashes or child_ch in fanout_seen_hashes:
+                    # The fact is already recorded — either from an earlier
+                    # enrichment of this parent, or earlier in this very loop.
+                    # Writing it again is one of the two reasons prod carries
+                    # duplicate content-hash groups with no concurrency.
+                    #
+                    # Before the embed below on purpose: a dropped fact must not
+                    # cost an embedding call. This ``continue`` is unlike the two
+                    # inside the embed block — those exit AFTER deciding
+                    # ``child_embedding`` precisely so a failed embed still
+                    # persists the fact (see below); this one decides the fact
+                    # should not be persisted at all, so it is the one case where
+                    # skipping ahead of the embed is correct.
+                    fanout_deduped += 1
+                    continue
+                fanout_seen_hashes.add(child_ch)
+                # A failed embed must NOT skip the fact. Both exits here used
+                # to ``continue`` BEFORE ``create_memory``, so the child row
+                # was never written at all and the fact was lost outright —
+                # nothing downstream could repair what does not exist. Persist
+                # unembedded instead, exactly as the auto-chunk parent insert
+                # does, and hand the vector off to the normal recovery path
+                # below.
+                #
+                # The two arms are not symmetric in how often they fire.
+                # ``get_embedding`` RETURNS None once its retry budget is
+                # exhausted rather than raising (see
+                # ``common/embedding/_service.py::_run_with_retry``), so under
+                # the gate saturation this path actually meets, the None arm is
+                # the common one. It was not silent globally — ``_run_with_retry``
+                # logs its own terminal error — but nothing here attributed the
+                # loss to a parent, a fact, or this code path.
+                child_embedding: list[float] | None = None
                 try:
-                    child_embedding = await get_embedding(fact_content, tenant_config=tenant_config)
+                    child_embedding = await get_embedding(
+                        fact_content, tenant_config=tenant_config, background=True
+                    )
                 except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
                     logger.warning(
-                        "atomic-fact embed failed for memory %s (skipping this fact)",
+                        "atomic-fact embed raised for memory %s; persisting the fact unembedded",
                         memory_id,
                         exc_info=True,
                     )
-                    continue
-                if child_embedding is None:
-                    continue
-                child_ch = _content_hash(tenant_id, fleet_id, fact_content)
                 child_meta = {
                     "parent_memory_id": str(memory_id),
                     "source": "atomic_fact_fanout",
                     "retrieval_hint": fact.retrieval_hint or "",
                 }
+                # #808: carry the parent's verdict onto the derived rows. A DROP
+                # never reaches here — the early return above — so this only
+                # ever labels rows the policy allowed to live.
+                _inherit_governance_signals(child_meta, meta)
+                if child_embedding is None:
+                    # ``embedding_pending`` is public API, not bookkeeping:
+                    # ``MemoryOut.metadata`` documents it, agents are told to
+                    # read it, and core-worker clears it when the vector
+                    # lands. Without it a fan-out child is indistinguishable
+                    # from a fully-embedded row to every consumer.
+                    child_meta["embedding_pending"] = True
                 # Intentionally NOT wrapped in ``per_tenant_storage_slot``
                 # (CAURA-602 follow-up): this site runs inside
                 # ``_enrich_memory_background``, a fire-and-forget task
@@ -2424,7 +3217,7 @@ async def _enrich_memory_background(
                 # storage-pool occupancy, revisit by giving the task
                 # its own deadline first.
                 try:
-                    await sc.create_memory(
+                    child = await sc.create_memory(
                         {
                             "tenant_id": tenant_id,
                             "fleet_id": fleet_id,
@@ -2440,17 +3233,120 @@ async def _enrich_memory_background(
                             "ts_valid_start": parent_ts_start,
                         }
                     )
-                    fanout_created += 1
+                except DuplicateMemoryError:
+                    # NOT an error here, and deliberately not routed through
+                    # ``_create_memory_or_409``: this loop has no HTTP contract to
+                    # honour — it runs inside a fire-and-forget background task, so
+                    # a 409 would go nowhere and abort the remaining facts.
+                    #
+                    # A 409 means the fact is already recorded, which is the
+                    # outcome this loop wants. The dedup lookup above catches the
+                    # ordinary case; reaching here means a concurrent enrichment of
+                    # the same parent committed it in between. Counted with the
+                    # deduped facts because that is what it is.
+                    fanout_deduped += 1
+                    continue
                 except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
                     logger.warning(
                         "atomic-fact create_memory failed for parent %s",
                         memory_id,
                         exc_info=True,
                     )
+                    continue
+                # Everything below is post-write and deliberately OUTSIDE the
+                # try above. Folding it in would let a failure in the RECOVERY
+                # step surface as "create_memory failed" for a row that was in
+                # fact written — mislabelling the one log an operator would
+                # use to decide whether the fact exists.
+                fanout_created += 1
+                if child_embedding is None:
+                    # Durable handoff rather than waiting for the nightly
+                    # sweep. The sweep is the floor, not the mechanism:
+                    # ``embed_backfill_enabled`` defaults to FALSE, so a
+                    # deployment that has not turned it on would leave these
+                    # rows stranded indefinitely — which is how ~430 memories
+                    # were stranded in the 2026-07-27 incident this module
+                    # already carries a postmortem for.
+                    # ``_schedule_embed_or_reembed`` publishes EMBED_REQUESTED
+                    # in deferred mode (Pub/Sub owns retry/backoff/DLQ, paced
+                    # by the consumer's per-tenant slots) and retries
+                    # in-process otherwise.
+                    child_id = child.get("id") if isinstance(child, dict) else None
+                    if not child_id:
+                        # Loud, and NOT folded into fanout_unembedded: this
+                        # row is unembedded with no repair queued, which is a
+                        # strictly worse state than the counted one. The
+                        # nightly sweep remains its only recovery, and only
+                        # where enabled.
+                        # Log the response SHAPE, never the response. ``child``
+                        # is the created row, so it carries the raw fact text
+                        # and its metadata; interpolating it here would put
+                        # memory content — and any PII in it — into an ERROR
+                        # log. The key set is what actually diagnoses this
+                        # (which field the storage contract dropped) and is
+                        # content-free.
+                        logger.error(
+                            "atomic-fact child persisted unembedded but create_memory "
+                            "returned no usable id (response keys: %s) for parent %s; "
+                            "NO re-embed scheduled — recovery depends on the nightly sweep",
+                            sorted(child) if isinstance(child, dict) else type(child).__name__,
+                            memory_id,
+                        )
+                        continue
+                    # Counted only once the repair is actually queued, so the
+                    # summary below cannot claim a scheduled re-embed that was
+                    # never issued.
+                    fanout_unembedded += 1
+                    child_uuid = UUID(str(child_id))
+                    track_task(
+                        tracked_task(
+                            _schedule_embed_or_reembed(
+                                child_uuid,
+                                fact_content,
+                                tenant_id,
+                                content_hash=child_ch,
+                                is_failure_fallback=True,
+                            ),
+                            "embed_or_publish",
+                            # The CHILD's id, not the parent's. ``tracked_task``
+                            # uses this to label the BackgroundTaskLog row and
+                            # the failure log, so passing ``memory_id`` here
+                            # would file a failed child re-embed against the
+                            # parent — leaving the row that actually needs
+                            # repair untraceable. Every other call site passes
+                            # the same id to both the coroutine and the wrapper.
+                            child_uuid,
+                            tenant_id,
+                        )
+                    )
             if fanout_created:
                 logger.info(
                     "atomic-fact fan-out created %d children for parent %s",
                     fanout_created,
+                    memory_id,
+                )
+            if fanout_deduped:
+                # Its own line rather than a field on the created line above,
+                # because it explains a discrepancy an operator would otherwise
+                # read as loss: the enrichment reported N atomic facts and fewer
+                # than N children exist. INFO because a re-enriched parent
+                # hitting this is the dedup working, not a fault.
+                logger.info(
+                    "atomic-fact fan-out skipped %d facts already recorded for parent %s",
+                    fanout_deduped,
+                    memory_id,
+                )
+            if fanout_unembedded:
+                # WARNING rather than a field on the info line above, because
+                # it needs to be alertable on its own: it attributes an
+                # embedding-tier degradation to this specific path and parent,
+                # which the global coverage tick cannot do. Each of these
+                # children has a re-embed scheduled above; the count is what
+                # says how much of this fan-out is riding on that.
+                logger.warning(
+                    "atomic-fact fan-out persisted %d children without embeddings "
+                    "for parent %s; re-embed scheduled for each",
+                    fanout_unembedded,
                     memory_id,
                 )
 
@@ -2485,7 +3381,12 @@ async def _enrich_memory_background(
         # respective worker PATCHes land.
         logger.info("Background enrichment succeeded for memory %s", memory_id)
     except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError):
-        logger.exception("Background enrichment error for memory %s", memory_id)
+        # Distinct from the enrichment handler above so the two phases are
+        # tellable apart in logs: by this point the row is enriched AND
+        # governed, and only the derived rows failed.
+        logger.exception("Background enrichment fan-out error for memory %s", memory_id)
+
+    return governed_row
 
 
 async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> None:
@@ -2558,7 +3459,8 @@ async def update_memory(
     # Content change: re-embed, re-hash, check dedup
     if content_changed:
         tenant_config = await resolve_config(tenant_id)
-        new_embedding = await get_embedding(data.content, tenant_config)
+        # Synchronous update: the caller awaits the re-embed.
+        new_embedding = await get_embedding(data.content, tenant_config, background=False)
         new_hash = _content_hash(tenant_id, mem.get("fleet_id"), data.content)
 
         # Dedup check (exclude self)
@@ -2590,8 +3492,19 @@ async def update_memory(
     patch: dict = {}
     if content_changed:
         patch["content"] = data.content
-        if new_embedding is not None:
-            patch["embedding"] = new_embedding
+        # Write the embedding unconditionally — including None. ``get_embedding``
+        # returns None only on failure (exhausted retries, or a degraded /
+        # misconfigured provider), and its contract is that callers "persist rows
+        # with ``embedding=NULL`` and let the async-embed worker backfill".
+        #
+        # Guarding this on ``is not None`` omitted the key instead, which left the
+        # PREVIOUS content's vector on a row whose content had just changed. That
+        # is wrong twice over: the row is silently mis-embedded (recall ranks it
+        # against text it no longer holds, with no error anywhere), and because
+        # the column is non-NULL neither the async-embed worker nor the nightly
+        # NULL-embedding sweep can ever see it — so it stays wrong forever. NULL
+        # is the honest state and the one the existing repair paths look for.
+        patch["embedding"] = new_embedding
         patch["content_hash"] = _content_hash(tenant_id, mem.get("fleet_id"), data.content)
         # P1-2: Clear stale contradiction/supersession state on content change
         if mem.get("supersedes_id") is not None:
@@ -2765,16 +3678,17 @@ async def update_memory(
                 )
             )
         # P1-2: Re-check contradictions after content update
-        from core_api.services.contradiction_detector import detect_contradictions_async
+        from core_api.services.contradiction import Trigger, run_contradiction_detection
 
         track_task(
             tracked_task(
-                detect_contradictions_async(
+                run_contradiction_detection(
                     memory_id,
                     tenant_id,
                     updated.get("fleet_id"),
-                    updated.get("content"),
-                    new_embedding,
+                    trigger=Trigger.UPDATE,
+                    content=updated.get("content"),
+                    embedding=new_embedding,
                 ),
                 "contradiction_detection",
                 memory_id,
@@ -3041,6 +3955,20 @@ async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
         async with per_tenant_slot("embed", tenant_id):
             embedding = await asyncio.wait_for(get_query_embedding(query, tenant_config), timeout=10.0)
         if embedding is None:
+            # Two different things arrive as ``None`` and they are not the
+            # same incident. A blank query cannot be embedded by anyone, and
+            # calling that "service unavailable" sent operators after a
+            # healthy backend for the whole 2026-08-18 17:00-18:59 window —
+            # the embedder was answering in ~7 ms while every one of these
+            # blamed it.
+            #
+            # A distinct TYPE, not just a distinct message: every caller
+            # funnels ``ValueError`` into ``HTTPException(503)``, so a message
+            # alone still pages someone for a 5xx. ``BlankQuery`` subclasses
+            # ``ValueError`` so any handler that does not know about it keeps
+            # the old behaviour, and the two that do can answer 400.
+            if is_blank_text(query):
+                raise BlankQuery("Search query must not be blank")
             raise ValueError("Embedding service unavailable")
         await cache_set(_cache_key, json.dumps(embedding), ttl=EMBEDDING_CACHE_TTL)
         fut.set_result(embedding)
@@ -3510,6 +4438,13 @@ async def _search_memories_legacy(
         emb_task.cancel()
         ent_task.cancel()
         raise HTTPException(status_code=504, detail="Search embedding timed out")
+    except BlankQuery as exc:
+        # Same 400-not-503 reasoning as the pipeline step. Kept in step even
+        # though this path is deprecated: a divergence here would be a trap
+        # for whoever flips ``_USE_PIPELINE_SEARCH`` back during a hotfix.
+        emb_task.cancel()
+        ent_task.cancel()
+        raise HTTPException(status_code=400, detail=str(exc))
     except ValueError as exc:
         emb_task.cancel()
         ent_task.cancel()
