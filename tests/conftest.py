@@ -73,7 +73,13 @@ TEST_DB_URL = os.environ.get(
 # tenant without taking a fixture argument. None of them relies on cross-test
 # sharing, so they could each mint their own; threading a tenant through those
 # helpers is the follow-up that would let this go away.
-TENANT_ID = f"test-tenant-{uuid.uuid4().hex[:8]}"
+# The prefix the end-of-run sweep matches on, and the only place it is written.
+# The two sides that must agree — every minter here and the DELETE in
+# ``_setup_schema`` — were previously coupled by a note in a docstring, which is
+# what #858 cost: a file minting its own prefix leaked every row it ever wrote.
+SWEEP_TENANT_PREFIX = "test-tenant-"
+
+TENANT_ID = f"{SWEEP_TENANT_PREFIX}{uuid.uuid4().hex[:8]}"
 FLEET_ID = "test-fleet"
 AGENT_ID = "test-agent"
 
@@ -101,6 +107,24 @@ def get_admin_headers() -> dict:
 def uid() -> str:
     """Short unique suffix — for distinct content (409s) and distinct tenant ids."""
     return uuid.uuid4().hex[:8]
+
+
+def new_tenant_id() -> str:
+    """A tenant id unique to one test AND visible to the end-of-run sweep.
+
+    The prefix is not cosmetic: ``_setup_schema`` cleans with
+    ``tenant_id LIKE 'test-tenant-%'``, so a tenant minted with any other prefix
+    is never reclaimed and its committed rows outlive the run. That is how #858
+    happened — two interview files minted ``t-`` tenants, their job documents
+    accumulated across every local run, and a cross-tenant sweep endpoint under
+    test started reading other runs' residue.
+
+    Defined here rather than repeated at call sites so the prefix and the DELETE
+    that depends on it stay in one file. The ``tenant_id`` fixture is the same
+    value for tests that can take a fixture; this is for the ones that mint
+    several per test.
+    """
+    return f"{SWEEP_TENANT_PREFIX}{uid()}"
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +194,8 @@ async def _setup_schema(_engine):
         ):
             try:
                 await conn.execute(
-                    text(f"DELETE FROM {table} WHERE tenant_id LIKE 'test-tenant-%'")
+                    text(f"DELETE FROM {table} WHERE tenant_id LIKE :prefix"),
+                    {"prefix": f"{SWEEP_TENANT_PREFIX}%"},
                 )
             except Exception:
                 # Best-effort, and the ONLY thing that ever removes rows written
@@ -186,8 +211,9 @@ async def _setup_schema(_engine):
             await conn.execute(
                 text(
                     "DELETE FROM memory_entity_links WHERE memory_id IN "
-                    "(SELECT id FROM memories WHERE tenant_id LIKE 'test-tenant-%')"
-                )
+                    "(SELECT id FROM memories WHERE tenant_id LIKE :prefix)"
+                ),
+                {"prefix": f"{SWEEP_TENANT_PREFIX}%"},
             )
         except Exception:
             pass
@@ -304,9 +330,10 @@ def tenant_id():
     reason, or failing only when the run order changed. Nothing removes those rows
     mid-run; see the sweep in ``_setup_schema`` for why.
 
-    Keep the ``test-tenant-`` prefix: that sweep matches on it.
+    Keep the ``test-tenant-`` prefix: that sweep matches on it — see
+    :func:`new_tenant_id`, which owns it.
     """
-    return f"test-tenant-{uid()}"
+    return new_tenant_id()
 
 
 @pytest.fixture
