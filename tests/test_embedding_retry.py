@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from common.embedding import _service as embedding_service
 from core_api.constants import (
     EMBEDDING_REEMBED_BATCH_SIZE,
     EMBEDDING_REEMBED_DELAY_S,
@@ -21,6 +22,7 @@ from core_api.constants import (
     EMBEDDING_RETRY_DELAY_S,
     VECTOR_DIM,
 )
+from tests._scoped_module import scoped
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +74,7 @@ async def test_retry_exhaustion_returns_none():
             "common.embedding._service.get_embedding_provider",
             return_value=mock_provider,
         ),
-        patch("common.embedding._service.asyncio.sleep", new_callable=AsyncMock),
+        patch.object(embedding_service, "asyncio", scoped(asyncio, sleep=AsyncMock())),
     ):
         result = await get_embedding("hello world", background=False)
 
@@ -99,7 +101,7 @@ async def test_success_on_second_attempt():
             "common.embedding._service.get_embedding_provider",
             return_value=mock_provider,
         ),
-        patch("common.embedding._service.asyncio.sleep", new_callable=AsyncMock),
+        patch.object(embedding_service, "asyncio", scoped(asyncio, sleep=AsyncMock())),
     ):
         result = await get_embedding("hello world", background=False)
 

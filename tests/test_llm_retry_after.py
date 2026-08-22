@@ -24,6 +24,7 @@ sustains itself.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 
@@ -33,6 +34,7 @@ import pytest
 
 from common.llm import retry as retry_mod
 from common.llm.retry import call_with_fallback, call_with_retry, retry_after_seconds
+from tests._scoped_module import scoped
 
 
 def _rate_limited(**headers: str) -> openai.RateLimitError:
@@ -47,13 +49,19 @@ def _rate_limited(**headers: str) -> openai.RateLimitError:
 
 @pytest.fixture
 def slept(monkeypatch):
-    """Record every sleep instead of taking it."""
+    """Record every sleep ``call_with_retry`` takes, instead of taking it.
+
+    Scoped to ``retry_mod``'s own view of ``asyncio``. Patching
+    ``retry_mod.asyncio.sleep`` would patch the shared module and record
+    every task in the process — see ``tests/_scoped_module`` for the CI
+    failure that cost.
+    """
     recorded: list[float] = []
 
     async def _fake_sleep(seconds: float) -> None:
         recorded.append(seconds)
 
-    monkeypatch.setattr(retry_mod.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(retry_mod, "asyncio", scoped(asyncio, sleep=_fake_sleep))
     # Jitter off by default so a delay assertion is exact; the two tests
     # that care about jitter turn it back on themselves.
     monkeypatch.setattr(retry_mod, "LLM_RETRY_JITTER_FRACTION", 0.0)
@@ -62,6 +70,57 @@ def slept(monkeypatch):
 
 async def _always(exc: BaseException):
     raise exc
+
+
+@pytest.mark.unit
+class TestTheRecorderRecordsOnlyUs:
+    """Every delay assertion below is only worth what this class pins.
+
+    caura#863 failed here with ``[0.7359102269208245, 1.0, 2.0]``: a
+    leaked background task retrying ``/memories/similar-candidates``
+    reached its third backoff inside this fixture's window, and the
+    recorder took the credit. Nothing in the suite said the recorder was
+    supposed to be ours alone, so nothing caught it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_sleep_taken_elsewhere_is_not_recorded(self, slept):
+        """This module is not ``common.llm.retry``, so its sleeps are its own."""
+        await asyncio.sleep(0)
+
+        assert slept == []
+
+    @pytest.mark.asyncio
+    async def test_a_sleep_taken_elsewhere_still_really_happens(self, slept):
+        """Scoping must not silence the rest of the process either.
+
+        A globally faked ``sleep`` does not merely mis-attribute: it turns
+        every other task's backoff into a no-op, so a leaked retry loop
+        spins through its remaining attempts at once. Whatever else is
+        running must be left alone, not sped up.
+        """
+        started = asyncio.get_running_loop().time()
+        await asyncio.sleep(0.05)
+
+        assert asyncio.get_running_loop().time() - started >= 0.05
+
+    @pytest.mark.asyncio
+    async def test_the_retry_loop_is_still_recorded(self, slept):
+        """The inverse, and the one that keeps the rest of the file honest.
+
+        A fixture scoped to the WRONG module records nothing at all, and
+        every ``assert slept == [...]`` here would then be asserting on an
+        empty list that no code path can fill.
+        """
+        with pytest.raises(openai.RateLimitError):
+            await call_with_retry(
+                lambda: _always(_rate_limited()),
+                label="t",
+                max_attempts=2,
+                base_delay=1.0,
+            )
+
+        assert slept == [1.0]
 
 
 @pytest.mark.unit
