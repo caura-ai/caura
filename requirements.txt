@@ -27,7 +27,7 @@ python-jose[cryptography]>=3.3
 pyotp>=2.9
 cachetools>=7.1.7
 
-croniter>=2.0
+croniter>=6.2.4
 
 # SQLite async driver (for OSS standalone storage backend)
 aiosqlite>=0.19,<1
