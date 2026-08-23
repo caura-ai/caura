@@ -58,7 +58,7 @@ The fastest way to see Caura work. Standalone mode runs single-tenant with auth 
 
 ```bash
 git clone https://github.com/caura-ai/caura.git
-cd caura-memclaw
+cd caura
 cp .env.example .env && echo "IS_STANDALONE=true" >> .env   # single-tenant, no API key
 docker compose up -d                                        # Postgres + pgvector + Redis + API (~30s)
 
@@ -129,7 +129,7 @@ The fastest path is Docker Compose — one command brings up Postgres + pgvector
 
 ```bash
 git clone https://github.com/caura-ai/caura.git
-cd caura-memclaw
+cd caura
 cp .env.example .env
 ```
 
@@ -767,7 +767,7 @@ The **reader/writer split** is an opt-in topology for high-write-rate deploys th
 
 2. **Snapshot the database.** A `pg_dump` is the safest fallback. Replace
    `<container>` with the running PostgreSQL container name (typically
-   `caura-memclaw-db-1`):
+   `caura-db-1`):
    ```bash
    docker compose up -d db    # bring just the DB back
    docker exec <container> pg_dump -U memclaw memclaw > backup-pre-v2.sql
@@ -1043,7 +1043,7 @@ All configuration is via environment variables or `.env`. See `.env.example` for
 <summary>Project structure</summary>
 
 ```
-memclaw/
+caura/
 ├── core-api/                      # Main FastAPI service
 │   └── src/core_api/
 │       ├── app.py                 # FastAPI app, lifespan, middleware
@@ -1264,7 +1264,7 @@ Mem0 and Zep focus on memory for individual agents; accuracy benchmarks
 cluster all three tools in a narrow band. Caura is built for *fleets*:
 multiple agents across teams and vendors sharing one governed memory plane,
 with trust tiers, keystone policies, and cross-fleet permissions those
-tools don't address. See [How Caura compares](#how-memclaw-compares).
+tools don't address. See [How Caura compares](#how-caura-compares).
 
 **Does Caura work with Claude Desktop, Claude Code, Cursor, or Windsurf?**
 Yes — Caura is MCP-native. Paste a JSON config with a URL and API key
