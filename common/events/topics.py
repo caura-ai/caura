@@ -100,3 +100,100 @@ class Topics:
     Pipeline = Pipeline
     Lifecycle = Lifecycle
     Org = Org
+
+
+# ── Brand rename: one publish name, a set of subscribe names ────────────────
+#
+# A Pub/Sub topic cannot be renamed. It is created and deleted, and a
+# subscription cannot move between topics, so the cutover is expand -> migrate
+# -> contract: create twin topics, have every subscriber bind both names, flip
+# the publishers one family at a time, drain the old subscriptions, then delete
+# them.
+#
+# What that needs from this module is a distinction it did not previously have
+# to make, because one name served both roles:
+#
+#   * the PUBLISH name — exactly one, always. Publishing an event under both
+#     names at once delivers it twice to every subscriber bound to both, which
+#     is the precise failure the ordering above exists to avoid. There is
+#     deliberately no function here that returns more than one publish name, so
+#     "just publish to both for a while" is not something this API can express.
+#   * the SUBSCRIBE set — one name or two. A subscriber holding both is what
+#     makes flipping a publisher lossless: the message lands on whichever name
+#     the publisher used, and a handler is already waiting on it.
+#
+# The enum members above are deliberately untouched. They still ARE their
+# string values, so equality, dict-key hashing, f-string formatting and
+# ``topic_path`` building all keep working exactly as the module docstring
+# promises. Everything below is derived from them.
+
+RENAMED_PREFIX = "caura."
+
+
+def renamed(topic: str) -> str:
+    """The post-rename name for ``topic``.
+
+    Rewrites the FIRST dot-segment rather than matching the outgoing brand by
+    name, mirroring the ``replace(n, "/^[^.]+\\./", ...)`` that derives the twin
+    topics in Terraform. Two consequences worth having: it is idempotent, so a
+    name already carrying the new prefix maps to itself and nothing can
+    double-rename; and this file gains no new occurrence of the outgoing brand
+    for the rule-7 ratchet to count. A name with no dot is returned unchanged.
+    """
+    _, dot, rest = str(topic).partition(".")
+    return RENAMED_PREFIX + rest if dot else str(topic)
+
+
+def family(topic: str) -> str:
+    """The topic family — the segment between the brand and the event name.
+
+    ``<brand>.pipeline.entity-extracted`` -> ``pipeline``. Publishers flip one
+    family at a time, so this is the unit that decision is made in. Returns ""
+    for a name that has no family segment.
+    """
+    parts = str(topic).split(".")
+    return parts[1] if len(parts) > 2 else ""
+
+
+# Families whose PUBLISHERS have been flipped to the renamed topics.
+#
+# Empty, and that is the point: with nothing here, ``publish_name`` is the
+# identity and publishing is byte-for-byte what it was before this module
+# changed. That is what makes binding both names safe to ship ahead of any
+# particular environment's deploy.
+#
+# Flipping a family is a separate, later step. Add ONE family at a time, and
+# only once every subscriber of that family is confirmed deployed and bound to
+# both names — confirmed per running service, not per merged pull request; a
+# merge is not a vendor and a vendor is not a deploy. Order by blast radius:
+# "pipeline" or "org" first, and "audit" LAST, because those rows are
+# hash-chained and a lost or reordered audit event is the one failure in this
+# programme that cannot be undone.
+FLIPPED_FAMILIES: frozenset[str] = frozenset()
+
+
+def publish_name(topic: str) -> str:
+    """The single name to publish ``topic`` under.
+
+    Returns one name. Never two — see the note above on why dual-publishing is
+    the version of this cutover that duplicates every event.
+    """
+    return renamed(topic) if family(topic) in FLIPPED_FAMILIES else str(topic)
+
+
+def subscribe_names(topic: str, *, dual: bool) -> tuple[str, ...]:
+    """Every name a subscriber of ``topic`` has to bind.
+
+    ``dual=False`` returns just the current name, which is the default and
+    keeps a process's subscription set identical to what it was. ``dual=True``
+    returns both, and is only safe where the twin subscription actually exists —
+    on the Pub/Sub backend a subscription that is absent is a permanent
+    ``NotFound``, which halts the pull loop and takes the health endpoint down.
+    Never returns a duplicate, so a name that is already renamed yields one
+    entry rather than the same string twice.
+    """
+    current = str(topic)
+    if not dual:
+        return (current,)
+    new = renamed(current)
+    return (current,) if new == current else (current, new)

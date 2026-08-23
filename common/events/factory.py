@@ -59,6 +59,23 @@ def get_event_bus() -> EventBus:
             topic_prefix = (os.getenv("EVENT_BUS_TOPIC_PREFIX") or "").strip()
             if topic_prefix:
                 kwargs["topic_prefix"] = topic_prefix
+            # Brand rename: bind every subscribed topic under its renamed twin
+            # as well, so a later publisher flip cannot land a message on a
+            # name nothing is pulling.
+            #
+            # Requires an explicit affirmative value, and anything else — unset,
+            # empty, whitespace, "0", a typo — means OFF. That direction is
+            # deliberate and it is the whole safety property of this step. OFF
+            # is byte-identical to the previous behaviour, so the code ships
+            # everywhere ahead of any environment's infrastructure; the cost of
+            # a value that fails to parse is only that the cutover has not
+            # started yet, which the next step verifies per service anyway.
+            # ON in an environment whose twin subscriptions do not exist is a
+            # permanent NotFound on every pull loop and a red readiness probe,
+            # so a blank or fat-fingered value must never be read as "yes".
+            kwargs["dual_subscribe"] = (
+                os.getenv("EVENT_BUS_DUAL_SUBSCRIBE") or ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
             # Environment identity for the cross-env fan-out guard. Two
             # environments sharing one GCP project also share its topic
             # namespace, so Pub/Sub delivers every published message to

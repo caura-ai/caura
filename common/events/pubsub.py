@@ -48,6 +48,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from common.events.base import Event, EventBus, EventHandler
+from common.events.topics import publish_name, subscribe_names
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,19 @@ class PubSubEventBus(EventBus):
         error_backoff: float = 5.0,
         publish_concurrency: int = 32,
         topic_prefix: str = "",
+        # Bind each subscribed topic under its renamed twin as well as its
+        # current name, so a publisher flip later cannot land a message on a
+        # name nothing is pulling. Defaults OFF, and the default is the whole
+        # safety argument: with it off this bus's subscription set is
+        # byte-identical to what it was, so the code can be merged, vendored
+        # and deployed everywhere before any environment has the twin
+        # subscriptions. Turning it ON in an environment whose Terraform has
+        # not been applied is NOT a soft failure — the twin subscription is
+        # absent, the pull loop takes a permanent NotFound and halts, and
+        # ``is_healthy`` turns the readiness endpoint red. Set
+        # EVENT_BUS_DUAL_SUBSCRIBE per environment only after the expand apply
+        # has landed there, and verify it per service.
+        dual_subscribe: bool = False,
     ) -> None:
         # No SDK import at construction: the factory can return this
         # instance even in environments where google-cloud-pubsub isn't
@@ -142,6 +156,7 @@ class PubSubEventBus(EventBus):
         # (via the factory) to isolate topics across environments that share one GCP
         # project, eliminating cross-env message fan-out. See _topic_name().
         self._topic_prefix = topic_prefix
+        self._dual_subscribe = dual_subscribe
         self._max_messages = max_messages
         self._pull_timeout = pull_timeout
         self._error_backoff = error_backoff
@@ -424,7 +439,14 @@ class PubSubEventBus(EventBus):
                 "events. Call `await bus.start()` at service startup."
             )
         publisher = await self._ensure_publisher()
-        topic_path = publisher.topic_path(self._project_id, self._topic_name(topic))
+        # ``publish_name`` resolves the ONE name this topic's family currently
+        # publishes under — the old one until that family is flipped. Resolved
+        # here rather than at each publisher call site so the flip is a single
+        # decision per family in one file, instead of a sweep across every
+        # publisher at the riskiest moment of the cutover.
+        topic_path = publisher.topic_path(
+            self._project_id, self._topic_name(publish_name(topic))
+        )
         payload = event.model_dump_json().encode("utf-8")
         # Fire the publish into the client's internal batch queue and
         # return — do NOT block on the returned Future. .result(timeout=30)
@@ -475,11 +497,27 @@ class PubSubEventBus(EventBus):
                 "PubSubEventBus.subscribe() must be called before start(); "
                 "the pull loop for this topic won't be created otherwise."
             )
-        self._handlers[topic].append(handler)
-        # ``broadcast`` topics get a per-process subscription at start() so
-        # every process receives every message (fan-out), not just one.
-        if broadcast:
-            self._broadcast_topics.add(topic)
+        # Brand rename: with dual-subscribe on, one subscribe() binds the
+        # handler to both the current topic and its renamed twin, so a
+        # publisher can be flipped later without a message landing on a name
+        # nothing is listening to. Applied here rather than at each call site
+        # on purpose — the failure this guards against is ONE consumer that
+        # nobody remembered to update, and a bus-level expansion cannot miss
+        # one. It also means a subscribe() added next week inherits it.
+        for name in subscribe_names(topic, dual=self._dual_subscribe):
+            self._handlers[name].append(handler)
+            # ``broadcast`` topics get a per-process subscription at start() so
+            # every process receives every message (fan-out), not just one.
+            #
+            # The flag MUST carry to the twin. A broadcast topic has no durable
+            # subscription by design, so a twin left out of this set is treated
+            # as an ordinary work queue at start(): the pull loop looks for a
+            # ``<prefix>--<twin>`` subscription that was never provisioned and
+            # never will be, gets NotFound, and halts — turning the health
+            # endpoint red on a topic whose whole point is that it degrades
+            # quietly.
+            if broadcast:
+                self._broadcast_topics.add(name)
 
     async def start(self) -> None:
         # Idempotent guard — a second call would leak the old
