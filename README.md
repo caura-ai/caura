@@ -114,7 +114,7 @@ Get up and running in minutes — no infrastructure, automatic updates, usage an
 
 The fastest path is Docker Compose — one command brings up Postgres + pgvector + Redis + the API.
 
-> **Prefer not to use Docker?** Skip to [Manual deployment (Python + Postgres)](#manual-deployment) below for the bare-Python path.
+> **Prefer not to use Docker?** Skip to [Manual deployment (without Docker)](#manual-deployment-without-docker) below for the bare-Python path.
 >
 > **No cloud API key, no external calls?** v2.0+ supports a self-hosted local embedder (`BAAI/bge-m3` via HuggingFace TEI) — see [`docs/local-embedder.md`](docs/local-embedder.md). The setup below walks through the OpenAI default; the local-embedder doc walks through the alternative.
 
@@ -374,8 +374,7 @@ await mc.write("Q3 revenue target is $4M, set on 2026-04-15.");
 console.log((await mc.recall("Q3 revenue target")).summary);
 ```
 
-`MemClaw` remains a permanent alias of `Caura`, and `npm install caura`
-works too (a re-export of this package).
+`MemClaw` remains a permanent alias of `Caura`.
 
 See [`clients/typescript/`](clients/typescript/) for the full client.
 
