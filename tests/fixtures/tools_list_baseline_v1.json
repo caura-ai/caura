@@ -449,7 +449,7 @@
   {
     "name": "caura_list",
     "title": null,
-    "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' (default) lists your memories at trust ≥ 1; scope='fleet' reads your OWN fleet at trust ≥ 1, a different fleet at trust ≥ 2; scope='all' (tenant-wide) requires trust ≥ 2. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use caura_recall.",
+    "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' lists your memories at trust ≥ 1; scope='fleet' reads your OWN fleet at trust ≥ 1, a different fleet at trust ≥ 2; scope='all' (tenant-wide) requires trust ≥ 2. Omitted scope means 'agent' on MCP; over REST/plugin it filters by agent_id with no trust gate. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use caura_recall.",
     "inputSchema": {
       "properties": {
         "agent_id": {
@@ -859,7 +859,7 @@
   {
     "name": "caura_stats",
     "title": null,
-    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' (default) counts only memories visible to YOU (trust ≥ 1); scope='fleet' aggregates your OWN fleet at trust ≥ 1, a different fleet at trust ≥ 2; scope='all' (tenant-wide) requires trust ≥ 2. Counts exclude soft-deleted memories by default; set include_deleted=true for additional 'deleted' and 'total_including_deleted' fields. Read-only — useful for self-introspection and dashboard-style summaries.",
+    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' counts only memories visible to YOU (trust ≥ 1); scope='fleet' aggregates your OWN fleet at trust ≥ 1, a different fleet at trust ≥ 2; scope='all' (tenant-wide) requires trust ≥ 2. Omitted scope means 'agent' on MCP; over REST/plugin it aggregates over agent_id with no trust gate. Counts exclude soft-deleted memories by default; set include_deleted=true for additional 'deleted' and 'total_including_deleted' fields. Read-only — useful for self-introspection and dashboard-style summaries.",
     "inputSchema": {
       "properties": {
         "scope": {
