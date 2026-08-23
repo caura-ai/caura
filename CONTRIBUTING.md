@@ -26,7 +26,7 @@ up, the expected workflow, and how we review changes.
 
 ```bash
 git clone https://github.com/caura-ai/caura.git
-cd caura-memclaw
+cd caura
 uv venv .venv
 source .venv/bin/activate
 uv pip install -e "core-api/[dev]" -e "core-storage-api/[dev]"

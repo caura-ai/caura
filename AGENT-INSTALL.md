@@ -15,7 +15,7 @@ You need these on your machine:
 ```bash
 # 1. Clone
 git clone https://github.com/caura-ai/caura.git
-cd caura-memclaw
+cd caura
 
 # 2. Start everything (PostgreSQL + pgvector, Redis, Caura API)
 docker compose up -d
@@ -37,7 +37,7 @@ You need a PostgreSQL 16+ instance with pgvector extension installed.
 ```bash
 # 1. Clone
 git clone https://github.com/caura-ai/caura.git
-cd caura-memclaw
+cd caura
 
 # 2. Create virtual environment
 python -m venv venv

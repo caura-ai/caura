@@ -200,7 +200,7 @@ On a machine with `node` (v18+) and `npm`:
 
 ```bash
 git clone https://github.com/caura-ai/caura.git
-cd caura-memclaw/plugin
+cd caura/plugin
 npm install
 npm run build            # emits plugin/dist/
 ```
