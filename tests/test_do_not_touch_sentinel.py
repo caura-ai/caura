@@ -26,6 +26,7 @@ SCRIPT = REPO_ROOT / "scripts" / "do_not_touch_sentinel.py"
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+import do_not_touch_sentinel as sentinel_module
 from do_not_touch_sentinel import (
     LITERAL,
     LOG_MESSAGE,
@@ -295,6 +296,29 @@ def test_no_literal_can_be_satisfied_by_a_comment_alone(sentinel: Sentinel) -> N
         f"{sentinel.path} mentions {sentinel.text!r} in a comment, so deleting the "
         f"code that uses it would still pass: {in_comment}"
     )
+
+
+def test_main_turns_an_unreadable_file_into_exit_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file the gate cannot read means the gate did not run — which is not the
+    same as the gate finding something, and a traceback reads as neither. Exit 2
+    says it could not run; exit 1 always means it ran and something is missing.
+
+    Driven through a substituted list rather than the real one, so the case is
+    identical in every copy of this file: only a LOG_MESSAGE entry reaches the
+    parser, and not every repo's list has one.
+    """
+    root = _root(tmp_path, "a.py", "def broken(:\n")
+    monkeypatch.setattr(
+        sentinel_module,
+        "SENTINELS",
+        (Sentinel("a.py", "Widget degraded", LOG_MESSAGE, "x"),),
+    )
+    monkeypatch.setattr(sys, "argv", ["do_not_touch_sentinel.py", "--root", str(root)])
+
+    assert sentinel_module.main() == 2
+    assert "does not parse" in capsys.readouterr().err
 
 
 def test_the_list_is_not_empty() -> None:

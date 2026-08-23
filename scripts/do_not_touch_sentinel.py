@@ -364,7 +364,14 @@ def main() -> int:
         return 1
 
     root = Path(args.root).resolve()
-    failures = [(s, why) for s in SENTINELS if (why := _check(s, root)) is not None]
+    try:
+        failures = [(s, why) for s in SENTINELS if (why := _check(s, root)) is not None]
+    except RuntimeError as exc:
+        # A file this gate cannot read is a gate that did not run, which is not
+        # the same as a gate that found something — and a traceback reads as
+        # neither. Exit 2 says it could not run; exit 1 always means it ran.
+        print(exc, file=sys.stderr)
+        return 2
 
     if not failures:
         print(f"All {len(SENTINELS)} protected strings survive.")
