@@ -7,9 +7,12 @@ redirect somebody has to keep forever and spends a rename option that was alread
 paid for. The programme runs for weeks with ordinary feature work alongside it,
 so the rule needs a gate rather than a reviewer's attention.
 
-What it does: counts the lines carrying the legacy name per file, in the tree being
-built and in the base tree, and fails on any file that went **up**. Decreases are
-the point of the programme and are reported as progress.
+What it does: compares the legacy-name lines per file, by TEXT, between the tree
+being built and the base tree, and fails a file that carries text the repo did
+not have before. Not a count comparison — a flat or falling count can still hide
+newly minted text, and a risen one can be nothing but a move. See "Why the count
+is not the check" below. Decreases are the point of the programme and are
+reported as progress.
 
 Why per file rather than a repo total: a total hides an addition behind an
 unrelated deletion elsewhere in the same PR, while a per-file count keeps a

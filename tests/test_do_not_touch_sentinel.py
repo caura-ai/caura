@@ -252,7 +252,17 @@ def test_every_listed_string_is_actually_load_bearing(
     assert _check(sentinel, scrubbed) is not None
 
 
-_COMMENT_STARTS = ("#", "//", "*", "--")
+_COMMENT_STARTS = ("#", "//", "*")
+# SQL's marker needs its trailing space to tell ``-- a note`` from a command-line
+# flag. Without it a pinned ``--update-labels=…`` reads as a comment and the
+# guard fails the very entry it exists to protect. No OSS entry starts with a
+# dash today; the enterprise copy has several, and found this.
+_SQL_COMMENT = "-- "
+
+
+def _is_comment_only(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith(_COMMENT_STARTS) or stripped.startswith(_SQL_COMMENT)
 
 
 @pytest.mark.parametrize(
@@ -278,7 +288,7 @@ def test_no_literal_can_be_satisfied_by_a_comment_alone(sentinel: Sentinel) -> N
     in_comment = [
         line.strip()
         for line in lines
-        if sentinel.text in line and line.strip().startswith(_COMMENT_STARTS)
+        if sentinel.text in line and _is_comment_only(line)
     ]
 
     assert not in_comment, (
@@ -320,5 +330,7 @@ def test_a_removal_names_the_file_and_what_breaks(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert sentinel.path in result.stdout
-    assert sentinel.text in result.stdout
+    # repr, because that is how the report prints it — a pinned string containing
+    # a backslash (a terraform filter, say) never appears verbatim in the output.
+    assert repr(sentinel.text) in result.stdout
     assert sentinel.breaks in result.stdout
