@@ -303,13 +303,17 @@ def test_a_move_does_not_launder_an_addition_beside_it(repo: Path) -> None:
     assert "URL" not in offenders
 
 
-def test_only_the_minted_copies_of_a_repeated_line_are_named(repo: Path) -> None:
-    """A file can hold more copies of a text than were actually minted.
+def test_identical_added_lines_are_all_named_with_the_split_stated(repo: Path) -> None:
+    """A file can gain more copies of a text than were minted.
 
-    Two identical lines move in and a third is added. All three read the same, so
-    a membership test on the minted set prints all three and sends the reader to
-    "fix" two lines that were already in the tree. Only the count separates them,
-    so the report spends a budget rather than testing membership.
+    Two identical lines move in and a third is added. All three are lines this
+    change added, and they are byte-identical, so which one is the mint cannot be
+    determined — naming one would be a guess dressed as a finding. All three are
+    printed and the split is stated instead.
+
+    An earlier version spent a text-keyed budget and named whichever occurrence
+    came first in the file. That is worse than imprecise: where the file ALREADY
+    held the text it names a line nobody touched, which the next test pins.
     """
     # Base holds two copies: the fixture's existing.py, plus a second file.
     _stage(repo, "second.py", f'URL = "https://{LEGACY}.net"\n')
@@ -325,7 +329,10 @@ def test_only_the_minted_copies_of_a_repeated_line_are_named(repo: Path) -> None
 
     assert result.returncode == 1
     assert "(0 -> 3)" in offenders
-    assert offenders.count("URL = ") == 1
+    # All three are lines this change added, so all three are named...
+    assert offenders.count('URL = "https://') == 3
+    # ...and the report says how many of them are actually new.
+    assert "3 added lines share this text; 1 new, 2 moved in" in offenders
 
 
 def test_one_deletion_pays_for_only_one_of_two_destinations(repo: Path) -> None:
@@ -350,6 +357,35 @@ def test_one_deletion_pays_for_only_one_of_two_destinations(repo: Path) -> None:
     assert offenders.count("(0 -> 1)") == 1
     # And the other is named as the move it is, not silently dropped.
     assert "treated as moved rather than added" in result.stdout
+
+
+def test_the_line_named_is_one_the_change_added(repo: Path) -> None:
+    """The report must never point at a line nobody touched.
+
+    ``existing.py`` already carries the text on line 1 and keeps it. The change
+    appends an identical line further down. Both hold the same text, so a
+    text-keyed budget spent in file order names line 1 — a line that did not
+    change — and never prints the one that did. For a gate whose entire output is
+    "here is the line you added", sending the reader to an untouched line is
+    worse than saying nothing: they go looking for a mistake that is not there.
+
+    Which physical line the change added is the one question the text cannot
+    answer and git's diff can, so the report asks git.
+    """
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"\n'
+        + "filler = 1\n" * 5
+        + f'URL = "https://{LEGACY}.net"\n',
+    )
+
+    result = _run(repo)
+    offenders = result.stdout.split("adds the legacy name in", 1)[1]
+
+    assert result.returncode == 1
+    assert "      7: " in offenders  # the appended line
+    assert "      1: " not in offenders  # the untouched one
 
 
 def test_an_excused_move_is_always_named(repo: Path) -> None:
@@ -443,6 +479,45 @@ def test_a_newly_exempted_line_is_always_named(repo: Path) -> None:
     assert "1 line(s) newly exempted" in result.stdout
     assert "existing.py:1" in result.stdout
     assert "gateway mirror" in result.stdout
+
+
+def test_many_exemptions_sharing_a_reason_are_grouped(repo: Path) -> None:
+    """The wall is the failure mode, and Phase 5 builds walls.
+
+    A dual-read wave exempts dozens of lines carrying one identical reason. At
+    that length the list stops being read, which costs the report the thing it is
+    for: the swap it exposes shows up as the ONE reason that does not match its
+    neighbours. Collapsing repeats is what keeps the odd one visible.
+    """
+    body = "".join(
+        f'A{i} = "{LEGACY}_x"  # legacy-name-ok: rule 3 dual-read alias\n'
+        for i in range(6)
+    )
+    _stage(repo, "many.py", body)
+
+    out = _run(repo).stdout
+
+    assert "6x  rule 3 dual-read alias" in out
+    assert "in 1 file(s): many.py" in out
+    # Collapsed, not listed line by line.
+    assert out.count("A0 = ") == 0
+
+
+def test_an_odd_reason_out_survives_the_grouping(repo: Path) -> None:
+    """The whole point of grouping: the one that differs is still printed in full,
+    where a reader scanning past forty identical lines would have missed it."""
+    body = "".join(
+        f'A{i} = "{LEGACY}_x"  # legacy-name-ok: rule 3 dual-read alias\n'
+        for i in range(6)
+    )
+    body += f'SNUCK = "{LEGACY}-new"  # legacy-name-ok: headroom, honestly\n'
+    _stage(repo, "many.py", body)
+
+    out = _run(repo).stdout
+
+    assert "6x  rule 3 dual-read alias" in out
+    assert "headroom, honestly" in out
+    assert "SNUCK" in out
 
 
 def test_the_exempt_and_add_swap_is_caught(repo: Path) -> None:

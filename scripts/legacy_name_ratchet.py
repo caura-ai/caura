@@ -104,6 +104,12 @@ EXEMPT_RE = re.compile(
 )
 
 
+# Above this many lines sharing one reason, the list is collapsed to a count.
+# Four is where a homogeneous block stops being read line by line; below it the
+# individual lines are still the more useful form.
+_EXEMPTION_GROUP_AT = 4
+
+
 def _git(args: list[str]) -> str:
     """git, with ``grep``'s no-match exit treated as an empty result.
 
@@ -168,6 +174,41 @@ def _grep(tree: str | None, pathspec: str = ":/") -> list[tuple[str, str, str, b
             path = path[len(prefix) :]
         out.append((path, lineno, text, bool(EXEMPT_RE.search(text))))
     return out
+
+
+def _added_lines(base: str, path: str) -> set[int]:
+    """Line numbers this change actually added to ``path``, per git's own diff.
+
+    Used for the failure report only, never for the decision. The decision
+    compares text because a per-line diff calls every move an addition — but the
+    report has the opposite problem, and needs exactly what the diff knows.
+
+    Without it the report spends a text-keyed budget in file order, which assumes
+    the first occurrence of a text is the new one. Line order says nothing about
+    that. A file holding an untouched line and a new line with identical text
+    gets the untouched one named, and the real addition is never printed — the
+    reader is sent to a line that has not changed, for a gate whose whole output
+    is "here is the line you added".
+
+    Empty on any failure, and the caller falls back to naming every occurrence of
+    the minted text: too many lines is a nuisance, none is a dead end.
+    """
+    try:
+        out = _git(["git", "diff", "-U0", base, "--", _literal(path)])
+    except RuntimeError:
+        return set()
+
+    added: set[int] = set()
+    lineno = 0
+    for line in out.splitlines():
+        if line.startswith("@@"):
+            # ``@@ -a,b +c,d @@`` — c is where the added run starts.
+            match = re.search(r"\+(\d+)", line)
+            lineno = int(match.group(1)) if match else 0
+        elif line.startswith("+") and not line.startswith("+++"):
+            added.add(lineno)
+            lineno += 1
+    return added
 
 
 def _literal(path: str) -> str:
@@ -386,10 +427,36 @@ def _report_new_exemptions(before: Counter[str], after: Counter[str]) -> None:
     print(
         "compat alias, a redirect or a pinned wire format, and not headroom for a new name:"
     )
+
+    # Grouped by reason, because the wall is the failure mode. A dual-read wave
+    # exempts dozens of lines carrying one identical reason, and at that length
+    # the list stops being read — which costs exactly the thing it is for, since
+    # the swap this report exists to expose shows up as the ONE reason that does
+    # not match its neighbours. Collapsing the repeats is what makes the odd one
+    # visible instead of burying it on line forty.
+    by_reason: dict[str, list[tuple[str, str, str]]] = {}
     for path in sorted(added):
         for _, lineno, text, exempt in _grep(None, pathspec=_literal(path)):
-            if exempt:
-                print(f"  {path}:{lineno}: {text.strip()[:100]}")
+            if not exempt:
+                continue
+            stripped = text.strip()
+            match = EXEMPT_RE.search(stripped)
+            tail = stripped[match.end() :].lstrip(": ") if match else ""
+            by_reason.setdefault(tail.strip() or "(no reason given)", []).append(
+                (path, lineno, stripped)
+            )
+
+    for reason, lines in sorted(by_reason.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        if len(lines) <= _EXEMPTION_GROUP_AT:
+            for path, lineno, stripped in lines:
+                print(f"  {path}:{lineno}: {stripped[:100]}")
+            continue
+        files = sorted({path for path, _, _ in lines})
+        shown = ", ".join(files[:4]) + (
+            f" (+{len(files) - 4} more)" if len(files) > 4 else ""
+        )
+        print(f"  {len(lines)}x  {reason[:80]}")
+        print(f"      in {len(files)} file(s): {shown}")
     print()
 
 
@@ -487,16 +554,36 @@ def main() -> int:
         else:
             note = ", count fell — the text is new"
         print(f"  {path}  ({before} -> {after}{note})")
-        # Only the minted lines, and only as many of each as were minted. A file
-        # can hold three copies of a text that moved in twice and was added once;
-        # printing all three sends the reader to "fix" two lines that are not why
-        # this failed. The budget is consumed as lines are printed.
-        budget = Counter(minted)
-        for _, lineno, text, exempt in _grep(None, pathspec=_literal(path)):
-            stripped = text.strip()
-            if not exempt and budget[stripped] > 0:
-                budget[stripped] -= 1
-                print(f"      {lineno}: {stripped[:110]}")
+        # Lines carrying minted text AND actually added by this change. Both
+        # halves are needed. Without the text filter the report names every
+        # branded line in the file; without the diff it names the first line
+        # holding the text, which in a file that already had one is a line
+        # nobody touched.
+        added = _added_lines(args.base, path)
+        candidates = [
+            (lineno, text.strip())
+            for _, lineno, text, exempt in _grep(None, pathspec=_literal(path))
+            if not exempt and text.strip() in minted
+        ]
+        shown = [(n, t) for n, t in candidates if int(n) in added]
+        # Falling back to every occurrence rather than to silence: if the diff
+        # could not be read, too many lines is a nuisance and none is a dead end.
+        shown = shown or candidates
+        for lineno, stripped in shown:
+            print(f"      {lineno}: {stripped[:110]}")
+
+        # When a change adds several identical lines and only some are minted,
+        # every one of them is a line this change added and they cannot be told
+        # apart — that is what identical means. Naming one would be a guess
+        # dressed as a finding, so all are printed and the split is stated.
+        for text, new in sorted(minted.items()):
+            here = sum(1 for _, t in shown if t == text)
+            if here > new:
+                print(
+                    f"      ^ {here} added lines share this text; {new} new, "
+                    f"{here - new} moved in from elsewhere — identical, so which is which"
+                    " cannot be told apart"
+                )
     print(
         f"\nRule 7 of the sunset plan: mint nothing new named '{LEGACY_NAME}'. Every one adds a\n"
         "redirect to keep forever and spends a rename option. Use the Caura name instead.\n\n"
