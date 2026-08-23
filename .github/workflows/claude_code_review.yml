@@ -48,7 +48,9 @@
 #     policy is "drafts get opt-in review, not automatic review" — which is
 #     deliberate (drafts are unfinished; each review costs real budget), and
 #     is the intended way to request one. It is not discoverable from the
-#     skip message, which is why it is written down here.
+#     skip message, which is why it is written down here. It stops being a
+#     draft when it is marked ready, and ``ready_for_review`` reviews it
+#     then — see the note on the trigger list.
 #   * The ``MAX_FILES`` cap is likewise bypassed on the comment path, so an
 #     "@claude" comment can review a PR of any size. Left as-is on purpose:
 #     it is a useful escape hatch for a large but genuinely reviewable PR.
@@ -100,7 +102,15 @@ on:
     branches: [main, dev]
     # `closed` feeds claude-capture ONLY (merged PRs). pre-checks excludes it, which is
     # what stops a merge triggering a fresh review.
-    types: [opened, reopened, synchronize, closed]
+    #
+    # `ready_for_review` reviews a draft at the moment it stops being one. Without it a
+    # draft-first PR is never reviewed automatically at all: `opened` hits the draft skip
+    # by design, the promotion fires an event nobody listens for, and the next push fires
+    # `synchronize`, which is skipped deliberately. This does not weaken the drafts-are-
+    # opt-in policy described above — it applies exactly when the PR is no longer a draft,
+    # and `pull_request.draft` is already false by the time the event fires, so the draft
+    # skip in pre-checks is untouched.
+    types: [opened, reopened, synchronize, closed, ready_for_review]
   issue_comment:
     types: [created]
   # Manual backfill for claude-capture, mirroring the shared pipeline's caller. Two uses: it makes
