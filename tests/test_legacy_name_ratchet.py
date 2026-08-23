@@ -552,6 +552,70 @@ def test_an_edited_exemption_is_listed_though_it_is_not_newly_exempt(
     assert "pre-existing alias one" not in out
 
 
+def test_a_net_zero_swap_of_exemptions_is_still_reported(repo: Path) -> None:
+    """The hole a risen-tally selection leaves, and why git picks the files now.
+
+    Drop one exemption and add another in the same file and the tally is flat, so
+    a rise-based filter never examines the file and the new reason is never
+    printed. The gate still catches the dangerous form — un-marking a line raises
+    the non-exempt count and the text gets charged — but a brand-new reason
+    nobody is pointed at is the exact thing this report exists to prevent, and in
+    a file already full of exemptions the swap is unremarkable in a diff.
+    """
+    body = _with_two_aliases_already(repo)
+    _stage(
+        repo,
+        "aliases.py",
+        # "alias two" loses its marker and "alias three" arrives with one:
+        # exempt 2 -> 2, flat.
+        body.replace("  # legacy-name-ok: pre-existing alias two", "")
+        + f'C = "{LEGACY}-three"  # legacy-name-ok: brand new alias three\n',
+    )
+
+    out = _run(repo).stdout
+
+    assert "brand new alias three" in out
+    assert "1 exempt line(s) written by this change in 1 file(s)" in out
+    # Still only the written one — widening the file selection must not widen
+    # the line list back out to the whole pile.
+    assert "pre-existing alias one" not in out
+
+
+def test_a_touched_file_whose_exemptions_are_all_old_says_nothing(repo: Path) -> None:
+    """The cost of letting git choose the files, and the guard against paying it.
+
+    Selecting on the diff means every touched file that happens to hold a marker
+    becomes a candidate — including ones where the change went nowhere near it.
+    If an empty per-line result fell back to "print them all", #894 would be back
+    through the file-selection door, and worse: it would fire on files whose
+    exempt count never moved at all.
+    """
+    body = _with_two_aliases_already(repo)
+    _stage(repo, "aliases.py", body + "UNRELATED = 1\n")
+
+    result = _run(repo)
+
+    assert result.returncode == 0
+    assert "exempt line(s) written by this change" not in result.stdout
+    assert "pre-existing alias" not in result.stdout
+
+
+def test_a_file_only_deleted_from_reports_no_exemptions(repo: Path) -> None:
+    """A deletion adds no lines, so there is nothing for this report to name.
+
+    Distinct from the case above because `_added_lines` returns an empty set here
+    rather than a set that simply misses — which is why it has to be able to say
+    "empty" separately from "I could not read the diff".
+    """
+    body = _with_two_aliases_already(repo)
+    _stage(repo, "aliases.py", body.splitlines(keepends=True)[0])
+
+    result = _run(repo)
+
+    assert result.returncode == 0
+    assert "exempt line(s) written by this change" not in result.stdout
+
+
 def test_many_exemptions_sharing_a_reason_are_grouped(repo: Path) -> None:
     """The wall is the failure mode, and Phase 5 builds walls.
 
