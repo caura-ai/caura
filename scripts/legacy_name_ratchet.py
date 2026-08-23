@@ -138,7 +138,12 @@ def _git(args: list[str]) -> str:
     # counts occurrences of an ASCII name, so a mangled character elsewhere on
     # the line changes nothing about the match.
     proc = subprocess.run(
-        args, capture_output=True, text=True, check=False, encoding="utf-8", errors="replace"
+        args,
+        capture_output=True,
+        text=True,
+        check=False,
+        encoding="utf-8",
+        errors="replace",
     )
     if proc.returncode == 0:
         return proc.stdout
@@ -411,8 +416,10 @@ def _report_excused_moves(
     print()
 
 
-def _report_new_exemptions(before: Counter[str], after: Counter[str]) -> None:
-    """Name every line this change newly exempted, whether or not it fails.
+def _report_new_exemptions(
+    before: Counter[str], after: Counter[str], base: str
+) -> None:
+    """Name every exempt line this change wrote, whether or not it fails.
 
     The one thing a count-based ratchet cannot decide for itself, and the reason
     this report exists. Marking an existing line exempt lowers a file's
@@ -432,18 +439,21 @@ def _report_new_exemptions(before: Counter[str], after: Counter[str]) -> None:
     It is still printed, on the passing path as well. An exemption is the move
     that buys headroom, and a deliberate one — an alias landing in the same PR as
     unrelated work — should never be made quietly even when it is legitimate.
+
+    Which is why the list is filtered to the lines this change actually wrote,
+    rather than every exempt line the file happens to hold. A file's exempt count
+    is what selects it; the diff is what selects the lines. Re-greping and
+    printing all of them puts a file's whole accumulated pile under a header
+    counting one, sends the reader to lines that are not in the diff, and reads
+    as self-contradictory — which invites distrusting the total rather than the
+    list. Phase 5's dual-read wave is exactly the change that builds those piles,
+    so every later PR touching those files would reprint them. A reader who
+    learns the list is mostly noise stops reading it, and that is the failure
+    this report exists to prevent.
     """
     added = {p: n - before.get(p, 0) for p, n in after.items() if n > before.get(p, 0)}
     if not added:
         return
-
-    total = sum(added.values())
-    print(
-        f"{total} line(s) newly exempted in {len(added)} file(s) — check each one is a"
-    )
-    print(
-        "compat alias, a redirect or a pinned wire format, and not headroom for a new name:"
-    )
 
     # Grouped by reason, because the wall is the failure mode. A dual-read wave
     # exempts dozens of lines carrying one identical reason, and at that length
@@ -452,16 +462,57 @@ def _report_new_exemptions(before: Counter[str], after: Counter[str]) -> None:
     # not match its neighbours. Collapsing the repeats is what makes the odd one
     # visible instead of burying it on line forty.
     by_reason: dict[str, list[tuple[str, str, str]]] = {}
+    shown_total = 0
+    unfiltered: list[str] = []
     for path in sorted(added):
-        for _, lineno, text, exempt in _grep(None, pathspec=_literal(path)):
-            if not exempt:
-                continue
-            stripped = text.strip()
+        here = [
+            (lineno, text.strip())
+            for _, lineno, text, exempt in _grep(None, pathspec=_literal(path))
+            if exempt
+        ]
+        # The same pair the offender report below uses, for the same reason: the
+        # text-or-count comparison decides WHICH FILE to talk about, and git's own
+        # diff decides which of its lines the change is responsible for. An
+        # existing line that gains a marker is a rewrite, so git calls it added
+        # and it stays in — which matters, because that is the headroom move.
+        touched = _added_lines(base, path)
+        picked = [(n, t) for n, t in here if int(n) in touched]
+        if not picked:
+            # Falling back to every exempt line in the file rather than to
+            # silence, on the same trade as below: too many lines is a nuisance
+            # and none is a dead end. Named out loud, though, because unlike
+            # below this report puts a number on its own list.
+            #
+            # Reported as what was observed, not as a cause. An unreadable diff
+            # is the likely one — ``_added_lines`` returns empty on any git
+            # failure — but a diff that read fine and simply did not intersect
+            # this file's exempt lines lands here identically, and nothing at
+            # this point can tell the two apart. Naming the cause would be a
+            # guess printed as a finding, which is the habit this whole report
+            # exists to discourage.
+            picked = here
+            unfiltered.append(path)
+        shown_total += len(picked)
+        for lineno, stripped in picked:
             match = EXEMPT_RE.search(stripped)
             tail = stripped[match.end() :].lstrip(": ") if match else ""
             by_reason.setdefault(tail.strip() or "(no reason given)", []).append(
                 (path, lineno, stripped)
             )
+
+    print(
+        f"{shown_total} exempt line(s) written by this change in {len(added)} file(s) —"
+    )
+    print("check each is a compat alias, a redirect or a pinned wire format, and not")
+    print("headroom for a new name:")
+    if unfiltered:
+        named = ", ".join(unfiltered[:4]) + (
+            f" (+{len(unfiltered) - 4} more)" if len(unfiltered) > 4 else ""
+        )
+        print(
+            f"  (no diff line matched in {len(unfiltered)} file(s): {named} — every "
+            "exempt line they hold is listed, so some may predate this change)"
+        )
 
     for reason, lines in sorted(by_reason.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         if len(lines) <= _EXEMPTION_GROUP_AT:
@@ -521,7 +572,7 @@ def main() -> int:
         )
         return 1
 
-    _report_new_exemptions(base_scan.exempt, head_scan.exempt)
+    _report_new_exemptions(base_scan.exempt, head_scan.exempt, args.base)
 
     head_by_file, base_by_file = head_scan.by_file, base_scan.by_file
     budget = _mint_budget(head_scan.total, base_scan.total)
