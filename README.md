@@ -580,7 +580,7 @@ settings.
   with the trail's real event timestamps preserved.
 - **How activity is captured.** Two families, one submit protocol:
   - **Plugin-buffer** — the OpenClaw plugin keeps a durable node-local buffer
-    and submits windows (add `MEMCLAW_INTERVIEWER=true` to the plugin env).
+    and submits windows (add `CAURA_INTERVIEWER=true` to the plugin env).
   - **Disk-parser** — the `caura-interviewer` CLI (shipped in the
     `caura-client` package) reads a harness's on-disk transcript read-only
     and submits windows. Ships for **Claude Code** (`~/.claude/projects`) and
