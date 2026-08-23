@@ -199,6 +199,23 @@ def test_exception_counts_as_error(tmp_path: Path) -> None:
     assert _check(sentinel, root) is None
 
 
+def test_a_format_argument_does_not_count_as_the_message(tmp_path: Path) -> None:
+    """The message is the first positional argument, not any of them.
+
+    Reading every argument lets a %-substitution VALUE satisfy the check for a
+    call whose message text has changed — a false pass on exactly the regression
+    this kind exists to catch, and the harder one to notice because the phrase
+    really is still in the file.
+    """
+    root = _root(
+        tmp_path, "a.py", 'logger.error("Widget renamed: %s", "Widget degraded")\n'
+    )
+
+    result = _check(Sentinel("a.py", "Widget degraded", LOG_MESSAGE, "x"), root)
+
+    assert result == "it survives only in prose — no logging call emits it any more"
+
+
 def test_a_phrase_in_a_non_logging_call_does_not_count(tmp_path: Path) -> None:
     """Otherwise any string anywhere satisfies the strictest kind in the list."""
     root = _root(tmp_path, "a.py", 'print("Widget degraded")\n')
@@ -216,6 +233,19 @@ def test_a_file_that_does_not_parse_fails_loudly(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="does not parse"):
         _check(Sentinel("a.py", "Widget degraded", LOG_MESSAGE, "x"), root)
+
+
+def test_an_unknown_kind_refuses_to_run(tmp_path: Path) -> None:
+    """A mistyped kind must not fall through to the log-message path.
+
+    It would quietly run the wrong check on an entry whose author believed they
+    had written a literal one — and pass or fail for reasons unrelated to what
+    they pinned. A gate running the wrong check is worse than one that refuses.
+    """
+    root = _root(tmp_path, "a.py", 'KEY = "keep-me"\n')
+
+    with pytest.raises(RuntimeError, match="unknown kind"):
+        _check(Sentinel("a.py", "keep-me", "litteral", "x"), root)
 
 
 # ── the real list ────────────────────────────────────────────────────────────
