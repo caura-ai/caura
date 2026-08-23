@@ -268,7 +268,7 @@ async def test_install_script_escapes_malicious_api_url(client):
     assert resp.status_code == 200
     script = resp.text
     # The malicious URL must be single-quoted by shlex.quote() — not bare
-    assert "MEMCLAW_API_URL='https://evil.com; rm -rf /'" in script
+    assert "CAURA_API_URL='https://evil.com; rm -rf /'" in script
     # Bare (unquoted) interpolation into curl must NOT appear
     assert 'curl -sf "https://evil.com; rm -rf /' not in script
     assert 'curl $CURL_INSECURE -sf "https://evil.com; rm -rf /' not in script
@@ -277,7 +277,7 @@ async def test_install_script_escapes_malicious_api_url(client):
     # TOFU (CAURA-000 install-plugin), so the var sits between ``curl``
     # and ``-sf`` — match the safe-variable usage rather than the exact
     # arg ordering.
-    assert '"$MEMCLAW_API_URL/api/plugin-source' in script
+    assert '"$CAURA_API_URL/api/plugin-source' in script
 
 
 @pytest.mark.integration
@@ -294,7 +294,7 @@ async def test_install_script_escapes_malicious_node_name(client):
     assert resp.status_code == 200
     script = resp.text
     # The raw $(whoami) should NOT appear unquoted
-    assert "MEMCLAW_NODE_NAME=$(whoami)" not in script
+    assert "CAURA_NODE_NAME=$(whoami)" not in script
     # It should be single-quoted
     assert "'$(whoami)'" in script
 

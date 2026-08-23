@@ -24,21 +24,21 @@ set -euo pipefail
 BRANCH="main"
 REPO="git@github.com:caura-ai/caura.git"
 PLUGIN_DIR="$HOME/.openclaw/plugins/memclaw"
-MEMCLAW_API_URL=""
-MEMCLAW_API_KEY=""
-MEMCLAW_FLEET_ID=""
-MEMCLAW_NODE_NAME=""
-MEMCLAW_TENANT_ID=""
+CAURA_API_URL=""
+CAURA_API_KEY=""
+CAURA_FLEET_ID=""
+CAURA_NODE_NAME=""
+CAURA_TENANT_ID=""
 SKIP_RESTART=""
 
 # ── Parse arguments ──
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --api-url)      MEMCLAW_API_URL="$2"; shift 2 ;;
-    --api-key)      MEMCLAW_API_KEY="$2"; shift 2 ;;
-    --fleet-id)     MEMCLAW_FLEET_ID="$2"; shift 2 ;;
-    --node-name)    MEMCLAW_NODE_NAME="$2"; shift 2 ;;
-    --tenant-id)    MEMCLAW_TENANT_ID="$2"; shift 2 ;;
+    --api-url)      CAURA_API_URL="$2"; shift 2 ;;
+    --api-key)      CAURA_API_KEY="$2"; shift 2 ;;
+    --fleet-id)     CAURA_FLEET_ID="$2"; shift 2 ;;
+    --node-name)    CAURA_NODE_NAME="$2"; shift 2 ;;
+    --tenant-id)    CAURA_TENANT_ID="$2"; shift 2 ;;
     --branch)       BRANCH="$2"; shift 2 ;;
     --repo)         REPO="$2"; shift 2 ;;
     --plugin-dir)   PLUGIN_DIR="$2"; shift 2 ;;
@@ -51,13 +51,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── Validate required args ──
-if [[ -z "$MEMCLAW_API_URL" || -z "$MEMCLAW_API_KEY" ]]; then
+if [[ -z "$CAURA_API_URL" || -z "$CAURA_API_KEY" ]]; then
   echo "ERROR: --api-url and --api-key are required"
   exit 1
 fi
-if [[ -z "$MEMCLAW_NODE_NAME" ]]; then
-  MEMCLAW_NODE_NAME="$(hostname)"
-  echo "INFO: --node-name not set, using hostname: $MEMCLAW_NODE_NAME"
+if [[ -z "$CAURA_NODE_NAME" ]]; then
+  CAURA_NODE_NAME="$(hostname)"
+  echo "INFO: --node-name not set, using hostname: $CAURA_NODE_NAME"
 fi
 
 echo ""
@@ -66,9 +66,9 @@ echo "║  MemClaw Wet-Test Installer                     ║"
 echo "╚══════════════════════════════════════════════════╝"
 echo ""
 echo "  Branch:    $BRANCH"
-echo "  API URL:   $MEMCLAW_API_URL"
-echo "  Fleet ID:  ${MEMCLAW_FLEET_ID:-"(not set)"}"
-echo "  Node:      $MEMCLAW_NODE_NAME"
+echo "  API URL:   $CAURA_API_URL"
+echo "  Fleet ID:  ${CAURA_FLEET_ID:-"(not set)"}"
+echo "  Node:      $CAURA_NODE_NAME"
 echo "  Plugin:    $PLUGIN_DIR"
 echo ""
 
@@ -129,13 +129,13 @@ fi
 cat > "$ENV_FILE" << ENVEOF
 # MemClaw wet-test config — generated $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # Branch: $BRANCH
-MEMCLAW_API_URL=$MEMCLAW_API_URL
-MEMCLAW_API_KEY=$MEMCLAW_API_KEY
-MEMCLAW_FLEET_ID=$MEMCLAW_FLEET_ID
-MEMCLAW_NODE_NAME=$MEMCLAW_NODE_NAME
-MEMCLAW_TENANT_ID=$MEMCLAW_TENANT_ID
-MEMCLAW_AUTO_WRITE_TURNS=true
-MEMCLAW_AUTO_FIX_CONFIG=true
+CAURA_API_URL=$CAURA_API_URL
+CAURA_API_KEY=$CAURA_API_KEY
+CAURA_FLEET_ID=$CAURA_FLEET_ID
+CAURA_NODE_NAME=$CAURA_NODE_NAME
+CAURA_TENANT_ID=$CAURA_TENANT_ID
+CAURA_AUTO_WRITE_TURNS=true
+CAURA_AUTO_FIX_CONFIG=true
 ENVEOF
 
 echo "    .env written"

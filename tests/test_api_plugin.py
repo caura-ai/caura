@@ -26,13 +26,13 @@ async def test_post_install_plugin_generates_script(client):
     assert resp.status_code == 200
     script = resp.text
     assert script.startswith("#!/usr/bin/env bash")
-    assert "MEMCLAW_API_URL=" in script
+    assert "CAURA_API_URL=" in script
     assert "memclaw.example.com" in script
-    assert "MEMCLAW_FLEET_ID=" in script
+    assert "CAURA_FLEET_ID=" in script
     assert "my-fleet" in script
-    assert "MEMCLAW_API_KEY=" in script
+    assert "CAURA_API_KEY=" in script
     assert "sk-test-key-1234" in script
-    assert "MEMCLAW_NODE_NAME=" in script
+    assert "CAURA_NODE_NAME=" in script
     assert "node-alpha" in script
 
 
@@ -112,8 +112,8 @@ async def test_script_contains_correct_env_vars(client):
     assert resp.status_code == 200
     script = resp.text
     # Check .env block contains all five vars
-    for var in ("MEMCLAW_API_URL", "MEMCLAW_API_KEY", "MEMCLAW_FLEET_ID",
-                "MEMCLAW_TENANT_ID", "MEMCLAW_NODE_NAME"):
+    for var in ("CAURA_API_URL", "CAURA_API_KEY", "CAURA_FLEET_ID",
+                "CAURA_TENANT_ID", "CAURA_NODE_NAME"):
         assert var in script, f"Missing {var} in script"
 
 
@@ -139,7 +139,7 @@ async def test_shell_injection_api_url(client):
     # should NOT appear unquoted
     assert "rm -rf" not in script or "'" in script
     # The raw semicolon should be inside a quoted string, not bare
-    assert "MEMCLAW_API_URL=" in script
+    assert "CAURA_API_URL=" in script
 
 
 async def test_shell_injection_fleet_id(client):
@@ -156,9 +156,9 @@ async def test_shell_injection_fleet_id(client):
     assert resp.status_code == 200
     script = resp.text
     # shlex.quote should wrap it — the $() should not be bare
-    assert "MEMCLAW_FLEET_ID=" in script
+    assert "CAURA_FLEET_ID=" in script
     # Ensure the command substitution is neutralised (inside single quotes)
-    line = [l for l in script.splitlines() if "MEMCLAW_FLEET_ID=" in l][0]
+    line = [l for l in script.splitlines() if "CAURA_FLEET_ID=" in l][0]
     # shlex.quote produces: '$(cat /etc/passwd)' (with outer single quotes)
     assert line.count("'") >= 2, "Fleet ID should be single-quoted"
 
@@ -213,7 +213,7 @@ async def test_legacy_install_plugin_alias(client):
     )
     assert resp.status_code == 200
     assert resp.text.startswith("#!/usr/bin/env bash")
-    assert "MEMCLAW_FLEET_ID=alias-fleet" in resp.text
+    assert "CAURA_FLEET_ID=alias-fleet" in resp.text
 
 
 async def test_install_script_uses_non_versioned_paths(client):

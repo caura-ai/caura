@@ -2,13 +2,13 @@
 
 Covers two fixes that landed together:
 
-1. Auto-derive ``MEMCLAW_API_URL`` from the request Host (and
+1. Auto-derive ``CAURA_API_URL`` from the request Host (and
    ``X-Forwarded-Proto`` when proxied) so ``curl
-   https://memclaw.dev/api/v1/install-skill | bash`` yields a script that
-   keeps fetching from memclaw.dev — not from ``http://localhost:8000``
+   https://caura.ai/api/v1/install-skill | bash`` yields a script that
+   keeps fetching from caura.ai — not from ``http://localhost:8000``
    which was the old default.
 2. Forward the caller's ``X-API-Key`` into the generated script so its
-   internal curls carry auth. Required on edge-gated deploys (memclaw.dev
+   internal curls carry auth. Required on edge-gated deploys (caura.ai
    nginx rejects unauthenticated calls on every path).
 """
 
@@ -36,7 +36,7 @@ def test_api_url_auto_derived_from_request_host():
     # TestClient default Host is ``testserver``; scheme is http.
     resp = client.get("/api/v1/install-skill?agent=claude-code")
     assert resp.status_code == 200
-    assert "MEMCLAW_API_URL=http://testserver" in resp.text
+    assert "CAURA_API_URL=http://testserver" in resp.text
     assert "http://localhost:8000" not in resp.text
 
 
@@ -45,30 +45,30 @@ def test_api_url_override_via_query_param():
     client = _client()
     resp = client.get("/api/v1/install-skill?api_url=https://explicit.example.com")
     assert resp.status_code == 200
-    assert "MEMCLAW_API_URL=https://explicit.example.com" in resp.text
+    assert "CAURA_API_URL=https://explicit.example.com" in resp.text
 
 
 def test_x_forwarded_proto_and_host_preferred_over_raw():
     """Behind a proxy, ``X-Forwarded-Proto`` / ``X-Forwarded-Host`` should
     be treated as authoritative — otherwise a user's script generated
-    against ``https://memclaw.dev`` would read as ``http://internal-ip``."""
+    against ``https://caura.ai`` would read as ``http://internal-ip``."""
     client = _client()
     resp = client.get(
         "/api/v1/install-skill?agent=both",
         headers={
             "X-Forwarded-Proto": "https",
-            "X-Forwarded-Host": "memclaw.dev",
+            "X-Forwarded-Host": "caura.ai",
         },
     )
     assert resp.status_code == 200
-    assert "MEMCLAW_API_URL=https://memclaw.dev" in resp.text
+    assert "CAURA_API_URL=https://caura.ai" in resp.text
     # The raw ``Host: testserver`` header must not leak through.
     assert "testserver" not in resp.text
 
 
 def test_api_key_header_forwarded_into_script():
     """Caller's ``X-API-Key`` is baked into the script, and the internal
-    curl calls carry ``-H "X-API-Key: $MEMCLAW_API_KEY"``."""
+    curl calls carry ``-H "X-API-Key: $CAURA_API_KEY"``."""
     client = _client()
     resp = client.get(
         "/api/v1/install-skill?agent=claude-code",
@@ -78,8 +78,8 @@ def test_api_key_header_forwarded_into_script():
     script = resp.text
     # ``shlex.quote`` only wraps when the value has special chars. An
     # ``mc_``-style key is shell-safe and emitted unquoted, which is fine.
-    assert "MEMCLAW_API_KEY=mc_test_key_abc123" in script
-    assert '-H "X-API-Key: $MEMCLAW_API_KEY"' in script
+    assert "CAURA_API_KEY=mc_test_key_abc123" in script
+    assert '-H "X-API-Key: $CAURA_API_KEY"' in script
 
 
 def test_no_api_key_header_means_no_key_in_script():
@@ -89,7 +89,7 @@ def test_no_api_key_header_means_no_key_in_script():
     resp = client.get("/api/v1/install-skill?agent=claude-code")
     assert resp.status_code == 200
     script = resp.text
-    assert "MEMCLAW_API_KEY=" not in script
+    assert "CAURA_API_KEY=" not in script
     assert "X-API-Key" not in script
 
 

@@ -87,21 +87,21 @@ def test_build_run_command_all_projects_flag(tmp_path):
 
 def test_render_env_file_only_set_keys_and_quotes():
     out = render_env_file({
-        "MEMCLAW_BASE_URL": "https://memclaw.corp.internal",
-        "MEMCLAW_API_KEY": "mc_secret",
-        "MEMCLAW_TENANT_ID": "t1",
-        "MEMCLAW_AGENT_ID": "",          # falsy → omitted
-        "MEMCLAW_INTERVIEWER_PROJECTS": "app-*,foo",
+        "CAURA_BASE_URL": "https://caura.corp.internal",
+        "CAURA_API_KEY": "mc_secret",
+        "CAURA_TENANT_ID": "t1",
+        "CAURA_AGENT_ID": "",          # falsy → omitted
+        "CAURA_INTERVIEWER_PROJECTS": "app-*,foo",
     })
-    assert "export MEMCLAW_BASE_URL='https://memclaw.corp.internal'" in out
-    assert "export MEMCLAW_API_KEY='mc_secret'" in out
-    assert "export MEMCLAW_INTERVIEWER_PROJECTS='app-*,foo'" in out
-    assert "MEMCLAW_AGENT_ID" not in out  # empty value not written
-    assert "MEMCLAW_FLEET_ID" not in out  # absent key not written
+    assert "export CAURA_BASE_URL='https://caura.corp.internal'" in out
+    assert "export CAURA_API_KEY='mc_secret'" in out
+    assert "export CAURA_INTERVIEWER_PROJECTS='app-*,foo'" in out
+    assert "CAURA_AGENT_ID" not in out  # empty value not written
+    assert "CAURA_FLEET_ID" not in out  # absent key not written
 
 
 def test_render_env_file_escapes_single_quotes():
-    out = render_env_file({"MEMCLAW_API_KEY": "a'b"})
+    out = render_env_file({"CAURA_API_KEY": "a'b"})
     assert r"'a'\''b'" in out
 
 
@@ -167,7 +167,7 @@ def test_install_writes_cron_and_env_then_uninstall_removes(monkeypatch, tmp_pat
 
     rc = main([
         "install", "--interval", "30m",
-        "--base-url", "https://memclaw.corp.internal",
+        "--base-url", "https://caura.corp.internal",
         "--api-key", "mc_k", "--tenant-id", "t1",
         "--projects", "app-*",
     ])
@@ -176,8 +176,8 @@ def test_install_writes_cron_and_env_then_uninstall_removes(monkeypatch, tmp_pat
     assert "*/30 * * * *" in cron.table
     assert "run --harness claude-code" in cron.table
     env_txt = (tmp_path / "cfg" / "env").read_text()
-    assert "export MEMCLAW_API_KEY='mc_k'" in env_txt
-    assert "export MEMCLAW_INTERVIEWER_PROJECTS='app-*'" in env_txt
+    assert "export CAURA_API_KEY='mc_k'" in env_txt
+    assert "export CAURA_INTERVIEWER_PROJECTS='app-*'" in env_txt
     assert stat.S_IMODE(os.stat(tmp_path / "cfg" / "env").st_mode) == 0o600
 
     # re-install (hourly) replaces, does not duplicate
