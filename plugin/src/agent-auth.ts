@@ -79,13 +79,13 @@ async function provisionAgentKey(
     });
     if (!res.ok) {
       console.warn(
-        `[memclaw] Agent key provisioning failed for '${agentId}': ${res.status}`,
+        `[caura] Agent key provisioning failed for '${agentId}': ${res.status}`,
       );
       return null;
     }
     const data = (await res.json()) as { raw_key: string; key_prefix: string };
     console.log(
-      `[memclaw] Provisioned agent key for '${agentId}' (${data.key_prefix})`,
+      `[caura] Provisioned agent key for '${agentId}' (${data.key_prefix})`,
     );
     return data;
   } catch (e: unknown) {
@@ -152,7 +152,7 @@ export function evictAgentKey(agentId: string): void {
     if (secrets.keys[agentId]) {
       delete secrets.keys[agentId];
       writeSecretsFile(secrets);
-      console.log(`[memclaw] Evicted agent key for '${agentId}' (will re-provision)`);
+      console.log(`[caura] Evicted agent key for '${agentId}' (will re-provision)`);
     }
   } catch {
     // Best-effort eviction

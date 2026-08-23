@@ -422,7 +422,7 @@ function _recordDecision(decision: ShouldRecallResult, sessionHash: string): voi
     const last = _lastLoggedAt.get(k) || 0;
     if (Date.now() - last > _SKIP_LOG_INTERVAL_MS) {
       console.log(
-        `[memclaw] recall skipped: reason=${decision.reason} ` +
+        `[caura] recall skipped: reason=${decision.reason} ` +
           `policy=${RECALL_POLICY} session=${sessionHash}`,
       );
       _lastLoggedAt.set(k, Date.now());
@@ -503,7 +503,7 @@ export class MemClawContextEngine {
    */
   readonly info = {
     id: "memclaw",
-    name: "MemClaw Context Engine",
+    name: "Caura Context Engine",
     ownsCompaction: true,
   };
 
@@ -555,7 +555,7 @@ export class MemClawContextEngine {
     // 100% of residual warn noise comes from this exact bootstrap path.)
     const bootAgentId = resolveAgentIdQuiet(this.config);
     console.log(
-      `[memclaw] ContextEngine bootstrap: agent=${bootAgentId}, ` +
+      `[caura] ContextEngine bootstrap: agent=${bootAgentId}, ` +
         `fleet=${MEMCLAW_FLEET_ID || "(unset)"}, ` +
         `config keys=${Object.keys(this.config || {}).join(",") || "(empty)"}`,
     );
@@ -580,7 +580,7 @@ export class MemClawContextEngine {
         ((wr?.data as Record<string, unknown>)?.id as string) ||
         null;
       if (!writtenId) {
-        console.warn("[memclaw] bootstrap: could not extract memory ID — smoke test memory may not be cleaned up");
+        console.warn("[caura] bootstrap: could not extract memory ID — smoke test memory may not be cleaned up");
       }
 
       let top: Record<string, unknown> | undefined;
@@ -600,15 +600,15 @@ export class MemClawContextEngine {
 
       if (!top) {
         console.error(
-          "[memclaw] SMOKE TEST FAILED: search returned no results — check EMBEDDING_PROVIDER",
+          "[caura] SMOKE TEST FAILED: search returned no results — check EMBEDDING_PROVIDER",
         );
       } else if (score < 0.7) {
         console.error(
-          `[memclaw] SMOKE TEST WARNING: score ${score.toFixed(3)} < 0.7 — embeddings may be degraded`,
+          `[caura] SMOKE TEST WARNING: score ${score.toFixed(3)} < 0.7 — embeddings may be degraded`,
         );
       } else {
         console.log(
-          `[memclaw] Smoke test passed (score: ${score.toFixed(3)})`,
+          `[caura] Smoke test passed (score: ${score.toFixed(3)})`,
         );
       }
     } catch (e: unknown) {
@@ -772,7 +772,7 @@ export class MemClawContextEngine {
       const stack =
         err instanceof Error && err.stack ? err.stack : String(err);
       console.error(
-        `[memclaw] assemble: unexpected error (returning safe fallback)\n${stack}`,
+        `[caura] assemble: unexpected error (returning safe fallback)\n${stack}`,
       );
       return { messages: safeMessages, systemPromptAddition: "", estimatedTokens: 0 };
     }
@@ -984,7 +984,7 @@ export class MemClawContextEngine {
           );
           recallBlock =
             "\n## Recalled Memory Context\n" +
-            "The following memories were retrieved from MemClaw for this session:\n" +
+            "The following memories were retrieved from Caura for this session:\n" +
             lines.join("\n") +
             "\n";
         }

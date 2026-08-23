@@ -576,7 +576,7 @@ describe("ContextEngine.assemble contract (OpenClaw AssembleResult)", () => {
 // --- Per-call agent-id resolution contract (v2.8.1 hotfix) ---
 //
 // Customer report 2026-06-02: webclaw agent's gateway log emitted
-// ``[memclaw] Could not resolve agent ID — using install-default
+// ``[caura] Could not resolve agent ID — using install-default
 // 'main-e5366d79a926'`` 4-5 times per turn. Root cause: 3 of our 6
 // ``resolveAgentId`` call sites passed only ``this.config`` (the
 // factory-time ``factoryCtx`` wrapper, containing only
@@ -770,7 +770,7 @@ describe("ContextEngine session-key consistency (ingest ↔ assemble)", () => {
 // Customer escalation 2026-05-28: a different agent (``dbaclaw``)
 // on the same gateway emitted:
 //
-//     [memclaw] assemble: unexpected error (returning safe fallback)
+//     [caura] assemble: unexpected error (returning safe fallback)
 //     TypeError: Cannot read properties of undefined (reading 'tenantId')
 //         at getTenantPrefix (...context-engine.js:29:19)
 //         at getSessionKey   (...context-engine.js:32:26)
@@ -801,7 +801,7 @@ describe("MemClawContextEngine.constructor — undefined-config tolerance (v2.6.
     // Pass undefined where the type-system expects a config object —
     // exactly the shape that triggered the dbaclaw production
     // TypeError. Without the constructor coercion, this turn would
-    // surface ``[memclaw] assemble: unexpected error (returning safe
+    // surface ``[caura] assemble: unexpected error (returning safe
     // fallback)`` in the log; with it, the inner code completes and
     // we get the normal AssembleResult.
     const engine = new MemClawContextEngine(
