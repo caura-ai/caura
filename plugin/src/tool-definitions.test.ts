@@ -154,6 +154,35 @@ describe("createToolFromSpec factory", () => {
     assert.ok(list.properties.include_deleted);
   });
 
+  // ``GET /memories`` and ``GET /memories/stats`` declare ``scope`` as an
+  // OPT-IN query param (``Query(default=None)``), and an omitted one is a
+  // different request from ``scope='agent'``: it skips the trust ladder and
+  // takes its author filter from ``written_by ?? agent_id``. So neither may
+  // declare a schema default — a client honouring it would start sending
+  // 'agent', which adds the trust-1 gate and turns an agent-less install's
+  // tenant-wide team/org read into a 400. Nor may the description call any
+  // value "the default", which is what it used to claim.
+  //
+  // ``caura_insights`` / ``caura_evolve`` are deliberately not covered: their
+  // ``scope`` travels in a JSON body whose Pydantic model really does
+  // ``Field(default="agent")``, so calling 'agent' the default is true there.
+  test("caura_list / caura_stats declare no default for scope", () => {
+    for (const name of ["caura_list", "caura_stats"]) {
+      const schema = createToolFromSpec(name).parameters as any;
+      const scope = schema.properties.scope;
+      assert.ok(scope, `${name}: scope property missing`);
+      assert.deepEqual(scope.enum, ["agent", "fleet", "all"], `${name}: scope enum`);
+      assert.ok(
+        !("default" in scope),
+        `${name}: scope must not declare a schema default — an omitted scope is not scope='agent'`,
+      );
+      assert.ok(
+        !/\(default/.test(scope.description),
+        `${name}: scope description must not call a value "the default": ${scope.description}`,
+      );
+    }
+  });
+
   test("openclaw.plugin.json contracts.tools matches MEMCLAW_TOOLS exactly", () => {
     // OpenClaw runtime requires plugins to declare ``contracts.tools``
     // before it accepts ``api.registerTool`` calls. The list MUST match

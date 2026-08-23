@@ -243,9 +243,20 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     required: [],
     properties: {
       agent_id: { type: "string", description: "Caller agent ID (trust + visibility scoping)" },
-      scope: { type: "string", enum: ["agent", "fleet", "all"], description: "'agent' (default) = your memories only (trust ≥ 1). 'fleet'/'all' = cross-agent (trust ≥ 2)." },
+      // Deliberately NO schema ``default``. ``GET /memories`` declares
+      // ``scope`` as an opt-in query param (``Query(default=None)``), and an
+      // omitted one skips the trust ladder and takes its author filter from
+      // ``written_by ?? agent_id``. Declaring 'agent' here would make a
+      // schema-honouring client start sending it, which adds the trust-1 gate
+      // and, on an install with no agent id, turns a working tenant-wide
+      // team/org read into a 400 ("scope='agent' requires an agent identity").
+      // The two requests are near-identical once an agent id is configured,
+      // but they are not the same request — so the description says what
+      // omitting does instead of calling either one the default.
+      // ``caura_stats`` below has the same shape.
+      scope: { type: "string", enum: ["agent", "fleet", "all"], description: "Optional. Omitted: filtered by agent_id if one is set, with no trust gate — not the same request as 'agent'. 'agent' = your memories only (trust ≥ 1). 'fleet'/'all' = cross-agent (trust ≥ 2)." },
       fleet_id: { type: "string", description: "Restrict to a fleet" },
-      written_by: { type: "string", description: "Filter by author agent_id (ignored when scope='agent')" },
+      written_by: { type: "string", description: "Filter by author agent_id. With scope='agent' it must be omitted or match your own agent_id — a different author is rejected, not ignored." },
       memory_type: MEMORY_TYPE_SCHEMA,
       status: STATUS_SCHEMA,
       weight_min: { type: "number" },
@@ -320,7 +331,8 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     type: "object",
     required: [],
     properties: {
-      scope: { type: "string", enum: ["agent", "fleet", "all"], description: "'agent' (default, trust ≥ 1) | 'fleet'/'all' (trust ≥ 2)" },
+      // No schema ``default`` — see the note on ``caura_list.scope`` above.
+      scope: { type: "string", enum: ["agent", "fleet", "all"], description: "Optional. Omitted: aggregated over agent_id if one is set, with no trust gate — not the same request as 'agent'. 'agent' = only memories visible to you (trust ≥ 1). 'fleet'/'all' = cross-agent (trust ≥ 2)." },
       agent_id: { type: "string", description: "Caller agent ID" },
       fleet_id: { type: "string", description: "Restrict aggregate to a fleet" },
       memory_type: MEMORY_TYPE_SCHEMA,
