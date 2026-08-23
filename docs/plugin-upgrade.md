@@ -58,11 +58,24 @@ When upgrading an existing install, read its current `.env` first and pass the v
 
 ```bash
 ENV=$HOME/.openclaw/plugins/memclaw/.env
-URL=$(grep    '^MEMCLAW_API_URL='    "$ENV" | cut -d= -f2-)
-KEY=$(grep    '^MEMCLAW_API_KEY='    "$ENV" | cut -d= -f2-)
-FLEET=$(grep  '^MEMCLAW_FLEET_ID='   "$ENV" | cut -d= -f2-)
-TENANT=$(grep '^MEMCLAW_TENANT_ID='  "$ENV" | cut -d= -f2-)
-NODE=$(grep   '^MEMCLAW_NODE_NAME='  "$ENV" | cut -d= -f2-)
+
+# Read one setting, accepting either prefix: the installer writes CAURA_* into
+# new installs, older installs kept the pre-rename prefix, and a re-deploy
+# preserves whichever the file already had. First NON-EMPTY wins — a key can be
+# present but blank in a hand-edited .env, and blank here silently re-installs
+# the node with no identity at all.
+read_env() {
+  for _p in CAURA MEMCLAW; do  # legacy-name-ok: dual-prefix read, both are live
+    _v=$(grep -m1 "^${_p}_$1=" "$ENV" | cut -d= -f2-)
+    if [ -n "$_v" ]; then printf '%s\n' "$_v"; return; fi
+  done
+}
+
+URL=$(read_env API_URL)
+KEY=$(read_env API_KEY)
+FLEET=$(read_env FLEET_ID)
+TENANT=$(read_env TENANT_ID)
+NODE=$(read_env NODE_NAME)
 
 curl -ks -X POST "$URL/api/v1/install-plugin" \
   -H "Content-Type: application/json" \

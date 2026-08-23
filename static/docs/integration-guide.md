@@ -229,7 +229,7 @@ MEMCLAW_NODE_NAME=my-gateway                                 # friendly name sho
 # MEMCLAW_AUTO_FIX_CONFIG=false                              # set true to auto-fix openclaw.json on startup
 ```
 
-The plugin loads this `.env` file automatically (only `MEMCLAW_*` keys are read). If you use systemd, also add the vars to a drop-in file (`.env` values don't override existing process env).
+The plugin loads this `.env` file automatically. Both `CAURA_*` and `MEMCLAW_*` keys are read — and only those, so a `.env` cannot set `PATH` or `NODE_OPTIONS`. The installer writes `CAURA_*` into new installs; the older names above keep working unchanged. If you use systemd, also add the vars to a drop-in file (`.env` values don't override existing process env). <!-- legacy-name-ok: rule 3 dual-read alias -->
 
 **Configure OpenClaw** — edit `~/.openclaw/openclaw.json`:
 

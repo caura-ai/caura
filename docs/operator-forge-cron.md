@@ -42,7 +42,7 @@ http_target:
   oidc_token:
     service_account_email: <core-operations-sa>@<project>.iam.gserviceaccount.com
   headers:
-    X-Memclaw-Admin-Token: ${MEMCLAW_ADMIN_TOKEN}   # see core-api/auth.enforce_admin
+    X-API-Key: ${ADMIN_API_KEY}   # the admin key — see core-api/auth.enforce_admin
 ```
 
 ### Kubernetes CronJob (alternative)
@@ -67,9 +67,10 @@ spec:
                 - |
                   curl -fsS \
                     -X POST \
-                    -H "X-Memclaw-Admin-Token: $MEMCLAW_ADMIN_TOKEN" \
+                    -H "X-API-Key: $ADMIN_API_KEY" \
                     "$CORE_API_BASE_URL/admin/lifecycle/fanout/forge-distill"
               envFrom:
+                # whichever secret you use, it must expose ADMIN_API_KEY
                 - secretRef: { name: memclaw-admin }
           restartPolicy: OnFailure
 ```

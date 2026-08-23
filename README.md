@@ -1192,7 +1192,7 @@ Anything not listed above is internal and may change in any release without a ma
 
 - Python module layout (`core_api.middleware.*`, `core_api.providers.*`, `core_api.pipeline.*`, `core_api.services.*`, `common/*`)
 - Database schema, table names, migration paths
-- Gateway-injected HTTP headers (`X-Memclaw-Gateway`, `X-Tenant-ID`, `X-Agent-ID`, `X-Org-Read-Only`)
+- Gateway-injected HTTP headers (`X-Gateway-Secret`, `X-Tenant-ID`, `X-Agent-ID`, `X-Org-Read-Only`)
 - Most `/api/v1/admin/*` and all `/api/v1/testing/*` routes (the documented exception is `POST /admin/agent-keys/provision`, which is part of the stable identity-bootstrap surface — see the Agents row above)
 - The `core-storage-api` microservice (internal, not user-facing)
 - The plugin's TypeScript module structure
