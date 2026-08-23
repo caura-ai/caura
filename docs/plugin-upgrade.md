@@ -35,10 +35,10 @@ The server's `/api/v1/install-plugin` endpoint returns a complete bash installer
 ### Minimal — fresh install or operator-driven re-install with explicit creds
 
 ```bash
-curl -ks -X POST "$MEMCLAW_API_URL/api/v1/install-plugin" \
+curl -ks -X POST "$CAURA_API_URL/api/v1/install-plugin" \
   -H "Content-Type: application/json" \
   -d '{
-    "api_url":   "https://your-memclaw-server",
+    "api_url":   "https://your-caura-server",
     "api_key":   "mc_…",
     "fleet_id":  "your-fleet",
     "tenant_id": "your-tenant",
@@ -108,7 +108,7 @@ For operators with many nodes (and SSH or OpenClaw-agent reach to all of them), 
 Identifying which nodes need re-install:
 
 ```bash
-curl -s "https://your-memclaw-server/api/v1/fleet/stats?tenant_id=$TENANT_ID&fleet_id=$FLEET_ID" \
+curl -s "https://your-caura-server/api/v1/fleet/stats?tenant_id=$TENANT_ID&fleet_id=$FLEET_ID" \
   -H "Authorization: Bearer $JWT" \
   | jq '.nodes[]
         | select((.plugin_version // "0") | split(".") | map(tonumber? // 0) | . < [2,6,0])
@@ -121,7 +121,7 @@ That returns the stale-plugin set the auto-deploy gate is currently skipping. Th
 
 | Resource | Auto-upgrade (heartbeat) | Manual install (with creds) | Manual install (default creds) |
 |---|---|---|---|
-| `.env` (`MEMCLAW_API_KEY` etc.) | Preserved + merged | Preserved (you pass them back) | Overwritten with defaults |
+| `.env` (`CAURA_API_KEY` etc.) | Preserved + merged | Preserved (you pass them back) | Overwritten with defaults |
 | `dist/*.js`, `src/*.ts` | Replaced | Replaced | Replaced |
 | `node_modules/` | Replaced | Replaced | Replaced |
 | `.agent-keys.json`, `.educated`, `.allowlist-applied` | Preserved | Preserved | Preserved |

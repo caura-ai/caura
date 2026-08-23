@@ -173,7 +173,7 @@ Anthropic, Gemini, and OpenRouter don't offer embedding APIs here — pair them 
 docker compose up -d
 ```
 
-By default this **pulls the multi-arch images from `ghcr.io`** (`linux/amd64` + `linux/arm64`) on first run — takes ~30 seconds. Subsequent `up` commands re-use the cached image (no registry round-trip, works offline). To pin a specific version, set `MEMCLAW_VERSION=v1.2.3` in your `.env`. To build from local source instead (e.g. when iterating on a fork), run `docker compose up --build --no-pull`.
+By default this **pulls the multi-arch images from `ghcr.io`** (`linux/amd64` + `linux/arm64`) on first run — takes ~30 seconds. Subsequent `up` commands re-use the cached image (no registry round-trip, works offline). To pin a specific version, set `CAURA_VERSION=v1.2.3` in your `.env`. To build from local source instead (e.g. when iterating on a fork), run `docker compose up --build --no-pull`.
 
 To upgrade to a newer image at the same tag (e.g. `:latest` after we cut a new release), run `docker compose pull && docker compose up -d`. Without an explicit `pull`, the local cache wins — there's no silent version drift.
 
@@ -292,7 +292,7 @@ Pass `X-API-Key: your-long-random-admin-key` and include `tenant_id` in request 
 
 **Shared gate** — for network-exposed OSS deployments:
 ```env
-MEMCLAW_API_KEY=your-shared-key
+CAURA_API_KEY=your-shared-key
 ```
 Clients send `X-API-Key: your-shared-key` plus `X-Tenant-ID: <tenant>`.
 
@@ -782,7 +782,7 @@ The **reader/writer split** is an opt-in topology for high-write-rate deploys th
    a populated DB:
    ```bash
    docker compose pull
-   MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS=true docker compose up -d
+   CAURA_RUN_DESTRUCTIVE_MIGRATIONS=true docker compose up -d
    ```
    The `core-storage-api` container will run `alembic upgrade head` on
    startup. The migration runs in seconds-to-minutes for typical OSS
@@ -832,10 +832,10 @@ The **reader/writer split** is an opt-in topology for high-write-rate deploys th
      so self-hosters on the stock stack should use the `core-storage-api`
      variant above, which works as documented.
 
-6. **Once stable, unset `MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS`** so subsequent
+6. **Once stable, unset `CAURA_RUN_DESTRUCTIVE_MIGRATIONS`** so subsequent
    `up` commands don't carry the opt-in:
    ```bash
-   unset MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS  # if exported in the shell
+   unset CAURA_RUN_DESTRUCTIVE_MIGRATIONS  # if exported in the shell
    # or remove the line from your .env file
    ```
 
@@ -852,7 +852,7 @@ explicitly downgrade:
 
 ```bash
 docker compose run --rm \
-  -e MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS=true \
+  -e CAURA_RUN_DESTRUCTIVE_MIGRATIONS=true \
   core-storage-api alembic downgrade 011
 ```
 
@@ -981,7 +981,7 @@ All routes are versioned under `/api/v1/`. Interactive Swagger docs at `/api/doc
 |---|---|
 | `X-Agent-ID` | Scopes the request to this agent |
 | `X-Org-Read-Only: true` | Read-only mode — creates/updates return 403 |
-| `X-Tenant-ID` | Tenant identity when using the shared `MEMCLAW_API_KEY` gate |
+| `X-Tenant-ID` | Tenant identity when using the shared `CAURA_API_KEY` gate |
 
 These headers are honored unconditionally — `core-api` must not be network-exposed without a gateway that strips them from untrusted callers.
 
@@ -1158,12 +1158,17 @@ Read by the OpenClaw plugin. The plugin's published name (`memclaw`) and these v
 
 | Var | Purpose |
 |---|---|
-| `MEMCLAW_API_URL` | Base URL of the core-api server. |
-| `MEMCLAW_API_KEY` | Tenant or admin API key sent in `X-API-Key`. |
-| `MEMCLAW_TENANT_ID` | Optional pre-resolved tenant id; bypasses lookup. |
-| `MEMCLAW_FLEET_ID` | Default fleet id for writes/heartbeat. |
-| `MEMCLAW_NODE_NAME` | Fleet node identifier reported on heartbeat. |
-| `MEMCLAW_AUTO_WRITE_TURNS` | Auto-write turn summaries (default `true`). |
+| `CAURA_API_URL` | Base URL of the core-api server. |
+| `CAURA_API_KEY` | Tenant or admin API key sent in `X-API-Key`. |
+| `CAURA_TENANT_ID` | Optional pre-resolved tenant id; bypasses lookup. |
+| `CAURA_FLEET_ID` | Default fleet id for writes/heartbeat. |
+| `CAURA_NODE_NAME` | Fleet node identifier reported on heartbeat. |
+| `CAURA_AUTO_WRITE_TURNS` | Auto-write turn summaries (default `true`). |
+
+**Legacy spellings.** Every `CAURA_*` variable in this document — the table above, the `CAURA_API_KEY` server gate, and `CAURA_VERSION` in compose — also answers to its pre-rename `MEMCLAW_*` name and will keep doing so: swap the prefix, and the rest of the name is unchanged (`CAURA_API_URL` ⇄ `MEMCLAW_API_URL`). Where both are set the first **non-empty** value wins — deliberately, rather than the first one *defined* — so an unfilled `CAURA_FOO=` in a deploy template cannot blank out a working `MEMCLAW_FOO`. <!-- legacy-name-ok: rule 3 dual-read alias — the one surviving alias table -->
+
+New installs are written with the `CAURA_*` names. Variables without the prefix
+(`ADMIN_API_KEY`, `POSTGRES_*`, `IS_STANDALONE`, …) never had a branded spelling.
 
 #### Server environment variables
 
@@ -1172,7 +1177,7 @@ These mirror the Configuration table above. See it for defaults.
 | Group | Vars |
 |---|---|
 | Database | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_USE_IAM_AUTH`, `POSTGRES_REQUIRE_SSL` |
-| Auth | `ADMIN_API_KEY`, `MEMCLAW_API_KEY`, `IS_STANDALONE` |
+| Auth | `ADMIN_API_KEY`, `CAURA_API_KEY`, `IS_STANDALONE` |
 | Providers | `EMBEDDING_PROVIDER`, `ENTITY_EXTRACTION_PROVIDER`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `USE_LLM_FOR_MEMORY_CREATION` |
 | Runtime | `CORS_ORIGINS`, `ENVIRONMENT`, `SETTINGS_ENCRYPTION_KEY`, `REDIS_URL` |
 
@@ -1182,7 +1187,7 @@ These mirror the Configuration table above. See it for defaults.
 |---|---|---|
 | Standalone | `IS_STANDALONE=true` | Single-tenant self-host; auth bypassed. |
 | Multi-tenant admin | `ADMIN_API_KEY=…` | Operator key for multi-tenant deployments. |
-| Shared gate | `MEMCLAW_API_KEY=…` | Optional shared secret required on every non-admin request. |
+| Shared gate | `CAURA_API_KEY=…` | Optional shared secret required on every non-admin request. |
 
 See [AGENT-INSTALL.md](AGENT-INSTALL.md) for installation flows that exercise each mode.
 

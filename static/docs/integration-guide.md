@@ -66,7 +66,7 @@ Add this to your MCP client configuration:
 {
   "mcpServers": {
     "caura": {
-      "url": "https://your-memclaw-instance.example.com/mcp",
+      "url": "https://your-caura-instance.example.com/mcp",
       "headers": {
         "X-API-Key": "mc_your_api_key_here"
       }
@@ -81,8 +81,8 @@ Add this to your MCP client configuration:
 |---|---|
 | Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
-| Claude Code | `~/.claude.json` (user scope) — preferred; register via `claude mcp add --scope user --transport http caura https://your-memclaw-instance.example.com/mcp --header "X-API-Key: mc_your_key"` |
-| Cursor | Settings -> MCP Servers -> Add Server (type: `sse`, URL: `https://your-memclaw-instance.example.com/mcp`) |
+| Claude Code | `~/.claude.json` (user scope) — preferred; register via `claude mcp add --scope user --transport http caura https://your-caura-instance.example.com/mcp --header "X-API-Key: mc_your_key"` |
+| Cursor | Settings -> MCP Servers -> Add Server (type: `sse`, URL: `https://your-caura-instance.example.com/mcp`) |
 
 > The Claude Code MCP-server registry lives in `~/.claude.json` — NOT `~/.claude/settings.json`. The latter's schema rejects an `mcpServers` block. Prefer the `claude mcp add` CLI over hand-editing so the correct file is written.
 
@@ -98,7 +98,7 @@ agent reads on-demand. Install it after the MCP config above:
 ```bash
 # Installs SKILL.md into ~/.claude/skills/memclaw/ (Claude Code)
 # and/or ~/.agents/skills/memclaw/ (Codex).
-curl -s "https://your-memclaw-instance.example.com/api/v1/install-skill" \
+curl -s "https://your-caura-instance.example.com/api/v1/install-skill" \
   -H "X-API-Key: mc_your_key" | bash
 ```
 
@@ -220,16 +220,16 @@ scp -r plugin/dist plugin/package.json plugin/openclaw.plugin.json \
 Add to `~/.openclaw/plugins/memclaw/.env`:
 
 ```bash
-MEMCLAW_API_URL=https://your-memclaw-instance.example.com   # your Caura API
-MEMCLAW_API_KEY=mc_your_key_here                             # tenant-scoped API key
-MEMCLAW_FLEET_ID=fleet-001                                   # identifies this fleet
-MEMCLAW_NODE_NAME=my-gateway                                 # friendly name shown in Fleet page
-# MEMCLAW_TENANT_ID=                                         # auto-resolved from API key
-# MEMCLAW_AUTO_WRITE_TURNS=true                              # default; set false to disable auto-write
-# MEMCLAW_AUTO_FIX_CONFIG=false                              # set true to auto-fix openclaw.json on startup
+CAURA_API_URL=https://your-caura-instance.example.com   # your Caura API
+CAURA_API_KEY=mc_your_key_here                          # tenant-scoped API key
+CAURA_FLEET_ID=fleet-001                                # identifies this fleet
+CAURA_NODE_NAME=my-gateway                              # friendly name shown in Fleet page
+# CAURA_TENANT_ID=                                      # auto-resolved from API key
+# CAURA_AUTO_WRITE_TURNS=true                           # default; set false to disable auto-write
+# CAURA_AUTO_FIX_CONFIG=false                           # set true to auto-fix openclaw.json on startup
 ```
 
-The plugin loads this `.env` file automatically. Both `CAURA_*` and `MEMCLAW_*` keys are read — and only those, so a `.env` cannot set `PATH` or `NODE_OPTIONS`. The installer writes `CAURA_*` into new installs; the older names above keep working unchanged. If you use systemd, also add the vars to a drop-in file (`.env` values don't override existing process env). <!-- legacy-name-ok: rule 3 dual-read alias -->
+The plugin loads this `.env` file automatically. Both `CAURA_*` and `MEMCLAW_*` keys are read — and only those, so a `.env` cannot set `PATH` or `NODE_OPTIONS`. The pre-rename `MEMCLAW_*` spelling of every name above keeps working; where both are set the first **non-empty** one wins, so a half-filled template cannot blank out a working value. If you use systemd, also add the vars to a drop-in file (`.env` values don't override existing process env). <!-- legacy-name-ok: rule 3 dual-read alias -->
 
 **Configure OpenClaw** — edit `~/.openclaw/openclaw.json`:
 
@@ -711,11 +711,11 @@ Content-hash rejects exact duplicates within a tenant+fleet scope (HTTP 409). Sa
 | Issue | Fix |
 |---|---|
 | Plugin tools don't appear | Ensure all three `plugins` keys are set in `openclaw.json`: `allow`, `entries`, and `load.paths`. Restart OpenClaw |
-| Tools not in agent sessions | Auto-fixed on first plugin load (adds v1.0 names, removes stale pre-v1.0 names). If it persists after restart, run `openclaw gateway memclaw.allowlist.fix` or check that `MEMCLAW_AUTO_FIX_CONFIG` is not set to `false` |
+| Tools not in agent sessions | Auto-fixed on first plugin load (adds v1.0 names, removes stale pre-v1.0 names). If it persists after restart, run `openclaw gateway memclaw.allowlist.fix` or check that `CAURA_AUTO_FIX_CONFIG` is not set to `false` <!-- legacy-name-ok: memclaw.allowlist.fix is the live gateway RPC method name --> |
 | Plugin allowed but not loading | Missing `plugins.entries.memclaw.enabled: true` or `plugins.load.paths` entry — the installer and Fix Configuration set both |
 | All config issues | Use the "Fix Configuration" button in Fleet Browser Plugin Manager to auto-fix all settings |
-| `ECONNREFUSED` | Check `MEMCLAW_API_URL`, ensure API is running |
-| 401 Unauthorized | Check `MEMCLAW_API_KEY` env var on gateway |
+| `ECONNREFUSED` | Check `CAURA_API_URL`, ensure API is running |
+| 401 Unauthorized | Check `CAURA_API_KEY` env var on gateway |
 | 403 Forbidden | Key used for wrong tenant, or agent trust level too low |
 | 409 Conflict | Duplicate content — safe to ignore |
 | Empty search results | Verify tenant_id, check fleet_id scope, write test memories |
