@@ -45,7 +45,7 @@ Agents write plain text. Caura turns it into searchable, governed, self-improvin
 </p>
 
 <p align="center">
-  <img src="static/images/memclaw-demo.gif" alt="Caura demo — write, recall, and governed cross-fleet memory in action" width="700" />
+  <img src="static/images/caura-demo.gif" alt="Caura demo — write, recall, and governed cross-fleet memory in action" width="700" />
 </p>
 
 ---
