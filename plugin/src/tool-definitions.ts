@@ -50,12 +50,47 @@ export interface AgentTool {
 
 // --- Helpers ---
 
+interface EnrichOptions {
+  /**
+   * Set on the tools whose ``fleet_id`` is *only* a read filter, so an
+   * explicit ``scope: "all"`` is honoured instead of being narrowed back to
+   * the configured fleet.
+   *
+   * ``caura_list`` and ``caura_stats`` are the two. Server-side they apply
+   * ``fleet_id`` as a row filter OUTSIDE any scope branch
+   * (``memory_list_by_filters`` / ``memory_stats_breakdown``:
+   * ``if fleet_id: Memory.fleet_id == fleet_id``), and their shared ladder
+   * ``resolve_read_fleet_gate`` passes it through untouched for 'all'. So a
+   * defaulted ``fleet_id`` turns a tenant-wide read into a single-fleet one —
+   * and being a strict equality it drops fleet-less (``NULL``) rows too, with
+   * nothing in the response to signal it.
+   *
+   * NOT set on ``caura_insights`` / ``caura_evolve``, which also take
+   * ``scope: "all"``. Their reads branch on ``scope`` and ignore ``fleet_id``
+   * entirely under 'all' (``_insights_scope_filters`` /
+   * ``evolve_service._filter_by_scope``), so there is no read to widen — and
+   * for them ``fleet_id`` doubles as a WRITE target: the fleet persisted
+   * findings and outcome rules land in, and the key insights supersedes priors
+   * under. Withholding it there relocates a write instead of widening a read.
+   */
+  fleetIsReadFilterOnly?: boolean;
+}
+
 async function enrichBody(
   params: Record<string, unknown>,
+  opts: EnrichOptions = {},
 ): Promise<Record<string, unknown>> {
   const body = { ...params };
   if (!body.tenant_id) body.tenant_id = await ensureTenantId();
   if (!body.agent_id && MEMCLAW_AGENT_ID) body.agent_id = MEMCLAW_AGENT_ID;
+  // The configured fleet below is a DEFAULT, for callers that did not say
+  // which fleet they meant — so it must not override a caller that asked to
+  // span every fleet. Three cases deliberately keep it: an omitted ``scope``
+  // (that default is what makes ordinary calls fleet-scoped in the first
+  // place), ``scope='agent'`` / ``'fleet'`` (a fleet-scoped read is what they
+  // ask for), and a caller-supplied ``fleet_id`` — this withholds a default,
+  // it never strips a value.
+  if (opts.fleetIsReadFilterOnly && body.scope === "all") return body;
   if (!body.fleet_id && MEMCLAW_FLEET_ID) body.fleet_id = MEMCLAW_FLEET_ID;
   return body;
 }
@@ -464,7 +499,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   },
 
   caura_list: async (params, signal) => {
-    const enriched = await enrichBody(params);
+    const enriched = await enrichBody(params, { fleetIsReadFilterOnly: true });
     const query: Record<string, string> = {};
     for (const [k, v] of Object.entries(enriched)) {
       if (v === undefined || v === null) continue;
@@ -517,7 +552,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   },
 
   caura_stats: async (params, signal) => {
-    const enriched = await enrichBody(params);
+    const enriched = await enrichBody(params, { fleetIsReadFilterOnly: true });
     const query: Record<string, string> = {};
     for (const [k, v] of Object.entries(enriched)) {
       if (v === undefined || v === null) continue;
