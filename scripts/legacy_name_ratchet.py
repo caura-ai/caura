@@ -125,7 +125,21 @@ def _git(args: list[str]) -> str:
     :func:`main` refuses to pass when BOTH trees come back empty.
     """
     # check=False deliberately: the return code is the signal here, not an error.
-    proc = subprocess.run(args, capture_output=True, text=True, check=False)
+    #
+    # The encoding is pinned rather than left to the locale. ``text=True`` alone
+    # decodes with ``locale.getpreferredencoding()``, which is UTF-8 on the CI
+    # runner but a legacy codepage on a Windows workstation — cp1255, cp1251,
+    # cp1252, whatever the machine is set to. The tree has non-ASCII bytes in it
+    # (em dashes in prose, accented names in fixtures), so on those machines the
+    # decode raises UnicodeDecodeError inside subprocess's reader thread and the
+    # script dies before it prints anything. It is not a gate failure — the gate
+    # simply cannot be run locally, which is where you want to run it first.
+    # ``errors="replace"`` keeps an undecodable byte from being fatal: this
+    # counts occurrences of an ASCII name, so a mangled character elsewhere on
+    # the line changes nothing about the match.
+    proc = subprocess.run(
+        args, capture_output=True, text=True, check=False, encoding="utf-8", errors="replace"
+    )
     if proc.returncode == 0:
         return proc.stdout
     if proc.returncode == 1:
