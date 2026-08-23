@@ -513,3 +513,29 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin main
           python3 scripts/legacy_name_ratchet.py --base origin/main
+
+  do-not-touch-sentinel:
+    # The other half of hard rule 4. The ratchet above is directional — it fails a
+    # file whose old-brand count goes UP — so a sweep that DELETES a load-bearing
+    # string reads as progress and passes. This job asserts the same list in the
+    # other direction, and must exist before the Phase 1.3 and Phase 7 sweeps.
+    #
+    # Not every string it guards carries the brand: three are ordinary English
+    # that a CRITICAL production Datadog monitor matches on as a regex substring.
+    # Reword one and the alert stops firing with nothing in the tree to fail.
+    #
+    # No fetch and no base. Unlike the ratchet this is not a comparison — the
+    # question is whether the strings are in the tree being built, so the
+    # checkout alone answers it.
+    name: Do-not-touch sentinel
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Load-bearing strings survive
+        run: python3 scripts/do_not_touch_sentinel.py
