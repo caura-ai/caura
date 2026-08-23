@@ -581,8 +581,8 @@ settings.
 - **How activity is captured.** Two families, one submit protocol:
   - **Plugin-buffer** — the OpenClaw plugin keeps a durable node-local buffer
     and submits windows (add `MEMCLAW_INTERVIEWER=true` to the plugin env).
-  - **Disk-parser** — the `memclaw-interviewer` CLI (shipped in the
-    `memclaw-client` package) reads a harness's on-disk transcript read-only
+  - **Disk-parser** — the `caura-interviewer` CLI (shipped in the
+    `caura-client` package) reads a harness's on-disk transcript read-only
     and submits windows. Ships for **Claude Code** (`~/.claude/projects`) and
     **Cursor** (`~/.cursor/…/agent-transcripts`) today; **Hermes** and others
     are planned.
