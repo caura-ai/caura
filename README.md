@@ -376,6 +376,10 @@ console.log((await mc.recall("Q3 revenue target")).summary);
 
 `MemClaw` remains a permanent alias of `Caura`.
 
+The bare `caura` name on npm is held up by the registry's package-name
+similarity filter, so install the scoped package above. On the Python side,
+`pip install caura` works and pulls the same client.
+
 See [`clients/typescript/`](clients/typescript/) for the full client.
 
 ---
