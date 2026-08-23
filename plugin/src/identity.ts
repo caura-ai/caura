@@ -28,6 +28,7 @@
  */
 
 import { hostname } from "os";
+import { readEnv } from "./env.js";
 
 /**
  * Normalise a hostname to a friendly suffix:
@@ -78,7 +79,7 @@ export function getDisplayName(
   const ov =
     override !== undefined
       ? override
-      : process.env.MEMCLAW_DISPLAY_NAME_OVERRIDE;
+      : readEnv(["CAURA_DISPLAY_NAME_OVERRIDE", "MEMCLAW_DISPLAY_NAME_OVERRIDE"]);  // legacy-name-ok: rule 3 dual-read alias
   if (ov && ov.trim()) return ov.trim();
   const h = sanitizeHostname(host !== undefined ? host : hostname());
   if (!h) return baseName;

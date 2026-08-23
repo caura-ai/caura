@@ -14,7 +14,7 @@ process.env.MEMCLAW_API_KEY = "mc_test_key_for_env_tests";
 // Clear tenant id so resolveTenantId actually attempts a fetch.
 delete process.env.MEMCLAW_TENANT_ID;
 
-const { resolveTenantId } = await import("./env.js");
+const { resolveTenantId, readEnv, isPluginEnvKey, hasPluginEnvPrefix } = await import("./env.js");
 
 interface MockCall {
   url: string;
@@ -171,7 +171,10 @@ describe("env.ts default-value source pins", () => {
     const envSrc = await readFile(join(here, "..", "src", "env.ts"), "utf8");
     // Match the exact ``_readIntEnv`` call site to avoid colliding with
     // doc-comment occurrences of the number 1500.
-    const re = /_readIntEnv\(\s*"MEMCLAW_KEYSTONES_TOKEN_CAP"\s*,\s*(\d+)\s*,/;
+    // Tolerates the ratchet's ``legacy-name-ok`` comment between the alias
+    // array and the default, which is where it has to sit.
+    const re =
+      /_readIntEnv\(\s*\[[^\]]*"MEMCLAW_KEYSTONES_TOKEN_CAP"[^\]]*\]\s*,(?:\s*\/\/[^\n]*)?\s*(\d+)\s*,/;  // legacy-name-ok: rule 3 dual-read alias
     const match = envSrc.match(re);
     assert.ok(
       match,
@@ -186,5 +189,133 @@ describe("env.ts default-value source pins", () => {
         "and review the keystones formatter's truncation behavior in " +
         "keystones.test.ts.",
     );
+  });
+});
+
+// --- Environment dual-read (Phase 5.1) ---
+
+describe("isPluginEnvKey — .env allow-list", () => {
+  test("accepts both prefixes", () => {
+    assert.ok(isPluginEnvKey("CAURA_API_KEY"), "CAURA_* must not be dropped");
+    assert.ok(isPluginEnvKey("MEMCLAW_API_KEY"), "old prefix keeps working"); // legacy-name-ok: rule 3 — pins that the old prefix is still accepted
+  });
+
+  test("is stricter than hasPluginEnvPrefix, deliberately", () => {
+    // deploy.ts filters with the loose form because it PRESERVES an operator's
+    // existing .env keys across a redeploy; using the strict form there would
+    // silently delete anything it rejects from a file we don't own.
+    for (const key of ["CAURA_API_KEY2", "MEMCLAW_API_KEY2", "CAURA_lower"]) { // legacy-name-ok: rule 3 — an old-prefixed key must survive a redeploy
+      assert.equal(hasPluginEnvPrefix(key), true, `${key} must survive a redeploy`);
+      assert.equal(isPluginEnvKey(key), false, `${key} must not reach process.env`);
+    }
+  });
+
+  test("hasPluginEnvPrefix still refuses foreign keys", () => {
+    for (const key of ["PATH", "NODE_OPTIONS", "CAURAX_API_KEY", "XCAURA_API_KEY"]) {
+      assert.equal(hasPluginEnvPrefix(key), false, `${key} is not ours to carry`);
+    }
+  });
+
+  test("still refuses everything else", () => {
+    for (const key of [
+      "PATH",
+      "NODE_OPTIONS",
+      "LD_PRELOAD",
+      "CAURA",
+      "CAURAX_API_KEY",
+      "XCAURA_API_KEY",
+      "caura_api_key",
+      "CAURA_api_key",
+      "CAURA_API-KEY",
+      " CAURA_API_KEY",
+    ]) {
+      assert.equal(isPluginEnvKey(key), false, `${key} must not be settable from .env`);
+    }
+  });
+});
+
+describe("readEnv call sites — alias pairs stay in step", () => {
+  test("every pair is the same suffix under both prefixes", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+    const here = dirname(fileURLToPath(import.meta.url));
+    // Source-scraped for the same reason as the default pin above: the risk is a
+    // typo in a literal, which no runtime test can see. A mismatched suffix
+    // type-checks, passes any test that only sets the new name, and strands the
+    // old one forever — the one thing rule 3 forbids.
+    const { readdir } = await import("node:fs/promises");
+    const srcDir = join(here, "..", "src");
+    // Globbed, not listed: a new module with a dual-read call site would be
+    // silently unchecked by a hardcoded list, and the floor below cannot catch
+    // that because a new file only ever adds pairs.
+    const files = (await readdir(srcDir)).filter(
+      (f) => f.endsWith(".ts") && !f.endsWith(".test.ts"),
+    );
+    // Covers the wrapper helpers too — those are the multi-line call sites,
+    // where a mismatched suffix is hardest to spot by eye.
+    const callSite =
+      /(?:readEnv|_readBoolEnv|_readIntEnv)\(\s*\[\s*"([A-Z_]+)"\s*,\s*"([A-Z_]+)"\s*,?\s*\]/gs;
+    let pairs = 0;
+    for (const file of files) {
+      const src = await readFile(join(srcDir, file), "utf8");
+      for (const [, newName, oldName] of src.matchAll(callSite)) {
+        pairs++;
+        assert.ok(
+          newName.startsWith("CAURA_"),
+          `${file}: first alias must be the new name, got ${newName}`,
+        );
+        assert.equal(
+          oldName,
+          `MEMCLAW_${newName.slice("CAURA_".length)}`, // legacy-name-ok: rule 3 — asserts the old alias tracks the new one
+          `${file}: ${newName} is paired with ${oldName}, which is a different variable — the old name would never be read`,
+        );
+      }
+    }
+    assert.ok(pairs >= 28, `expected every dual-read call site to be scanned, found ${pairs}`);
+  });
+});
+
+describe("readEnv — new/old env-name dual-read", () => {
+  const NEW = "CAURA_TEST_DUAL_READ";
+  const OLD = "MEMCLAW_TEST_DUAL_READ"; // legacy-name-ok: rule 3 — the old alias this suite pins
+  const aliases = [NEW, OLD];
+
+  afterEach(() => {
+    delete process.env[NEW];
+    delete process.env[OLD];
+  });
+
+  test("new name wins when both are set", () => {
+    process.env[NEW] = "new-value";
+    process.env[OLD] = "old-value";
+    assert.equal(readEnv(aliases), "new-value");
+  });
+
+  test("old name is still read when the new one is absent", () => {
+    process.env[OLD] = "old-value";
+    assert.equal(readEnv(aliases), "old-value");
+  });
+
+  test("new name is read when the old one is absent", () => {
+    process.env[NEW] = "new-value";
+    assert.equal(readEnv(aliases), "new-value");
+  });
+
+  test("a blank new name does not shadow a working old one", () => {
+    // The regression this guards: a single "first defined wins" pass would
+    // return "" here and strand an install that only sets the old name.
+    process.env[NEW] = "";
+    process.env[OLD] = "old-value";
+    assert.equal(readEnv(aliases), "old-value");
+  });
+
+  test("a blank value is honoured when it is the only alias set", () => {
+    process.env[NEW] = "";
+    assert.equal(readEnv(aliases), "", "KEY= must still mean 'set to empty'");
+  });
+
+  test("undefined when no alias is set", () => {
+    assert.equal(readEnv(aliases), undefined);
   });
 });

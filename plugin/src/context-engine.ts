@@ -32,6 +32,7 @@ import {
   RECALL_CROSS_AGENT,
   MEMCLAW_INTERVIEWER,
   type RecallPolicy,
+  readEnv,
 } from "./env.js";
 import { appendInterviewEvent } from "./interview-buffer.js";
 import { memclawPromptSectionText } from "./prompt-section.js";
@@ -829,7 +830,7 @@ export class MemClawContextEngine {
       (fleetId ? `, fleet_id=\`${fleetId}\`` : "") +
       (MEMCLAW_TENANT_ID ? `, tenant_id=\`${MEMCLAW_TENANT_ID}\`` : "") +
       "\n";
-    const operatorPrompt = process.env.MEMCLAW_EDUCATION_PROMPT || "";
+    const operatorPrompt = readEnv(["CAURA_EDUCATION_PROMPT", "MEMCLAW_EDUCATION_PROMPT"]) || "";  // legacy-name-ok: rule 3 dual-read alias
     const operatorBlock = operatorPrompt
       ? `\n## Operator Instructions\n${operatorPrompt}\n`
       : "";

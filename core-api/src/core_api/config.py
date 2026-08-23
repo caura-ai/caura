@@ -26,7 +26,19 @@ class Settings(BaseSettings):
     # ``db_pool_*`` settings + ``database_url`` were removed with the engine.
     api_key: str | None = None  # legacy, deprecated
     admin_api_key: str | None = None
-    memclaw_api_key: str | None = None  # Optional: when set, all non-admin requests must present this key
+    # Optional: when set, all non-admin requests must present this key. Both
+    # spellings are accepted as INPUTS; ``_prefer_the_new_api_key_name`` below
+    # collapses them onto the second field, the only one downstream code reads —
+    # the first is None whenever the operator set the old name.
+    #
+    # Deliberately NOT ``AliasChoices``: that resolves to the first alias that is
+    # DEFINED, and the empty string counts. A deploy template carrying an
+    # unfilled ``CAURA_API_KEY=`` next to a working old name would resolve to
+    # ``""``, and auth.py's ``if mclaw_key:`` would skip the whole Path-2
+    # perimeter without a word. For a secret, blank and unset mean the same
+    # thing, so first-NON-EMPTY is the only safe rule.
+    caura_api_key: str | None = None
+    memclaw_api_key: str | None = None  # legacy-name-ok: rule 3 dual-read alias
     # Perimeter secret shared with the enterprise gateway. When set, the
     # header-trust auth path (X-Tenant-ID) additionally requires a matching
     # ``X-Gateway-Secret`` header — so a caller who reaches core-api directly
@@ -355,6 +367,16 @@ class Settings(BaseSettings):
     security_audit_alert_score_below: float | None = None
     security_audit_alert_critical_findings_min: int | None = None
     security_audit_alert_score_drop_delta: float | None = None
+
+    @model_validator(mode="after")
+    def _prefer_the_new_api_key_name(self) -> "Settings":
+        """Collapse the two accepted spellings onto the field auth.py reads.
+
+        First non-empty wins, new name first — so the old spelling keeps working
+        forever and a blank new one can never shadow it.
+        """
+        self.memclaw_api_key = self.caura_api_key or self.memclaw_api_key  # legacy-name-ok: rule 3 alias
+        return self
 
     @field_validator("log_level", mode="before")
     @classmethod

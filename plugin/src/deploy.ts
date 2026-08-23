@@ -3,7 +3,9 @@
  *
  * Security controls:
  * - Size validation on source code (MAX_SOURCE_SIZE)
- * - Only MEMCLAW_* env vars accepted (key filtering)
+ * - Only the plugin's own env-var prefixes accepted, via
+ *   ``hasPluginEnvPrefix`` (key filtering) — a remote deploy command cannot
+ *   write an arbitrary key into the plugin's ``.env``
  * - Backup and restore on build failure
  *
  * Note: caller authentication (HMAC or token) is handled upstream —
@@ -14,7 +16,7 @@ import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import { execSync } from "child_process";
 import { getPluginDir, getPluginSrcPath } from "./config.js";
-import { BUILD_TIMEOUT_MS, MAX_SOURCE_SIZE } from "./env.js";
+import { BUILD_TIMEOUT_MS, MAX_SOURCE_SIZE, hasPluginEnvPrefix } from "./env.js";
 import { logError } from "./logger.js";
 
 export async function deployPlugin(
@@ -57,13 +59,13 @@ export async function deployPlugin(
           if (eq < 1) continue;
           const k = trimmed.slice(0, eq).trim();
           const v = trimmed.slice(eq + 1).trim();
-          if (/^MEMCLAW_/.test(k)) existing.set(k, v);
+          if (hasPluginEnvPrefix(k)) existing.set(k, v);
         }
       }
 
       // Merge provided keys over existing
       for (const [key, val] of Object.entries(envVars)) {
-        if (/^MEMCLAW_/.test(key) && typeof val === "string") {
+        if (hasPluginEnvPrefix(key) && typeof val === "string") {
           existing.set(key, val.replace(/[\r\n]/g, ""));
           envChanges.push(key);
         }

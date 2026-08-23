@@ -129,7 +129,10 @@ def upgrade() -> None:
 
     from sqlalchemy import text as _sql_text
 
-    _opt_in = os.environ.get("MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS", "").lower() == "true"
+    _opt_in = (
+        os.environ.get("CAURA_RUN_DESTRUCTIVE_MIGRATIONS", "")
+        or os.environ.get("MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS", "")  # legacy-name-ok: rule 3 dual-read alias
+    ).lower() == "true"
     if not _opt_in:
         bind = op.get_bind()
         # Count rows that would be destroyed. Single round-trip; cast

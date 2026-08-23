@@ -38,6 +38,7 @@ import {
   BUILD_TIMEOUT_MS,
   MAX_SOURCE_SIZE,
   ensureTenantId,
+  readEnv,
 } from "./env.js";
 import { readInterviewEvents, pruneInterviewBuffer } from "./interview-buffer.js";
 import { syncTaskTrail } from "./task-trail.js";
@@ -101,7 +102,7 @@ const DEPLOY_COOLDOWN_FILE = ".deploy-cooldown.json";
 
 function _failureCooldownHours(): number {
   const raw = parseInt(
-    process.env.MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS || "",
+    readEnv(["CAURA_DEPLOY_FAILURE_COOLDOWN_HOURS", "MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS"]) || "",  // legacy-name-ok: rule 3 dual-read alias
     10,
   );
   return Number.isFinite(raw) && raw > 0 ? raw : 24;

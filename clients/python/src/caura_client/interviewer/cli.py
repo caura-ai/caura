@@ -48,6 +48,23 @@ def _default_agent_id() -> str:
     return f"cc-{getpass.getuser()}@{socket.gethostname()}"
 
 
+def _read_env(*names: str, default: str = "") -> str:
+    """First alias carrying a value, new names before old ones.
+
+    A blank alias never shadows a working one, but a lone ``X=`` still means
+    "empty" rather than falling back to ``default`` — which is what
+    ``os.environ.get(name, default)`` did before the aliases existed.
+    """
+    saw_blank = False
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+        if value is not None:
+            saw_blank = True
+    return "" if saw_blank else default
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="memclaw-interviewer",
@@ -56,11 +73,17 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def common(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--base-url", default=os.environ.get("MEMCLAW_BASE_URL", DEFAULT_BASE_URL))
-        p.add_argument("--api-key", default=os.environ.get("MEMCLAW_API_KEY", ""))
-        p.add_argument("--tenant-id", default=os.environ.get("MEMCLAW_TENANT_ID", ""))
-        p.add_argument("--agent-id", default=os.environ.get("MEMCLAW_AGENT_ID", "") or _default_agent_id())
-        p.add_argument("--fleet-id", default=os.environ.get("MEMCLAW_FLEET_ID", "") or None)
+        p.add_argument(
+            "--base-url",
+            default=_read_env("CAURA_BASE_URL", "MEMCLAW_BASE_URL", default=DEFAULT_BASE_URL),  # legacy-name-ok: rule 3 dual-read alias
+        )
+        p.add_argument("--api-key", default=_read_env("CAURA_API_KEY", "MEMCLAW_API_KEY"))  # legacy-name-ok: rule 3 dual-read alias
+        p.add_argument("--tenant-id", default=_read_env("CAURA_TENANT_ID", "MEMCLAW_TENANT_ID"))  # legacy-name-ok: rule 3 dual-read alias
+        p.add_argument(
+            "--agent-id",
+            default=_read_env("CAURA_AGENT_ID", "MEMCLAW_AGENT_ID") or _default_agent_id(),  # legacy-name-ok: rule 3 dual-read alias
+        )
+        p.add_argument("--fleet-id", default=_read_env("CAURA_FLEET_ID", "MEMCLAW_FLEET_ID") or None)  # legacy-name-ok: rule 3 dual-read alias
         p.add_argument(
             "--projects",
             nargs="+",
@@ -71,7 +94,11 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument(
             "--harness",
             choices=(HARNESS_CLAUDE_CODE, HARNESS_CURSOR),
-            default=os.environ.get("MEMCLAW_INTERVIEWER_HARNESS", HARNESS_CLAUDE_CODE),
+            default=_read_env(
+                "CAURA_INTERVIEWER_HARNESS",
+                "MEMCLAW_INTERVIEWER_HARNESS",  # legacy-name-ok: rule 3 dual-read alias
+                default=HARNESS_CLAUDE_CODE,
+            ),
             help="which agent's transcripts to harvest (default: claude-code; env MEMCLAW_INTERVIEWER_HARNESS)",
         )
         p.add_argument(
@@ -121,7 +148,7 @@ def _projects_root(args: argparse.Namespace) -> Path:
 def _resolve_allowlist(args: argparse.Namespace) -> list[str]:
     if args.projects is not None:
         return list(args.projects)
-    env = os.environ.get("MEMCLAW_INTERVIEWER_PROJECTS", "")
+    env = _read_env("CAURA_INTERVIEWER_PROJECTS", "MEMCLAW_INTERVIEWER_PROJECTS")  # legacy-name-ok: rule 3 dual-read alias
     return [g.strip() for g in env.split(",") if g.strip()]
 
 

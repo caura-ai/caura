@@ -60,9 +60,16 @@ services:
     # on pull failure; an unreachable registry hard-fails ``up`` only
     # when no local image is cached.
     #
-    # Pin a specific version with ``MEMCLAW_VERSION=v1.2.3`` in your
-    # ``.env``; defaults to ``latest`` for the most recent stable.
-    image: ghcr.io/caura-ai/caura-memclaw-core-storage-api:${MEMCLAW_VERSION:-latest}
+    # Pin a specific version with ``CAURA_VERSION=v1.2.3`` in your ``.env``
+    # (``MEMCLAW_VERSION`` is still read); defaults to ``latest``.  # legacy-name-ok: rule 3 dual-read alias
+    #
+    # The nested default is deliberate and needs Compose v2, which README.md
+    # already requires. Compose v2 resolves a ``${...}`` inside a default
+    # recursively — verified for all four combinations of the two names, and
+    # pinned by ``tests/test_env_dual_read.py`` so the fallback cannot be
+    # dropped silently. Do not flatten it to a single name: dropping the old
+    # one strands every install that pins with it today.
+    image: ghcr.io/caura-ai/caura-memclaw-core-storage-api:${CAURA_VERSION:-${MEMCLAW_VERSION:-latest}}  # legacy-name-ok: rule 3 dual-read alias
     pull_policy: missing
     build:
       context: .
@@ -94,7 +101,7 @@ services:
   core-api:
     # Same pull-on-first-up + ``pull_policy: missing`` pattern as
     # core-storage-api above. See its block for the full rationale.
-    image: ghcr.io/caura-ai/caura-memclaw-core-api:${MEMCLAW_VERSION:-latest}
+    image: ghcr.io/caura-ai/caura-memclaw-core-api:${CAURA_VERSION:-${MEMCLAW_VERSION:-latest}}  # legacy-name-ok: rule 3 dual-read alias
     pull_policy: missing
     build:
       context: .

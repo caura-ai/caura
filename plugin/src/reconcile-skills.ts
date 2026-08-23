@@ -55,7 +55,7 @@ import {
 import { join, resolve } from "path";
 
 import { apiCall } from "./transport.js";
-import { MEMCLAW_TENANT_ID, MEMCLAW_FLEET_ID } from "./env.js";
+import { MEMCLAW_TENANT_ID, MEMCLAW_FLEET_ID, readEnv } from "./env.js";  // legacy-name-ok: rule 3 dual-read alias
 import { getPluginDir, ensureExtraSkillDirs } from "./config.js";
 import { logError } from "./logger.js";
 
@@ -191,7 +191,7 @@ export function resolveSkillTargets(): SkillTarget[] {
   // as an extraDir.
   const targets: SkillTarget[] = [{ dir: ownedDir, mode: "owned", register: false }];
 
-  const raw = process.env.MEMCLAW_SKILL_TARGETS;
+  const raw = readEnv(["CAURA_SKILL_TARGETS", "MEMCLAW_SKILL_TARGETS"]);  // legacy-name-ok: rule 3 dual-read alias
   if (!raw || !raw.trim()) return targets;
 
   let parsed: unknown;

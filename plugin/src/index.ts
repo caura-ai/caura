@@ -35,6 +35,8 @@ import {
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_INITIAL_DELAY_MS,
   MAX_SOURCE_SIZE,
+  readEnv,
+  hasPluginEnvPrefix,
 } from "./env.js";
 import { apiCall, parseSearchItems } from "./transport.js";
 import { PLUGIN_VERSION } from "./version.js";
@@ -310,11 +312,14 @@ const memclawPlugin = {
           const content = readFileSync(envPath, "utf-8");
           const env = result.currentEnv as Record<string, string>;
           for (const line of content.split("\n")) {
-            const match = line.match(/^(MEMCLAW_\w+)=(.*)$/);
-            if (match) {
-              const key = match[1];
-              env[key] = key.includes("KEY") ? match[2].slice(0, 6) + "..." : match[2];
-            }
+            // Trim before testing, like the loader does — otherwise an indented
+            // line reads as foreign here while env.ts loads it fine.
+            const eq = line.indexOf("=");
+            if (eq < 1) continue;
+            const key = line.slice(0, eq).trim();
+            if (!hasPluginEnvPrefix(key)) continue;
+            const val = line.slice(eq + 1).trim();
+            env[key] = key.includes("KEY") ? val.slice(0, 6) + "..." : val;
           }
         }
       } catch (e: unknown) {
@@ -398,7 +403,7 @@ const memclawPlugin = {
     // Opt-out: MEMCLAW_AUTO_FIX_CONFIG=false skips auto-fix.
     // Force re-run: MEMCLAW_AUTO_FIX_CONFIG=true ignores the flag file.
     const allowlistFlagPath = join(getPluginDir(), ".allowlist-applied");
-    const autoFixEnv = process.env.MEMCLAW_AUTO_FIX_CONFIG;
+    const autoFixEnv = readEnv(["CAURA_AUTO_FIX_CONFIG", "MEMCLAW_AUTO_FIX_CONFIG"]);  // legacy-name-ok: rule 3 dual-read alias
     const flagExists = existsSync(allowlistFlagPath);
     // Read config once to detect drift so auto-fix re-runs even when the
     // one-time flag is already present: a plugin upgrade that ADDS a tool
