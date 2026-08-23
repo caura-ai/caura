@@ -230,7 +230,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="MemClaw core-operations",
+        title="Caura core-operations",
         description=(
             "Host for OSS cron/scheduled jobs (lifecycle, retention, etc.). "
             "No business HTTP routes — only /healthz."
