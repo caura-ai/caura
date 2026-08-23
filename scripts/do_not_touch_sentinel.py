@@ -202,6 +202,30 @@ SENTINELS: tuple[Sentinel, ...] = (
         kind=LITERAL,
         breaks="the interviewer stops finding config customers already have on disk",
     ),
+    # The whole assignment, not the marker value alone — and this one is a
+    # judgement call the comment-only guard below CANNOT make for us.
+    #
+    # That guard asks whether the pinned text appears on a line that starts with
+    # a comment character. This value *is* comment-shaped (it starts with ``#``),
+    # but the line defining it starts with ``CRON_MARKER``, so the guard sees
+    # nothing and every candidate form passes it. Pinning the bare value would
+    # therefore be accepted while being satisfiable by anyone who later writes a
+    # single line of commentary quoting the marker — and commentary quoting it is
+    # likelier here than usual, precisely because it reads as a comment already.
+    #
+    # Anchoring to the assignment also fails if the value survives only in prose
+    # after the constant is deleted. It costs a false red on a rename that keeps
+    # the value, which is behaviour-preserving; that trade is deliberate, because
+    # a false red is loud and a gate that quietly stopped protecting is not.
+    Sentinel(
+        path="clients/python/src/caura_client/interviewer/installer.py",
+        text='CRON_MARKER = "# memclaw-interviewer (managed)"',  # legacy-name-ok: pinned floor string
+        kind=LITERAL,
+        breaks=(
+            "uninstall stops finding crontab entries customers already have, "
+            "and re-install duplicates them instead of replacing"
+        ),
+    ),
     Sentinel(
         path=".github/workflows/publish-python-client.yml",
         text="memclaw-client-v*",  # legacy-name-ok: pinned floor string
