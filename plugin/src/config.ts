@@ -317,7 +317,7 @@ function canonicalDir(p: string): string {
  * ``openclaw.json`` — OpenClaw's documented, watched load path for extra
  * skill directories (``docs/tools/skills-config.md``; consumed by
  * ``src/skills/runtime/refresh.ts``). This is how a reconciled *additive*
- * target dir (one MemClaw doesn't own and can't publish as a plugin skill)
+ * target dir (one Caura doesn't own and can't publish as a plugin skill)
  * actually reaches agents.
  *
  * Append-only and idempotent: existing entries are preserved, a dir already

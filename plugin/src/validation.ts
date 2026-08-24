@@ -1,5 +1,5 @@
 /**
- * Validation helpers for MemClaw plugin security.
+ * Validation helpers for Caura plugin security.
  *
  * Covers: UUID format, HTTPS enforcement, path containment,
  * HMAC command signature verification, and prompt length caps.

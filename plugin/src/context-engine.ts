@@ -1050,7 +1050,7 @@ export class MemClawContextEngine {
    *
    *   1. **Persist** any pre-computed summary (passed in by OpenClaw
    *      when its compaction pipeline ran the summarization step
-   *      before invoking us) as a MemClaw episode memory tagged
+   *      before invoking us) as a Caura episode memory tagged
    *      ``auto-compaction``. This is the long-standing
    *      observability side-effect — surviving summaries get
    *      recallable later via ``caura_recall``.
@@ -1107,7 +1107,7 @@ export class MemClawContextEngine {
   async compact(
     context: CompactContext,
   ): Promise<{ ok: boolean; compacted: boolean; reason?: string; result?: unknown }> {
-    // 1. Persist OpenClaw's summary into MemClaw as an episode
+    // 1. Persist OpenClaw's summary into Caura as an episode
     // memory. This runs regardless of whether the delegation
     // succeeds below — even on a degraded environment the summary
     // is worth keeping if we can. Failure here is logged and

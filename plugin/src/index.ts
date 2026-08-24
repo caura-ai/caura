@@ -1,7 +1,7 @@
 /**
- * MemClaw OpenClaw Plugin — registration glue.
+ * Caura OpenClaw Plugin — registration glue.
  *
- * Registers MemClaw tools (set + order derived from plugin/tools.json
+ * Registers Caura tools (set + order derived from plugin/tools.json
  * via MEMCLAW_TOOLS), gateway methods, prompt section, memory runtime,
  * context engine, and heartbeat loop.
  *
@@ -512,7 +512,7 @@ const memclawPlugin = {
     //
     // relativePath is the workspace-relative scratch file the
     // compaction sub-agent has append-only write access to during the
-    // flush turn. MemClaw's server-side persistence is orthogonal — the
+    // flush turn. Caura's server-side persistence is orthogonal — the
     // sub-agent still calls caura_write to capture salient
     // context, but it ALSO needs the file to exist because that's the
     // only filesystem write surface OpenClaw exposes to it. Mirror
@@ -652,7 +652,7 @@ const memclawPlugin = {
               async search(query: string, opts?: { limit?: number }) {
                 return searchMemories(query, opts?.limit ?? 5);
               },
-              // readFile is not a MemClaw concept — memories are fetched by
+              // readFile is not a Caura concept — memories are fetched by
               // id, not by path. Return an empty MemoryReadResult-shaped
               // value (type-conformant) rather than `null` (type violation
               // that OpenClaw silently coerces).
@@ -732,13 +732,13 @@ const memclawPlugin = {
                 return getReachability().state !== "unreachable";
               },
               async close() {
-                // no-op — MemClaw manages connections server-side
+                // no-op — Caura manages connections server-side
               },
             };
             return { manager, error: null };
           },
           async closeAllMemorySearchManagers() {
-            // no-op — MemClaw manages connections server-side
+            // no-op — Caura manages connections server-side
           },
         });
       }

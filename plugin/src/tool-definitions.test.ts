@@ -1,5 +1,5 @@
 /**
- * Tests for the MemClaw plugin tool surface.
+ * Tests for the Caura plugin tool surface.
  *
  * Guards the contract between `plugin/tools.json` (SoT), `MEMCLAW_TOOLS`
  * (registration order), `PARAM_SCHEMAS` (runtime input validation), and

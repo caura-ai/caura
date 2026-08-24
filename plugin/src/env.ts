@@ -1,5 +1,5 @@
 /**
- * Environment configuration and tenant resolution for MemClaw plugin.
+ * Environment configuration and tenant resolution for Caura plugin.
  *
  * Security fixes:
  * - .env parse errors are logged (no silent swallow)
@@ -85,7 +85,7 @@ export const MEMCLAW_API_URL =
   readEnv(["CAURA_API_URL", "MEMCLAW_API_URL"]) || "http://localhost:8000";  // legacy-name-ok: rule 3 dual-read alias
 
 /**
- * Prefix for all MemClaw REST routes. Single source of truth for API
+ * Prefix for all Caura REST routes. Single source of truth for API
  * versioning — bump to "/api/v2" here when the backend ships a new version.
  *
  * The transport layer auto-prepends this to relative paths. Raw fetch
@@ -417,7 +417,7 @@ export const KEYSTONES_TIMEOUT_MS = 5_000;
 //
 // The OpenClaw runtime calls our context engine on every prompt assembly
 // (heartbeats, tool follow-ups, no-reply lurk turns, trivial pings — all
-// of them). Without gating, every call hits the MemClaw backend with a
+// of them). Without gating, every call hits the Caura backend with a
 // `/search` regardless of whether the turn would benefit from LTM. These
 // knobs let operators tune when recall fires.
 

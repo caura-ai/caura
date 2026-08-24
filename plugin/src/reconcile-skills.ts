@@ -12,10 +12,10 @@
  * can be configured via ``MEMCLAW_SKILL_TARGETS`` (see
  * {@link resolveSkillTargets}). Two modes:
  *   - ``owned`` ({@link reconcileOwnedDir}): the dir is fully
- *     MemClaw-managed; any on-disk skill not in the catalog is pruned
+ *     Caura-managed; any on-disk skill not in the catalog is pruned
  *     (except {@link PROTECTED_SKILLS}).
  *   - ``additive`` ({@link reconcileAdditiveDir}): a shared/foreign dir.
- *     MemClaw only ever touches entries it wrote, tracked per-skill via
+ *     Caura only ever touches entries it wrote, tracked per-skill via
  *     the {@link OWNED_MARKER} sentinel — foreign skills are never
  *     overwritten (collisions are skipped) or removed.
  * With no config, the single default ``owned`` target makes behaviour
@@ -68,7 +68,7 @@ import { logError } from "./logger.js";
 export const PROTECTED_SKILLS: ReadonlySet<string> = new Set(["memclaw"]);
 
 // Per-skill ownership marker for ``additive`` (shared/foreign) target
-// dirs. MemClaw writes this sentinel inside every skill dir it creates
+// dirs. Caura writes this sentinel inside every skill dir it creates
 // there, and only ever updates/removes a ``<slug>`` that carries it — so
 // a skill it doesn't own is never touched. The marker lives INSIDE the
 // skill dir (``<dir>/<slug>/.memclaw-owned``); OpenClaw's loader reads
@@ -79,10 +79,10 @@ export const PROTECTED_SKILLS: ReadonlySet<string> = new Set(["memclaw"]);
 // "delete it".
 export const OWNED_MARKER = ".memclaw-owned";
 const OWNED_MARKER_BODY =
-  "This skill directory is managed by the MemClaw plugin reconciler.\n" +
+  "This skill directory is managed by the Caura plugin reconciler.\n" +
   "Do not edit by hand — it is overwritten/removed to match the catalog.\n";
 
-/** True if ``skillDir`` carries the MemClaw ownership marker. */
+/** True if ``skillDir`` carries the Caura ownership marker. */
 function isMemclawOwned(skillDir: string): boolean {
   return existsSync(join(skillDir, OWNED_MARKER));
 }
@@ -121,7 +121,7 @@ export interface ReconcileSummary {
   // For the default single-target case this is one entry mirroring the
   // top-level arrays.
   targets: TargetReconcileResult[];
-  // Target dirs MemClaw ensured are present in OpenClaw's
+  // Target dirs Caura ensured are present in OpenClaw's
   // ``skills.load.extraDirs`` this tick (the ``register: true`` opt-in).
   // Standing truth — the full set we manage, sorted — not a delta. Empty
   // unless a configured target opts into registration.
@@ -142,9 +142,9 @@ export interface TargetReconcileResult {
 /**
  * How aggressively the reconciler may prune a target dir.
  *
- * - ``owned``: the dir is fully MemClaw-managed — every on-disk entry
+ * - ``owned``: the dir is fully Caura-managed — every on-disk entry
  *   not in the catalog is deleted (except {@link PROTECTED_SKILLS}).
- * - ``additive``: a shared/foreign dir — MemClaw only ever touches
+ * - ``additive``: a shared/foreign dir — Caura only ever touches
  *   entries it wrote, tracked by a per-skill {@link OWNED_MARKER}. A
  *   foreign occupant of a desired slug is a collision (skipped, never
  *   clobbered); unowned entries are never pruned.
@@ -249,7 +249,7 @@ interface DirReconcileResult {
   installed: string[];
   /**
    * Desired skills NOT materialised because the slug is already occupied
-   * by a foreign (non-MemClaw-owned) entry in an ``additive`` dir. Always
+   * by a foreign (non-Caura-owned) entry in an ``additive`` dir. Always
    * empty for ``owned`` dirs (which fully own their contents).
    */
   collisions: string[];
@@ -371,19 +371,19 @@ function reconcileOwnedDir(
 /**
  * Reconcile ONE ``additive`` (shared / foreign) target dir.
  *
- * Unlike {@link reconcileOwnedDir}, MemClaw does NOT own this dir, so it
+ * Unlike {@link reconcileOwnedDir}, Caura does NOT own this dir, so it
  * must never touch an entry it didn't write. Safety is enforced by the
  * per-skill {@link OWNED_MARKER}:
  *
  *  - **write**: a desired slug is written only when its dir is absent
- *    (new → stamp the marker) or already MemClaw-owned (update in place).
+ *    (new → stamp the marker) or already Caura-owned (update in place).
  *    A slug occupied by an UNOWNED dir is a collision → skipped, never
  *    overwritten.
  *  - **remove**: an on-disk slug not in the catalog is removed only when
  *    it carries the marker; unowned (foreign) entries are left untouched.
  *
  * Consequence: an empty catalog (or a misconfigured tenant returning an
- * empty installable set) prunes only MemClaw-owned entries here —
+ * empty installable set) prunes only Caura-owned entries here —
  * foreign skills survive. Never throws.
  */
 function reconcileAdditiveDir(
@@ -404,14 +404,14 @@ function reconcileAdditiveDir(
   const onDisk = readDirSlugs(skillsRoot, "reconcileAdditiveDir");
   if (!onDisk) return result;
 
-  // Removals first — but ONLY for MemClaw-owned (marker-bearing) orphans.
+  // Removals first — but ONLY for Caura-owned (marker-bearing) orphans.
   // Anything without the marker is foreign and is never touched.
   for (const slug of onDisk) {
     if (desired.has(slug)) continue;
     // Ownership gates everything in an additive dir: a foreign slug is left
     // alone even if its name collides with a PROTECTED one. A foreign
     // "memclaw" dir (no marker) is the client's, not ours — ignore it
-    // rather than misreport it as a MemClaw-protected skill. An OWNED
+    // rather than misreport it as a Caura-protected skill. An OWNED
     // protected dir still survives via the protected check below.
     if (!isMemclawOwned(join(skillsRoot, slug))) continue; // foreign — leave alone
     if (PROTECTED_SKILLS.has(slug)) {
@@ -428,7 +428,7 @@ function reconcileAdditiveDir(
   }
 
   // Track CONFIRMED on-disk state for ``installed``. Pre-seed with skills
-  // already on disk, MemClaw-owned, AND catalog-active this tick — mirrors
+  // already on disk, Caura-owned, AND catalog-active this tick — mirrors
   // reconcileOwnedDir so a transient read/write I/O failure doesn't drop a
   // physically-present skill from the installed report. (Unlike the owned
   // dir we additionally require the ownership marker — a foreign occupant

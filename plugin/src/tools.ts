@@ -1,10 +1,10 @@
 /**
- * Ordered list of MemClaw tool names exposed via the OpenClaw plugin.
+ * Ordered list of Caura tool names exposed via the OpenClaw plugin.
  *
  * The *set* is derived from `plugin/tools.json` (SoT): every entry with
  * `plugin_exposed: true`. The *order* is hand-maintained here because
  * it is observable — it drives registration order, the "Available
- * MemClaw tools: …" line in the prompt section, and any downstream UI
+ * tools: …" line in the prompt section, and any downstream UI
  * that renders tools in discovery order.
  *
  * Current surface: 11 tools — LTM (write/recall/list/manage), doc,

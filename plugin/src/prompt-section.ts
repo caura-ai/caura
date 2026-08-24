@@ -1,5 +1,5 @@
 /**
- * MemClaw Memory Prompt Section Builder
+ * Caura Memory Prompt Section Builder
  *
  * Produces the system-prompt fragment that is injected on every turn
  * via the OpenClaw memory-prompt-section API. Two consumers:
@@ -16,9 +16,9 @@
  * non-negotiable identity reminder, and a pointer to SKILL.md.
  *
  * On hosts that do NOT bootstrap-inject TOOLS.md / AGENTS.md, this
- * fragment is the agent's only direct prompt-time signal that MemClaw
+ * fragment is the agent's only direct prompt-time signal that Caura
  * exists; the agent is still expected to read SKILL.md before its
- * first MemClaw call to pick up the operating contract.
+ * first Caura call to pick up the operating contract.
  */
 
 import { MEMCLAW_TOOLS } from "./tools.js";

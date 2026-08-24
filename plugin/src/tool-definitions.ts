@@ -1,5 +1,5 @@
 /**
- * MemClaw tool definitions — current surface (10 tools).
+ * Caura tool definitions — current surface (10 tools).
  *
  * One `createToolFromSpec(name)` factory wires together three sources:
  *

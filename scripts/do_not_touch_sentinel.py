@@ -348,6 +348,21 @@ SENTINELS: tuple[Sentinel, ...] = (
         kind=LITERAL,
         breaks="heartbeat reports tools_md=false for every install written before the rename",
     ),
+    # Same category as the six above, found one PR later while rebranding the
+    # prose in this very file — which is exactly why it is being pinned here:
+    # the surrounding comments now say Caura, so the next reader has one more
+    # reason to think the marker should follow them. It must not.
+    Sentinel(
+        path="plugin/src/reconcile-skills.ts",
+        text='OWNED_MARKER = ".memclaw-owned"',  # legacy-name-ok: pinned floor string
+        kind=LITERAL,
+        breaks=(
+            "the per-skill ownership marker already written into every managed "
+            "skill dir on disk — the ownership check gates all pruning on it, so "
+            "a rename makes every existing dir read as foreign and orphans stop "
+            "being collected, permanently and silently"
+        ),
+    ),
 )
 
 

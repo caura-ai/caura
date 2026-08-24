@@ -1,5 +1,5 @@
 /**
- * Agent authentication broker for MemClaw plugin.
+ * Agent authentication broker for Caura plugin.
  *
  * Auto-provisions agent-scoped credentials using the tenant-scoped key
  * as a bootstrap credential. Both kinds share the `mc_` prefix on the

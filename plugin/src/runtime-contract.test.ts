@@ -243,7 +243,7 @@ describe("memory-runtime contract (OpenClaw MemoryPluginRuntime)", () => {
     assert.equal(r, r); // non-null
     assert.equal(typeof r.text, "string");
     assert.equal(typeof r.path, "string");
-    // MemClaw does not back readFile with content; empty text is the honest
+    // Caura does not back readFile with content; empty text is the honest
     // answer. What matters is the SHAPE, not the content.
   });
 });
@@ -875,7 +875,7 @@ describe("MemClawContextEngine.constructor — undefined-config tolerance (v2.6.
 //      return would break compaction silently again).
 //   2. ``compact()`` returns a structured ``CompactResult`` shape
 //      regardless of whether the SDK is discoverable.
-//   3. ``compact()`` still persists the summary into MemClaw as a
+//   3. ``compact()`` still persists the summary into Caura as a
 //      side effect (existing behavior preserved).
 //   4. The bridge's resolver cache works — second call doesn't
 //      repeat the filesystem walk.

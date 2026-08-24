@@ -600,7 +600,7 @@ describe("reconcileSkills — configured targets", () => {
     const summary = await reconcileSkills();
 
     // Ownership gates first: the foreign dir is left untouched AND is not
-    // misreported as a MemClaw-protected skill.
+    // misreported as a Caura-protected skill.
     assert.equal(readFileSync(ext("memclaw", "SKILL.md"), "utf-8"), "# client's own thing named memclaw\n");
     assert.ok(!summary.removed.includes("memclaw"), "foreign protected-name dir not removed");
     assert.ok(!summary.protected.includes("memclaw"), "foreign dir not reported as protected");
