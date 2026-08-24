@@ -8,5 +8,7 @@ end-to-end). Phase 1 lands :mod:`forge_service`,
 real :mod:`sentinel_scan` checks; Phase 3 adds
 :mod:`harness_install`; Phase 5 adds :mod:`openclaw_bridge`.
 
-See ``docs/live-memory-pitch/skill-factory-implementation-plan.md``.
+See ``skill-factory-implementation-plan.md`` — archived from HEAD with the
+rest of ``docs/live-memory-pitch/`` (W2 of the sunset programme); recover it
+with ``git show 691659a:docs/live-memory-pitch/skill-factory-implementation-plan.md``.
 """

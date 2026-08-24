@@ -221,7 +221,9 @@ DEFAULT_SETTINGS: dict = {
     # harness install). Defaults are CONCRETE here (not None) so the
     # OSS resolver and tests have predictable values; tenants override
     # by writing a partial dict (existing _deep_merge + _check_keys
-    # plumbing). See docs/live-memory-pitch/skill-factory-implementation-plan.md §12.
+    # plumbing). See skill-factory-implementation-plan.md §12, archived from
+    # HEAD with docs/live-memory-pitch/ (W2 of the sunset programme):
+    # git show 691659a:docs/live-memory-pitch/skill-factory-implementation-plan.md
     "skills_factory": {
         # Feature flag gating the SF-002 ``caura_doc`` skills-write
         # adjustments. OSS default ``False`` so existing eToro and
