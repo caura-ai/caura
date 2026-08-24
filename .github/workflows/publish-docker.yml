@@ -147,7 +147,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && inputs.push_latest == 'true' }}
           labels: |
             org.opencontainers.image.title=caura-memclaw-${{ matrix.name }}
-            org.opencontainers.image.description=MemClaw ${{ matrix.name }} — fleet memory for AI agents
+            org.opencontainers.image.description=Caura ${{ matrix.name }} — fleet memory for AI agents
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.licenses=Apache-2.0
 
