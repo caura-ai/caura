@@ -165,6 +165,22 @@ SENTINELS: tuple[Sentinel, ...] = (
         kind=LITERAL,
         breaks="every installed plugin is orphaned — the id keys the on-disk install",
     ),
+    # The other end of the same id. The manifest above is what OpenClaw's loader
+    # reads; this constant is what writes the four id-keyed fields in the USER's
+    # openclaw.json. Pinning only the manifest was worse than pinning neither:
+    # the gate went green on a change that renamed the plugin side alone, which
+    # is the half that produces a config OpenClaw cannot match.
+    Sentinel(
+        path="plugin/src/config.ts",
+        text='PLUGIN_ID = "memclaw"',  # legacy-name-ok: pinned floor string
+        kind=LITERAL,
+        breaks=(
+            "the id this plugin writes into plugins.allow, plugins.entries.<id> "
+            "and both plugins.slots entries of the user's openclaw.json — rename "
+            "it without the manifest and the loader never matches what we wrote, "
+            "so the memory slot is never claimed and keystone injection stops"
+        ),
+    ),
     Sentinel(
         path="core-api/src/core_api/routes/plugin.py",
         text=".openclaw/plugins/memclaw",  # legacy-name-ok: pinned floor string

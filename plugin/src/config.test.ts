@@ -1,7 +1,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, rmSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import { tmpdir } from "os";
 import {
   autoFixAllowlist,
@@ -11,8 +12,35 @@ import {
   isMemclawFullyConfigured,
   isMemorySlotClaimed,
   shouldRunAutoFix,
+  PLUGIN_ID,
 } from "./config.js";
 import { getPluginDir } from "./paths.js";
+
+describe("PLUGIN_ID", () => {
+  // The id lives in two files that are read by different consumers:
+  // openclaw.plugin.json, which OpenClaw's LOADER reads, and config.ts, which
+  // writes the four id-keyed fields in the USER's openclaw.json. Renaming one
+  // and not the other type-checks and leaves every other test in this suite
+  // green, while producing a plugin that writes entries.<new> into a config
+  // OpenClaw still keys as <old> — memory slot never claimed, keystone
+  // injection silently dead. Nothing else in the build compares the two.
+  test("matches the id in openclaw.plugin.json", () => {
+    const manifestPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "openclaw.plugin.json",
+    );
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    assert.equal(
+      PLUGIN_ID,
+      manifest.id,
+      `config.ts PLUGIN_ID ("${PLUGIN_ID}") and openclaw.plugin.json id ` +
+        `("${manifest.id}") must be identical — OpenClaw reads the manifest, ` +
+        `this module writes the user's config, and a mismatch means the memory ` +
+        `slot is never claimed and keystone injection stops with nothing failing.`,
+    );
+  });
+});
 
 // Minimal "happy-path" config scaffold — every predicate true. Individual
 // tests selectively break one field at a time.

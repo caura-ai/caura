@@ -11,6 +11,25 @@ import { logError } from "./logger.js";
 
 export { getPluginDir, getOpenClawConfigPath };
 
+/**
+ * This plugin's id, as OpenClaw knows it.
+ *
+ * It is NOT a display name and it is not ours to change unilaterally. The same
+ * string appears in ``openclaw.plugin.json`` — which is what OpenClaw's loader
+ * actually reads — and keys four separate places in the USER's
+ * ``~/.openclaw/openclaw.json``: ``plugins.allow``, ``plugins.entries.<id>``,
+ * ``plugins.slots.memory`` and ``plugins.slots.contextEngine``.
+ *
+ * Every one of those used to spell the id inline, eleven times in this file.
+ * That is what made a partial rename possible: renaming the eleven while
+ * leaving the manifest alone type-checks, tests green, and produces a plugin
+ * writing ``entries.<new>`` into a config OpenClaw still keys as ``<old>`` — so
+ * the memory slot is never claimed and keystone injection silently dies. One
+ * declaration means a rename is one edit, and ``config.test.ts`` asserts this
+ * value still equals the manifest's so the two cannot drift apart again.
+ */
+export const PLUGIN_ID = "memclaw";  // legacy-name-ok: the id keys every existing on-disk install
+
 export function getPluginSrcPath(): string {
   return join(getPluginDir(), "src", "index.ts");
 }
@@ -52,11 +71,11 @@ export function isMemclawAllowed(config: Record<string, any>): boolean {
   // plugin including `openai`. Customer-reported on a fresh 2.8.1
   // install: "Unknown model: openai/gpt-5.5" 2 minutes after install.
   if (!Array.isArray(allow) || allow.length === 0) return true;
-  return allow.includes("memclaw");
+  return allow.includes(PLUGIN_ID);
 }
 
 export function isMemclawEnabled(config: Record<string, any>): boolean {
-  return !!config?.plugins?.entries?.memclaw?.enabled;
+  return !!config?.plugins?.entries?.[PLUGIN_ID]?.enabled;
 }
 
 export function isMemclawPathLoaded(config: Record<string, any>): boolean {
@@ -71,7 +90,7 @@ export function isMemclawPathLoaded(config: Record<string, any>): boolean {
  * which case `register()` runs but memory-runtime methods are never called.
  */
 export function isMemorySlotClaimed(config: Record<string, any>): boolean {
-  return config?.plugins?.slots?.memory === "memclaw";
+  return config?.plugins?.slots?.memory === PLUGIN_ID;
 }
 
 /**
@@ -87,7 +106,7 @@ export function isMemorySlotClaimed(config: Record<string, any>): boolean {
  * ``dist/registry-DFFgCbcm.js:241 resolveContextEngine``.
  */
 export function isContextEngineSlotClaimed(config: Record<string, any>): boolean {
-  return config?.plugins?.slots?.contextEngine === "memclaw";
+  return config?.plugins?.slots?.contextEngine === PLUGIN_ID;
 }
 
 export function isMemclawFullyConfigured(config: Record<string, any>): boolean {
@@ -136,9 +155,9 @@ export function autoFixAllowlist(options?: {
   if (
     Array.isArray(config?.plugins?.allow) &&
     config.plugins.allow.length > 0 &&
-    !config.plugins.allow.includes("memclaw")
+    !config.plugins.allow.includes(PLUGIN_ID)
   ) {
-    config.plugins.allow.push("memclaw");
+    config.plugins.allow.push(PLUGIN_ID);
     changes.push("plugins.allow");
   }
 
@@ -146,7 +165,7 @@ export function autoFixAllowlist(options?: {
   if (!isMemclawEnabled(config)) {
     if (!config.plugins) config.plugins = {};
     if (!config.plugins.entries) config.plugins.entries = {};
-    config.plugins.entries.memclaw = { enabled: true };
+    config.plugins.entries[PLUGIN_ID] = { enabled: true };
     changes.push("plugins.entries");
   }
 
@@ -163,7 +182,7 @@ export function autoFixAllowlist(options?: {
   // 4. Claim the exclusive memory slot for memclaw
   if (!config.plugins) config.plugins = {};
   if (!config.plugins.slots) config.plugins.slots = {};
-  if (config.plugins.slots.memory !== "memclaw") {
+  if (config.plugins.slots.memory !== PLUGIN_ID) {
     const previousSlot = config.plugins.slots.memory;
     if (previousSlot && !options?.forceSlotOverride) {
       console.warn(
@@ -172,7 +191,7 @@ export function autoFixAllowlist(options?: {
           `or set CAURA_AUTO_FIX_CONFIG=true to force.`,
       );
     } else {
-      config.plugins.slots.memory = "memclaw";
+      config.plugins.slots.memory = PLUGIN_ID;
       // Disable the previous memory plugin to avoid slot conflict
       if (previousSlot && config.plugins.entries?.[previousSlot]) {
         config.plugins.entries[previousSlot].enabled = false;
@@ -192,17 +211,17 @@ export function autoFixAllowlist(options?: {
   //     prompt. Mirrors step 4's forceSlotOverride handling so an
   //     operator who deliberately set a different engine doesn't get
   //     silently stomped.
-  if (config.plugins.slots.contextEngine !== "memclaw") {
+  if (config.plugins.slots.contextEngine !== PLUGIN_ID) {
     const previousCe = config.plugins.slots.contextEngine;
     if (previousCe && !options?.forceSlotOverride) {
       console.warn(
         `[caura] plugins.slots.contextEngine already set to "${previousCe}" — ` +
           `skipping auto-override. Run "openclaw gateway memclaw.allowlist.fix" ` +
           `or set CAURA_AUTO_FIX_CONFIG=true to force. ` +
-          `Note: keystone rules will NOT inject without contextEngine="memclaw".`,
+          `Note: keystone rules will NOT inject without contextEngine="${PLUGIN_ID}".`,
       );
     } else {
-      config.plugins.slots.contextEngine = "memclaw";
+      config.plugins.slots.contextEngine = PLUGIN_ID;
       // Disable the previous contextEngine plugin to avoid slot conflict.
       // Without this, two plugins are both ``enabled`` and both
       // declared a contextEngine — OpenClaw's resolveContextEngine
