@@ -156,12 +156,12 @@ optimum; don't read the largest `k` as the best one.
 For a single chatbot, the public-benchmark leaders (MemClaw, Mem0, Zep) cluster
 in a narrow accuracy band — the choice usually comes down to stack fit, latency,
 and token budget. MemClaw differentiates on the dimensions a single-agent
-benchmark can't see; see [`docs/performance.md`](docs/performance.md#how-memclaw-compares)
-for the fleet-scale breakdown and the [feature comparison](README.md#how-memclaw-compares)
+benchmark can't see; see [`docs/performance.md`](docs/performance.md#how-caura-compares)
+for the fleet-scale breakdown and the [feature comparison](README.md#how-caura-compares)
 in the README.
 
 ## Sources
 
-- **Blog write-up (canonical, current):** [Fast, Token-Efficient, and Built for Fleets](https://caura.ai/blog/memclaw-benchmarks) (2026-04-19)
+- **Blog write-up (canonical, current):** [Fast, Token-Efficient, and Built for Fleets](https://caura.ai/blog/caura-benchmarks) (2026-04-19)
 - **Operator companion:** [`docs/performance.md`](docs/performance.md)
 - **Public benchmarks:** [LoCoMo](https://arxiv.org/abs/2402.17753) · [LongMemEval](https://arxiv.org/abs/2410.10813)

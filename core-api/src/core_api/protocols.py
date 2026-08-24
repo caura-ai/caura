@@ -205,8 +205,9 @@ class IdentityResolver(Protocol):
 
         *context* is a backend-agnostic dict that may contain headers,
         tokens, API keys, or other authentication material.  The OSS
-        ``ConfigIdentity`` reads from ``memclaw.toml``; business
-        implementations validate JWTs or API key databases.
+        ``ConfigIdentity`` returns a fixed identity from its constructor
+        arguments; business implementations validate JWTs or API key
+        databases.
 
         Raises
         ------
