@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dump the SoT `REGISTRY` to `plugin/tools.json` for consumption by the TS plugin.
 
-Run from the memclaw repo root:
+Run from the caura repo root:
 
     PYTHONPATH=core-api/src:core-storage-api/src:. python scripts/export_tool_specs.py
 

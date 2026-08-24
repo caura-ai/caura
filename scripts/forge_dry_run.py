@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """``memclawctl forge dry-run`` — Phase 1 manual harness (SF-106).
 
-Invokes the Forge resident pipeline against a live MemClaw deployment
+Invokes the Forge resident pipeline against a live Caura deployment
 for one tenant + fleet and reports the run summary. Candidates always
 land with ``status='candidate'`` and are NEVER promoted; the operator
 runs this to:
@@ -19,7 +19,7 @@ Usage::
         --fleet  <fleet_id> \\
         --window-days 14
 
-The script reads MemClaw connection params from the standard env
+The script reads Caura connection params from the standard env
 (``DATABASE_URL``, ``OPENAI_API_KEY``) — see ``core_api.config``.
 
 This is NOT a production-grade scheduler. The real Forge run flows

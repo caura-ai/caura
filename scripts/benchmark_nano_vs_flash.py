@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Quick benchmark: GPT-5.4-nano vs Gemini 3.1 Flash Lite.
 
-Measures latency, output quality, and token throughput on MemClaw-relevant tasks:
+Measures latency, output quality, and token throughput on Caura-relevant tasks:
   1. Memory classification (type + title from content)
   2. Entity extraction
   3. Summarization / recall synthesis
@@ -34,7 +34,7 @@ PRICING = {
     "gemini": {"input": 0.025, "output": 0.15, "label": "Gemini 3.1 Flash Lite"},
 }
 
-# ── Prompts (MemClaw-relevant tasks) ──
+# ── Prompts (Caura-relevant tasks) ──
 
 TASKS = [
     {
@@ -119,7 +119,7 @@ async def call_gemini(client: httpx.AsyncClient, prompt: str) -> tuple[str, floa
 
 async def benchmark():
     print()
-    print("  GPT-5.4-nano vs Gemini 3.1 Flash Lite — MemClaw Task Benchmark")
+    print("  GPT-5.4-nano vs Gemini 3.1 Flash Lite — Caura Task Benchmark")
     print("  " + "=" * 62)
     print(f"  Runs per task: {RUNS}")
     print()
