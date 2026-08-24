@@ -100,3 +100,185 @@ class Topics:
     Pipeline = Pipeline
     Lifecycle = Lifecycle
     Org = Org
+
+
+# ── Brand rename: one publish name, a set of subscribe names ────────────────
+#
+# A Pub/Sub topic cannot be renamed. It is created and deleted, and a
+# subscription cannot move between topics, so the cutover is expand -> migrate
+# -> contract: create twin topics, have every subscriber bind both names, flip
+# the publishers one family at a time, drain the old subscriptions, then delete
+# them.
+#
+# What that needs from this module is a distinction it did not previously have
+# to make, because one name served both roles:
+#
+#   * the PUBLISH name — exactly one, always. Publishing an event under both
+#     names at once delivers it twice to every subscriber bound to both, which
+#     is the precise failure the ordering above exists to avoid. There is
+#     deliberately no function here that returns more than one publish name, so
+#     "just publish to both for a while" is not something this API can express.
+#   * the SUBSCRIBE set — one name or two. A subscriber holding both is what
+#     makes flipping a publisher lossless: the message lands on whichever name
+#     the publisher used, and a handler is already waiting on it.
+#
+# The enum members above are deliberately untouched. They still ARE their
+# string values, so equality, dict-key hashing, f-string formatting and
+# ``topic_path`` building all keep working exactly as the module docstring
+# promises. Everything below is derived from them.
+
+RENAMED_PREFIX = "caura."
+
+
+def renamed(topic: str) -> str:
+    """The post-rename name for ``topic``.
+
+    Rewrites the FIRST dot-segment rather than matching the outgoing brand by
+    name, mirroring the ``replace(n, "/^[^.]+\\./", ...)`` that derives the twin
+    topics in Terraform. Two consequences worth having: it is idempotent, so a
+    name already carrying the new prefix maps to itself and nothing can
+    double-rename; and this file gains no new occurrence of the outgoing brand
+    for the rule-7 ratchet to count. A name with no dot is returned unchanged.
+    """
+    _, dot, rest = str(topic).partition(".")
+    return RENAMED_PREFIX + rest if dot else str(topic)
+
+
+def family(topic: str) -> str:
+    """The topic family — the segment between the brand and the event name.
+
+    ``<brand>.pipeline.entity-extracted`` -> ``pipeline``. Publishers flip one
+    family at a time, so this is the unit that decision is made in. Returns ""
+    for a name that has no family segment.
+    """
+    parts = str(topic).split(".")
+    return parts[1] if len(parts) > 2 else ""
+
+
+# Families whose PUBLISHERS have been flipped to the renamed topics.
+#
+# Empty, and that is the point: with nothing here, ``publish_name`` is the
+# identity and publishing is byte-for-byte what it was before this module
+# changed. That is what makes binding both names safe to ship ahead of any
+# particular environment's deploy.
+#
+# Flipping a family is a separate, later step. Add ONE family at a time, and
+# only once every subscriber of that family is confirmed deployed and bound to
+# both names — confirmed per running service, not per merged pull request; a
+# merge is not a vendor and a vendor is not a deploy. Order by blast radius:
+# "pipeline" or "org" first, and "audit" LAST, because those rows are
+# hash-chained and a lost or reordered audit event is the one failure in this
+# programme that cannot be undone.
+FLIPPED_FAMILIES: frozenset[str] = frozenset()
+
+
+def all_topics() -> tuple[str, ...]:
+    """Every topic declared in this module.
+
+    Derived by walking the enums rather than listed, so it cannot drift from
+    them, and so the same code yields the right answer in each repo despite the
+    two copies declaring different topics.
+    """
+    return tuple(
+        str(member)
+        for attr in vars(Topics).values()
+        if isinstance(attr, type) and issubclass(attr, enum.StrEnum)
+        for member in attr
+    )
+
+
+def known_families() -> frozenset[str]:
+    """Every family the topics declared in this module actually use."""
+    return frozenset(f for topic in all_topics() if (f := family(topic)))
+
+
+# A family named here that does not exist would be a SILENT no-op: publish_name
+# would go on returning the outgoing name for every topic, so the flip would
+# look done, move nothing, and leave the twin subscriptions idle with no error
+# anywhere to say so. That is the same shape as every other failure in this
+# cutover — quiet, and only visible if you already suspected it — so it is
+# checked at the point of definition rather than left to a reviewer's eye.
+#
+# Raising here is a deliberate choice about blast radius. This set is a literal
+# in this file, so the only way to trip it is editing that literal, and the
+# import runs in every test that touches the bus — a typo cannot get past CI,
+# let alone reach a deploy. The cost of being wrong is an ImportError in front
+# of the person who made the typo; the cost of NOT checking is a step 4 that
+# reports success and moves no traffic.
+def _validate_flipped_families() -> None:
+    """Raise if FLIPPED_FAMILIES names a family that does not exist.
+
+    A function rather than a bare module-level check so nothing is left behind in
+    the module namespace once it has run, and so ``known_families()`` is
+    evaluated once for both the comparison and the message.
+    """
+    known = known_families()
+    if unknown := FLIPPED_FAMILIES - known:
+        raise ValueError(
+            f"FLIPPED_FAMILIES names {sorted(unknown)}, which match no topic "
+            f"family declared here (known: {sorted(known)}). A family that does "
+            "not exist flips nothing and reports no error — fix the spelling."
+        )
+
+
+_validate_flipped_families()
+
+
+def publish_name(topic: str) -> str:
+    """The single name to publish ``topic`` under.
+
+    Returns one name. Never two — see the note above on why dual-publishing is
+    the version of this cutover that duplicates every event.
+    """
+    return renamed(topic) if family(topic) in FLIPPED_FAMILIES else str(topic)
+
+
+def subscribe_names(topic: str, *, dual: bool) -> tuple[str, ...]:
+    """Every name a subscriber of ``topic`` has to bind.
+
+    ``dual=False`` returns just the current name, which is the default and
+    keeps a process's subscription set identical to what it was. ``dual=True``
+    returns both, and is only safe where the twin subscription actually exists —
+    on the Pub/Sub backend a subscription that is absent is a permanent
+    ``NotFound``, which halts the pull loop and takes the health endpoint down.
+    Never returns a duplicate, so a name that is already renamed yields one
+    entry rather than the same string twice.
+    """
+    current = str(topic)
+    if not dual:
+        return (current,)
+    new = renamed(current)
+    return (current,) if new == current else (current, new)
+
+
+def unbound_publish_topics(*, dual: bool) -> tuple[str, ...]:
+    """Topics this module would publish under a name no subscriber of them binds.
+
+    The one combination in this cutover that fails with no signal at all. A
+    flipped family publishes under its renamed name; a subscriber running with
+    ``dual=False`` binds only the current one. The message lands on a topic
+    nothing is pulling — no exception, no ``NotFound``, a green readiness probe,
+    and zero delivered. Every other ordering mistake here is loud: binding a twin
+    that was never provisioned is a permanent ``NotFound`` that reds the health
+    endpoint, and naming a family that does not exist raises at import.
+
+    Asking the two functions directly, rather than testing ``FLIPPED_FAMILIES``
+    for emptiness, is what makes this exact instead of approximate. Non-empty
+    ``FLIPPED_FAMILIES`` is only a PROXY for the hazard, and it over-fires in a
+    state this cutover really passes through: once a family's enum members have
+    themselves been renamed (the contract step), ``renamed`` is the identity for
+    them, so ``publish_name`` and ``subscribe_names(dual=False)`` agree and
+    ``dual=False`` is not merely safe but correct — there is no twin left to
+    bind. A guard keyed on emptiness would refuse to start those processes, and
+    ``dual=False`` is the DEFAULT, so it would take out precisely the standalone
+    and on-prem deployments that never run the Terraform the flag is gated on.
+    Comparing the names cannot make that mistake: agreement is agreement however
+    it arose.
+
+    Returns the offending topics rather than a bool so a caller can name them.
+    """
+    return tuple(
+        topic
+        for topic in all_topics()
+        if publish_name(topic) not in subscribe_names(topic, dual=dual)
+    )

@@ -76,9 +76,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     app = FastAPI(
-        title="MemClaw Core Storage API",
+        title="Caura Core Storage API",
         description=(
-            "PostgreSQL CRUD service for MemClaw core tables.\n\n"
+            "PostgreSQL CRUD service for Caura core tables.\n\n"
             "Provides typed CRUD operations for memories, entities, agents, "
             "documents, fleet, audit logs, and reports.\n\n"
             "**Base path:** `/api/v1/storage`"

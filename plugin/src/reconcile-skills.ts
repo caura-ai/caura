@@ -317,7 +317,7 @@ function reconcileOwnedDir(
     try {
       rmSync(join(skillsRoot, slug), { recursive: true, force: true });
       result.removed.push(slug);
-      console.log(`[memclaw] Reconciler removed orphan skill: ${slug}`);
+      console.log(`[caura] Reconciler removed orphan skill: ${slug}`);
     } catch (e: unknown) {
       logError(`reconcileOwnedDir: rm failed for ${slug}`, e);
     }
@@ -357,7 +357,7 @@ function reconcileOwnedDir(
       installedSet.add(slug);
       result.added.push(slug);
       console.log(
-        `[memclaw] Reconciler ${onDisk.has(slug) ? "updated" : "pulled"} skill: ${slug}`,
+        `[caura] Reconciler ${onDisk.has(slug) ? "updated" : "pulled"} skill: ${slug}`,
       );
     } catch (e: unknown) {
       logError(`reconcileOwnedDir: write failed for ${slug}`, e);
@@ -421,7 +421,7 @@ function reconcileAdditiveDir(
     try {
       rmSync(join(skillsRoot, slug), { recursive: true, force: true });
       result.removed.push(slug);
-      console.log(`[memclaw] Reconciler (additive) removed owned orphan: ${slug}`);
+      console.log(`[caura] Reconciler (additive) removed owned orphan: ${slug}`);
     } catch (e: unknown) {
       logError(`reconcileAdditiveDir: rm failed for ${slug}`, e);
     }
@@ -454,7 +454,7 @@ function reconcileAdditiveDir(
     if (dirExistsNow && !isMemclawOwned(skillDir)) {
       result.collisions.push(slug);
       console.warn(
-        `[memclaw] additive: ${slug} is occupied by an unowned skill in ` +
+        `[caura] additive: ${slug} is occupied by an unowned skill in ` +
           `${skillsRoot}; skipping (collision)`,
       );
       continue;
@@ -486,7 +486,7 @@ function reconcileAdditiveDir(
         if (!isMemclawOwned(skillDir)) {
           result.collisions.push(slug);
           console.warn(
-            `[memclaw] additive: ${slug} collision (post-existsSync race in ${skillsRoot}); skipping`,
+            `[caura] additive: ${slug} collision (post-existsSync race in ${skillsRoot}); skipping`,
           );
           continue;
         }
@@ -503,7 +503,7 @@ function reconcileAdditiveDir(
       installedSet.add(slug);
       result.added.push(slug);
       console.log(
-        `[memclaw] additive: ${isNew ? "pulled" : "updated"} skill ${slug} in ${skillsRoot}`,
+        `[caura] additive: ${isNew ? "pulled" : "updated"} skill ${slug} in ${skillsRoot}`,
       );
     } catch (e: unknown) {
       logError(`reconcileAdditiveDir: write failed for ${slug}`, e);
@@ -663,7 +663,7 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
       // The write for NEW additions failed — but any dirs that were already
       // on the load path are genuinely registered, so still report those.
       console.warn(
-        `[memclaw] reconcileSkills: could not register extra skill dir(s) in openclaw.json: ${reg.error}`,
+        `[caura] reconcileSkills: could not register extra skill dir(s) in openclaw.json: ${reg.error}`,
       );
       if (reg.alreadyPresent.length > 0) {
         summary.registeredDirs = [...new Set(reg.alreadyPresent)].sort();
@@ -673,7 +673,7 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
       summary.registeredDirs = [...new Set(registerDirs)].sort();
       if (reg.added.length > 0) {
         console.log(
-          `[memclaw] reconcileSkills: registered skills.load.extraDirs: ${reg.added.join(", ")}`,
+          `[caura] reconcileSkills: registered skills.load.extraDirs: ${reg.added.join(", ")}`,
         );
       }
     }

@@ -476,9 +476,144 @@ def test_a_newly_exempted_line_is_always_named(repo: Path) -> None:
     result = _run(repo)
 
     assert result.returncode == 0
-    assert "1 line(s) newly exempted" in result.stdout
+    assert "1 exempt line(s) written by this change" in result.stdout
     assert "existing.py:1" in result.stdout
     assert "gateway mirror" in result.stdout
+
+
+def _with_two_aliases_already(repo: Path) -> str:
+    """Commit a file that already carries two exemptions, and return its body.
+
+    The realistic starting point for this report, and the one the grouping tests
+    do not cover: they build files from nothing, where every line is new and no
+    filter can be wrong.
+    """
+    body = (
+        f'A = "{LEGACY}-one"  # legacy-name-ok: pre-existing alias one\n'
+        f'B = "{LEGACY}-two"  # legacy-name-ok: pre-existing alias two\n'
+    )
+    (repo / "aliases.py").write_text(body)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "two aliases already here")
+    return body
+
+
+def test_only_the_exemptions_this_change_wrote_are_listed(repo: Path) -> None:
+    """The file's exempt count selects the FILE; git's diff selects the LINES.
+
+    Re-greping the file and printing everything it holds puts its whole
+    accumulated pile under a header counting one — three lines under a "1", two
+    of them not in the diff. Phase 5's dual-read wave is precisely what builds
+    those piles, so this is the case that would have degraded fastest: every
+    later PR touching such a file reprints the lot, and a reader who learns the
+    list is mostly noise stops reading it.
+    """
+    body = _with_two_aliases_already(repo)
+    _stage(
+        repo,
+        "aliases.py",
+        body + f'C = "{LEGACY}-three"  # legacy-name-ok: brand new alias three\n',
+    )
+
+    out = _run(repo).stdout
+
+    # The claim, asserted before the header wording so a later rephrasing of the
+    # message cannot be what this test is seen to be about.
+    assert "pre-existing alias one" not in out
+    assert "pre-existing alias two" not in out
+    assert "brand new alias three" in out
+    assert "1 exempt line(s) written by this change in 1 file(s)" in out
+
+
+def test_an_edited_exemption_is_listed_though_it_is_not_newly_exempt(
+    repo: Path,
+) -> None:
+    """Why the header counts lines written rather than the rise in the tally.
+
+    Rewriting an existing exemption's reason does not newly exempt anything, but
+    it is exactly how a true reason becomes a false one — so the line has to be
+    read. Git calls a rewritten line an addition, which is what puts it in scope,
+    and the header counts what is printed so the two can never disagree.
+    """
+    body = _with_two_aliases_already(repo)
+    _stage(
+        repo,
+        "aliases.py",
+        body.replace("pre-existing alias two", "actually a pinned wire format")
+        + f'C = "{LEGACY}-three"  # legacy-name-ok: brand new alias three\n',
+    )
+
+    out = _run(repo).stdout
+
+    # Exempt tally rose by one; two lines were written, and both are shown.
+    assert "2 exempt line(s) written by this change in 1 file(s)" in out
+    assert "actually a pinned wire format" in out
+    assert "brand new alias three" in out
+    assert "pre-existing alias one" not in out
+
+
+def test_a_net_zero_swap_of_exemptions_is_still_reported(repo: Path) -> None:
+    """The hole a risen-tally selection leaves, and why git picks the files now.
+
+    Drop one exemption and add another in the same file and the tally is flat, so
+    a rise-based filter never examines the file and the new reason is never
+    printed. The gate still catches the dangerous form — un-marking a line raises
+    the non-exempt count and the text gets charged — but a brand-new reason
+    nobody is pointed at is the exact thing this report exists to prevent, and in
+    a file already full of exemptions the swap is unremarkable in a diff.
+    """
+    body = _with_two_aliases_already(repo)
+    _stage(
+        repo,
+        "aliases.py",
+        # "alias two" loses its marker and "alias three" arrives with one:
+        # exempt 2 -> 2, flat.
+        body.replace("  # legacy-name-ok: pre-existing alias two", "")
+        + f'C = "{LEGACY}-three"  # legacy-name-ok: brand new alias three\n',
+    )
+
+    out = _run(repo).stdout
+
+    assert "brand new alias three" in out
+    assert "1 exempt line(s) written by this change in 1 file(s)" in out
+    # Still only the written one — widening the file selection must not widen
+    # the line list back out to the whole pile.
+    assert "pre-existing alias one" not in out
+
+
+def test_a_touched_file_whose_exemptions_are_all_old_says_nothing(repo: Path) -> None:
+    """The cost of letting git choose the files, and the guard against paying it.
+
+    Selecting on the diff means every touched file that happens to hold a marker
+    becomes a candidate — including ones where the change went nowhere near it.
+    If an empty per-line result fell back to "print them all", #894 would be back
+    through the file-selection door, and worse: it would fire on files whose
+    exempt count never moved at all.
+    """
+    body = _with_two_aliases_already(repo)
+    _stage(repo, "aliases.py", body + "UNRELATED = 1\n")
+
+    result = _run(repo)
+
+    assert result.returncode == 0
+    assert "exempt line(s) written by this change" not in result.stdout
+    assert "pre-existing alias" not in result.stdout
+
+
+def test_a_file_only_deleted_from_reports_no_exemptions(repo: Path) -> None:
+    """A deletion adds no lines, so there is nothing for this report to name.
+
+    Distinct from the case above because `_added_lines` returns an empty set here
+    rather than a set that simply misses — which is why it has to be able to say
+    "empty" separately from "I could not read the diff".
+    """
+    body = _with_two_aliases_already(repo)
+    _stage(repo, "aliases.py", body.splitlines(keepends=True)[0])
+
+    result = _run(repo)
+
+    assert result.returncode == 0
+    assert "exempt line(s) written by this change" not in result.stdout
 
 
 def test_many_exemptions_sharing_a_reason_are_grouped(repo: Path) -> None:
@@ -548,7 +683,7 @@ def test_the_exempt_and_add_swap_is_caught(repo: Path) -> None:
     result = _run(repo)
 
     assert result.returncode == 1
-    assert "newly exempted" in result.stdout
+    assert "exempt line(s) written by this change" in result.stdout
     assert "gateway mirror" in result.stdout
     offenders = result.stdout.split("adds the legacy name in", 1)[1]
     assert "SNUCK" in offenders

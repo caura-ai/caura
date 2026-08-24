@@ -11,7 +11,7 @@
 # shared pipeline and keeps its own copy. See the workflow header. The fleet is shared even
 # though the code is not: notes written here are recalled by the other six repos and vice versa.
 #
-# DARK AND SILENT without MEMCLAW_AGENTS_KEY. That is the state to expect at the moment this
+# DARK AND SILENT without CAURA_AGENTS_KEY. That is the state to expect at the moment this
 # lands: the org secret has `private` visibility, which a PUBLIC repo cannot read, so until a
 # repo-level secret exists this exits immediately having done nothing.
 #
@@ -29,8 +29,9 @@
 #   ANTHROPIC_API_KEY Anthropic API key
 #   GH_TOKEN          token with issues:read and pull-requests:read
 # Optional env:
-#   MEMCLAW_AGENTS_KEY   internal-agents tenant key (empty => dark no-op)
-#   MEMCLAW_API_URL      default https://caura.ai
+#   CAURA_AGENTS_KEY     internal-agents tenant key (empty => dark no-op)
+#   CAURA_API_URL        default https://caura.ai
+# Both also accept their pre-rename MEMCLAW_* spelling.  # legacy-name-ok: rule 3 dual-read alias
 #   CODE_REVIEW_FLEET_ID default code-review
 #   MODEL                default claude-sonnet-5
 #   MAX_BUDGET_USD       per-invocation ceiling (default 2.00)
@@ -46,8 +47,15 @@ MAX_THREAD_CHARS=60000
 # from here would be the only one no per-reviewer filter could account for.
 REVIEWER="claude"
 
-if [ -z "${MEMCLAW_AGENTS_KEY:-}" ]; then
-  echo "::notice::Declined-finding capture is dark (no MEMCLAW_AGENTS_KEY) — skipping"
+# Either spelling: the workflow passes CAURA_AGENTS_KEY (itself resolved from
+# whichever secret exists), but a manual run may still export the old name.
+# ``:-`` treats blank as unset, so this is first NON-EMPTY, not first defined —
+# an unfilled CAURA_AGENTS_KEY= must not shadow a working old one and take the
+# capture dark without saying so.
+AGENTS_KEY="${CAURA_AGENTS_KEY:-${MEMCLAW_AGENTS_KEY:-}}"  # legacy-name-ok: rule 3 dual-read alias
+
+if [ -z "$AGENTS_KEY" ]; then
+  echo "::notice::Declined-finding capture is dark (no CAURA_AGENTS_KEY) — skipping"
   exit 0
 fi
 
@@ -236,7 +244,7 @@ if [ -z "$NOTES" ]; then
   exit 0
 fi
 
-CAURA_URL="${MEMCLAW_API_URL:-https://caura.ai}"
+CAURA_URL="${CAURA_API_URL:-${MEMCLAW_API_URL:-https://caura.ai}}"  # legacy-name-ok: rule 3 dual-read alias
 CR_FLEET="${CODE_REVIEW_FLEET_ID:-code-review}"
 SAVED=0
 while IFS= read -r NOTE; do
@@ -259,7 +267,7 @@ while IFS= read -r NOTE; do
     continue
   }
   RESP=$(curl -sS --max-time 20 "${CAURA_URL%/}/mcp" \
-    -H "X-API-Key: ${MEMCLAW_AGENTS_KEY}" \
+    -H "X-API-Key: ${AGENTS_KEY}" \
     -H "Content-Type: application/json" -H "Accept: application/json" \
     -d "$REQ") || { echo "::warning::MemClaw unreachable — note dropped"; continue; }
   if printf '%s' "$RESP" | jq -e 'has("result") and (.error | not)' >/dev/null 2>&1; then

@@ -85,11 +85,12 @@ class Sentinel:
 
 # ── the list ─────────────────────────────────────────────────────────────────
 #
-# Every entry carries ``legacy-name-ok`` because this file is itself scanned by
-# the ratchet, and the reason is the same one every time: the line exists to pin
-# a string rule 3 keeps readable forever. Excluding the file from the ratchet
-# instead would leave a hole in that scan, which is the trade its author already
-# refused once for the same reason.
+# Entries whose pinned text contains the old brand carry ``legacy-name-ok``,
+# because this file is itself scanned by the ratchet, and the reason is the same
+# every time: the line exists to pin a string rule 3 keeps readable forever.
+# Entries pinning brand-free text need no marker and correctly have none — the
+# ratchet never sees them. Excluding this file from the ratchet instead would
+# leave a hole in that scan, which is the trade its author already refused once.
 
 SENTINELS: tuple[Sentinel, ...] = (
     # -- Matched by a live production Datadog monitor. Carries no brand. -------
@@ -201,6 +202,30 @@ SENTINELS: tuple[Sentinel, ...] = (
         kind=LITERAL,
         breaks="the interviewer stops finding config customers already have on disk",
     ),
+    # The whole assignment, not the marker value alone — and this one is a
+    # judgement call the comment-only guard below CANNOT make for us.
+    #
+    # That guard asks whether the pinned text appears on a line that starts with
+    # a comment character. This value *is* comment-shaped (it starts with ``#``),
+    # but the line defining it starts with ``CRON_MARKER``, so the guard sees
+    # nothing and every candidate form passes it. Pinning the bare value would
+    # therefore be accepted while being satisfiable by anyone who later writes a
+    # single line of commentary quoting the marker — and commentary quoting it is
+    # likelier here than usual, precisely because it reads as a comment already.
+    #
+    # Anchoring to the assignment also fails if the value survives only in prose
+    # after the constant is deleted. It costs a false red on a rename that keeps
+    # the value, which is behaviour-preserving; that trade is deliberate, because
+    # a false red is loud and a gate that quietly stopped protecting is not.
+    Sentinel(
+        path="clients/python/src/caura_client/interviewer/installer.py",
+        text='CRON_MARKER = "# memclaw-interviewer (managed)"',  # legacy-name-ok: pinned floor string
+        kind=LITERAL,
+        breaks=(
+            "uninstall stops finding crontab entries customers already have, "
+            "and re-install duplicates them instead of replacing"
+        ),
+    ),
     Sentinel(
         path=".github/workflows/publish-python-client.yml",
         text="memclaw-client-v*",  # legacy-name-ok: pinned floor string
@@ -273,9 +298,11 @@ def _static_text(node: ast.expr) -> str | None:
 def _log_calls(source: str, path: str) -> list[tuple[str | None, str]]:
     """``(level, message)`` for every logging call — level ``None`` if unknowable.
 
-    Positional args only, and every one of them: ``logger.log`` takes the level
-    first, so keying on argument position would miss the message while keying on
-    "any string argument" costs nothing.
+    One argument per call, by position: index 0, or index 1 for ``logger.log``
+    where the level takes the first slot. Reading every positional argument
+    instead — which this did until a %-substitution value was found able to
+    satisfy a check for a message that had been renamed — is the wider net that
+    catches the wrong fish.
     """
     try:
         tree = ast.parse(source)
@@ -292,8 +319,14 @@ def _log_calls(source: str, path: str) -> list[tuple[str | None, str]]:
         ):
             continue
         level = node.func.attr if node.func.attr in _LEVEL_RANK else None
-        for arg in node.args:
-            text = _static_text(arg)
+        # The message is the first positional argument — except for
+        # ``logger.log(level, msg)``, where the level takes that slot. Reading
+        # every argument instead would let a %-substitution VALUE satisfy the
+        # check for a call whose message text had changed, which is the exact
+        # false pass this kind exists to prevent.
+        index = 1 if node.func.attr == "log" else 0
+        if len(node.args) > index:
+            text = _static_text(node.args[index])
             if text:
                 out.append((level, text))
     return out
@@ -312,6 +345,13 @@ def _check(sentinel: Sentinel, root: Path) -> str | None:
 
     if sentinel.kind == LITERAL:
         return None if sentinel.text in source else "the string is gone"
+
+    if sentinel.kind != LOG_MESSAGE:
+        # Not defensive padding: a mistyped kind would otherwise fall through to
+        # the log-message path and quietly check the wrong thing, on an entry
+        # whose author believed they had written a literal one. A gate running
+        # the wrong check is worse than one that refuses to run.
+        raise RuntimeError(f"unknown kind {sentinel.kind!r} on {sentinel.path}")
 
     emitting = [
         (level, text)
@@ -364,7 +404,14 @@ def main() -> int:
         return 1
 
     root = Path(args.root).resolve()
-    failures = [(s, why) for s in SENTINELS if (why := _check(s, root)) is not None]
+    try:
+        failures = [(s, why) for s in SENTINELS if (why := _check(s, root)) is not None]
+    except RuntimeError as exc:
+        # A file this gate cannot read is a gate that did not run, which is not
+        # the same as a gate that found something — and a traceback reads as
+        # neither. Exit 2 says it could not run; exit 1 always means it ran.
+        print(exc, file=sys.stderr)
+        return 2
 
     if not failures:
         print(f"All {len(SENTINELS)} protected strings survive.")

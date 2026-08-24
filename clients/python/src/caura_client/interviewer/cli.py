@@ -403,15 +403,17 @@ def _cmd_install(args: argparse.Namespace) -> int:
         print(f"[interviewer] {exc}", file=sys.stderr)
         return 2
 
+    # New installs are written with the new names only. Existing env files keep
+    # their old names and keep working — every reader above accepts both.
     env = {
-        "MEMCLAW_BASE_URL": args.base_url,
-        "MEMCLAW_API_KEY": args.api_key,
-        "MEMCLAW_TENANT_ID": args.tenant_id,
-        "MEMCLAW_AGENT_ID": args.agent_id,
-        "MEMCLAW_FLEET_ID": args.fleet_id or "",
+        "CAURA_BASE_URL": args.base_url,
+        "CAURA_API_KEY": args.api_key,
+        "CAURA_TENANT_ID": args.tenant_id,
+        "CAURA_AGENT_ID": args.agent_id,
+        "CAURA_FLEET_ID": args.fleet_id or "",
     }
     if not args.all_projects:
-        env["MEMCLAW_INTERVIEWER_PROJECTS"] = ",".join(allow)
+        env["CAURA_INTERVIEWER_PROJECTS"] = ",".join(allow)
 
     env_file = installer.env_file_path()
     log_file = installer.log_file_path()

@@ -55,7 +55,7 @@ function resolveAgentIdInner(
   const fallback = `main-${getInstallId()}`;
   if (!quiet) {
     console.warn(
-      `[memclaw] Could not resolve agent ID — using install-default '${fallback}'. ` +
+      `[caura] Could not resolve agent ID — using install-default '${fallback}'. ` +
         `Pass agent_id explicitly (or set MEMCLAW_AGENT_ID) for clarity.`,
     );
   }

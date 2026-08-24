@@ -24,7 +24,7 @@ deliberate, explicit error rather than a silent 404).
 - **Scripts / CLI** authenticate with a Bearer JWT:
   `Authorization: Bearer <token>`.
 - **Self-hosted / standalone** deployments that hit core-api directly
-  use the `X-API-Key` header (admin key or `MEMCLAW_API_KEY`); in
+  use the `X-API-Key` header (admin key or `CAURA_API_KEY`); in
   standalone mode the resolved context is already `orgRole=admin`.
 
 **Authorization.** The five action endpoints

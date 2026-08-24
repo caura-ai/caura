@@ -7,9 +7,12 @@ redirect somebody has to keep forever and spends a rename option that was alread
 paid for. The programme runs for weeks with ordinary feature work alongside it,
 so the rule needs a gate rather than a reviewer's attention.
 
-What it does: counts the lines carrying the legacy name per file, in the tree being
-built and in the base tree, and fails on any file that went **up**. Decreases are
-the point of the programme and are reported as progress.
+What it does: compares the legacy-name lines per file, by TEXT, between the tree
+being built and the base tree, and fails a file that carries text the repo did
+not have before. Not a count comparison — a flat or falling count can still hide
+newly minted text, and a risen one can be nothing but a move. See "Why the count
+is not the check" below. Decreases are the point of the programme and are
+reported as progress.
 
 Why per file rather than a repo total: a total hides an addition behind an
 unrelated deletion elsewhere in the same PR, while a per-file count keeps a
@@ -122,7 +125,26 @@ def _git(args: list[str]) -> str:
     :func:`main` refuses to pass when BOTH trees come back empty.
     """
     # check=False deliberately: the return code is the signal here, not an error.
-    proc = subprocess.run(args, capture_output=True, text=True, check=False)
+    #
+    # The encoding is pinned rather than left to the locale. ``text=True`` alone
+    # decodes with ``locale.getpreferredencoding()``, which is UTF-8 on the CI
+    # runner but a legacy codepage on a Windows workstation — cp1255, cp1251,
+    # cp1252, whatever the machine is set to. The tree has non-ASCII bytes in it
+    # (em dashes in prose, accented names in fixtures), so on those machines the
+    # decode raises UnicodeDecodeError inside subprocess's reader thread and the
+    # script dies before it prints anything. It is not a gate failure — the gate
+    # simply cannot be run locally, which is where you want to run it first.
+    # ``errors="replace"`` keeps an undecodable byte from being fatal: this
+    # counts occurrences of an ASCII name, so a mangled character elsewhere on
+    # the line changes nothing about the match.
+    proc = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        check=False,
+        encoding="utf-8",
+        errors="replace",
+    )
     if proc.returncode == 0:
         return proc.stdout
     if proc.returncode == 1:
@@ -176,7 +198,30 @@ def _grep(tree: str | None, pathspec: str = ":/") -> list[tuple[str, str, str, b
     return out
 
 
-def _added_lines(base: str, path: str) -> set[int]:
+def _changed_paths(base: str) -> set[str] | None:
+    """Every path this change touched, per git. ``None`` if the diff failed.
+
+    What selects the files the exemption report talks about. The exempt tally
+    cannot do it: a change that removes one exemption and adds another in the
+    same file is net zero, so a rise-based filter never looks at that file and
+    the new exemption is never printed — the one thing the report exists to stop
+    happening quietly. Asking git which files moved has no such blind spot.
+
+    ``None`` rather than an empty set on failure, because the two mean opposite
+    things to the caller: "could not tell" must fall back to the old tally-based
+    selection, while "nothing changed" must select nothing.
+    """
+    try:
+        return {
+            line
+            for line in _git(["git", "diff", "--name-only", base]).splitlines()
+            if line
+        }
+    except RuntimeError:
+        return None
+
+
+def _added_lines(base: str, path: str) -> set[int] | None:
     """Line numbers this change actually added to ``path``, per git's own diff.
 
     Used for the failure report only, never for the decision. The decision
@@ -190,13 +235,21 @@ def _added_lines(base: str, path: str) -> set[int]:
     reader is sent to a line that has not changed, for a gate whose whole output
     is "here is the line you added".
 
-    Empty on any failure, and the caller falls back to naming every occurrence of
+    ``None`` on failure, and the caller falls back to naming every occurrence of
     the minted text: too many lines is a nuisance, none is a dead end.
+
+    ``None`` rather than an empty set, because once the exemption report selects
+    files by what git says changed rather than by a risen tally, an empty result
+    is a real and common answer — a file this change only DELETED from adds no
+    lines, and every exempt line it still holds predates the change. Collapsing
+    that into the failure case would reprint the whole pile for exactly the files
+    that deserve none of it, which is the bug #894 fixed, reintroduced through
+    the back door.
     """
     try:
         out = _git(["git", "diff", "-U0", base, "--", _literal(path)])
     except RuntimeError:
-        return set()
+        return None
 
     added: set[int] = set()
     lineno = 0
@@ -394,8 +447,10 @@ def _report_excused_moves(
     print()
 
 
-def _report_new_exemptions(before: Counter[str], after: Counter[str]) -> None:
-    """Name every line this change newly exempted, whether or not it fails.
+def _report_new_exemptions(
+    before: Counter[str], after: Counter[str], base: str
+) -> None:
+    """Name every exempt line this change wrote, whether or not it fails.
 
     The one thing a count-based ratchet cannot decide for itself, and the reason
     this report exists. Marking an existing line exempt lowers a file's
@@ -415,18 +470,39 @@ def _report_new_exemptions(before: Counter[str], after: Counter[str]) -> None:
     It is still printed, on the passing path as well. An exemption is the move
     that buys headroom, and a deliberate one — an alias landing in the same PR as
     unrelated work — should never be made quietly even when it is legitimate.
-    """
-    added = {p: n - before.get(p, 0) for p, n in after.items() if n > before.get(p, 0)}
-    if not added:
-        return
 
-    total = sum(added.values())
-    print(
-        f"{total} line(s) newly exempted in {len(added)} file(s) — check each one is a"
-    )
-    print(
-        "compat alias, a redirect or a pinned wire format, and not headroom for a new name:"
-    )
+    Which is why the list is filtered to the lines this change actually wrote,
+    rather than every exempt line the file happens to hold. Re-greping and
+    printing all of them puts a file's whole accumulated pile under a header
+    counting one, sends the reader to lines that are not in the diff, and reads
+    as self-contradictory — which invites distrusting the total rather than the
+    list. Phase 5's dual-read wave is exactly the change that builds those piles,
+    so every later PR touching those files would reprint them. A reader who
+    learns the list is mostly noise stops reading it, and that is the failure
+    this report exists to prevent.
+
+    **Git decides both halves.** It selects the lines, and it also selects the
+    files. Selecting files by a risen exempt tally leaves a hole: remove one
+    exemption and add another in the same file and the tally is flat, so the file
+    is never examined and the new exemption is never printed. The gate still
+    catches the dangerous form of that — un-marking a line raises the non-exempt
+    count and :func:`_minted` charges the text — but a brand-new reason nobody is
+    pointed at is precisely what this report exists to prevent, and during a
+    dual-read wave a one-for-one swap inside a file already full of exemptions is
+    unremarkable in a diff.
+
+    The tally is kept only as the fallback for when git cannot answer, since a
+    selection that is too narrow beats one that is arbitrary.
+    """
+    # Files git says this change touched, narrowed to those that hold an exempt
+    # line at all. The union with the risen-tally set is belt and braces: when
+    # ``changed`` is available it already contains every risen file, and when it
+    # is ``None`` the tally is all there is.
+    changed = _changed_paths(base)
+    risen = {p for p, n in after.items() if n > before.get(p, 0)}
+    paths = risen if changed is None else {p for p in after if p in changed} | risen
+    if not paths:
+        return
 
     # Grouped by reason, because the wall is the failure mode. A dual-read wave
     # exempts dozens of lines carrying one identical reason, and at that length
@@ -435,16 +511,65 @@ def _report_new_exemptions(before: Counter[str], after: Counter[str]) -> None:
     # not match its neighbours. Collapsing the repeats is what makes the odd one
     # visible instead of burying it on line forty.
     by_reason: dict[str, list[tuple[str, str, str]]] = {}
-    for path in sorted(added):
-        for _, lineno, text, exempt in _grep(None, pathspec=_literal(path)):
-            if not exempt:
-                continue
-            stripped = text.strip()
+    shown_total = 0
+    unfiltered: list[str] = []
+    for path in sorted(paths):
+        here = [
+            (lineno, text.strip())
+            for _, lineno, text, exempt in _grep(None, pathspec=_literal(path))
+            if exempt
+        ]
+        if not here:
+            continue
+        # git decides which of the file's lines this change is responsible for.
+        # An existing line that gains a marker is a rewrite, so git calls it
+        # added and it stays in — which matters, because that is the headroom
+        # move this report exists to expose.
+        touched = _added_lines(base, path)
+        if touched is None:
+            # Diff unreadable. Falling back to every exempt line in the file
+            # rather than to silence, on the same trade the offender report
+            # makes below: too many lines is a nuisance and none is a dead end.
+            # Named out loud, though, because unlike below this report puts a
+            # number on its own list.
+            picked = here
+            unfiltered.append(path)
+        else:
+            picked = [(n, t) for n, t in here if int(n) in touched]
+        # Empty is now a real answer rather than a failure — a file this change
+        # only deleted from, or touched somewhere other than its exempt lines,
+        # adds nothing and every marker it holds predates the change. Printing
+        # them would be #894 reintroduced through the file-selection door, which
+        # is the specific risk of selecting on the diff rather than the tally.
+        if not picked:
+            continue
+        shown_total += len(picked)
+        for lineno, stripped in picked:
             match = EXEMPT_RE.search(stripped)
             tail = stripped[match.end() :].lstrip(": ") if match else ""
             by_reason.setdefault(tail.strip() or "(no reason given)", []).append(
                 (path, lineno, stripped)
             )
+
+    # Nothing survived the per-line filter: every candidate file holds only
+    # exemptions that predate this change. Silence is right — the previous
+    # version could not reach here, because a risen tally guaranteed something
+    # to print.
+    if not by_reason:
+        return
+
+    listed = len({path for lines in by_reason.values() for path, _, _ in lines})
+    print(f"{shown_total} exempt line(s) written by this change in {listed} file(s) —")
+    print("check each is a compat alias, a redirect or a pinned wire format, and not")
+    print("headroom for a new name:")
+    if unfiltered:
+        named = ", ".join(unfiltered[:4]) + (
+            f" (+{len(unfiltered) - 4} more)" if len(unfiltered) > 4 else ""
+        )
+        print(
+            f"  (diff unreadable for {len(unfiltered)} file(s): {named} — every "
+            "exempt line they hold is listed, so some may predate this change)"
+        )
 
     for reason, lines in sorted(by_reason.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         if len(lines) <= _EXEMPTION_GROUP_AT:
@@ -504,7 +629,7 @@ def main() -> int:
         )
         return 1
 
-    _report_new_exemptions(base_scan.exempt, head_scan.exempt)
+    _report_new_exemptions(base_scan.exempt, head_scan.exempt, args.base)
 
     head_by_file, base_by_file = head_scan.by_file, base_scan.by_file
     budget = _mint_budget(head_scan.total, base_scan.total)
@@ -565,9 +690,19 @@ def main() -> int:
             for _, lineno, text, exempt in _grep(None, pathspec=_literal(path))
             if not exempt and text.strip() in minted
         ]
-        shown = [(n, t) for n, t in candidates if int(n) in added]
+        shown = (
+            candidates
+            if added is None
+            else [(n, t) for n, t in candidates if int(n) in added]
+        )
         # Falling back to every occurrence rather than to silence: if the diff
         # could not be read, too many lines is a nuisance and none is a dead end.
+        #
+        # The ``or candidates`` also covers an empty-but-successful diff. Unlike
+        # the exemption report, silence is NOT right here: this branch only runs
+        # for a file that minted text the repo never had, so something was added
+        # and an empty intersection means the two disagree. Naming every
+        # occurrence keeps a real offender on screen.
         shown = shown or candidates
         for lineno, stripped in shown:
             print(f"      {lineno}: {stripped[:110]}")

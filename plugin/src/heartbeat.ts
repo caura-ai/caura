@@ -203,7 +203,7 @@ export const __DEPLOY_INTERNALS__ = {
   setScheduleRestartForTests: (fn: (() => void) | null) => {
     if (process.env.NODE_ENV !== "test") {
       console.warn(
-        "[memclaw] __DEPLOY_INTERNALS__.setScheduleRestartForTests called " +
+        "[caura] __DEPLOY_INTERNALS__.setScheduleRestartForTests called " +
           "outside NODE_ENV=test — ignored. The production restart scheduler " +
           "is still active; tests using this seam must set NODE_ENV=test " +
           "(the plugin's npm test script already does) or the real " +
@@ -246,7 +246,7 @@ function writeDeployCooldown(failed_version: string, reason: string): void {
       "utf-8",
     );
     console.warn(
-      `[memclaw] deploy cooldown engaged: failed_version=${failed_version} ` +
+      `[caura] deploy cooldown engaged: failed_version=${failed_version} ` +
         `reason=${reason} blocked_until=${new Date(blocked_until).toISOString()}`,
     );
   } catch (e: unknown) {
@@ -319,13 +319,13 @@ function verifyDeployPostRestart(): void {
   if (!pending.target_version) return;
   if (pending.target_version === PLUGIN_VERSION) {
     console.log(
-      `[memclaw] deploy verified post-restart: now running v${PLUGIN_VERSION}`,
+      `[caura] deploy verified post-restart: now running v${PLUGIN_VERSION}`,
     );
     clearDeployPending();
     clearDeployCooldown();
   } else {
     console.error(
-      `[memclaw] DEPLOY VERIFICATION FAILED: target=${pending.target_version} ` +
+      `[caura] DEPLOY VERIFICATION FAILED: target=${pending.target_version} ` +
         `actual=${PLUGIN_VERSION} — engaging cooldown`,
     );
     writeDeployCooldown(
@@ -533,7 +533,7 @@ export async function sendHeartbeat(): Promise<void> {
       );
       if (filesResult.toolsUpdated > 0 || filesResult.agentsUpdated > 0) {
         console.log(
-          `[memclaw] Auto-educated workspaces on heartbeat ` +
+          `[caura] Auto-educated workspaces on heartbeat ` +
             `(TOOLS.md: ${filesResult.toolsUpdated}, AGENTS.md: ${filesResult.agentsUpdated})`,
         );
         // Re-check tools_md presence so setup_status reflects the write.
@@ -660,7 +660,7 @@ async function processCommand(cmd: {
   );
   if (!sigResult.valid) {
     console.warn(
-      `[memclaw] Rejected command ${cmd.command} (${cmd.id}): ${sigResult.reason}`,
+      `[caura] Rejected command ${cmd.command} (${cmd.id}): ${sigResult.reason}`,
     );
     // Still report rejection to server (encodeURIComponent is sufficient for URL safety)
     try {
@@ -790,22 +790,22 @@ async function processCommand(cmd: {
             // payload.target_version fallback for cooldown bookkeeping).
             if (manifestVersion && !/^[\w.\-+]+$/.test(manifestVersion)) {
               console.warn(
-                `[memclaw] manifest version "${manifestVersion}" contains unexpected characters — ignoring`,
+                `[caura] manifest version "${manifestVersion}" contains unexpected characters — ignoring`,
               );
               manifestVersion = undefined;
             }
             console.log(
-              `[memclaw] manifest fetched: target=v${manifestVersion || "?"} ` +
+              `[caura] manifest fetched: target=v${manifestVersion || "?"} ` +
                 `src=${srcFiles.length} root=${rootFiles.length}`,
             );
           } else if (mRes.status !== 404) {
             console.warn(
-              `[memclaw] /plugin-manifest returned ${mRes.status}; using fallback file list`,
+              `[caura] /plugin-manifest returned ${mRes.status}; using fallback file list`,
             );
           }
         } catch (e: unknown) {
           console.warn(
-            `[memclaw] /plugin-manifest fetch failed (back-compat fallback): ${(e as Error).message}`,
+            `[caura] /plugin-manifest fetch failed (back-compat fallback): ${(e as Error).message}`,
           );
         }
 
@@ -855,7 +855,7 @@ async function processCommand(cmd: {
             name.includes("\0")
           ) {
             console.error(
-              `[memclaw] deploy aborted: unsafe filename in manifest: ${name}`,
+              `[caura] deploy aborted: unsafe filename in manifest: ${name}`,
             );
             status = "failed";
             result = {
@@ -915,9 +915,9 @@ async function processCommand(cmd: {
                 } else {
                   fetchOk = false;
                   if (text.length > MAX_SOURCE_SIZE) {
-                    console.warn(`[memclaw] Fetched file ${name} exceeds MAX_SOURCE_SIZE`);
+                    console.warn(`[caura] Fetched file ${name} exceeds MAX_SOURCE_SIZE`);
                   } else {
-                    console.warn(`[memclaw] Fetched file ${name} returned empty body`);
+                    console.warn(`[caura] Fetched file ${name} returned empty body`);
                   }
                 }
               } else if (res.status === 404) {
@@ -926,12 +926,12 @@ async function processCommand(cmd: {
                 skipped404.push(name);
               } else {
                 fetchOk = false;
-                console.warn(`[memclaw] Fetched file ${name} returned HTTP ${res.status}`);
+                console.warn(`[caura] Fetched file ${name} returned HTTP ${res.status}`);
               }
             } catch (e: unknown) {
               fetchOk = false;
               console.warn(
-                `[memclaw] Fetched file ${name} threw: ${(e as Error).message}`,
+                `[caura] Fetched file ${name} threw: ${(e as Error).message}`,
               );
             } finally {
               clearTimeout(fetchTimeout);
@@ -939,7 +939,7 @@ async function processCommand(cmd: {
           }
           if (skipped404.length > 0) {
             console.warn(
-              `[memclaw] /plugin-source 404 on ${skipped404.length} files (older backend?), ` +
+              `[caura] /plugin-source 404 on ${skipped404.length} files (older backend?), ` +
                 `keeping local copies: ${skipped404.join(", ")}`,
             );
           }
@@ -952,7 +952,7 @@ async function processCommand(cmd: {
                 if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
                 writeFileSync(target, text, "utf-8");
               }
-              console.log(`[memclaw] deploy: wrote ${fetched.size} files`);
+              console.log(`[caura] deploy: wrote ${fetched.size} files`);
               // Stamp version.ts from the manifest's version BEFORE
               // building. This is the fix for drift 2 — the prebuild
               // step references a monorepo path that doesn't exist on
@@ -995,13 +995,13 @@ async function processCommand(cmd: {
               // version.ts directly above when manifestVersion is set,
               // so the prebuild step is redundant AND fatal here. Going
               // straight through tsc keeps the build hermetic.
-              console.log(`[memclaw] deploy: invoking npx tsc (timeout=${BUILD_TIMEOUT_MS}ms)`);
+              console.log(`[caura] deploy: invoking npx tsc (timeout=${BUILD_TIMEOUT_MS}ms)`);
               const buildOutput = execSync("npx tsc 2>&1", {
                 cwd: pluginDir,
                 encoding: "utf-8",
                 timeout: BUILD_TIMEOUT_MS,
               });
-              console.log(`[memclaw] deploy: build succeeded, restart will be scheduled after result POST`);
+              console.log(`[caura] deploy: build succeeded, restart will be scheduled after result POST`);
               result = {
                 ok: true,
                 // Report the version that the cooldown / verifier path
@@ -1014,7 +1014,7 @@ async function processCommand(cmd: {
               shouldRestart = true;
             } catch (e: unknown) {
               const errMsg = e instanceof Error ? e.message : String(e);
-              console.warn(`[memclaw] deploy: build failed — ${errMsg.slice(0, 200)}`);
+              console.warn(`[caura] deploy: build failed — ${errMsg.slice(0, 200)}`);
               // Write or build failed — restore backups (both src + root)
               for (const [relPath, content] of backups) {
                 try {
@@ -1023,7 +1023,7 @@ async function processCommand(cmd: {
                   // Restore failed for this file
                 }
               }
-              console.log(`[memclaw] deploy: backups restored (${backups.size} files), status=failed`);
+              console.log(`[caura] deploy: backups restored (${backups.size} files), status=failed`);
               // Cooldown the failed version so the backend stops
               // re-queuing for it. Uses `effectiveVersion` so a failed
               // deploy from a `target_version`-stamped payload (backend
@@ -1231,10 +1231,10 @@ async function processCommand(cmd: {
       status,
       result,
     });
-    console.log(`[memclaw] command ${cmd.command} reported: status=${status}`);
+    console.log(`[caura] command ${cmd.command} reported: status=${status}`);
   } catch (re: unknown) {
     console.warn(
-      `[memclaw] command ${cmd.command} result POST failed: ${(re as Error).message}`,
+      `[caura] command ${cmd.command} result POST failed: ${(re as Error).message}`,
     );
   }
 

@@ -26,6 +26,7 @@ SCRIPT = REPO_ROOT / "scripts" / "do_not_touch_sentinel.py"
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+import do_not_touch_sentinel as sentinel_module
 from do_not_touch_sentinel import (
     LITERAL,
     LOG_MESSAGE,
@@ -198,6 +199,23 @@ def test_exception_counts_as_error(tmp_path: Path) -> None:
     assert _check(sentinel, root) is None
 
 
+def test_a_format_argument_does_not_count_as_the_message(tmp_path: Path) -> None:
+    """The message is the first positional argument, not any of them.
+
+    Reading every argument lets a %-substitution VALUE satisfy the check for a
+    call whose message text has changed — a false pass on exactly the regression
+    this kind exists to catch, and the harder one to notice because the phrase
+    really is still in the file.
+    """
+    root = _root(
+        tmp_path, "a.py", 'logger.error("Widget renamed: %s", "Widget degraded")\n'
+    )
+
+    result = _check(Sentinel("a.py", "Widget degraded", LOG_MESSAGE, "x"), root)
+
+    assert result == "it survives only in prose — no logging call emits it any more"
+
+
 def test_a_phrase_in_a_non_logging_call_does_not_count(tmp_path: Path) -> None:
     """Otherwise any string anywhere satisfies the strictest kind in the list."""
     root = _root(tmp_path, "a.py", 'print("Widget degraded")\n')
@@ -215,6 +233,19 @@ def test_a_file_that_does_not_parse_fails_loudly(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="does not parse"):
         _check(Sentinel("a.py", "Widget degraded", LOG_MESSAGE, "x"), root)
+
+
+def test_an_unknown_kind_refuses_to_run(tmp_path: Path) -> None:
+    """A mistyped kind must not fall through to the log-message path.
+
+    It would quietly run the wrong check on an entry whose author believed they
+    had written a literal one — and pass or fail for reasons unrelated to what
+    they pinned. A gate running the wrong check is worse than one that refuses.
+    """
+    root = _root(tmp_path, "a.py", 'KEY = "keep-me"\n')
+
+    with pytest.raises(RuntimeError, match="unknown kind"):
+        _check(Sentinel("a.py", "keep-me", "litteral", "x"), root)
 
 
 # ── the real list ────────────────────────────────────────────────────────────
@@ -252,7 +283,17 @@ def test_every_listed_string_is_actually_load_bearing(
     assert _check(sentinel, scrubbed) is not None
 
 
-_COMMENT_STARTS = ("#", "//", "*", "--")
+_COMMENT_STARTS = ("#", "//", "*")
+# SQL's marker needs its trailing space to tell ``-- a note`` from a command-line
+# flag. Without it a pinned ``--update-labels=…`` reads as a comment and the
+# guard fails the very entry it exists to protect. No OSS entry starts with a
+# dash today; the enterprise copy has several, and found this.
+_SQL_COMMENT = "-- "
+
+
+def _is_comment_only(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith(_COMMENT_STARTS) or stripped.startswith(_SQL_COMMENT)
 
 
 @pytest.mark.parametrize(
@@ -278,13 +319,36 @@ def test_no_literal_can_be_satisfied_by_a_comment_alone(sentinel: Sentinel) -> N
     in_comment = [
         line.strip()
         for line in lines
-        if sentinel.text in line and line.strip().startswith(_COMMENT_STARTS)
+        if sentinel.text in line and _is_comment_only(line)
     ]
 
     assert not in_comment, (
         f"{sentinel.path} mentions {sentinel.text!r} in a comment, so deleting the "
         f"code that uses it would still pass: {in_comment}"
     )
+
+
+def test_main_turns_an_unreadable_file_into_exit_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file the gate cannot read means the gate did not run — which is not the
+    same as the gate finding something, and a traceback reads as neither. Exit 2
+    says it could not run; exit 1 always means it ran and something is missing.
+
+    Driven through a substituted list rather than the real one, so the case is
+    identical in every copy of this file: only a LOG_MESSAGE entry reaches the
+    parser, and not every repo's list has one.
+    """
+    root = _root(tmp_path, "a.py", "def broken(:\n")
+    monkeypatch.setattr(
+        sentinel_module,
+        "SENTINELS",
+        (Sentinel("a.py", "Widget degraded", LOG_MESSAGE, "x"),),
+    )
+    monkeypatch.setattr(sys, "argv", ["do_not_touch_sentinel.py", "--root", str(root)])
+
+    assert sentinel_module.main() == 2
+    assert "does not parse" in capsys.readouterr().err
 
 
 def test_the_list_is_not_empty() -> None:
@@ -320,5 +384,7 @@ def test_a_removal_names_the_file_and_what_breaks(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert sentinel.path in result.stdout
-    assert sentinel.text in result.stdout
+    # repr, because that is how the report prints it — a pinned string containing
+    # a backslash (a terraform filter, say) never appears verbatim in the output.
+    assert repr(sentinel.text) in result.stdout
     assert sentinel.breaks in result.stdout

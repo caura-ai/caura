@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.17.0](https://github.com/caura-ai/caura/compare/plugin-v2.16.1...plugin-v2.17.0) (2026-08-23)
+
+
+### Features
+
+* **env:** read CAURA_* everywhere the old names are read ([#886](https://github.com/caura-ai/caura/issues/886)) ([74b8a07](https://github.com/caura-ai/caura/commit/74b8a07386cbd2338c4816c0a0eeb049c7d2bb6c))
+
 ## [2.16.1](https://github.com/caura-ai/caura/compare/plugin-v2.16.0...plugin-v2.16.1) (2026-08-13)
 
 

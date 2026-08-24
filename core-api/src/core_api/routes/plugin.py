@@ -262,12 +262,12 @@ def _generate_install_script(
 set -euo pipefail
 
 # ── Shell-safe variable assignments ──
-MEMCLAW_API_URL={safe_api_url}
-MEMCLAW_API_KEY={safe_api_key}
-MEMCLAW_FLEET_ID={safe_fleet_id}
-MEMCLAW_TENANT_ID={safe_tenant_id}
-MEMCLAW_NODE_NAME={safe_node_name or '"$(hostname -s)"'}
-MEMCLAW_PLUGIN_VERSION={safe_version}
+CAURA_API_URL={safe_api_url}
+CAURA_API_KEY={safe_api_key}
+CAURA_FLEET_ID={safe_fleet_id}
+CAURA_TENANT_ID={safe_tenant_id}
+CAURA_NODE_NAME={safe_node_name or '"$(hostname -s)"'}
+CAURA_PLUGIN_VERSION={safe_version}
 
 echo "=== MemClaw Plugin Installer ==="
 echo ""
@@ -303,10 +303,10 @@ _version_compare() {{
 }}
 if [ -z "$INSTALLED_OPENCLAW_VERSION" ]; then
   echo "WARNING: openclaw CLI not found in PATH or returned no version."
-  echo "         Plugin v$MEMCLAW_PLUGIN_VERSION targets OpenClaw >= $MIN_OPENCLAW_VERSION."
+  echo "         Plugin v$CAURA_PLUGIN_VERSION targets OpenClaw >= $MIN_OPENCLAW_VERSION."
 elif [ "$(_version_compare "$INSTALLED_OPENCLAW_VERSION" "$MIN_OPENCLAW_VERSION")" = "lt" ]; then
   echo "WARNING: OpenClaw $INSTALLED_OPENCLAW_VERSION is older than the recommended"
-  echo "         minimum $MIN_OPENCLAW_VERSION for MemClaw plugin v$MEMCLAW_PLUGIN_VERSION."
+  echo "         minimum $MIN_OPENCLAW_VERSION for plugin v$CAURA_PLUGIN_VERSION."
   echo "         The recall-policy gate (assemble({{prompt}}) param) and"
   echo "         registerContextEngine slot landed in OpenClaw v$MIN_OPENCLAW_VERSION;"
   echo "         on older runtimes the plugin falls back to before_prompt_build but"
@@ -323,11 +323,11 @@ CONFIG_PATH="$HOME/.openclaw/openclaw.json"
 # When the on-prem uses self-signed TLS, the bootstrap fetches below
 # (plugin-source, tools.json, SKILL.md) hit certificate verification
 # errors before step 8 has a chance to install the trust anchor.
-# Switch to TOFU mode for the bootstrap curls when MEMCLAW_API_URL is
+# Switch to TOFU mode for the bootstrap curls when CAURA_API_URL is
 # HTTPS — same reasoning as `docker login` against a self-signed
 # registry. After install, NODE_EXTRA_CA_CERTS handles long-term
 # trust at runtime, so no -k anywhere outside this script.
-case "$MEMCLAW_API_URL" in
+case "$CAURA_API_URL" in
   https://*) CURL_INSECURE="-k" ;;
   *)         CURL_INSECURE="" ;;
 esac
@@ -341,7 +341,7 @@ echo "[2/7] Writing package.json..."
 cat > "$PLUGIN_DIR/package.json" << PACKAGE_EOF
 {{
   "name": "@caura/memclaw",
-  "version": "$MEMCLAW_PLUGIN_VERSION",
+  "version": "$CAURA_PLUGIN_VERSION",
   "description": "OpenClaw plugin for MemClaw central memory",
   "private": true,
   "type": "module",
@@ -387,16 +387,16 @@ TSCONFIG_EOF
 # ``keystones.ts`` 2026-05). Fall back to the hardcoded list with a warning
 # if ``python3`` isn't available (older minimal containers) or the
 # manifest endpoint is unreachable.
-echo "[4/7] Fetching plugin manifest from $MEMCLAW_API_URL..."
+echo "[4/7] Fetching plugin manifest from $CAURA_API_URL..."
 # Use ``/api/v1/plugin-manifest`` with X-API-Key rather than the
 # unversioned bootstrap alias: the enterprise nginx gateway only
 # allowlists a small set of unauthenticated bootstrap paths
 # (``/plugin-source``, ``/plugin-source-hash``, ``/install-plugin``), and
 # adding a new path there is an enterprise-repo change. The install
-# script always has ``MEMCLAW_API_KEY`` (required arg), so sending it
+# script always has ``CAURA_API_KEY`` (required arg), so sending it
 # satisfies the gateway's auth subrequest. OSS standalone (no gateway)
 # ignores the header and serves the same route — works in both.
-MANIFEST_JSON=$(curl $CURL_INSECURE -sf -H "X-API-Key: $MEMCLAW_API_KEY" "$MEMCLAW_API_URL/api/v1/plugin-manifest" || true)
+MANIFEST_JSON=$(curl $CURL_INSECURE -sf -H "X-API-Key: $CAURA_API_KEY" "$CAURA_API_URL/api/v1/plugin-manifest" || true)
 
 SRC_FILES=""
 ROOT_FILES=""
@@ -437,10 +437,10 @@ for _f in $SRC_FILES $ROOT_FILES; do
 done
 
 # 5. Fetch latest plugin source from MemClaw server
-echo "[5/7] Fetching latest plugin source from $MEMCLAW_API_URL..."
+echo "[5/7] Fetching latest plugin source from $CAURA_API_URL..."
 for srcfile in $SRC_FILES; do
-  curl $CURL_INSECURE -sf "$MEMCLAW_API_URL/api/plugin-source?file=$srcfile" > "$PLUGIN_DIR/src/$srcfile" || {{
-    echo "ERROR: Could not fetch $srcfile from $MEMCLAW_API_URL/api/plugin-source?file=$srcfile"
+  curl $CURL_INSECURE -sf "$CAURA_API_URL/api/plugin-source?file=$srcfile" > "$PLUGIN_DIR/src/$srcfile" || {{
+    echo "ERROR: Could not fetch $srcfile from $CAURA_API_URL/api/plugin-source?file=$srcfile"
     exit 1
   }}
 done
@@ -453,8 +453,8 @@ for rootfile in $ROOT_FILES; do
     echo "ERROR: Could not create directory $_parent_dir"
     exit 1
   }}
-  curl $CURL_INSECURE -sf "$MEMCLAW_API_URL/api/plugin-source?file=$rootfile" > "$PLUGIN_DIR/$rootfile" || {{
-    echo "ERROR: Could not fetch $rootfile from $MEMCLAW_API_URL/api/plugin-source?file=$rootfile"
+  curl $CURL_INSECURE -sf "$CAURA_API_URL/api/plugin-source?file=$rootfile" > "$PLUGIN_DIR/$rootfile" || {{
+    echo "ERROR: Could not fetch $rootfile from $CAURA_API_URL/api/plugin-source?file=$rootfile"
     exit 1
   }}
 done
@@ -463,16 +463,16 @@ echo "    Downloaded all plugin source files"
 # Generate version.ts (imported by index.ts)
 cat > "$PLUGIN_DIR/src/version.ts" << VERSION_EOF
 // Auto-generated by install script
-export const PLUGIN_VERSION = "$MEMCLAW_PLUGIN_VERSION";
+export const PLUGIN_VERSION = "$CAURA_PLUGIN_VERSION";
 VERSION_EOF
 
 # Write .env file (includes heartbeat config)
 cat > "$PLUGIN_DIR/.env" << ENV_EOF
-MEMCLAW_API_URL=$MEMCLAW_API_URL
-MEMCLAW_API_KEY=$MEMCLAW_API_KEY
-MEMCLAW_FLEET_ID=$MEMCLAW_FLEET_ID
-MEMCLAW_TENANT_ID=$MEMCLAW_TENANT_ID
-MEMCLAW_NODE_NAME=$MEMCLAW_NODE_NAME
+CAURA_API_URL=$CAURA_API_URL
+CAURA_API_KEY=$CAURA_API_KEY
+CAURA_FLEET_ID=$CAURA_FLEET_ID
+CAURA_TENANT_ID=$CAURA_TENANT_ID
+CAURA_NODE_NAME=$CAURA_NODE_NAME
 ENV_EOF
 chmod 600 "$PLUGIN_DIR/.env"
 
@@ -539,17 +539,17 @@ else
   echo "    WARNING: $CONFIG_PATH not found — you will need to configure allowlist manually"
 fi
 
-# 8. TLS trust bootstrap — only when MEMCLAW_API_URL is HTTPS.
+# 8. TLS trust bootstrap — only when CAURA_API_URL is HTTPS.
 # OSS / dev installs (http://localhost:8000) skip this entirely.
 # For an enterprise on-prem with a self-signed cert, the gateway exposes
 # the cert at /onprem-ca.pem; we curl it once with -k (TOFU — same trust
 # pattern as `docker login` to a self-signed registry), save it next to
 # the plugin, and write a systemd drop-in that exports
 # NODE_EXTRA_CA_CERTS so Node trusts it across openclaw-gateway restarts.
-case "$MEMCLAW_API_URL" in
+case "$CAURA_API_URL" in
   https://*)
-    echo "[8/8] Bootstrapping TLS trust for $MEMCLAW_API_URL"
-    if curl -ksSL "$MEMCLAW_API_URL/onprem-ca.pem" -o "$PLUGIN_DIR/onprem-ca.pem" \
+    echo "[8/8] Bootstrapping TLS trust for $CAURA_API_URL"
+    if curl -ksSL "$CAURA_API_URL/onprem-ca.pem" -o "$PLUGIN_DIR/onprem-ca.pem" \
         && [ -s "$PLUGIN_DIR/onprem-ca.pem" ] \
         && head -1 "$PLUGIN_DIR/onprem-ca.pem" | grep -q '^-----BEGIN CERTIFICATE-----$'; then
       chmod 0644 "$PLUGIN_DIR/onprem-ca.pem"
@@ -583,7 +583,7 @@ SDEOF
       echo "    Shell env → ~/.bashrc + ~/.zshrc (NODE_EXTRA_CA_CERTS for new shells)"
     else
       rm -f "$PLUGIN_DIR/onprem-ca.pem"
-      echo "    WARNING: could not fetch $MEMCLAW_API_URL/onprem-ca.pem."
+      echo "    WARNING: could not fetch $CAURA_API_URL/onprem-ca.pem."
       echo "    If your on-prem uses a publicly-trusted cert (Let's Encrypt or"
       echo "    a corporate CA already in the system trust store), this is fine."
       echo "    Otherwise plugin requests will fail TLS verification — either"
@@ -597,8 +597,8 @@ echo ""
 echo "=== Installation complete ==="
 echo ""
 echo "Plugin directory: $PLUGIN_DIR"
-echo "API URL:          $MEMCLAW_API_URL"
-echo "Fleet ID:         $MEMCLAW_FLEET_ID"
+echo "API URL:          $CAURA_API_URL"
+echo "Fleet ID:         $CAURA_FLEET_ID"
 echo "API Key:          {api_key_preview}"
 echo ""
 echo "Next: restart your OpenClaw gateway to activate the plugin."
@@ -719,12 +719,12 @@ def _generate_skill_install_script(
 
     # Only emit the ``-H X-API-Key: …`` flag when a key was supplied.
     # Otherwise the header becomes an empty string and curl rejects.
-    key_header = ' -H "X-API-Key: $MEMCLAW_API_KEY"' if api_key else ""
+    key_header = ' -H "X-API-Key: $CAURA_API_KEY"' if api_key else ""
     # ``skill`` is allowlisted by the caller, so interpolating it into the
     # path and URL is safe. For skill="memclaw" every line below is identical
     # to the original installer.
     label = _SKILL_LABELS[skill]
-    skill_url = f'"$MEMCLAW_API_URL/api/v1/skill/{skill}"'
+    skill_url = f'"$CAURA_API_URL/api/v1/skill/{skill}"'
     blocks = []
     if install_claude:
         blocks.append(
@@ -757,7 +757,7 @@ def _generate_skill_install_script(
             "# treat as sensitive; do not paste the rendered script into "
             "shared channels.\n"
         )
-        key_assign = f"MEMCLAW_API_KEY={safe_api_key}"
+        key_assign = f"CAURA_API_KEY={safe_api_key}"
     else:
         header_line = ""
         key_assign = ""
@@ -765,12 +765,12 @@ def _generate_skill_install_script(
     return f"""#!/usr/bin/env bash
 {header_line}set -euo pipefail
 
-MEMCLAW_API_URL={safe_api_url}
+CAURA_API_URL={safe_api_url}
 {key_assign}
 
 echo "=== {label} Skill Installer (direct-MCP) ==="
 echo ""
-echo "Fetching SKILL.md from $MEMCLAW_API_URL and installing to:"
+echo "Fetching SKILL.md from $CAURA_API_URL and installing to:"
 
 {install_blocks}
 
@@ -876,7 +876,7 @@ async def skill_by_name(skill: str):
 
 # Non-versioned aliases for the install bootstrap. The generated install
 # script (see ``_generate_install_script``) fetches plugin sources via
-# ``$MEMCLAW_API_URL/api/plugin-source`` (no ``v1`` segment) so the same
+# ``$CAURA_API_URL/api/plugin-source`` (no ``v1`` segment) so the same
 # script runs unchanged against both OSS and the enterprise gateway —
 # enterprise nginx whitelists ``/api/install-plugin`` and
 # ``/api/plugin-source`` as unauthenticated bootstrap paths and rewrites

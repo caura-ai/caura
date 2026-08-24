@@ -385,7 +385,7 @@
     "trust_required": 1
   },
   {
-    "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' (default) lists your memories at trust \u2265 1; scope='fleet' reads your OWN fleet at trust \u2265 1, a different fleet at trust \u2265 2; scope='all' (tenant-wide) requires trust \u2265 2. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use caura_recall.",
+    "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' lists your memories at trust \u2265 1; scope='fleet' reads your OWN fleet at trust \u2265 1, a different fleet at trust \u2265 2; scope='all' (tenant-wide) requires trust \u2265 2. Omitted scope means 'agent' on MCP; over REST/plugin it filters by agent_id with no trust gate. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use caura_recall.",
     "error_codes": [],
     "impl_status": "live",
     "name": "caura_list",
@@ -690,7 +690,7 @@
     "trust_required": 0
   },
   {
-    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' (default) counts only memories visible to YOU (trust \u2265 1); scope='fleet' aggregates your OWN fleet at trust \u2265 1, a different fleet at trust \u2265 2; scope='all' (tenant-wide) requires trust \u2265 2. Counts exclude soft-deleted memories by default; set include_deleted=true for additional 'deleted' and 'total_including_deleted' fields. Read-only \u2014 useful for self-introspection and dashboard-style summaries.",
+    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' counts only memories visible to YOU (trust \u2265 1); scope='fleet' aggregates your OWN fleet at trust \u2265 1, a different fleet at trust \u2265 2; scope='all' (tenant-wide) requires trust \u2265 2. Omitted scope means 'agent' on MCP; over REST/plugin it aggregates over agent_id with no trust gate. Counts exclude soft-deleted memories by default; set include_deleted=true for additional 'deleted' and 'total_including_deleted' fields. Read-only \u2014 useful for self-introspection and dashboard-style summaries.",
     "error_codes": [],
     "impl_status": "live",
     "name": "caura_stats",

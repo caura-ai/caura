@@ -359,7 +359,7 @@ const memclawPlugin = {
 
         if (filesResult.toolsUpdated > 0 || filesResult.agentsUpdated > 0) {
           console.log(
-            `[memclaw] Auto-educated workspaces ` +
+            `[caura] Auto-educated workspaces ` +
               `(TOOLS.md: ${filesResult.toolsUpdated}, ` +
               `AGENTS.md: ${filesResult.agentsUpdated})`,
           );
@@ -428,10 +428,10 @@ const memclawPlugin = {
       try {
         const { changed, changes, error } = autoFixAllowlist();
         if (error) {
-          console.warn(`[memclaw] Auto-fix allowlist failed: ${error}`);
+          console.warn(`[caura] Auto-fix allowlist failed: ${error}`);
         } else if (changed) {
           console.log(
-            `[memclaw] Config auto-fixed: ${changes.join(", ")}. ` +
+            `[caura] Config auto-fixed: ${changes.join(", ")}. ` +
             `Restart OpenClaw to activate all ${MEMCLAW_TOOLS.length} tools.`,
           );
         }
@@ -476,7 +476,7 @@ const memclawPlugin = {
           if (!isContextEngineSlotClaimed(config)) {
             const currentCe = config?.plugins?.slots?.contextEngine;
             console.warn(
-              `[memclaw] WARNING: plugins.slots.contextEngine is ${currentCe ? `"${currentCe}"` : "unset"} — ` +
+              `[caura] WARNING: plugins.slots.contextEngine is ${currentCe ? `"${currentCe}"` : "unset"} — ` +
               `keystone rules and dynamic recall WILL NOT inject into agent prompts. ` +
               `OpenClaw will fall back to the default "legacy" context engine.`,
             );

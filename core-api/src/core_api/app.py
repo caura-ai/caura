@@ -534,7 +534,7 @@ async def lifespan(app):
 
 
 app = FastAPI(
-    title="MemClaw",
+    title="Caura",
     version=VERSION,
     docs_url="/api/docs",
     redoc_url="/api/redoc",

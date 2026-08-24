@@ -262,7 +262,7 @@ def test_plugin_manifest_version_matches_package_json():
     The two are read by different downstream surfaces:
       - ``package.json:version`` is what ``_plugin_version()`` (in
         ``core_api/routes/plugin.py``) returns; the heartbeat auto-upgrade
-        trigger and the install script's stamped ``MEMCLAW_PLUGIN_VERSION``
+        trigger and the install script's stamped ``CAURA_PLUGIN_VERSION``
         derive from this side.
       - ``openclaw.plugin.json:version`` is what OpenClaw reads when
         loading the plugin and what any plugin-info UI renders to operators.

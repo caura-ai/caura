@@ -16,6 +16,7 @@ from common.events.base import (
     EventBus,
     EventHandler,
 )
+from common.events.topics import publish_name, subscribe_names
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +40,26 @@ class InProcessEventBus(EventBus):
         # ``broadcast`` is a no-op here: a single-process bus already
         # dispatches every event to all local handlers (fan-out within the
         # process). Cross-worker fan-out is a Pub/Sub-backend concern.
-        self._handlers[topic].append(handler)
+        #
+        # Brand rename: bind both names ALWAYS, with no flag — the opposite
+        # default to the Pub/Sub backend, for the reason that makes the flag
+        # necessary there. On Pub/Sub a name is a provisioned subscription, so
+        # binding one that does not exist yet halts a pull loop; here a name is
+        # a dict key, costs nothing, and cannot fail. What it buys is that the
+        # publisher flip stays correct for standalone and on-prem deployments,
+        # which never run the Terraform that the flag is gated on. Leaving this
+        # backend single-name would mean a flipped family silently dispatches to
+        # nobody in exactly the deployments with no Pub/Sub console to notice it
+        # in.
+        for name in subscribe_names(topic, dual=True):
+            self._handlers[name].append(handler)
 
     async def publish(self, topic: str, event: Event) -> None:
-        for handler in self._handlers.get(topic, ()):
+        # One name, resolved the same way the Pub/Sub backend resolves it, so
+        # the two backends cannot disagree about which name a family publishes
+        # under. Dispatch stays exactly once: subscribers hold both names but
+        # only one of them is ever published to.
+        for handler in self._handlers.get(publish_name(topic), ()):
             task = asyncio.create_task(self._safe_invoke(handler, event))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)

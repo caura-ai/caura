@@ -35,12 +35,12 @@ CRON_MARKER = "# memclaw-interviewer (managed)"
 # Only the connection identity is persisted to the env file (0600). Non-secret
 # behavior flags (--harness, --all-projects) ride on the cron command instead.
 _ENV_KEYS = (
-    "MEMCLAW_BASE_URL",
-    "MEMCLAW_API_KEY",
-    "MEMCLAW_TENANT_ID",
-    "MEMCLAW_AGENT_ID",
-    "MEMCLAW_FLEET_ID",
-    "MEMCLAW_INTERVIEWER_PROJECTS",
+    "CAURA_BASE_URL",
+    "CAURA_API_KEY",
+    "CAURA_TENANT_ID",
+    "CAURA_AGENT_ID",
+    "CAURA_FLEET_ID",
+    "CAURA_INTERVIEWER_PROJECTS",
 )
 
 _INTERVAL_RE = re.compile(r"^(\d+)\s*([mh])$", re.IGNORECASE)
