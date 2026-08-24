@@ -172,6 +172,43 @@ def family(topic: str) -> str:
 FLIPPED_FAMILIES: frozenset[str] = frozenset()
 
 
+def known_families() -> frozenset[str]:
+    """Every family the topics declared in this module actually use.
+
+    Derived by walking the enums rather than listed, so it cannot drift from
+    them, and so the same code yields the right answer in each repo despite the
+    two copies declaring different families.
+    """
+    return frozenset(
+        f
+        for attr in vars(Topics).values()
+        if isinstance(attr, type) and issubclass(attr, enum.StrEnum)
+        for member in attr
+        if (f := family(member))
+    )
+
+
+# A family named here that does not exist would be a SILENT no-op: publish_name
+# would go on returning the outgoing name for every topic, so the flip would
+# look done, move nothing, and leave the twin subscriptions idle with no error
+# anywhere to say so. That is the same shape as every other failure in this
+# cutover — quiet, and only visible if you already suspected it — so it is
+# checked at the point of definition rather than left to a reviewer's eye.
+#
+# Raising here is a deliberate choice about blast radius. This set is a literal
+# in this file, so the only way to trip it is editing that literal, and the
+# import runs in every test that touches the bus — a typo cannot get past CI,
+# let alone reach a deploy. The cost of being wrong is an ImportError in front
+# of the person who made the typo; the cost of NOT checking is a step 4 that
+# reports success and moves no traffic.
+if unknown_families := FLIPPED_FAMILIES - known_families():
+    raise ValueError(
+        f"FLIPPED_FAMILIES names {sorted(unknown_families)}, which match no topic "
+        f"family declared here (known: {sorted(known_families())}). A family that "
+        "does not exist flips nothing and reports no error — fix the spelling."
+    )
+
+
 def publish_name(topic: str) -> str:
     """The single name to publish ``topic`` under.
 

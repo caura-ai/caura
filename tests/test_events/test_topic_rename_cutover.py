@@ -24,6 +24,7 @@ opposite ones and a missing twin fails differently in each.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -107,6 +108,47 @@ def test_no_family_is_flipped_yet() -> None:
     cutover has not started, instead of somewhere that reads like a broken test.
     """
     assert topics_mod.FLIPPED_FAMILIES == frozenset()
+
+
+def test_known_families_are_derived_from_the_enums() -> None:
+    """The set a flip is validated against comes from the topics themselves."""
+    assert topics_mod.known_families() == {
+        "memory",
+        "audit",
+        "pipeline",
+        "lifecycle",
+        "org",
+    }
+
+
+def test_a_misspelled_flipped_family_is_refused() -> None:
+    """A typo must not be a silent no-op.
+
+    ``publish_name`` looks the family up by string, so ``"audi"`` would simply
+    never match: every topic keeps its outgoing name, the flip reports success,
+    no traffic moves, and the twin subscriptions sit idle with nothing anywhere
+    saying why.
+
+    The guard runs at import, so this re-executes the real module source with
+    the literal edited — the same edit a fat-fingered flip would make — rather
+    than re-implementing the check and asserting the copy raises.
+    """
+    original = Path(topics_mod.__file__).read_text(encoding="utf-8")
+    target = "FLIPPED_FAMILIES: frozenset[str] = frozenset()"
+    assert target in original, "the literal moved; this test is no longer editing it"
+    source = original.replace(target, f'{target[:-11]}frozenset({{"audi"}})')
+    assert source != original
+
+    with pytest.raises(ValueError, match="match no topic family"):
+        exec(  # noqa: S102 — executing our own module source, with one literal edited
+            compile(source, topics_mod.__file__, "exec"),
+            {"__name__": "_topics_under_test"},
+        )
+
+
+def test_the_real_module_passes_its_own_guard() -> None:
+    """Counterpart, so the test above cannot pass because the guard is unreachable."""
+    assert topics_mod.FLIPPED_FAMILIES - topics_mod.known_families() == frozenset()
 
 
 def test_publish_name_is_the_identity_while_nothing_is_flipped() -> None:
