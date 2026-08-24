@@ -360,14 +360,14 @@ A thin wrapper over the REST API — see [`clients/python/`](clients/python/) fo
 
 ### TypeScript client
 
-Same, from TypeScript / JavaScript (Node 18+, zero dependencies):
+Same, from TypeScript / JavaScript (Node 18+, no third-party dependencies):
 
 ```bash
-npm install @caura/memclaw-client
+npm install @caura/client
 ```
 
 ```ts
-import { Caura } from "@caura/memclaw-client";
+import { Caura } from "@caura/client";
 
 const mc = new Caura("mc_xxx", { tenantId: "my-team", agentId: "my-agent" });
 await mc.write("Q3 revenue target is $4M, set on 2026-04-15.");

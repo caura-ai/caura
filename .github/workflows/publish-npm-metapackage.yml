@@ -1,20 +1,35 @@
-name: Publish caura to npm
+name: Publish the canonical npm client
 
-# Publishes `clients/npm-caura` — the bare `caura` name on npm, a thin
-# re-export of the scoped TypeScript client.
+# Publishes `clients/npm-client` — `@caura/client`, the canonical install name,
+# a thin re-export of the implementation package.
 #
-# WHY THIS EXISTS AS ITS OWN WORKFLOW. The package had none, so the name was
-# never claimed: `npm install caura` 404s today while `README.md` and
-# `clients/npm-caura/README.md` both instruct people to run it. That is worse
-# than an unshipped package — it is a live instruction pointing at a slot
-# anyone can take, and whoever takes it inherits the traffic and the two
-# README citations.
+# NAMED FOR WHAT IT PUBLISHES, not for the brand. There are two npm publish
+# workflows here and they are easy to confuse, which has already cost a
+# debugging round: `publish-npm-client.yml` publishes the IMPLEMENTATION
+# (`clients/typescript`), while this one publishes the METAPACKAGE that
+# re-exports it. The file was previously named after the bare `caura` name it
+# tried and failed to claim, which put "client" in one filename and "caura" in
+# the other while the directories said the opposite.
 #
-# The precedent is ours. The old brand's bare name is third-party-held on BOTH
-# registries — npm by `deshrajdry`, PyPI by `emanuilo` — and one of the two
-# describes itself as a memory layer for OpenClaw. Installing either by that
-# name fetches foreign code today. Both were lost by not claiming them and
-# neither is recoverable; `caura` on npm is the equivalent door still open.
+# THIS WORKFLOW USED TO TARGET THE BARE `caura` NAME. It no longer can, and the
+# reasoning it carried is worth correcting rather than deleting, because it is
+# the reasoning someone would use to re-create it.
+#
+# It argued that `npm install caura` 404ing was "a live instruction pointing at
+# a slot anyone can take" — urgent, because the old brand's bare name was lost
+# on both registries by not claiming it. That premise is FALSE. Measured
+# 2026-08-24, npm rejects the name for everyone:
+#
+#   403 Package name too similar to existing package csurf
+#
+# csurf is the Express CSRF middleware: 435k weekly downloads, archived by its
+# maintainers, and two Levenshtein edits from `caura` (they share three of five
+# positions). The filter is working, not misfiring. So the slot is not an open
+# door — it is closed to squatters and to us alike, and the urgency argument
+# inverts: there is nothing to lose by not claiming it, because nobody can.
+#
+# The scoped name is therefore the canonical one, not a workaround. npm's own
+# rejection message recommends scoping.
 #
 # ORDERING. This package depends on the scoped client at `^1.0.0`, so that
 # package must exist on the registry at a matching version first — it does
@@ -26,10 +41,27 @@ name: Publish caura to npm
 #   1. Add an `NPM_TOKEN` repository secret — an npm automation token with
 #      publish rights. Automation tokens are exempt from 2FA/OTP prompts by
 #      design; an OTP is never entered in CI.
-#   2. Nothing else. The name is unscoped, so no npm org is required.
+#   2. That token must have publish rights to the `@caura` SCOPE. This replaces
+#      an earlier note saying no org was required, which was true only while the
+#      package was unscoped.
+#
+#      Not a formality — it is the exact axis that failed during the 2026-08-24
+#      publish attempt. A granular token scoped to `@caura` returned
+#      "cannot publish over the previously published versions" for the
+#      implementation package (so it HAD publish rights inside the scope) while
+#      returning a bare "You may not perform that action with these
+#      credentials" for the unscoped name. Same token, same account, opposite answers, and the second
+#      error says nothing about scope — it reads like a name problem. If a
+#      rotated token is scoped to the wrong thing, this workflow fails with a
+#      message that will send someone hunting the wrong bug.
+#
+#      Reusing the token from publish-npm-client.yml satisfies this, since that
+#      workflow publishes from the same scope. Stated rather than assumed,
+#      because the two workflows are provisioned separately and nothing
+#      enforces that they share a token.
 #
 # Release: push a tag `caura-npm-v<version>` matching the version in
-# clients/npm-caura/package.json, or run this workflow manually.
+# clients/npm-client/package.json, or run this workflow manually.
 
 on:
   push:
@@ -49,7 +81,7 @@ jobs:
       id-token: write # npm provenance
     defaults:
       run:
-        working-directory: clients/npm-caura
+        working-directory: clients/npm-client
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
