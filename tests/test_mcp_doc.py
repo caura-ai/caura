@@ -103,9 +103,7 @@ async def test_doc_read_missing_doc_id(mcp_env):
 
 async def test_doc_read_not_found(mcp_env, monkeypatch):
     stub_storage_client(monkeypatch, get_document=None)
-    out = await mcp_server.caura_doc(
-        op="read", collection="customers", doc_id="ghost"
-    )
+    out = await mcp_server.caura_doc(op="read", collection="customers", doc_id="ghost")
     assert "Not found: customers/ghost" in strip_latency(out)
 
 
@@ -155,9 +153,7 @@ async def test_doc_delete_not_found_envelope(mcp_env, monkeypatch):
 
 async def test_doc_delete_happy_path(mcp_env, monkeypatch):
     sc = stub_storage_client(monkeypatch, delete_document=True)
-    out = await mcp_server.caura_doc(
-        op="delete", collection="customers", doc_id="acme"
-    )
+    out = await mcp_server.caura_doc(op="delete", collection="customers", doc_id="acme")
     payload = parse_envelope(out)
     assert payload["ok"] is True
     assert payload["deleted"] is True
@@ -708,9 +704,7 @@ async def test_skill_query_scopes_to_active_when_no_status_when_flag_on(
     # sees live skills.
     _patch_flag(monkeypatch, True)
     sc = stub_storage_client(monkeypatch, query_documents=[])
-    await mcp_server.caura_doc(
-        op="query", collection="skills", where={"domain": "ops"}
-    )
+    await mcp_server.caura_doc(op="query", collection="skills", where={"domain": "ops"})
     sent = sc.query_documents.await_args.args[0]
     assert sent["where"]["status"] == "active"
     assert sent["where"]["domain"] == "ops"
@@ -769,9 +763,7 @@ async def test_skill_search_scoped_passes_active_status_when_flag_on(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
     sc = stub_storage_client(monkeypatch, search_documents_vector=[])
-    await mcp_server.caura_doc(
-        op="search", collection="skills", query="deploy eu-west"
-    )
+    await mcp_server.caura_doc(op="search", collection="skills", query="deploy eu-west")
     assert sc.search_documents_vector.await_args.args[0]["status"] == "active"
 
 
@@ -781,9 +773,7 @@ async def test_skill_search_scoped_no_status_when_flag_off(mcp_env, monkeypatch)
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
     sc = stub_storage_client(monkeypatch, search_documents_vector=[])
-    await mcp_server.caura_doc(
-        op="search", collection="skills", query="deploy eu-west"
-    )
+    await mcp_server.caura_doc(op="search", collection="skills", query="deploy eu-west")
     assert sc.search_documents_vector.await_args.args[0]["status"] is None
 
 
@@ -1008,9 +998,7 @@ async def test_skill_delete_hides_non_active_when_flag_on(mcp_env, monkeypatch):
     stub_storage_client(
         monkeypatch, delete_document=False
     )  # status guard matched nothing
-    out = await mcp_server.caura_doc(
-        op="delete", collection="skills", doc_id="forge/x"
-    )
+    out = await mcp_server.caura_doc(op="delete", collection="skills", doc_id="forge/x")
     payload = parse_envelope(out)  # must be valid JSON
     assert payload["error"] == "Document 'forge/x' not found in collection 'skills'"
 
@@ -1020,9 +1008,7 @@ async def test_skill_delete_allows_active_when_flag_on(mcp_env, monkeypatch):
     # deleted, storage returns True.
     _patch_flag(monkeypatch, True)
     stub_storage_client(monkeypatch, delete_document=True)
-    out = await mcp_server.caura_doc(
-        op="delete", collection="skills", doc_id="forge/x"
-    )
+    out = await mcp_server.caura_doc(op="delete", collection="skills", doc_id="forge/x")
     payload = parse_envelope(out)
     assert payload["deleted"] is True
 
@@ -1037,9 +1023,7 @@ async def test_skill_delete_fails_closed_on_settings_error(mcp_env, monkeypatch)
 
     monkeypatch.setattr(mcp_server, "_skills_factory_flag", _boom)
     sc = stub_storage_client(monkeypatch, delete_document=True)
-    out = await mcp_server.caura_doc(
-        op="delete", collection="skills", doc_id="forge/x"
-    )
+    out = await mcp_server.caura_doc(op="delete", collection="skills", doc_id="forge/x")
     payload = parse_envelope(out)
     assert payload["error"]["code"] == "INTERNAL_ERROR"
     # The DELETE must never have run.
@@ -1268,7 +1252,7 @@ async def test_doc_write_mints_memory_for_body_bearing_doc(
     assert parse_envelope(out)["ok"] is True
     spy_doc_memory.assert_awaited_once()
     spec = spy_doc_memory.call_args.args[0]
-    assert spec.content == "# Vacuum\n\nRun nightly."  # verbatim
+    assert "# Vacuum\n\nRun nightly." in spec.content  # rendered, body intact
     assert spec.source_uri == "memclaw-doc://runbooks/pg-tuning"
 
 
@@ -1290,8 +1274,8 @@ async def test_doc_write_mints_on_update_too(mcp_env, monkeypatch, spy_doc_memor
 @pytest.mark.parametrize(
     ("collection", "data"),
     [
-        ("customers", {"plan": "enterprise"}),  # no body
-        ("notes", {"content": ""}),  # empty body
+        ("customers", {}),  # empty payload — nothing to render
+        ("notes", {"content": ""}),  # only empty values
     ],
 )
 async def test_doc_write_skips_mint_per_shared_rule(

@@ -10,7 +10,7 @@ Covers:
 - Identity resolution: the real doc writer wins; the service fallback is used
   only when the caller has no identity at all, and either way the agent is
   registered (else insights refuses to run for it).
-- The ``MemoryCreate`` payload: verbatim content, provenance ``source_uri``,
+- The ``MemoryCreate`` payload: spec content passed through unchanged, provenance ``source_uri``,
   ``scope_team``, and ``write_mode="fast"`` (load-bearing — it's what gives
   exact-dedup-without-semantic-reject on rewrites).
 - Which fields are shielded from enrichment: ``status`` is pinned ``active``
@@ -82,7 +82,7 @@ def patched(monkeypatch):
 
 async def test_creates_memory_with_expected_payload(patched):
     mem_id = await doc_memory.sync_doc_memory(
-        _spec("# H\n\nverbatim body"),
+        _spec("# H\n\nrendered body"),
         tenant_id="t1",
         fleet_id="f1",
         agent_id="agent-a",
@@ -90,7 +90,9 @@ async def test_creates_memory_with_expected_payload(patched):
 
     assert mem_id == "mem-1"
     (payload,) = patched.create_memory.call_args.args
-    assert payload.content == "# H\n\nverbatim body"  # verbatim
+    # ``sync_doc_memory`` passes the spec's content through unchanged — the
+    # render happens upstream in ``resolve_doc_memory``.
+    assert payload.content == "# H\n\nrendered body"
     assert payload.source_uri == "memclaw-doc://runbooks/pg-tuning"
     assert payload.tenant_id == "t1"
     assert payload.fleet_id == "f1"

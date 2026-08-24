@@ -178,10 +178,13 @@ MAX_QUERY_LENGTH = 5000
 # ``memories.content`` directly). Docs themselves are only searchable via their
 # ``data["summary"]`` embedding, and ``caura_recall`` never returns documents.
 #
-# The memory content is the doc body VERBATIM, so the cutoff is simply the
-# memory schema ceiling: mint whenever the body fits in a memory at all.
-# Over-cutoff bodies are SKIPPED rather than truncated — a truncated body reads
-# as complete and would produce confidently wrong downstream conclusions.
+# The memory content is the whole ``data`` payload rendered as text (CAURA-717),
+# so the cutoff is simply the memory schema ceiling: mint whenever the RENDER
+# fits in a memory at all. Note the render is slightly longer than any one field
+# — ``key: `` labels and blank-line separators — so a doc can be under the cap
+# on its body and over it once rendered. Over-cutoff payloads are SKIPPED rather
+# than truncated: a truncated payload reads as complete and would produce
+# confidently wrong downstream conclusions.
 DOC_MEMORY_MAX_CHARS = MAX_CONTENT_LENGTH
 
 # NOTE: there is deliberately no ``DOC_MEMORY_TYPE``. Doc-derived memories pass

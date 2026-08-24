@@ -6,8 +6,14 @@ The two stores are not cross-searched: ``caura_recall`` never returns
 documents, and a document row embeds only ``data["summary"]`` — never its body.
 So a document's *content* is unreachable by meaning; you can only find it if you
 already know its ``collection`` + ``doc_id``. Minting a memory that carries the
-body verbatim closes that gap for the paths that read ``memories.content``
+document's data closes that gap for the paths that read ``memories.content``
 directly (``caura_recall`` and the recall brief, neither of which truncates).
+
+CAURA-717: that memory carries the WHOLE ``data`` payload rendered as text with
+``summary`` first — not one guessed field. The previous rule required
+``data["content"]`` or ``data["body"]``, which no producer is obliged to use;
+eToro's only organic doc feed has neither, so every write returned 200 and
+silently minted nothing. See ``doc_indexing._render_doc_data``.
 
 Rewrite semantics come free from ``write_mode="fast"``
 -----------------------------------------------------
