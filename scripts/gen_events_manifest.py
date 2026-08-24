@@ -29,7 +29,7 @@ from typing import Callable
 from unittest import mock
 
 from common.events import lifecycle_handlers
-from common.events.topics import Topics
+from common.events.topics import Topics, renamed
 
 MANIFEST_PATH = (
     Path(__file__).resolve().parent.parent
@@ -99,6 +99,19 @@ def build_manifest() -> dict:
         topics: set[str] = set(_DIRECT_SUBSCRIBES.get(service, []))
         for register in _LIFECYCLE_HELPERS.get(service, []):
             topics.update(_capture_helper_topics(register))
+        # Brand rename: list the renamed twin of every consumed topic, whether
+        # or not dual-subscribe is switched on anywhere yet.
+        #
+        # This manifest states what infrastructure a service MAY need, not what
+        # one process happens to be doing — the enterprise check turns it into a
+        # provisioning requirement. Listing the twins here is what forces the
+        # Terraform to be in place BEFORE the flag can be turned on in any
+        # environment, which is the ordering that keeps a pull loop off a
+        # subscription that does not exist. Generating from the live flag
+        # instead would make the manifest depend on the generating process's
+        # environment, and would drop the requirement precisely when it is
+        # still needed.
+        topics.update(renamed(topic) for topic in tuple(topics))
         services[service] = sorted(topics)
     return {
         "_comment": (

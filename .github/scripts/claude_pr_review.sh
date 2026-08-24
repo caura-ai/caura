@@ -61,7 +61,7 @@ fi
 # findings a maintainer has already judged wrong — here and in the six repos on the org's shared
 # pipeline, which write into the same fleet.
 #
-# DARK AND SILENT without MEMCLAW_AGENTS_KEY: returns immediately, and the review is
+# DARK AND SILENT without CAURA_AGENTS_KEY: returns immediately, and the review is
 # byte-for-byte what it would be without the feature. That matters more here than elsewhere —
 # this repo is PUBLIC, and the org secret is `private` visibility, so it cannot read it. Until a
 # repo-level secret exists this is a no-op by design, not a misconfiguration.
@@ -72,8 +72,12 @@ fi
 recall_review_guidance() {
   local diff="$1"
   GUIDANCE_SECTION=""
-  [ -n "${MEMCLAW_AGENTS_KEY:-}" ] || return 0
-  local memclaw_url="${MEMCLAW_API_URL:-https://caura.ai}"
+  # Either spelling, first NON-EMPTY (``:-`` treats blank as unset): the workflow
+  # passes CAURA_AGENTS_KEY, resolved from whichever secret exists, but a manual
+  # run may still export the pre-rename name.
+  local agents_key="${CAURA_AGENTS_KEY:-${MEMCLAW_AGENTS_KEY:-}}"  # legacy-name-ok: rule 3 dual-read alias
+  [ -n "$agents_key" ] || return 0
+  local caura_url="${CAURA_API_URL:-${MEMCLAW_API_URL:-https://caura.ai}}"  # legacy-name-ok: rule 3 dual-read alias
   local fleet="${CODE_REVIEW_FLEET_ID:-code-review}"
   # Query built from the changed paths so recall is relevant to THIS diff. The sanitiser keeps
   # only path characters, so a crafted filename cannot inject into the query, and caps length.
@@ -93,8 +97,8 @@ recall_review_guidance() {
   # -S so a failure (bad key, DNS, TLS) reaches the workflow log and warns — distinct from the
   # "no memories" no-op. Best-effort either way: the review proceeds without guidance.
   local resp
-  resp=$(curl -sS --max-time 20 "${memclaw_url%/}/mcp" \
-    -H "X-API-Key: ${MEMCLAW_AGENTS_KEY}" \
+  resp=$(curl -sS --max-time 20 "${caura_url%/}/mcp" \
+    -H "X-API-Key: ${agents_key}" \
     -H "Content-Type: application/json" -H "Accept: application/json" \
     -d "$req") || { echo "::warning::memclaw recall failed — reviewing without learned guidance"; return 0; }
   local guidance

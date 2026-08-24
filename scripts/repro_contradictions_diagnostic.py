@@ -34,13 +34,9 @@ import uuid
 
 import httpx
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-def _env(name: str) -> str:
-    val = os.environ.get(name)
-    if not val:
-        print(f"ERROR: ${name} must be set", file=sys.stderr)
-        sys.exit(2)
-    return val
+from _env_compat import env_any as _env_any, env_required as _env  # noqa: E402  (path shim above must run first)
 
 
 def _ts() -> str:
@@ -55,9 +51,9 @@ def main() -> int:
     ap.add_argument("--probe", choices=("all", "a", "b", "c"), default="all")
     args = ap.parse_args()
 
-    base = _env("MEMCLAW_API_URL").rstrip("/")
-    key = _env("MEMCLAW_API_KEY")
-    tenant = os.environ.get("MEMCLAW_TENANT_ID")
+    base = _env("CAURA_API_URL").rstrip("/")
+    key = _env("CAURA_API_KEY")
+    tenant = _env_any("CAURA_TENANT_ID")
 
     token = f"TOKEN-{uuid.uuid4().hex[:8].upper()}"
     agent = f"diag-contradictions-{uuid.uuid4().hex[:6]}"
