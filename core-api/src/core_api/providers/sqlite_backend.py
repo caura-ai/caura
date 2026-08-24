@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import os
+from pathlib import Path
 import struct
 import uuid
 from datetime import UTC, datetime
@@ -200,8 +201,8 @@ class SqliteBackend:
     def __init__(self, db_path: str = _DEFAULT_DB_PATH) -> None:
         if (
             db_path == _DEFAULT_DB_PATH
-            and not os.path.exists(os.path.expanduser(_DEFAULT_DB_PATH))
-            and os.path.exists(os.path.expanduser(_LEGACY_DB_PATH))
+            and not Path(_DEFAULT_DB_PATH).expanduser().exists()
+            and Path(_LEGACY_DB_PATH).expanduser().exists()
         ):
             # Pre-rename install: keep reading the database it already has.
             db_path = _LEGACY_DB_PATH
