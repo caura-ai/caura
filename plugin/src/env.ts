@@ -60,7 +60,7 @@ try {
   }
 } catch (e: unknown) {
   const msg = e instanceof Error ? e.message : String(e);
-  console.warn("[memclaw] Failed to parse .env file:", msg);
+  console.warn("[caura] Failed to parse .env file:", msg);
 }
 
 /**
@@ -192,23 +192,23 @@ export async function resolveTenantId(): Promise<string> {
           return data.tenant_id;
         }
         console.warn(
-          `[memclaw] tenant_id resolution failed: server returned 200 but response lacks tenant_id field`,
+          `[caura] tenant_id resolution failed: server returned 200 but response lacks tenant_id field`,
         );
         break; // permanent server-side issue; retrying won't help
       } else if (res.status >= 400 && res.status < 500) {
         console.error(
-          `[memclaw] tenant_id resolution failed: HTTP ${res.status} (client error, not retrying)`,
+          `[caura] tenant_id resolution failed: HTTP ${res.status} (client error, not retrying)`,
         );
         break;
       } else if (attempt < MAX_RETRIES) {
         const delay = BASE_DELAY_MS * Math.pow(2, attempt);
         console.warn(
-          `[memclaw] tenant_id resolution attempt ${attempt + 1}/${MAX_RETRIES + 1} failed: HTTP ${res.status} — retrying in ${delay}ms`,
+          `[caura] tenant_id resolution attempt ${attempt + 1}/${MAX_RETRIES + 1} failed: HTTP ${res.status} — retrying in ${delay}ms`,
         );
         await new Promise((r) => setTimeout(r, delay));
       } else {
         console.error(
-          `[memclaw] tenant_id resolution failed after ${MAX_RETRIES + 1} attempts: HTTP ${res.status}`,
+          `[caura] tenant_id resolution failed after ${MAX_RETRIES + 1} attempts: HTTP ${res.status}`,
         );
       }
     } catch (e: unknown) {
@@ -245,12 +245,12 @@ export async function resolveTenantId(): Promise<string> {
       if (attempt < MAX_RETRIES) {
         const delay = BASE_DELAY_MS * Math.pow(2, attempt);
         console.warn(
-          `[memclaw] tenant_id resolution attempt ${attempt + 1}/${MAX_RETRIES + 1} failed: ${reason} — retrying in ${delay}ms`,
+          `[caura] tenant_id resolution attempt ${attempt + 1}/${MAX_RETRIES + 1} failed: ${reason} — retrying in ${delay}ms`,
         );
         await new Promise((r) => setTimeout(r, delay));
       } else {
         console.error(
-          `[memclaw] tenant_id resolution failed after ${MAX_RETRIES + 1} attempts: ${reason}`,
+          `[caura] tenant_id resolution failed after ${MAX_RETRIES + 1} attempts: ${reason}`,
         );
       }
     }
@@ -294,7 +294,7 @@ export async function fetchToolDescriptions(): Promise<void> {
       toolDescriptions = (await res.json()) as Record<string, string>;
     }
   } catch {
-    console.warn("[memclaw] Failed to fetch tool descriptions, using defaults");
+    console.warn("[caura] Failed to fetch tool descriptions, using defaults");
     toolDescriptions = {
       remember: "Store a memory for future retrieval",
       recall: "Search and retrieve relevant memories",

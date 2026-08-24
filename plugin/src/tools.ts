@@ -54,5 +54,5 @@ if (missingFromList.length || extraInList.length) {
       `listed in MEMCLAW_TOOLS but not plugin_exposed in tools.json: ${extraInList.join(", ")}`,
     );
   }
-  throw new Error(`[memclaw] Tool-surface drift — ${parts.join("; ")}`);
+  throw new Error(`[caura] Tool-surface drift — ${parts.join("; ")}`);
 }

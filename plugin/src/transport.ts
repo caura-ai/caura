@@ -29,7 +29,7 @@ export async function apiCall(
   const normalized = path.startsWith("/") ? path : `/${path}`;
   if (normalized.startsWith(MEMCLAW_API_PREFIX + "/") || normalized === MEMCLAW_API_PREFIX) {
     throw new Error(
-      `[memclaw] apiCall path must be a resource path (e.g. "/evolve/report"); ` +
+      `[caura] apiCall path must be a resource path (e.g. "/evolve/report"); ` +
       `got "${path}". MEMCLAW_API_PREFIX ("${MEMCLAW_API_PREFIX}") is applied automatically.`,
     );
   }
@@ -78,7 +78,7 @@ export async function apiCall(
       // 401 with agent key → evict and retry once with tenant key
       if (res.status === 401 && effectiveKey !== MEMCLAW_API_KEY && effectiveAgentId) {
         evictAgentKey(effectiveAgentId);
-        console.warn(`[memclaw] Agent key rejected for '${effectiveAgentId}', retrying with tenant key`);
+        console.warn(`[caura] Agent key rejected for '${effectiveAgentId}', retrying with tenant key`);
         // Forward extraHeaders so the retry reuses the same per-attempt
         // idempotency id (a fresh id would defeat bulk de-dup on retry).
         return apiCall(method, path, body, query, signal, undefined, extraHeaders);  // retry without agentId → uses tenant key

@@ -11,13 +11,13 @@ export function formatError(err: unknown): string {
 /** Log at warn level (default for non-critical failures). */
 export function logError(context: string, err: unknown): string {
   const msg = formatError(err);
-  console.warn(`[memclaw] ${context}:`, msg);
+  console.warn(`[caura] ${context}:`, msg);
   return msg;
 }
 
 /** Log at error level (smoke-test failures, education failures, etc.). */
 export function logErrorCritical(context: string, err: unknown): string {
   const msg = formatError(err);
-  console.error(`[memclaw] ${context}:`, msg);
+  console.error(`[caura] ${context}:`, msg);
   return msg;
 }

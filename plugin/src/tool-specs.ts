@@ -52,7 +52,7 @@ export function getSpec(name: string): ToolSpecEntry {
   const spec = TOOL_SPECS_BY_NAME[name];
   if (!spec) {
     throw new Error(
-      `[memclaw] Unknown tool '${name}' — not present in tools.json`,
+      `[caura] Unknown tool '${name}' — not present in tools.json`,
     );
   }
   return spec;

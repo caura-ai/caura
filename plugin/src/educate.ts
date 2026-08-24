@@ -62,7 +62,7 @@ export function discoverAgentWorkspaces(
     const resolved = dir.startsWith("/") ? resolve(dir) : resolve(join(baseDir, dir));
     if (!isContainedPath(resolved, baseDir)) {
       console.warn(
-        `[memclaw] Rejected workspace path outside openclawDir: ${resolved}`,
+        `[caura] Rejected workspace path outside openclawDir: ${resolved}`,
       );
       return;
     }

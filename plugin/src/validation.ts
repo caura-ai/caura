@@ -119,7 +119,7 @@ export function verifyCommandSignature(
     // is visible without flooding logs every 60s heartbeat.
     if (!_unsignedWarned) {
       console.warn(
-        `[memclaw] accepting unsigned command "${cmd.command}" — server is not signing commands. ` +
+        `[caura] accepting unsigned command "${cmd.command}" — server is not signing commands. ` +
           `Set MEMCLAW_REQUIRE_SIGNED_COMMANDS=true to fail closed once your gateway signs.`,
       );
       _unsignedWarned = true;

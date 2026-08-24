@@ -610,10 +610,10 @@ export function createToolFromSpec(name: string): AgentTool {
   const parameters = PARAM_SCHEMAS[name];
   const execute = ENDPOINT_DISPATCH[name];
   if (!parameters) {
-    throw new Error(`[memclaw] Missing PARAM_SCHEMAS entry for '${name}'`);
+    throw new Error(`[caura] Missing PARAM_SCHEMAS entry for '${name}'`);
   }
   if (!execute) {
-    throw new Error(`[memclaw] Missing ENDPOINT_DISPATCH entry for '${name}'`);
+    throw new Error(`[caura] Missing ENDPOINT_DISPATCH entry for '${name}'`);
   }
   const label = labelFor(name);
   const fallbackDescription = spec.description;

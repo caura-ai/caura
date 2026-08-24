@@ -167,7 +167,7 @@ export function autoFixAllowlist(options?: {
     const previousSlot = config.plugins.slots.memory;
     if (previousSlot && !options?.forceSlotOverride) {
       console.warn(
-        `[memclaw] plugins.slots.memory already set to "${previousSlot}" — ` +
+        `[caura] plugins.slots.memory already set to "${previousSlot}" — ` +
           `skipping auto-override. Run "openclaw gateway memclaw.allowlist.fix" ` +
           `or set MEMCLAW_AUTO_FIX_CONFIG=true to force.`,
       );
@@ -196,7 +196,7 @@ export function autoFixAllowlist(options?: {
     const previousCe = config.plugins.slots.contextEngine;
     if (previousCe && !options?.forceSlotOverride) {
       console.warn(
-        `[memclaw] plugins.slots.contextEngine already set to "${previousCe}" — ` +
+        `[caura] plugins.slots.contextEngine already set to "${previousCe}" — ` +
           `skipping auto-override. Run "openclaw gateway memclaw.allowlist.fix" ` +
           `or set MEMCLAW_AUTO_FIX_CONFIG=true to force. ` +
           `Note: keystone rules will NOT inject without contextEngine="memclaw".`,
