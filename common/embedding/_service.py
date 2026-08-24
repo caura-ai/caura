@@ -23,7 +23,7 @@ from common.embedding.constants import (
     EMBEDDING_RETRY_ATTEMPTS,
     EMBEDDING_RETRY_DELAY_S,
 )
-from common.embedding.protocols import InstructionAwareEmbedder
+from common.embedding.protocols import EmbeddingProvider, InstructionAwareEmbedder
 
 logger = logging.getLogger(__name__)
 
@@ -791,7 +791,7 @@ async def _run_with_retry(
 async def _resolve_provider_or_degrade(
     tenant_config: object | None,
     context: str,
-) -> object | None:
+) -> EmbeddingProvider | None:
     """Resolve the embedding provider, mapping a misconfiguration
     ``ValueError`` from the registry to the same ``None`` degradation
     contract the rest of this module documents.
@@ -936,14 +936,21 @@ async def get_query_embedding(
     # not implement ``embed_query`` and the isinstance check returns
     # False — they fall through to :meth:`embed` and silently ignore
     # *instruction*.
-    is_instruction_aware = isinstance(provider, InstructionAwareEmbedder)
+    #
+    # Bound to the narrowed provider rather than to a bare bool: the isinstance
+    # still runs exactly once here, but a ``bool`` would not carry the narrowing
+    # into the closure below, and ``embed_query`` is deliberately absent from
+    # ``EmbeddingProvider`` — so a bool leaves that call unverifiable.
+    instruction_aware = (
+        provider if isinstance(provider, InstructionAwareEmbedder) else None
+    )
 
     async def _call() -> list[float]:
         # Inner ``def`` rather than a ``lambda`` so the closure captures
         # *provider* / *text* / *instruction* with explicit ``await``
         # ergonomics; ruff E731 disapproves of ``make_call = lambda:``.
-        if is_instruction_aware:
-            return await provider.embed_query(text, instruction)
+        if instruction_aware is not None:
+            return await instruction_aware.embed_query(text, instruction)
         return await provider.embed(text)
 
     return await _run_with_retry(

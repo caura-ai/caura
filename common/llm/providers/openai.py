@@ -67,8 +67,13 @@ def _usage_tokens(response) -> tuple[int, int, int]:
     def _int(value: object) -> int:
         # Coerce defensively: OpenAI-compatible endpoints return None or
         # omit fields, and unit-test stubs return non-numeric attributes.
+        # The ignore code is ``call-overload``, not ``arg-type``: ``int`` is
+        # overloaded, so passing ``object`` fails overload resolution rather
+        # than a single argument's type. It read ``arg-type`` until common/
+        # entered the mypy gate, which is the first thing that ran mypy here
+        # and reported the mismatch.
         try:
-            return int(value)  # type: ignore[arg-type]
+            return int(value)  # type: ignore[call-overload]
         except (TypeError, ValueError):
             return 0
 

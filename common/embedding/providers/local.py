@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from common.constants import VECTOR_DIM
 
@@ -20,7 +21,13 @@ class LocalEmbedding:
 
     def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5") -> None:
         self._model_name = model_name
-        self._model = None
+        # ``SentenceTransformer`` is imported inside ``_ensure_model`` to keep
+        # sentence-transformers optional (see the module docstring), so there is
+        # no importable type to name here and ``Any`` is the honest annotation.
+        # Stated rather than left implicit: from the bare ``None`` sentinel mypy
+        # infers the attribute's type as ``None``, which made both
+        # ``self._model.encode`` calls below errors against ``None``.
+        self._model: Any = None
         self._load_lock = asyncio.Lock()
 
     @property

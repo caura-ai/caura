@@ -258,7 +258,12 @@ class PubSubEventBus(EventBus):
     @staticmethod
     def _ensure_pubsub_sdk() -> Any:
         try:
-            from google.cloud import pubsub_v1  # type: ignore[import-untyped]
+            # ``attr-defined``, not ``import-untyped``: ``google.cloud`` is a
+            # namespace package, so with google-cloud-pubsub installed (as CI
+            # has it, via the storage-api ``pubsub`` extra) mypy resolves the
+            # parent and rejects the submodule as a missing attribute. The
+            # absent case is already covered by ignore_missing_imports.
+            from google.cloud import pubsub_v1  # type: ignore[attr-defined]
 
             return pubsub_v1
         except ImportError as exc:

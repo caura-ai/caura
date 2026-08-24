@@ -247,6 +247,37 @@ jobs:
         # along, nothing ever ran it.
         run: cd core-worker && uv run mypy src/
 
+      - name: Run mypy (common/)
+        # common/ was type-checked by NOTHING before this step. Each mypy step
+        # above ``cd``s into one service and checks that service's own src/, so
+        # no invocation's path ever resolved to common/ — while 40 files under
+        # core-api/src alone import it. Those imports were not caught either:
+        # ``ignore_missing_imports = true`` (every service sets it) plus a
+        # ``mypy_path`` of just that service's src/ means an unresolved
+        # ``common.*`` import degrades to Any in silence rather than failing.
+        # ``cd core-api && mypy src/`` reported 199 files and none of them were
+        # common/'s 94.
+        #
+        # Nor did the hook cover it: .pre-commit-config.yaml deliberately runs no
+        # mypy, deferring to "CI is the authoritative type-check" — which pointed
+        # at a check that did not include this directory.
+        #
+        # What it was hiding: 12 errors in 7 files, all fixed in the commit that
+        # added this step. Two were ``# type: ignore[...]`` comments naming an
+        # error code mypy does not report here (``arg-type`` for an overload
+        # failure, ``import-untyped`` for a namespace-package attribute), so they
+        # suppressed nothing — nobody could have known, because nothing ever ran
+        # mypy over these files to say so.
+        #
+        # ``--config-file`` is required, not stylistic: common/ has no
+        # pyproject.toml and the repo root has no [tool.mypy], and mypy resolves
+        # config from the CWD rather than walking up from the files it checks
+        # (ruff does walk up, which is why common/ruff.toml needs no flag). Drop
+        # the flag and this runs at mypy's bare defaults, which reports 17 —
+        # the 12 plus 5 missing-stub errors for optional deps — so the failure
+        # mode is a noisier gate, not an absent one. See common/mypy.ini.
+        run: uv run mypy --config-file common/mypy.ini common/
+
       - name: Enable pgvector extension
         run: PGPASSWORD=changeme psql -h localhost -U memclaw -d memclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 

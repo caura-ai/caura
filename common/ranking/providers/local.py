@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from common.ranking.constants import RANK_MAX_LENGTH, RANK_MODEL
 from common.ranking.errors import PermanentRankError
@@ -33,7 +34,15 @@ class LocalCrossEncoderRanker:
     ) -> None:
         self._model_name = model_name
         self._max_length = max_length
-        self._model = None
+        # ``CrossEncoder`` is imported inside ``_ensure_model`` to keep
+        # sentence-transformers optional (see the module docstring), so there is
+        # no importable type to name here and ``Any`` is the honest annotation.
+        # It has to be stated: from the bare ``None`` sentinel mypy infers the
+        # attribute's type as ``None`` itself, which made ``self._model.predict``
+        # below an error against ``None`` rather than against the model, and made
+        # the executor call in ``_ensure_model`` infer its result type as
+        # ``None`` too.
+        self._model: Any = None
         self._load_lock = asyncio.Lock()
 
     @property
