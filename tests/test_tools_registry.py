@@ -159,6 +159,35 @@ def test_descriptions_are_non_empty():
         assert spec.description.strip(), f"{spec.name}: description is empty"
 
 
+def test_query_param_scope_tools_do_not_claim_a_default():
+    """``caura_list`` / ``caura_stats`` must not call any ``scope`` value "the
+    default" (#908).
+
+    One description string is served to BOTH surfaces — it feeds
+    ``/tool-descriptions`` and the generated ``plugin/tools.json`` — and only
+    MCP defaults ``scope``. ``mcp_server.caura_list`` declares
+    ``scope=... = "agent"``; ``GET /memories`` declares it
+    ``Query(default=None)`` and consults the trust ladder only when the caller
+    supplied one, so an omitted ``scope`` there takes its author filter from
+    ``written_by ?? agent_id`` and skips ``require_trust``. Naming a default
+    without naming the surface is therefore false for every plugin caller.
+
+    ``caura_insights`` / ``caura_evolve`` are excluded on purpose: their
+    ``scope`` arrives in a request body whose model really does
+    ``Field(default="agent")``, so the claim is true on every surface there.
+    Mirrors the plugin-side guard in ``plugin/src/tool-definitions.test.ts``.
+    """
+    from core_api.tools import REGISTRY
+
+    for name in ("caura_list", "caura_stats"):
+        description = REGISTRY[name].description
+        assert "(default)" not in description, (
+            f"{name}: description calls a scope value \"(default)\", but an "
+            "omitted scope is not scope='agent' on the REST/plugin path. "
+            "State the ladder per value and name the per-surface default."
+        )
+
+
 def test_descriptions_no_leftover_tool_descriptions_import():
     """After Phase 4, no spec module should import TOOL_DESCRIPTIONS."""
     import pkgutil

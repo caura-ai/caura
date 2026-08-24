@@ -14,7 +14,7 @@ import json
 import re
 from pathlib import Path
 
-from common.events.topics import Topics
+from common.events.topics import Topics, renamed
 from scripts.gen_events_manifest import (
     _DIRECT_SUBSCRIBES,
     MANIFEST_PATH,
@@ -35,6 +35,8 @@ _CONSUMER_FILES = {
 _DIRECT_SUBSCRIBE_RE = re.compile(
     r"bus\.subscribe\(\s*Topics\.(Memory|Lifecycle)\.([A-Z_]+)"
 )
+# ``<brand>.<family>.<event>`` — three non-empty lowercase segments.
+_TOPIC_SHAPE_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*(?:\.[a-z0-9]+(?:-[a-z0-9]+)*){2}")
 
 
 def test_events_manifest_is_in_sync() -> None:
@@ -59,8 +61,25 @@ def test_events_manifest_is_well_formed() -> None:
         assert topics == sorted(set(topics)), (
             f"{service} topics must be sorted and unique"
         )
-        assert all(t.startswith("memclaw.") for t in topics), (
+        # Shape, not brand. This asserted the outgoing prefix, which made it
+        # something the rename had to come and edit — and, worse, an assertion
+        # that would have gone quietly vacuous the moment the prefix it names
+        # stopped appearing. A structural check keeps meaning the same thing on
+        # both sides of the cutover.
+        assert all(_TOPIC_SHAPE_RE.fullmatch(t) for t in topics), (
             f"{service} has a malformed topic"
+        )
+        # And during the cutover the manifest must be CLOSED under the rename:
+        # every consumed topic's twin is listed alongside it. That closure is
+        # what turns "a service may subscribe to the twin" into "the twin
+        # subscription must already be provisioned" over in the infra repo's
+        # check — so a subscriber can never reach a name Terraform has not
+        # created. After the contract step drops the old names, the set is all
+        # renamed topics and this still holds, because renaming an already
+        # renamed name is a no-op.
+        assert {renamed(t) for t in topics} <= set(topics), (
+            f"{service} lists a topic whose renamed twin is missing: "
+            f"{sorted({renamed(t) for t in topics} - set(topics))}"
         )
 
 
