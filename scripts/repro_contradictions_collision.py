@@ -29,9 +29,9 @@ The verdict logic inspects the entity_links after the writes settle
 and reports which arm fired.
 
 Usage:
-    export MEMCLAW_API_URL=https://caura.ai
-    export MEMCLAW_API_KEY=mc_...
-    export MEMCLAW_TENANT_ID=rantaig-...
+    export CAURA_API_URL=https://caura.ai
+    export CAURA_API_KEY=mc_...
+    export CAURA_TENANT_ID=rantaig-...
     python scripts/repro_contradictions_collision.py
 """
 
@@ -48,8 +48,18 @@ import uuid
 import httpx
 
 
+def _env_any(name: str) -> str | None:
+    """First non-empty of ``name`` and its pre-rename spelling.
+
+    ``or`` rather than a defined-check on purpose: blank counts as unset, so an
+    exported-but-empty ``CAURA_*`` cannot shadow a working legacy value.
+    """
+    legacy = name.replace("CAURA_", "MEMCLAW_", 1)  # legacy-name-ok: rule 3 dual-read alias
+    return os.environ.get(name) or os.environ.get(legacy)
+
+
 def _env(name: str) -> str:
-    val = os.environ.get(name)
+    val = _env_any(name)
     if not val:
         print(f"ERROR: ${name} must be set", file=sys.stderr)
         sys.exit(2)
@@ -85,9 +95,9 @@ def main() -> int:
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
-    base = _env("MEMCLAW_API_URL").rstrip("/")
-    key = _env("MEMCLAW_API_KEY")
-    tenant = _env("MEMCLAW_TENANT_ID")
+    base = _env("CAURA_API_URL").rstrip("/")
+    key = _env("CAURA_API_KEY")
+    tenant = _env("CAURA_TENANT_ID")
 
     # Generate two distinguishable contexts that share a common given
     # name. Use a uniqued suffix to avoid polluting prior runs.

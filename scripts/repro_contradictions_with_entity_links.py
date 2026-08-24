@@ -28,8 +28,19 @@ import uuid
 
 import httpx
 
-BASE = os.environ.get("MEMCLAW_API_URL", "http://localhost:8000").rstrip("/")
-TENANT = os.environ.get("MEMCLAW_TENANT_ID", "default")  # standalone default
+
+def _env(name: str, default: str = "") -> str:
+    """First non-empty of ``name`` and its pre-rename spelling.
+
+    ``or`` rather than a defined-check on purpose: blank counts as unset, so an
+    exported-but-empty ``CAURA_*`` cannot shadow a working legacy value.
+    """
+    legacy = name.replace("CAURA_", "MEMCLAW_", 1)  # legacy-name-ok: rule 3 dual-read alias
+    return os.environ.get(name) or os.environ.get(legacy) or default
+
+
+BASE = _env("CAURA_API_URL", "http://localhost:8000").rstrip("/")
+TENANT = _env("CAURA_TENANT_ID", "default")  # standalone default
 
 
 def main() -> int:
@@ -37,7 +48,7 @@ def main() -> int:
     ap.add_argument("--wait", type=int, default=5)
     args = ap.parse_args()
 
-    key = os.environ.get("MEMCLAW_API_KEY", "")
+    key = _env("CAURA_API_KEY")
     headers = {"Content-Type": "application/json"}
     if key:
         headers["X-API-Key"] = key

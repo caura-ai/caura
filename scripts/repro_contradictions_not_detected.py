@@ -24,8 +24,8 @@ prints a structured diagnostic dump showing exactly what the server
 reported.
 
 Usage:
-    export MEMCLAW_API_URL=https://caura.ai
-    export MEMCLAW_API_KEY=mc_...
+    export CAURA_API_URL=https://caura.ai
+    export CAURA_API_KEY=mc_...
     python scripts/repro_contradictions_not_detected.py
 
     # Adjust settle time if your env's detection is slow
@@ -44,8 +44,18 @@ import uuid
 import httpx
 
 
+def _env_any(name: str) -> str | None:
+    """First non-empty of ``name`` and its pre-rename spelling.
+
+    ``or`` rather than a defined-check on purpose: blank counts as unset, so an
+    exported-but-empty ``CAURA_*`` cannot shadow a working legacy value.
+    """
+    legacy = name.replace("CAURA_", "MEMCLAW_", 1)  # legacy-name-ok: rule 3 dual-read alias
+    return os.environ.get(name) or os.environ.get(legacy)
+
+
 def _env(name: str) -> str:
-    val = os.environ.get(name)
+    val = _env_any(name)
     if not val:
         print(f"ERROR: ${name} must be set", file=sys.stderr)
         sys.exit(2)
@@ -67,9 +77,9 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    base = _env("MEMCLAW_API_URL").rstrip("/")
-    key = _env("MEMCLAW_API_KEY")
-    tenant = os.environ.get("MEMCLAW_TENANT_ID")  # optional — server may infer from key
+    base = _env("CAURA_API_URL").rstrip("/")
+    key = _env("CAURA_API_KEY")
+    tenant = _env_any("CAURA_TENANT_ID")  # optional — server may infer from key
 
     token = args.token or f"TOKEN-{uuid.uuid4().hex[:8].upper()}"
     agent = f"repro-contradictions-{uuid.uuid4().hex[:6]}"
@@ -125,7 +135,7 @@ def main() -> int:
     # parameter; without it, validation 422s and the response
     # decoder silently returns ``{"detail": [...]}``). Use the
     # tenant id returned on the write so this works even when
-    # ``MEMCLAW_TENANT_ID`` is unset.
+    # ``CAURA_TENANT_ID`` is unset.
     print("\n[4/4] Re-fetching memories + contradictions endpoints\n")
     qp = {"tenant_id": tenant or mem_a.get("tenant_id")}
     a_now = client.get(f"/api/v1/memories/{mem_a['id']}", params=qp).json()

@@ -28,8 +28,8 @@ This script probes that exact gap with two arms:
   If both succeed → S1 is closed; move to S2 (enrichment-lag race).
 
 Usage:
-    export MEMCLAW_API_URL=https://caura.ai
-    export MEMCLAW_API_KEY=mc_...
+    export CAURA_API_URL=https://caura.ai
+    export CAURA_API_KEY=mc_...
     python scripts/repro_contradictions_proper_noun.py
 
     # tweak settle time
@@ -74,8 +74,18 @@ def _mint_proper_noun() -> str:
     return f"Project {stem}{tail.capitalize()}"
 
 
+def _env_any(name: str) -> str | None:
+    """First non-empty of ``name`` and its pre-rename spelling.
+
+    ``or`` rather than a defined-check on purpose: blank counts as unset, so an
+    exported-but-empty ``CAURA_*`` cannot shadow a working legacy value.
+    """
+    legacy = name.replace("CAURA_", "MEMCLAW_", 1)  # legacy-name-ok: rule 3 dual-read alias
+    return os.environ.get(name) or os.environ.get(legacy)
+
+
 def _env(name: str) -> str:
-    val = os.environ.get(name)
+    val = _env_any(name)
     if not val:
         print(f"ERROR: ${name} must be set", file=sys.stderr)
         sys.exit(2)
@@ -198,9 +208,9 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    base = _env("MEMCLAW_API_URL").rstrip("/")
-    key = _env("MEMCLAW_API_KEY")
-    tenant = os.environ.get("MEMCLAW_TENANT_ID")
+    base = _env("CAURA_API_URL").rstrip("/")
+    key = _env("CAURA_API_KEY")
+    tenant = _env_any("CAURA_TENANT_ID")
 
     agent = f"repro-proper-noun-{uuid.uuid4().hex[:6]}"
     common = {
