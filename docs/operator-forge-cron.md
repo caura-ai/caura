@@ -176,5 +176,6 @@ bypass the lifecycle path entirely and are not affected.
 - `core-api/src/core_api/services/forge/cron_handler.py` — the cron
   entry point this doc describes
 - `core-api/src/core_api/routes/lifecycle.py` — the fanout endpoint
-- `docs/live-memory-pitch/skill-factory-implementation-plan.md §12` —
-  knobs reference
+- `skill-factory-implementation-plan.md §12` — knobs reference; archived from
+  HEAD with `docs/live-memory-pitch/` (W2), recover with
+  `git show 691659a:docs/live-memory-pitch/skill-factory-implementation-plan.md`
