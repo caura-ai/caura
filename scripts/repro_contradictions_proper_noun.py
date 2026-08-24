@@ -52,6 +52,10 @@ import uuid
 
 import httpx
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _env_compat import env_any as _env_any, env_required as _env  # noqa: E402  (path shim above must run first)
+
 # Synthesised proper-noun stems. Mixed-case + no digits + no hyphens →
 # guaranteed NOT to match _IDENTIFIER_TOKEN, exercising the gap.
 _STEMS = (
@@ -72,24 +76,6 @@ def _mint_proper_noun() -> str:
     stem = random.choice(_STEMS)
     tail = "".join(random.choices(string.ascii_lowercase, k=6))
     return f"Project {stem}{tail.capitalize()}"
-
-
-def _env_any(name: str) -> str | None:
-    """First non-empty of ``name`` and its pre-rename spelling.
-
-    ``or`` rather than a defined-check on purpose: blank counts as unset, so an
-    exported-but-empty ``CAURA_*`` cannot shadow a working legacy value.
-    """
-    legacy = name.replace("CAURA_", "MEMCLAW_", 1)  # legacy-name-ok: rule 3 dual-read alias
-    return os.environ.get(name) or os.environ.get(legacy)
-
-
-def _env(name: str) -> str:
-    val = _env_any(name)
-    if not val:
-        print(f"ERROR: ${name} must be set", file=sys.stderr)
-        sys.exit(2)
-    return val
 
 
 def _detected(target_id: str, resp: dict) -> bool:

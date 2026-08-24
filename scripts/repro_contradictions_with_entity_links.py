@@ -23,20 +23,15 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import time
 import uuid
 
 import httpx
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-def _env(name: str, default: str = "") -> str:
-    """First non-empty of ``name`` and its pre-rename spelling.
-
-    ``or`` rather than a defined-check on purpose: blank counts as unset, so an
-    exported-but-empty ``CAURA_*`` cannot shadow a working legacy value.
-    """
-    legacy = name.replace("CAURA_", "MEMCLAW_", 1)  # legacy-name-ok: rule 3 dual-read alias
-    return os.environ.get(name) or os.environ.get(legacy) or default
+from _env_compat import env_default as _env  # noqa: E402  (path shim above must run first)
 
 
 BASE = _env("CAURA_API_URL", "http://localhost:8000").rstrip("/")
