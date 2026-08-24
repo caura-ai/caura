@@ -201,12 +201,23 @@ def known_families() -> frozenset[str]:
 # let alone reach a deploy. The cost of being wrong is an ImportError in front
 # of the person who made the typo; the cost of NOT checking is a step 4 that
 # reports success and moves no traffic.
-if unknown_families := FLIPPED_FAMILIES - known_families():
-    raise ValueError(
-        f"FLIPPED_FAMILIES names {sorted(unknown_families)}, which match no topic "
-        f"family declared here (known: {sorted(known_families())}). A family that "
-        "does not exist flips nothing and reports no error — fix the spelling."
-    )
+def _validate_flipped_families() -> None:
+    """Raise if FLIPPED_FAMILIES names a family that does not exist.
+
+    A function rather than a bare module-level check so nothing is left behind in
+    the module namespace once it has run, and so ``known_families()`` is
+    evaluated once for both the comparison and the message.
+    """
+    known = known_families()
+    if unknown := FLIPPED_FAMILIES - known:
+        raise ValueError(
+            f"FLIPPED_FAMILIES names {sorted(unknown)}, which match no topic "
+            f"family declared here (known: {sorted(known)}). A family that does "
+            "not exist flips nothing and reports no error — fix the spelling."
+        )
+
+
+_validate_flipped_families()
 
 
 def publish_name(topic: str) -> str:
