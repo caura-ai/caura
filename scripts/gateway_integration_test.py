@@ -188,7 +188,7 @@ class GatewayIntegrationTest:
             # ── Section 5: Education files ──
             self.test_educated_flag_exists,
             self.test_skill_md_exists,
-            self.test_tools_md_has_memclaw,
+            self.test_tools_md_has_tools_section,
             self.test_agents_md_has_memclaw,
             self.test_heartbeat_md_exists,
             # ── Section 6: Memory prompt section injection ──
@@ -671,20 +671,25 @@ class GatewayIntegrationTest:
                 "expected 3-Layer Memory Capture section",
             )
 
-    def test_tools_md_has_memclaw(self):
-        """Check TOOLS.md in at least one workspace mentions MemClaw."""
+    def test_tools_md_has_tools_section(self):
+        """Check TOOLS.md in at least one workspace has the Tools Available section."""
         workspaces = self._find_workspaces()
         if not workspaces:
-            self.skip("Education: TOOLS.md has MemClaw", "no workspaces found")
+            self.skip("Education: TOOLS.md has Tools Available", "no workspaces found")
             return
         found = False
         for ws in workspaces:
             tools_md = ws / "TOOLS.md"
-            if tools_md.exists() and "MemClaw" in tools_md.read_text():
+            if not tools_md.exists():
+                continue
+            content = tools_md.read_text()
+            if "Caura — Tools Available" in content or (
+                "MemClaw — Tools Available" in content  # legacy-name-ok: matches education files old plugin versions wrote
+            ):
                 found = True
                 break
         self.check(
-            "Education: TOOLS.md has MemClaw section",
+            "Education: TOOLS.md has Tools Available section",
             found,
             f"checked {len(workspaces)} workspace(s)",
         )

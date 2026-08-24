@@ -145,7 +145,7 @@ rollback), and the inbox resumes as the gate.
 The shared lifecycle handler uses
 `_PIPELINE_DEDUP_WINDOW_HOURS` (currently 1 hour) — re-curling the
 fanout endpoint within the window is a no-op for any tenant whose
-prior tick succeeded. Manual `memclawctl forge dry-run` invocations
+prior tick succeeded. Manual `python scripts/forge_dry_run.py` invocations
 bypass the lifecycle path entirely and are not affected.
 
 ## Opt-in / opt-out
