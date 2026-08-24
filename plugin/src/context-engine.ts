@@ -1332,13 +1332,53 @@ export class MemClawContextEngine {
     }
   }
 
-  async prepareSubagentSpawn(
-    context: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return {
-      memclawAgentId: resolveAgentId(context, this.config),
-      memclawFleetId: MEMCLAW_FLEET_ID,
-    };
+  /**
+   * Nothing is prepared here, so there is nothing to roll back.
+   *
+   * OpenClaw's contract (``src/context-engine/types.ts``) is
+   * ``Promise<SubagentSpawnPreparation | undefined>``, where the preparation is
+   * ``{ rollback: () => void | Promise<void> }`` — a handle it invokes if the
+   * spawn fails after preparation succeeded.
+   *
+   * This previously returned two identity fields instead, and both problems
+   * with that were invisible to every gate we have:
+   *
+   * 1. The object was truthy but carried no ``rollback``. OpenClaw calls
+   *    ``await preparation?.rollback()`` inside a best-effort ``try/catch``, so
+   *    the optional chain did NOT short-circuit, the resulting TypeError was
+   *    swallowed, and its cleanup helper reported failure on every failed spawn
+   *    rather than "nothing to undo".
+   * 2. Nothing read either field — not this repo, not OpenClaw, no test. They
+   *    were computed and dropped. And the agent id could never resolve from
+   *    what OpenClaw passes: the params carry ``parentSessionKey`` /
+   *    ``childSessionKey``, while the resolver looks for a bare ``sessionKey``,
+   *    so every spawn fell through to the install default and emitted the loud
+   *    "could not resolve agent ID" warning that ``resolveAgentIdQuiet``'s
+   *    docstring calls a real bug. It was: we were reading the wrong key.
+   *
+   * ``undefined`` is the honest answer. The optional chain short-circuits and
+   * the rollback path becomes a correct no-op.
+   *
+   * If subagent identity propagation is ever actually wanted, this return value
+   * is not the channel for it — OpenClaw never reads it. The parent's identity
+   * is available, but as ``parentSessionKey``.
+   *
+   * The parameter is typed to OpenClaw's real shape rather than
+   * ``Record<string, unknown>`` so the next reader can see what arrives. ``tsc``
+   * cannot check that for us: the plugin has no ``openclaw`` dependency and
+   * reaches the SDK at runtime (see ``openclaw-sdk-bridge.ts``).
+   */
+  async prepareSubagentSpawn(_params: {
+    parentSessionKey: string;
+    childSessionKey: string;
+    contextMode?: "isolated" | "fork";
+    parentSessionId?: string;
+    parentSessionFile?: string;
+    childSessionId?: string;
+    childSessionFile?: string;
+    ttlMs?: number;
+  }): Promise<undefined> {
+    return undefined;
   }
 
   async onSubagentEnded(_context: unknown): Promise<void> {}

@@ -13,8 +13,67 @@ import {
   shouldRecall,
   getRecallMetrics,
   isDuplicateMemoryError,
+  // Aliased so the test bodies below carry no brand and survive the rename
+  // untouched — the class rename lands with its exported alias in its own
+  // slice, and only this line will need to change.
+  MemClawContextEngine as ContextEngine,  // legacy-name-ok: references the class as currently named
   type ShouldRecallInput,
 } from "./context-engine.js";
+
+describe("prepareSubagentSpawn — OpenClaw's rollback contract", () => {
+  // OpenClaw's contract is `Promise<SubagentSpawnPreparation | undefined>` with
+  // `SubagentSpawnPreparation = { rollback: () => void | Promise<void> }`, and it
+  // consumes the result as `await preparation?.rollback()` inside a best-effort
+  // try/catch.
+  //
+  // That makes a truthy return WITHOUT a callable rollback the worst possible
+  // shape: the optional chain does not short-circuit, the TypeError is swallowed
+  // by the catch, and OpenClaw reports cleanup failure on every failed spawn.
+  // Returning `undefined` is fine; returning a real handle is fine; returning a
+  // bare object is not. Nothing else in the build checks this — the plugin has no
+  // `openclaw` dependency, so tsc cannot see the contract at all.
+  const spawnParams = {
+    parentSessionKey: "agent:alice:cli:local",
+    childSessionKey: "agent:alice:cli:child",
+    contextMode: "isolated" as const,
+  };
+
+  test("survives OpenClaw's `await preparation?.rollback()` call", async () => {
+    const engine = new ContextEngine({ sessionId: "subagent-contract" });
+    const preparation = await engine.prepareSubagentSpawn(spawnParams);
+
+    // Byte-for-byte what subagent-spawn-context.ts does on spawn failure.
+    // NOTE the single `?.`: OpenClaw writes `preparation?.rollback()`, not
+    // `preparation?.rollback?.()`. Adding the second one here would make this
+    // test pass against the very bug it exists to catch, because it would
+    // short-circuit on the missing method instead of throwing on it.
+    let threw = false;
+    try {
+      await (preparation as { rollback: () => unknown } | undefined)?.rollback();
+    } catch {
+      threw = true;
+    }
+    assert.equal(
+      threw,
+      false,
+      "OpenClaw invokes preparation?.rollback() on spawn failure — a truthy " +
+        "return without a callable rollback throws into its best-effort catch " +
+        "and makes cleanup report failure every time",
+    );
+  });
+
+  test("returns undefined, or a preparation whose rollback is callable", async () => {
+    const engine = new ContextEngine({ sessionId: "subagent-contract-2" });
+    const preparation = await engine.prepareSubagentSpawn(spawnParams);
+    if (preparation !== undefined) {
+      assert.equal(
+        typeof (preparation as { rollback?: unknown }).rollback,
+        "function",
+        "a truthy preparation MUST carry a callable rollback",
+      );
+    }
+  });
+});
 
 const DEFAULT_KEYWORDS = [
   "memclaw",
