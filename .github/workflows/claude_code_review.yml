@@ -114,7 +114,7 @@ on:
   issue_comment:
     types: [created]
   # Manual backfill for claude-capture, mirroring the shared pipeline's caller. Two uses: it makes
-  # capture verifiable the moment MEMCLAW_AGENTS_KEY is added — the on-merge path cannot be tested
+  # capture verifiable the moment CAURA_AGENTS_KEY is added — the on-merge path cannot be tested
   # on demand, since it needs a real merge that happens to carry a declined finding — and it can
   # extract declines from pull requests that merged BEFORE capture existed here.
   #
@@ -360,7 +360,7 @@ jobs:
           # is unreadable — which is TODAY, because the org secret is `private` visibility and
           # this repo is public — and recall is then a silent no-op leaving the review
           # byte-for-byte unchanged. Adding a repo-level secret turns it on with no code change.
-          MEMCLAW_AGENTS_KEY: ${{ secrets.MEMCLAW_AGENTS_KEY }}
+          CAURA_AGENTS_KEY: ${{ secrets.CAURA_AGENTS_KEY || secrets.MEMCLAW_AGENTS_KEY }}  # legacy-name-ok: rule 3 dual-read alias
         run: bash .github/scripts/claude_pr_review.sh
 
   # Runs on @claude comment — only for public org members (MEMBER or OWNER).
@@ -468,7 +468,7 @@ jobs:
           # is unreadable — which is TODAY, because the org secret is `private` visibility and
           # this repo is public — and recall is then a silent no-op leaving the review
           # byte-for-byte unchanged. Adding a repo-level secret turns it on with no code change.
-          MEMCLAW_AGENTS_KEY: ${{ secrets.MEMCLAW_AGENTS_KEY }}
+          CAURA_AGENTS_KEY: ${{ secrets.CAURA_AGENTS_KEY || secrets.MEMCLAW_AGENTS_KEY }}  # legacy-name-ok: rule 3 dual-read alias
         run: bash .github/scripts/claude_pr_review.sh
 
   # Runs on MERGE, and only on merge: extracts findings a maintainer DECLINED into the shared
@@ -479,7 +479,7 @@ jobs:
   # accepted judgement, and capturing declines from an abandoned branch would teach the reviewer
   # from a decision nobody stood behind.
   #
-  # Dark and silent without MEMCLAW_AGENTS_KEY, which is the state on the day this lands — the
+  # Dark and silent without CAURA_AGENTS_KEY, which is the state on the day this lands — the
   # org secret is `private` visibility and this repo is public, so it reads as ''. The job still
   # runs and exits 0 having logged that it was dark, which is the diagnosable outcome.
   # Only this job answers a workflow_dispatch. pre-checks is gated on `pull_request` and
@@ -516,5 +516,5 @@ jobs:
           # pull_request supplies the number; on workflow_dispatch that context is absent and the
           # input takes over. Ordered this way so a merge never reads a stale dispatch input.
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
-          MEMCLAW_AGENTS_KEY: ${{ secrets.MEMCLAW_AGENTS_KEY }}
+          CAURA_AGENTS_KEY: ${{ secrets.CAURA_AGENTS_KEY || secrets.MEMCLAW_AGENTS_KEY }}  # legacy-name-ok: rule 3 dual-read alias
         run: bash .github/scripts/claude_pr_capture.sh

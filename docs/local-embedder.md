@@ -41,7 +41,7 @@ In another terminal, fire one write → search round-trip:
 > These examples assume `IS_STANDALONE=true` in `.env` (see the
 > [Auth modes](../README.md#self-hosted-open-source) section in README).
 > Replace `standalone` with your actual API key if you're using `ADMIN_API_KEY`
-> or `MEMCLAW_API_KEY` instead, and add `tenant_id` matching your setup.
+> or `CAURA_API_KEY` instead, and add `tenant_id` matching your setup.
 
 ```bash
 curl -fsS -X POST http://localhost:8000/api/v1/memories \

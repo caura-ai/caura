@@ -188,7 +188,7 @@ opt-in below); it's empty unless a target opts in.
 By default the reconciler manages one **`owned`** dir — the plugin's own
 `skills/` — where it has full authority: anything on disk not in the
 catalog is pruned. Operators can add extra target dirs via the
-`MEMCLAW_SKILL_TARGETS` env var (JSON array of `{ dir, mode, register? }`):
+`CAURA_SKILL_TARGETS` env var (JSON array of `{ dir, mode, register? }`):
 
 - **`owned`** — fully Caura-managed (destructive prune). Use only for
   dirs Caura exclusively controls.
