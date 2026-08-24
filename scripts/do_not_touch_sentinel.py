@@ -363,6 +363,58 @@ SENTINELS: tuple[Sentinel, ...] = (
             "being collected, permanently and silently"
         ),
     ),
+    # -- The plugin's own .env gate and install root. ----------------------------
+    #
+    # These three outrank everything above them in blast radius, and they were
+    # the last to be pinned, for a reason worth writing down: all three sit on
+    # lines that already carried an exemption marker.
+    #
+    # The marker and this list do different jobs. The marker tells the ratchet
+    # "this old-brand text is deliberate, stop failing the build". It says
+    # nothing about DELETING the line, and a sweep that deletes it lowers the
+    # file's count, which the ratchet reads as progress. So the three lines with
+    # the largest consequence in the whole plugin were annotated in a way that
+    # looks like protection and is not. An exemption is a statement of intent;
+    # only an entry here is a guard.
+    #
+    # If a future dual-read alias is added anywhere, it wants both.
+    Sentinel(
+        path="plugin/src/env.ts",
+        text="/^(?:CAURA|MEMCLAW)_[A-Z_]+$/",  # legacy-name-ok: pinned floor string
+        kind=LITERAL,
+        breaks=(
+            "the gate deciding which .env keys may reach process.env — drop the "
+            "legacy alternative and every existing install silently stops loading "
+            "its api key, tenant, agent and fleet id, then starts up behaving "
+            "like a fresh install with nothing configured"
+        ),
+    ),
+    # Anchored through ``.test(key)`` deliberately. The bare prefix pattern is a
+    # SUBSTRING of the stricter regex two functions above, so pinning it alone
+    # would still pass on a tree where this function had been deleted and only
+    # the stricter one survived — a pin satisfied by the wrong line.
+    Sentinel(
+        path="plugin/src/env.ts",
+        text="/^(?:CAURA|MEMCLAW)_/.test(key)",  # legacy-name-ok: pinned floor string
+        kind=LITERAL,
+        breaks=(
+            "deploy.ts filters the operator's existing .env through this and then "
+            "writes the survivors back as the WHOLE file — drop the legacy "
+            "alternative and the next redeploy ERASES every legacy-prefixed key "
+            "from a file the plugin explicitly does not own the contents of"
+        ),
+    ),
+    Sentinel(
+        path="plugin/src/paths.ts",
+        text='join(getOpenClawBaseDir(), "plugins", "memclaw")',  # legacy-name-ok: pinned floor string
+        kind=LITERAL,
+        breaks=(
+            "the install root on every user's disk — the .env, install.json, "
+            "dist/ and shared-skill paths all derive from it. The server's copy "
+            "of this same path is pinned separately, so renaming one side alone "
+            "leaves a server writing where the plugin no longer reads"
+        ),
+    ),
 )
 
 
