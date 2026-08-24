@@ -129,7 +129,7 @@ let sideEffectsBootstrapped = false;
 
 const memclawPlugin = {
   id: "memclaw",
-  name: "MemClaw",
+  name: "Caura",
   description:
     "Central persistent memory for OpenClaw agents with cross-fleet, multi-agent shared recall",
   configSchema: {
@@ -191,7 +191,7 @@ const memclawPlugin = {
       const config = readOpenClawConfig();
       respond({
         id: "memclaw",
-        name: "MemClaw",
+        name: "Caura",
         version: PLUGIN_VERSION,
         status: "loaded",
         description: memclawPlugin.description,
@@ -539,7 +539,7 @@ const memclawPlugin = {
       forceFlushTranscriptBytes: 2 * 1024 * 1024,
       reserveTokensFloor: 20000,
       prompt:
-        "Before this conversation is compacted, save any important context to MemClaw. " +
+        "Before this conversation is compacted, save any important context to Caura. " +
         "Call caura_write with a summary of: decisions made, tasks completed, bugs found, " +
         "configuration changes, and any commitments or deadlines discovered in this session. " +
         "Include your agent_id, specific names, dates, paths, and outcomes. " +
@@ -547,7 +547,7 @@ const memclawPlugin = {
         "Do NOT reply to the user from this turn.",
       systemPrompt:
         "You are running inside an OpenClaw memory-flush turn. Your only job is to " +
-        "persist salient context to MemClaw via caura_write before this conversation " +
+        "persist salient context to Caura via caura_write before this conversation " +
         "is compacted. Do not call any other tools. Do not produce a user-visible reply.",
       relativePath: `memclaw/flush-${dateStamp}.md`,
     });

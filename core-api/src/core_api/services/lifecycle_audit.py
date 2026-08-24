@@ -205,7 +205,7 @@ class _CoreApiLifecycleAdapter:
                         "tenant_id": org_id,
                         "agent_id": INSIGHTER_AGENT_ID,
                         "fleet_id": None,
-                        "display_name": "MemClaw Insighter",
+                        "display_name": "Caura Insighter",
                         "belonging_type": "service",
                         "trust_level": INSIGHTER_TRUST_LEVEL,
                     }

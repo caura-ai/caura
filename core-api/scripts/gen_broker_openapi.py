@@ -91,7 +91,7 @@ _NON_OPERATION_KEYS = frozenset(
 # Frozen broker-contract version, deliberately decoupled from core-api's
 # package version. Bump ONLY for an intentional contract major per the RFC.
 CONTRACT_VERSION = "v1"
-CONTRACT_TITLE = "MemClaw core-api broker contract"
+CONTRACT_TITLE = "Caura core-api broker contract"
 
 BASELINE_PATH = Path(__file__).resolve().parent.parent / "openapi.broker.json"
 

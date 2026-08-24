@@ -28,7 +28,7 @@ function buildRecallLines(availableTools: Set<string>): string[] {
   if (present.length === 0) return [];
 
   const lines: string[] = [];
-  lines.push("## MemClaw Memory");
+  lines.push("## Caura Memory");
   lines.push("");
   lines.push(
     "Persistent cross-session memory. Available tools: " +
@@ -41,7 +41,7 @@ function buildRecallLines(availableTools: Set<string>): string[] {
       "outcomes, supersede don't delete), quality rules, and per-tool " +
       "reference live in the " +
       "**memclaw** skill, which your runtime loads automatically — open " +
-      "it via your skill system before your first MemClaw call this " +
+      "it via your skill system before your first Caura call this " +
       "session. Do NOT search the filesystem for it.",
   );
   lines.push("");

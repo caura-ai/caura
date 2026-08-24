@@ -187,13 +187,24 @@ def _row_to_dict(
 # ---------------------------------------------------------------------------
 
 
+_DEFAULT_DB_PATH = "~/.caura/caura.db"
+_LEGACY_DB_PATH = "~/.memclaw/memclaw.db"  # legacy-name-ok: read-fallback for pre-rename installs
+
+
 class SqliteBackend:
     """File-based storage backend using SQLite (via ``aiosqlite``).
 
     Satisfies the ``StorageBackend`` protocol through structural subtyping.
     """
 
-    def __init__(self, db_path: str = "~/.memclaw/memclaw.db") -> None:
+    def __init__(self, db_path: str = _DEFAULT_DB_PATH) -> None:
+        if (
+            db_path == _DEFAULT_DB_PATH
+            and not os.path.exists(os.path.expanduser(_DEFAULT_DB_PATH))
+            and os.path.exists(os.path.expanduser(_LEGACY_DB_PATH))
+        ):
+            # Pre-rename install: keep reading the database it already has.
+            db_path = _LEGACY_DB_PATH
         self._db_path = db_path
         if db_path != ":memory:":
             self._db_path = os.path.expanduser(db_path)

@@ -1,6 +1,6 @@
 {
   "id": "memclaw",
-  "name": "MemClaw",
+  "name": "Caura",
   "kind": "memory",
   "version": "2.17.0",
   "description": "Central persistent memory for OpenClaw agents — write, search, and entity lookup tools.",

@@ -269,7 +269,7 @@ CAURA_TENANT_ID={safe_tenant_id}
 CAURA_NODE_NAME={safe_node_name or '"$(hostname -s)"'}
 CAURA_PLUGIN_VERSION={safe_version}
 
-echo "=== MemClaw Plugin Installer ==="
+echo "=== Caura Plugin Installer ==="
 echo ""
 
 # Preflight: warn (don't fail) if the local OpenClaw runtime is older
@@ -342,7 +342,7 @@ cat > "$PLUGIN_DIR/package.json" << PACKAGE_EOF
 {{
   "name": "@caura/memclaw",
   "version": "$CAURA_PLUGIN_VERSION",
-  "description": "OpenClaw plugin for MemClaw central memory",
+  "description": "OpenClaw plugin for Caura central memory",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -605,11 +605,11 @@ echo "Next: restart your OpenClaw gateway to activate the plugin."
 echo "  Linux:  systemctl --user restart openclaw-gateway"
 echo '  macOS:  launchctl kickstart -k "gui/$(id -u)/ai.openclaw.gateway"'
 echo ""
-echo "After restart, MemClaw will:"
+echo "After restart, Caura will:"
 echo "  1. Claim the memory slot (replacing memory-core)"
 echo "  2. Load the plugin and register 12 tools"
 echo "  3. Auto-educate your agents (SKILL.md, TOOLS.md, AGENTS.md, HEARTBEAT.md)"
-echo "  4. Start heartbeating to the MemClaw API"
+echo "  4. Start heartbeating to the Caura API"
 echo ""
 echo "Your node will appear in Fleet Management within 60 seconds."
 echo ""

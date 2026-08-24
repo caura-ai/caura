@@ -307,7 +307,7 @@ describe("drift checks across tool surface artefacts", () => {
     const tools = memclawPromptSectionText(new Set(MEMCLAW_TOOLS));
 
     test("includes header, identity, and pointer to the memclaw skill (by name)", () => {
-      assert.ok(tools.includes("## MemClaw Memory"), "missing header");
+      assert.ok(tools.includes("## Caura Memory"), "missing header");
       assert.ok(tools.includes("`agent_id`"), "missing agent_id mention");
       assert.ok(tools.includes("never fabricate") || tools.includes("Never fabricate"),
         "missing identity 'never fabricate' clause");

@@ -112,7 +112,7 @@ async def resolve_doc_memory_agent(
         tenant_id,
         agent_id,
         fleet_id,
-        display_name=None if caller_agent_id else "MemClaw Doc Indexer",
+        display_name=None if caller_agent_id else "Caura Doc Indexer",
     )
     return agent_id
 
