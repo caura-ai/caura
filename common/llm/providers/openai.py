@@ -22,6 +22,7 @@ import time
 import httpx
 import openai
 
+from common.llm.call_context import llm_call_label
 from common.llm.constants import (
     LLM_PROVIDER_MAX_RETRIES,
     OPENAI_CHAT_BASE_URL,
@@ -252,12 +253,13 @@ class OpenAILLMProvider:
         tokens_in, tokens_out, tokens_reasoning = _usage_tokens(response)
         logger.info(
             "OpenAI-compatible complete_json (%s) took %dms "
-            "tokens_in=%d tokens_out=%d tokens_reasoning=%d",
+            "tokens_in=%d tokens_out=%d tokens_reasoning=%d service=%s",
             self._model,
             llm_ms,
             tokens_in,
             tokens_out,
             tokens_reasoning,
+            llm_call_label.get() or "-",
         )
         content = response.choices[0].message.content
         if not content:
@@ -286,11 +288,12 @@ class OpenAILLMProvider:
         tokens_in, tokens_out, tokens_reasoning = _usage_tokens(response)
         logger.info(
             "OpenAI-compatible complete_text (%s) took %dms "
-            "tokens_in=%d tokens_out=%d tokens_reasoning=%d",
+            "tokens_in=%d tokens_out=%d tokens_reasoning=%d service=%s",
             self._model,
             llm_ms,
             tokens_in,
             tokens_out,
             tokens_reasoning,
+            llm_call_label.get() or "-",
         )
         return response.choices[0].message.content or ""
