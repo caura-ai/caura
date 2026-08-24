@@ -8,8 +8,8 @@ import {
   autoFixAllowlist,
   ensureExtraSkillDirs,
   isContextEngineSlotClaimed,
-  isMemclawAllowed,
-  isMemclawFullyConfigured,
+  isCauraAllowed,
+  isCauraFullyConfigured,
   isMemorySlotClaimed,
   shouldRunAutoFix,
   PLUGIN_ID,
@@ -74,12 +74,12 @@ describe("isMemorySlotClaimed", () => {
   });
 });
 
-describe("isMemclawFullyConfigured", () => {
+describe("isCauraFullyConfigured", () => {
   // Paints the Fleet UI dashboard via heartbeat.setup_status.fully_configured.
   // Each test below corresponds to one of the four conditions that must hold.
 
   test("true on happy-path config", () => {
-    assert.equal(isMemclawFullyConfigured(happyConfig()), true);
+    assert.equal(isCauraFullyConfigured(happyConfig()), true);
   });
 
   test("false when memclaw is not in a restrictive allowlist", () => {
@@ -91,25 +91,25 @@ describe("isMemclawFullyConfigured", () => {
     // "not allowlisted" case.
     const c = happyConfig();
     (c as any).plugins.allow = ["some-other-plugin"];
-    assert.equal(isMemclawFullyConfigured(c), false);
+    assert.equal(isCauraFullyConfigured(c), false);
   });
 
   test("false when memclaw is disabled", () => {
     const c = happyConfig();
     (c as any).plugins.entries.memclaw.enabled = false;
-    assert.equal(isMemclawFullyConfigured(c), false);
+    assert.equal(isCauraFullyConfigured(c), false);
   });
 
   test("false when plugin path is not loaded", () => {
     const c = happyConfig();
     (c as any).plugins.load.paths = [];
-    assert.equal(isMemclawFullyConfigured(c), false);
+    assert.equal(isCauraFullyConfigured(c), false);
   });
 
   test("false when memory slot is not claimed", () => {
     const c = happyConfig();
     (c as any).plugins.slots.memory = "memory-core";
-    assert.equal(isMemclawFullyConfigured(c), false);
+    assert.equal(isCauraFullyConfigured(c), false);
   });
 });
 
@@ -143,8 +143,8 @@ describe("isContextEngineSlotClaimed (CAURA-000 — keystone-injection gate)", (
   });
 });
 
-describe("isMemclawFullyConfigured — contextEngine slot is now required", () => {
-  // Pre-fix happyConfig() didn't include contextEngine and isMemclawFullyConfigured
+describe("isCauraFullyConfigured — contextEngine slot is now required", () => {
+  // Pre-fix happyConfig() didn't include contextEngine and isCauraFullyConfigured
   // returned true anyway. That hid the WhatsApp keystone-injection regression
   // because Fleet UI's "fully configured" badge was green while assemble()
   // silently never ran. Adding the slot to the predicate surfaces the gap.
@@ -152,13 +152,13 @@ describe("isMemclawFullyConfigured — contextEngine slot is now required", () =
   test("false when contextEngine slot is missing", () => {
     const c = happyConfig();
     delete (c as any).plugins.slots.contextEngine;
-    assert.equal(isMemclawFullyConfigured(c), false);
+    assert.equal(isCauraFullyConfigured(c), false);
   });
 
   test("false when contextEngine slot is held by another plugin", () => {
     const c = happyConfig();
     (c as any).plugins.slots.contextEngine = "legacy";
-    assert.equal(isMemclawFullyConfigured(c), false);
+    assert.equal(isCauraFullyConfigured(c), false);
   });
 });
 
@@ -173,11 +173,11 @@ describe("shouldRunAutoFix — allowlist drift gate", () => {
     contextEngineSlotClaimed: true,
   };
 
-  test("MEMCLAW_AUTO_FIX_CONFIG=true always runs (explicit force)", () => {
+  test("CAURA_AUTO_FIX_CONFIG=true always runs (explicit force)", () => {
     assert.equal(shouldRunAutoFix({ ...clean, autoFixEnv: "true" }), true);
   });
 
-  test("MEMCLAW_AUTO_FIX_CONFIG=false never runs, even with drift", () => {
+  test("CAURA_AUTO_FIX_CONFIG=false never runs, even with drift", () => {
     assert.equal(
       shouldRunAutoFix({
         autoFixEnv: "false",
@@ -210,7 +210,7 @@ describe("shouldRunAutoFix — allowlist drift gate", () => {
 });
 
 
-// ---- isMemclawAllowed — permissive allowlist semantics (CAURA-000) ----
+// ---- isCauraAllowed — permissive allowlist semantics (CAURA-000) ----
 //
 // OpenClaw 2026.6.x treats `plugins.allow` as a STRICT allowlist only when
 // it is BOTH present AND non-empty. A missing or empty array means "no
@@ -220,34 +220,34 @@ describe("shouldRunAutoFix — allowlist drift gate", () => {
 // permissive config into a restrictive one and locking out built-ins
 // like the bundled `openai` provider plugin.
 
-describe("isMemclawAllowed — permissive when allow is missing or empty (CAURA-000)", () => {
+describe("isCauraAllowed — permissive when allow is missing or empty (CAURA-000)", () => {
   test("true when plugins.allow is missing entirely (permissive default)", () => {
     const c: any = { plugins: { entries: {}, load: {}, slots: {} } };
-    assert.equal(isMemclawAllowed(c), true);
+    assert.equal(isCauraAllowed(c), true);
   });
 
   test("true when plugins.allow is an empty array (permissive)", () => {
     const c: any = { plugins: { allow: [], entries: {}, load: {}, slots: {} } };
-    assert.equal(isMemclawAllowed(c), true);
+    assert.equal(isCauraAllowed(c), true);
   });
 
   test("true when plugins.allow is non-empty AND includes memclaw", () => {
     const c: any = {
       plugins: { allow: ["memclaw", "browser"], entries: {}, load: {}, slots: {} },
     };
-    assert.equal(isMemclawAllowed(c), true);
+    assert.equal(isCauraAllowed(c), true);
   });
 
   test("false when plugins.allow is non-empty AND excludes memclaw (the only real 'not allowed' case)", () => {
     const c: any = {
       plugins: { allow: ["browser"], entries: {}, load: {}, slots: {} },
     };
-    assert.equal(isMemclawAllowed(c), false);
+    assert.equal(isCauraAllowed(c), false);
   });
 
   test("true when plugins object is completely missing (no allowlist to speak of)", () => {
     const c: any = {};
-    assert.equal(isMemclawAllowed(c), true);
+    assert.equal(isCauraAllowed(c), true);
   });
 });
 

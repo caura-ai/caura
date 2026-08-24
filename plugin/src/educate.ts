@@ -23,7 +23,7 @@ import { join, basename, resolve } from "path";
 import { createHash } from "crypto";
 import { isContainedPath, assertPromptLength } from "./validation.js";
 import { getOpenClawBaseDir } from "./paths.js";
-import { MEMCLAW_TOOLS } from "./tools.js";
+import { CAURA_TOOLS } from "./tools.js";
 import { logError } from "./logger.js";
 
 /**
@@ -350,7 +350,7 @@ filesystem for it) before your first call in a session.
 
 \`agent_id\` is resolved by your runtime — never fabricate.
 
-### Quick matrix · ${MEMCLAW_TOOLS.length} tools
+### Quick matrix · ${CAURA_TOOLS.length} tools
 
 | Tool | Purpose | Returns |
 |------|---------|---------|

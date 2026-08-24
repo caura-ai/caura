@@ -20,9 +20,9 @@ import { tmpdir } from "os";
 // Pattern matches ``keystones.test.ts`` / ``transport.test.ts``: env is
 // fixed BEFORE the dynamic import so env.js captures it (its exports are
 // bound at module-evaluation time — a static import would evaluate first).
-process.env.MEMCLAW_API_KEY = "mc_test_interview";
-process.env.MEMCLAW_API_URL = "http://localhost:8000";
-process.env.MEMCLAW_TENANT_ID = "t-test";
+process.env.CAURA_API_KEY = "mc_test_interview";
+process.env.CAURA_API_URL = "http://localhost:8000";
+process.env.CAURA_TENANT_ID = "t-test";
 
 const { __DEPLOY_INTERNALS__ } = await import("./heartbeat.js");
 const { __TASK_TRAIL_INTERNALS__ } = await import("./task-trail.js");

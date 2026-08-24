@@ -73,21 +73,21 @@ describe("deploy cooldown lifecycle", () => {
   });
 
   test("failureCooldownHours honours env override", () => {
-    const prev = process.env.MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS;
+    const prev = process.env.CAURA_DEPLOY_FAILURE_COOLDOWN_HOURS;
     try {
-      process.env.MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS = "6";
+      process.env.CAURA_DEPLOY_FAILURE_COOLDOWN_HOURS = "6";
       assert.equal(__DEPLOY_INTERNALS__.failureCooldownHours(), 6);
-      process.env.MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS = "";
+      process.env.CAURA_DEPLOY_FAILURE_COOLDOWN_HOURS = "";
       assert.equal(__DEPLOY_INTERNALS__.failureCooldownHours(), 24);
-      process.env.MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS = "garbage";
+      process.env.CAURA_DEPLOY_FAILURE_COOLDOWN_HOURS = "garbage";
       assert.equal(__DEPLOY_INTERNALS__.failureCooldownHours(), 24);
-      process.env.MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS = "0";
+      process.env.CAURA_DEPLOY_FAILURE_COOLDOWN_HOURS = "0";
       assert.equal(__DEPLOY_INTERNALS__.failureCooldownHours(), 24);
     } finally {
       if (prev === undefined) {
-        delete process.env.MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS;
+        delete process.env.CAURA_DEPLOY_FAILURE_COOLDOWN_HOURS;
       } else {
-        process.env.MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS = prev;
+        process.env.CAURA_DEPLOY_FAILURE_COOLDOWN_HOURS = prev;
       }
     }
   });
@@ -178,9 +178,9 @@ describe("deploy post-restart verification", () => {
 
 describe("processCommand — restart-after-POST ordering (CAURA-000)", () => {
   // Required env so transport.ts / sendHeartbeat machinery imports cleanly.
-  process.env.MEMCLAW_API_KEY = "mc_test_key_for_processcommand_tests";
-  process.env.MEMCLAW_API_URL = "http://localhost:8000";
-  process.env.MEMCLAW_TENANT_ID = "t_test";
+  process.env.CAURA_API_KEY = "mc_test_key_for_processcommand_tests";
+  process.env.CAURA_API_URL = "http://localhost:8000";
+  process.env.CAURA_TENANT_ID = "t_test";
 
   let originalFetch: typeof fetch;
   let order: string[];

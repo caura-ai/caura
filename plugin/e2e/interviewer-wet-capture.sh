@@ -8,22 +8,22 @@
 # cron runs where possible, schema-introspecting inserts for edge
 # shapes). No appendInterviewEvent calls anywhere in this file.
 #
-# Expects: plugin/ cwd with dist/ built; backend up on MEMCLAW_API_URL;
+# Expects: plugin/ cwd with dist/ built; backend up on CAURA_API_URL;
 # a real ~/.openclaw created by the installed OpenClaw (legacy layout
 # phase A; run again post-upgrade for phase B). TASK_DB points at the
 # discovered task DB for insert helpers.
 set -u
 set -o pipefail
 
-: "${MEMCLAW_API_URL:=http://localhost:8000}"
-: "${MEMCLAW_API_KEY:?set MEMCLAW_API_KEY (admin key)}"
-: "${MEMCLAW_TENANT_ID:=t-wet-capture}"
-: "${MEMCLAW_FLEET_ID:=wet-fleet}"
-: "${MEMCLAW_NODE_NAME:=wet-node-capture}"
+: "${CAURA_API_URL:=http://localhost:8000}"
+: "${CAURA_API_KEY:?set CAURA_API_KEY (admin key)}"
+: "${CAURA_TENANT_ID:=t-wet-capture}"
+: "${CAURA_FLEET_ID:=wet-fleet}"
+: "${CAURA_NODE_NAME:=wet-node-capture}"
 : "${TASK_DB:=$HOME/.openclaw/tasks/runs.sqlite}"
-export MEMCLAW_API_URL MEMCLAW_API_KEY MEMCLAW_TENANT_ID MEMCLAW_FLEET_ID MEMCLAW_NODE_NAME
-export MEMCLAW_INTERVIEWER=true
-unset MEMCLAW_INTERVIEWER_TASKS MEMCLAW_TASK_DB_PATH || true
+export CAURA_API_URL CAURA_API_KEY CAURA_TENANT_ID CAURA_FLEET_ID CAURA_NODE_NAME
+export CAURA_INTERVIEWER=true
+unset CAURA_INTERVIEWER_TASKS CAURA_TASK_DB_PATH || true
 
 H() { node e2e/interviewer-wet.mjs "$@" | tail -1; }
 PASS=0; FAIL=0
@@ -75,12 +75,12 @@ need '.result.synced_tasks' 1 "$R" "terminal event synced on transition"
 W=$(echo "$R" | jq -r '.result.watermark // empty')
 
 say "D1 observability: task capture disabled is a distinct note"
-R=$(MEMCLAW_INTERVIEWER_TASKS=false H tick $((W + 1)))
+R=$(CAURA_INTERVIEWER_TASKS=false H tick $((W + 1)))
 need '.result.synced_tasks' 0 "$R" "no sync when disabled"
-need '.result.task_trail' "task capture disabled (MEMCLAW_INTERVIEWER_TASKS=false)" "$R" "disabled note"
+need '.result.task_trail' "task capture disabled (CAURA_INTERVIEWER_TASKS=false)" "$R" "disabled note"
 
-say "D2 observability: broken MEMCLAW_TASK_DB_PATH names the path"
-R=$(MEMCLAW_TASK_DB_PATH=/nonexistent/tasks.sqlite H tick $((W + 1)))
+say "D2 observability: broken CAURA_TASK_DB_PATH names the path"
+R=$(CAURA_TASK_DB_PATH=/nonexistent/tasks.sqlite H tick $((W + 1)))
 need '.result.synced_tasks' 0 "$R" "no sync on broken override"
 need '.result.task_trail | contains("/nonexistent/tasks.sqlite")' true "$R" "note names the misconfigured path"
 

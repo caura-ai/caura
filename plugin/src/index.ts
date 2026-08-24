@@ -2,7 +2,7 @@
  * Caura OpenClaw Plugin — registration glue.
  *
  * Registers Caura tools (set + order derived from plugin/tools.json
- * via MEMCLAW_TOOLS), gateway methods, prompt section, memory runtime,
+ * via CAURA_TOOLS), gateway methods, prompt section, memory runtime,
  * context engine, and heartbeat loop.
  *
  * All implementation is in separate modules for maintainability:
@@ -15,7 +15,7 @@
  * - deploy.ts       — plugin deployment logic
  * - heartbeat.ts    — heartbeat loop + command processing
  * - educate.ts      — agent education (HEARTBEAT.md writes)
- * - context-engine.ts — MemClawContextEngine lifecycle
+ * - context-engine.ts — CauraContextEngine lifecycle
  * - resolve-agent.ts  — agent identity resolution
  */
 
@@ -25,11 +25,11 @@ import { createHash } from "crypto";
 import { getOpenClawBaseDir, getPluginEnvPath } from "./paths.js";
 
 import {
-  MEMCLAW_API_URL,
-  MEMCLAW_API_KEY,
-  MEMCLAW_FLEET_ID,
-  MEMCLAW_TENANT_ID,
-  MEMCLAW_NODE_NAME,
+  CAURA_API_URL,
+  CAURA_API_KEY,
+  CAURA_FLEET_ID,
+  CAURA_TENANT_ID,
+  CAURA_NODE_NAME,
   ensureTenantId,
   fetchToolDescriptions,
   HEARTBEAT_INTERVAL_MS,
@@ -41,10 +41,10 @@ import {
 import { apiCall, parseSearchItems } from "./transport.js";
 import { PLUGIN_VERSION } from "./version.js";
 import {
-  memclawPromptSectionBuilder,
-  memclawPromptSectionText,
+  cauraPromptSectionBuilder,
+  cauraPromptSectionText,
 } from "./prompt-section.js";
-import { MEMCLAW_TOOLS } from "./tools.js";
+import { CAURA_TOOLS } from "./tools.js";
 import {
   autoFixAllowlist,
   readOpenClawConfig,
@@ -52,10 +52,10 @@ import {
   getPluginDir,
   getPluginSrcPath,
   getMissingTools,
-  isMemclawAllowed,
-  isMemclawEnabled,
-  isMemclawPathLoaded,
-  isMemclawFullyConfigured,
+  isCauraAllowed,
+  isCauraEnabled,
+  isCauraPathLoaded,
+  isCauraFullyConfigured,
   isContextEngineSlotClaimed,
   shouldRunAutoFix,
 } from "./config.js";
@@ -68,7 +68,7 @@ import {
   buildToolsMd,
   buildAgentsMd,
 } from "./educate.js";
-import { MemClawContextEngine } from "./context-engine.js";
+import { CauraContextEngine } from "./context-engine.js";
 import {
   getReachability,
   markReachable,
@@ -148,12 +148,12 @@ const memclawPlugin = {
       sideEffectsBootstrapped = true;
       ensureTenantId()
         .then((tid) => {
-          if (tid && MEMCLAW_NODE_NAME) {
+          if (tid && CAURA_NODE_NAME) {
             setTimeout(() => {
               sendHeartbeat();
               setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
             }, HEARTBEAT_INITIAL_DELAY_MS);
-          } else if (tid && !MEMCLAW_NODE_NAME) {
+          } else if (tid && !CAURA_NODE_NAME) {
             console.warn("[caura] Heartbeat disabled — CAURA_NODE_NAME not set.");
           }
         })
@@ -179,9 +179,9 @@ const memclawPlugin = {
     }
 
     // Register tools from the SoT (plugin/tools.json), in the order
-    // declared by MEMCLAW_TOOLS. The factory pulls name/description from
+    // declared by CAURA_TOOLS. The factory pulls name/description from
     // tools.json; drift between the two sets throws at import time.
-    for (const name of MEMCLAW_TOOLS) {
+    for (const name of CAURA_TOOLS) {
       api.registerTool(createToolFromSpec(name), { names: [name] });
     }
 
@@ -195,16 +195,16 @@ const memclawPlugin = {
         version: PLUGIN_VERSION,
         status: "loaded",
         description: memclawPlugin.description,
-        apiUrl: MEMCLAW_API_URL,
-        fleetId: MEMCLAW_FLEET_ID || null,
-        apiKeyHint: MEMCLAW_API_KEY ? MEMCLAW_API_KEY.slice(0, 6) + "..." : null,
-        tools: MEMCLAW_TOOLS,
-        allowlisted: config ? isMemclawAllowed(config as any) : null,
-        enabled: config ? isMemclawEnabled(config as any) : null,
-        pathLoaded: config ? isMemclawPathLoaded(config as any) : null,
-        fullyConfigured: config ? isMemclawFullyConfigured(config as any) : null,
+        apiUrl: CAURA_API_URL,
+        fleetId: CAURA_FLEET_ID || null,
+        apiKeyHint: CAURA_API_KEY ? CAURA_API_KEY.slice(0, 6) + "..." : null,
+        tools: CAURA_TOOLS,
+        allowlisted: config ? isCauraAllowed(config as any) : null,
+        enabled: config ? isCauraEnabled(config as any) : null,
+        pathLoaded: config ? isCauraPathLoaded(config as any) : null,
+        fullyConfigured: config ? isCauraFullyConfigured(config as any) : null,
         toolsAllowed: config
-          ? MEMCLAW_TOOLS.every(
+          ? CAURA_TOOLS.every(
               (t) =>
                 Array.isArray((config as any)?.tools?.alsoAllow) &&
                 (config as any).tools.alsoAllow.includes(t),
@@ -222,10 +222,10 @@ const memclawPlugin = {
       const allow = (config as any)?.plugins?.allow;
       respond({
         ok: true,
-        allowed: isMemclawAllowed(config as any),
-        enabled: isMemclawEnabled(config as any),
-        pathLoaded: isMemclawPathLoaded(config as any),
-        fullyConfigured: isMemclawFullyConfigured(config as any),
+        allowed: isCauraAllowed(config as any),
+        enabled: isCauraEnabled(config as any),
+        pathLoaded: isCauraPathLoaded(config as any),
+        fullyConfigured: isCauraFullyConfigured(config as any),
         allowList: Array.isArray(allow) ? allow : [],
         path: getOpenClawConfigPath(),
       });
@@ -252,7 +252,7 @@ const memclawPlugin = {
     // Gateway methods are already gated by OpenClaw operator auth, but we add
     // a token check as defense-in-depth (consistent with heartbeat HMAC model).
     api.registerGatewayMethod("memclaw.deploy", ({ respond, params }: any) => {
-      if (MEMCLAW_API_KEY && params?.token !== MEMCLAW_API_KEY) {
+      if (CAURA_API_KEY && params?.token !== CAURA_API_KEY) {
         respond({ ok: false, error: "invalid or missing token" });
         return;
       }
@@ -374,7 +374,7 @@ const memclawPlugin = {
 
     try {
       if (typeof api.registerMemoryPromptSection === "function") {
-        api.registerMemoryPromptSection(memclawPromptSectionBuilder);
+        api.registerMemoryPromptSection(cauraPromptSectionBuilder);
         promptSectionRegistered = true;
       }
     } catch (e: unknown) {
@@ -384,9 +384,9 @@ const memclawPlugin = {
     if (!promptSectionRegistered) {
       try {
         if (typeof api.on === "function") {
-          const fallbackToolSet = new Set(MEMCLAW_TOOLS);
+          const fallbackToolSet = new Set(CAURA_TOOLS);
           api.on("before_prompt_build", async (_event: unknown, _ctx: unknown) => {
-            const text = memclawPromptSectionText(fallbackToolSet);
+            const text = cauraPromptSectionText(fallbackToolSet);
             if (!text) return {};
             return { prependSystemContext: text };
           });
@@ -400,14 +400,14 @@ const memclawPlugin = {
     // Auto-fix allowlist on first registration — claims memory slot, ensures
     // v1.0 tool names are in tools.alsoAllow, and removes stale pre-v1.0 names.
     // Gated by .allowlist-applied flag file (same pattern as .educated above).
-    // Opt-out: MEMCLAW_AUTO_FIX_CONFIG=false skips auto-fix.
-    // Force re-run: MEMCLAW_AUTO_FIX_CONFIG=true ignores the flag file.
+    // Opt-out: CAURA_AUTO_FIX_CONFIG=false skips auto-fix.
+    // Force re-run: CAURA_AUTO_FIX_CONFIG=true ignores the flag file.
     const allowlistFlagPath = join(getPluginDir(), ".allowlist-applied");
     const autoFixEnv = readEnv(["CAURA_AUTO_FIX_CONFIG", "MEMCLAW_AUTO_FIX_CONFIG"]);  // legacy-name-ok: rule 3 dual-read alias
     const flagExists = existsSync(allowlistFlagPath);
     // Read config once to detect drift so auto-fix re-runs even when the
     // one-time flag is already present: a plugin upgrade that ADDS a tool
-    // to MEMCLAW_TOOLS (e.g. caura_keystones) would otherwise never land
+    // to CAURA_TOOLS (e.g. caura_keystones) would otherwise never land
     // in tools.alsoAllow on an existing install, and a later OpenClaw
     // tools.profile (core tools + alsoAllow only) silently strips it.
     // autoFixAllowlist is idempotent (writes only on change), so a clean
@@ -418,7 +418,7 @@ const memclawPlugin = {
       flagExists,
       missingToolCount: preFixConfig
         ? getMissingTools(preFixConfig).length
-        : MEMCLAW_TOOLS.length,
+        : CAURA_TOOLS.length,
       contextEngineSlotClaimed: preFixConfig
         ? isContextEngineSlotClaimed(preFixConfig)
         : false,
@@ -432,7 +432,7 @@ const memclawPlugin = {
         } else if (changed) {
           console.log(
             `[caura] Config auto-fixed: ${changes.join(", ")}. ` +
-            `Restart OpenClaw to activate all ${MEMCLAW_TOOLS.length} tools.`,
+            `Restart OpenClaw to activate all ${CAURA_TOOLS.length} tools.`,
           );
         }
         writeFileSync(
@@ -466,7 +466,7 @@ const memclawPlugin = {
           const missing = getMissingTools(config);
           if (missing.length > 0) {
             console.warn(
-              `[memclaw] WARNING: ${missing.length} of ${MEMCLAW_TOOLS.length} tools not in tools.alsoAllow — ` +
+              `[caura] WARNING: ${missing.length} of ${CAURA_TOOLS.length} tools not in tools.alsoAllow — ` +
               `agents cannot use: ${missing.join(", ")}`,
             );
             console.warn(
@@ -481,7 +481,7 @@ const memclawPlugin = {
               `OpenClaw will fall back to the default "legacy" context engine.`,
             );
             console.warn(
-              `[memclaw] Fix: set plugins.slots.contextEngine to "memclaw" in ~/.openclaw/openclaw.json, ` +
+              `[caura] Fix: set plugins.slots.contextEngine to "memclaw" in ~/.openclaw/openclaw.json, ` +  // legacy-name-ok: "memclaw" is the kept plugin id the user must type
               `or run "openclaw gateway memclaw.allowlist.fix" / set CAURA_AUTO_FIX_CONFIG=true`, // legacy-name-ok: gateway command is namespaced by the frozen plugin id
             );
           }
@@ -622,7 +622,7 @@ const memclawPlugin = {
             // `{manager: null, error}` shape is OpenClaw's typed unreachability
             // channel; the caller surfaces it as a "memory unavailable"
             // result to the model instead of treating empty as success.
-            if (!MEMCLAW_API_URL) {
+            if (!CAURA_API_URL) {
               return {
                 manager: null,
                 error: "Caura plugin unconfigured: CAURA_API_URL not set",
@@ -672,7 +672,7 @@ const memclawPlugin = {
                 const base = {
                   provider: "memclaw",
                   backend: "memclaw-api" as const,
-                  apiUrl: MEMCLAW_API_URL,
+                  apiUrl: CAURA_API_URL,
                 };
                 if (hs.state === "unreachable") {
                   return {
@@ -750,9 +750,9 @@ const memclawPlugin = {
     try {
       if (typeof api.registerContextEngine === "function") {
         api.registerContextEngine("memclaw", (config: Record<string, unknown> | undefined | null) => {
-          return new MemClawContextEngine(config);
+          return new CauraContextEngine(config);
         });
-        console.log("[memclaw] ContextEngine 'memclaw' registered");
+        console.log("[caura] ContextEngine 'memclaw' registered");  // legacy-name-ok: names the kept engine id (info.id)
       }
     } catch (e: unknown) {
       logError("registerContextEngine failed", e);
@@ -773,7 +773,7 @@ const memclawPlugin = {
           ? process.versions.node
           : "unknown";
       console.log(
-        `[memclaw] BOOT: plugin v${PLUGIN_VERSION}, ${MEMCLAW_TOOLS.length} tools registered, node ${nodeVersion}`,
+        `[caura] BOOT: plugin v${PLUGIN_VERSION}, ${CAURA_TOOLS.length} tools registered, node ${nodeVersion}`,
       );
     } catch (e: unknown) {
       // Diagnostic line must never block registration — swallow any

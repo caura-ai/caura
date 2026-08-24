@@ -16,7 +16,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, chmodSync } from "fs";
-import { MEMCLAW_API_URL, MEMCLAW_API_KEY, MEMCLAW_API_PREFIX } from "./env.js";
+import { CAURA_API_URL, CAURA_API_KEY, CAURA_API_PREFIX } from "./env.js";
 import { getSecretsPath } from "./paths.js";
 import { logError } from "./logger.js";
 
@@ -25,7 +25,7 @@ import { logError } from "./logger.js";
 const SECRETS_PATH = getSecretsPath();
 
 // Skip agent auth when no tenant key or running in standalone/OSS mode
-const AGENT_AUTH_ENABLED = Boolean(MEMCLAW_API_KEY);
+const AGENT_AUTH_ENABLED = Boolean(CAURA_API_KEY);
 
 // --- In-memory cache ---
 
@@ -67,12 +67,12 @@ async function provisionAgentKey(
   agentId: string,
 ): Promise<{ raw_key: string; key_prefix: string } | null> {
   try {
-    const url = new URL(`${MEMCLAW_API_PREFIX}/admin/agent-keys/provision`, MEMCLAW_API_URL);
+    const url = new URL(`${CAURA_API_PREFIX}/admin/agent-keys/provision`, CAURA_API_URL);
     const res = await fetch(url.toString(), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-API-Key": MEMCLAW_API_KEY,
+        "X-API-Key": CAURA_API_KEY,
       },
       body: JSON.stringify({ agent_id: agentId }),
       signal: AbortSignal.timeout(10_000),

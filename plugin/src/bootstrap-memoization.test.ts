@@ -1,7 +1,7 @@
 /**
  * Tests for the process-level bootstrap memoization (CAURA-000).
  *
- * Pins the contract that ``MemClawContextEngine.bootstrap()`` runs the
+ * Pins the contract that ``CauraContextEngine.bootstrap()`` runs the
  * smoke test (write → search → delete) AT MOST ONCE per Node process,
  * regardless of how many engine instances OpenClaw constructs. The
  * customer's goodclaw window logged 390 ``ContextEngine bootstrap``
@@ -18,11 +18,11 @@ import assert from "node:assert/strict";
 
 // Set required env before importing the module so resolveTenantId
 // short-circuits without hitting the network.
-process.env.MEMCLAW_API_KEY = "mc_test_key_for_bootstrap_memo";
-process.env.MEMCLAW_API_URL = "http://localhost:8000";
-process.env.MEMCLAW_TENANT_ID = "t_test";
+process.env.CAURA_API_KEY = "mc_test_key_for_bootstrap_memo";
+process.env.CAURA_API_URL = "http://localhost:8000";
+process.env.CAURA_TENANT_ID = "t_test";
 
-const { MemClawContextEngine, _resetBootstrapForTests } = await import(
+const { CauraContextEngine, _resetBootstrapForTests } = await import(
   "./context-engine.js"
 );
 
@@ -115,7 +115,7 @@ function countSmokeWrites(): number {
   ).length;
 }
 
-describe("MemClawContextEngine — process-level bootstrap memoization (CAURA-000)", () => {
+describe("CauraContextEngine — process-level bootstrap memoization (CAURA-000)", () => {
   beforeEach(() => {
     originalFetch = globalThis.fetch;
     calls = [];
@@ -131,8 +131,8 @@ describe("MemClawContextEngine — process-level bootstrap memoization (CAURA-00
   });
 
   test("two engine instances share one smoke test (the headline fix)", async () => {
-    const engine1 = new MemClawContextEngine({ sessionId: "session-a" });
-    const engine2 = new MemClawContextEngine({ sessionId: "session-b" });
+    const engine1 = new CauraContextEngine({ sessionId: "session-a" });
+    const engine2 = new CauraContextEngine({ sessionId: "session-b" });
 
     await engine1.bootstrap();
     await engine2.bootstrap();
@@ -154,7 +154,7 @@ describe("MemClawContextEngine — process-level bootstrap memoization (CAURA-00
     // race-trigger N smoke writes here.
     const engines = Array.from(
       { length: 10 },
-      (_, i) => new MemClawContextEngine({ sessionId: `session-${i}` }),
+      (_, i) => new CauraContextEngine({ sessionId: `session-${i}` }),
     );
     await Promise.all(engines.map((e) => e.bootstrap()));
 
@@ -166,15 +166,15 @@ describe("MemClawContextEngine — process-level bootstrap memoization (CAURA-00
   });
 
   test("after success, subsequent bootstrap() calls are instant no-ops", async () => {
-    const engine = new MemClawContextEngine({ sessionId: "session-a" });
+    const engine = new CauraContextEngine({ sessionId: "session-a" });
     await engine.bootstrap();
     const callsAfterFirst = calls.length;
 
     // Bootstrap again on the same engine + on fresh engines — none should
     // trigger new fetches.
     await engine.bootstrap();
-    await new MemClawContextEngine({ sessionId: "session-b" }).bootstrap();
-    await new MemClawContextEngine({ sessionId: "session-c" }).bootstrap();
+    await new CauraContextEngine({ sessionId: "session-b" }).bootstrap();
+    await new CauraContextEngine({ sessionId: "session-c" }).bootstrap();
 
     assert.equal(
       calls.length,
@@ -202,7 +202,7 @@ describe("MemClawContextEngine — process-level bootstrap memoization (CAURA-00
       return new Response("{}", { status: 200 });
     }) as typeof fetch;
 
-    const engine = new MemClawContextEngine({ sessionId: "sick-backend" });
+    const engine = new CauraContextEngine({ sessionId: "sick-backend" });
     // MUST NOT throw — the smoke is internal-best-effort, lifecycle hooks
     // continue regardless. (Customer ground truth: their 2 SMOKE TEST
     // ERROR log lines on 06-07 13:14/13:22 did NOT prevent subsequent
@@ -211,7 +211,7 @@ describe("MemClawContextEngine — process-level bootstrap memoization (CAURA-00
     // And the memoization holds — second engine doesn't re-fail and
     // re-log; one error per process, not per engine.
     const callsAfterFirst = calls.length;
-    await new MemClawContextEngine({ sessionId: "subsequent" }).bootstrap();
+    await new CauraContextEngine({ sessionId: "subsequent" }).bootstrap();
     assert.equal(
       calls.length,
       callsAfterFirst,

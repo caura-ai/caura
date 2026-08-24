@@ -18,7 +18,7 @@
  */
 import { TOOL_SPECS } from "./tool-specs.js";
 
-export const MEMCLAW_TOOLS = [
+export const CAURA_TOOLS = [
   "caura_recall",
   "caura_write",
   "caura_manage",
@@ -37,7 +37,7 @@ export const MEMCLAW_TOOLS = [
 const exposedInSpec = new Set(
   TOOL_SPECS.filter((t) => t.plugin_exposed).map((t) => t.name),
 );
-const listed = new Set<string>(MEMCLAW_TOOLS);
+const listed = new Set<string>(CAURA_TOOLS);
 
 const missingFromList = [...exposedInSpec].filter((t) => !listed.has(t));
 const extraInList = [...listed].filter((t) => !exposedInSpec.has(t));
@@ -46,12 +46,12 @@ if (missingFromList.length || extraInList.length) {
   const parts: string[] = [];
   if (missingFromList.length) {
     parts.push(
-      `exposed in tools.json but missing from MEMCLAW_TOOLS: ${missingFromList.join(", ")}`,
+      `exposed in tools.json but missing from CAURA_TOOLS: ${missingFromList.join(", ")}`,
     );
   }
   if (extraInList.length) {
     parts.push(
-      `listed in MEMCLAW_TOOLS but not plugin_exposed in tools.json: ${extraInList.join(", ")}`,
+      `listed in CAURA_TOOLS but not plugin_exposed in tools.json: ${extraInList.join(", ")}`,
     );
   }
   throw new Error(`[caura] Tool-surface drift — ${parts.join("; ")}`);

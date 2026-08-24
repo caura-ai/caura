@@ -1,9 +1,9 @@
 """memclaw-interviewer CLI — run / status / hook.
 
 Config precedence: flags > env > defaults. Env vars:
-  MEMCLAW_API_KEY (required)      MEMCLAW_TENANT_ID (required)
-  MEMCLAW_BASE_URL                MEMCLAW_AGENT_ID (default user@host)
-  MEMCLAW_FLEET_ID                MEMCLAW_INTERVIEWER_PROJECTS (comma-sep globs)
+  CAURA_API_KEY (required)      CAURA_TENANT_ID (required)
+  CAURA_BASE_URL                CAURA_AGENT_ID (default user@host)
+  CAURA_FLEET_ID                CAURA_INTERVIEWER_PROJECTS (comma-sep globs)
 
 Exit codes: 0 success / nothing to do; 1 every attempted file failed;
 2 configuration or authorization error. ``hook`` ALWAYS exits 0 — a
@@ -165,7 +165,7 @@ def _deny_guidance(args: argparse.Namespace) -> str:
     lines = [
         "No project allowlist configured - refusing to harvest by default.",
         "Agent transcripts can contain sensitive work across ALL projects;",
-        "opt in explicitly with --projects <glob...>, MEMCLAW_INTERVIEWER_PROJECTS,",
+        "opt in explicitly with --projects <glob...>, CAURA_INTERVIEWER_PROJECTS,",
         "or --all-projects.",
         "",
         "Discovered project dirs:",
@@ -496,7 +496,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     # argparse's choices= only validates values passed on the command line,
     # NOT a default sourced from os.environ — so a bad
-    # MEMCLAW_INTERVIEWER_HARNESS (wrong case "Cursor", a typo) would slip
+    # CAURA_INTERVIEWER_HARNESS (wrong case "Cursor", a typo) would slip
     # through and silently fall back to Claude Code behavior. Fail loudly —
     # but ONLY for run/status: parser.error() exits 2, and `hook` both
     # ignores --harness (it infers from path shape) and must ALWAYS exit 0.

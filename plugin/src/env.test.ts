@@ -10,9 +10,9 @@ import assert from "node:assert/strict";
 
 // Set API key before importing env.ts so resolveTenantId won't early-exit.
 // Must be MEMCLAW_*-prefixed — env.ts only loads those from .env.
-process.env.MEMCLAW_API_KEY = "mc_test_key_for_env_tests";
+process.env.CAURA_API_KEY = "mc_test_key_for_env_tests";
 // Clear tenant id so resolveTenantId actually attempts a fetch.
-delete process.env.MEMCLAW_TENANT_ID;
+delete process.env.CAURA_TENANT_ID;
 
 const { resolveTenantId, readEnv, isPluginEnvKey, hasPluginEnvPrefix } = await import("./env.js");
 
@@ -152,7 +152,7 @@ describe("resolveTenantId — network failure handling", () => {
 //
 // We don't pin defaults via runtime import because other test files in
 // this suite override env vars at their module-load time (e.g.
-// ``keystones.test.ts:26`` sets ``MEMCLAW_KEYSTONES_TOKEN_CAP=120``),
+// ``keystones.test.ts:26`` sets ``CAURA_KEYSTONES_TOKEN_CAP=120``),
 // and ``node --test`` shares process env across files — so any
 // runtime read could see a polluted value. Reading the source TS
 // file's literal value is robust to that, and also documents the
@@ -160,7 +160,7 @@ describe("resolveTenantId — network failure handling", () => {
 // without intent.
 
 describe("env.ts default-value source pins", () => {
-  test("MEMCLAW_KEYSTONES_TOKEN_CAP default literal is 1500 (CAURA-000)", async () => {
+  test("CAURA_KEYSTONES_TOKEN_CAP default literal is 1500 (CAURA-000)", async () => {
     const { readFile } = await import("node:fs/promises");
     const { fileURLToPath } = await import("node:url");
     const { dirname, join } = await import("node:path");
@@ -178,12 +178,12 @@ describe("env.ts default-value source pins", () => {
     const match = envSrc.match(re);
     assert.ok(
       match,
-      "could not locate MEMCLAW_KEYSTONES_TOKEN_CAP _readIntEnv call in env.ts",
+      "could not locate CAURA_KEYSTONES_TOKEN_CAP _readIntEnv call in env.ts",
     );
     assert.equal(
       match![1],
       "1500",
-      "MEMCLAW_KEYSTONES_TOKEN_CAP default must be 1500 — bumped from 500 " +
+      "CAURA_KEYSTONES_TOKEN_CAP default must be 1500 — bumped from 500 " +
         "after CAURA-000 customer with 16 rules saw 4 dropped at every turn. " +
         "If you intend to change it, also update the doc comment in env.ts " +
         "and review the keystones formatter's truncation behavior in " +

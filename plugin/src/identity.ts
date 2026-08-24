@@ -12,7 +12,7 @@
  * stable so historical attribution is preserved.
  *
  * Resolution order:
- *   1. ``MEMCLAW_DISPLAY_NAME_OVERRIDE`` env var — operator's literal
+ *   1. ``CAURA_DISPLAY_NAME_OVERRIDE`` env var — operator's literal
  *      override, used verbatim. Lets users pick a pseudonymous or
  *      branded label, or pin a stable name when their hostname flaps.
  *   2. ``${shortHostname}-${baseName}`` — shortHostname is the first
@@ -69,7 +69,7 @@ export function sanitizeHostname(raw: string): string {
  * Resolution: env-var override → ``${shortHostname}-${baseName}`` →
  * ``baseName``. The hostname source and override env can be passed
  * for tests; production callers omit them and the OS hostname /
- * ``process.env.MEMCLAW_DISPLAY_NAME_OVERRIDE`` are used.
+ * ``process.env.CAURA_DISPLAY_NAME_OVERRIDE`` are used.
  */
 export function getDisplayName(
   baseName: string,

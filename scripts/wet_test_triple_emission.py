@@ -38,7 +38,7 @@ Keys you (the operator) need
 ============================
 * No LLM keys required — triple emission is purely deterministic and
   the contradiction path under test is the *non-LLM* one.
-* ``--api-key`` only needed if your core-api has ``MEMCLAW_API_KEY`` set
+* ``--api-key`` only needed if your core-api has ``CAURA_API_KEY`` set
   (network-exposed deployments). Local docker-compose dev does not.
 """
 

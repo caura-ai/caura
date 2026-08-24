@@ -15,15 +15,15 @@
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
-process.env.MEMCLAW_API_KEY = "mc_test_keystones";
-process.env.MEMCLAW_API_URL = "http://localhost:8000";
-process.env.MEMCLAW_TENANT_ID = "t_keystones_test";
+process.env.CAURA_API_KEY = "mc_test_keystones";
+process.env.CAURA_API_URL = "http://localhost:8000";
+process.env.CAURA_TENANT_ID = "t_keystones_test";
 // Default-on; specific tests flip the flag and re-import the module.
-process.env.MEMCLAW_KEYSTONES_ENABLED = "true";
+process.env.CAURA_KEYSTONES_ENABLED = "true";
 // Cap fits the header (~190 chars) plus a single short rule (~30 chars)
 // + footer (~20 chars). Anything beyond rule #1 (in weight DESC order)
 // must be dropped — that's what the truncation test asserts.
-process.env.MEMCLAW_KEYSTONES_TOKEN_CAP = "120"; // ~480 chars
+process.env.CAURA_KEYSTONES_TOKEN_CAP = "120"; // ~480 chars
 
 const keystones = await import("./keystones.js");
 const { formatKeystones, fetchKeystonesBlock, invalidateKeystoneCache } = keystones;
@@ -179,7 +179,7 @@ describe("fetchKeystonesBlock", () => {
     const url = new URL(ks[0].url);
     assert.equal(url.searchParams.get("agent_id"), null);
     assert.equal(url.searchParams.get("fleet_id"), null);
-    assert.equal(url.searchParams.get("tenant_id"), process.env.MEMCLAW_TENANT_ID);
+    assert.equal(url.searchParams.get("tenant_id"), process.env.CAURA_TENANT_ID);
   });
 
   test("fail-open on network error — returns '' and does not throw", async () => {
@@ -219,10 +219,10 @@ describe("fetchKeystonesBlock", () => {
   });
 });
 
-// NB: ``MEMCLAW_KEYSTONES_ENABLED`` is captured at module-load time in
+// NB: ``CAURA_KEYSTONES_ENABLED`` is captured at module-load time in
 // ``env.ts`` (see ``_readBoolEnv``), so toggling the env var inside a
 // running test would no-op against the already-imported boolean. The
 // kill-switch path is covered indirectly by the env-test suite, which
 // exercises ``_readBoolEnv`` with both literal values. Re-running the
-// integration test with ``MEMCLAW_KEYSTONES_ENABLED=false`` in the
+// integration test with ``CAURA_KEYSTONES_ENABLED=false`` in the
 // shell is the operational verification path.

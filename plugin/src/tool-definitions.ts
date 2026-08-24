@@ -22,8 +22,8 @@
 import { randomUUID } from "crypto";
 import { apiCall, textResult } from "./transport.js";
 import {
-  MEMCLAW_FLEET_ID,
-  MEMCLAW_AGENT_ID,
+  CAURA_FLEET_ID,
+  CAURA_AGENT_ID,
   ensureTenantId,
   getToolDescription,
 } from "./env.js";
@@ -82,7 +82,7 @@ async function enrichBody(
 ): Promise<Record<string, unknown>> {
   const body = { ...params };
   if (!body.tenant_id) body.tenant_id = await ensureTenantId();
-  if (!body.agent_id && MEMCLAW_AGENT_ID) body.agent_id = MEMCLAW_AGENT_ID;
+  if (!body.agent_id && CAURA_AGENT_ID) body.agent_id = CAURA_AGENT_ID;
   // The configured fleet below is a DEFAULT, for callers that did not say
   // which fleet they meant — so it must not override a caller that asked to
   // span every fleet. Three cases deliberately keep it: an omitted ``scope``
@@ -91,7 +91,7 @@ async function enrichBody(
   // ask for), and a caller-supplied ``fleet_id`` — this withholds a default,
   // it never strips a value.
   if (opts.fleetIsReadFilterOnly && body.scope === "all") return body;
-  if (!body.fleet_id && MEMCLAW_FLEET_ID) body.fleet_id = MEMCLAW_FLEET_ID;
+  if (!body.fleet_id && CAURA_FLEET_ID) body.fleet_id = CAURA_FLEET_ID;
   return body;
 }
 
@@ -388,7 +388,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     const body = await enrichBody(params);
     // Write-scoped identity default: never send an empty agent_id, which on the
     // gateway path collapses onto the reserved "main" default. enrichBody set it
-    // from MEMCLAW_AGENT_ID if present; otherwise fall back to a stable
+    // from CAURA_AGENT_ID if present; otherwise fall back to a stable
     // install-scoped id (mirrors resolve-agent.ts step 5). Scoped to writes so
     // read visibility scoping is unchanged.
     if (!body.agent_id) body.agent_id = `main-${getInstallId()}`;

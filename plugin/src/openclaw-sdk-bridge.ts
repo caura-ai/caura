@@ -99,7 +99,7 @@ export interface OpenClawSdkSurface {
  *     we don't recognize (custom symlink farm, vendored tree). The
  *     operator's next step is to check where openclaw lives.
  *
- * Callers (currently just ``MemClawContextEngine.compact()``) branch
+ * Callers (currently just ``CauraContextEngine.compact()``) branch
  * on ``pkgRoot`` to emit a remediation-specific log message instead
  * of a generic "not discoverable" hint that sends operators hunting
  * for a missing install when the real cause is a present-but-broken

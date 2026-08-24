@@ -11,7 +11,7 @@ import {
   discoverAgentWorkspaces,
   cleanupStaleHeartbeatEducation,
 } from "./educate.js";
-import { MEMCLAW_TOOLS } from "./tools.js";
+import { CAURA_TOOLS } from "./tools.js";
 import { MEMORY_TYPES, STATUSES } from "./tool-definitions.js";
 
 // Resolve the shared SKILL.md that ships with the plugin. Tests run from
@@ -1268,8 +1268,8 @@ describe("buildToolsMd", () => {
   test("quick-matrix header uses dynamic tool count", () => {
     const tools = buildToolsMd();
     assert.ok(
-      tools.includes(`### Quick matrix · ${MEMCLAW_TOOLS.length} tools`),
-      `quick matrix header missing dynamic tool count (expected "### Quick matrix · ${MEMCLAW_TOOLS.length} tools")`,
+      tools.includes(`### Quick matrix · ${CAURA_TOOLS.length} tools`),
+      `quick matrix header missing dynamic tool count (expected "### Quick matrix · ${CAURA_TOOLS.length} tools")`,
     );
   });
 

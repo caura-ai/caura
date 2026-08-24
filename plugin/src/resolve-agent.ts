@@ -5,7 +5,7 @@
  *   1. Explicit field from caller (context.agentId, config.agentId)
  *   2. Session key parsing — "agent:AGENT_NAME:CHANNEL:TARGET"
  *   3. Config agent name (config.agentName, config.agent?.name)
- *   4. MEMCLAW_AGENT_ID env var
+ *   4. CAURA_AGENT_ID env var
  *   5. ``main-${installId}`` — install-disambiguated default so two
  *      OpenClaw installs sharing one tenant don't merge their memories
  *      into a single ``(tenant_id, agent_id="main")`` row. Pre-Task6
@@ -13,7 +13,7 @@
  *      with worse semantics.
  */
 
-import { MEMCLAW_AGENT_ID } from "./env.js";
+import { CAURA_AGENT_ID } from "./env.js";
 import { getInstallId } from "./install-id.js";
 
 function resolveAgentIdInner(
@@ -41,13 +41,13 @@ function resolveAgentIdInner(
       return src.agentName as string;
   }
 
-  if (MEMCLAW_AGENT_ID) {
+  if (CAURA_AGENT_ID) {
     if (!quiet) {
       console.warn(
         "[caura] Agent ID resolved from the CAURA_AGENT_ID (legacy: MEMCLAW_AGENT_ID) env var — consider passing agent_id explicitly", // legacy-name-ok: taught as legacy alias
       );
     }
-    return MEMCLAW_AGENT_ID;
+    return CAURA_AGENT_ID;
   }
 
   // Per-install fallback. Was ``"unknown-agent"`` pre-Task6 — every

@@ -301,13 +301,13 @@ class GatewayIntegrationTest:
             content = env_path.read_text()
             self.check(
                 "Plugin .env: has API_URL",
-                "MEMCLAW_API_URL=" in content,
-                "MEMCLAW_API_URL",
+                "CAURA_API_URL=" in content,
+                "CAURA_API_URL",
             )
             self.check(
                 "Plugin .env: has API_KEY",
-                "MEMCLAW_API_KEY=" in content,
-                "MEMCLAW_API_KEY",
+                "CAURA_API_KEY=" in content,
+                "CAURA_API_KEY",
             )
 
     def test_openclaw_config_allowlist(self):
@@ -412,7 +412,7 @@ class GatewayIntegrationTest:
 
         self.check(
             "Gateway log: plugin loaded",
-            "[memclaw]" in log_content,
+            "[caura]" in log_content,
             "searched journalctl + log files",
         )
 
@@ -1071,7 +1071,7 @@ def main():
     parser.add_argument(
         "--node-name",
         required=True,
-        help="Node name (must match the gateway's MEMCLAW_NODE_NAME)",
+        help="Node name (must match the gateway's CAURA_NODE_NAME)",
     )
     parser.add_argument("--fleet-id", default="", help="Fleet ID")
     parser.add_argument(

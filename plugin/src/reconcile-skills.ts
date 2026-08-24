@@ -9,7 +9,7 @@
  *
  * Targets: by default the reconciler converges the plugin's own skills
  * dir (``getPluginDir()/skills``) in ``owned`` mode. Additional targets
- * can be configured via ``MEMCLAW_SKILL_TARGETS`` (see
+ * can be configured via ``CAURA_SKILL_TARGETS`` (see
  * {@link resolveSkillTargets}). Two modes:
  *   - ``owned`` ({@link reconcileOwnedDir}): the dir is fully
  *     Caura-managed; any on-disk skill not in the catalog is pruned
@@ -55,7 +55,7 @@ import {
 import { join, resolve } from "path";
 
 import { apiCall } from "./transport.js";
-import { MEMCLAW_TENANT_ID, MEMCLAW_FLEET_ID, readEnv } from "./env.js";  // legacy-name-ok: rule 3 dual-read alias
+import { CAURA_TENANT_ID, CAURA_FLEET_ID, readEnv } from "./env.js";
 import { getPluginDir, ensureExtraSkillDirs } from "./config.js";
 import { logError } from "./logger.js";
 
@@ -83,7 +83,7 @@ const OWNED_MARKER_BODY =
   "Do not edit by hand — it is overwritten/removed to match the catalog.\n";
 
 /** True if ``skillDir`` carries the Caura ownership marker. */
-function isMemclawOwned(skillDir: string): boolean {
+function isCauraOwned(skillDir: string): boolean {
   return existsSync(join(skillDir, OWNED_MARKER));
 }
 
@@ -173,7 +173,7 @@ function ownedSkillsDir(): string {
  * Resolve the target dirs to reconcile this tick.
  *
  * Always includes the plugin's owned dir (``owned`` mode). Additional
- * targets come from the ``MEMCLAW_SKILL_TARGETS`` env var — a JSON array
+ * targets come from the ``CAURA_SKILL_TARGETS`` env var — a JSON array
  * of ``{ dir, mode }``. Read at call time (``env.ts`` has already loaded
  * ``.env`` into ``process.env`` at import). The parse fails safe: invalid
  * JSON, a non-array value, or a malformed entry is logged and ignored so
@@ -198,29 +198,29 @@ export function resolveSkillTargets(): SkillTarget[] {
   try {
     parsed = JSON.parse(raw);
   } catch (e: unknown) {
-    logError("resolveSkillTargets: MEMCLAW_SKILL_TARGETS is not valid JSON; ignoring", e);
+    logError("resolveSkillTargets: CAURA_SKILL_TARGETS is not valid JSON; ignoring", e);
     return targets;
   }
   if (!Array.isArray(parsed)) {
-    console.warn("[memclaw] MEMCLAW_SKILL_TARGETS must be a JSON array; ignoring");
+    console.warn("[caura] CAURA_SKILL_TARGETS must be a JSON array; ignoring");
     return targets;
   }
 
   const seen = new Set<string>([ownedDir]);
   for (const entry of parsed) {
     if (!entry || typeof entry !== "object") {
-      console.warn("[memclaw] MEMCLAW_SKILL_TARGETS: skipping non-object entry");
+      console.warn("[caura] CAURA_SKILL_TARGETS: skipping non-object entry");
       continue;
     }
     const dir = (entry as { dir?: unknown }).dir;
     const mode = (entry as { mode?: unknown }).mode;
     const register = (entry as { register?: unknown }).register === true;
     if (typeof dir !== "string" || !dir.trim()) {
-      console.warn("[memclaw] MEMCLAW_SKILL_TARGETS: entry missing string 'dir'; skipping");
+      console.warn("[caura] CAURA_SKILL_TARGETS: entry missing string 'dir'; skipping");
       continue;
     }
     if (mode !== "owned" && mode !== "additive") {
-      console.warn(`[memclaw] MEMCLAW_SKILL_TARGETS: entry ${dir} has invalid mode ${String(mode)}; skipping`);
+      console.warn(`[caura] CAURA_SKILL_TARGETS: entry ${dir} has invalid mode ${String(mode)}; skipping`);
       continue;
     }
     const normalized = resolve(dir);
@@ -230,7 +230,7 @@ export function resolveSkillTargets(): SkillTarget[] {
     const parts = normalized.split("/").filter(Boolean);
     if (parts.length < 2) {
       console.warn(
-        `[memclaw] MEMCLAW_SKILL_TARGETS: entry dir ${normalized} is too shallow; skipping`,
+        `[caura] CAURA_SKILL_TARGETS: entry dir ${normalized} is too shallow; skipping`,
       );
       continue;
     }
@@ -413,7 +413,7 @@ function reconcileAdditiveDir(
     // "memclaw" dir (no marker) is the client's, not ours — ignore it
     // rather than misreport it as a Caura-protected skill. An OWNED
     // protected dir still survives via the protected check below.
-    if (!isMemclawOwned(join(skillsRoot, slug))) continue; // foreign — leave alone
+    if (!isCauraOwned(join(skillsRoot, slug))) continue; // foreign — leave alone
     if (PROTECTED_SKILLS.has(slug)) {
       result.protected.push(slug);
       continue;
@@ -435,7 +435,7 @@ function reconcileAdditiveDir(
   // of a desired slug is never "ours" and is reported as a collision.)
   const installedSet = new Set<string>(
     [...onDisk].filter(
-      (s) => desired.has(s) && isMemclawOwned(join(skillsRoot, s)),
+      (s) => desired.has(s) && isCauraOwned(join(skillsRoot, s)),
     ),
   );
 
@@ -451,7 +451,7 @@ function reconcileAdditiveDir(
     // non-recursive ``mkdirSync`` below provides the actual atomic guard
     // via EEXIST.
     const dirExistsNow = existsSync(skillDir);
-    if (dirExistsNow && !isMemclawOwned(skillDir)) {
+    if (dirExistsNow && !isCauraOwned(skillDir)) {
       result.collisions.push(slug);
       console.warn(
         `[caura] additive: ${slug} is occupied by an unowned skill in ` +
@@ -483,7 +483,7 @@ function reconcileAdditiveDir(
         if ((mkdirErr as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirErr;
         // Dir raced into existence after our existsSync check — re-verify
         // ownership before touching it; a foreign winner is a collision.
-        if (!isMemclawOwned(skillDir)) {
+        if (!isCauraOwned(skillDir)) {
           result.collisions.push(slug);
           console.warn(
             `[caura] additive: ${slug} collision (post-existsSync race in ${skillsRoot}); skipping`,
@@ -531,7 +531,7 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
     registeredDirs: [],
   };
 
-  if (!MEMCLAW_TENANT_ID) {
+  if (!CAURA_TENANT_ID) {
     // No tenant resolved — heartbeat already short-circuits in this
     // case, but the reconciler is called independently in tests.
     return summary;
@@ -549,8 +549,8 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
       "POST",
       "/skills/installable",
       {
-        tenant_id: MEMCLAW_TENANT_ID,
-        fleet_id: MEMCLAW_FLEET_ID || undefined,
+        tenant_id: CAURA_TENANT_ID,
+        fleet_id: CAURA_FLEET_ID || undefined,
         limit: 1000,
       },
     )) as { documents?: CatalogDoc[] } | CatalogDoc[];

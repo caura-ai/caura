@@ -70,7 +70,7 @@ let _unsignedWarned = false;
  *
  * The OSS server doesn't sign commands — signing is reserved for
  * enterprise gateways that proxy commands through a signing layer.
- * Defaulting to "fail closed when MEMCLAW_API_KEY is set" (the prior
+ * Defaulting to "fail closed when CAURA_API_KEY is set" (the prior
  * behavior) silently broke every fleet command (educate / deploy /
  * install_skill / uninstall_skill) on every OSS install with auth on,
  * because the secret used for tenant auth is not a command-signing
@@ -115,7 +115,7 @@ export function verifyCommandSignature(
     }
     // Permissive (default): server-side command-signing is opt-in
     // infra; reject only when the operator has explicitly demanded it
-    // via MEMCLAW_REQUIRE_SIGNED_COMMANDS=true. Warn once so the gap
+    // via CAURA_REQUIRE_SIGNED_COMMANDS=true. Warn once so the gap
     // is visible without flooding logs every 60s heartbeat.
     if (!_unsignedWarned) {
       console.warn(

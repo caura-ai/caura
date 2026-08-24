@@ -5,7 +5,7 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join, resolve } from "path";
 import { homedir } from "os";
-import { MEMCLAW_TOOLS } from "./tools.js";
+import { CAURA_TOOLS } from "./tools.js";
 import { getPluginDir, getOpenClawConfigPath } from "./paths.js";
 import { logError } from "./logger.js";
 
@@ -49,7 +49,7 @@ export function readOpenClawConfig(): Record<string, unknown> | null {
 // that varies by version and cannot be statically typed here.
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-export function isMemclawAllowed(config: Record<string, any>): boolean {
+export function isCauraAllowed(config: Record<string, any>): boolean {
   const allow = config?.plugins?.allow;
   // CAURA-000: `plugins.allow` in OpenClaw 2026.6.x is a STRICT
   // allowlist only when it is BOTH present AND non-empty. The runtime
@@ -74,11 +74,11 @@ export function isMemclawAllowed(config: Record<string, any>): boolean {
   return allow.includes(PLUGIN_ID);
 }
 
-export function isMemclawEnabled(config: Record<string, any>): boolean {
+export function isCauraEnabled(config: Record<string, any>): boolean {
   return !!config?.plugins?.entries?.[PLUGIN_ID]?.enabled;
 }
 
-export function isMemclawPathLoaded(config: Record<string, any>): boolean {
+export function isCauraPathLoaded(config: Record<string, any>): boolean {
   const paths = config?.plugins?.load?.paths;
   const pluginDir = getPluginDir();
   return Array.isArray(paths) && paths.includes(pluginDir);
@@ -109,11 +109,11 @@ export function isContextEngineSlotClaimed(config: Record<string, any>): boolean
   return config?.plugins?.slots?.contextEngine === PLUGIN_ID;
 }
 
-export function isMemclawFullyConfigured(config: Record<string, any>): boolean {
+export function isCauraFullyConfigured(config: Record<string, any>): boolean {
   return (
-    isMemclawAllowed(config) &&
-    isMemclawEnabled(config) &&
-    isMemclawPathLoaded(config) &&
+    isCauraAllowed(config) &&
+    isCauraEnabled(config) &&
+    isCauraPathLoaded(config) &&
     isMemorySlotClaimed(config) &&
     isContextEngineSlotClaimed(config)
   );
@@ -145,7 +145,7 @@ export function autoFixAllowlist(options?: {
   //    into a restrictive one that locked out every other plugin
   //    (the customer's "openai disabled after 2.8.1 install"
   //    symptom). The runtime gate treats missing/empty allow as
-  //    "no restriction" — see `isMemclawAllowed` docstring for the
+  //    "no restriction" — see `isCauraAllowed` docstring for the
   //    OpenClaw-side gate evidence.
   //
   //    So the fix is: leave a missing/empty allowlist alone; only
@@ -162,7 +162,7 @@ export function autoFixAllowlist(options?: {
   }
 
   // 2. Ensure memclaw is enabled in plugins.entries
-  if (!isMemclawEnabled(config)) {
+  if (!isCauraEnabled(config)) {
     if (!config.plugins) config.plugins = {};
     if (!config.plugins.entries) config.plugins.entries = {};
     config.plugins.entries[PLUGIN_ID] = { enabled: true };
@@ -170,7 +170,7 @@ export function autoFixAllowlist(options?: {
   }
 
   // 3. Ensure plugin path is in plugins.load.paths
-  if (!isMemclawPathLoaded(config)) {
+  if (!isCauraPathLoaded(config)) {
     if (!config.plugins) config.plugins = {};
     if (!config.plugins.load) config.plugins.load = {};
     if (!Array.isArray(config.plugins.load.paths))
@@ -244,7 +244,7 @@ export function autoFixAllowlist(options?: {
   // 5. Ensure tools are in tools.alsoAllow
   if (!config.tools) config.tools = {};
   if (!Array.isArray(config.tools.alsoAllow)) config.tools.alsoAllow = [];
-  for (const t of MEMCLAW_TOOLS) {
+  for (const t of CAURA_TOOLS) {
     if (!config.tools.alsoAllow.includes(t)) {
       config.tools.alsoAllow.push(t);
       changes.push(t);
@@ -253,7 +253,7 @@ export function autoFixAllowlist(options?: {
 
   // 6. Remove stale pre-v1.0 tool names that no longer match any registered tool
   const staleRemoved: string[] = [];
-  const currentToolSet = new Set<string>(MEMCLAW_TOOLS);
+  const currentToolSet = new Set<string>(CAURA_TOOLS);
   config.tools.alsoAllow = config.tools.alsoAllow.filter((entry: string) => {
     if (entry.startsWith("memclaw_") && !currentToolSet.has(entry)) {
       staleRemoved.push(entry);
@@ -282,8 +282,8 @@ export function autoFixAllowlist(options?: {
 
 export function getMissingTools(config: Record<string, any>): string[] {
   const alsoAllow = config?.tools?.alsoAllow;
-  if (!Array.isArray(alsoAllow)) return [...MEMCLAW_TOOLS];
-  return MEMCLAW_TOOLS.filter((t) => !alsoAllow.includes(t));
+  if (!Array.isArray(alsoAllow)) return [...CAURA_TOOLS];
+  return CAURA_TOOLS.filter((t) => !alsoAllow.includes(t));
 }
 
 /**
@@ -291,7 +291,7 @@ export function getMissingTools(config: Record<string, any>): string[] {
  *
  * Pure so it can be unit-tested. The original gate ran auto-fix exactly
  * once (guarded by the ``.allowlist-applied`` flag file), which meant a
- * plugin upgrade that ADDED a tool to ``MEMCLAW_TOOLS`` (e.g.
+ * plugin upgrade that ADDED a tool to ``CAURA_TOOLS`` (e.g.
  * ``caura_keystones``) never got that tool into ``tools.alsoAllow`` on
  * an existing install — so a later OpenClaw ``tools.profile`` (which only
  * grants core tools + ``alsoAllow``) silently stripped it. We now also
@@ -299,8 +299,8 @@ export function getMissingTools(config: Record<string, any>): string[] {
  * slot. ``autoFixAllowlist`` is idempotent (writes only on change) so a
  * clean install with the flag present still no-ops.
  *
- *   - ``MEMCLAW_AUTO_FIX_CONFIG=true``  → always run (explicit force).
- *   - ``MEMCLAW_AUTO_FIX_CONFIG=false`` → never run (explicit opt-out).
+ *   - ``CAURA_AUTO_FIX_CONFIG=true``  → always run (explicit force).
+ *   - ``CAURA_AUTO_FIX_CONFIG=false`` → never run (explicit opt-out).
  *   - unset → run on first registration (no flag) OR when drift exists.
  */
 export function shouldRunAutoFix(params: {

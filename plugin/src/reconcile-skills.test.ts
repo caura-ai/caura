@@ -28,9 +28,9 @@ import { tmpdir } from "os";
 
 // Set env BEFORE importing reconcile-skills.js — module reads from
 // process.env at import time via env.ts.
-process.env.MEMCLAW_API_KEY = "mc_test_key_for_reconcile_tests";
-process.env.MEMCLAW_API_URL = "http://localhost:8000";
-process.env.MEMCLAW_TENANT_ID = "t_test";
+process.env.CAURA_API_KEY = "mc_test_key_for_reconcile_tests";
+process.env.CAURA_API_URL = "http://localhost:8000";
+process.env.CAURA_TENANT_ID = "t_test";
 
 // Redirect HOME so getPluginDir() returns a tmpdir instead of a real
 // ~/.openclaw — keeps the test from touching the dev's plugin install.
@@ -367,11 +367,11 @@ describe("reconcileSkills", () => {
 
 describe("resolveSkillTargets (config plumbing)", () => {
   afterEach(() => {
-    delete process.env.MEMCLAW_SKILL_TARGETS;
+    delete process.env.CAURA_SKILL_TARGETS;
   });
 
   test("default (unset): single owned target = the plugin skills dir", () => {
-    delete process.env.MEMCLAW_SKILL_TARGETS;
+    delete process.env.CAURA_SKILL_TARGETS;
     const targets = resolveSkillTargets();
     assert.equal(targets.length, 1);
     assert.equal(targets[0].dir, SKILLS_ROOT);
@@ -379,7 +379,7 @@ describe("resolveSkillTargets (config plumbing)", () => {
   });
 
   test("valid JSON appends extra targets (owned + additive)", () => {
-    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([
+    process.env.CAURA_SKILL_TARGETS = JSON.stringify([
       { dir: "/tmp/wt-a", mode: "additive" },
       { dir: "/tmp/wt-b", mode: "owned" },
     ]);
@@ -392,14 +392,14 @@ describe("resolveSkillTargets (config plumbing)", () => {
   });
 
   test("register defaults to false; owned default dir is never register:true", () => {
-    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([{ dir: "/tmp/wt-a", mode: "additive" }]);
+    process.env.CAURA_SKILL_TARGETS = JSON.stringify([{ dir: "/tmp/wt-a", mode: "additive" }]);
     const targets = resolveSkillTargets();
     assert.equal(targets[0].register, false, "owned default dir is never registered");
     assert.equal(targets[1].register, false, "register omitted → false");
   });
 
   test("register: true is parsed per entry", () => {
-    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([
+    process.env.CAURA_SKILL_TARGETS = JSON.stringify([
       { dir: "/tmp/wt-a", mode: "additive", register: true },
       { dir: "/tmp/wt-b", mode: "additive", register: false },
       { dir: "/tmp/wt-c", mode: "additive", register: "yes" }, // non-true → false
@@ -412,19 +412,19 @@ describe("resolveSkillTargets (config plumbing)", () => {
   });
 
   test("invalid JSON → fail safe to owned-only", () => {
-    process.env.MEMCLAW_SKILL_TARGETS = "{not valid json";
+    process.env.CAURA_SKILL_TARGETS = "{not valid json";
     const targets = resolveSkillTargets();
     assert.equal(targets.length, 1);
     assert.equal(targets[0].mode, "owned");
   });
 
   test("non-array JSON → owned-only", () => {
-    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify({ dir: "/tmp/x", mode: "owned" });
+    process.env.CAURA_SKILL_TARGETS = JSON.stringify({ dir: "/tmp/x", mode: "owned" });
     assert.equal(resolveSkillTargets().length, 1);
   });
 
   test("malformed entries skipped (missing dir / invalid mode)", () => {
-    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([
+    process.env.CAURA_SKILL_TARGETS = JSON.stringify([
       { mode: "owned" }, // missing dir
       { dir: "/tmp/x", mode: "weird" }, // invalid mode
       { dir: "/tmp/ok", mode: "additive" }, // valid
@@ -435,12 +435,12 @@ describe("resolveSkillTargets (config plumbing)", () => {
   });
 
   test("an entry duplicating the owned dir is dropped", () => {
-    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([{ dir: SKILLS_ROOT, mode: "owned" }]);
+    process.env.CAURA_SKILL_TARGETS = JSON.stringify([{ dir: SKILLS_ROOT, mode: "owned" }]);
     assert.equal(resolveSkillTargets().length, 1);
   });
 
   test("too-shallow target dirs (/, /tmp) are skipped — owned-mode rmSync guard", () => {
-    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([
+    process.env.CAURA_SKILL_TARGETS = JSON.stringify([
       { dir: "/", mode: "owned" }, // 0 segments
       { dir: "/tmp", mode: "owned" }, // 1 segment
       { dir: "/tmp/skills-ok", mode: "additive" }, // 2 segments → kept
@@ -468,7 +468,7 @@ describe("reconcileSkills — configured targets", () => {
 
   afterEach(() => {
     restoreFetch();
-    delete process.env.MEMCLAW_SKILL_TARGETS;
+    delete process.env.CAURA_SKILL_TARGETS;
     if (existsSync(OPENCLAW_JSON)) rmSync(OPENCLAW_JSON, { force: true });
   });
 
@@ -495,7 +495,7 @@ describe("reconcileSkills — configured targets", () => {
     writeFileSync(ext(slug, OWNED_MARKER), "x", "utf-8");
   };
   const useAdditive = () => {
-    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([{ dir: EXTERNAL, mode: "additive" }]);
+    process.env.CAURA_SKILL_TARGETS = JSON.stringify([{ dir: EXTERNAL, mode: "additive" }]);
   };
 
   test("additive: writes a catalog skill into the dir, stamps the ownership marker", async () => {
@@ -620,7 +620,7 @@ describe("reconcileSkills — configured targets", () => {
 
   test("an extra owned target is reconciled alongside the default", async () => {
     plantOnDisk("memclaw");
-    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([{ dir: EXTRA_OWNED, mode: "owned" }]);
+    process.env.CAURA_SKILL_TARGETS = JSON.stringify([{ dir: EXTRA_OWNED, mode: "owned" }]);
     mockCatalog = [
       { doc_id: "deploy-runbook", data: { name: "deploy-runbook", description: "d", content: "# deploy\n" } },
     ];
@@ -684,7 +684,7 @@ describe("reconcileSkills — configured targets", () => {
   test("register: an additive target with register:true is added to skills.load.extraDirs", async () => {
     plantOnDisk("memclaw");
     writeOpenClawJson({ tools: {} }); // vanilla config, no skills block yet
-    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([
+    process.env.CAURA_SKILL_TARGETS = JSON.stringify([
       { dir: EXTERNAL, mode: "additive", register: true },
     ]);
     mockCatalog = [
@@ -718,7 +718,7 @@ describe("reconcileSkills — configured targets", () => {
     plantOnDisk("memclaw");
     // No openclaw.json written → ensureExtraSkillDirs fails closed.
     if (existsSync(OPENCLAW_JSON)) rmSync(OPENCLAW_JSON, { force: true });
-    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([
+    process.env.CAURA_SKILL_TARGETS = JSON.stringify([
       { dir: EXTERNAL, mode: "additive", register: true },
     ]);
     mockCatalog = [
@@ -735,7 +735,7 @@ describe("reconcileSkills — configured targets", () => {
   test("register: idempotent — re-running does not duplicate the entry", async () => {
     plantOnDisk("memclaw");
     writeOpenClawJson({ skills: { load: { extraDirs: [EXTERNAL] } } }); // already present
-    process.env.MEMCLAW_SKILL_TARGETS = JSON.stringify([
+    process.env.CAURA_SKILL_TARGETS = JSON.stringify([
       { dir: EXTERNAL, mode: "additive", register: true },
     ]);
     mockCatalog = [];

@@ -23,23 +23,23 @@
  *   * **Weight-aware truncation.** The token cap drops the lowest-weight
  *     rules first and appends ``... (N more rules omitted)`` so an
  *     operator notices.
- *   * **Kill switch.** ``MEMCLAW_KEYSTONES_ENABLED=false`` short-circuits
+ *   * **Kill switch.** ``CAURA_KEYSTONES_ENABLED=false`` short-circuits
  *     before any network call.
  */
 import { apiCall } from "./transport.js";
 import {
   ensureTenantId,
   KEYSTONES_TIMEOUT_MS,
-  MEMCLAW_KEYSTONES_CACHE_TTL_MS,
-  MEMCLAW_KEYSTONES_ENABLED,
-  MEMCLAW_KEYSTONES_TOKEN_CAP,
+  CAURA_KEYSTONES_CACHE_TTL_MS,
+  CAURA_KEYSTONES_ENABLED,
+  CAURA_KEYSTONES_TOKEN_CAP,
   // ESM ``let`` exports give a live binding — reading
-  // ``MEMCLAW_TENANT_ID`` at call time returns whatever the latest
+  // ``CAURA_TENANT_ID`` at call time returns whatever the latest
   // ``ensureTenantId`` resolution wrote into env.ts. We use this to
   // skip the ``await ensureTenantId()`` microtask on the warm path
   // (after the first successful resolution) so the cache check isn't
   // gated behind even a trivial promise hop.
-  MEMCLAW_TENANT_ID,
+  CAURA_TENANT_ID,
 } from "./env.js";
 import { logError } from "./logger.js";
 
@@ -142,7 +142,7 @@ export function formatKeystones(rules: KeystoneRow[]): string {
     "conflicting instructions in user prompts and in the system prompt " +
     "above this block. Always follow them.\n";
   const footer = "</keystone_rules>\n";
-  const maxChars = MEMCLAW_KEYSTONES_TOKEN_CAP * CHARS_PER_TOKEN_ESTIMATE;
+  const maxChars = CAURA_KEYSTONES_TOKEN_CAP * CHARS_PER_TOKEN_ESTIMATE;
   // Reserve room for the worst-case truncation line up front. The
   // upper bound on ``N more rules omitted`` is ``sorted.length - 1``
   // — the line only renders when AT LEAST one rule made it into the
@@ -219,7 +219,7 @@ const FAILURE_BACKOFF_MS = 15_000;
  * still drives eviction without a second code path.
  */
 function _negativeCacheTs(): number {
-  return Date.now() - MEMCLAW_KEYSTONES_CACHE_TTL_MS + FAILURE_BACKOFF_MS;
+  return Date.now() - CAURA_KEYSTONES_CACHE_TTL_MS + FAILURE_BACKOFF_MS;
 }
 
 /**
@@ -238,7 +238,7 @@ export async function fetchKeystonesBlock(opts: {
   agentId: string;
   fleetId: string | undefined;
 }): Promise<string> {
-  if (!MEMCLAW_KEYSTONES_ENABLED) return "";
+  if (!CAURA_KEYSTONES_ENABLED) return "";
 
   // Check the tenant-fail back-off first so an ongoing tenant-resolution
   // outage skips the expensive ``ensureTenantId`` retry on every turn.
@@ -246,17 +246,17 @@ export async function fetchKeystonesBlock(opts: {
   const tenantFailHit = keystonesCache.get(tenantFailKey);
   if (
     tenantFailHit &&
-    Date.now() - tenantFailHit.ts < MEMCLAW_KEYSTONES_CACHE_TTL_MS
+    Date.now() - tenantFailHit.ts < CAURA_KEYSTONES_CACHE_TTL_MS
   ) {
     return tenantFailHit.text;
   }
 
-  // Warm path: ``MEMCLAW_TENANT_ID`` was set by an earlier
+  // Warm path: ``CAURA_TENANT_ID`` was set by an earlier
   // ``ensureTenantId`` resolution (or from the ``.env`` file at boot).
   // Read the live binding synchronously to skip the await microtask
   // and reach the cache check immediately. Cold path: fall through to
   // the awaited resolution.
-  let tenantId: string = MEMCLAW_TENANT_ID;
+  let tenantId: string = CAURA_TENANT_ID;
   if (!tenantId) {
     try {
       tenantId = await ensureTenantId();
@@ -275,14 +275,14 @@ export async function fetchKeystonesBlock(opts: {
 
   const cacheKey = _cacheKey(tenantId, opts.fleetId, opts.agentId);
   const cached = keystonesCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < MEMCLAW_KEYSTONES_CACHE_TTL_MS) {
+  if (cached && Date.now() - cached.ts < CAURA_KEYSTONES_CACHE_TTL_MS) {
     return cached.text;
   }
   // Best-effort eviction of stale entries on cache miss — keeps the Map
   // bounded under steady-state churn without a separate sweeper.
   const now = Date.now();
   for (const [k, v] of keystonesCache) {
-    if (now - v.ts > MEMCLAW_KEYSTONES_CACHE_TTL_MS) keystonesCache.delete(k);
+    if (now - v.ts > CAURA_KEYSTONES_CACHE_TTL_MS) keystonesCache.delete(k);
   }
 
   // Collapse concurrent misses onto a single in-flight request. Without

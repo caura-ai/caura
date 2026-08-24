@@ -11,7 +11,7 @@ Pins:
 - the allowlist — values outside the org-membership model are dropped
   (a smuggled third role must never reach ``== "admin"`` gates),
 - absent header → ``org_role is None`` (pre-rollout gateways),
-- the MEMCLAW_API_KEY path (Path 2) ignores the header — API-key
+- the CAURA_API_KEY path (Path 2) ignores the header — API-key
   callers must NOT gain inbox-action rights from a spoofable header,
 - end-to-end: a gateway-shaped request opens the Skills Inbox admin
   gate with the role and is 403'd without it.

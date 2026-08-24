@@ -156,7 +156,7 @@ def _validate_production_settings(app_settings) -> None:  # type: ignore[no-unty
         raise RuntimeError("ADMIN_API_KEY must be set for production")
     if not app_settings.gateway_shared_secret and not app_settings.memclaw_api_key:
         # What production actually requires is A PERIMETER — not specifically the
-        # gateway one. ``MEMCLAW_API_KEY`` is the other way to have one: when it
+        # gateway one. ``CAURA_API_KEY`` is the other way to have one: when it
         # is set, auth.py's "Path 2" either authenticates the request against
         # that key or raises 401 for everything else, so "Path 4" below it is
         # UNREACHABLE and there is no header-trust surface left to protect. That

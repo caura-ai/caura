@@ -41,7 +41,7 @@ import { getOpenClawBaseDir, getPluginDir } from "./paths.js";
 import {
   INTERVIEW_TASK_SYNC_MAX_PER_TICK,
   INTERVIEW_TASK_SIDECAR_RETENTION_MS,
-  MEMCLAW_TASK_DB_PATH,
+  CAURA_TASK_DB_PATH,
 } from "./env.js";
 
 // ---------------------------------------------------------------------------
@@ -131,7 +131,7 @@ export const __TASK_TRAIL_INTERNALS__ = {
 };
 
 function taskDbPathOverride(): string {
-  return _taskDbPathOverride ?? MEMCLAW_TASK_DB_PATH;
+  return _taskDbPathOverride ?? CAURA_TASK_DB_PATH;
 }
 
 function baseDir(): string {
@@ -229,7 +229,7 @@ function hasTaskRunsTable(db: SqliteDb): boolean {
  * multi-source safe (rows migrated into the new DB de-dup as already
  * seen), and the shallow scan is a trivial hourly readdir.
  *
- * ``MEMCLAW_TASK_DB_PATH`` remains an exclusive operator override.
+ * ``CAURA_TASK_DB_PATH`` remains an exclusive operator override.
  */
 function discoverTaskDbs(sqlite: SqliteModule): string[] {
   const tryPath = (p: string): boolean => {
@@ -407,7 +407,7 @@ export async function syncTaskTrail(): Promise<TaskSyncResult> {
       // sends the operator hunting in the wrong place.
       const overridePath = taskDbPathOverride();
       const note = overridePath
-        ? `task-db-unavailable: MEMCLAW_TASK_DB_PATH=${overridePath} has no task_runs table`
+        ? `task-db-unavailable: CAURA_TASK_DB_PATH=${overridePath} has no task_runs table`
         : "task-db-unavailable: no task_runs database found";
       return { synced: 0, note };
     }

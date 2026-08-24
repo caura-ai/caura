@@ -7,16 +7,16 @@
  * OpenClaw runtime via ``openclaw-sdk-bridge``).
  *
  * Security:
- * - afterTurn enabled by default; opt out with MEMCLAW_AUTO_WRITE_TURNS=false
+ * - afterTurn enabled by default; opt out with CAURA_AUTO_WRITE_TURNS=false
  * - Recall timeout enforced via AbortController
  */
 
 import { createHash } from "crypto";
 import { apiCall, parseSearchItems } from "./transport.js";
 import {
-  MEMCLAW_FLEET_ID,
-  MEMCLAW_TENANT_ID,
-  MEMCLAW_AUTO_WRITE_TURNS,
+  CAURA_FLEET_ID,
+  CAURA_TENANT_ID,
+  CAURA_AUTO_WRITE_TURNS,
   ensureTenantId,
   RECALL_CACHE_TTL_MS,
   RECALL_TIMEOUT_MS,
@@ -30,13 +30,13 @@ import {
   RECALL_MACHINE_PATTERNS,
   RECALL_GATE_MODE,
   RECALL_CROSS_AGENT,
-  MEMCLAW_INTERVIEWER,
+  CAURA_INTERVIEWER,
   type RecallPolicy,
   readEnv,
 } from "./env.js";
 import { appendInterviewEvent } from "./interview-buffer.js";
-import { memclawPromptSectionText } from "./prompt-section.js";
-import { MEMCLAW_TOOLS } from "./tools.js";
+import { cauraPromptSectionText } from "./prompt-section.js";
+import { CAURA_TOOLS } from "./tools.js";
 import { resolveAgentId, resolveAgentIdQuiet } from "./resolve-agent.js";
 import { getTenantPrefix, getSessionKey } from "./context-engine.internal.js";
 import { logError, logErrorCritical } from "./logger.js";
@@ -485,7 +485,7 @@ const recallCache = new Map<string, { text: string; ts: number }>();
 
 // --- ContextEngine class ---
 
-export class MemClawContextEngine {
+export class CauraContextEngine {
   private config: Record<string, unknown>;
 
   /**
@@ -556,7 +556,7 @@ export class MemClawContextEngine {
     const bootAgentId = resolveAgentIdQuiet(this.config);
     console.log(
       `[caura] ContextEngine bootstrap: agent=${bootAgentId}, ` +
-        `fleet=${MEMCLAW_FLEET_ID || "(unset)"}, ` +
+        `fleet=${CAURA_FLEET_ID || "(unset)"}, ` +
         `config keys=${Object.keys(this.config || {}).join(",") || "(empty)"}`,
     );
 
@@ -648,7 +648,7 @@ export class MemClawContextEngine {
     // on-disk buffer the interview_request handler reads. Fire-and-forget —
     // the write chain inside the buffer preserves ordering, and a disk
     // error must never break the turn.
-    if (MEMCLAW_INTERVIEWER) {
+    if (CAURA_INTERVIEWER) {
       const bufContent =
         typeof message.content === "string"
           ? message.content
@@ -693,7 +693,7 @@ export class MemClawContextEngine {
         await apiCall("POST", "/memories", {
           tenant_id: tid,
           agent_id: agentId,
-          fleet_id: MEMCLAW_FLEET_ID || undefined,
+          fleet_id: CAURA_FLEET_ID || undefined,
           content: truncated,
           memory_type: "episode",
           tags: ["auto-ingest", "user-message"],
@@ -821,14 +821,14 @@ export class MemClawContextEngine {
       params as unknown as Record<string, unknown>,
       this.config,
     );
-    const fleetId = MEMCLAW_FLEET_ID || undefined;
+    const fleetId = CAURA_FLEET_ID || undefined;
 
     // --- Section 1: Education (always emitted; cheap, static) ---
-    const educationText = memclawPromptSectionText(new Set(MEMCLAW_TOOLS));
+    const educationText = cauraPromptSectionText(new Set(CAURA_TOOLS));
     const identityBlock =
       `\n**Your identity**: agent_id=\`${agentId}\`` +
       (fleetId ? `, fleet_id=\`${fleetId}\`` : "") +
-      (MEMCLAW_TENANT_ID ? `, tenant_id=\`${MEMCLAW_TENANT_ID}\`` : "") +
+      (CAURA_TENANT_ID ? `, tenant_id=\`${CAURA_TENANT_ID}\`` : "") +
       "\n";
     const operatorPrompt = readEnv(["CAURA_EDUCATION_PROMPT", "MEMCLAW_EDUCATION_PROMPT"]) || "";  // legacy-name-ok: rule 3 dual-read alias
     const operatorBlock = operatorPrompt
@@ -1123,7 +1123,7 @@ export class MemClawContextEngine {
         await apiCall("POST", "/memories", {
           tenant_id: tid,
           agent_id: agentId,
-          fleet_id: MEMCLAW_FLEET_ID || undefined,
+          fleet_id: CAURA_FLEET_ID || undefined,
           content: summary,
           memory_type: "episode",
           tags: ["auto-compaction"],
@@ -1289,9 +1289,9 @@ export class MemClawContextEngine {
     };
   }
 
-  /** afterTurn — auto-write turn summary. Enabled by default; opt out with MEMCLAW_AUTO_WRITE_TURNS=false. */
+  /** afterTurn — auto-write turn summary. Enabled by default; opt out with CAURA_AUTO_WRITE_TURNS=false. */
   async afterTurn(context: AfterTurnContext): Promise<void> {
-    if (!MEMCLAW_AUTO_WRITE_TURNS) return;
+    if (!CAURA_AUTO_WRITE_TURNS) return;
 
     const lastAssistant = context?.messages
       ?.filter((m) => m.role === "assistant")
@@ -1317,7 +1317,7 @@ export class MemClawContextEngine {
       await apiCall("POST", "/memories", {
         tenant_id: tid,
         agent_id: agentId,
-        fleet_id: MEMCLAW_FLEET_ID || undefined,
+        fleet_id: CAURA_FLEET_ID || undefined,
         content: turnSummary,
         memory_type: "episode",
         tags: ["auto-turn-summary"],
@@ -1384,3 +1384,6 @@ export class MemClawContextEngine {
   async onSubagentEnded(_context: unknown): Promise<void> {}
 }
 
+// The pre-rename class name is public API — dist/ is consumed outside this repo.
+export const MemClawContextEngine = CauraContextEngine;  // legacy-name-ok: rule 3 exported API alias
+export type MemClawContextEngine = CauraContextEngine;  // legacy-name-ok: rule 3 exported API alias

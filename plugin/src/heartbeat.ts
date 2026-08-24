@@ -24,15 +24,15 @@ import { getOpenClawBaseDir } from "./paths.js";
 
 import { apiCall } from "./transport.js";
 import {
-  MEMCLAW_API_URL,
-  MEMCLAW_API_PREFIX,
-  MEMCLAW_API_KEY,
-  MEMCLAW_TENANT_ID,
-  MEMCLAW_NODE_NAME,
-  MEMCLAW_FLEET_ID,
-  MEMCLAW_REQUIRE_SIGNED_COMMANDS,
-  MEMCLAW_INTERVIEWER,
-  MEMCLAW_INTERVIEWER_TASKS,
+  CAURA_API_URL,
+  CAURA_API_PREFIX,
+  CAURA_API_KEY,
+  CAURA_TENANT_ID,
+  CAURA_NODE_NAME,
+  CAURA_FLEET_ID,
+  CAURA_REQUIRE_SIGNED_COMMANDS,
+  CAURA_INTERVIEWER,
+  CAURA_INTERVIEWER_TASKS,
   INTERVIEW_SUBMIT_MAX_EVENTS,
   INTERVIEW_SUBMIT_TIMEOUT_MS,
   BUILD_TIMEOUT_MS,
@@ -44,12 +44,12 @@ import { readInterviewEvents, pruneInterviewBuffer } from "./interview-buffer.js
 import { syncTaskTrail } from "./task-trail.js";
 import { resolveAgentIdQuiet } from "./resolve-agent.js";
 import { PLUGIN_VERSION } from "./version.js";
-import { MEMCLAW_TOOLS } from "./tools.js";
+import { CAURA_TOOLS } from "./tools.js";
 import {
   getPluginDir,
   getMissingTools,
   readOpenClawConfig,
-  isMemclawFullyConfigured,
+  isCauraFullyConfigured,
 } from "./config.js";
 import { getReachability, markReachable, markUnreachable } from "./health.js";
 import { deployPlugin } from "./deploy.js";
@@ -70,12 +70,12 @@ import { getInstallId } from "./install-id.js";
 import { getDisplayName } from "./identity.js";
 import { reconcileSkills, type ReconcileSummary } from "./reconcile-skills.js";
 
-// Test seam: MEMCLAW_INTERVIEWER is captured at env.js import time, so
+// Test seam: CAURA_INTERVIEWER is captured at env.js import time, so
 // tests can't flip it via process.env after module load. Production
 // always reads the env-derived constant.
 let _interviewerEnabledOverride: boolean | undefined;
 function interviewerEnabled(): boolean {
-  return _interviewerEnabledOverride ?? MEMCLAW_INTERVIEWER;
+  return _interviewerEnabledOverride ?? CAURA_INTERVIEWER;
 }
 
 let heartbeatCount = 0;
@@ -91,7 +91,7 @@ let postRestartCheckDone = false;
 // rolled back, prebuild failed silently and version.ts wasn't updated,
 // the gateway never restarted, etc.), we record a failure into
 // ``.deploy-cooldown.json`` and refuse further deploys for that
-// version for ``MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS``.
+// version for ``CAURA_DEPLOY_FAILURE_COOLDOWN_HOURS``.
 //
 // The plugin also surfaces ``deploy_blocked_until`` in its heartbeat
 // payload so the backend's auto-upgrade trigger can skip queueing
@@ -372,7 +372,7 @@ function cleanupStaleBackups(): void {
 export async function sendHeartbeat(): Promise<void> {
   cleanupStaleBackups();
   verifyDeployPostRestart();
-  if (!MEMCLAW_TENANT_ID || !MEMCLAW_NODE_NAME) return;
+  if (!CAURA_TENANT_ID || !CAURA_NODE_NAME) return;
 
   // Skill reconciler — converge plugin/skills/ with the catalog before
   // anything else. Failures are non-fatal (best-effort distribution).
@@ -553,14 +553,14 @@ export async function sendHeartbeat(): Promise<void> {
     const reach = getReachability();
 
     // Single source of truth for "fully configured" — see
-    // plugin/src/config.ts::isMemclawFullyConfigured. Checks that memclaw is
+    // plugin/src/config.ts::isCauraFullyConfigured. Checks that the plugin is
     // allowlisted, enabled, on the load path, and holds the exclusive memory
     // slot. `backend_reachable` below surfaces runtime health separately.
     setupStatus = {
       plugin_loaded: true,
-      tools_registered: MEMCLAW_TOOLS.length,
+      tools_registered: CAURA_TOOLS.length,
       tools_allowed: toolsAllowed,
-      fully_configured: config ? isMemclawFullyConfigured(config) : false,
+      fully_configured: config ? isCauraFullyConfigured(config) : false,
       agents_educated: educated,
       shared_skill_present: sharedSkillPresent,
       backend_reachable: reach.state,
@@ -579,9 +579,9 @@ export async function sendHeartbeat(): Promise<void> {
   const deploy_blocked_until = cooldown.blocked_until || undefined;
 
   const body: Record<string, unknown> = {
-    tenant_id: MEMCLAW_TENANT_ID,
-    node_name: MEMCLAW_NODE_NAME,
-    fleet_id: MEMCLAW_FLEET_ID || undefined,
+    tenant_id: CAURA_TENANT_ID,
+    node_name: CAURA_NODE_NAME,
+    fleet_id: CAURA_FLEET_ID || undefined,
     hostname: hostname(),
     ip: ipAddress,
     openclaw_version: openclawVersion,
@@ -590,7 +590,7 @@ export async function sendHeartbeat(): Promise<void> {
     plugin_hash: pluginHash,
     install_id: installId,
     agents,
-    tools: MEMCLAW_TOOLS,
+    tools: CAURA_TOOLS,
     metadata: setupStatus ? { setup_status: setupStatus } : undefined,
     // CAURA-444: rolling counters reset on plugin restart. Backend
     // stores latest snapshot per node; aggregated via the existing
@@ -630,10 +630,10 @@ export async function sendHeartbeat(): Promise<void> {
   // benign reasons (new tenant, throttled embeddings) and is NOT treated as
   // unreachable — only genuine network-class throws are.
   heartbeatCount++;
-  if (heartbeatCount % 10 === 0 && MEMCLAW_TENANT_ID) {
+  if (heartbeatCount % 10 === 0 && CAURA_TENANT_ID) {
     try {
       (await apiCall("POST", "/search", {
-        tenant_id: MEMCLAW_TENANT_ID,
+        tenant_id: CAURA_TENANT_ID,
         query: "health check",
         top_k: 1,
       })) as Record<string, any>;
@@ -655,8 +655,8 @@ async function processCommand(cmd: {
   // Verify command signature (HMAC-SHA256)
   const sigResult = verifyCommandSignature(
     cmd,
-    MEMCLAW_API_KEY,
-    MEMCLAW_REQUIRE_SIGNED_COMMANDS,
+    CAURA_API_KEY,
+    CAURA_REQUIRE_SIGNED_COMMANDS,
   );
   if (!sigResult.valid) {
     console.warn(
@@ -706,7 +706,7 @@ async function processCommand(cmd: {
       const targetVersion = (payload.target_version as string | undefined) ?? undefined;
       let sourceCode = source;
 
-      if (!sourceCode && MEMCLAW_API_URL) {
+      if (!sourceCode && CAURA_API_URL) {
         // Fetch the canonical file list from /plugin-manifest. Falls
         // back to a built-in default array when the backend doesn't
         // expose the endpoint yet (back-compat with pre-CAURA-444
@@ -746,8 +746,8 @@ async function processCommand(cmd: {
         let manifestVersion: string | undefined;
         try {
           const mUrl = new URL(
-            `${MEMCLAW_API_PREFIX}/plugin-manifest`,
-            MEMCLAW_API_URL,
+            `${CAURA_API_PREFIX}/plugin-manifest`,
+            CAURA_API_URL,
           ).toString();
           // ``X-API-Key`` is required for the enterprise gateway's auth
           // subrequest on ``/api/v1/*``. Without it, the manifest fetch
@@ -759,7 +759,7 @@ async function processCommand(cmd: {
           // gateway; the bootstrap-router alias path is the
           // unauthenticated route for fresh installs.
           const mHeaders: Record<string, string> = {};
-          if (MEMCLAW_API_KEY) mHeaders["X-API-Key"] = MEMCLAW_API_KEY;
+          if (CAURA_API_KEY) mHeaders["X-API-Key"] = CAURA_API_KEY;
           const mRes = await fetch(mUrl, {
             headers: mHeaders,
             signal: AbortSignal.timeout(10_000),
@@ -904,8 +904,8 @@ async function processCommand(cmd: {
             const fetchTimeout = setTimeout(() => fetchController.abort(), 30_000);
             try {
               const url = new URL(
-                `${MEMCLAW_API_PREFIX}/plugin-source?file=${encodeURIComponent(name)}`,
-                MEMCLAW_API_URL,
+                `${CAURA_API_PREFIX}/plugin-source?file=${encodeURIComponent(name)}`,
+                CAURA_API_URL,
               ).toString();
               const res = await fetch(url, { signal: fetchController.signal });
               if (res.ok) {
@@ -1136,9 +1136,9 @@ async function processCommand(cmd: {
         // syncTaskTrail never throws; a degraded sync (db missing/locked)
         // is reported via ``task_trail`` so operators can tell "idle"
         // from "not captured" instead of a silent no-op.
-        const taskSync = MEMCLAW_INTERVIEWER_TASKS
+        const taskSync = CAURA_INTERVIEWER_TASKS
           ? await syncTaskTrail()
-          : { synced: 0, note: "task capture disabled (MEMCLAW_INTERVIEWER_TASKS=false)" };
+          : { synced: 0, note: "task capture disabled (CAURA_INTERVIEWER_TASKS=false)" };
         const events = await readInterviewEvents(sinceSeq, INTERVIEW_SUBMIT_MAX_EVENTS);
         if (events.length === 0) {
           // Nothing new since the cursor: done, nothing submitted. The
@@ -1159,7 +1159,7 @@ async function processCommand(cmd: {
           const agentId = resolveAgentIdQuiet();
           const resp = (await apiCall("POST", "/interview/submit", {
             tenant_id: tenantId,
-            fleet_id: MEMCLAW_FLEET_ID || undefined,
+            fleet_id: CAURA_FLEET_ID || undefined,
             node_id: nodeId,
             agent_id: agentId,
             command_id: cmd.id,
@@ -1203,7 +1203,7 @@ async function processCommand(cmd: {
       result = {
         ok: true,
         pong: true,
-        node_name: MEMCLAW_NODE_NAME,
+        node_name: CAURA_NODE_NAME,
         plugin_version: PLUGIN_VERSION,
         uptime_ms: Math.floor(process.uptime() * 1000),
         timestamp: new Date().toISOString(),

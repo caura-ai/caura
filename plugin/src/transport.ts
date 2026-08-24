@@ -7,7 +7,7 @@
  * - HTTPS enforced by default
  */
 
-import { MEMCLAW_API_PREFIX, MEMCLAW_API_URL, MEMCLAW_API_KEY } from "./env.js";
+import { CAURA_API_PREFIX, CAURA_API_URL, CAURA_API_KEY } from "./env.js";
 import { resolveAgentKey, evictAgentKey } from "./agent-auth.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -27,13 +27,13 @@ export async function apiCall(
   // Reject prefixed paths early so accidental full-path regressions are loud
   // during tsc/tests rather than silently 404'ing at runtime.
   const normalized = path.startsWith("/") ? path : `/${path}`;
-  if (normalized.startsWith(MEMCLAW_API_PREFIX + "/") || normalized === MEMCLAW_API_PREFIX) {
+  if (normalized.startsWith(CAURA_API_PREFIX + "/") || normalized === CAURA_API_PREFIX) {
     throw new Error(
       `[caura] apiCall path must be a resource path (e.g. "/evolve/report"); ` +
-      `got "${path}". MEMCLAW_API_PREFIX ("${MEMCLAW_API_PREFIX}") is applied automatically.`,
+      `got "${path}". CAURA_API_PREFIX ("${CAURA_API_PREFIX}") is applied automatically.`,
     );
   }
-  const url = new URL(`${MEMCLAW_API_PREFIX}${normalized}`, MEMCLAW_API_URL);
+  const url = new URL(`${CAURA_API_PREFIX}${normalized}`, CAURA_API_URL);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
       url.searchParams.set(k, v);
@@ -42,7 +42,7 @@ export async function apiCall(
 
   // Resolve agent-scoped credential, or fall back to the tenant-scoped key
   const effectiveAgentId = agentId || (body?.agent_id as string) || (query?.agent_id as string);
-  let effectiveKey = MEMCLAW_API_KEY;
+  let effectiveKey = CAURA_API_KEY;
   if (effectiveAgentId) {
     const agentKey = await resolveAgentKey(effectiveAgentId);
     if (agentKey) effectiveKey = agentKey;
@@ -76,7 +76,7 @@ export async function apiCall(
 
     if (!res.ok) {
       // 401 with agent key → evict and retry once with tenant key
-      if (res.status === 401 && effectiveKey !== MEMCLAW_API_KEY && effectiveAgentId) {
+      if (res.status === 401 && effectiveKey !== CAURA_API_KEY && effectiveAgentId) {
         evictAgentKey(effectiveAgentId);
         console.warn(`[caura] Agent key rejected for '${effectiveAgentId}', retrying with tenant key`);
         // Forward extraHeaders so the retry reuses the same per-attempt

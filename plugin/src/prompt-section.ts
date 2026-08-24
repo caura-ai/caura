@@ -21,10 +21,10 @@
  * first Caura call to pick up the operating contract.
  */
 
-import { MEMCLAW_TOOLS } from "./tools.js";
+import { CAURA_TOOLS } from "./tools.js";
 
 function buildRecallLines(availableTools: Set<string>): string[] {
-  const present = MEMCLAW_TOOLS.filter((t) => availableTools.has(t));
+  const present = CAURA_TOOLS.filter((t) => availableTools.has(t));
   if (present.length === 0) return [];
 
   const lines: string[] = [];
@@ -55,7 +55,7 @@ function buildRecallLines(availableTools: Set<string>): string[] {
  * Signature matches OpenClaw's expected:
  *   ({ availableTools: Set<string>, citationsMode?: string }) => string[]
  */
-export function memclawPromptSectionBuilder(params: {
+export function cauraPromptSectionBuilder(params: {
   availableTools: Set<string>;
   citationsMode?: string;
 }): string[] {
@@ -66,7 +66,7 @@ export function memclawPromptSectionBuilder(params: {
  * Flatten the prompt section into a single string for use as
  * `prependSystemContext` in the before_prompt_build fallback path.
  */
-export function memclawPromptSectionText(
+export function cauraPromptSectionText(
   availableTools: Set<string>,
 ): string {
   return buildRecallLines(availableTools).join("\n");
