@@ -266,6 +266,88 @@ SENTINELS: tuple[Sentinel, ...] = (
         kind=LITERAL,
         breaks="the migration stops naming the topic it documents, before Phase 2 renames it",
     ),
+    # -- Plugin self-migration anchors. -----------------------------------------
+    #
+    # A category the entries above do not cover. Everything else here is pinned
+    # for a consumer in another repo or another company's config — Datadog, npm,
+    # a crontab, a customer's .env. These are pinned because the consumer is the
+    # plugin's OWN PREVIOUS OUTPUT, already sitting in end users' TOOLS.md,
+    # AGENTS.md and .env files, written by versions 0.98.5 and 1.x.
+    #
+    # That makes them invisible twice over. The ratchet is directional, so
+    # renaming one lowers the file's count and reads as progress. And a reviewer
+    # seeing a legacy heading prefix in a diff sees brand prose, because it IS
+    # brand prose — it just happens to be brand prose that a regex on a user's
+    # disk has to keep matching.
+    #
+    # Every text below is anchored to its code form rather than to the bare
+    # string, for the reason the CRON_MARKER entry gives above: LITERAL is a
+    # substring test over the whole file, and educate.ts discusses each of these
+    # in its own comments as well as using it. Pinning the bare phrase would be
+    # satisfied by the commentary alone, on exactly the tree where the code that
+    # matters is gone. Verified: each text below appears only on code lines.
+    Sentinel(
+        path="plugin/src/educate.ts",
+        text="const tag = `memclaw:${marker}`;",  # legacy-name-ok: pinned floor string
+        kind=LITERAL,
+        breaks=(
+            "the fence tag written into every install's TOOLS.md/AGENTS.md as an "
+            "HTML comment also builds the regex that finds that block again — "
+            "rename it and the next run appends a second block instead of "
+            "updating the first, in every existing install at once"
+        ),
+    ),
+    Sentinel(
+        path="plugin/src/educate.ts",
+        text='"## MemClaw —",',  # legacy-name-ok: pinned floor string
+        kind=LITERAL,
+        breaks=(
+            "the legacyHeadingPrefix that finds pre-fence sections this plugin "
+            "itself emitted (1.x and 0.98.5) — rename it and those sections are "
+            "never replaced, so users keep a stale duplicate forever"
+        ),
+    ),
+    Sentinel(
+        path="plugin/src/educate.ts",
+        text='.memclaw-bak"',  # legacy-name-ok: pinned floor string
+        kind=LITERAL,
+        breaks=(
+            "the one-shot backup is written only when the path does not already "
+            "exist — rename it and the guard stops seeing the backup already on "
+            "disk, overwriting the hand-edits it was created to preserve"
+        ),
+    ),
+    Sentinel(
+        path="plugin/src/educate.ts",
+        # Regex syntax, so this form cannot occur in prose about the phrase.
+        text="You have been connected to MemClaw[^\\n]*?always include your agent_id",  # legacy-name-ok: pinned floor string
+        kind=LITERAL,
+        breaks=(
+            "the pre-C1 blurb stops being stripped and accumulates alongside "
+            "the current one on every subsequent run"
+        ),
+    ),
+    Sentinel(
+        path="plugin/src/educate.ts",
+        text='includes("MemClaw — Tools Available")',  # legacy-name-ok: pinned floor string
+        kind=LITERAL,
+        breaks="phantom plugin-written files under workspaces/ stop being collected",
+    ),
+    # Diagnostic rather than a data contract, and pinned anyway: breaking these
+    # does not corrupt anything, it makes every existing install report itself as
+    # not-installed, which is the shape of bug that gets chased for a week.
+    Sentinel(
+        path="plugin/src/heartbeat.ts",
+        text='"HEARTBEAT.md"), "utf-8").includes("memclaw")',  # legacy-name-ok: pinned floor string
+        kind=LITERAL,
+        breaks="heartbeat reports heartbeat_md=false for every install written before the rename",
+    ),
+    Sentinel(
+        path="plugin/src/heartbeat.ts",
+        text='"TOOLS.md"), "utf-8").toLowerCase().includes("memclaw")',  # legacy-name-ok: pinned floor string
+        kind=LITERAL,
+        breaks="heartbeat reports tools_md=false for every install written before the rename",
+    ),
 )
 
 
