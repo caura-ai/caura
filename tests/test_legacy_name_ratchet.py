@@ -884,3 +884,86 @@ def test_report_mode_never_fails(repo: Path) -> None:
 
     assert result.returncode == 0
     assert "2 lines across 2 files" in result.stdout
+
+
+# ── removed exemptions: reported, never fatal ────────────────────────────────
+#
+# ``legacy-name-ok`` exempts a line from this gate. It has never protected the
+# line from being DELETED — and deleting one lowers the file's non-exempt count,
+# which this gate reads as progress. A sweep that removed a dual-read alias
+# deciding which ``.env`` keys survive a redeploy passed both required gates
+# green. These pin the report that makes that visible.
+
+
+def test_removing_an_exempt_line_is_reported(repo: Path) -> None:
+    """The gap that let a data-loss change through green.
+
+    Deleting a marked alias is indistinguishable from progress by count alone,
+    so the only defence is telling the reader it happened.
+    """
+    alias = f'LEGACY = "{LEGACY}"  # legacy-name-ok: dual-read alias\n'
+    (repo / "aliases.py").write_text(alias)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add alias")
+    _stage(repo, "aliases.py", "LEGACY = None\n")
+
+    result = _run(repo)
+
+    assert "exempt line(s) removed" in result.stdout
+    assert "dual-read alias" in result.stdout
+
+
+def test_removing_an_exempt_line_does_not_fail_the_gate(repo: Path) -> None:
+    """Reports rather than fails, and the reason is measured, not stylistic.
+
+    Across the last 400 commits of the real repo, seven removed a marked line
+    and none was a genuine removal of protection — every one reworded or
+    consolidated markers while keeping the alias. Failing here would have been
+    four false positives and no true ones, and false positives on a gate teach
+    people to stop reading it.
+    """
+    alias = f'LEGACY = "{LEGACY}"  # legacy-name-ok: dual-read alias\n'
+    (repo / "aliases.py").write_text(alias)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add alias")
+    _stage(repo, "aliases.py", "LEGACY = None\n")
+
+    assert _run(repo).returncode == 0
+
+
+def test_consolidating_exemptions_still_reports_the_removals(repo: Path) -> None:
+    """The commonest real shape: several markers collapse into one.
+
+    Net protection is unchanged, so this must not fail — but the removals are
+    still named, because "did the alias survive the rewording" is exactly the
+    question a human has to answer and a tool cannot.
+    """
+    (repo / "aliases.py").write_text(
+        f'A = "{LEGACY}"  # legacy-name-ok: alias one\n'
+        f'B = "{LEGACY}"  # legacy-name-ok: alias two\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add aliases")
+    _stage(
+        repo, "aliases.py", f'BOTH = "{LEGACY}"  # legacy-name-ok: one rule for both\n'
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0
+    assert "alias one" in result.stdout
+    assert "alias two" in result.stdout
+
+
+def test_an_untouched_exemption_is_not_reported(repo: Path) -> None:
+    """No report when nothing was removed — a section that prints on every run
+    is one people stop reading, which is the failure this exists to prevent."""
+    alias = f'LEGACY = "{LEGACY}"  # legacy-name-ok: dual-read alias\n'
+    (repo / "aliases.py").write_text(alias)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add alias")
+    _stage(repo, "clean.py", "VALUE = 2\n")
+
+    result = _run(repo)
+
+    assert "exempt line(s) removed" not in result.stdout
