@@ -376,3 +376,117 @@ async def test_dual_subscribe_flag_reads_anything_but_an_explicit_yes_as_off(
         assert bus._dual_subscribe is expected
     finally:
         await reset_event_bus_for_testing()
+
+
+# ── the guard: refuse to publish where nothing is bound (#913) ───────────────
+#
+# The combination the rest of this module documents as the one that fails with
+# no signal at all — a flipped family publishing under its renamed name while
+# the subscriber binds only the current one — is now refused at construction
+# instead of merely being described. These tests pin the refusal AND its
+# boundaries, because a guard that over-fires here would take out the default
+# configuration rather than the broken one.
+
+
+def test_unbound_publish_topics_is_empty_in_the_shipped_state() -> None:
+    """Nothing flipped: no topic publishes anywhere unbound, either way.
+
+    The byte-identical-behaviour property. If this fails, merging this guard
+    stopped being a runtime no-op.
+    """
+    assert topics_mod.FLIPPED_FAMILIES == frozenset()
+    assert topics_mod.unbound_publish_topics(dual=False) == ()
+    assert topics_mod.unbound_publish_topics(dual=True) == ()
+
+
+def test_unbound_publish_topics_names_a_flipped_family_when_dual_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flipped + dual off is the hazard, and it is reported per topic."""
+    monkeypatch.setattr(topics_mod, "FLIPPED_FAMILIES", frozenset({"memory"}))
+    unbound = topics_mod.unbound_publish_topics(dual=False)
+    assert unbound, "a flipped family with dual off must be reported"
+    assert all(topics_mod.family(t) == "memory" for t in unbound)
+    # Every reported topic really would go nowhere: the name it publishes under
+    # is absent from the names a dual=False subscriber binds.
+    for topic in unbound:
+        assert topics_mod.publish_name(topic) not in topics_mod.subscribe_names(
+            topic, dual=False
+        )
+    # A family that has NOT flipped is not swept up in the report.
+    assert not any(topics_mod.family(t) == "audit" for t in unbound)
+
+
+def test_dual_subscribe_makes_a_flipped_family_bound_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same flip with dual on is exactly what step 2 bought."""
+    monkeypatch.setattr(topics_mod, "FLIPPED_FAMILIES", frozenset({"memory"}))
+    assert topics_mod.unbound_publish_topics(dual=True) == ()
+
+
+def test_pubsub_bus_refuses_to_construct_when_a_flip_has_nothing_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard itself: the bus will not exist in the silent-failure state.
+
+    At construction rather than ``start()`` — a publish-only process never calls
+    ``start()``, so a check there would leave the write side unguarded, which is
+    the side that does the losing.
+    """
+    monkeypatch.setattr(topics_mod, "FLIPPED_FAMILIES", frozenset({"memory"}))
+    with pytest.raises(ValueError, match="does not bind"):
+        PubSubEventBus(project_id="proj", subscription_prefix="test")
+
+
+def test_pubsub_bus_constructs_when_the_flip_is_matched_by_dual_subscribe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard is about the MISMATCH, not about having flipped anything."""
+    monkeypatch.setattr(topics_mod, "FLIPPED_FAMILIES", frozenset({"memory"}))
+    b = PubSubEventBus(
+        project_id="proj", subscription_prefix="test", dual_subscribe=True
+    )
+    assert b._dual_subscribe is True
+
+
+def test_the_guard_does_not_fire_once_a_family_is_fully_contracted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The false positive an emptiness check would cause — the reason this guard
+    compares names instead of testing ``FLIPPED_FAMILIES`` for emptiness.
+
+    After the contract step a family's enum members ARE the renamed names.
+    ``renamed`` is idempotent, so ``publish_name`` and
+    ``subscribe_names(dual=False)`` agree and there is no twin left to bind:
+    ``dual=False`` is not merely tolerable there, it is correct. A guard keyed on
+    "is FLIPPED_FAMILIES non-empty" would refuse to start those processes — and
+    ``dual=False`` is the DEFAULT, so it would take out precisely the standalone
+    and on-prem deployments that never run the Terraform the flag is gated on.
+
+    Simulated by declaring a topic whose name already carries the new prefix,
+    which is what the contract step leaves behind.
+    """
+    contracted = topics_mod.RENAMED_PREFIX + "memory.embedded"
+    assert topics_mod.renamed(contracted) == contracted, "precondition: idempotent"
+    monkeypatch.setattr(topics_mod, "all_topics", lambda: (contracted,))
+    monkeypatch.setattr(topics_mod, "FLIPPED_FAMILIES", frozenset({"memory"}))
+
+    # Non-empty FLIPPED_FAMILIES, dual off — and yet nothing is unbound.
+    assert topics_mod.FLIPPED_FAMILIES
+    assert topics_mod.unbound_publish_topics(dual=False) == ()
+    PubSubEventBus(project_id="proj", subscription_prefix="test")
+
+
+def test_inprocess_bus_can_never_reach_the_guarded_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Why the in-process backend needs no guard: it binds both, always.
+
+    ``InProcessEventBus.subscribe`` calls ``subscribe_names(..., dual=True)``
+    unconditionally, so the mismatch this guard catches is unreachable there for
+    any value of ``FLIPPED_FAMILIES``.
+    """
+    for flipped in (frozenset(), frozenset({"memory"}), topics_mod.known_families()):
+        monkeypatch.setattr(topics_mod, "FLIPPED_FAMILIES", flipped)
+        assert topics_mod.unbound_publish_topics(dual=True) == ()

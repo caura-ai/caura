@@ -172,20 +172,24 @@ def family(topic: str) -> str:
 FLIPPED_FAMILIES: frozenset[str] = frozenset()
 
 
-def known_families() -> frozenset[str]:
-    """Every family the topics declared in this module actually use.
+def all_topics() -> tuple[str, ...]:
+    """Every topic declared in this module.
 
     Derived by walking the enums rather than listed, so it cannot drift from
     them, and so the same code yields the right answer in each repo despite the
-    two copies declaring different families.
+    two copies declaring different topics.
     """
-    return frozenset(
-        f
+    return tuple(
+        str(member)
         for attr in vars(Topics).values()
         if isinstance(attr, type) and issubclass(attr, enum.StrEnum)
         for member in attr
-        if (f := family(member))
     )
+
+
+def known_families() -> frozenset[str]:
+    """Every family the topics declared in this module actually use."""
+    return frozenset(f for topic in all_topics() if (f := family(topic)))
 
 
 # A family named here that does not exist would be a SILENT no-op: publish_name
@@ -245,3 +249,36 @@ def subscribe_names(topic: str, *, dual: bool) -> tuple[str, ...]:
         return (current,)
     new = renamed(current)
     return (current,) if new == current else (current, new)
+
+
+def unbound_publish_topics(*, dual: bool) -> tuple[str, ...]:
+    """Topics this module would publish under a name no subscriber of them binds.
+
+    The one combination in this cutover that fails with no signal at all. A
+    flipped family publishes under its renamed name; a subscriber running with
+    ``dual=False`` binds only the current one. The message lands on a topic
+    nothing is pulling — no exception, no ``NotFound``, a green readiness probe,
+    and zero delivered. Every other ordering mistake here is loud: binding a twin
+    that was never provisioned is a permanent ``NotFound`` that reds the health
+    endpoint, and naming a family that does not exist raises at import.
+
+    Asking the two functions directly, rather than testing ``FLIPPED_FAMILIES``
+    for emptiness, is what makes this exact instead of approximate. Non-empty
+    ``FLIPPED_FAMILIES`` is only a PROXY for the hazard, and it over-fires in a
+    state this cutover really passes through: once a family's enum members have
+    themselves been renamed (the contract step), ``renamed`` is the identity for
+    them, so ``publish_name`` and ``subscribe_names(dual=False)`` agree and
+    ``dual=False`` is not merely safe but correct — there is no twin left to
+    bind. A guard keyed on emptiness would refuse to start those processes, and
+    ``dual=False`` is the DEFAULT, so it would take out precisely the standalone
+    and on-prem deployments that never run the Terraform the flag is gated on.
+    Comparing the names cannot make that mistake: agreement is agreement however
+    it arose.
+
+    Returns the offending topics rather than a bool so a caller can name them.
+    """
+    return tuple(
+        topic
+        for topic in all_topics()
+        if publish_name(topic) not in subscribe_names(topic, dual=dual)
+    )

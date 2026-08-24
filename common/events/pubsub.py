@@ -48,7 +48,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from common.events.base import Event, EventBus, EventHandler
-from common.events.topics import publish_name, subscribe_names
+from common.events.topics import publish_name, subscribe_names, unbound_publish_topics
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +157,28 @@ class PubSubEventBus(EventBus):
         # project, eliminating cross-env message fan-out. See _topic_name().
         self._topic_prefix = topic_prefix
         self._dual_subscribe = dual_subscribe
+        # Refuse to exist in the one combination that fails silently: publishing
+        # a flipped family under its renamed name while binding only the current
+        # one. See ``unbound_publish_topics`` for why the check compares the two
+        # names instead of asking whether ``FLIPPED_FAMILIES`` is empty.
+        #
+        # At construction, not at ``start()``: publishing does not require
+        # ``start()`` (a publish-only process never calls it), so a check there
+        # would leave exactly the write side of the hazard unguarded. Raising
+        # here also means a misconfigured process dies before it can report
+        # itself ready. This is the loud direction of a fault that otherwise has
+        # no signal, so a hard failure is the point rather than a side effect.
+        if unbound := unbound_publish_topics(dual=dual_subscribe):
+            raise ValueError(
+                f"dual_subscribe is off, but {len(unbound)} topic(s) would be "
+                f"published under a name this bus does not bind: {sorted(unbound)}. "
+                "Nothing would be delivered and nothing would raise. Either those "
+                "families were flipped before this environment could bind their "
+                "twins, or this environment's twin subscriptions exist and its "
+                "configuration has not caught up — the two halves are set "
+                "independently, which is what lets them disagree. Resolve which "
+                "one is wrong; do not start a publisher in this state."
+            )
         self._max_messages = max_messages
         self._pull_timeout = pull_timeout
         self._error_backoff = error_backoff
