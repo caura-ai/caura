@@ -1,4 +1,4 @@
-"""Centralised constants for the MemClaw API."""
+"""Centralised constants for the Caura API."""
 
 import importlib.metadata
 import os

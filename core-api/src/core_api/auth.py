@@ -29,7 +29,7 @@ class AuthContext:
 
     OSS auth paths:
     1. Admin API key (ADMIN_API_KEY)      → is_admin=True, tenant_id=None
-    2. MemClaw API key (MEMCLAW_API_KEY)  → gates all non-admin access when set
+    2. Caura API key (CAURA_API_KEY)      → gates all non-admin access when set
     3. Standalone mode                     → tenant_id from config, org_role="admin"
     4. X-Tenant-ID header (enterprise)    → tenant_id from header
 
@@ -371,11 +371,11 @@ async def get_auth_context(
         set_current_tenant(None)  # Admin — RLS bypass
         return AuthContext(tenant_id=None, is_admin=True)
 
-    # ── Path 2: MEMCLAW_API_KEY gate (optional, for network-exposed OSS) ──
+    # ── Path 2: CAURA_API_KEY gate (optional, for network-exposed OSS) ──
     mclaw_key = settings.memclaw_api_key
     if mclaw_key:
         if key and hmac.compare_digest(key, mclaw_key):
-            # Valid memclaw key — resolve tenant from standalone or header
+            # Valid Caura key — resolve tenant from standalone or header
             if settings.is_standalone:
                 from core_api.standalone import get_standalone_tenant_id
 

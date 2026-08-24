@@ -128,14 +128,14 @@ def test_codex_only_skips_claude_block():
 
 
 def test_default_skill_is_memclaw_and_unchanged():
-    """No ``?skill=`` → the installer is the original memclaw installer:
-    memclaw paths, the /skill/memclaw fetch URL, the 'MemClaw' title, and no
-    trace of company-brain. Guards the 'default load is unaffected' contract."""
+    """No ``?skill=`` → the installer is the original default one: the same
+    install paths, the same fetch URL, the 'Caura' title, and no trace of
+    company-brain. Guards the 'default load is unaffected' contract."""
     client = _client()
     resp = client.get("/api/v1/install-skill?agent=both")
     assert resp.status_code == 200
     script = resp.text
-    assert "=== MemClaw Skill Installer (direct-MCP) ===" in script
+    assert "=== Caura Skill Installer (direct-MCP) ===" in script
     assert "$HOME/.claude/skills/memclaw" in script
     assert "$HOME/.agents/skills/memclaw" in script
     assert "/api/v1/skill/memclaw" in script

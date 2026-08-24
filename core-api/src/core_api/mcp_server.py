@@ -1,6 +1,6 @@
-"""MCP (Model Context Protocol) server for MemClaw.
+"""MCP (Model Context Protocol) server for Caura.
 
-Exposes MemClaw tools over Streamable HTTP so any MCP client
+Exposes Caura tools over Streamable HTTP so any MCP client
 (Claude Desktop, Claude Code, Cursor, etc.) can connect with just a URL + API key.
 
 Mounted onto the main FastAPI app at /mcp.

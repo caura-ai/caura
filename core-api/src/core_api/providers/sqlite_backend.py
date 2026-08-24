@@ -1,4 +1,4 @@
-"""SQLite storage backend for MemClaw.
+"""SQLite storage backend for Caura.
 
 A lightweight, file-based implementation of the ``StorageBackend`` protocol
 suitable for local development, on-premise single-node deployments, and

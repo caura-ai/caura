@@ -63,7 +63,7 @@ _plugin_files = [
 #   periodically as OpenClaw evolves its plugin contract — e.g. the
 #   ``contracts.tools`` field became strictly enforced upstream on
 #   2026-05-01 (openclaw/openclaw@7641783d), and any user installing
-#   from a stale baked HEREDOC silently lost their entire MemClaw tool
+#   from a stale baked HEREDOC silently lost their entire Caura tool
 #   surface. Serving from disk keeps the manifest in lockstep with
 #   ``plugin/openclaw.plugin.json`` so the installer never falls behind.
 _plugin_root_files = {
@@ -74,7 +74,7 @@ _plugin_root_files = {
 
 # Direct-MCP skill adapter. Lives under the repo-root ``static/`` tree
 # rather than ``plugin/`` — it is NOT an OpenClaw plugin artifact; it is
-# served to Claude Code / Codex users who connect to MemClaw directly via
+# served to Claude Code / Codex users who connect to Caura directly via
 # MCP. Resolved from app.py's position: core-api/src/core_api/routes/ →
 # five ``.parent``s up land on the repo root.
 _skill_md_path = (
@@ -436,7 +436,7 @@ for _f in $SRC_FILES $ROOT_FILES; do
   esac
 done
 
-# 5. Fetch latest plugin source from MemClaw server
+# 5. Fetch latest plugin source from Caura server
 echo "[5/7] Fetching latest plugin source from $CAURA_API_URL..."
 for srcfile in $SRC_FILES; do
   curl $CURL_INSECURE -sf "$CAURA_API_URL/api/plugin-source?file=$srcfile" > "$PLUGIN_DIR/src/$srcfile" || {{
@@ -670,7 +670,10 @@ _VALID_SKILL_AGENTS = {"claude-code", "codex", "both"}
 # filesystem path and the generated script, so an arbitrary value must never
 # reach either. ``memclaw`` is the default (the operational manual); the
 # opt-in ``company-brain`` posture skill layers on top of it.
-_SKILL_LABELS = {"memclaw": "MemClaw", "company-brain": "Company Brain"}
+_SKILL_LABELS = {
+    "memclaw": "Caura",  # legacy-name-ok: wire — ?skill= param + on-disk dir
+    "company-brain": "Company Brain",
+}
 _VALID_SKILLS = frozenset(_SKILL_LABELS)
 _static_skills_dir = Path(__file__).resolve().parent.parent.parent.parent.parent / "static" / "skills"
 # Precomputed name → SKILL.md path map. Keys are the constant allowlist, so
