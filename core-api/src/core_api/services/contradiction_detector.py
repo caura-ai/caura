@@ -1092,6 +1092,21 @@ def _judge_contradiction(raw) -> tuple[bool, float]:
 # ---------------------------------------------------------------------------
 
 
+def _judge_effort_kwargs() -> dict:
+    """``complete_json`` kwargs for every contradiction-judge call (E3).
+
+    The judge is the dominant OpenAI spend (up to 20 candidates per write,
+    ~80% of the bill in OUTPUT tokens — mostly hidden reasoning tokens on
+    gpt-5-family models). ``contradiction_reasoning_effort`` caps that
+    per-call reasoning budget. Returned as a kwargs dict, EMPTY when
+    unset, rather than passing ``reasoning_effort=None`` positionally:
+    an unset knob must not change the wire request, and test doubles that
+    predate the parameter keep working without it.
+    """
+    effort = settings.contradiction_reasoning_effort
+    return {"reasoning_effort": effort} if effort else {}
+
+
 async def _llm_contradiction_check(
     new_content: str,
     old_content: str,
@@ -1117,7 +1132,7 @@ async def _llm_contradiction_check(
     prompt = CONTRADICTION_PROMPT.format(new_content=new_content[:500], old_content=old_content[:500])
 
     async def _do_check(llm) -> tuple[bool, float]:
-        raw = await llm.complete_json(prompt)
+        raw = await llm.complete_json(prompt, **_judge_effort_kwargs())
         return _judge_contradiction(raw)
 
     return await call_with_fallback(
@@ -1219,7 +1234,7 @@ async def _llm_contradiction_check_batch(
         return out
 
     async def _do_check(llm) -> list[dict]:
-        raw = await llm.complete_json(prompt)
+        raw = await llm.complete_json(prompt, **_judge_effort_kwargs())
         return _align(raw)
 
     return await call_with_fallback(
@@ -1633,7 +1648,7 @@ async def _llm_entity_aware_contradiction_check(
     )
 
     async def _do_check(llm) -> tuple[bool, float]:
-        raw = await llm.complete_json(prompt)
+        raw = await llm.complete_json(prompt, **_judge_effort_kwargs())
         return _judge_contradiction(raw)
 
     return await call_with_fallback(
@@ -1757,7 +1772,7 @@ async def _llm_entity_aware_contradiction_check_batch(
         return out
 
     async def _do_check(llm) -> list[dict]:
-        raw = await llm.complete_json(prompt)
+        raw = await llm.complete_json(prompt, **_judge_effort_kwargs())
         return _align(raw)
 
     return await call_with_fallback(

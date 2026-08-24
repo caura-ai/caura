@@ -167,10 +167,12 @@ class VertexLLMProvider:
         temperature: float = 0.0,
         seed: int | None = None,
         response_schema: dict | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict:
         """Async wrapper around synchronous Vertex AI JSON completion.
 
-        ``seed`` / ``response_schema`` are accepted-and-ignored (OpenAI
+        ``seed`` / ``response_schema`` / ``reasoning_effort`` are
+        accepted-and-ignored (OpenAI
         structured-output kwargs) — see ``GeminiProvider.complete_json``
         for why rejecting them silently broke entity extraction (C1).
         """

@@ -129,10 +129,12 @@ class GeminiLLMProvider:
         temperature: float = 0.0,
         seed: int | None = None,
         response_schema: dict | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict:
         """Async wrapper around the synchronous Gemini JSON completion.
 
-        ``seed`` / ``response_schema`` are accepted-and-ignored (OpenAI
+        ``seed`` / ``response_schema`` / ``reasoning_effort`` are
+        accepted-and-ignored (OpenAI
         structured-output kwargs). Rejecting them made every
         ``complete_json(..., seed=..., response_schema=...)`` caller —
         notably entity extraction — raise ``TypeError``, exhaust its

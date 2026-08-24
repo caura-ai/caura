@@ -109,6 +109,19 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     entity_extraction_provider: str = "openai"  # none | fake | openai | anthropic | openrouter | gemini
     entity_extraction_model: str = "gpt-5.4-nano"
+    # E3 — reasoning-effort for the contradiction judge's LLM calls.
+    # Valid values are MODEL-SPECIFIC (gpt-5.4 family, wet-tested:
+    # "none" | "low" | "medium" | "high" | "xhigh"; some models take
+    # "minimal" instead of "none") — verify against the configured
+    # entity_extraction_model before setting, because an unsupported
+    # value 400s on every call and call_with_fallback silently degrades
+    # the judge to abstention. The judge is bounded classification work,
+    # so a low tier bounds hidden reasoning-token spend (billed as
+    # output) without changing which candidates are considered; use the
+    # per-call tokens_reasoning log field to compare tiers in dollars.
+    # None (the default) sends no parameter at all — REQUIRED for
+    # non-reasoning models, which reject the parameter outright.
+    contradiction_reasoning_effort: str | None = None
     # Default for the ``search.entity_retrieval`` org setting: query-time entity
     # lookup + graph search. A tenant override wins; this is the fleet-wide
     # fallback so an operator can disable entity/graph reads on a whole box
