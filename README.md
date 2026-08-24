@@ -602,8 +602,8 @@ wiring, and the protocol are in the
 
 ### The Caura Broker
 
-The **Caura Broker** is a local daemon (`memclawd`, driven by the `memclaw`
-CLI) that runs on a developer's machine and connects coding agents — Claude
+The **Caura Broker** is a local daemon (`caura-daemon`, formerly `memclawd`, <!-- legacy-name-ok: taught as legacy alias -->
+driven by the `caura` CLI) that runs on a developer's machine and connects coding agents — Claude
 Code, Codex, Cursor, Gemini — to Caura. Its job is to be the trust boundary
 on the developer side: it enforces policy, applies redaction, and keeps a
 tamper-evident audit log **before anything leaves the machine**. The Broker
@@ -1141,7 +1141,7 @@ All paths are prefixed with `/api/v1` unless noted. Request and response shapes 
 | Memory | `GET/POST /memories`, `PATCH /memories/{id}`, `DELETE /memories/{id}`, `PATCH /memories/{id}/status`, `POST /memories/bulk`, `POST /memories/bulk-delete`, `GET /memories/stats`, `GET /memories/{id}`, `GET /memories/{id}/contradictions`, `POST /search`, `POST /recall`, `POST /ingest/preview`, `POST /ingest/commit` |
 | Knowledge graph | `GET /entities`, `GET /entities/{id}`, `POST /entities/upsert`, `GET /graph`, `POST /relations/upsert` |
 | Documents | `POST /documents`, `GET /documents`, `GET /documents/{id}`, `POST /documents/query`, `DELETE /documents/{id}` |
-| Keystones | `GET /memclaw/keystones`, `POST /memclaw/keystones`, `DELETE /memclaw/keystones/{doc_id}` |
+| Keystones | `GET /keystones`, `POST /keystones`, `DELETE /keystones/{doc_id}` (permanent legacy alias: `/memclaw/keystones`) | <!-- legacy-name-ok: taught as legacy alias -->
 | Fleet | `POST /fleet/heartbeat`, `GET /fleet/nodes`, `POST /fleet/commands`, `GET /fleet/commands` |
 | Agents | `GET /agents`, `GET /agents/{id}`, `PATCH /agents/{id}/trust`, `POST /admin/agent-keys/provision` (atomic key + row + trust + fleet), `GET /whoami` (identity probe) |
 | Insights | `POST /insights/generate` |

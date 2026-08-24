@@ -1124,7 +1124,7 @@ async function processCommand(cmd: {
         result = {
           error:
             "interviewer buffer is disabled on this node — set " +
-            "MEMCLAW_INTERVIEWER=true in the plugin env and restart the gateway",
+            "CAURA_INTERVIEWER=true in the plugin env and restart the gateway",
         };
       } else if (!nodeId) {
         status = "failed";

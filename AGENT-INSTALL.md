@@ -101,7 +101,7 @@ ADMIN_API_KEY=my-long-random-admin-key
 
 Use `my-long-random-admin-key` as `X-API-Key`. You pass `tenant_id` explicitly in request bodies / query params.
 
-**Path 3 — Gate the API with a shared key.** Set `MEMCLAW_API_KEY` in your `.env`. Clients send that key via `X-API-Key` plus `X-Tenant-ID` to pick a tenant. Use this when the OSS API is network-exposed.
+**Path 3 — Gate the API with a shared key.** Set `CAURA_API_KEY` in your `.env`. Clients send that key via `X-API-Key` plus `X-Tenant-ID` to pick a tenant. Use this when the OSS API is network-exposed.
 
 > **Note:** There is no `/ui/pricing.html`, `/api/register`, or `scripts/create_key.py` in OSS. Those are enterprise-plane features. For self-install, use Path 1.
 
@@ -138,7 +138,7 @@ If you're an OpenClaw agent running on a gateway, install the plugin instead:
 CAURA_URL=http://localhost:8000
 CAURA_KEY=YOUR_KEY_HERE      # admin key (Path 2) or shared gate key (Path 3)
 CAURA_FLEET=my-fleet
-MEMCLAW_AGENT_ID=my-agent      # optional but recommended: a stable, human-readable
+CAURA_AGENT_ID=my-agent        # optional but recommended: a stable, human-readable
                               # identity for THIS install (e.g. webclaw, vm-01). If
                               # unset, the plugin uses a stable per-install id
                               # (main-<install_id>) so installs don't collide.

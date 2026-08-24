@@ -11,7 +11,7 @@ Output covers:
 - A back-of-envelope wall-clock estimate for the per-table
   ``UPDATE ... = NULL`` phase (the long part on production-sized tables).
 - Whether the migration's safety gate (see migration 012's ``upgrade()``)
-  would refuse to run without ``MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS=true``,
+  would refuse to run without ``CAURA_RUN_DESTRUCTIVE_MIGRATIONS=true``,
   plus the exact opt-in command to use.
 
 Usage:
@@ -180,7 +180,7 @@ def _format_human(report: PreflightReport) -> str:
     out.append("")
     if report.safety_gate_would_trip:
         out.append("⚠ Migration is destructive. Opt in explicitly:")
-        out.append("    MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS=true alembic upgrade 012")
+        out.append("    CAURA_RUN_DESTRUCTIVE_MIGRATIONS=true alembic upgrade 012")
         out.append("After it completes, run the embedding backfill:")
         out.append("    python -m core_storage_api.scripts.backfill_embeddings")
     else:

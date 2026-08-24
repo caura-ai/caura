@@ -169,7 +169,7 @@ export function autoFixAllowlist(options?: {
       console.warn(
         `[caura] plugins.slots.memory already set to "${previousSlot}" — ` +
           `skipping auto-override. Run "openclaw gateway memclaw.allowlist.fix" ` +
-          `or set MEMCLAW_AUTO_FIX_CONFIG=true to force.`,
+          `or set CAURA_AUTO_FIX_CONFIG=true to force.`,
       );
     } else {
       config.plugins.slots.memory = "memclaw";
@@ -198,7 +198,7 @@ export function autoFixAllowlist(options?: {
       console.warn(
         `[caura] plugins.slots.contextEngine already set to "${previousCe}" — ` +
           `skipping auto-override. Run "openclaw gateway memclaw.allowlist.fix" ` +
-          `or set MEMCLAW_AUTO_FIX_CONFIG=true to force. ` +
+          `or set CAURA_AUTO_FIX_CONFIG=true to force. ` +
           `Note: keystone rules will NOT inject without contextEngine="memclaw".`,
       );
     } else {

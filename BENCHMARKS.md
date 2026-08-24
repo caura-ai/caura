@@ -1,10 +1,10 @@
-# MemClaw Benchmarks
+# Caura Benchmarks
 
-How MemClaw performs on the two most-cited public agent-memory benchmarks —
+How Caura (formerly MemClaw) performs on the two most-cited public agent-memory benchmarks — <!-- legacy-name-ok: taught as legacy alias -->
 **LoCoMo** and **LongMemEval** — plus the fleet-shaped dimensions those
 single-agent benchmarks can't measure.
 
-> **TL;DR** — On accuracy, MemClaw sits inside the leading cluster (MemClaw,
+> **TL;DR** — On accuracy, Caura sits inside the leading cluster (Caura,
 > Mem0, Zep land in a narrow band). Where we push hardest, and where it
 > compounds at fleet scale, is **latency, token efficiency, and governance
 > correctness**.
@@ -51,7 +51,7 @@ system is deployable inside a company:
 - Does cross-tenant data ever leak when the recall query is ambiguous?
 
 None of this moves a `recall@k` number; all of it moves whether you can deploy.
-MemClaw is built around these — scoped memory (agent / fleet / cross-fleet),
+Caura is built around these — scoped memory (agent / fleet / cross-fleet),
 per-agent trust tiers, keystone policies, PII quarantine before cross-fleet
 exposure, a full audit log, and the `caura_evolve` → `caura_insights`
 outcome-propagation loop. The field still needs a benchmark for the
@@ -60,9 +60,9 @@ fleet-shaped problem; we're working toward one.
 ## Reproduce it yourself
 
 The accuracy and token-efficiency numbers run against the **public** datasets,
-so you can reproduce the methodology against your own MemClaw instance:
+so you can reproduce the methodology against your own Caura instance:
 
-1. **Stand up MemClaw locally** — follow the [Quick Start](README.md#quick-start)
+1. **Stand up Caura locally** — follow the [Quick Start](README.md#quick-start)
    (`docker compose up -d`). Set an embedding/LLM provider key so memories are
    embedded and enriched (standalone dummy-embedding mode runs but won't produce
    meaningful recall).
@@ -151,11 +151,11 @@ effect rises monotonically with `k` across the range tested, so this benchmark c
 say whether more keyword weight helps on LoCoMo, but it does **not** locate an
 optimum; don't read the largest `k` as the best one.
 
-## How MemClaw compares
+## How Caura compares
 
-For a single chatbot, the public-benchmark leaders (MemClaw, Mem0, Zep) cluster
+For a single chatbot, the public-benchmark leaders (Caura, Mem0, Zep) cluster
 in a narrow accuracy band — the choice usually comes down to stack fit, latency,
-and token budget. MemClaw differentiates on the dimensions a single-agent
+and token budget. Caura differentiates on the dimensions a single-agent
 benchmark can't see; see [`docs/performance.md`](docs/performance.md#how-caura-compares)
 for the fleet-scale breakdown and the [feature comparison](README.md#how-caura-compares)
 in the README.

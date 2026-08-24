@@ -55,9 +55,10 @@ For credentials, scopes, and the full API surface, see the
 [Caura docs](https://caura.ai/docs). Production fleets should use
 [per-agent keys](https://caura.ai/docs/integrations/per-agent-keys).
 
-## memclaw-interviewer — Claude Code + Cursor adapter
+## caura-interviewer — Claude Code + Cursor adapter
 
-Installing this package also provides the `memclaw-interviewer` CLI: the
+Installing this package also provides the `caura-interviewer` CLI (the
+legacy `memclaw-interviewer` entrypoint is installed too and keeps working): the <!-- legacy-name-ok: taught as legacy alias -->
 Caura Interviewer's disk-parser adapter for Claude Code and Cursor
 workstations. It reads agent session transcripts **read-only** — Claude
 Code's `~/.claude/projects/…/*.jsonl` or Cursor's
@@ -68,15 +69,17 @@ synthesizes them into typed memories. Requires the tenant to have
 `interviewer.enabled = true`.
 
 ```bash
-export MEMCLAW_API_KEY=mc_xxx MEMCLAW_TENANT_ID=my-team
-export MEMCLAW_INTERVIEWER_PROJECTS="-Users-me-work-*"   # allowlist, default-deny
+export CAURA_API_KEY=mc_xxx CAURA_TENANT_ID=my-team
+export CAURA_INTERVIEWER_PROJECTS="-Users-me-work-*"     # allowlist, default-deny
 
-memclaw-interviewer status --since-hours 24     # cursors vs. local line counts
-memclaw-interviewer run --dry-run -v            # parse + window, submit nothing
-memclaw-interviewer run --max-windows 8         # submit due windows
-memclaw-interviewer run --harness cursor        # harvest Cursor instead (or
-                                                # MEMCLAW_INTERVIEWER_HARNESS=cursor)
+caura-interviewer status --since-hours 24       # cursors vs. local line counts
+caura-interviewer run --dry-run -v              # parse + window, submit nothing
+caura-interviewer run --max-windows 8           # submit due windows
+caura-interviewer run --harness cursor          # harvest Cursor instead (or
+                                                # CAURA_INTERVIEWER_HARNESS=cursor)
 ```
+
+Every `CAURA_*` variable above also answers to its pre-rename `MEMCLAW_*` name; where both are set the first non-empty value wins. <!-- legacy-name-ok: taught as legacy alias -->
 
 **Privacy:** default-deny — with no allowlist the CLI lists discovered
 project dirs and exits with guidance; `--all-projects` is the explicit
@@ -92,14 +95,14 @@ inferred from the path shape.
 Claude Code (`~/.claude/settings.json`):
 ```json
 { "hooks": { "SessionEnd": [ { "hooks": [
-  { "type": "command", "command": "memclaw-interviewer hook", "timeout": 300 }
+  { "type": "command", "command": "caura-interviewer hook", "timeout": 300 }
 ] } ] } }
 ```
 
 Cursor (`~/.cursor/hooks.json`):
 ```json
 { "version": 1, "hooks": {
-  "sessionEnd": [ { "command": "memclaw-interviewer hook" } ]
+  "sessionEnd": [ { "command": "caura-interviewer hook" } ]
 } }
 ```
 
@@ -108,12 +111,12 @@ Cursor (`~/.cursor/hooks.json`):
 since cron doesn't inherit your shell environment). Config comes from the
 same flags/env as `run`:
 ```bash
-memclaw-interviewer install --interval 30m        # add --harness cursor for Cursor
-memclaw-interviewer uninstall                      # removes the entry + env file
+caura-interviewer install --interval 30m          # add --harness cursor for Cursor
+caura-interviewer uninstall                        # removes the entry + env file
 ```
 It refuses to schedule a job that would no-op (missing credentials or no
 project allowlist). On Windows (no `crontab`), use Task Scheduler to run
-`memclaw-interviewer run` on a timer instead.
+`caura-interviewer run` on a timer instead.
 
 Crash-safety is inherited from the Interviewer protocol: the watermark
 advances only after the server commits a window, and retries of the same

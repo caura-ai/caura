@@ -106,7 +106,7 @@ describe("interview_request command handler", () => {
     assert.equal(rp!.body!.status, "failed");
     assert.match(
       String((rp!.body!.result as Record<string, unknown>).error),
-      /MEMCLAW_INTERVIEWER/,
+      /CAURA_INTERVIEWER/,
     );
     // Buffer untouched.
     assert.equal((await readInterviewEvents(0, 500)).length, 1);

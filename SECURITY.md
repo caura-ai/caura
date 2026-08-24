@@ -10,7 +10,7 @@ Please include:
 
 - A description of the issue and its impact
 - Steps to reproduce, or a proof-of-concept
-- The affected MemClaw version (call `GET /api/v1/version`, or `git rev-parse HEAD` if running from source)
+- The affected Caura (formerly MemClaw) version (call `GET /api/v1/version`, or `git rev-parse HEAD` if running from source) <!-- legacy-name-ok: taught as legacy alias -->
 
 If you cannot use GitHub Security Advisories, email **security@caura.ai** as a fallback. Mark the subject `[SECURITY]` and expect a slower acknowledgement than the form.
 
@@ -33,7 +33,7 @@ We ask that you do not publicly disclose the issue until we have released a fix.
 
 ## Supported Versions
 
-MemClaw follows [Semantic Versioning](https://semver.org/). Security fixes are
+Caura follows [Semantic Versioning](https://semver.org/). Security fixes are
 provided for:
 
 | Version | Supported |
@@ -46,8 +46,8 @@ provided for:
 
 In scope:
 
-- MemClaw core API (`core-api/`)
-- MemClaw storage API (`core-storage-api/`)
+- Caura core API (`core-api/`)
+- Caura storage API (`core-storage-api/`)
 - OpenClaw plugin (`plugin/`)
 - Default Docker images published from this repository
 
@@ -58,7 +58,7 @@ Out of scope:
 - Denial-of-service via excessive resource usage when users control their own
   configuration
 - Issues in integrations (e.g., a specific MCP client) that are not bugs in
-  MemClaw itself
+  Caura itself
 
 ## Non-Security Bugs
 

@@ -3,7 +3,7 @@
 ## `gen_broker_openapi.py` — frozen v1 broker OpenAPI contract
 
 `../openapi.broker.json` is the **frozen v1 contract** for the broker-facing
-gateway operations that memclawd (the on-prem broker) calls against Caura
+gateway operations that caura-daemon (the on-prem broker) calls against Caura
 cloud:
 
 | Method | Path                            | Broker caller (`internal/cloud`) |
@@ -37,7 +37,7 @@ rows above went unprotected — the broker's MCP dispatcher was wired to serve
 `memory_recall` / `memory_list` / `memory_update` / `memory_delete`, and the
 baseline was never widened to match.
 
-So when a new `internal/cloud` client method lands in memclawd against a
+So when a new `internal/cloud` client method lands in caura-daemon against a
 core-api endpoint, add it here in the same change. Adding a row is **additive**
 — it only widens what the gate protects, so it does not move
 `CONTRACT_VERSION`. Removing one, or renaming a path/method the broker calls,

@@ -38,7 +38,7 @@ export function assertSafePathSegment(
 export function warnIfInsecureUrl(apiUrl: string, apiKey: string): void {
   if (apiKey && apiUrl.startsWith("http://")) {
     console.warn(
-      "[memclaw] WARNING: MEMCLAW_API_KEY is set but MEMCLAW_API_URL uses plain HTTP. " +
+      "[caura] WARNING: CAURA_API_KEY is set but CAURA_API_URL uses plain HTTP. " +
         "API key will be transmitted in cleartext. Use https:// in production.",
     );
   }
@@ -102,7 +102,7 @@ export function verifyCommandSignature(
     }
     if (!_unsignedWarned) {
       console.warn(
-        `[memclaw] accepting unsigned commands (no MEMCLAW_API_KEY); set the key to enable verification.`,
+        `[caura] accepting unsigned commands (no CAURA_API_KEY); set the key to enable verification.`,
       );
       _unsignedWarned = true;
     }
@@ -120,7 +120,7 @@ export function verifyCommandSignature(
     if (!_unsignedWarned) {
       console.warn(
         `[caura] accepting unsigned command "${cmd.command}" — server is not signing commands. ` +
-          `Set MEMCLAW_REQUIRE_SIGNED_COMMANDS=true to fail closed once your gateway signs.`,
+          `Set CAURA_REQUIRE_SIGNED_COMMANDS=true to fail closed once your gateway signs.`,
       );
       _unsignedWarned = true;
     }

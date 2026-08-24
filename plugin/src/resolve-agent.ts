@@ -44,7 +44,7 @@ function resolveAgentIdInner(
   if (MEMCLAW_AGENT_ID) {
     if (!quiet) {
       console.warn(
-        "[memclaw] Agent ID resolved from MEMCLAW_AGENT_ID env var — consider passing agent_id explicitly",
+        "[caura] Agent ID resolved from the CAURA_AGENT_ID (legacy: MEMCLAW_AGENT_ID) env var — consider passing agent_id explicitly", // legacy-name-ok: taught as legacy alias
       );
     }
     return MEMCLAW_AGENT_ID;
@@ -56,7 +56,7 @@ function resolveAgentIdInner(
   if (!quiet) {
     console.warn(
       `[caura] Could not resolve agent ID — using install-default '${fallback}'. ` +
-        `Pass agent_id explicitly (or set MEMCLAW_AGENT_ID) for clarity.`,
+        `Pass agent_id explicitly (or set CAURA_AGENT_ID) for clarity.`,
     );
   }
   return fallback;

@@ -180,12 +180,13 @@ def _validate_production_settings(app_settings) -> None:  # type: ignore[no-unty
         # unnoticed in the first place — whereas a service that will not start
         # gets caught at deploy.
         raise RuntimeError(
-            "GATEWAY_SHARED_SECRET (or MEMCLAW_API_KEY) must be set when "
-            "ENVIRONMENT=production. With neither, the X-Tenant-ID header-trust "
-            "auth path accepts caller-supplied identity headers from anyone who "
-            "can reach this service directly. Set GATEWAY_SHARED_SECRET to the "
-            "same value the gateway injects as X-Gateway-Secret, or set "
-            "MEMCLAW_API_KEY if this deployment is not fronted by the gateway."
+            "GATEWAY_SHARED_SECRET (or CAURA_API_KEY, legacy: MEMCLAW_API_KEY) "  # legacy-name-ok: taught as legacy alias
+            "must be set when ENVIRONMENT=production. With neither, the "
+            "X-Tenant-ID header-trust auth path accepts caller-supplied identity "
+            "headers from anyone who can reach this service directly. Set "
+            "GATEWAY_SHARED_SECRET to the same value the gateway injects as "
+            "X-Gateway-Secret, or set CAURA_API_KEY if this deployment is not "
+            "fronted by the gateway."
         )
 
 

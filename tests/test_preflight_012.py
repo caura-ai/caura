@@ -70,7 +70,7 @@ def test_human_output_includes_opt_in_command_when_destructive() -> None:
     AND the follow-up backfill so the operator can copy-paste the
     full sequence."""
     out = _format_human(_make_report(total=10_000))
-    assert "MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS=true" in out
+    assert "CAURA_RUN_DESTRUCTIVE_MIGRATIONS=true" in out
     assert "alembic upgrade 012" in out
     assert "backfill_embeddings" in out
 
@@ -81,7 +81,7 @@ def test_human_output_calls_safe_when_empty_db() -> None:
     operator into thinking they need it)."""
     out = _format_human(_make_report(total=0))
     assert "safe to run" in out
-    assert "MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS" not in out
+    assert "CAURA_RUN_DESTRUCTIVE_MIGRATIONS" not in out
     # The plain ``alembic upgrade 012`` command is still printed.
     assert "alembic upgrade 012" in out
 
@@ -161,7 +161,7 @@ async def test_amain_returns_1_on_destructive_db(
     monkeypatch.setattr(preflight_012, "_gather", _fake_gather)
     code = await _amain(["--dsn", "postgresql+asyncpg://x/y"])
     assert code == 1
-    assert "MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS" in capsys.readouterr().out
+    assert "CAURA_RUN_DESTRUCTIVE_MIGRATIONS" in capsys.readouterr().out
 
 
 @pytest.mark.unit

@@ -1,6 +1,6 @@
 # Contributors
 
-MemClaw exists thanks to the people listed here. Names are sourced from the [caura-ai](https://github.com/caura-ai) GitHub organisation roster and the project's commit history.
+Caura (formerly MemClaw) exists thanks to the people listed here. <!-- legacy-name-ok: taught as legacy alias --> Names are sourced from the [caura-ai](https://github.com/caura-ai) GitHub organisation roster and the project's commit history.
 
 If you've contributed and don't see your name, please open a PR adding yourself — handle linking to your profile, optionally with the name you'd like credited.
 

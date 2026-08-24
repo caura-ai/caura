@@ -154,7 +154,7 @@ const memclawPlugin = {
               setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
             }, HEARTBEAT_INITIAL_DELAY_MS);
           } else if (tid && !MEMCLAW_NODE_NAME) {
-            console.warn("[memclaw] Heartbeat disabled — MEMCLAW_NODE_NAME not set.");
+            console.warn("[caura] Heartbeat disabled — CAURA_NODE_NAME not set.");
           }
         })
         .catch(() => {
@@ -163,7 +163,7 @@ const memclawPlugin = {
           // network error, or missing field), so just emit the
           // user-facing next-step here.
           console.warn(
-            "[memclaw] Heartbeat disabled — tenant_id could not be resolved. Set MEMCLAW_TENANT_ID in .env.",
+            "[caura] Heartbeat disabled — tenant_id could not be resolved. Set CAURA_TENANT_ID in .env.",
           );
         });
       fetchToolDescriptions()
@@ -470,7 +470,7 @@ const memclawPlugin = {
               `agents cannot use: ${missing.join(", ")}`,
             );
             console.warn(
-              `[memclaw] Fix: run "openclaw gateway memclaw.allowlist.fix" or set MEMCLAW_AUTO_FIX_CONFIG=true`,
+              `[caura] Fix: run "openclaw gateway memclaw.allowlist.fix" or set CAURA_AUTO_FIX_CONFIG=true`, // legacy-name-ok: gateway command is namespaced by the frozen plugin id
             );
           }
           if (!isContextEngineSlotClaimed(config)) {
@@ -482,7 +482,7 @@ const memclawPlugin = {
             );
             console.warn(
               `[memclaw] Fix: set plugins.slots.contextEngine to "memclaw" in ~/.openclaw/openclaw.json, ` +
-              `or run "openclaw gateway memclaw.allowlist.fix" / set MEMCLAW_AUTO_FIX_CONFIG=true`,
+              `or run "openclaw gateway memclaw.allowlist.fix" / set CAURA_AUTO_FIX_CONFIG=true`, // legacy-name-ok: gateway command is namespaced by the frozen plugin id
             );
           }
         }
@@ -625,7 +625,7 @@ const memclawPlugin = {
             if (!MEMCLAW_API_URL) {
               return {
                 manager: null,
-                error: "Caura plugin unconfigured: MEMCLAW_API_URL not set",
+                error: "Caura plugin unconfigured: CAURA_API_URL not set",
               };
             }
             const health = getReachability();

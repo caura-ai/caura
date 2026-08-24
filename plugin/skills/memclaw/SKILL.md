@@ -19,7 +19,7 @@ knows. Using it is the job, not an optional extra.
 runtime the Caura plugin handles the automatic layer: it injects the mandatory
 keystones at session start (§1), recalls relevant memory before your substantive
 turns (§11), and writes a short **turn summary** afterward as a backstop
-(`MEMCLAW_AUTO_WRITE_TURNS`, on by default). Treat that as a floor, not a
+(`CAURA_AUTO_WRITE_TURNS`, on by default). Treat that as a floor, not a
 substitute. You still call the `caura_*` tools **directly** whenever you need
 to interact deliberately — above all to **write the high-value memories the
 auto-summary won't** (a decision and its *why*, an outcome, a rule), and to
@@ -134,7 +134,7 @@ Interviewer enabled, a scheduled server-side job reads your durable work trail
 (the transcript your harness already keeps) and synthesizes typed memories from
 it — episodes, decisions, outcomes — after the fact. You don't invoke it and
 won't see it run. This is a **different mechanism** from the plugin's per-turn
-auto-writes (`MEMCLAW_AUTO_WRITE_TURNS`, described in the preamble): the
+auto-writes (`CAURA_AUTO_WRITE_TURNS`, described in the preamble): the
 auto-write layer summarizes turns locally as you work; the Interviewer is a
 server-side scheduled synthesis from the work trail. Both are floors, not
 substitutes for deliberate writes — keep writing in realtime for anything you
@@ -262,11 +262,11 @@ Before each model call the plugin's context engine decides whether to issue a
 plugin-driven recall, so trivial turns ("hi", "ok", `/help`, single-emoji acks)
 don't hit the backend and pay tokens for an unhelpful recall block.
 
-- **Default** (`MEMCLAW_RECALL_POLICY=auto`): recall on substantive turns; skip
+- **Default** (`CAURA_RECALL_POLICY=auto`): recall on substantive turns; skip
   very short prompts, trivial pings, and short slash-commands.
 - **Recall keywords always force recall** (e.g. `remember`, `recall`, `last
   time`, `we discussed`, `previously`, `history`); override the set with
-  `MEMCLAW_RECALL_TRIGGER_KEYWORDS`.
+  `CAURA_RECALL_TRIGGER_KEYWORDS`.
 - Other policies: `always`, `never` (education block only), `keywords`.
 - The gate only suppresses *plugin-driven* recall — **you can always call
   `caura_recall` directly** when a short turn needs context the gate can't
@@ -276,7 +276,7 @@ Rolling skip counters (`recall_metrics`) ride the heartbeat for per-fleet
 visibility.
 
 The plugin also auto-writes a short **turn summary** after substantive turns
-(`MEMCLAW_AUTO_WRITE_TURNS`, on by default). That's a backstop, not a
+(`CAURA_AUTO_WRITE_TURNS`, on by default). That's a backstop, not a
 replacement for the deliberate, high-value writes in §3 — and it never evolves,
 supersedes, or files docs for you. Do that work yourself.
 

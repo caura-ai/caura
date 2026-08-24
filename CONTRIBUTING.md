@@ -154,7 +154,7 @@ and is what the Linux kernel, Docker, and GitLab use.
 Sign off automatically with `git commit -s`:
 
 ```bash
-git commit -s -m "feat(plugin): handle MEMCLAW_API_PREFIX override"
+git commit -s -m "feat(plugin): handle CAURA_API_PREFIX override"
 ```
 
 Configure once and forget:
