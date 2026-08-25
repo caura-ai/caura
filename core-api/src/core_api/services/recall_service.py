@@ -2,6 +2,7 @@
 
 import json as _json
 import logging
+import re
 import time
 from datetime import UTC, datetime
 
@@ -36,12 +37,59 @@ not paraphrase inside quotes.
 than supplying one. If they don't contain enough to answer at all, say so plainly. Do not \
 infer beyond the evidence.
 
+After your step-by-step reasoning, end your reply with one final line formatted exactly:
+**Answer:** <your answer>
+This line must contain the complete answer on its own.
+
 Memories:
 
 {memories}
 
 {reference_date_line}Question: {query}
 Answer (step by step):"""
+
+# WT-1 — the prompt above deliberately elicits step-by-step reasoning before the
+# answer (it is load-bearing for recall accuracy on LoCoMo/LongMemEval), but the
+# raw completion used to be surfaced as ``summary`` unfiltered: callers paid ~5x
+# the tokens and had to string-parse for the trailing "**Answer:**" line
+# themselves. The marker is now extracted server-side; the reasoning scaffold
+# stays in the completion (and in ``diagnostic.recall_raw``), never in ``summary``.
+#
+# Tolerant of the variants models actually emit: ``**Answer:**`` / ``**Answer**:``
+# anywhere in the text, or a plain ``Answer:`` at the start of a line. The plain
+# form is line-anchored so prose like "the answer: ..." inside the reasoning
+# cannot false-positive mid-sentence.
+_ANSWER_MARKER = re.compile(
+    r"""
+    (?:
+        \*\*[ \t]*Answer[ \t]*:[ \t]*\*\*     # **Answer:**
+      | \*\*[ \t]*Answer[ \t]*\*\*[ \t]*:     # **Answer**:
+      | ^[ \t]*Answer[ \t]*:                  # Answer: at line start
+    )
+    [ \t]*
+    """,
+    re.MULTILINE | re.VERBOSE,
+)
+
+
+def _extract_final_answer(completion: str) -> str:
+    """Return the text after the LAST answer marker, stripped.
+
+    Fail open: with no marker (older prompt in flight, a model that ignored the
+    format instruction, the ``_fake_recall`` fallback, or a completion truncated
+    by ``MEMORY_RECALL_SUMMARY_MAX_TOKENS`` before the marker was emitted) the
+    full completion is returned unchanged — a verbose summary beats an empty or
+    mangled one. Ditto when the marker is the last thing in the completion and
+    nothing follows it.
+
+    LAST occurrence, not first: the reasoning steps may legitimately quote or
+    rehearse an "Answer:" line before committing to the final one.
+    """
+    matches = list(_ANSWER_MARKER.finditer(completion))
+    if not matches:
+        return completion
+    answer = completion[matches[-1].end() :].strip()
+    return answer or completion
 
 
 def _format_memories_for_prompt(memories: list) -> str:
@@ -113,6 +161,7 @@ async def summarize_memories(
         if diagnostic:
             resp["diagnostic"] = {
                 "recall_prompt": None,
+                "recall_raw": None,
                 "recall_model": None,
                 "recall_provider": None,
                 "all_candidates": diagnostic_ctx.get("all_candidates", []),
@@ -154,6 +203,7 @@ async def summarize_memories(
         if diagnostic:
             resp["diagnostic"] = {
                 "recall_prompt": None,
+                "recall_raw": None,
                 "recall_model": None,
                 "recall_provider": provider,
                 "all_candidates": diagnostic_ctx.get("all_candidates", []),
@@ -197,7 +247,7 @@ async def summarize_memories(
         )
 
     recall_model = getattr(config, "recall_model", None)
-    summary = await call_with_fallback(
+    completion = await call_with_fallback(
         primary_provider_name=provider,
         call_fn=_do_recall,
         fake_fn=_fake_recall,
@@ -222,6 +272,10 @@ async def summarize_memories(
         budget_s=15.0,
     )
 
+    # WT-1 — surface only the final answer as ``summary``; the step-by-step
+    # scaffold stays available under ``diagnostic.recall_raw``.
+    summary = _extract_final_answer(completion)
+
     recall_ms = int((time.perf_counter() - t0) * 1000)
 
     # C4 — materialise once; alias under both ``memories`` and ``items``.
@@ -238,6 +292,9 @@ async def summarize_memories(
     if diagnostic:
         result["diagnostic"] = {
             "recall_prompt": prompt,
+            # WT-1 — the unfiltered completion (reasoning scaffold + marker),
+            # for debugging what the extraction saw.
+            "recall_raw": completion,
             "recall_model": recall_model or "default",
             "recall_provider": provider,
             "all_candidates": diagnostic_ctx.get("all_candidates", []),

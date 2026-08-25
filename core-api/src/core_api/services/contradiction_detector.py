@@ -1501,6 +1501,20 @@ def _format_entity_context(entities: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _normalize_subject_name(name: str | None) -> str:
+    """WT-3 — normalise a canonical subject name for the L3.4 preflight's
+    name-equality check: lowercase, collapse internal whitespace, strip.
+
+    Returns ``""`` when the name is missing or is the
+    ``_extract_subject_canonical_identity`` ``"<unknown>"`` placeholder —
+    an unresolvable name can never *establish* a collision, so callers
+    treat ``""`` as "names do not match" (fail open to the judge).
+    """
+    if not name or name == "<unknown>":
+        return ""
+    return " ".join(name.lower().split())
+
+
 def _extract_subject_canonical_identity(
     entities: list[dict],
 ) -> tuple[str, str, str] | None:
@@ -1516,10 +1530,14 @@ def _extract_subject_canonical_identity(
     see the inline TODO at the preflight site for the original
     ``priya``-collision write-up).
 
-    Identity is keyed on ``entity_id`` ONLY — two ``priya`` rows with
-    the same canonical name but different entity rows ARE distinct
-    subjects (that's the whole point). The canonical name + type are
-    returned for logging / debugging, not for equality.
+    Identity is keyed on ``entity_id`` — two ``priya`` rows with the
+    same canonical name but different entity rows ARE distinct subjects
+    (that's the whole point). WT-3: the canonical name (index 0,
+    compared via ``_normalize_subject_name``) additionally scopes the
+    preflight's drop to that same-name collision class — differing ids
+    under DIFFERING names may be a canonicalisation split of one
+    subject, and the preflight fails open there. ``entity_type`` stays
+    logging/debugging-only.
     """
     if not entities:
         return None
@@ -2310,11 +2328,25 @@ async def detect_contradictions_by_entities_async(
         # (the ``priya``-collision class from the original followup
         # TODO). Now that the contexts are fetched once above, the
         # preflight is a cheap dict lookup.
+        #
+        # WT-3 — the drop is scoped to the NAME-COLLISION class the
+        # gate was built for: same canonical subject name (under
+        # ``_normalize_subject_name``) resolving to DISTINCT entity
+        # rows ("priya" vs "priya"). When the canonical NAMES differ
+        # as well as the ids, the two rows may instead be a
+        # canonicalisation SPLIT of one real-world subject ("new
+        # analytics service" vs "analytics service" — the WT-2 class);
+        # dropping there silently eats real contradictions, so we
+        # FAIL OPEN and let the LLM judge decide. Costs judge spend on
+        # genuinely-different subjects; the judge is the correct
+        # arbiter for those, the preflight is not.
         if contexts_fetched and new_ctx:
             new_identity = _extract_subject_canonical_identity(new_ctx)
             if new_identity is not None:
                 new_eid = new_identity[2]
+                new_name = _normalize_subject_name(new_identity[0])
                 drop_ids: set[str] = set()
+                n_failopen_id_mismatch = 0
                 for c in candidates:
                     if new_subject is not None and c.get("subject_entity_id") is not None:
                         # Both sides had non-NULL subject_entity_id — A1
@@ -2324,16 +2356,36 @@ async def detect_contradictions_by_entities_async(
                     cand_identity = _extract_subject_canonical_identity(cand_ctx)
                     if cand_identity is None:
                         continue  # No subject resolved — fail open.
-                    if cand_identity[2] != new_eid:
+                    if cand_identity[2] == new_eid:
+                        continue  # Same entity row — same subject.
+                    cand_name = _normalize_subject_name(cand_identity[0])
+                    if new_name and cand_name and new_name == cand_name:
+                        # Same canonical name, distinct entity rows —
+                        # the name-collision class. Drop.
                         drop_ids.add(str(c.get("id")))
+                    else:
+                        # Names differ (or one is unresolvable) — may
+                        # be a canonicalisation split of ONE subject
+                        # (WT-3). Fail open: keep the candidate.
+                        n_failopen_id_mismatch += 1
                 if drop_ids:
                     before = len(candidates)
                     candidates = [c for c in candidates if str(c.get("id")) not in drop_ids]
                     n_entity_links_skipped = before - len(candidates)
                     logger.info(
                         "Path C entity-links preflight dropped %d candidate(s) "
-                        "for memory %s (canonical subjects differ by entity_id)",
+                        "for memory %s (same canonical subject name, entity_id "
+                        "differs — name-collision class)",
                         n_entity_links_skipped,
+                        memory_id,
+                    )
+                if n_failopen_id_mismatch:
+                    logger.info(
+                        "Path C entity-links preflight retained %d candidate(s) "
+                        "for memory %s despite entity_id mismatch (canonical "
+                        "subject names differ — possible canonicalisation "
+                        "split; failing open to the LLM judge)",
+                        n_failopen_id_mismatch,
                         memory_id,
                     )
 

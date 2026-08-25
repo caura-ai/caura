@@ -17,6 +17,7 @@ is locked in by tests in ``tests/test_a4_13_path_c_retraction.py``.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -217,9 +218,19 @@ def _make_new_memory(mid, *, subject_entity_id=None) -> dict:
 
 
 def _sc_for_forward_path(
-    new_mem: dict, candidates: list[dict], links_by_mem: dict[str, list[dict]]
+    new_mem: dict,
+    candidates: list[dict],
+    links_by_mem: dict[str, list[dict]],
+    entities: dict[str, dict] | None = None,
 ) -> AsyncMock:
-    """Build a mock storage client for the forward Path C path."""
+    """Build a mock storage client for the forward Path C path.
+
+    ``entities`` (optional) maps entity_id → explicit entity row, for
+    tests that need the canonical_name decoupled from the entity_id
+    (WT-3: same canonical name under DIFFERENT entity_ids, and vice
+    versa). Ids absent from the map fall back to the legacy synthesis
+    (canonical_name derived from the ``ent:<name>`` id).
+    """
     sc = AsyncMock()
 
     async def get_memory(mid: str):
@@ -236,6 +247,8 @@ def _sc_for_forward_path(
     sc.get_entity_links_for_memories = AsyncMock(return_value=links_by_mem)
 
     async def get_entity(eid: str):
+        if entities is not None and eid in entities:
+            return entities[eid]
         # Synthesize a minimal entity row keyed by id; tests pass the
         # canonical_name they want here via the links_by_mem structure
         # (we encode it in the link by using entity_id == "ent:<name>").
@@ -264,12 +277,27 @@ async def test_forward_preflight_drops_collision_when_subject_entity_id_null():
     new_mem = _make_new_memory(new_id, subject_entity_id=None)
     cand = _make_candidate(cand_id, subject_entity_id=None)
     # Same canonical name ("Priya"), different entity_ids → distinct
-    # real-world subjects → preflight must drop.
+    # real-world subjects → preflight must drop. WT-3 scoped the drop
+    # to this same-NAME collision class, so the entity rows must carry
+    # the SAME canonical_name under DIFFERENT ids (the legacy id-derived
+    # synthesis would have given them different names too).
     links = {
         str(new_id): [{"entity_id": "ent:priya-A", "role": "subject"}],
         str(cand_id): [{"entity_id": "ent:priya-B", "role": "subject"}],
     }
-    sc = _sc_for_forward_path(new_mem, [cand], links)
+    entities = {
+        "ent:priya-A": {
+            "id": "ent:priya-A",
+            "canonical_name": "Priya",
+            "entity_type": "person",
+        },
+        "ent:priya-B": {
+            "id": "ent:priya-B",
+            "canonical_name": "Priya",
+            "entity_type": "person",
+        },
+    }
+    sc = _sc_for_forward_path(new_mem, [cand], links, entities=entities)
     judge = AsyncMock(return_value=(True, 0.95))
 
     with (
@@ -525,3 +553,159 @@ async def test_forward_preflight_caps_fallthrough_set_at_max():
         f"expected the batched base call to cover {len(cands)} candidates, "
         f"got {len(judge_batch.call_args.args[1])}"
     )
+
+
+# ---------------------------------------------------------------------------
+# WT-3 — the L3.4 drop is scoped to the same-NAME collision class;
+# differing names + differing ids (a possible canonicalisation split of
+# ONE subject) must fail open to the LLM judge.
+# ---------------------------------------------------------------------------
+
+
+def _wt3_patches(sc, base_judge, entity_aware_judge):
+    """One combined context manager for the standard WT-3 patch set."""
+    stack = ExitStack()
+    for p in (
+        patch(
+            "core_api.services.contradiction_detector.get_storage_client",
+            return_value=sc,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._llm_contradiction_check",
+            base_judge,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
+            entity_aware_judge,
+        ),
+        patch(
+            "core_api.services.contradiction_detector.resolve_config",
+            new_callable=AsyncMock,
+            return_value=None,
+            create=True,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+    ):
+        stack.enter_context(p)
+    return stack
+
+
+@pytest.mark.asyncio
+async def test_wt3_preflight_fails_open_when_names_and_ids_both_differ():
+    """WT-3 regression — entity canonicalisation split ONE real-world
+    subject into two entity rows with DIFFERENT canonical names ("new
+    analytics service" vs "analytics service"). The L3.4 preflight
+    previously dropped on the id mismatch alone, silently eating the
+    real contradiction (wet-test: candidates_initial=1 → n_conflicts=0).
+    Differing names cannot be the priya name-collision class, so the
+    candidate must SURVIVE the preflight and reach the judge."""
+    from core_api.services.contradiction_detector import (
+        detect_contradictions_by_entities_async,
+    )
+
+    new_id, cand_id = uuid4(), uuid4()
+    new_mem = _make_new_memory(new_id, subject_entity_id=None)
+    cand = _make_candidate(cand_id, subject_entity_id=None)
+    links = {
+        str(new_id): [{"entity_id": "ent:svc-A", "role": "subject"}],
+        str(cand_id): [{"entity_id": "ent:svc-B", "role": "subject"}],
+    }
+    entities = {
+        "ent:svc-A": {
+            "id": "ent:svc-A",
+            "canonical_name": "new analytics service",
+            "entity_type": "project",
+        },
+        "ent:svc-B": {
+            "id": "ent:svc-B",
+            "canonical_name": "analytics service",
+            "entity_type": "project",
+        },
+    }
+    sc = _sc_for_forward_path(new_mem, [cand], links, entities=entities)
+    base_judge = AsyncMock(return_value=(False, 0.95))
+    entity_aware_judge = AsyncMock(return_value=(False, 0.95))
+
+    with _wt3_patches(sc, base_judge, entity_aware_judge):
+        await detect_contradictions_by_entities_async(new_id, "t1", "f1")
+
+    # Fail open: the candidate reaches the judge (entity-aware, since
+    # both contexts are populated — CAURA-131 wiring).
+    entity_aware_judge.assert_called_once()
+    base_judge.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wt3_preflight_still_drops_same_name_collision_after_normalisation():
+    """The priya guard — SAME canonical subject name (up to the WT-3
+    normalisation: case + whitespace) under DIFFERENT entity_ids is the
+    name-collision class the gate was built for and must STILL drop."""
+    from core_api.services.contradiction_detector import (
+        detect_contradictions_by_entities_async,
+    )
+
+    new_id, cand_id = uuid4(), uuid4()
+    new_mem = _make_new_memory(new_id, subject_entity_id=None)
+    cand = _make_candidate(cand_id, subject_entity_id=None)
+    links = {
+        str(new_id): [{"entity_id": "ent:priya-1", "role": "subject"}],
+        str(cand_id): [{"entity_id": "ent:priya-2", "role": "subject"}],
+    }
+    entities = {
+        "ent:priya-1": {
+            "id": "ent:priya-1",
+            "canonical_name": "Priya  Sharma",
+            "entity_type": "person",
+        },
+        "ent:priya-2": {
+            "id": "ent:priya-2",
+            "canonical_name": "priya sharma",
+            "entity_type": "person",
+        },
+    }
+    sc = _sc_for_forward_path(new_mem, [cand], links, entities=entities)
+    base_judge = AsyncMock(return_value=(True, 0.95))
+    entity_aware_judge = AsyncMock(return_value=(True, 0.95))
+
+    with _wt3_patches(sc, base_judge, entity_aware_judge):
+        await detect_contradictions_by_entities_async(new_id, "t1", "f1")
+
+    entity_aware_judge.assert_not_called()
+    base_judge.assert_not_called()
+    assert sc.update_memory_status.call_args_list == [], (
+        "same-canonical-name collision must still be dropped by the "
+        "L3.4 preflight after the WT-3 fail-open change"
+    )
+
+
+@pytest.mark.asyncio
+async def test_wt3_preflight_null_identity_side_still_fails_open():
+    """A candidate whose entity_links resolve NO subject-role entity has
+    no identity to compare — the preflight must keep failing open (the
+    pre-WT-3 behaviour) and let the judge decide."""
+    from core_api.services.contradiction_detector import (
+        detect_contradictions_by_entities_async,
+    )
+
+    new_id, cand_id = uuid4(), uuid4()
+    new_mem = _make_new_memory(new_id, subject_entity_id=None)
+    cand = _make_candidate(cand_id, subject_entity_id=None)
+    links = {
+        str(new_id): [{"entity_id": "ent:svc-A", "role": "subject"}],
+        # Object-role only — _extract_subject_canonical_identity → None.
+        str(cand_id): [{"entity_id": "ent:svc-A", "role": "object"}],
+    }
+    sc = _sc_for_forward_path(new_mem, [cand], links)
+    base_judge = AsyncMock(return_value=(False, 0.95))
+    entity_aware_judge = AsyncMock(return_value=(False, 0.95))
+
+    with _wt3_patches(sc, base_judge, entity_aware_judge):
+        await detect_contradictions_by_entities_async(new_id, "t1", "f1")
+
+    # Kept: judge runs (entity-aware — both contexts non-empty).
+    entity_aware_judge.assert_called_once()
+    base_judge.assert_not_called()

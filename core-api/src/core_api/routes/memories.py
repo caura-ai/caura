@@ -1824,6 +1824,7 @@ async def ingest_preview_endpoint(
 async def ingest_commit_endpoint(
     request: Request,
     body: IngestCommitRequest,
+    response: Response,
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Write previewed facts as memories."""
@@ -1961,6 +1962,7 @@ async def ingest_undo_endpoint(
 async def recall_endpoint(
     request: Request,
     body: SearchRequest,
+    response: Response,
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Search memories and return an LLM-synthesized context summary.
