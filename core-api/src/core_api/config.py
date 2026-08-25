@@ -354,6 +354,13 @@ class Settings(BaseSettings):
     paddle_business_monthly_price_id: str | None = None
     paddle_business_annual_price_id: str | None = None
     use_stm: bool = False
+    # D13 — meter /recall and MCP caura_recall against the "recall" counter
+    # instead of "search". Off by default because the recalls counter feeds
+    # plan enforcement (`_is_over_plan_limits` → x-org-read-only → 403 on
+    # write routes): flipping this makes the per-plan recall cap computable
+    # for the first time, so enabling it is a deliberate billing decision,
+    # not a deploy side effect. Off = the historical (miscounted) behavior.
+    meter_recall_as_recall: bool = False
     stm_backend: str = "memory"  # memory | redis
     stm_notes_ttl: int = 86400  # 24h
     stm_bulletin_ttl: int = 172800  # 48h

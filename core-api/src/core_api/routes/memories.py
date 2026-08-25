@@ -94,7 +94,11 @@ from core_api.services.memory_service import (
 )
 from core_api.services.tenants import list_active_tenant_ids
 from core_api.services.trust_service import parse_trust_error, require_trust
-from core_api.services.usage_service import bulk_check_and_increment, check_and_increment
+from core_api.services.usage_service import (
+    bulk_check_and_increment,
+    check_and_increment,
+    recall_operation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1981,7 +1985,10 @@ async def recall_endpoint(
                 body.fleet_ids = [_agent["fleet_id"]]
             if body.fleet_ids and len(body.fleet_ids) == 1:
                 await enforce_fleet_read(body.tenant_id, body.filter_agent_id, body.fleet_ids[0])
-        await check_and_increment(body.tenant_id, "search")
+        # D13 — a recall is a recall, not a search: plans meter them separately
+        # and the recalls counter never moved because this site (and the MCP
+        # twin) billed "search". Flag-gated; see ``recall_operation``.
+        await check_and_increment(body.tenant_id, recall_operation())
 
     from core_api.services.memory_service import search_memories
     from core_api.services.organization_settings import resolve_config

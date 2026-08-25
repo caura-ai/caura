@@ -94,6 +94,7 @@ from core_api.services.recall_service import summarize_memories
 from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
+from core_api.services.usage_service import recall_operation
 from core_api.trust_utils import effective_keystone_min_trust, keystone_min_trust
 
 logger = logging.getLogger(__name__)
@@ -749,7 +750,8 @@ async def caura_recall(
         # the agent lookup + write quota pin to the HOME tenant, while the READ
         # (search + audit) widens via ``readable_tenant_ids`` exactly as before.
         sc = get_storage_client()
-        await check_and_increment(tenant_id, "search")
+        # D13 — same fix as REST /recall: bill the recall counter (flag-gated).
+        await check_and_increment(tenant_id, recall_operation())
         config = await resolve_config(tenant_id)
         # Agent profile + fleet-scope signals are HOME-tenant only — never
         # widened by the readable set.
