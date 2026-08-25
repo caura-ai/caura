@@ -19,23 +19,25 @@ pip install caura-client
 ```python
 from caura_client import Caura
 
-mc = Caura("mc_xxx", tenant_id="my-team", agent_id="my-agent")
+# Recommended: the client is a context manager and closes its HTTP
+# connection on exit (use close() for manual management).
+with Caura("mc_xxx", tenant_id="my-team", agent_id="my-agent") as mc:
+    # Write a memory — enriched server-side with type, title, tags, importance.
+    mc.write("Q3 revenue target is $4M, set on 2026-04-15.")
 
-# Write a memory — enriched server-side with type, title, tags, importance.
-mc.write("Q3 revenue target is $4M, set on 2026-04-15.")
+    # Search (ranked raw results)
+    for m in mc.search("Q3 revenue target", top_k=5):
+        print(m.title, "—", m.content)
 
-# Search (ranked raw results)
-for m in mc.search("Q3 revenue target", top_k=5):
-    print(m.title, "—", m.content)
-
-# Recall (LLM-synthesized context brief)
-print(mc.recall("Q3 revenue target").summary)
+    # Recall (LLM-synthesized context brief)
+    print(mc.recall("Q3 revenue target").summary)
 ```
 
 Self-hosted? Pass `base_url`:
 
 ```python
-mc = Caura("standalone", tenant_id="default", base_url="http://localhost:8000")
+with Caura("standalone", tenant_id="default", base_url="http://localhost:8000") as mc:
+    ...
 ```
 
 ## API
@@ -46,10 +48,50 @@ mc = Caura("standalone", tenant_id="default", base_url="http://localhost:8000")
 | `search(query, top_k=5, ...)` | `POST /api/v1/search` | `list[Memory]` |
 | `recall(query, top_k=5, ...)` | `POST /api/v1/recall` | `RecallResult` |
 | `health()` | `GET /api/v1/health` | `dict` |
+| `get_document(doc_id, *, collection, ...)` | `GET /api/v1/documents/{doc_id}` | `dict` |
+| `submit_interview(...)` | `POST /api/v1/interview/submit` | `dict` |
+| `close()` | — | `None` |
 
 The client is a context manager (`with Caura(...) as mc:`) and raises
 `AuthError` (401/403), `NotFoundError` (404), or `CauraAPIError` on failures.
 Every result also exposes the full API payload on `.raw`.
+
+### Fetching a document
+
+`get_document()` returns the full `DocOut` envelope — the stored record is
+nested under the `"data"` key, not returned directly. `collection` is a
+required keyword-only argument, and a missing document raises
+`NotFoundError`:
+
+```python
+with Caura("mc_xxx", tenant_id="my-team", agent_id="my-agent") as mc:
+    doc = mc.get_document("doc-123", collection="interviews")
+    record = doc["data"]       # the stored record lives under "data"
+```
+
+### Lifecycle
+
+`Caura` holds an `httpx.Client`, so prefer the `with` form above — the
+connection is closed on exit. For manual management, call `close()`
+explicitly when you are done:
+
+```python
+mc = Caura("mc_xxx", tenant_id="my-team", agent_id="my-agent")
+try:
+    mc.write("...")
+finally:
+    mc.close()
+```
+
+### `submit_interview()` is an Interviewer-internal surface
+
+`submit_interview()` is used by the `caura-interviewer` adapter below to
+submit parsed session windows to the server. It is not intended as a
+general-purpose SDK method: it calls the server synchronously (the server
+interviews the window in-line, up to a 90s budget), so its `timeout`
+defaults to 120s rather than the client-wide 30s, and the returned body
+carries an extra `"http_status"` key so callers can tell a `207` partial
+from a `200` committed. New SDK users should not need it.
 
 For credentials, scopes, and the full API surface, see the
 [Caura docs](https://caura.ai/docs). Production fleets should use
