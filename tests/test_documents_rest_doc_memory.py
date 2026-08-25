@@ -17,8 +17,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
-
 from core_api.services.doc_indexing import resolve_doc_memory
+from fastapi import Response
 
 pytestmark = [pytest.mark.unit]
 
@@ -50,9 +50,8 @@ def test_rule_lives_in_one_module_only():
     """Guard against a surface growing its own derivation logic."""
     import inspect
 
-    from core_api.routes import documents as rest_module
-
     from core_api import mcp_server
+    from core_api.routes import documents as rest_module
 
     for module in (rest_module, mcp_server):
         src = inspect.getsource(module)
@@ -138,6 +137,7 @@ async def test_unindexed_branch_mints(rest_env):
 
     await mod.upsert_document.__wrapped__(
         request=AsyncMock(),
+        response=Response(),
         body=_body(mod),
         auth=_auth(),
         idempotency_key=None,
@@ -158,6 +158,7 @@ async def test_indexed_branch_mints(rest_env, monkeypatch):
 
     await mod.upsert_document.__wrapped__(
         request=AsyncMock(),
+        response=Response(),
         body=_body(mod, data={"summary": "Postgres tuning.", "content": _BODY}),
         auth=_auth(),
         idempotency_key=None,
@@ -172,7 +173,11 @@ async def test_caller_agent_id_is_forwarded(rest_env):
     mod = rest_env["module"]
 
     await mod.upsert_document.__wrapped__(
-        request=AsyncMock(), body=_body(mod), auth=_auth(), idempotency_key=None
+        request=AsyncMock(),
+        response=Response(),
+        body=_body(mod),
+        auth=_auth(),
+        idempotency_key=None,
     )
 
     assert rest_env["spy"].call_args.kwargs["agent_id"] == "agent-a"
@@ -185,6 +190,7 @@ async def test_bodyless_structured_record_now_mints(rest_env):
 
     await mod.upsert_document.__wrapped__(
         request=AsyncMock(),
+        response=Response(),
         body=_body(mod, collection="customers", data={"plan": "business", "seats": 40}),
         auth=_auth(),
         idempotency_key=None,
@@ -202,6 +208,7 @@ async def test_skips_mint_for_empty_payload(rest_env):
 
     await mod.upsert_document.__wrapped__(
         request=AsyncMock(),
+        response=Response(),
         body=_body(mod, collection="customers", data={}),
         auth=_auth(),
         idempotency_key=None,
@@ -217,7 +224,11 @@ async def test_raising_mint_does_not_fail_the_doc_write(rest_env):
     rest_env["spy"].side_effect = RuntimeError("memory subsystem down")
 
     out = await mod.upsert_document.__wrapped__(
-        request=AsyncMock(), body=_body(mod), auth=_auth(), idempotency_key=None
+        request=AsyncMock(),
+        response=Response(),
+        body=_body(mod),
+        auth=_auth(),
+        idempotency_key=None,
     )
 
     rest_env["spy"].assert_awaited_once()
