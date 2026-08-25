@@ -708,11 +708,49 @@ async def caura_recall(
     top_k: Annotated[
         int, Field(description="Max results, default 5. Values above 20 are capped to 20.")
     ] = DEFAULT_SEARCH_TOP_K,
+    valid_at: Annotated[
+        str | None,
+        Field(description="As-of ISO 8601 date: filter to rows valid at that time."),
+    ] = None,
+    min_similarity: Annotated[
+        float | None,
+        Field(description="Cosine floor 0.0-1.0; overrides the tuned profile for this call."),
+    ] = None,
+    diagnostic: Annotated[
+        bool,
+        Field(description="Return retrieval trace; results unchanged, never bumps recall_count."),
+    ] = False,
 ) -> str:
     """Hybrid semantic+keyword recall, with optional LLM brief."""
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
+    # C31/D2 — MCP gains the formerly REST-only knobs; validate like the
+    # sibling filters so a bad value is a structured refusal, not a 500.
+    parsed_valid_at = None
+    if valid_at:
+        try:
+            parsed_valid_at = _dt.fromisoformat(valid_at.replace("Z", "+00:00"))
+        except ValueError:
+            return _with_latency(
+                _error_response(
+                    "INVALID_ARGUMENTS",
+                    f"Invalid valid_at '{valid_at}'. Must be an ISO 8601 datetime.",
+                    field="valid_at",
+                    value=valid_at,
+                ),
+                t0,
+            )
+    if min_similarity is not None and not (0.0 <= min_similarity <= 1.0):
+        return _with_latency(
+            _error_response(
+                "INVALID_ARGUMENTS",
+                f"Invalid min_similarity '{min_similarity}'. Must be between 0.0 and 1.0.",
+                field="min_similarity",
+                value=str(min_similarity),
+            ),
+            t0,
+        )
     if memory_type and memory_type not in MEMORY_TYPES:
         return _with_latency(
             _error_response(
@@ -785,6 +823,8 @@ async def caura_recall(
         # gateway plumbs ``X-Readable-Tenant-IDs`` and the MCP middleware parks
         # it on ``_readable_tenant_ids_var``. Single-tenant credentials leave
         # the var empty; ``search_memories`` falls back to the home tenant only.
+        # C31/D12 — diagnostic trace context, filled by the pipeline when requested.
+        diagnostic_ctx: dict = {}
         results = await search_memories(
             tenant_id=tenant_id,
             query=query,
@@ -794,6 +834,7 @@ async def caura_recall(
             memory_type_filter=memory_type,
             status_filter=status,
             top_k=capped_top_k,
+            valid_at=parsed_valid_at,
             recall_boost=config.recall_boost,
             graph_expand=config.graph_expand,
             entity_retrieval=config.entity_retrieval,
@@ -801,6 +842,9 @@ async def caura_recall(
             search_profile=agent_profile,
             readable_tenant_ids=_get_readable_tenants() or None,
             source="mcp_recall",
+            diagnostic=diagnostic,
+            diagnostic_ctx=diagnostic_ctx if diagnostic else None,
+            min_similarity=min_similarity,
         )
         # Cross-tenant read audit (F2): emit one event per source tenant when
         # the credential widened beyond home. Async queue — non-blocking.
@@ -815,9 +859,28 @@ async def caura_recall(
                 query_summary=(query or "")[:200],
             )
         # The LLM brief (when requested) runs without any DB connection held.
+        _rows = [r.model_dump(mode="json") for r in results] if results else []
+        # C31/D1 — ``items`` is the canonical list key everywhere; ``results``
+        # stays as a permanent dual-emit alias (same list object, two keys) so
+        # existing consumers keep working. ``count`` per the contract.
         payload: dict = {
-            "results": [r.model_dump(mode="json") for r in results] if results else [],
+            "results": _rows,
+            "items": _rows,
+            "count": len(_rows),
         }
+        if diagnostic:
+            counts = diagnostic_ctx.get("counts", {}) or {}
+            payload["diagnostic"] = {
+                "retrieval_strategy": diagnostic_ctx.get("retrieval_strategy"),
+                "top_k_requested": diagnostic_ctx.get("diagnostic_original_top_k"),
+                "min_similarity_applied": diagnostic_ctx.get("min_similarity_applied"),
+                **counts,
+                "search_params": {
+                    k: (float(v) if isinstance(v, (int, float)) else v)
+                    for k, v in (diagnostic_ctx.get("search_params", {}) or {}).items()
+                },
+                "all_candidates": diagnostic_ctx.get("all_candidates", []) or [],
+            }
         if top_k > MAX_SEARCH_TOP_K:
             payload["warning"] = f"top_k was capped at the maximum allowed value of {MAX_SEARCH_TOP_K}."
         if include_brief:
