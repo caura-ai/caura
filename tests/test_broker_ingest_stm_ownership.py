@@ -19,6 +19,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import Response
+
 from core_api.auth import AuthContext
 from core_api.routes import memories, stm
 from core_api.schemas import IngestCommitRequest, IngestFact
@@ -56,7 +58,9 @@ async def _drive_ingest(monkeypatch, *, agent_id, auth):
         agent_id=agent_id,
         facts=[IngestFact(content="a durable fact", suggested_type="fact")],
     )
-    await memories.ingest_commit_endpoint(SimpleNamespace(), body, auth)
+    # response arg: required since /ingest/commit grew the ``response: Response``
+    # param slowapi needs under headers_enabled=True.
+    await memories.ingest_commit_endpoint(SimpleNamespace(), body, Response(), auth)
     return captured["agent_id"], gate
 
 
