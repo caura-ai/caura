@@ -104,6 +104,13 @@ limiter = Limiter(
     # Redis outages degrade gracefully — requests pass through rather
     # than all rate-limited routes returning 500.
     swallow_errors=True,
+    # D14 — without this, slowapi's ``_inject_headers`` is a silent no-op
+    # (it checks ``self._headers_enabled`` first), so NO response carried
+    # X-RateLimit-* and no 429 carried Retry-After — despite app.py's 429
+    # handler dutifully calling the injector. Field-observed as "MCP feels
+    # fragile": throttled agents saw random unreliability with no back-off
+    # signal (Hermes onboarding test).
+    headers_enabled=True,
     # No default_limits — decorators are applied explicitly per-route.
     # Avoids accidentally limiting /health, /version, /mcp, etc.
 )
