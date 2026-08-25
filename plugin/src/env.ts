@@ -444,7 +444,8 @@ function _readMinPromptChars(): number {
 }
 
 const DEFAULT_TRIGGER_KEYWORDS = [
-  "memclaw",
+  "caura",
+  "memclaw", // legacy-name-ok: rule 3 — old name keeps triggering
   "ltm",
   "long term",
   "long-term",

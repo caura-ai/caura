@@ -116,6 +116,30 @@ comment syntax with `legacy-name-ok:` followed by the reason. Exemptions are rep
 on every run, so a PR that adds them is visible as such to a reviewer. Use them for
 contract, not for convenience.
 
+### A mention gets reworded, a contract gets the marker
+
+That last sentence needs a test, because every line the ratchet stops looks like a
+contract to whoever is writing it.
+
+Ask what breaks if the old spelling is not on that line. If the answer is nothing — it
+is prose that happens to name the thing — **reword it off the literal and take no
+exemption.** If a reader has to type the string, or find it on disk, or a machine has to
+match it, that is a contract: **mark it, and say which.**
+
+Marking a mention is not a harmless extra. Every exemption widens the surface the gate
+no longer watches, and it spends the one annotation whose whole value is that its reasons
+are true.
+
+Which way a given sweep falls is not predictable, so measure rather than assume. Prose
+about code is mostly mention. Operator-facing documentation is mostly contract, because
+its literals are the things a reader types or goes looking for — in one docs sweep, ten
+of eleven exemptions survived this test.
+
+Two practical consequences, both cheaper to know early: re-wrapping a line that carries
+the old spelling mints new text even when the file's count *falls*, and a marker cannot
+be taken off a line without taking the literal off with it. Reword first; annotate only
+what is left.
+
 ---
 
 ## Before you change an old-brand string

@@ -76,7 +76,8 @@ describe("prepareSubagentSpawn — OpenClaw's rollback contract", () => {
 });
 
 const DEFAULT_KEYWORDS = [
-  "memclaw",
+  "caura",
+  "memclaw", // legacy-name-ok: rule 3 — old name keeps triggering
   "ltm",
   "long term",
   "long-term",
@@ -292,7 +293,14 @@ describe("shouldRecall — policy=auto (the default)", () => {
     assert.equal(r.reason, "explicit-recall-trigger");
   });
 
+  test("trigger keyword 'caura' fires recall on otherwise-skip prompt", () => {
+    const r = shouldRecall(input({ prompt: "caura?" }));
+    assert.equal(r.recall, true);
+    assert.equal(r.reason, "explicit-recall-trigger");
+  });
+
   test("trigger keyword 'memclaw' fires recall on otherwise-skip prompt", () => {
+    // Rule 3: the old name keeps triggering forever.
     const r = shouldRecall(input({ prompt: "memclaw?" }));
     assert.equal(r.recall, true);
     assert.equal(r.reason, "explicit-recall-trigger");

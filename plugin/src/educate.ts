@@ -478,9 +478,10 @@ function escapeRegex(s: string): string {
  *
  * To prevent false positives on user-authored headings that happen to
  * start with the same prefix, the splice range is additionally
- * required to contain a Caura token (default: `caura_`). If the
- * range doesn't contain it, the function returns null and the splice
- * is skipped.
+ * required to contain a tool-name prefix the plugin has ever emitted —
+ * the current one (`caura_`) or the pre-rename one that 0.98.5/1.x
+ * sections on customers' disks still carry. If the range contains
+ * neither, the function returns null and the splice is skipped.
  *
  * The range starts at one preceding `---` rule (if any blank-only lines
  * separate it from the heading) and ends at the next `## ` heading or
@@ -490,7 +491,7 @@ function escapeRegex(s: string): string {
 export function findLegacyRange(
   content: string,
   legacyHeadingPrefix: string,
-  contentMustInclude: string = "caura_",
+  contentMustIncludeOneOf: readonly string[] = ["caura_", "memclaw_"], // legacy-name-ok: recognizes section bodies old plugin versions wrote to customer disks
 ): { start: number; end: number } | null {
   // Split on LF, not CRLF: under CRLF input each `lines[i]` carries a
   // trailing `\r` and `lines[i].length + 1` (LF) sums to the correct
@@ -539,14 +540,15 @@ export function findLegacyRange(
     content.length,
   );
 
-  // Content-shape verification: the splice range MUST contain a
-  // Caura token (default `caura_`). This guards against a user
-  // heading that coincidentally starts with the same prefix but
-  // contains no MemClaw content. If the slice doesn't smell like one
-  // of our blocks, leave it alone.
-  if (contentMustInclude) {
-    const slice = content.slice(startChar, endChar);
-    if (!slice.toLowerCase().includes(contentMustInclude.toLowerCase())) {
+  // Content-shape verification: the splice range MUST contain one of
+  // the tool-name prefixes the plugin has ever emitted (current
+  // `caura_`, or the pre-rename prefix 0.98.5/1.x sections carry).
+  // This guards against a user heading that coincidentally starts
+  // with the same prefix but lists none of our tools. If the slice
+  // doesn't smell like one of our blocks, leave it alone.
+  if (contentMustIncludeOneOf.length > 0) {
+    const slice = content.slice(startChar, endChar).toLowerCase();
+    if (!contentMustIncludeOneOf.some((token) => slice.includes(token.toLowerCase()))) {
       return null;
     }
   }
