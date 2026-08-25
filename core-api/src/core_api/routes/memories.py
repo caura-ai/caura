@@ -1989,14 +1989,33 @@ async def recall_endpoint(
     """
     # Read endpoint — readable set widening applies (see /search).
     auth.enforce_readable_tenant(body.tenant_id)
+    # Same identity binding as /search, for the same two reasons. An agent
+    # credential may only filter to itself, and the effective identity is
+    # body-first with a fall back to the authenticated agent. Before this,
+    # /recall ran its trust<2 fleet forcing against whatever
+    # ``filter_agent_id`` the caller asserted, and an agent that omitted the
+    # filter passed ``caller_agent_id=None`` to the search, which is the
+    # tenant-wide visibility a tenant credential gets. Either way a trust-1
+    # agent read another fleet's scope_team rows through /recall while
+    # /search refused the same request. The MCP twin (``caura_recall``)
+    # already binds to the authenticated agent.
+    if auth.agent_id and body.filter_agent_id and body.filter_agent_id != auth.agent_id:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"filter_agent_id '{body.filter_agent_id}' does not match the "
+                f"authenticated agent identity '{auth.agent_id}'."
+            ),
+        )
+    eff_agent_id = body.filter_agent_id or auth.agent_id
     if auth.tenant_id:
-        if body.filter_agent_id:
+        if eff_agent_id:
             fleet_id_hint = body.fleet_ids[0] if body.fleet_ids and len(body.fleet_ids) == 1 else None
-            _agent = await get_or_create_agent(body.tenant_id, body.filter_agent_id, fleet_id_hint)
+            _agent = await get_or_create_agent(body.tenant_id, eff_agent_id, fleet_id_hint)
             if not body.fleet_ids and _agent.get("fleet_id") and _agent.get("trust_level", 0) < 2:
                 body.fleet_ids = [_agent["fleet_id"]]
             if body.fleet_ids and len(body.fleet_ids) == 1:
-                await enforce_fleet_read(body.tenant_id, body.filter_agent_id, body.fleet_ids[0])
+                await enforce_fleet_read(body.tenant_id, eff_agent_id, body.fleet_ids[0])
         # D13 — a recall is a recall, not a search: plans meter them separately
         # and the recalls counter never moved because this site (and the MCP
         # twin) billed "search". Flag-gated; see ``recall_operation``.
@@ -2021,7 +2040,8 @@ async def recall_endpoint(
         query=body.query,
         fleet_ids=body.fleet_ids,
         filter_agent_id=body.filter_agent_id,
-        caller_agent_id=body.filter_agent_id,
+        # Visibility identity is the authenticated agent, as in /search.
+        caller_agent_id=eff_agent_id,
         memory_type_filter=body.memory_type_filter,
         status_filter=body.status_filter,
         top_k=body.top_k,

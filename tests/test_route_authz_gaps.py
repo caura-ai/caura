@@ -256,10 +256,10 @@ async def test_stm_promote_rejects_peer_agent(client, as_auth, _stm_enabled):
 async def test_delete_audit_attributes_gateway_agent(client, as_auth, sc):
     """A gateway agent credential deleting WITHOUT the agent_id query param
     must be attributed to its verified identity, not None."""
+    from core_storage_api.services.postgres_service import get_read_session
     from sqlalchemy import select
 
     from common.models.audit import AuditLog
-    from core_storage_api.services.postgres_service import get_read_session
 
     tenant = f"tenant-{_uid()}"
     await _seed_agent(sc, tenant, "deleter-agent", 3)
@@ -541,6 +541,92 @@ async def test_a_tenant_credential_may_still_filter_search_by_any_agent(
     as_auth(tenant)  # no agent_id
     resp = await client.post(
         "/api/v1/search",
+        json={
+            "tenant_id": tenant,
+            "query": "anything",
+            "top_k": 5,
+            "filter_agent_id": "agent-b",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+
+# ---------------------------------------------------------------------------
+# POST /recall — the sibling of /search never received the H-14 binding
+# ---------------------------------------------------------------------------
+
+
+async def test_recall_cannot_borrow_a_peer_identity_via_filter_agent_id(
+    client, as_auth
+):
+    """``/recall`` ran the H-14 path unbound: ``filter_agent_id`` was both the
+    visibility identity and the subject of the trust<2 fleet forcing, and an
+    omitted filter passed ``caller_agent_id=None``, the tenant-wide identity.
+    A trust-1 agent read another fleet's scope_team rows through ``/recall``
+    while ``/search`` refused the same request.
+    """
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, agent_id="agent-a")
+    resp = await client.post(
+        "/api/v1/recall",
+        json={
+            "tenant_id": tenant,
+            "query": "anything",
+            "top_k": 5,
+            "filter_agent_id": "agent-b",
+        },
+    )
+    assert resp.status_code == 403, resp.text
+    assert "does not match the authenticated agent identity" in resp.text
+
+
+async def test_recall_filtering_to_own_agent_id_is_allowed(client, as_auth):
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, agent_id="agent-a")
+    resp = await client.post(
+        "/api/v1/recall",
+        json={
+            "tenant_id": tenant,
+            "query": "anything",
+            "top_k": 5,
+            "filter_agent_id": "agent-a",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+
+async def test_recall_binds_an_omitted_filter_to_the_authenticated_agent(
+    client, as_auth, monkeypatch
+):
+    """An agent credential that omits ``filter_agent_id`` must still recall as
+    itself, not as the tenant. The search call is the seam: its
+    ``caller_agent_id`` is what decides which scope_agent rows are visible.
+    """
+    from core_api.services import memory_service
+
+    seen: dict = {}
+
+    async def _fake_search(**kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(memory_service, "search_memories", _fake_search)
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, agent_id="agent-a")
+    resp = await client.post(
+        "/api/v1/recall",
+        json={"tenant_id": tenant, "query": "anything", "top_k": 5},
+    )
+    assert resp.status_code == 200, resp.text
+    assert seen["caller_agent_id"] == "agent-a"
+    assert seen["filter_agent_id"] is None
+
+
+async def test_a_tenant_credential_may_still_recall_by_any_agent(client, as_auth):
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant)  # no agent_id
+    resp = await client.post(
+        "/api/v1/recall",
         json={
             "tenant_id": tenant,
             "query": "anything",
