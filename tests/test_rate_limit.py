@@ -213,3 +213,52 @@ async def test_search_fails_open_when_rate_limit_storage_errors(client, monkeypa
     assert resp.status_code == 200, (
         f"rate-limit storage outage must fail open, got {resp.text}"
     )
+
+
+# ── headers_enabled=True: every limited route must satisfy _inject_headers ──
+
+
+async def test_every_rate_limited_route_survives_header_injection(client):
+    """With ``headers_enabled=True`` (D14, #976) slowapi's ``_inject_headers``
+    runs on every SUCCESSFUL response of a limited route and raises unless the
+    endpoint either declares a ``response: Response`` parameter or returns a
+    ``Response`` instance. ``/recall`` and ``/ingest/commit`` declared neither —
+    every call 500'd on staging the moment #976 deployed (2026-08-25 17:51Z),
+    while CI stayed green because conftest disables the limiter suite-wide.
+
+    One request per limited route, limiter ON: assert it doesn't 500 and that
+    the success actually carries the X-RateLimit headers D14 promised."""
+    key = {"x-api-key": "mc_hdr_inject_probe"}
+
+    cases = [
+        (
+            "/api/v1/recall",
+            {"tenant_id": "default", "query": "header injection probe"},
+        ),
+        (
+            "/api/v1/ingest/commit",
+            {"tenant_id": "default", "facts": []},
+        ),
+        (
+            "/api/v1/search",
+            {"tenant_id": "default", "query": "header injection probe"},
+        ),
+        (
+            "/api/v1/memories",
+            {
+                "tenant_id": "default",
+                "agent_id": "hdr-inject-agent",
+                "memory_type": "fact",
+                "content": "header injection probe memory",
+            },
+        ),
+    ]
+    for path, body in cases:
+        resp = await client.post(path, json=body, headers=key)
+        assert resp.status_code < 500, (
+            f"{path} must not 500 under headers_enabled=True: {resp.text}"
+        )
+        assert "x-ratelimit-limit" in resp.headers, (
+            f"{path} success must carry X-RateLimit headers (D14), "
+            f"got {dict(resp.headers)}"
+        )
