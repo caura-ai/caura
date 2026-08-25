@@ -3069,7 +3069,7 @@ async def _enrich_memory_background(
             patch["status"] = enrichment.status
 
         meta.pop("enrichment_pending", None)
-        # B7×C25 — this path REPLACES metadata wholesale, so clear the
+        # B7 x C25 — this path REPLACES metadata wholesale, so clear the
         # namespaced copy too or the C25 read view stays pending forever.
         if isinstance(meta.get("_system"), dict):
             meta["_system"].pop("enrichment_pending", None)
