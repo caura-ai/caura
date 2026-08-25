@@ -1338,6 +1338,96 @@ async def test_unprovisioned_subscription_still_reports_loudly(
     assert bus.is_healthy is False
 
 
+async def test_release_bounds_the_delete_rpc(bus: PubSubEventBus) -> None:
+    """The delete must carry an explicit short timeout, not the SDK default.
+
+    This method exists to finish inside Cloud Run's 10s SIGTERM budget. The
+    SDK's generated default is 60s per call with a 60s retry deadline — six
+    times the whole budget for one call — so inheriting it defeats the reason
+    the method was split out: one slow Pub/Sub call and the process is killed
+    mid-release, leaking exactly what this reclaims.
+
+    A timed-out delete costs nothing that matters; ``expiration_policy`` still
+    reaps the subscription. Bounding only trades a slow failure for a fast one.
+    """
+    from common.events.pubsub import BROADCAST_RELEASE_TIMEOUT_SECONDS
+
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    bus._broadcast_sub_paths = [
+        "projects/proj/subscriptions/a--x--abc",
+        "projects/proj/subscriptions/b--x--abc",
+    ]
+
+    await bus.release_broadcast_subscriptions()
+
+    assert fake_sub.delete_subscription.call_count == 2
+    for call in fake_sub.delete_subscription.call_args_list:
+        assert call.kwargs["timeout"] == BROADCAST_RELEASE_TIMEOUT_SECONDS
+    # Small enough that even a sequential worst case fits the budget.
+    assert BROADCAST_RELEASE_TIMEOUT_SECONDS <= 5.0
+
+
+async def test_release_survives_one_failing_delete(bus: PubSubEventBus) -> None:
+    """One subscription failing must not strand the others.
+
+    The deletes are fanned out concurrently; a single raise must neither abort
+    its siblings nor escape into the shutdown path that called this.
+    """
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    fake_sub.delete_subscription = MagicMock(
+        side_effect=[RuntimeError("pubsub blip"), None]
+    )
+    bus._broadcast_sub_paths = [
+        "projects/proj/subscriptions/a--x--abc",
+        "projects/proj/subscriptions/b--x--abc",
+    ]
+
+    await bus.release_broadcast_subscriptions()
+
+    assert fake_sub.delete_subscription.call_count == 2
+    # Both are recorded as released regardless: the pull loops must exit
+    # quietly either way, and the TTL reaps whatever the delete missed.
+    assert bus._released_subscriptions == {"a--x--abc", "b--x--abc"}
+    assert bus._broadcast_sub_paths == []
+
+
+@pytest.mark.parametrize("exc_name", ["PermissionDenied", "InvalidArgument"])
+async def test_released_subscription_still_reports_non_notfound_loudly(
+    bus: PubSubEventBus,
+    exc_name: str,
+) -> None:
+    """Releasing a name excuses a later NotFound on it, and nothing else.
+
+    "We deleted this one ourselves" explains a subsequent NotFound. It does not
+    explain a PermissionDenied — an IAM grant changed — or an InvalidArgument —
+    we built a malformed request. Neither becomes benign because this process
+    happened to release that name, and both are precisely what the halting path
+    exists to surface.
+
+    The original suppression sat inside the shared handler for all three, so a
+    real IAM regression against a released name would exit the loop silently with
+    ``is_healthy`` still true. ``test_unprovisioned_subscription_still_reports_loudly``
+    does NOT cover this: it varies the *name* (never released) while holding the
+    exception at NotFound, so it constrains only one of the two axes.
+    """
+    from google.api_core import exceptions as gexc
+
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    bus._broadcast_sub_paths = ["projects/proj/subscriptions/core-api--x--abc"]
+    await bus.release_broadcast_subscriptions()
+    assert "core-api--x--abc" in bus._released_subscriptions
+
+    fake_sub.pull = MagicMock(side_effect=getattr(gexc, exc_name)("still a fault"))
+    bus._pull_executor = ThreadPoolExecutor(max_workers=1)
+    await bus._pull_loop("core-api--x--abc", [])
+
+    assert "core-api--x--abc" in bus._failed_subscriptions
+    assert bus.is_healthy is False
+
+
 async def test_restart_clears_the_released_record(bus: PubSubEventBus) -> None:
     """Subscription names are deterministic per bus object, so a second start()
     recreates the same names. A leftover entry would silence a genuine NotFound

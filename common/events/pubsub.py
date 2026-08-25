@@ -69,6 +69,20 @@ SOURCE_ENV_ATTRIBUTE = "source_env"
 # Pub/Sub minimum for ``expiration_policy``.
 BROADCAST_SUBSCRIPTION_TTL_SECONDS = 86400
 
+# Per-call ceiling on the delete RPC in ``release_broadcast_subscriptions()``.
+#
+# The SDK's generated default is 60s, with a retry deadline also 60s — six times
+# Cloud Run's entire 10s SIGTERM budget for a single call. Since that method
+# exists precisely to finish inside that budget, inheriting the default defeats
+# it: one slow Pub/Sub call and the process is killed mid-release, leaking the
+# subscriptions the method was added to reclaim.
+#
+# A timed-out delete costs nothing that matters. ``expiration_policy`` still
+# reaps the subscription, so bounding the call only trades a slow failure mode
+# for a fast one — which is the entire point. Prefer failing fast and leaving
+# the TTL to clean up over blocking a shutdown that has nine seconds to live.
+BROADCAST_RELEASE_TIMEOUT_SECONDS = 2.0
+
 
 class PubSubEventBus(EventBus):
     """Pub/Sub-backed bus.
@@ -874,7 +888,7 @@ class PubSubEventBus(EventBus):
                 gexc.NotFound,
                 gexc.PermissionDenied,
                 gexc.InvalidArgument,
-            ):
+            ) as exc:
                 # We deleted this one ourselves. ``release_broadcast_subscriptions()``
                 # runs ahead of the rest of teardown so it fits inside the
                 # SIGTERM budget, which means this loop can still be mid-pull
@@ -882,7 +896,18 @@ class PubSubEventBus(EventBus):
                 # a configuration fault: staying on the loud path below would
                 # log an ERROR and flip ``is_healthy`` false on every graceful
                 # shutdown, which is how a real alert gets tuned out.
-                if subscription_name in self._released_subscriptions:
+                #
+                # NotFound ONLY, deliberately. "We deleted it" explains a
+                # subsequent NotFound and nothing else. PermissionDenied means an
+                # IAM grant changed and InvalidArgument means we built a bad
+                # request — neither becomes benign because this process happened
+                # to release that name, and both are exactly what the loud path
+                # below exists to surface. Widening this back to the whole
+                # exception group would let a real IAM regression exit silently
+                # with ``is_healthy`` still true.
+                if isinstance(exc, gexc.NotFound) and (
+                    subscription_name in self._released_subscriptions
+                ):
                     return
                 # Permanent configuration errors: subscription doesn't
                 # exist, service account lacks permission, or the
@@ -1040,13 +1065,15 @@ class PubSubEventBus(EventBus):
         self._released_subscriptions.update(
             path.rsplit("/", 1)[-1] for path in self._broadcast_sub_paths
         )
-        for sub_path in self._broadcast_sub_paths:
+
+        async def _release_one(sub_path: str) -> None:
             try:
                 await loop.run_in_executor(
                     None,
                     functools.partial(
                         self._subscriber.delete_subscription,
                         request={"subscription": sub_path},
+                        timeout=BROADCAST_RELEASE_TIMEOUT_SECONDS,
                     ),
                 )
             except Exception:
@@ -1058,6 +1085,21 @@ class PubSubEventBus(EventBus):
                     BROADCAST_SUBSCRIPTION_TTL_SECONDS,
                     exc_info=True,
                 )
+
+        # Concurrently, not sequentially. Under dual-subscribe every broadcast
+        # topic has two names, so even one topic is two deletes — and a
+        # sequential loop multiplies the per-call ceiling by the subscription
+        # count, which is how a bounded call still overruns an unbounded
+        # budget. Fanning out keeps the wall-clock at roughly one timeout no
+        # matter how many there are.
+        #
+        # ``return_exceptions=True`` because ``_release_one`` already logs and
+        # swallows; this is belt-and-braces so an unexpected escape cannot
+        # abort the remaining deletes or propagate out of a shutdown path.
+        await asyncio.gather(
+            *(_release_one(p) for p in self._broadcast_sub_paths),
+            return_exceptions=True,
+        )
         self._broadcast_sub_paths.clear()
 
     async def stop(self) -> None:
