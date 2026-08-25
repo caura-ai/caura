@@ -47,6 +47,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from common.events import trace_filters
 from common.events.base import Event, EventBus, EventHandler
 from common.events.topics import publish_name, subscribe_names, unbound_publish_topics
 
@@ -569,6 +570,24 @@ class PubSubEventBus(EventBus):
         # gRPC channel. publish() handles the off-loop construction
         # lazily on the first call (see ``_ensure_publisher``).
         if topic_count > 0:
+            # Inside this branch, not at the top of start(): the spans this
+            # corrects come from the pull loop, so a publisher-only bus can
+            # never produce one and shouldn't pay for the filter — and
+            # registering it calls tracer.configure(), which recreates the
+            # trace writer.
+            #
+            # Registered here rather than at import for the same reason.
+            # Idempotent, never raises, and a no-op when ddtrace isn't
+            # installed. See trace_filters for the measurement that motivated
+            # it. Logged either way so "pull spans are still showing as errors"
+            # is one grep from the answer instead of a guess about whether the
+            # filter ever loaded. The negative branch doesn't name a cause:
+            # False means ddtrace is absent OR registration failed, and
+            # install() warns about the latter itself.
+            if trace_filters.install():
+                logger.debug("Pub/Sub pull-timeout span filter registered")
+            else:
+                logger.debug("Pub/Sub pull-timeout span filter not registered")
             loop = asyncio.get_running_loop()
             # Snapshot the stop generation BEFORE the shielded await.
             # A clean ``stop()`` resets both ``_stopped`` and
