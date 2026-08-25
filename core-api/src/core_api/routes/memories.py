@@ -594,6 +594,14 @@ async def delete_all_memories(
     agent_id: str | None = Query(default=None),
     memory_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    confirm_scope: str | None = Query(
+        default=None,
+        description=(
+            "Required, with the value 'tenant', when this call would delete an "
+            "entire tenant corpus — i.e. no fleet_id and no other narrowing "
+            "filter. Ignored otherwise."
+        ),
+    ),
     auth: AuthContext = Depends(get_auth_context),
     body: dict | None = Body(default=None),
 ):
@@ -607,6 +615,26 @@ async def delete_all_memories(
       harness, tagging rows with ``metadata.load_test_run_id``) clean
       up by tag in one round-trip instead of paginated enumerate +
       per-row delete. All entries combine with AND.
+
+    **Blast radius.** With no ``fleet_id`` and no other narrowing filter this
+    deletes EVERY memory the tenant has. That is a supported operation — it is
+    the dashboard's "reset workspace" — but it was reachable by omission: leave
+    one query parameter off a fleet-scoped call and the same request wipes the
+    tenant, with nothing in the request to distinguish the two intents. Agent
+    credentials have been gated at trust >= 3 since the BFLA fix below; tenant
+    and user credentials were not gated at all.
+
+    So the unbounded case now requires ``confirm_scope=tenant`` (SAFE-03 /
+    C28). Every narrowed call is unaffected: pass a ``fleet_id``, ``agent_id``,
+    ``memory_type``, ``status``, ``exclude_ids`` or ``metadata_filter`` and
+    nothing changes. This deliberately does not widen C13 — the trust ladder is
+    untouched, and the confirmation is a statement of intent, not a permission.
+
+    **Recovery.** Deletes here are SOFT: rows are marked deleted, not removed,
+    and stay readable with ``include_deleted=true``. There is no self-serve
+    restore endpoint today (API-08), so undoing a mistaken tenant-wide delete
+    is an operator task against the store. Treat the confirmation as the last
+    cheap step before an expensive one.
     """
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
@@ -619,6 +647,32 @@ async def delete_all_memories(
         await enforce_delete(tenant_id, auth.agent_id)
     exclude_ids = (body or {}).get("exclude_ids", [])
     metadata_filter = (body or {}).get("metadata_filter") or {}
+    # SAFE-03 / C28. "Unbounded" means every narrowing input is absent, so the
+    # filter set degenerates to the tenant alone. Listed explicitly rather than
+    # inferred, because a new filter parameter added later must be a deliberate
+    # entry here: forgetting it would silently classify a narrowed call as
+    # unbounded (annoying), while inferring from ``locals()`` would silently do
+    # the reverse the day someone adds a non-filter parameter (dangerous).
+    is_tenant_wide = not any((fleet_id, agent_id, memory_type, status, exclude_ids, metadata_filter))
+    if is_tenant_wide and confirm_scope != "tenant":
+        logger.warning(
+            "Refused unconfirmed tenant-wide delete",
+            extra={
+                "tenant_id": tenant_id,
+                "principal_agent_id": auth.agent_id,
+                "confirm_scope": confirm_scope,
+            },
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This request would soft-delete every memory in the tenant. "
+                "No fleet_id and no other narrowing filter was supplied. "
+                "Pass confirm_scope=tenant to proceed, or narrow the request "
+                "with fleet_id / agent_id / memory_type / status / exclude_ids "
+                "/ metadata_filter."
+            ),
+        )
     if metadata_filter:
         # Validation stays in core-api so the exact 400 messages are preserved;
         # the storage endpoint builds the JSONB predicate via SQLAlchemy bound
@@ -672,6 +726,10 @@ async def delete_all_memories(
             "memory_type": memory_type,
             "status_filter": status,
             "metadata_filter": metadata_filter or None,
+            # Without this the audit row for a tenant wipe is shaped exactly
+            # like the row for a narrow delete that happened to match a lot.
+            "tenant_wide": is_tenant_wide,
+            "confirm_scope": confirm_scope,
         },
     )
 
