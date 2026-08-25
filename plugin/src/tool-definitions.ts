@@ -28,8 +28,8 @@ import {
   getToolDescription,
 } from "./env.js";
 import { assertSafePathSegment } from "./validation.js";
+import { resolveAgentIdQuiet } from "./resolve-agent.js";
 import { getSpec } from "./tool-specs.js";
-import { getInstallId } from "./install-id.js";
 
 interface ToolResult {
   content: Array<{ type: string; text: string }>;
@@ -74,6 +74,25 @@ interface EnrichOptions {
    * under. Withholding it there relocates a write instead of widening a read.
    */
   fleetIsReadFilterOnly?: boolean;
+
+  /**
+   * Set on the tools that SEND ``agent_id`` to the server, so identity is
+   * resolved once here instead of each dispatch inventing its own fallback.
+   *
+   * Three of them did invent one, and they disagreed: ``caura_write`` fell
+   * back to ``main-${installId}`` (correct — it mirrors ``resolve-agent.ts``
+   * step 5), while ``caura_manage`` op=update and ``caura_tune`` fell back to
+   * the literal ``"unknown-agent"``. That literal is not an identity: tune
+   * PATCHes ``/agents/unknown-agent/tune`` and 404s, and update passes it as
+   * the ``agent_id`` query param where the server feeds it to trust and fleet
+   * enforcement (``routes/memories.py``: ``auth.agent_id or agent_id``) — so
+   * it does not fail loudly there, it authorizes as the wrong principal.
+   *
+   * Deliberately opt-in rather than applied to every call. Reads do not send
+   * ``agent_id`` today, and adding one would narrow their visibility scoping —
+   * a silent behaviour change dressed up as a bug fix.
+   */
+  resolveIdentity?: boolean;
 }
 
 async function enrichBody(
@@ -82,7 +101,15 @@ async function enrichBody(
 ): Promise<Record<string, unknown>> {
   const body = { ...params };
   if (!body.tenant_id) body.tenant_id = await ensureTenantId();
-  if (!body.agent_id && CAURA_AGENT_ID) body.agent_id = CAURA_AGENT_ID;
+  // ``resolveAgentIdQuiet`` covers the env var too (its step 4), so the
+  // identity-bearing branch subsumes the plain one rather than racing it.
+  // Quiet, not loud: the install-scoped default IS the design for a tool call,
+  // which carries no session context to resolve a richer identity from. The
+  // loud variant is for the per-turn paths, where a fall-through is a real bug.
+  if (!body.agent_id) {
+    if (opts.resolveIdentity) body.agent_id = resolveAgentIdQuiet(params);
+    else if (CAURA_AGENT_ID) body.agent_id = CAURA_AGENT_ID;
+  }
   // The configured fleet below is a DEFAULT, for callers that did not say
   // which fleet they meant — so it must not override a caller that asked to
   // span every fleet. Three cases deliberately keep it: an omitted ``scope``
@@ -385,13 +412,10 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
 
   caura_write: async (params, signal) => {
     const isBatch = Array.isArray(params.items);
-    const body = await enrichBody(params);
-    // Write-scoped identity default: never send an empty agent_id, which on the
-    // gateway path collapses onto the reserved "main" default. enrichBody set it
-    // from CAURA_AGENT_ID if present; otherwise fall back to a stable
-    // install-scoped id (mirrors resolve-agent.ts step 5). Scoped to writes so
-    // read visibility scoping is unchanged.
-    if (!body.agent_id) body.agent_id = `main-${getInstallId()}`;
+    // Never send an empty agent_id: on the gateway path it collapses onto the
+    // reserved "main" default. ``resolveIdentity`` supplies the install-scoped
+    // id this dispatch used to build inline.
+    const body = await enrichBody(params, { resolveIdentity: true });
     if (isBatch) {
       // POST /memories/bulk requires a per-attempt idempotency token via
       // the `X-Bulk-Attempt-Id` header (CAURA-602). The server derives each
@@ -410,7 +434,8 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   },
 
   caura_manage: async (params, signal) => {
-    const enriched = await enrichBody(params);
+    // op=update sends ``agent_id`` as a query param; the other ops ignore it.
+    const enriched = await enrichBody(params, { resolveIdentity: true });
     const op = enriched.op as string;
     const memory_id = enriched.memory_id as string;
     assertSafePathSegment(memory_id, "memory_id");
@@ -432,7 +457,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
       return apiCall("DELETE", `/memories/${id}`, undefined, { tenant_id }, signal);
     }
     // op === "update"
-    const agent_id = (enriched.agent_id as string) || "unknown-agent";
+    const agent_id = enriched.agent_id as string;
     const updateFields: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(enriched)) {
       if (v === undefined) continue;
@@ -535,9 +560,9 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   },
 
   caura_tune: async (params, signal) => {
-    const enriched = await enrichBody(params);
+    const enriched = await enrichBody(params, { resolveIdentity: true });
     const tenant_id = enriched.tenant_id as string;
-    const agent_id = (enriched.agent_id as string) || "unknown-agent";
+    const agent_id = enriched.agent_id as string;
     assertSafePathSegment(agent_id, "agent_id");
     const body = { ...enriched };
     delete body.agent_id;
