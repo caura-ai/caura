@@ -27,6 +27,7 @@ from common.llm.constants import (
     LLM_JSON_MAX_OUTPUT_TOKENS,
     LLM_PROVIDER_MAX_RETRIES,
     OPENAI_CHAT_BASE_URL,
+    OPENAI_HOSTED_CHAT_BASE_URL,
     OPENAI_HTTPX_CONNECT_TIMEOUT_SECONDS,
     OPENAI_HTTPX_MAX_CONNECTIONS,
     OPENAI_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
@@ -86,6 +87,63 @@ def _usage_tokens(response) -> tuple[int, int, int]:
         _int(getattr(usage, "completion_tokens", 0)),
         _int(getattr(details, "reasoning_tokens", 0)),
     )
+
+
+def _is_hosted_openai(base_url: str) -> bool:
+    """True when ``base_url`` is api.openai.com itself, after any override."""
+    return base_url.rstrip("/") == OPENAI_HOSTED_CHAT_BASE_URL
+
+
+def _strict_schema(schema: dict) -> dict:
+    """Return a copy of ``schema`` that strict JSON mode accepts.
+
+    Strict mode, as OpenAI defines it and as Anthropic's OpenAI-compatible
+    endpoint enforces it, wants every object closed
+    (``additionalProperties: false``) with every property listed under
+    ``required``. Pydantic-generated schemas leave both open for fields
+    with defaults. This walks the schema (``properties``, ``items``,
+    ``anyOf``/``oneOf``/``allOf``, ``$defs``) and closes each object. It
+    also drops ``default`` and ``title``, which strict mode rejects or
+    ignores and which carry no meaning for the model. The input is not
+    modified.
+    """
+    if isinstance(schema, list):
+        return [_strict_schema(s) for s in schema]  # type: ignore[return-value]
+    if not isinstance(schema, dict):
+        return schema
+    out: dict = {}
+    for key, value in schema.items():
+        if key in ("default", "title"):
+            continue
+        if key in ("properties", "$defs"):
+            out[key] = {k: _strict_schema(v) for k, v in value.items()}
+        elif key in ("items", "anyOf", "oneOf", "allOf"):
+            out[key] = _strict_schema(value)
+        else:
+            out[key] = value
+    if out.get("type") == "object" or "properties" in out:
+        out["additionalProperties"] = False
+        out["required"] = list(out.get("properties", {}).keys())
+    return out
+
+
+def _strip_code_fence(content: str) -> str:
+    """Remove a Markdown code fence around ``content`` when there is one.
+
+    Without a ``response_format`` to constrain them, models often answer
+    with the JSON wrapped in a fence. The JSON inside is what the caller
+    asked for.
+    """
+    text = content.strip()
+    if not text.startswith("```"):
+        return content
+    first_newline = text.find("\n")
+    if first_newline == -1:
+        return content
+    body = text[first_newline + 1 :]
+    if body.rstrip().endswith("```"):
+        body = body.rstrip()[:-3]
+    return body
 
 
 class OpenAILLMProvider:
@@ -193,9 +251,20 @@ class OpenAILLMProvider:
     ) -> dict:
         """Send a prompt and return a parsed JSON dict.
 
-        Without ``response_schema``, uses
-        ``response_format={"type": "json_object"}`` to enforce shape-less
-        JSON output (back-compat for enrichment and dedup callers).
+        The ``response_format`` sent depends on the endpoint, because the
+        compatible servers do not agree on what they accept:
+
+        - Hosted OpenAI (``OPENAI_HOSTED_CHAT_BASE_URL``) keeps the shapes
+          it always got: ``json_object`` without a schema, and a
+          non-strict ``json_schema`` with one.
+        - Any other base URL (a self-hosted server, Anthropic's compatible
+          endpoint, OpenRouter) gets no ``response_format`` without a
+          schema, because LM Studio and Anthropic both reject
+          ``json_object``; the prompt already asks for JSON and a code
+          fence in the reply is stripped before parsing. With a schema it
+          gets ``strict: true`` and a closed schema (see
+          ``_strict_schema``), which is the one shape Anthropic accepts and
+          which every other compatible server also takes.
 
         ``seed`` (A5a #2): when provided, forwarded to OpenAI's chat
         completions API for response determinism. ``temperature=0.0`` is
@@ -226,27 +295,29 @@ class OpenAILLMProvider:
         see the inline note at the call.
         """
         t0 = time.perf_counter()
-        if response_schema is not None:
-            response_format: dict = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "response",
-                    "schema": response_schema,
-                    "strict": False,
-                },
-            }
-        else:
-            response_format = {"type": "json_object"}
+        hosted = _is_hosted_openai(self._base_url)
         create_kwargs: dict = {
             "model": self._model,
             "messages": [{"role": "user", "content": prompt}],
-            "response_format": response_format,
             "temperature": temperature,
             # Runaway guard — same failure mode as the Gemini-backed
             # providers: an uncapped looping generation comes back as
             # truncated JSON (finish_reason="length").
             "max_completion_tokens": LLM_JSON_MAX_OUTPUT_TOKENS,
         }
+        if response_schema is not None:
+            create_kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "schema": (
+                        response_schema if hosted else _strict_schema(response_schema)
+                    ),
+                    "strict": not hosted,
+                },
+            }
+        elif hosted:
+            create_kwargs["response_format"] = {"type": "json_object"}
         if seed is not None:
             create_kwargs["seed"] = seed
         if reasoning_effort is not None:
@@ -281,7 +352,7 @@ class OpenAILLMProvider:
             model=self._model,
             max_tokens=LLM_JSON_MAX_OUTPUT_TOKENS,
         )
-        parsed = json.loads(content)
+        parsed = json.loads(_strip_code_fence(content))
         if not isinstance(parsed, dict):
             raise OpenAIResponseShapeError(content, type(parsed).__name__)
         return parsed
