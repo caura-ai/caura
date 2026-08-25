@@ -618,7 +618,19 @@ echo ""
 
 class InstallPluginRequest(BaseModel):
     fleet_id: str = ""
-    api_url: str = "http://localhost:8000"
+    # F4/AX-03. Was ``"http://localhost:8000"``. That default is correct for
+    # exactly one caller — someone running the API on their own machine — and
+    # wrong for every hosted install, which is who the published one-liner is
+    # for: ``curl https://caura.ai/api/v1/install-plugin | bash`` produced a
+    # script pointing at the installing machine's own port 8000, so the
+    # documented cloud install could not work unless the reader knew to append
+    # ``?api_url=`` that no published copy of the command mentions.
+    #
+    # ``None`` means "not supplied", and the host that just served this script
+    # is by definition a reachable API host. That is what the SKILL installer
+    # below already does via ``_derive_api_url_from_request`` — this endpoint
+    # simply never adopted it.
+    api_url: str | None = None
     api_key: str = ""
     node_name: str = ""
 
@@ -627,7 +639,14 @@ class InstallPluginRequest(BaseModel):
 async def install_plugin_script(
     request: Request,
     fleet_id: str = Query(default=""),
-    api_url: str = Query(default="http://localhost:8000"),
+    api_url: str | None = Query(
+        default=None,
+        description=(
+            "Override the API URL baked into the generated script. Auto-derived "
+            "from the request Host (and X-Forwarded-Proto) when omitted — so "
+            "``curl https://caura.ai/api/v1/install-plugin | bash`` just works."
+        ),
+    ),
     node_name: str = Query(default=""),
 ):
     """Generate a bash install script for first-time plugin setup on an OpenClaw gateway."""
@@ -635,7 +654,7 @@ async def install_plugin_script(
     tenant_id = _resolve_tenant_id()
 
     script = _generate_install_script(
-        api_url=api_url,
+        api_url=api_url or _derive_api_url_from_request(request),
         api_key=api_key,
         fleet_id=fleet_id,
         tenant_id=tenant_id,
@@ -654,7 +673,7 @@ async def install_plugin_script_post(
     tenant_id = _resolve_tenant_id()
 
     script = _generate_install_script(
-        api_url=body.api_url,
+        api_url=body.api_url or _derive_api_url_from_request(request),
         api_key=api_key,
         fleet_id=body.fleet_id,
         tenant_id=tenant_id,
