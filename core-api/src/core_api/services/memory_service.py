@@ -143,6 +143,18 @@ class BlankQuery(ValueError):
     """
 
 
+# ``MemoryUpdate`` fields whose backing column on ``Memory`` is NOT NULL, so an
+# explicit ``null`` in a PATCH body has no way to be honoured. Kept as a literal
+# rather than derived from ``Memory.__table__`` at import time: the schema field
+# names and column names coincide for these five but not in general (``metadata``
+# maps to ``metadata_``), so a derivation would need its own mapping table and
+# would fail silently if that drifted. ``test_patch_null_non_nullable`` asserts
+# this tuple still matches the model, which is the check that actually holds it
+# in sync — add a NOT NULL column with a ``MemoryUpdate`` field and that test
+# fails until it is listed here.
+NON_NULLABLE_UPDATE_FIELDS = ("content", "memory_type", "weight", "status", "visibility")
+
+
 def _content_hash(tenant_id: str, fleet_id: str | None, content: str) -> str:
     return hashlib.sha256(f"{tenant_id}:{fleet_id or ''}:{content}".encode()).hexdigest()
 
@@ -3499,6 +3511,34 @@ async def update_memory(
     fields_set = data.model_fields_set
     if not fields_set:
         raise HTTPException(status_code=400, detail="No fields to update")
+
+    # Explicit ``null`` on a column the row cannot hold NULL in. Every
+    # ``MemoryUpdate`` field is typed ``X | None`` because that is how an
+    # optional PATCH field is spelled, so ``{"weight": null}`` validates and
+    # arrives here indistinguishable from a real value — the field-level
+    # constraints (``min_length``, ``ge``/``le``, ``pattern``) only bind the
+    # non-None branch of the union.
+    #
+    # Nine sibling fields DO honour null-as-clear (title, source_uri,
+    # predicate, object_value, subject_entity_id, the three timestamps,
+    # entity_links); those are nullable columns and the ``simple_fields`` loop
+    # below writes the NULL deliberately. These five are not, and left
+    # unguarded each one produced a 500 rather than a 4xx: ``content`` raised
+    # ``TypeError: 'NoneType' object is not subscriptable`` building the audit
+    # diff, and the other four reached Postgres and came back as
+    # ``NotNullViolationError``. Reachable from any caller that serialises the
+    # whole schema rather than only the fields it set — the plugin's update
+    # tool drops ``undefined`` but forwards ``null`` verbatim.
+    #
+    # 400 rather than a schema-level 422, to match ``metadata=null`` below,
+    # which is the same "this null has no valid meaning" rule and is already
+    # answered that way a hundred lines down.
+    nulled = [f for f in NON_NULLABLE_UPDATE_FIELDS if f in fields_set and getattr(data, f) is None]
+    if nulled:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{', '.join(nulled)} cannot be null; omit the field to leave it unchanged",
+        )
 
     # Snapshot old values for audit diff
     changes: dict = {}
