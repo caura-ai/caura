@@ -8,7 +8,9 @@ are replaced by stand-ins so these tests run without GCP.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -1250,3 +1252,125 @@ async def test_stop_deletes_broadcast_subscriptions(bus: PubSubEventBus) -> None
     req = fake_sub.delete_subscription.call_args.kwargs["request"]
     assert req["subscription"] == "projects/proj/subscriptions/core-api--x--abc"
     assert bus._broadcast_sub_paths == []
+
+
+async def test_release_broadcast_subscriptions_needs_nothing_else_torn_down(
+    bus: PubSubEventBus,
+) -> None:
+    """The release must work on a fully live bus, with no teardown run first.
+
+    This is the property the fix depends on. Cloud Run allows 10s between
+    SIGTERM and SIGKILL; core-api's shutdown awaits three 5s-timeout flushes
+    sequentially before it reaches the bus, so anything that can only run after
+    them does not run at all on a busy shutdown. That is how 6,571 orphaned
+    subscriptions accumulated in staging against a live instance count in the
+    low tens, exhausting a project-wide cap shared with prod.
+
+    So this asserts the release is callable in isolation — no stop(), no
+    cancelled pull tasks, no closed clients — and that it is the delete alone.
+    """
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    bus._started = True
+    bus._broadcast_sub_paths = [
+        "projects/proj/subscriptions/core-api--a--1",
+        "projects/proj/subscriptions/core-api--b--2",
+    ]
+
+    await bus.release_broadcast_subscriptions()
+
+    assert fake_sub.delete_subscription.call_count == 2
+    assert bus._broadcast_sub_paths == []
+    # It must not have torn the bus down as a side effect: stop() still has
+    # work to do afterwards, and a release that closed the subscriber would
+    # break the very ordering it exists to enable.
+    fake_sub.close.assert_not_called()
+    assert bus._started is True
+    assert bus._stopped is False
+
+
+async def test_released_subscription_exits_pull_loop_quietly(
+    bus: PubSubEventBus,
+) -> None:
+    """A pull loop that outlives the release must not report a fault.
+
+    The release runs ahead of the rest of teardown so it fits inside the 10s
+    SIGTERM budget, which means a pull loop can still be mid-cycle when its
+    subscription disappears. Without this the loop takes the permanent-error
+    branch — ERROR log, ``_failed_subscriptions``, ``is_healthy`` false — on
+    EVERY graceful shutdown, which is how a real alert gets tuned out.
+    """
+    from google.api_core import exceptions as gexc
+
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    bus._broadcast_sub_paths = ["projects/proj/subscriptions/core-api--x--abc"]
+    await bus.release_broadcast_subscriptions()
+
+    fake_sub.pull = MagicMock(side_effect=gexc.NotFound("gone"))
+    bus._pull_executor = ThreadPoolExecutor(max_workers=1)
+    await bus._pull_loop("core-api--x--abc", [])
+
+    assert bus._failed_subscriptions == set()
+    assert bus.is_healthy is True
+
+
+async def test_unprovisioned_subscription_still_reports_loudly(
+    bus: PubSubEventBus,
+) -> None:
+    """The suppression must be scoped to what we deleted, and nothing else.
+
+    A NotFound on a subscription this process never released is a real
+    configuration fault — never provisioned, or deleted by someone else — and
+    must keep the loud halting path. A blanket suppression would trade one
+    silent failure for another.
+    """
+    from google.api_core import exceptions as gexc
+
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    fake_sub.pull = MagicMock(side_effect=gexc.NotFound("never existed"))
+    bus._pull_executor = ThreadPoolExecutor(max_workers=1)
+
+    await bus._pull_loop("core-api--never-provisioned", [])
+
+    assert "core-api--never-provisioned" in bus._failed_subscriptions
+    assert bus.is_healthy is False
+
+
+async def test_restart_clears_the_released_record(bus: PubSubEventBus) -> None:
+    """Subscription names are deterministic per bus object, so a second start()
+    recreates the same names. A leftover entry would silence a genuine NotFound
+    on the next run — the suppression becoming the blind spot it exists to
+    avoid."""
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    bus._broadcast_sub_paths = ["projects/proj/subscriptions/core-api--x--abc"]
+    await bus.release_broadcast_subscriptions()
+    assert "core-api--x--abc" in bus._released_subscriptions
+
+    bus._started = False
+    with contextlib.suppress(Exception):
+        await bus.start()
+
+    assert "core-api--x--abc" not in bus._released_subscriptions
+
+
+async def test_release_broadcast_subscriptions_is_idempotent(
+    bus: PubSubEventBus,
+) -> None:
+    """stop() still calls it, so it runs twice on every clean shutdown.
+
+    A second delete of an already-deleted subscription would log a NotFound
+    warning per topic on every graceful exit — noise that would train readers
+    to ignore the one warning that matters.
+    """
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    bus._broadcast_sub_paths = ["projects/proj/subscriptions/core-api--x--abc"]
+
+    await bus.release_broadcast_subscriptions()
+    await bus.release_broadcast_subscriptions()
+    await bus.stop()
+
+    fake_sub.delete_subscription.assert_called_once()

@@ -508,7 +508,28 @@ async def lifespan(app):
         # Bus stop also happens before storage-client close because
         # the bus's pull-loops may still be issuing storage calls
         # mid-cancel.
-        shutdown_steps: list = []
+        # FIRST, ahead of every flush below: hand back this process's ephemeral
+        # broadcast subscriptions.
+        #
+        # Cloud Run allows 10s between SIGTERM and SIGKILL. The steps below are
+        # awaited SEQUENTIALLY and the first three carry 5s timeouts each, so on
+        # any shutdown where a queue has work the budget is gone before
+        # event_bus.stop() — which is where the delete used to live — is even
+        # reached. The process is killed, the subscription survives, and its
+        # expiration_policy holds project quota for a full day.
+        #
+        # That is not theory. core-api accumulated 6,571 orphaned subscriptions
+        # in staging against a live instance count in the low tens, exhausted
+        # the 10,000 subscriptions-per-project cap — which is shared with prod —
+        # and prod core-api then began failing to create its own subscription
+        # and degrading cross-process cache invalidation to the TTL.
+        # platform-auth-api, same library and same TTL, awaits its bus stop
+        # early and holds 2-6.
+        #
+        # This step needs nothing that the flushes below need, so it is cheap
+        # and cannot be starved by them. event_bus.stop() still calls it; this
+        # is an idempotent hoist, not a move.
+        shutdown_steps: list = [event_bus.release_broadcast_subscriptions()]
         if audit_queue is not None:
             shutdown_steps.append(audit_queue.stop(timeout=5.0))
         if capability_usage_agg is not None:

@@ -245,6 +245,13 @@ class PubSubEventBus(EventBus):
         # this process created so ``stop()`` can delete them.
         self._broadcast_topics: set[str] = set()
         self._broadcast_sub_paths: list[str] = []
+        # Short names of subscriptions THIS bus deliberately deleted, so a pull
+        # loop that is still running when the delete lands can tell "I released
+        # this myself" from "this was never provisioned". Both surface as
+        # NotFound on the next pull; only the second is an error worth the loud
+        # halting-the-loop log. Short names because that is what ``_pull_loop``
+        # is given — ``_broadcast_sub_paths`` holds full resource paths.
+        self._released_subscriptions: set[str] = set()
         self._instance_id = uuid.uuid4().hex[:12]
 
     def _spawn_background_task(self, coro: Any) -> asyncio.Task[Any]:
@@ -557,6 +564,12 @@ class PubSubEventBus(EventBus):
         if self._started:
             logger.warning("PubSubEventBus.start() called more than once; ignoring")
             return
+        # Clear the released-subscription record. Names are deterministic in
+        # ``_instance_id``, which is per-object, so a start/stop/start cycle
+        # recreates the SAME names — a leftover entry here would silence a
+        # genuine NotFound on the second run, turning this suppression into
+        # the blind spot it was written to avoid.
+        self._released_subscriptions.clear()
         pubsub_v1 = self._ensure_pubsub_sdk()
         topic_count = len(self._handlers)
         # SubscriberClient construction can block the event loop for
@@ -862,6 +875,15 @@ class PubSubEventBus(EventBus):
                 gexc.PermissionDenied,
                 gexc.InvalidArgument,
             ):
+                # We deleted this one ourselves. ``release_broadcast_subscriptions()``
+                # runs ahead of the rest of teardown so it fits inside the
+                # SIGTERM budget, which means this loop can still be mid-pull
+                # when the subscription disappears. That is an orderly exit, not
+                # a configuration fault: staying on the loud path below would
+                # log an ERROR and flip ``is_healthy`` false on every graceful
+                # shutdown, which is how a real alert gets tuned out.
+                if subscription_name in self._released_subscriptions:
+                    return
                 # Permanent configuration errors: subscription doesn't
                 # exist, service account lacks permission, or the
                 # request shape is wrong. Retrying spins the log forever
@@ -981,6 +1003,63 @@ class PubSubEventBus(EventBus):
             raise cancelled
         return all_ok
 
+    async def release_broadcast_subscriptions(self) -> None:
+        """Delete this process's ephemeral broadcast subscriptions.
+
+        Split out of ``stop()`` so a shutdown path can run it FIRST, ahead of
+        anything slow. That ordering is the whole point, and it is worth stating
+        why rather than leaving it to be rediscovered.
+
+        Each process creates its own ephemeral subscription per broadcast topic
+        — a broadcast needs one subscription per consumer, or the messages
+        load-balance and only one process sees each. The ``expiration_policy``
+        set at creation is the backstop, but its floor is
+        ``BROADCAST_SUBSCRIPTION_TTL_SECONDS`` (1 day, the Pub/Sub minimum), so
+        a subscription this misses occupies project quota for a full day.
+
+        That quota is **per project**, not per topic, and it is shared with
+        every other environment. A service that leaks these steadily will
+        eventually refuse subscription creation somewhere else entirely —
+        which is not a hypothetical: staging's leak exhausted the project cap
+        and the failure surfaced in prod, on a different topic, in a different
+        service.
+
+        So this must run inside the platform's SIGTERM budget (10s on Cloud
+        Run) even when the rest of teardown cannot. It needs only the subscriber
+        client and the recorded paths — no pull loops stopped, no queues
+        flushed, no storage open. Idempotent: the paths are cleared, so calling
+        it again, or calling ``stop()`` afterwards, is a no-op.
+        """
+        if self._subscriber is None or not self._broadcast_sub_paths:
+            return
+        loop = asyncio.get_running_loop()
+        # Record before deleting, not after. The pull loop for a subscription
+        # can hit NotFound the instant the delete lands, and if it reaches the
+        # error branch before this set is updated it takes the loud path for a
+        # deletion we performed on purpose.
+        self._released_subscriptions.update(
+            path.rsplit("/", 1)[-1] for path in self._broadcast_sub_paths
+        )
+        for sub_path in self._broadcast_sub_paths:
+            try:
+                await loop.run_in_executor(
+                    None,
+                    functools.partial(
+                        self._subscriber.delete_subscription,
+                        request={"subscription": sub_path},
+                    ),
+                )
+            except Exception:
+                logger.warning(
+                    "pubsub: failed to delete ephemeral broadcast "
+                    "subscription %s; expiration_policy will reap it in up to "
+                    "%ds, during which it holds project subscription quota",
+                    sub_path,
+                    BROADCAST_SUBSCRIPTION_TTL_SECONDS,
+                    exc_info=True,
+                )
+        self._broadcast_sub_paths.clear()
+
     async def stop(self) -> None:
         # Flip `_stopped` first so `_get_publish_executor` / `_pull_loop`
         # refuse to spin up new resources after this point — closes the
@@ -1024,29 +1103,11 @@ class PubSubEventBus(EventBus):
         # the in-flight stop() would then close out from under the caller.
         try:
             # Delete this process's ephemeral broadcast subscriptions BEFORE
-            # closing the subscriber (the delete needs the client). Best-effort:
-            # the ``expiration_policy`` set at creation reaps any subscription
-            # this misses (unclean shutdown). The close below then wakes the
-            # pull threads via the gRPC channel error, so they exit through the
-            # ``if self._stopping: return`` path rather than logging NotFound.
-            if self._subscriber is not None and self._broadcast_sub_paths:
-                for sub_path in self._broadcast_sub_paths:
-                    try:
-                        await loop.run_in_executor(
-                            None,
-                            functools.partial(
-                                self._subscriber.delete_subscription,
-                                request={"subscription": sub_path},
-                            ),
-                        )
-                    except Exception:
-                        logger.warning(
-                            "pubsub: failed to delete ephemeral broadcast "
-                            "subscription %s; expiration_policy will reap it",
-                            sub_path,
-                            exc_info=True,
-                        )
-                self._broadcast_sub_paths.clear()
+            # closing the subscriber (the delete needs the client). The close
+            # below then wakes the pull threads via the gRPC channel error, so
+            # they exit through the ``if self._stopping: return`` path rather
+            # than logging NotFound.
+            await self.release_broadcast_subscriptions()
             # Close the subscriber BEFORE cancelling/awaiting the pull
             # tasks. Pull threads are blocked inside a synchronous
             # `subscriber.pull(timeout=pull_timeout)` — asyncio
