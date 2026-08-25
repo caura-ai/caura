@@ -219,6 +219,14 @@ async def list_keystones(
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
     agent_id: str | None = Query(default=None),
+    envelope: bool = Query(
+        default=False,
+        description=(
+            "C30/D1 opt-in: return {count, items} instead of the bare array. "
+            "The bare array stays the default until a separate announced "
+            "deprecation wave."
+        ),
+    ),
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Return scope-merged keystone rules. No trust gate — reads are
@@ -246,6 +254,11 @@ async def list_keystones(
         raise _surface_storage_error(exc) from exc
     if truncated:
         response.headers["X-Truncated"] = "true"
+    # C30 / wire-contract D1 (ratified 2026-08-25): opt-in envelope. The bare
+    # array remains the default response shape — existing consumers (plugin
+    # session-start fetch included) see zero change unless they ask.
+    if envelope:
+        return {"count": len(rows), "items": rows}
     return rows
 
 

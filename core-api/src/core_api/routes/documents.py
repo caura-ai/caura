@@ -657,11 +657,18 @@ async def search_documents(
             result_count_by_tenant=counts,
             query_summary=(body.query or "")[:200],
         )
+    # C30 / wire-contract D1 (ratified 2026-08-25): ``items`` is the canonical
+    # list key everywhere — /search always used it, this route used
+    # ``results``, and the mismatch cost the SupportHive builder a
+    # zero-hit-parsing bug (FR-1, ranked #1 by time cost). Dual-emit: both
+    # keys reference the same list; ``results`` stays until a separate,
+    # announced deprecation wave.
     return JSONResponse(
         {
             "collection": body.collection,
             "count": len(items),
             "results": items,
+            "items": items,
         }
     )
 
