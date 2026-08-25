@@ -68,7 +68,10 @@ def _make_new_memory(
 
 
 def _sc(
-    new_mem: dict, candidates: list[dict], links_by_mem: dict[str, list[dict]]
+    new_mem: dict,
+    candidates: list[dict],
+    links_by_mem: dict[str, list[dict]],
+    entities: dict[str, dict] | None = None,
 ) -> AsyncMock:
     sc = AsyncMock()
 
@@ -86,6 +89,11 @@ def _sc(
     sc.get_entity_links_for_memories = AsyncMock(return_value=links_by_mem)
 
     async def get_entity(eid: str):
+        # ``entities`` decouples canonical_name from entity_id (WT-3:
+        # the L3.4 drop is now scoped to SAME-name/different-id, so
+        # collision tests must pin the name explicitly).
+        if entities is not None and eid in entities:
+            return entities[eid]
         return {
             "id": eid,
             "canonical_name": eid.split(":", 1)[-1] if ":" in eid else eid,
@@ -801,12 +809,27 @@ async def test_l34_preflight_still_drops_collision_after_refactor():
     new_id, cand_id = uuid4(), uuid4()
     new_mem = _make_new_memory(new_id, subject_entity_id=None)
     cand = _make_candidate(cand_id, subject_entity_id=None)
-    # Distinct entity_ids → preflight drops.
+    # SAME canonical name under DISTINCT entity_ids → preflight drops.
+    # (WT-3 scoped the drop to this name-collision class, so the name
+    # must be pinned explicitly — the id-derived synthesis would give
+    # the two rows different names and fail open instead.)
     links = {
         str(new_id): [{"entity_id": "ent:priya-A", "role": "subject"}],
         str(cand_id): [{"entity_id": "ent:priya-B", "role": "subject"}],
     }
-    sc = _sc(new_mem, [cand], links)
+    entities = {
+        "ent:priya-A": {
+            "id": "ent:priya-A",
+            "canonical_name": "priya",
+            "entity_type": "person",
+        },
+        "ent:priya-B": {
+            "id": "ent:priya-B",
+            "canonical_name": "priya",
+            "entity_type": "person",
+        },
+    }
+    sc = _sc(new_mem, [cand], links, entities=entities)
     base_judge = AsyncMock(return_value=(True, 0.95))
     entity_aware_judge = AsyncMock(return_value=(True, 0.95))
 
