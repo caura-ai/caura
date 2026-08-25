@@ -1,4 +1,4 @@
-"""Tests for `memclaw-interviewer install` / `uninstall` (cron scheduling)."""
+"""Tests for `caura-interviewer install` / `uninstall` (cron scheduling)."""
 
 from __future__ import annotations
 
@@ -85,6 +85,34 @@ def test_build_run_command_all_projects_flag(tmp_path):
     assert "--harness claude-code --all-projects" in cmd
 
 
+def test_resolve_cmd_prefers_current_console_script(monkeypatch):
+    """When both console scripts are on PATH, the cron line must invoke the
+    CURRENT one — not schedule the legacy name into a fresh install."""
+    paths = {
+        "caura-interviewer": "/usr/local/bin/caura-interviewer",
+        "memclaw-interviewer": "/usr/local/bin/memclaw-interviewer",  # legacy-name-ok: the legacy script the current one must outrank
+    }
+    monkeypatch.setattr(installer.shutil, "which", lambda name: paths.get(name))
+    assert installer.resolve_cmd() == "/usr/local/bin/caura-interviewer"
+
+
+def test_resolve_cmd_falls_back_to_legacy_script(monkeypatch):
+    """Rule 3: a pre-rename install ships only the old console script — it
+    must still resolve rather than falling through to `python -m`."""
+    legacy = "/usr/local/bin/memclaw-interviewer"  # legacy-name-ok: rule 3 — pre-rename installs ship only the old console script
+    monkeypatch.setattr(
+        installer.shutil,
+        "which",
+        lambda name: legacy if name == "memclaw-interviewer" else None,  # legacy-name-ok: rule 3 — pre-rename installs ship only the old console script
+    )
+    assert installer.resolve_cmd() == legacy
+
+
+def test_resolve_cmd_module_fallback_when_no_script(monkeypatch):
+    monkeypatch.setattr(installer.shutil, "which", lambda name: None)
+    assert installer.resolve_cmd().endswith(" -m caura_client.interviewer.cli")
+
+
 def test_render_env_file_only_set_keys_and_quotes():
     out = render_env_file({
         "CAURA_BASE_URL": "https://caura.corp.internal",
@@ -93,6 +121,7 @@ def test_render_env_file_only_set_keys_and_quotes():
         "CAURA_AGENT_ID": "",          # falsy → omitted
         "CAURA_INTERVIEWER_PROJECTS": "app-*,foo",
     })
+    assert out.startswith("# Written by `caura-interviewer install`")
     assert "export CAURA_BASE_URL='https://caura.corp.internal'" in out
     assert "export CAURA_API_KEY='mc_secret'" in out
     assert "export CAURA_INTERVIEWER_PROJECTS='app-*,foo'" in out
@@ -157,7 +186,7 @@ def _patch(monkeypatch, tmp_path, cron, available=True):
     monkeypatch.setattr(installer, "config_dir", lambda: tmp_path / "cfg")
     monkeypatch.setattr(installer, "env_file_path", lambda: tmp_path / "cfg" / "env")
     monkeypatch.setattr(installer, "log_file_path", lambda: tmp_path / "cfg" / "cron.log")
-    monkeypatch.setattr(installer, "resolve_cmd", lambda: "memclaw-interviewer")
+    monkeypatch.setattr(installer, "resolve_cmd", lambda: "caura-interviewer")
 
 
 def test_install_writes_cron_and_env_then_uninstall_removes(monkeypatch, tmp_path, capsys):

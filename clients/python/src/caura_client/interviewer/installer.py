@@ -1,4 +1,4 @@
-"""Cron scheduling helper for ``memclaw-interviewer install`` / ``uninstall``.
+"""Cron scheduling helper for ``caura-interviewer install`` / ``uninstall``.
 
 `pip install` cannot register a cron (wheels run no install-time code), and
 silently scheduling a job that reads transcripts and phones home would be the
@@ -6,7 +6,7 @@ wrong consent posture anyway. So scheduling is one explicit command that
 writes:
 
 - a **crontab line** (idempotent — keyed by a marker comment) invoking
-  ``memclaw-interviewer run`` on an interval; and
+  ``caura-interviewer run`` on an interval; and
 - a **0600 env file** the cron line sources, because cron does NOT inherit
   the user's shell environment — the connection identity (base URL, key,
   tenant) would otherwise be absent when the job fires.
@@ -82,13 +82,16 @@ def interval_to_cron(interval: str) -> str:
 def resolve_cmd() -> str:
     """Absolute invocation for the CLI, resilient to how it was installed.
 
-    Prefer the console-script on PATH; fall back to ``<python> -m`` so a
-    venv/editable install still schedules a working command. Each path
+    Prefer the current console-script on PATH, then the legacy one (rule 3 —
+    a pre-rename install ships only that name); fall back to ``<python> -m``
+    so a venv/editable install still schedules a working command. Each path
     component is shell-quoted here (NOT the whole string — the fallback is
     two words and quoting it wholesale would make sh treat it as one
     command name).
     """
-    exe = shutil.which("memclaw-interviewer")
+    exe = shutil.which("caura-interviewer")
+    if not exe:
+        exe = shutil.which("memclaw-interviewer")  # legacy-name-ok: rule 3 — pre-rename installs ship only the old console script
     if exe:
         return shlex.quote(exe)
     return f"{shlex.quote(sys.executable)} -m caura_client.interviewer.cli"
@@ -131,7 +134,7 @@ def merge_crontab(existing: str, new_line: Optional[str]) -> str:
 
 def render_env_file(env: dict[str, str]) -> str:
     """Shell-sourceable ``export`` lines for the set connection vars only."""
-    lines = ["# Written by `memclaw-interviewer install` — sourced by the cron job.", ""]
+    lines = ["# Written by `caura-interviewer install` — sourced by the cron job.", ""]
     for k in _ENV_KEYS:
         v = env.get(k)
         if v:

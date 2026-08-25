@@ -147,7 +147,7 @@ async def test_unindexed_branch_mints(rest_env):
     rest_env["spy"].assert_awaited_once()
     spec = rest_env["spy"].call_args.args[0]
     assert _BODY in spec.content
-    assert spec.source_uri == "memclaw-doc://runbooks/pg-tuning"
+    assert spec.source_uri == "caura-doc://runbooks/pg-tuning"
 
 
 async def test_indexed_branch_mints(rest_env, monkeypatch):

@@ -196,10 +196,19 @@ DOC_MEMORY_MAX_CHARS = MAX_CONTENT_LENGTH
 # migration 013 would reject it.)
 
 # Provenance only — written to ``memories.source_uri`` as
-# ``memclaw-doc://<collection>/<doc_id>``. Nothing queries it yet (that would
+# ``caura-doc://<collection>/<doc_id>``. Nothing queries it yet (that would
 # need a storage-side filter + index); it exists so a later reconciliation
 # mechanism has a stable key to match a doc to the memories minted from it.
-DOC_MEMORY_URI_SCHEME = "memclaw-doc"
+DOC_MEMORY_URI_SCHEME = "caura-doc"
+
+# Rows minted before the rename carry the old scheme in ``source_uri`` and are
+# never rewritten (rule 2 — customer data is not migrated for a brand). All
+# minting uses ``DOC_MEMORY_URI_SCHEME``; anything that ever grows a
+# recognizer for doc-memory URIs (the reconciliation pass above) must accept
+# these schemes alongside it.
+LEGACY_DOC_MEMORY_URI_SCHEMES = (
+    "memclaw-doc",  # legacy-name-ok: scheme already persisted in customers' memories.source_uri
+)
 
 assert DOC_MEMORY_MAX_CHARS <= MAX_CONTENT_LENGTH, (
     "DOC_MEMORY_MAX_CHARS must not exceed MemoryCreate.content max_length "

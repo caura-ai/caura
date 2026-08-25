@@ -1253,7 +1253,7 @@ async def test_doc_write_mints_memory_for_body_bearing_doc(
     spy_doc_memory.assert_awaited_once()
     spec = spy_doc_memory.call_args.args[0]
     assert "# Vacuum\n\nRun nightly." in spec.content  # rendered, body intact
-    assert spec.source_uri == "memclaw-doc://runbooks/pg-tuning"
+    assert spec.source_uri == "caura-doc://runbooks/pg-tuning"
 
 
 async def test_doc_write_mints_on_update_too(mcp_env, monkeypatch, spy_doc_memory):

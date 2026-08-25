@@ -42,9 +42,25 @@ def test_mints_spec_for_ordinary_doc():
     spec = resolve_doc_memory("runbooks", "pg-tuning", _data(content="body text"))
     assert isinstance(spec, DocMemorySpec)
     assert "body text" in spec.content
-    assert spec.source_uri == "memclaw-doc://runbooks/pg-tuning"
+    assert spec.source_uri == "caura-doc://runbooks/pg-tuning"
     assert spec.metadata["doc_collection"] == "runbooks"
     assert spec.metadata["doc_id"] == "pg-tuning"
+
+
+def test_legacy_scheme_is_never_minted_but_stays_recognized():
+    """Erni's decision on the doc-memory URI scheme: new mints use the Caura
+    scheme; rows minted before the rename keep the old one in ``source_uri``
+    forever (rule 2 — no data rewrite). Anything that ever grows a recognizer
+    for doc-memory URIs must accept both, which this constant is the roster
+    for. Pinned here so a tidy-up cannot delete the legacy scheme out from
+    under data customers already hold.
+    """
+    from core_api.constants import DOC_MEMORY_URI_SCHEME, LEGACY_DOC_MEMORY_URI_SCHEMES
+
+    assert DOC_MEMORY_URI_SCHEME == "caura-doc"
+    assert "memclaw-doc" in LEGACY_DOC_MEMORY_URI_SCHEMES  # legacy-name-ok: pins the scheme persisted in customers' memories.source_uri
+    # Minting must never use a legacy scheme.
+    assert DOC_MEMORY_URI_SCHEME not in LEGACY_DOC_MEMORY_URI_SCHEMES
 
 
 def test_summary_is_rendered_first_as_bare_prose():

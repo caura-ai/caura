@@ -39,7 +39,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 def _spec(content: str = "body text") -> DocMemorySpec:
     return DocMemorySpec(
         content=content,
-        source_uri="memclaw-doc://runbooks/pg-tuning",
+        source_uri="caura-doc://runbooks/pg-tuning",
         metadata={"doc_collection": "runbooks", "doc_id": "pg-tuning"},
     )
 
@@ -93,7 +93,7 @@ async def test_creates_memory_with_expected_payload(patched):
     # ``sync_doc_memory`` passes the spec's content through unchanged — the
     # render happens upstream in ``resolve_doc_memory``.
     assert payload.content == "# H\n\nrendered body"
-    assert payload.source_uri == "memclaw-doc://runbooks/pg-tuning"
+    assert payload.source_uri == "caura-doc://runbooks/pg-tuning"
     assert payload.tenant_id == "t1"
     assert payload.fleet_id == "f1"
     assert payload.agent_id == "agent-a"
