@@ -26,6 +26,29 @@ These are the durable part of the plan. Every gate in CI traces to one of them.
 | 6 | **One coupled cluster at a time** | `{core-api, core-worker, platform-admin-api}` move together; vendored files move together; all DSN consumers move together. |
 | 7 | **Mint nothing under the old name** | A new repo, topic, package or service under the legacy brand kills a redirect that already works. This is the one the ratchet enforces automatically. |
 
+### The writer side of rule 3
+
+Rule 3 is stated read-side, and the corollary is not: **the moment you make a
+consumer dual-read, every writer that pins the old spelling into something that
+consumer later reads becomes a hazard** — a child process environment, a
+generated config, an installed service unit. The consumer now *prefers* the new
+name, so an ambient new-name value from anywhere else outranks the old-name
+value the writer deliberately set. This has already shipped once, as a daemon
+and the CLI that started it silently on different state directories.
+
+- **Pin both spellings.** Find every writer that feeds a dual-reading consumer
+  and have it set both, in the same change that makes the consumer dual-read.
+  Whether that works is a language question: Go's `os/exec` keeps the **last**
+  duplicate key, so appending overrides. Verify your language's rule instead of
+  assuming it.
+- **Precedence is first NON-EMPTY, never first-defined.** Every consumer in
+  this fleet reads `""` as "use the default", so first-defined would relocate a
+  state directory or drop a cloud origin with nothing red anywhere.
+- **The smell:** clearing the *new*-name variable in a test for hermeticity
+  during an alias wave. Production has no `t.Setenv`. If a test needs that
+  line, check whether the writer it stands in for is still pinning one
+  spelling — that clear will mask the live gap for as long as it is there.
+
 ---
 
 ## What is *not* frozen
@@ -105,6 +128,11 @@ contract, not for convenience.
    installed clients and air-gapped image tarballs all do.
 4. **Would deleting it lower a count while breaking a behaviour?** That combination
    passes CI green. It is the failure mode this plan is built around.
+5. **Are you making a consumer read both spellings?** Then find that consumer's
+   writers in the same PR and pin both — see
+   [The writer side of rule 3](#the-writer-side-of-rule-3). Neither gate can see
+   this one: the writer already carries the old name, so nothing is minted and
+   nothing is deleted.
 
 ---
 
