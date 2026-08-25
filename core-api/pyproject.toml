@@ -1,6 +1,6 @@
 [project]
 name = "core-api"
-version = "2.31.0"
+version = "2.32.0"
 description = "Caura Core API service"
 license = "Apache-2.0"
 requires-python = ">=3.12"

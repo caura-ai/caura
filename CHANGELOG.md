@@ -10,6 +10,32 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.32.0](https://github.com/caura-ai/caura/compare/backend-v2.31.0...backend-v2.32.0) (2026-08-25)
+
+
+### Features
+
+* **api:** envelope convergence — dual-emit items + keystones envelope opt-in (C30) ([#963](https://github.com/caura-ai/caura/issues/963)) ([e51cd9c](https://github.com/caura-ai/caura/commit/e51cd9c437b2d5edfca2bb17d5037838bc9a31b5))
+* **api:** MCP/REST search parity per the ratified wire contract (C31) ([#962](https://github.com/caura-ai/caura/issues/962)) ([d9bf825](https://github.com/caura-ai/caura/commit/d9bf825041d3ffa317ae4c47921d0dade2ff6a1c))
+
+
+### Bug Fixes
+
+* **entities:** make the entities read path work — search filters + relations ([#954](https://github.com/caura-ai/caura/issues/954)) ([d17164f](https://github.com/caura-ai/caura/commit/d17164fd9eec724d64b87cb80fd4523ff193027c))
+* **mcp:** stop _with_latency corrupting non-dict JSON payloads ([#959](https://github.com/caura-ai/caura/issues/959)) ([a9258ed](https://github.com/caura-ai/caura/commit/a9258ed2d0eda46c166536f65fbb75252d8e3381))
+* **memory:** platform/caller metadata boundary — system_metadata (C25) ([#967](https://github.com/caura-ai/caura/issues/967)) ([fd6b727](https://github.com/caura-ai/caura/commit/fd6b727ff6b60ec356130611fbd762fd1fa16756))
+* **ratchet:** exempt generated CHANGELOGs on release-please branches ([#966](https://github.com/caura-ai/caura/issues/966)) ([e244ad7](https://github.com/caura-ai/caura/commit/e244ad77ad97e780d1c343f98de606667777aaaa))
+* the four P1 behavior defects from the sunset report ([#964](https://github.com/caura-ai/caura/issues/964)) ([fd756e8](https://github.com/caura-ai/caura/commit/fd756e89f3e960ff94f962947738cc9c79cb616d))
+
+
+### Documentation
+
+* **clients:** complete python client README API coverage ([#975](https://github.com/caura-ai/caura/issues/975)) ([14645c6](https://github.com/caura-ai/caura/commit/14645c6452bb616c977bab51059779619022e4aa))
+* **contributing:** keep the old brand out of commit subjects ([#956](https://github.com/caura-ai/caura/issues/956)) ([5b1ba5c](https://github.com/caura-ai/caura/commit/5b1ba5c233ed084b2ded9355b9d1ed0bace5d5bc))
+* **sunset:** give "contract, not convenience" an actual test ([#965](https://github.com/caura-ai/caura/issues/965)) ([37cddce](https://github.com/caura-ai/caura/commit/37cddce1680a3517c83e231ba87654961e5f0814))
+* **sunset:** record the broker's cloud host as a sequenced cutover ([#968](https://github.com/caura-ai/caura/issues/968)) ([545cbd1](https://github.com/caura-ai/caura/commit/545cbd133b9f00a5287c4c025b593b936a0b9afe))
+* **sunset:** write down the writer side of rule 3 ([#960](https://github.com/caura-ai/caura/issues/960)) ([6175a4d](https://github.com/caura-ai/caura/commit/6175a4d26a4ad7acc38f31712fb3c438595962a1))
+
 ## [2.31.0](https://github.com/caura-ai/caura/compare/backend-v2.30.0...backend-v2.31.0) (2026-08-25)
 
 

@@ -4,6 +4,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.19.0](https://github.com/caura-ai/caura/compare/plugin-v2.18.0...plugin-v2.19.0) (2026-08-25)
+
+
+### Features
+
+* **api:** MCP/REST search parity per the ratified wire contract (C31) ([#962](https://github.com/caura-ai/caura/issues/962)) ([d9bf825](https://github.com/caura-ai/caura/commit/d9bf825041d3ffa317ae4c47921d0dade2ff6a1c))
+
+
+### Bug Fixes
+
+* the four P1 behavior defects from the sunset report ([#964](https://github.com/caura-ai/caura/issues/964)) ([fd756e8](https://github.com/caura-ai/caura/commit/fd756e89f3e960ff94f962947738cc9c79cb616d))
+
 ## [2.18.0](https://github.com/caura-ai/caura/compare/plugin-v2.17.0...plugin-v2.18.0) (2026-08-25)
 
 
