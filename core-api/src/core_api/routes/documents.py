@@ -4,7 +4,7 @@ import logging
 import re
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -192,6 +192,9 @@ def _dict_to_out(d: dict) -> DocOut:
 @write_limit
 async def upsert_document(
     request: Request,
+    # slowapi with headers_enabled needs an injectable Response to attach
+    # X-RateLimit-*/Retry-After; without this param every call 500s (D14).
+    response: Response,
     body: DocWriteRequest,
     auth: AuthContext = Depends(get_auth_context),
     idempotency_key: str | None = Header(None, alias=IDEMPOTENCY_HEADER),
