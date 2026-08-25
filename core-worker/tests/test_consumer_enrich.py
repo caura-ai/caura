@@ -444,7 +444,9 @@ async def test_enrichment_pending_cleared_even_with_heuristic_fallback(monkeypat
 
     fields = patch_call.await_args.kwargs["fields"]
     mp = fields["metadata_patch"]
-    assert mp == {"enrichment_pending": False}, "heuristic fallback PATCH must still clear enrichment_pending"
+    assert mp == {"enrichment_pending": False, "_system": {"enrichment_pending": False}}, (
+        "heuristic fallback PATCH must still clear enrichment_pending in both homes"
+    )
 
 
 @pytest.mark.asyncio

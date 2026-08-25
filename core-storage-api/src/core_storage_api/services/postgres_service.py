@@ -1080,13 +1080,33 @@ class PostgresService:
                 # ``deleted_at IS NULL`` guard mirrors the column-set
                 # branch above so a PATCH never resurrects a deleted
                 # row via the metadata-merge path either.
-                await session.execute(
-                    text(
-                        "UPDATE memories "
-                        "SET metadata = COALESCE(metadata::jsonb, '{}'::jsonb) || (:patch)::jsonb "
-                        "WHERE id = :id AND tenant_id = :tenant_id AND deleted_at IS NULL"
-                    ).bindparams(patch=json.dumps(metadata_patch), id=memory_id, tenant_id=tenant_id),
-                )
+                if "_system" in metadata_patch:
+                    # B7 x C25 — ``||`` is a SHALLOW merge: a patch carrying the
+                    # ``_system`` namespace would REPLACE the stored sub-object,
+                    # clobbering sibling platform keys (write_latency_ms,
+                    # write_mode, …) whenever the worker clears a *_pending
+                    # flag. Deep-merge that one level: top-level keys merge as
+                    # before, then ``_system`` is re-set to old||new.
+                    await session.execute(
+                        text(
+                            "UPDATE memories "
+                            "SET metadata = jsonb_set("
+                            "  COALESCE(metadata::jsonb, '{}'::jsonb) || (:patch)::jsonb, "
+                            "  '{_system}', "
+                            "  COALESCE(metadata::jsonb -> '_system', '{}'::jsonb) "
+                            "    || COALESCE((:patch)::jsonb -> '_system', '{}'::jsonb)"
+                            ") "
+                            "WHERE id = :id AND tenant_id = :tenant_id AND deleted_at IS NULL"
+                        ).bindparams(patch=json.dumps(metadata_patch), id=memory_id, tenant_id=tenant_id),
+                    )
+                else:
+                    await session.execute(
+                        text(
+                            "UPDATE memories "
+                            "SET metadata = COALESCE(metadata::jsonb, '{}'::jsonb) || (:patch)::jsonb "
+                            "WHERE id = :id AND tenant_id = :tenant_id AND deleted_at IS NULL"
+                        ).bindparams(patch=json.dumps(metadata_patch), id=memory_id, tenant_id=tenant_id),
+                    )
         return True
 
     async def memory_update_status(

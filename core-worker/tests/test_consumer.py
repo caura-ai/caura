@@ -221,7 +221,7 @@ async def test_update_memory_embedding_clears_embedding_pending_flag():
     body = client.patch.await_args.kwargs["json"]
     assert body["embedding"] == [0.1] * 768
     assert body["tenant_id"] == "tenant-A"
-    assert body["metadata_patch"] == {"embedding_pending": False}
+    assert body["metadata_patch"] == {"embedding_pending": False, "_system": {"embedding_pending": False}}
 
 
 @pytest.mark.asyncio
@@ -383,7 +383,7 @@ async def test_update_memory_embedding_sends_provenance_key():
     assert body["embedded_content_hash"] == "h1"
     assert "content_hash" not in body, body
     # The metadata merge must survive alongside it.
-    assert body["metadata_patch"] == {"embedding_pending": False}
+    assert body["metadata_patch"] == {"embedding_pending": False, "_system": {"embedding_pending": False}}
 
 
 @pytest.mark.asyncio

@@ -225,7 +225,10 @@ async def update_memory_embedding(
     body: dict = {
         "tenant_id": tenant_id,
         "embedding": embedding,
-        "metadata_patch": {"embedding_pending": False},
+        # B7 x C25 — clear BOTH homes: the C25 read view gives ``_system``
+        # precedence, so legacy-only clearing would leave
+        # ``system_metadata.embedding_pending`` True forever.
+        "metadata_patch": {"embedding_pending": False, "_system": {"embedding_pending": False}},
     }
     if embedded_content_hash is not None:
         body["embedded_content_hash"] = embedded_content_hash
