@@ -88,10 +88,21 @@ async def test_aggregate_agrees_with_per_tenant_endpoint(client, monkeypatch):
 
 async def test_aggregate_is_worst_first(client):
     """Ordering is the contract the per-tenant log cap relies on — it drops the
-    tail, so the tail must be the tenants nobody would act on."""
+    tail, so the tail must be the tenants nobody would act on.
+
+    Asserted on ``stale + missing``, which is what the query actually orders by
+    (``memory_embedding_coverage_by_tenant``: ``.order_by((stale + missing).desc())``,
+    documented there as "a stale row is actively wrong, a missing one is merely
+    absent, so stale leads"). This previously asserted ``missing`` alone, which
+    is a DIFFERENT invariant and only coincides while every tenant has zero
+    stale rows: a tenant with (stale=3, missing=0) correctly sorts above one
+    with (stale=0, missing=2), and the old assertion read that as [0, 2] and
+    failed. It surfaced as an intermittent failure that depended on whether
+    anything earlier in the session happened to leave a stale row behind.
+    """
     aggregate = await get_storage_client().get_embedding_coverage_all()
-    missing = [r["missing_embeddings"] for r in aggregate["tenants"]]
-    assert missing == sorted(missing, reverse=True), missing
+    worst_first = [r["stale_embeddings"] + r["missing_embeddings"] for r in aggregate["tenants"]]
+    assert worst_first == sorted(worst_first, reverse=True), aggregate["tenants"]
 
 
 async def test_admin_route_rejects_non_admin():
