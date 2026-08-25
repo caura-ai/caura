@@ -74,7 +74,15 @@ describe("verifyCommandSignature", () => {
 
   test("tampered signature fails closed regardless of mode", () => {
     const cmd = signedCommand();
-    const tampered = { ...cmd, signature: cmd.signature.replace(/.$/, "0") };
+    // Flip the last hex char to a DIFFERENT value. The old `.replace(/.$/, "0")`
+    // was a 1-in-16 flake: whenever the genuine signature already ended in "0"
+    // (timestamp-dependent), the "tampered" copy was byte-identical to the
+    // original and verification correctly returned true.
+    const tampered = {
+      ...cmd,
+      signature: cmd.signature.replace(/.$/, (c) => (c === "0" ? "1" : "0")),
+    };
+    assert.notEqual(tampered.signature, cmd.signature);
     assert.equal(verifyCommandSignature(tampered, KEY).valid, false);
     assert.equal(verifyCommandSignature(tampered, KEY).reason, "invalid_signature");
     assert.equal(verifyCommandSignature(tampered, KEY, true).valid, false);
