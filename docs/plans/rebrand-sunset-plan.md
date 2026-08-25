@@ -132,6 +132,12 @@ is prose that happens to name the thing — **reword it off the literal and take
 exemption.** If a reader has to type the string, or find it on disk, or a machine has to
 match it, that is a contract: **mark it, and say which.**
 
+"Which" is a marker, not a convention in the reason text. `legacy-name-ok` is a contract
+that **bears** the old name — the alias, the redirect, the pinned wire format rule 3
+recognises. `legacy-name-floor` is one that only **names** something the rename will
+never reach. Both exempt the line identically; they are counted apart so that a sweep
+adding ten mentions cannot bury the one alias among them.
+
 Marking a mention is not a harmless extra. Every exemption widens the surface the gate
 no longer watches, and it spends the one annotation whose whole value is that its reasons
 are true.
