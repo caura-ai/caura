@@ -842,6 +842,38 @@
           "description": "Max results, default 5. Values above 20 are capped to 20.",
           "title": "Top K",
           "type": "integer"
+        },
+        "valid_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "As-of ISO 8601 date: filter to rows valid at that time.",
+          "title": "Valid At"
+        },
+        "min_similarity": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cosine floor 0.0-1.0; overrides the tuned profile for this call.",
+          "title": "Min Similarity"
+        },
+        "diagnostic": {
+          "default": false,
+          "description": "Return retrieval trace; results unchanged, never bumps recall_count.",
+          "title": "Diagnostic",
+          "type": "boolean"
         }
       },
       "required": [

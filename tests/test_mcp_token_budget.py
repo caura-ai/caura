@@ -31,7 +31,15 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # external dev who wrote the v3 friction report lost ~10 minutes total
 # to those two misreads; the +155 tokens per session are worth more than
 # that across the install base.
-CEILING_TOKENS = 5200
+#
+# 2026-08-25 (C31 / wire-contract D2, ratified): 5296 cl100k after
+# ``caura_recall`` gained the formerly REST-only knobs — ``valid_at``,
+# ``min_similarity``, ``diagnostic`` — closing the MCP/REST parity gap
+# MemoryImpact flagged as "C1+C2 together are a trap". Descriptions are
+# already terse; the +96 is structural schema cost (three params × name/
+# type/default/title). Ceiling 5200 → 5350 keeps ~50 tokens of headroom
+# so the next accidental description bloat still trips this guard.
+CEILING_TOKENS = 5350
 
 
 def _count(path: Path) -> int:

@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, create_model, model_validator
+from pydantic import AliasChoices, BaseModel, Field, create_model, model_validator
 
 from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
 from core_api.constants import (
@@ -510,11 +510,21 @@ class SearchRequest(BaseModel):
     fleet_ids: list[str] | None = None
     query: str = Field(min_length=1, max_length=MAX_QUERY_LENGTH)
     filter_agent_id: str | None = None
+    # C31/D2 — the short names are canonical (the spellings the MCP tools use);
+    # the historical `*_filter` forms stay accepted forever as aliases. Before
+    # this, `memory_type=fact` (the MCP spelling) was silently DROPPED by the
+    # extra="ignore" contract — the C1+C2 trap. When both spellings arrive,
+    # the long form wins (first in AliasChoices).
     memory_type_filter: MemoryType | None = Field(
         default=None,
+        validation_alias=AliasChoices("memory_type_filter", "memory_type"),
         description=MEMORY_TYPES_FILTER_DESCRIPTION,
     )
-    status_filter: str | None = Field(default=None, pattern=MEMORY_STATUSES_PATTERN)
+    status_filter: str | None = Field(
+        default=None,
+        pattern=MEMORY_STATUSES_PATTERN,
+        validation_alias=AliasChoices("status_filter", "status"),
+    )
     valid_at: datetime | None = None
     top_k: int = Field(
         default=DEFAULT_SEARCH_TOP_K,

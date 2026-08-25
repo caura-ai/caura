@@ -684,6 +684,27 @@
         "name": "top_k",
         "required": false,
         "type": "int"
+      },
+      {
+        "default": null,
+        "description": "As-of ISO 8601 date: filter to rows valid at that time.",
+        "name": "valid_at",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Cosine floor 0.0-1.0; overrides the tuned profile for this call.",
+        "name": "min_similarity",
+        "required": false,
+        "type": "float | None"
+      },
+      {
+        "default": false,
+        "description": "Return retrieval trace; results unchanged, never bumps recall_count.",
+        "name": "diagnostic",
+        "required": false,
+        "type": "bool"
       }
     ],
     "plugin_exposed": true,
