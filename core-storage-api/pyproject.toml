@@ -1,6 +1,6 @@
 [project]
 name = "core-storage-api"
-version = "2.30.0"
+version = "2.31.0"
 description = "Caura Core Storage API — PostgreSQL CRUD service"
 license = "Apache-2.0"
 requires-python = ">=3.12"

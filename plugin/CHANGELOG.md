@@ -4,6 +4,33 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.18.0](https://github.com/caura-ai/caura/compare/plugin-v2.17.0...plugin-v2.18.0) (2026-08-25)
+
+
+### Features
+
+* **api:** structured errors, safe deletes, and client alias packages ([#950](https://github.com/caura-ai/caura/issues/950)) ([e9ae581](https://github.com/caura-ai/caura/commit/e9ae58141e5c96be6d9146b6dc238bdcde813cab))
+
+
+### Bug Fixes
+
+* **mcp:** stop the identity surface misdescribing itself ([#951](https://github.com/caura-ai/caura/issues/951)) ([a28938d](https://github.com/caura-ai/caura/commit/a28938d34af3b501ec097dcacadb83f35e307f6f))
+* **plugin:** caura_list scope='all' spans fleets instead of narrowing to one ([#904](https://github.com/caura-ai/caura/issues/904)) ([2bdf359](https://github.com/caura-ai/caura/commit/2bdf35933e747cda1f57fb21a30b2d52e8c9b684))
+* **plugin:** the strings the plugin emits still said memclaw ([#902](https://github.com/caura-ai/caura/issues/902)) ([b8450a6](https://github.com/caura-ai/caura/commit/b8450a64c2780206fae5e65d0d40442487e492f0))
+* stop minting old-brand strings into new installs and registrations ([#928](https://github.com/caura-ai/caura/issues/928)) ([f877e09](https://github.com/caura-ai/caura/commit/f877e098076eae1d570b03a4c5e0c0c01fed1b2b))
+
+
+### Documentation
+
+* **mcp:** scope has no single default, so the SoT descriptions stop naming one ([#910](https://github.com/caura-ai/caura/issues/910)) ([754336e](https://github.com/caura-ai/caura/commit/754336e950573ad08ef5f936f0ec8cf904d3e64c))
+* **plugin:** an omitted scope is not scope='agent' on caura_list/caura_stats ([#906](https://github.com/caura-ai/caura/issues/906)) ([41ee5a6](https://github.com/caura-ai/caura/commit/41ee5a685fa62ad02c4fae9562cf8066feb4a1a8))
+* teach the CAURA_* names everywhere humans read ([#929](https://github.com/caura-ai/caura/issues/929)) ([815221d](https://github.com/caura-ai/caura/commit/815221de4ac44e1db01e8b4c30b5eb53c1be9743))
+
+
+### Code Refactoring
+
+* **plugin:** collapse the plugin id to one constant and pin both ends ([#941](https://github.com/caura-ai/caura/issues/941)) ([3e62c74](https://github.com/caura-ai/caura/commit/3e62c749afd8280c6c4911191f1cbfd844baa9f6))
+
 ## [2.17.0](https://github.com/caura-ai/caura/compare/plugin-v2.16.1...plugin-v2.17.0) (2026-08-23)
 
 
