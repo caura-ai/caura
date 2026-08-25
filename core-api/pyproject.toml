@@ -159,12 +159,50 @@ ignore_missing_imports = true
 module = "tests.*"
 ignore_errors = true
 
+# Modules not yet type-checked. Deliberately enumerated one module per line
+# rather than globbed: ``core_api.services.*`` and ``core_api.pipeline.steps.*``
+# exempted 105 modules in order to cover the 19 that actually fail. Seven of
+# the remainder were already recovered by the ``forge`` carve-out below; the
+# other 79 were ungated for no reason — and, worse, every *future* file under
+# those two trees was exempt on creation. A new ``services/_probe.py``
+# returning ``str`` from an ``-> int`` function was reported as "Success: no
+# issues found in 201 source files"; with the globs gone the same file errors.
+#
+# Enumerating the 19 gates those 79, plus ``providers.local_embedding`` which
+# was on this list despite having no errors at all — 80 modules, no code
+# change. It also makes the list a ratchet: a module becomes exempt only by
+# someone adding it here in a reviewed diff, never by being born in the right
+# directory.
+#
+# Every line below is a to-do, not a policy. Delete one, fix what mypy then
+# reports, and the gate tightens for good. That is how
+# ``core_api.services.forge.*`` was recovered: it sat inside the
+# ``core_api.services.*`` glob while ``forge/cron_handler.py`` imported
+# ``LLMRequest`` from ``common.llm`` — a name that has never existed there —
+# and the forge distill cron raised RuntimeError on every tick and had never
+# once run (#955). Being inside an exempted tree is what kept that invisible.
 [[tool.mypy.overrides]]
 module = [
-    "core_api.providers.local_embedding",
     "core_api.providers._registry",
-    "core_api.services.*",
-    "core_api.pipeline.steps.*",
+    "core_api.services.contradiction_detector",
+    "core_api.services.crystallizer_service",
+    "core_api.services.entity_extraction_worker",
+    "core_api.services.entity_service",
+    "core_api.services.evolve_service",
+    "core_api.services.governance_remediation",
+    "core_api.services.ingest_service",
+    "core_api.services.insights_service",
+    "core_api.services.interview_service",
+    "core_api.services.memory_service",
+    "core_api.services.organization_settings",
+    "core_api.services.session_trace",
+    "core_api.services.skill_promoter",
+    "core_api.services.stm_service",
+    "core_api.pipeline.steps.search.classify_query",
+    "core_api.pipeline.steps.search.load_and_serialize",
+    "core_api.pipeline.steps.search.parallel_embed_entity_boost",
+    "core_api.pipeline.steps.write.parallel_embed_enrich",
+    "core_api.pipeline.steps.write.schedule_background_tasks",
     "core_api.routes.fleet",
     "core_api.routes.memories",
     "core_api.clients.storage_client",
@@ -174,6 +212,11 @@ module = [
 ]
 ignore_errors = true
 
+# Redundant against the enumerated list above — forge is no longer inside any
+# exempted glob — and kept anyway. mypy applies the last matching override, so
+# this pins the one module whose exemption is known to have hidden a total
+# production outage, whatever a later edit does to the list above. Three lines
+# of backstop on a gate that has already failed once.
 [[tool.mypy.overrides]]
 module = "core_api.services.forge.*"
 ignore_errors = false
