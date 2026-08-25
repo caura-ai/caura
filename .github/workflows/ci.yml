@@ -57,6 +57,18 @@ jobs:
         # type-check gate in CI.
         run: cd plugin && npm ci && npm run build
 
+      - name: Run plugin tests (node:test)
+        # The plugin had 423 tests and CI ran NONE of them. The step above
+        # proves it compiles; nothing proved it behaves. `client-typescript-ci.yml`
+        # is path-scoped to clients/typescript, so its `npm test` never touched
+        # /plugin — which is how the caura_tune identity bug (F5) reached a
+        # release: `tool-definitions.ts` shipped a literal "unknown-agent"
+        # fallback that a two-line test would have caught.
+        #
+        # `npm ci` is not repeated — the build step above installed into the
+        # same workspace, and `npm test` re-runs tsc itself via `pretest`.
+        run: cd plugin && npm test
+
       - name: Install uv
         uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5.4.2
         with:
@@ -226,6 +238,24 @@ jobs:
           fi
           if grep -nE "[f]?'Error(:| \()" core-api/src/core_api/mcp_server.py | grep -vE '^[0-9]+:\s*#'; then
             echo "::error::Raw-string MCP error return found (single-quote). Use _error_response(code, message) instead — see tests/test_mcp_iserror_propagation.py."
+            exit 1
+          fi
+
+      - name: Guard against stringified exception details (C29)
+        # ``HTTPException.detail`` is sometimes ``{code, message, details}`` now
+        # (``common.duplicate_memory.core_api_detail``). ``str()`` on that shape
+        # renders a Python dict repr — braces, quotes and all — straight into a
+        # message a model reads, and neither git nor mypy sees anything wrong:
+        # the types line up, the tests that assert on prose still pass, and the
+        # damage only shows in what the caller is told.
+        #
+        # This is aimed at the merge window specifically. Work already in flight
+        # was written when every detail was a string, so a rebase can
+        # reintroduce ``str(e.detail)`` with no conflict marker to warn anyone.
+        # ``_detail_text`` / ``_detail_code`` handle both shapes.
+        run: |
+          if grep -nE 'str\((e|exc)\.detail\)' core-api/src/core_api/mcp_server.py | grep -vE '^[0-9]+:\s*#'; then
+            echo "::error::Stringified exception detail found. Details may be structured — use _detail_text(...) / _detail_code(...) instead."
             exit 1
           fi
 
