@@ -1,0 +1,52 @@
+name: Publish the caura metapackage to PyPI
+
+# Publishes `clients/caura-meta` — the bare `caura` name, a metapackage that
+# installs and re-exports `caura-client`. Trusted publishing (OIDC), no token.
+#
+# WHY THIS WORKFLOW EXISTS. `caura` 1.0.0 was published by hand on 2026-08-17
+# and had no workflow, so the one package whose whole job is to make
+# `pip install caura` resolve was also the one nobody could ship a fix to
+# without remembering a manual twine invocation. Every other client artifact in
+# this repo publishes from CI; this closes the gap.
+#
+# NAMED FOR WHAT IT PUBLISHES — see the same note in `publish-python-sdk.yml`.
+#
+# One-time setup by a maintainer:
+#   1. `caura` ALREADY EXISTS on PyPI, so this is not a pending publisher. Add
+#      it under Manage → the `caura` project → Publishing → Add a new publisher:
+#      repo `caura-ai/caura`, workflow `publish-python-metapackage.yml`,
+#      environment `pypi`.
+#   2. The GitHub environment `pypi` already exists for
+#      `publish-python-client.yml`; this workflow reuses it.
+#
+# Release: bump the version in clients/caura-meta/pyproject.toml, then push a
+# tag `caura-meta-v<version>` (or run this workflow manually). The tag prefix is
+# `caura-meta-` rather than `caura-` so it cannot collide with a future bare
+# `caura-v*` release tag for the repo itself.
+
+on:
+  push:
+    tags:
+      - "caura-meta-v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # required for PyPI trusted publishing
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          pip install build
+          python -m build
+        working-directory: clients/caura-meta
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: clients/caura-meta/dist/
