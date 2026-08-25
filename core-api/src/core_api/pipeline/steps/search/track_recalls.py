@@ -55,6 +55,13 @@ class TrackRecalls:
         # unchanged either way; only the counter bump is skipped. (Gap A26.)
         if not ctx.data.get("caller_agent_id"):
             return None
+        # D12 — a diagnostic call is inspection, not use: the caller is asking
+        # "why does ranking look like this", and letting that bump
+        # ``recall_count`` would distort the very signal being inspected (the
+        # A26/A48 class of feedback loop). This also makes ``diagnostic=true``
+        # the supported dry-run recall: same results, no reinforcement.
+        if ctx.data.get("diagnostic"):
+            return None
         memory_ids = [row.Memory.id for row in ctx.data["filtered_rows"]]
         if memory_ids:
             track_task(_track_recalls_background(memory_ids))

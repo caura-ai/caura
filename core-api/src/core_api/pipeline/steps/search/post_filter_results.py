@@ -35,12 +35,66 @@ class PostFilterResults:
             or row.vec_sim is None
             or float(row.vec_sim) >= min_similarity
         ]
+        below_floor = len(ctx.data["raw_rows"]) - len(filtered)
         # Trim to the user-requested top_k (storage returned top_k * overfetch_factor)
         final_top_k = ctx.data.get("final_top_k")
         if final_top_k is not None:
             filtered = trim_reserving_fts_only(filtered, final_top_k, _is_fts_only)
         ctx.data["filtered_rows"] = filtered
+
+        # D12 — diagnostic trace: capture the FULL widened candidate set with
+        # per-row score factors and the reason each cut row was cut, before the
+        # trimmed rows are forgotten. Written here (not in a separate step)
+        # because this is the one place that knows both the floor and the trim.
+        if ctx.data.get("diagnostic"):
+            kept_ids = {id(row) for row in filtered}
+            passed_floor_ids = set()
+            for row in ctx.data["raw_rows"]:
+                if (
+                    (not getattr(row, "has_embedding", True))
+                    or row.vec_sim is None
+                    or float(row.vec_sim) >= min_similarity
+                ):
+                    passed_floor_ids.add(id(row))
+            candidates = []
+            for row in ctx.data["raw_rows"]:
+                m = row.Memory
+                excluded = None
+                if id(row) not in passed_floor_ids:
+                    excluded = "below_min_similarity"
+                elif id(row) not in kept_ids:
+                    excluded = "trimmed_by_top_k"
+                candidates.append(
+                    {
+                        "id": str(getattr(m, "id", None)),
+                        "title": getattr(m, "title", None),
+                        "memory_type": getattr(m, "memory_type", None),
+                        "status": getattr(m, "status", None),
+                        "score": _f(getattr(row, "score", None)),
+                        "vec_sim": _f(getattr(row, "vec_sim", None)),
+                        "fts_score": _f(getattr(row, "fts_score", None)),
+                        "freshness": _f(getattr(row, "freshness", None)),
+                        "entity_boost": _f(getattr(row, "entity_boost", None)),
+                        "recall_boost": _f(getattr(row, "recall_boost", None)),
+                        "temporal_boost": _f(getattr(row, "temporal_boost", None)),
+                        "status_penalty": _f(getattr(row, "status_penalty", None)),
+                        "has_embedding": bool(getattr(row, "has_embedding", True)),
+                        "excluded": excluded,
+                    }
+                )
+            ctx.data["diagnostic_results"] = candidates
+            ctx.data["diagnostic_counts"] = {
+                "candidates_considered": len(ctx.data["raw_rows"]),
+                "returned": len(filtered),
+                "excluded_below_min_similarity": below_floor,
+                "excluded_by_top_k_trim": len(ctx.data["raw_rows"]) - below_floor - len(filtered),
+            }
         return None
+
+
+def _f(v) -> float | None:
+    """Round a score factor for the diagnostic trace; None passes through."""
+    return round(float(v), 4) if v is not None else None
 
 
 def _is_fts_only(row) -> bool:

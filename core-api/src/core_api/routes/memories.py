@@ -54,6 +54,7 @@ from core_api.schemas import (
     PaginatedMemoryResponse,
     RedistributeRequest,
     RedistributeResponse,
+    SearchDiagnostic,
     SearchRequest,
     SearchResponse,
     STMWriteResponse,
@@ -1722,6 +1723,10 @@ async def _search_inner(
     t_start = time.perf_counter()
     success = True
     results: list = []
+    # D12 — the pipeline fills this when ``body.diagnostic`` is set; it feeds
+    # the typed ``SearchResponse.diagnostic`` block below. Results themselves
+    # are unchanged by diagnostic mode, and no recall_count is bumped.
+    diagnostic_ctx: dict = {}
     try:
         config = await resolve_config(body.tenant_id)
         # Widen the read predicate when the caller authenticated with
@@ -1746,6 +1751,9 @@ async def _search_inner(
             tenant_config=config,
             search_profile=_agent.get("search_profile") if _agent else None,
             readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
+            diagnostic=body.diagnostic,
+            diagnostic_ctx=diagnostic_ctx if body.diagnostic else None,
+            min_similarity=body.min_similarity,
         )
     except HTTPException:
         # Auth / tenant errors raised downstream are expected outcomes,
@@ -1767,7 +1775,26 @@ async def _search_inner(
                     "error": not success,
                 },
             )
-    return SearchResponse(items=results)
+    if not body.diagnostic:
+        return SearchResponse(items=results)
+    counts = diagnostic_ctx.get("counts", {}) or {}
+    return SearchResponse(
+        items=results,
+        diagnostic=SearchDiagnostic(
+            retrieval_strategy=diagnostic_ctx.get("retrieval_strategy"),
+            top_k_requested=diagnostic_ctx.get("diagnostic_original_top_k"),
+            min_similarity_applied=diagnostic_ctx.get("min_similarity_applied"),
+            candidates_considered=counts.get("candidates_considered", 0),
+            returned=counts.get("returned", len(results)),
+            excluded_below_min_similarity=counts.get("excluded_below_min_similarity", 0),
+            excluded_by_top_k_trim=counts.get("excluded_by_top_k_trim", 0),
+            search_params={
+                k: (float(v) if isinstance(v, (int, float)) else v)
+                for k, v in (diagnostic_ctx.get("search_params", {}) or {}).items()
+            },
+            all_candidates=diagnostic_ctx.get("all_candidates", []) or [],
+        ),
+    )
 
 
 @router.post("/ingest/preview")
@@ -1962,6 +1989,12 @@ async def recall_endpoint(
 
     t0 = time.perf_counter()
 
+    # D12 — same wiring as /search: the pipeline fills the ctx when
+    # ``body.diagnostic`` is set, and ``summarize_memories`` folds it into the
+    # response's ``diagnostic`` block (the recall-flavoured shape, which also
+    # carries the prompt/model/provider fields).
+    diagnostic_ctx: dict = {}
+
     # ── Phase 1: DB-bound — config + search ──────────────────────
     config = await resolve_config(body.tenant_id)
     memories = await search_memories(
@@ -1979,6 +2012,9 @@ async def recall_endpoint(
         entity_retrieval=config.entity_retrieval,
         tenant_config=config,
         readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
+        diagnostic=body.diagnostic,
+        diagnostic_ctx=diagnostic_ctx if body.diagnostic else None,
+        min_similarity=body.min_similarity,
     )
 
     # Release the pooled DB connection before the LLM round-trip.
@@ -1991,6 +2027,8 @@ async def recall_endpoint(
         body.query,
         config,
         valid_at=body.valid_at,
+        diagnostic=body.diagnostic,
+        diagnostic_ctx=diagnostic_ctx,
         top_k=body.top_k,
         t0=t0,
     )

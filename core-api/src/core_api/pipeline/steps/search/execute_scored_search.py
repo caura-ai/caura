@@ -54,7 +54,16 @@ class ExecuteScoredSearch:
         top_k = sp["top_k"]
         if diagnostic:
             data["diagnostic_original_top_k"] = top_k
-            top_k = max(top_k, 50)
+            # D12 — diagnostic must not change what the caller gets back:
+            # ``final_top_k`` is set so PostFilterResults trims the RESULTS to
+            # the requested size exactly as a normal call would, while the
+            # widened fetch below feeds the trace with the full candidate set
+            # (captured pre-trim in PostFilterResults). Before this, the
+            # diagnostic branch skipped ``final_top_k`` — an untrimmed 50-row
+            # response whose extra rows would also each get a recall_count
+            # bump (TrackRecalls now skips diagnostic calls entirely).
+            data["final_top_k"] = top_k
+            top_k = max(top_k * SEARCH_OVERFETCH_FACTOR, 50)
         else:
             # Overfetch so PostFilterResults has headroom to drop low-vec_sim rows
             # without starving the final result set. Final trim happens in PostFilterResults.
@@ -77,11 +86,11 @@ class ExecuteScoredSearch:
         # storage route's required-key check be the one place that rejects.
         #
         # The diagnostic branch's widening to 50 was defeated by the same
-        # shadowing and is restored — but note that mode is half-wired:
-        # ``SearchRequest.diagnostic`` is never read by a route and nothing writes
-        # ``diagnostic_results``, so no caller reaches it. Whoever reconnects it
-        # should know the branch skips ``final_top_k``, so PostFilterResults does
-        # not trim and TrackRecalls would bump ``recall_count`` for all 50 rows.
+        # shadowing and is restored. D12 wired the mode end-to-end: /search and
+        # /recall forward ``SearchRequest.diagnostic``, PostFilterResults writes
+        # ``diagnostic_results``/``diagnostic_counts``, the branch above sets
+        # ``final_top_k`` so results stay identical, and TrackRecalls skips
+        # diagnostic calls.
         search_data: dict = {
             "tenant_id": data["tenant_id"],
             "query": data["query"],

@@ -24,4 +24,12 @@ class ResolveSearchProfile:
             top_k=ctx.data["top_k"],
             tenant_config=ctx.tenant_config,
         )
+        # D12 — a per-request ``min_similarity`` (SearchRequest field) outranks
+        # the whole resolution ladder for this one call: request → agent
+        # profile → tenant default → constant. Applied here, after resolution,
+        # so PostFilterResults and the diagnostic trace both see the value the
+        # gate will actually use.
+        override = ctx.data.get("min_similarity_override")
+        if override is not None:
+            ctx.data["search_params"]["min_similarity"] = float(override)
         return None

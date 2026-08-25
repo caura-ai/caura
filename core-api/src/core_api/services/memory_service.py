@@ -88,6 +88,7 @@ from core_api.schemas import (
     MemoryCreate,
     MemoryOut,
     MemoryUpdate,
+    ScoreParts,
 )
 from core_api.search_trim import trim_reserving_fts_only
 from core_api.services.entity_extraction_worker import process_entity_extraction
@@ -483,6 +484,8 @@ def _memory_to_out(
     entity_links: list[EntityLinkOut] | None = None,
     similarity: float | None = None,
     contradictions: list[ContradictionInfo] | None = None,
+    score: float | None = None,
+    score_parts: ScoreParts | None = None,
 ) -> MemoryOut:
     # See ``_dict_to_memory_out`` for the falsy-``{}`` trap.
     if isinstance(memory, dict):
@@ -507,6 +510,8 @@ def _memory_to_out(
         expires_at=_mem_attr(memory, "expires_at"),
         entity_links=entity_links or [],
         similarity=similarity,
+        score=score,
+        score_parts=score_parts,
         subject_entity_id=_mem_attr(memory, "subject_entity_id"),
         predicate=_mem_attr(memory, "predicate"),
         object_value=_mem_attr(memory, "object_value"),
@@ -4310,6 +4315,7 @@ async def search_memories(
     diagnostic_ctx: dict | None = None,
     readable_tenant_ids: list[str] | None = None,
     source: str = "search",
+    min_similarity: float | None = None,
 ) -> list[MemoryOut]:
     # Diagnostic mode requires the pipeline path for score introspection
     if _USE_PIPELINE_SEARCH or diagnostic:
@@ -4332,6 +4338,7 @@ async def search_memories(
             diagnostic_ctx=diagnostic_ctx,
             readable_tenant_ids=readable_tenant_ids,
             source=source,
+            min_similarity=min_similarity,
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     return await _search_memories_legacy(
@@ -4349,6 +4356,7 @@ async def search_memories(
         entity_retrieval=entity_retrieval,
         tenant_config=tenant_config,
         search_profile=search_profile,
+        min_similarity=min_similarity,
     )
 
 
@@ -4371,6 +4379,7 @@ async def _search_memories_pipeline(
     diagnostic_ctx: dict | None = None,
     readable_tenant_ids: list[str] | None = None,
     source: str = "search",
+    min_similarity: float | None = None,
 ) -> list[MemoryOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.search import build_search_pipeline
@@ -4396,6 +4405,9 @@ async def _search_memories_pipeline(
             "tenant_config": tenant_config,
             "search_profile": search_profile,
             "diagnostic": diagnostic,
+            # D12 — per-request cosine floor; ResolveSearchProfile applies it
+            # OVER the resolved profile (request beats profile beats tenant).
+            "min_similarity_override": min_similarity,
             "readable_tenant_ids": readable_tenant_ids,
             "source": source,
         },
@@ -4424,6 +4436,11 @@ async def _search_memories_pipeline(
             ctx.data["retrieval_plan"].strategy.value if ctx.data.get("retrieval_plan") else None
         )
         diagnostic_ctx["diagnostic_original_top_k"] = ctx.data.get("diagnostic_original_top_k")
+        # D12 — exclusion tallies written by PostFilterResults, and the floor
+        # the gate actually used (post-override), so callers can see both.
+        diagnostic_ctx["counts"] = ctx.data.get("diagnostic_counts", {})
+        sp_applied = ctx.data.get("search_params") or {}
+        diagnostic_ctx["min_similarity_applied"] = sp_applied.get("min_similarity")
 
     return ctx.data["results"]
 
@@ -4452,6 +4469,7 @@ async def _search_memories_legacy(
     entity_retrieval: bool = True,
     tenant_config=None,
     search_profile: dict | None = None,
+    min_similarity: float | None = None,
 ) -> list[MemoryOut]:
     """Legacy search -- uses scored_search storage API endpoint."""
     sc = get_storage_client()
@@ -4459,7 +4477,9 @@ async def _search_memories_legacy(
     # Same resolver the pipeline step uses — see ``resolve_search_params``.
     sp = resolve_search_params(search_profile, query=query, top_k=top_k, tenant_config=tenant_config)
     _top_k = sp["top_k"]
-    _min_similarity = sp["min_similarity"]
+    # D12 — per-request floor beats the resolved profile, same precedence as
+    # ResolveSearchProfile applies on the pipeline path.
+    _min_similarity = min_similarity if min_similarity is not None else sp["min_similarity"]
 
     # Temporal hint
     temporal_window = _extract_temporal_hint(query)

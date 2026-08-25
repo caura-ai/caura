@@ -276,6 +276,24 @@ class UsageSummary(BaseModel):
     writes_remaining: int | None = None
 
 
+class ScoreParts(BaseModel):
+    """D12 — per-factor breakdown of the ranking composite ``MemoryOut.score``.
+
+    Every factor mirrors a column the scored-search SQL already computes and
+    returns per row; this model only surfaces them. All fields are nullable:
+    FTS-only rows have no ``vec_sim``, entity-lookup short-circuit rows have no
+    FTS rank, and successor-injected rows were never scored at all.
+    """
+
+    vec_sim: float | None = None
+    fts_score: float | None = None
+    freshness: float | None = None
+    entity_boost: float | None = None
+    recall_boost: float | None = None
+    temporal_boost: float | None = None
+    status_penalty: float | None = None
+
+
 class MemoryOut(BaseModel):
     id: UUID
     tenant_id: str
@@ -318,6 +336,15 @@ class MemoryOut(BaseModel):
     expires_at: datetime | None
     entity_links: list[EntityLinkOut] = []
     similarity: float | None = None
+    # D12 — the multiplicative ranking composite (similarity * freshness *
+    # entity/recall/temporal boosts * status_penalty) that actually ordered
+    # this row, plus its factors. ``similarity`` above stays the raw 0..1
+    # cosine (the ``min_similarity``-comparable value); ``score`` routinely
+    # exceeds 1.0 and is for explaining rank, not for threshold gating.
+    # Populated only on scored-search hits; None on list/get reads and on
+    # successor-injected rows, which were never scored.
+    score: float | None = None
+    score_parts: ScoreParts | None = None
     # RDF triple
     subject_entity_id: UUID | None = None
     predicate: str | None = None
@@ -445,10 +472,37 @@ class PaginatedMemoryResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class SearchDiagnostic(BaseModel):
+    """D12 — retrieval trace returned when ``SearchRequest.diagnostic`` is true.
+
+    Answers "why did each result appear (and what got cut)": the full widened
+    candidate set with per-row score factors and exclusion reasons, the applied
+    knobs, and the strategy the classifier picked. Requesting it does NOT change
+    the ``items`` a caller gets back, and a diagnostic call never bumps
+    ``recall_count`` — it is inspection, not use.
+    """
+
+    retrieval_strategy: str | None = None
+    top_k_requested: int | None = None
+    min_similarity_applied: float | None = None
+    candidates_considered: int = 0
+    returned: int = 0
+    excluded_below_min_similarity: int = 0
+    excluded_by_top_k_trim: int = 0
+    # The resolved knob set the scoring SQL ran with (profile → tenant → constant,
+    # after any per-request ``min_similarity`` override).
+    search_params: dict = {}
+    # One entry per widened candidate: id/title/type/status + score + factors +
+    # ``excluded`` (None | "below_min_similarity" | "trimmed_by_top_k").
+    all_candidates: list[dict] = []
+
+
 class SearchResponse(BaseModel):
     """Envelope for search results — matches PaginatedMemoryResponse shape."""
 
     items: list[MemoryOut]
+    # D12 — present only when the request set ``diagnostic=true``.
+    diagnostic: SearchDiagnostic | None = None
 
 
 class SearchRequest(BaseModel):
@@ -468,6 +522,23 @@ class SearchRequest(BaseModel):
         le=MAX_SEARCH_TOP_K,
         description=f"Maximum results to return (1-{MAX_SEARCH_TOP_K}, default {DEFAULT_SEARCH_TOP_K}).",
     )
+    # D12 — per-request cosine floor. Overrides the resolved profile/tenant
+    # default for THIS call only (request beats profile beats tenant beats
+    # constant). Gates on the raw ``vec_sim`` — the same value returned in
+    # ``MemoryOut.similarity`` — never on the boosted composite ``score``.
+    # FTS-only rows (no embedding yet) bypass the floor by contract.
+    min_similarity: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Per-request similarity floor (0.0-1.0) applied to the raw cosine; "
+            "overrides the agent/tenant search-profile value for this call."
+        ),
+    )
+    # D12 — when true, the response carries a ``diagnostic`` retrieval trace
+    # (full candidate set, score factors, exclusion reasons, applied knobs).
+    # Results are unchanged and no recall_count is bumped on a diagnostic call.
     diagnostic: bool = False
 
 

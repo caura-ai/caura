@@ -264,6 +264,7 @@ async def recall(
     valid_at: datetime | None = None,
     diagnostic: bool = False,
     readable_tenant_ids: list[str] | None = None,
+    min_similarity: float | None = None,
 ) -> dict:
     """Search memories and synthesize a context summary.
 
@@ -304,6 +305,7 @@ async def recall(
         diagnostic=diagnostic,
         diagnostic_ctx=diagnostic_ctx if diagnostic else None,
         readable_tenant_ids=readable_tenant_ids,
+        min_similarity=min_similarity,
     )
     return await summarize_memories(
         memories,
