@@ -246,11 +246,16 @@ def side_effects(monkeypatch):
 
 
 def make_client(
-    *, org_role: str | None = "admin", is_admin: bool = False
+    *,
+    org_role: str | None = "admin",
+    is_admin: bool = False,
+    # ``tenant_id=None`` + ``is_admin=True`` reproduces the OSS admin
+    # credential (auth Path 1) — the WT-4 shape.
+    tenant_id: str | None = TENANT,
 ) -> AsyncClient:
     app = FastAPI()
     app.include_router(si.router, prefix="/api/v1")
-    auth = AuthContext(tenant_id=TENANT, org_role=org_role, is_admin=is_admin)
+    auth = AuthContext(tenant_id=tenant_id, org_role=org_role, is_admin=is_admin)
 
     async def _auth_dep():
         return auth
@@ -466,6 +471,83 @@ async def test_action_on_missing_doc_404(storage, settings, side_effects):
     async with make_client() as client:
         r = await client.post(f"{BASE}/forge/nope/approve")
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Tenant resolution — WT-4 (admin credential vs ?tenant_id=)
+# ---------------------------------------------------------------------------
+# The OSS admin key (auth Path 1) deliberately builds
+# ``AuthContext(tenant_id=None, is_admin=True)``. Pre-fix,
+# ``_require_tenant`` answered it with "401 UNAUTHENTICATED — auth
+# context has no tenant_id" on every inbox endpoint — the most
+# privileged credential told it did not authenticate — and the
+# ``?tenant_id=`` the operator passed was silently ignored because no
+# route declared it.
+
+
+async def test_admin_key_with_explicit_tenant_lists(storage, settings):
+    storage.query_rows = [forge_doc()]
+    async with make_client(tenant_id=None, org_role=None, is_admin=True) as client:
+        r = await client.get(f"{BASE}?tenant_id={TENANT}")
+    assert r.status_code == 200, r.text
+    assert r.json()["tenant_id"] == TENANT
+
+
+async def test_admin_key_with_explicit_tenant_can_act(storage, settings, side_effects):
+    storage.seed(forge_doc())
+    async with make_client(tenant_id=None, org_role=None, is_admin=True) as client:
+        r = await client.post(f"{BASE}/{SLUG}/defer?tenant_id={TENANT}", json=None)
+    assert r.status_code == 200, r.text
+
+
+async def test_admin_key_without_tenant_is_400_not_401(storage, settings, side_effects):
+    """WT-4 regression: the admin key IS authenticated — omitting the
+    tenant selector is a request problem (400), never a 401."""
+    async with make_client(tenant_id=None, org_role=None, is_admin=True) as client:
+        r_list = await client.get(BASE)
+        r_action = await client.post(f"{BASE}/{SLUG}/defer", json=None)
+    assert r_list.status_code == 400, r_list.text
+    assert "tenant" in r_list.json()["detail"]
+    assert r_action.status_code == 400, r_action.text
+
+
+async def test_tenant_key_with_conflicting_tenant_is_403(storage, settings, side_effects):
+    """A tenant-scoped key cannot act on ANOTHER tenant via ?tenant_id=."""
+    storage.seed(forge_doc())
+    async with make_client() as client:
+        r_list = await client.get(f"{BASE}?tenant_id=t-other")
+        r_action = await client.post(f"{BASE}/{SLUG}/defer?tenant_id=t-other", json=None)
+    assert r_list.status_code == 403, r_list.text
+    assert r_list.json()["detail"].startswith("TENANT_MISMATCH")
+    assert r_action.status_code == 403, r_action.text
+    assert storage.upserts == []
+
+
+async def test_tenant_key_with_matching_tenant_still_works(storage, settings):
+    storage.query_rows = [forge_doc()]
+    async with make_client() as client:
+        r = await client.get(f"{BASE}?tenant_id={TENANT}")
+    assert r.status_code == 200, r.text
+
+
+async def test_tenant_key_without_param_unchanged(storage, settings, side_effects):
+    """No ?tenant_id= → the key's own tenant wins, exactly as before."""
+    storage.seed(forge_doc())
+    storage.query_rows = [forge_doc()]
+    async with make_client() as client:
+        r_list = await client.get(BASE)
+        r_action = await client.post(f"{BASE}/{SLUG}/defer", json=None)
+    assert r_list.status_code == 200, r_list.text
+    assert r_list.json()["tenant_id"] == TENANT
+    assert r_action.status_code == 200, r_action.text
+
+
+async def test_no_tenant_and_no_admin_still_401(storage, settings):
+    """Genuinely unauthenticated bootstrap context keeps the 401."""
+    async with make_client(tenant_id=None, org_role=None, is_admin=False) as client:
+        r = await client.get(BASE)
+    assert r.status_code == 401, r.text
+    assert r.json()["detail"].startswith("UNAUTHENTICATED")
 
 
 # ---------------------------------------------------------------------------

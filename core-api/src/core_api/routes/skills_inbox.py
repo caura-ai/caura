@@ -82,19 +82,49 @@ async def _require_skills_factory_enabled(tenant_id: str) -> dict:
     return await get_settings_for_display(tenant_id)
 
 
-def _require_tenant(auth: AuthContext) -> str:
+def _require_tenant(auth: AuthContext, explicit_tenant_id: str | None = None) -> str:
     """Every inbox endpoint needs a concrete tenant. ``AuthContext.tenant_id``
     is typed ``str | None`` because some bootstrap paths land there
-    pre-auth; the inbox is an authenticated route, so a missing tenant
-    is a 401. Returning the narrowed ``str`` lets mypy verify the
-    downstream calls without litter ``cast``s.
+    pre-auth — but so does the OSS admin path (auth Path 1), which
+    deliberately builds ``AuthContext(tenant_id=None, is_admin=True)``.
+    Wet-test defect WT-4: treating BOTH as "missing tenant → 401" told
+    the most privileged credential it did not authenticate.
+
+    Resolution order:
+
+    - Tenant-scoped credential (``auth.tenant_id`` set): the key's own
+      tenant wins. A conflicting explicit ``?tenant_id=`` is a 403 —
+      a tenant key must not act on another tenant.
+    - Admin credential (no tenant of its own): acts on the tenant it
+      names via ``?tenant_id=``. Naming none is a 400 (a REQUEST
+      problem — the credential IS authenticated, so never 401).
+    - Neither: genuinely unauthenticated bootstrap context → 401.
+
+    Returning the narrowed ``str`` lets mypy verify the downstream
+    calls without litter ``cast``s.
     """
-    if not auth.tenant_id:
+    if auth.tenant_id:
+        if explicit_tenant_id is not None and explicit_tenant_id != auth.tenant_id:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "TENANT_MISMATCH — this credential is scoped to "
+                    f"tenant {auth.tenant_id!r} and cannot act on tenant "
+                    f"{explicit_tenant_id!r}"
+                ),
+            )
+        return auth.tenant_id
+    if getattr(auth, "is_admin", False):
+        if explicit_tenant_id:
+            return explicit_tenant_id
         raise HTTPException(
-            status_code=401,
-            detail="UNAUTHENTICATED — auth context has no tenant_id",
+            status_code=400,
+            detail="admin credential must name a tenant — pass ?tenant_id=",
         )
-    return auth.tenant_id
+    raise HTTPException(
+        status_code=401,
+        detail="UNAUTHENTICATED — auth context has no tenant_id",
+    )
 
 
 def _require_inbox_admin(auth: AuthContext) -> None:
@@ -474,6 +504,11 @@ async def _persist_status_transition(
 @router.get("/", response_model=InboxListResponse, include_in_schema=False)
 async def list_inbox(
     fleet_id: str | None = None,
+    # Tenant selector for ADMIN credentials (auth Path 1 carries no
+    # tenant of its own — see _require_tenant / WT-4). Tenant-scoped
+    # keys may omit it (their own tenant wins) or echo it; a
+    # conflicting value is a 403.
+    tenant_id: str | None = Query(None),
     # Validated at the FastAPI layer: 1 ≤ limit ≤ 200. A bare ``int=50``
     # default would 200 on any non-negative input — including ``limit=0``
     # (silently empty list) and ``limit=10_000`` (DoS via wide query).
@@ -489,7 +524,7 @@ async def list_inbox(
     beyond that, auto-defer is the relief valve (Phase 2 worker
     enforces).
     """
-    tenant_id = _require_tenant(auth)
+    tenant_id = _require_tenant(auth, tenant_id)
     settings = await _require_skills_factory_enabled(tenant_id)
     max_pending = (
         ((settings.get("skills_factory") or {}).get("inbox_max_pending"))
@@ -592,13 +627,15 @@ async def list_inbox(
 @router.post("/{slug:path}/approve", response_model=ActionResponse)
 async def approve(
     slug: str,
+    # Tenant selector for admin credentials — see list_inbox / WT-4.
+    tenant_id: str | None = Query(None),
     auth: AuthContext = Depends(get_auth_context),
 ) -> ActionResponse:
     """Promote ``staged → active``. Pre-apply rescan via Sentinel
     blocks the transition if the doc became unsafe between propose
     and apply.
     """
-    tenant_id = _require_tenant(auth)
+    tenant_id = _require_tenant(auth, tenant_id)
     settings = await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)
     sf = (settings or {}).get("skills_factory") if isinstance(settings, dict) else {}
@@ -726,6 +763,8 @@ async def approve(
 async def reject(
     slug: str,
     body: RejectRequest,
+    # Tenant selector for admin credentials — see list_inbox / WT-4.
+    tenant_id: str | None = Query(None),
     auth: AuthContext = Depends(get_auth_context),
 ) -> ActionResponse:
     """Reject ``staged → rejected`` and write the cluster fingerprint
@@ -738,7 +777,7 @@ async def reject(
     depends on ``get_db`` (the settings gate + audit log already ignore
     their ``db`` arg and route through storage).
     """
-    tenant_id = _require_tenant(auth)
+    tenant_id = _require_tenant(auth, tenant_id)
     settings = await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)
     sf = (settings or {}).get("skills_factory") if isinstance(settings, dict) else {}
@@ -882,13 +921,15 @@ async def reject(
 async def quarantine(
     slug: str,
     body: QuarantineRequest,
+    # Tenant selector for admin credentials — see list_inbox / WT-4.
+    tenant_id: str | None = Query(None),
     auth: AuthContext = Depends(get_auth_context),
 ) -> ActionResponse:
     """Move to ``quarantined`` for security review. Does NOT touch the
     poison table — quarantine is reversible by a security admin; only
     Reject crystallizes a poison row.
     """
-    tenant_id = _require_tenant(auth)
+    tenant_id = _require_tenant(auth, tenant_id)
     await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)
     doc = await _load_doc_or_404(tenant_id=tenant_id, slug=slug)
@@ -940,13 +981,15 @@ async def defer(
     # ``POST`` (curl operators, the documented "empty body" contract)
     # must not 422 on the envelope itself.
     body: DeferRequest | None = None,
+    # Tenant selector for admin credentials — see list_inbox / WT-4.
+    tenant_id: str | None = Query(None),
     auth: AuthContext = Depends(get_auth_context),
 ) -> ActionResponse:
     """Defer — leaves the doc in ``staged`` so Forge can revise it on
     the next run. Stamps ``deferred_at`` so the inbox can sort
     deferred items to the bottom + show "deferred N days ago".
     """
-    tenant_id = _require_tenant(auth)
+    tenant_id = _require_tenant(auth, tenant_id)
     await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)
     doc = await _load_doc_or_404(tenant_id=tenant_id, slug=slug)
@@ -1007,6 +1050,8 @@ async def defer(
 async def edit(
     slug: str,
     body: EditRequest,
+    # Tenant selector for admin credentials — see list_inbox / WT-4.
+    tenant_id: str | None = Query(None),
     auth: AuthContext = Depends(get_auth_context),
 ) -> ActionResponse:
     """Edit content / description / summary, then rehash + rescan.
@@ -1016,7 +1061,7 @@ async def edit(
 
     Raw markdown only (per OQ-D — no WYSIWYG in MVP).
     """
-    tenant_id = _require_tenant(auth)
+    tenant_id = _require_tenant(auth, tenant_id)
     settings = await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)
     sf = (settings or {}).get("skills_factory") if isinstance(settings, dict) else {}
