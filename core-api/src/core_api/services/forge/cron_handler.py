@@ -31,6 +31,7 @@ attribute failures to the right tenant.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -200,11 +201,17 @@ async def _wire_llm_fn() -> LlmFn:
     # Lazy import — ``common.llm`` pulls in vertex/openai SDKs that
     # we don't want loading at core-api startup just for the cron
     # adapter wiring.
+    #
+    # Every name here is one ``common.llm`` actually exports. It used to ask for
+    # ``LLMRequest``, which has never existed in that module, so the import below
+    # always raised and the ``except`` clause below always ran — meaning this
+    # function raised RuntimeError on every tick and the distill cron could not
+    # run at all. Worse, the message blamed a missing provider chain, so the
+    # symptom read as a deployment problem rather than as a wrong import.
     try:
-        from common.llm import (  # type: ignore[import-not-found]
-            LLMRequest,
-            call_with_fallback,
-        )
+        from common.llm import LLMProvider, call_with_fallback
+        from common.llm.retry import deliberate_fake_provider
+        from common.provider_names import ProviderName
     except ImportError as exc:
         raise RuntimeError(
             "forge_cron: common.llm not importable — the production "
@@ -213,10 +220,50 @@ async def _wire_llm_fn() -> LlmFn:
             "dry-run); see scripts/forge_dry_run.py."
         ) from exc
 
+    # Same selector the enrichment write path uses. Forge has no provider
+    # setting of its own, and ``call_with_fallback`` resolves per-tenant model
+    # overrides against ``enrichment_model`` by default, so borrowing the
+    # enrichment provider keeps the two halves of one write pipeline on the same
+    # provider. A dedicated ``FORGE_PROVIDER`` would be a new config surface and
+    # belongs in its own change, not in a repair.
+    provider_name = os.environ.get("ENTITY_EXTRACTION_PROVIDER", ProviderName.OPENAI)
+
+    def _refuse_fake() -> str:
+        """``call_with_fallback``'s last resort, which this caller must not take.
+
+        This tick PERSISTS what the LLM returns, as skill candidates that
+        promote into ``staged``. ``deliberate_fake_provider`` documents the line
+        that matters for persisting callers: a configured ``fake`` provider is an
+        operator asking for a stub, while a real provider whose every attempt
+        failed is an outage — and an outage is not a request for made-up output.
+        Neither case may write placeholder skills here, so both raise; the
+        distinction is kept in the message because the two want different
+        operator responses. Same posture as ``contradiction_detector``, which
+        abstains rather than guessing a verdict.
+        """
+        if deliberate_fake_provider(provider_name):
+            raise RuntimeError(
+                "forge_cron: ENTITY_EXTRACTION_PROVIDER is 'fake'. The fake-LLM "
+                "fallback is intentionally CLI-only (see scripts/forge_dry_run.py) "
+                "— the cron will not mint placeholder skill candidates."
+            )
+        raise RuntimeError(
+            "forge_cron: every configured LLM provider failed for "
+            f"'{provider_name}'. Refusing to persist placeholder skill candidates."
+        )
+
     async def _llm_fn(prompt: str) -> str:
-        request = LLMRequest(messages=[{"role": "user", "content": prompt}])
-        response = await call_with_fallback(request, expecting="json")
-        return response.text
+        async def _call(llm: LLMProvider) -> str:
+            # ``complete_text``, not ``complete_json``: ``LlmFn``'s contract is
+            # raw text, which ``parse_distill_response`` parses downstream.
+            return await llm.complete_text(prompt)
+
+        return await call_with_fallback(
+            primary_provider_name=provider_name,
+            call_fn=_call,
+            fake_fn=_refuse_fake,
+            service_label="forge_cron",
+        )
 
     return _llm_fn
 
@@ -268,9 +315,12 @@ async def run_forge_cron_tick(
     candidate_writer = _make_candidate_writer()
     status_checker = _make_status_checker()
 
-    # ``run_forge_distill`` keeps a (now-vestigial) first positional arg for
-    # CLI / test-call-site compatibility; it no longer touches the DB —
-    # ``build_session_traces`` + the injected fetchers route through storage.
+    # ``run_forge_distill`` is keyword-only — it takes NO positional arg. It no
+    # longer touches the DB either; ``build_session_traces`` + the injected
+    # fetchers route through storage. This comment used to say the vestigial
+    # first positional was kept "for CLI / test-call-site compatibility", which
+    # stopped being true when the parameter was removed, and the CLI kept
+    # passing a session positionally on the strength of it.
     forge_result = await run_forge_distill(
         tenant_id=tenant_id,
         fleet_id=fleet_id,
