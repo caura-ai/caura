@@ -230,6 +230,35 @@ python3 scripts/legacy_name_ratchet.py --report
 python3 scripts/legacy_name_ratchet.py --base origin/main
 ```
 
+### Keep the old brand out of the commit subject
+
+`release-please` builds `CHANGELOG.md` from merged commit subjects. A subject
+naming the old brand puts that text into a file that had none, so the ratchet
+fails **the release pull request** — not yours, days later, for whoever opens
+the release to debug.
+
+This bites hardest on rebrand work, where naming what you renamed is the natural
+way to describe the change. Describe it without:
+
+| | |
+|---|---|
+| ✗ | `fix(api): the OpenAPI titles four services publish still said <old brand>` |
+| ✓ | `fix(api): the OpenAPI titles four services publish used the previous brand name` |
+
+The changelog entry links the pull request, which carries the detail the subject
+drops.
+
+Only the subject reaches the changelog, so the body is free — put the old name
+there if it helps a reader. And only the changelog-visible types are affected:
+`test`, `build`, `ci` and `chore` are hidden from `CHANGELOG.md` (see the table
+above), so a subject under those cannot reach it.
+
+**This is not fixable after merge.** The subject is immutable, so the only
+remedy is hand-editing the generated entry on the release pull request — and
+`release-please` force-pushes that branch on every merge to `main`, so the edit
+is lost if anything lands before the release goes in. Getting the subject right
+costs nothing; getting it wrong costs a race.
+
 ## Questions
 
 For questions that aren't bug reports, use
