@@ -43,6 +43,7 @@ from core_api.services.dedup_judge import (
 )
 from core_api.services.memory_service import _find_semantic_duplicate
 from core_api.services.subject_preflight import _subjects_differ_with_certainty
+from core_api.services.system_metadata import set_system_value
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,7 @@ class CheckSemanticDuplicate:
                 min_similarity=SEMANTIC_DEDUP_JUDGE_THRESHOLD,
             )
         )
-        metadata["semantic_dedup_ms"] = round((time.perf_counter() - t_dedup) * 1000, 1)
+        set_system_value(metadata, "semantic_dedup_ms", round((time.perf_counter() - t_dedup) * 1000, 1))
 
         if sem_dup is None:
             return None

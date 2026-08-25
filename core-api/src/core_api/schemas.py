@@ -332,6 +332,14 @@ class MemoryOut(BaseModel):
     # embedding only, enrichment defers either way, and the bulk path sets neither
     # flag — so a bulk caller cannot read pendingness off its own write response.
     metadata: dict | None
+    # C25 — platform-written telemetry/enrichment (llm_ms, write_latency_ms,
+    # semantic_dedup_ms, summary, tags, pii flags, write-mode flags …) exposed
+    # under their own namespace. For one release the same keys ALSO remain in
+    # ``metadata`` (dual-emit) — reading them from ``metadata`` is deprecated.
+    # Derived for historical rows too; None when nothing platform-written
+    # exists. A caller's own ``metadata.summary`` / ``metadata.tags`` are no
+    # longer overwritten by enrichment (the platform's copy lives here).
+    system_metadata: dict | None = None
     created_at: datetime
     expires_at: datetime | None
     entity_links: list[EntityLinkOut] = []
@@ -414,6 +422,8 @@ class MemoryDetailResponse(BaseModel):
     # Exposed as ``metadata``; storage serialises the JSONB column as ``metadata_``
     # and the route renames it on the way out.
     metadata: dict | None = None
+    # C25 — platform-written view; same contract as ``MemoryOut.system_metadata``.
+    system_metadata: dict | None = None
     content_hash: str | None = None
     created_at: str | None = None
     expires_at: str | None = None

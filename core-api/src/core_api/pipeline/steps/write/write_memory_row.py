@@ -12,6 +12,7 @@ from core_api.clients.storage_client import DuplicateMemoryError, get_storage_cl
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 from core_api.services.hooks import get_hooks
+from core_api.services.system_metadata import set_system_value
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class WriteMemoryRow:
         timings: dict = ctx.data.setdefault("phase_timings", {})
 
         if embedding is None:
-            metadata["embedding_pending"] = True
+            set_system_value(metadata, "embedding_pending", True)
             logger.warning("Storing memory without embedding; deferred backfill scheduled")
 
         # Store write latency in metadata. Despite the name, this is
@@ -51,7 +52,7 @@ class WriteMemoryRow:
         # depend on the contract. ``timings["storage_ms"]`` below is
         # the new, accurately-named signal for Phase 1 measurement.
         write_ms = round((time.perf_counter() - t0) * 1000)
-        metadata["write_latency_ms"] = write_ms
+        set_system_value(metadata, "write_latency_ms", write_ms)
 
         sc = get_storage_client()
         memory_data = {

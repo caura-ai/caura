@@ -92,6 +92,7 @@ from core_api.services.memory_service import (
     soft_delete_memory,
     update_memory,
 )
+from core_api.services.system_metadata import extract_system_metadata
 from core_api.services.tenants import list_active_tenant_ids
 from core_api.services.trust_service import parse_trust_error, require_trust
 from core_api.services.usage_service import (
@@ -851,6 +852,8 @@ async def get_memory(
         # Storage serialises the JSONB column under ``metadata_``; the API
         # response exposes it as ``metadata``.
         "metadata": memory.get("metadata_"),
+        # C25 — platform-written view (derived for historical rows too).
+        "system_metadata": extract_system_metadata(memory.get("metadata_")),
         "content_hash": memory["content_hash"],
         "created_at": memory["created_at"],
         "expires_at": memory["expires_at"],

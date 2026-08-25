@@ -8,6 +8,7 @@ from common.enrichment.constants import CLASSIFIER_DEPRECATED_MEMORY_TYPES
 from core_api.constants import DEFAULT_MEMORY_TYPE, DEFAULT_MEMORY_WEIGHT
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
+from core_api.services.system_metadata import set_system_value
 
 
 class MergeEnrichmentFields:
@@ -22,7 +23,19 @@ class MergeEnrichmentFields:
         memory_type = data.memory_type
         weight = data.weight
         title = None
+        # C25 — the platform/caller metadata boundary. Caller input was
+        # sanitized at the ``create_memory`` chokepoint (forgeable
+        # platform-only keys stripped there, BEFORE the governance gate runs —
+        # sanitizing here instead would nuke the gate's legitimate PII flags).
+        # ``caller_keys`` may therefore include upstream-gate keys; harmless,
+        # because ``set_system_value`` only consults it for the CALLER_OWNABLE
+        # set (summary/tags), which no upstream platform step writes — so any
+        # summary/tags present here are authentically the caller's, and
+        # enrichment never clobbers them again. Platform values go through
+        # ``set_system_value``: always into metadata["_system"], mirrored to
+        # the legacy top-level key for one release unless caller-owned.
         metadata = data.metadata or {}
+        caller_keys = frozenset(metadata.keys())
         ts_valid_start = data.ts_valid_start
         ts_valid_end = data.ts_valid_end
 
@@ -52,11 +65,11 @@ class MergeEnrichmentFields:
                 weight = enrichment.weight
             title = enrichment.title or None
             if enrichment.summary:
-                metadata["summary"] = enrichment.summary
+                set_system_value(metadata, "summary", enrichment.summary, caller_keys=caller_keys)
             if enrichment.tags:
-                metadata["tags"] = enrichment.tags
+                set_system_value(metadata, "tags", enrichment.tags, caller_keys=caller_keys)
             if enrichment.llm_ms:
-                metadata["llm_ms"] = enrichment.llm_ms
+                set_system_value(metadata, "llm_ms", enrichment.llm_ms, caller_keys=caller_keys)
             # Temporal resolution: LLM-extracted dates fill gaps
             if ts_valid_start is None and enrichment.ts_valid_start:
                 ts_valid_start = datetime.fromisoformat(enrichment.ts_valid_start.replace("Z", "+00:00"))
@@ -64,12 +77,14 @@ class MergeEnrichmentFields:
                 ts_valid_end = datetime.fromisoformat(enrichment.ts_valid_end.replace("Z", "+00:00"))
             # PII detection
             if enrichment.contains_pii:
-                metadata["contains_pii"] = True
+                set_system_value(metadata, "contains_pii", True, caller_keys=caller_keys)
                 if enrichment.pii_types:
-                    metadata["pii_types"] = enrichment.pii_types
+                    set_system_value(metadata, "pii_types", enrichment.pii_types, caller_keys=caller_keys)
             # Business-vs-personal classification (governance gate reads this in
             # strong mode; persisted to the row for parity with the worker path).
-            metadata["business_relevance"] = enrichment.business_relevance
+            set_system_value(
+                metadata, "business_relevance", enrichment.business_relevance, caller_keys=caller_keys
+            )
 
         # Apply defaults if still unset (LLM disabled or failed)
         if memory_type is None:
@@ -87,11 +102,11 @@ class MergeEnrichmentFields:
         # Write-mode metadata: track resolved mode and enrichment deferral
         resolved_write_mode = ctx.data.get("resolved_write_mode")
         if resolved_write_mode:
-            metadata["write_mode"] = resolved_write_mode
+            set_system_value(metadata, "write_mode", resolved_write_mode, caller_keys=caller_keys)
         if resolved_write_mode == "fast" and enrichment is None:
-            metadata["enrichment_pending"] = True
+            set_system_value(metadata, "enrichment_pending", True, caller_keys=caller_keys)
 
-        metadata["memory_type_agent_set"] = memory_type_agent_set
+        set_system_value(metadata, "memory_type_agent_set", memory_type_agent_set, caller_keys=caller_keys)
 
         ctx.data["memory_fields"] = {
             "memory_type": memory_type,

@@ -103,6 +103,11 @@ from core_api.services.governance_gate import (
 )
 from core_api.services.hooks import get_hooks
 from core_api.services.organization_settings import validate_search_profile
+from core_api.services.system_metadata import (
+    extract_system_metadata,
+    sanitize_caller_metadata,
+    set_system_value,
+)
 from core_api.services.task_tracker import tracked_task
 
 logger = logging.getLogger(__name__)
@@ -442,6 +447,7 @@ def _dict_to_memory_out(
     raw_meta = mem.get("metadata_")
     metadata = raw_meta if raw_meta is not None else mem.get("metadata")
     return MemoryOut(
+        system_metadata=extract_system_metadata(metadata),
         id=mem.get("id"),
         tenant_id=mem.get("tenant_id"),
         fleet_id=mem.get("fleet_id"),
@@ -494,6 +500,7 @@ def _memory_to_out(
     else:
         metadata = _mem_attr(memory, "metadata_")
     return MemoryOut(
+        system_metadata=extract_system_metadata(metadata),
         id=_mem_attr(memory, "id"),
         tenant_id=_mem_attr(memory, "tenant_id"),
         fleet_id=_mem_attr(memory, "fleet_id"),
@@ -535,6 +542,15 @@ async def create_memory(data: MemoryCreate) -> MemoryOut:
         enforce_reserved_write_id(data.agent_id)
     except ReservedAgentIdError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # C25 — sanitize caller metadata at the single entry chokepoint, BEFORE any
+    # platform writer touches it: forgeable platform-only keys (llm_ms,
+    # write_latency_ms, pii flags, …) and the _system namespace are stripped
+    # from caller input here, so everything a downstream step (governance
+    # gate, enrichment merge, row writer) adds is authentically
+    # platform-written. Doing this later — e.g. in MergeEnrichmentFields —
+    # would nuke the governance gate's own PII flags along with the forgeries.
+    if data.metadata:
+        data.metadata = sanitize_caller_metadata(data.metadata)
     if _USE_PIPELINE_WRITE:
         return await _create_memory_pipeline(data)
     logger.warning("legacy write path invoked; this path is deprecated and scheduled for removal")
@@ -827,7 +843,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         parent_metadata = dict(fields["metadata"])
         parent_metadata["auto_chunked"] = True
         parent_metadata["child_count"] = len(facts)
-        parent_metadata["write_latency_ms"] = round((time.perf_counter() - t0) * 1000)
+        set_system_value(parent_metadata, "write_latency_ms", round((time.perf_counter() - t0) * 1000))
         # #856: in a deferred deployment ``ParallelEmbedEnrich`` skipped both
         # provider calls, so this row is incomplete. ``MemoryOut.metadata``
         # documents absent flags as "that stage ran inline", which for this row
@@ -837,9 +853,9 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         # and ``MergeEnrichmentFields`` sets ``enrichment_pending``.
         defer_enrichment = _enrichment_backfill_needed(ctx.data.get("enrichment"), tenant_config)
         if embedding is None:
-            parent_metadata["embedding_pending"] = True
+            set_system_value(parent_metadata, "embedding_pending", True)
         if defer_enrichment:
-            parent_metadata["enrichment_pending"] = True
+            set_system_value(parent_metadata, "enrichment_pending", True)
 
         # Auto-chunk parent insert — wrapped in the storage bulkhead
         # like the regular single-write path. Auto-chunk fires two
