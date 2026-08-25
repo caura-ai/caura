@@ -242,7 +242,8 @@ async def bulk_resolve_entities(request: Request) -> list[dict | None]:
 
     Response is a list aligned to ``input_idx``: each element is either
     ``null`` (no match) or ``{"entity_id", "canonical_name", "attributes",
-    "matched_by": "exact" | "similarity", "similarity": float}``. Callers
+    "matched_by": "exact" | "normalized" | "similarity",
+    "similarity": float}``. Callers
     use the ``matched_by`` field to decide whether to take the update path
     (with client-side attribute merge) or the create path in a follow-up
     ``/entities/bulk-upsert`` call.

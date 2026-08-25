@@ -60,6 +60,7 @@ from common.constants import (
     SEMANTIC_DEDUP_THRESHOLD,
     TYPE_DECAY_DAYS,
 )
+from common.entity_naming import canonical_match_key, normalize_entity_name
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.models import (
     Agent,
@@ -4897,19 +4898,22 @@ class PostgresService:
         """Bulk version of the two-phase resolution in entity_service.upsert_entity.
 
         Replicates the same precedence — Phase 1 exact match by
-        ``(tenant_id, fleet_id, canonical_name, entity_type)``; Phase 2
-        embedding cosine similarity (top-N by distance, first ≥ threshold
-        wins) — but in one round-trip and one DB connection. Phase 1 is
-        a single batched SELECT keyed by row tuple; Phase 2 issues one
-        similarity SELECT per unresolved item with a non-null embedding,
-        all sharing the same session.
+        ``(tenant_id, fleet_id, canonical_name, entity_type)``; Phase 1.5
+        conservative normalised match (WT-2 — case/whitespace and a small
+        fixed leading-qualifier strip, see ``common.entity_naming``);
+        Phase 2 embedding cosine similarity (top-N by distance, first ≥
+        threshold wins) — but in one round-trip and one DB connection.
+        Phase 1 is a single batched SELECT keyed by row tuple; Phases 1.5
+        and 2 issue one SELECT per still-unresolved item, all sharing the
+        same session.
 
         Each input item: ``{"input_idx": int, "fleet_id": str|None,
         "canonical_name": str, "entity_type": str, "name_embedding":
         list[float]|None}``. Returns a list aligned to input order where
         each element is either ``None`` (no match) or
         ``{"entity_id", "canonical_name", "attributes", "matched_by",
-        "similarity"}`` — ``matched_by`` ∈ {"exact", "similarity"}.
+        "similarity"}`` — ``matched_by`` ∈ {"exact", "normalized",
+        "similarity"}.
 
         Threshold is required, not defaulted — the resolution rule lives
         in the core-api layer; the storage service is the executor.
@@ -4969,6 +4973,72 @@ class PostgresService:
                         "similarity": 1.0,
                     }
                     matched_idxs.add(idx)
+
+            # Phase 1.5 (WT-2): conservative normalised match. An extracted
+            # surface form and an existing row that differ only by case,
+            # whitespace, or a small fixed set of leading determiners /
+            # temporal qualifiers ("the new analytics service" vs
+            # "analytics service") are the SAME subject; minting a second
+            # row splits the knowledge graph and blinds entity-scoped
+            # contradiction detection (WT-3). Deterministic and symmetric:
+            # a match fires iff ``canonical_match_key`` of both names is
+            # equal (see common/entity_naming.py for the exact rule and the
+            # two-token "new york" guard — "new york" does NOT reduce to
+            # "york", in either direction). Runs BEFORE Phase 2 because a
+            # deterministic string match outranks embedding similarity.
+            # Same tenant / entity_type / fleet scoping as Phase 1.
+            for it in items:
+                idx = it["input_idx"]
+                if idx in matched_idxs:
+                    continue
+                key = canonical_match_key(it["canonical_name"])
+                if not key:
+                    continue
+                # Candidate prefetch only: lower(name) ending in the key
+                # catches both directions (existing "new analytics service"
+                # for incoming "analytics service", and existing
+                # "analytics service" for incoming "new analytics service").
+                # The DECIDER is the Python-side key equality below — the
+                # suffix LIKE can never merge on its own ("data analytics
+                # service" is prefetched but rejected: its own key differs).
+                escaped = key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                cand_stmt = (
+                    select(Entity)
+                    .where(
+                        Entity.tenant_id == tenant_id,
+                        Entity.entity_type == it["entity_type"],
+                        func.lower(Entity.canonical_name).like(f"%{escaped}", escape="\\"),
+                    )
+                    # Deterministic candidate order; cap keeps a pathological
+                    # tenant from turning the prefetch into a seq-scan dump.
+                    # A true match beyond the cap degrades to today's
+                    # behaviour (similarity / create), never to a bad merge.
+                    .order_by(Entity.id)
+                    .limit(50)
+                )
+                if it.get("fleet_id") is not None:
+                    cand_stmt = cand_stmt.where(Entity.fleet_id == it["fleet_id"])
+                else:
+                    cand_stmt = cand_stmt.where(Entity.fleet_id.is_(None))
+
+                candidates = (await session.execute(cand_stmt)).scalars().all()
+                verified = [e for e in candidates if canonical_match_key(e.canonical_name) == key]
+                if not verified:
+                    continue
+                # Prefer a pure case/whitespace variant (no qualifier was
+                # stripped on either side) over a qualifier-stripped match;
+                # ties broken by the deterministic id ordering above.
+                norm_incoming = normalize_entity_name(it["canonical_name"])
+                exact_norm = [e for e in verified if normalize_entity_name(e.canonical_name) == norm_incoming]
+                chosen = (exact_norm or verified)[0]
+                out[idx] = {
+                    "entity_id": str(chosen.id),
+                    "canonical_name": chosen.canonical_name,
+                    "attributes": chosen.attributes or {},
+                    "matched_by": "normalized",
+                    "similarity": 1.0,
+                }
+                matched_idxs.add(idx)
 
             # Phase 2: per-unmatched-item similarity SELECT, all in this
             # session. N queries one HTTP — the win is HTTP-roundtrip
