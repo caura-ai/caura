@@ -479,6 +479,68 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HealthResponse": {
+        "properties": {
+          "event_bus": {
+            "description": "ok, unhealthy, or error.",
+            "title": "Event Bus",
+            "type": "string"
+          },
+          "platform_init_errors": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only when platform init recorded errors and all dependencies are up (status=degraded).",
+            "title": "Platform Init Errors"
+          },
+          "redis": {
+            "description": "connected, unavailable, or not configured.",
+            "title": "Redis",
+            "type": "string"
+          },
+          "status": {
+            "description": "ok, degraded, or unhealthy (unhealthy is served as 503).",
+            "title": "Status",
+            "type": "string"
+          },
+          "storage": {
+            "description": "connected or unreachable.",
+            "title": "Storage",
+            "type": "string"
+          },
+          "unhealthy_dependencies": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only on 503: names of failing dependencies.",
+            "title": "Unhealthy Dependencies"
+          }
+        },
+        "required": [
+          "status",
+          "storage",
+          "redis",
+          "event_bus"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
       "MemoryDetailResponse": {
         "description": "Full detail for one memory: row fields, entity links, embedding stats.",
         "properties": {
@@ -1721,6 +1783,19 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "VersionResponse": {
+        "properties": {
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "title": "VersionResponse",
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -1745,7 +1820,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2614,7 +2691,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/VersionResponse"
+                }
               }
             },
             "description": "Successful Response"

@@ -52,6 +52,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Response
 from pydantic import BaseModel, Field
 
+from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.config import settings as app_settings
@@ -251,7 +252,10 @@ def _surface_storage_error(exc: httpx.HTTPStatusError) -> HTTPException:
 # ── Routes ──
 
 
-@router.get("")
+@router.get(
+    "",
+    responses={200: {"model": list[_oar.KeystoneDoc] | _oar.KeystonesEnvelope}},
+)
 async def list_keystones(
     response: Response,
     tenant_id: str = Query(...),
@@ -300,7 +304,7 @@ async def list_keystones(
     return rows
 
 
-@router.post("")
+@router.post("", responses={200: {"model": _oar.KeystoneDoc}})
 async def upsert_keystone(
     body: KeystoneSetRequest,
     x_agent_id: str | None = Header(default=None, alias="X-Agent-ID"),
@@ -433,7 +437,7 @@ async def upsert_keystone(
     return doc
 
 
-@router.delete("/{doc_id}")
+@router.delete("/{doc_id}", responses={200: {"model": _oar.KeystoneDeleteResponse}})
 async def delete_keystone(
     # Enforce the slug shape at the path-parameter layer — without this
     # an unvalidated ``doc_id`` flows straight into ``storage_client``'s

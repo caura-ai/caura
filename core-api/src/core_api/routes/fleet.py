@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
+from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import NODE_OFFLINE_SECONDS, NODE_STALE_SECONDS
@@ -239,7 +240,11 @@ class CommandResultIn(BaseModel):
 # ── Fleet CRUD ──
 
 
-@router.post("/fleet", status_code=201)
+@router.post(
+    "/fleet",
+    status_code=201,
+    responses={201: {"model": _oar.FleetCreateResponse}},
+)
 async def create_fleet(
     body: FleetCreateIn,
     auth: AuthContext = Depends(get_auth_context),
@@ -281,7 +286,7 @@ async def create_fleet(
     return {"ok": True, "fleet_id": body.fleet_id, "tenant_id": body.tenant_id}
 
 
-@router.get("/fleet")
+@router.get("/fleet", responses={200: {"model": list[_oar.FleetListItem]}})
 async def list_fleets(
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
@@ -332,7 +337,7 @@ async def delete_fleet(
     )
 
 
-@router.post("/fleet/{fleet_id}/purge")
+@router.post("/fleet/{fleet_id}/purge", responses={200: {"model": _oar.FleetPurgeResponse}})
 async def purge_fleet(
     fleet_id: str,
     tenant_id: str = Query(...),
@@ -640,7 +645,7 @@ async def _maybe_queue_auto_upgrade(
         return False
 
 
-@router.post("/fleet/heartbeat")
+@router.post("/fleet/heartbeat", responses={200: {"model": _oar.HeartbeatResponse}})
 async def heartbeat(
     body: HeartbeatIn,
     auth: AuthContext = Depends(get_auth_context),
@@ -862,7 +867,10 @@ async def heartbeat(
 # ── Command result ──
 
 
-@router.post("/fleet/commands/{command_id}/result")
+@router.post(
+    "/fleet/commands/{command_id}/result",
+    responses={200: {"model": _oar.OkResponse}},
+)
 async def command_result(
     command_id: UUID,
     body: CommandResultIn,
@@ -892,7 +900,7 @@ async def command_result(
 # ── Fleet nodes (frontend reads) ──
 
 
-@router.get("/fleet/nodes")
+@router.get("/fleet/nodes", responses={200: {"model": list[_oar.FleetNode]}})
 async def list_nodes(
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
@@ -953,7 +961,7 @@ async def list_nodes(
 # ── Fleet & agent stats ──
 
 
-@router.get("/fleet/stats")
+@router.get("/fleet/stats", responses={200: {"model": _oar.FleetStatsResponse}})
 async def fleet_stats(
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
@@ -968,7 +976,11 @@ async def fleet_stats(
 # ── Queue command (frontend posts) ──
 
 
-@router.post("/fleet/commands", status_code=201)
+@router.post(
+    "/fleet/commands",
+    status_code=201,
+    responses={201: {"model": _oar.CommandCreateResponse}},
+)
 async def create_command(
     body: CommandIn,
     auth: AuthContext = Depends(get_auth_context),
@@ -1001,7 +1013,7 @@ async def create_command(
 # ── Command history ──
 
 
-@router.get("/fleet/commands")
+@router.get("/fleet/commands", responses={200: {"model": list[_oar.FleetCommand]}})
 async def list_commands(
     tenant_id: str = Query(...),
     node_id: UUID | None = Query(default=None),

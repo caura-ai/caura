@@ -23,6 +23,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
+from core_api import openapi_responses as _oar
 from core_api.agent_ids import DEFAULT_AGENT_ID
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
@@ -159,7 +160,7 @@ def _missing_agent_id_error() -> RequestValidationError:
     )
 
 
-@router.get("/tenants")
+@router.get("/tenants", responses={200: {"model": list[str]}})
 async def list_tenants(
     auth: AuthContext = Depends(get_auth_context),
 ):
@@ -168,7 +169,7 @@ async def list_tenants(
     return sorted(await get_storage_client().list_active_tenants())
 
 
-@router.get("/fleets")
+@router.get("/fleets", responses={200: {"model": list[_oar.FleetDistributionItem]}})
 async def list_fleets(
     tenant_id: str | None = Query(default=None),
     auth: AuthContext = Depends(get_auth_context),
@@ -462,7 +463,7 @@ async def list_memories(
     return PaginatedMemoryResponse(items=items, next_cursor=next_cursor)
 
 
-@router.get("/memories/stats")
+@router.get("/memories/stats", responses={200: {"model": _oar.MemoryStatsResponse}})
 async def memory_stats(
     tenant_id: str | None = Query(default=None),
     fleet_id: str | None = Query(default=None),
@@ -555,7 +556,7 @@ async def memory_stats(
     )
 
 
-@router.get("/memories/count")
+@router.get("/memories/count", responses={200: {"model": _oar.MemoryCountResponse}})
 async def memory_count(
     tenant_id: str | None = Query(default=None),
     fleet_id: str | None = Query(default=None),
@@ -740,7 +741,7 @@ async def delete_all_memories(
     )
 
 
-@router.post("/memories/bulk-delete")
+@router.post("/memories/bulk-delete", responses={200: {"model": _oar.BulkDeleteResponse}})
 async def bulk_delete_by_ids(
     body: dict = Body(...),
     auth: AuthContext = Depends(get_auth_context),
@@ -874,7 +875,10 @@ async def get_memory(
     }
 
 
-@router.get("/memories/{memory_id}/contradictions")
+@router.get(
+    "/memories/{memory_id}/contradictions",
+    responses={200: {"model": _oar.MemoryContradictionsResponse}},
+)
 async def get_contradictions(
     memory_id: UUID,
     tenant_id: str = Query(...),
@@ -1529,7 +1533,10 @@ async def delete_memory(
     )
 
 
-@router.patch("/memories/{memory_id}/status")
+@router.patch(
+    "/memories/{memory_id}/status",
+    responses={200: {"model": _oar.MemoryStatusPatchResponse}},
+)
 async def update_memory_status(
     memory_id: UUID,
     body: dict,
@@ -1804,7 +1811,7 @@ async def _search_inner(
     )
 
 
-@router.post("/ingest/preview")
+@router.post("/ingest/preview", responses={200: {"model": _oar.IngestPreviewResponse}})
 async def ingest_preview_endpoint(
     body: IngestRequest,
     auth: AuthContext = Depends(get_auth_context),
@@ -1819,7 +1826,7 @@ async def ingest_preview_endpoint(
     return await ingest_preview(body)
 
 
-@router.post("/ingest/commit")
+@router.post("/ingest/commit", responses={200: {"model": _oar.IngestCommitResponse}})
 @write_limit
 async def ingest_commit_endpoint(
     request: Request,
@@ -1842,7 +1849,7 @@ async def ingest_commit_endpoint(
     return await ingest_commit(body)
 
 
-@router.post("/ingest/file")
+@router.post("/ingest/file", responses={200: {"model": _oar.IngestPreviewResponse}})
 async def ingest_file_endpoint(
     file: UploadFile = File(...),
     tenant_id: str = Form(...),
@@ -1902,7 +1909,7 @@ async def ingest_file_endpoint(
     return await ingest_preview(req)
 
 
-@router.post("/ingest/undo/{run_id}")
+@router.post("/ingest/undo/{run_id}", responses={200: {"model": _oar.IngestUndoResponse}})
 async def ingest_undo_endpoint(
     run_id: str,
     tenant_id: str = Query(...),
@@ -1957,7 +1964,7 @@ async def ingest_undo_endpoint(
     return {"deleted": deleted_count, "run_id": run_id}
 
 
-@router.post("/recall")
+@router.post("/recall", responses={200: {"model": _oar.RecallResponse}})
 @search_limit
 async def recall_endpoint(
     request: Request,

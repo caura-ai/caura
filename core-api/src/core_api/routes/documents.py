@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from common.embedding import get_embedding
+from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.middleware.idempotency import IDEMPOTENCY_HEADER, idempotency_for
@@ -403,7 +404,10 @@ async def upsert_document(
 # because FastAPI matches in declaration order — without this ordering,
 # `GET /documents/collections` would match `/documents/{doc_id}` with
 # doc_id="collections" and require the `collection=` query param, returning 422.
-@router.get("/documents/collections")
+@router.get(
+    "/documents/collections",
+    responses={200: {"model": _oar.DocumentCollectionsResponse}},
+)
 async def list_collections(
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
@@ -433,7 +437,7 @@ async def list_collections(
     )
 
 
-@router.get("/documents/{doc_id}")
+@router.get("/documents/{doc_id}", responses={200: {"model": DocOut}})
 async def get_document(
     doc_id: str,
     tenant_id: str = Query(...),
@@ -454,7 +458,7 @@ async def get_document(
     return _dict_to_out(doc)
 
 
-@router.post("/documents/query")
+@router.post("/documents/query", responses={200: {"model": list[DocOut]}})
 async def query_documents(
     body: DocQueryRequest,
     auth: AuthContext = Depends(get_auth_context),
@@ -484,7 +488,7 @@ async def query_documents(
     return [_dict_to_out(d) for d in docs]
 
 
-@router.post("/skills/installable")
+@router.post("/skills/installable", responses={200: {"model": list[DocOut]}})
 async def installable_skills(
     body: InstallableSkillsRequest,
     auth: AuthContext = Depends(get_auth_context),
@@ -548,7 +552,7 @@ async def installable_skills(
     return [_dict_to_out(d) for d in docs]
 
 
-@router.get("/documents")
+@router.get("/documents", responses={200: {"model": list[DocOut]}})
 async def list_documents(
     tenant_id: str = Query(...),
     collection: str = Query(...),
@@ -607,7 +611,7 @@ async def delete_document(
 # See docs/api-surfaces.md for surface ownership rationale.
 
 
-@router.post("/documents/search")
+@router.post("/documents/search", responses={200: {"model": _oar.DocumentSearchResponse}})
 async def search_documents(
     body: DocSearchRequest,
     auth: AuthContext = Depends(get_auth_context),

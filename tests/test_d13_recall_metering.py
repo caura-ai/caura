@@ -37,7 +37,6 @@ async def test_operation_reaches_the_usage_hook(monkeypatch):
 
     async def fake_hook(*, tenant_id, operation, count):
         seen["operation"] = operation
-        return None
 
     class Hooks:
         usage_meter = staticmethod(fake_hook)
@@ -63,8 +62,10 @@ def test_no_bare_search_literal_left_on_recall_sites():
 
     root = pathlib.Path(__file__).resolve().parents[1] / "core-api" / "src" / "core_api"
     recall_route = (root / "routes" / "memories.py").read_text()
-    # the /recall endpoint body sits between its decorator and the next route
-    recall_section = recall_route.split('@router.post("/recall")')[1].split("@router.post")[0]
+    # the /recall endpoint body sits between its decorator and the next route;
+    # anchor on the path literal only so decorator kwargs (e.g. C33's
+    # ``responses=``) don't break the split
+    recall_section = recall_route.split('@router.post("/recall"')[1].split("@router.post")[0]
     assert 'check_and_increment(body.tenant_id, recall_operation())' in recall_section
     assert 'check_and_increment(body.tenant_id, "search")' not in recall_section
 

@@ -344,6 +344,10 @@ class Settings(BaseSettings):
     # routes GET + tagged-read POST calls here instead of ``core_storage_api_url``;
     # empty keeps today's single-service behaviour (OSS + pre-split deploys).
     core_storage_read_url: str = ""
+    # Public base URL of THIS API as callers reach it (e.g. https://memclaw.dev).
+    # When set, the OpenAPI spec gains a ``servers`` block so generated clients
+    # and agents resolve relative paths correctly; empty emits no servers block.
+    public_api_url: str = ""
     settings_encryption_key: str = ""  # Required in production (Fernet key)
     jwt_secret: str = "change-me-in-production"  # Required in production
     paddle_client_token: str | None = None

@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.constants import EVOLVE_OUTCOME_TYPES, VALID_SCOPES
 from core_api.schemas import STRICT_WRITE_BODY
@@ -84,7 +85,7 @@ class EvolveRequest(BaseModel):
 # ── Routes ──
 
 
-@router.post("/evolve/report")
+@router.post("/evolve/report", responses={200: {"model": _oar.EvolveReportResponse}})
 async def report_outcome_endpoint(
     body: EvolveRequest,
     auth: AuthContext = Depends(get_auth_context),

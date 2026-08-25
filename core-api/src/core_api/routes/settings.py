@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
+from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.services.organization_settings import (
     PROVIDER_OPTIONS,
@@ -22,7 +23,7 @@ def _resolve_tenant(auth: AuthContext, tenant_id: str | None) -> str:
     raise HTTPException(status_code=400, detail="tenant_id required")
 
 
-@router.get("/settings")
+@router.get("/settings", responses={200: {"model": _oar.SettingsResponse}})
 async def get_tenant_settings(
     tenant_id: str | None = None,
     auth: AuthContext = Depends(get_auth_context),
@@ -32,7 +33,7 @@ async def get_tenant_settings(
     return await get_settings_for_display(tid)
 
 
-@router.put("/settings")
+@router.put("/settings", responses={200: {"model": _oar.SettingsResponse}})
 async def update_tenant_settings(
     body: dict,
     tenant_id: str | None = None,
@@ -73,7 +74,10 @@ async def update_tenant_settings(
         raise HTTPException(status_code=422, detail=str(e)) from e
 
 
-@router.get("/settings/providers")
+@router.get(
+    "/settings/providers",
+    responses={200: {"model": dict[str, dict[str, list[str]]]}},
+)
 async def list_providers():
     """List available LLM providers and models for each function."""
     return PROVIDER_OPTIONS

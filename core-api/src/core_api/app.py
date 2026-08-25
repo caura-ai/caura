@@ -696,6 +696,11 @@ def _openapi_with_error_responses() -> dict:
         version=app.version,
         routes=app.routes,
         tags=OPENAPI_TAGS,
+        servers=(
+            [{"url": app_settings.public_api_url.rstrip("/")}]
+            if app_settings.public_api_url
+            else None
+        ),
     )
     schema.setdefault("components", {}).setdefault("schemas", {})[_ERROR_ENVELOPE_REF] = (
         _ERROR_ENVELOPE_SCHEMA

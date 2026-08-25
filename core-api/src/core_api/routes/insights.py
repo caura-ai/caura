@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.constants import INSIGHTS_FOCUS_MODES, VALID_SCOPES
 from core_api.schemas import STRICT_WRITE_BODY
@@ -63,7 +64,7 @@ class InsightsRequest(BaseModel):
 # ── Routes ──
 
 
-@router.post("/insights/generate")
+@router.post("/insights/generate", responses={200: {"model": _oar.InsightsResponse}})
 async def generate_insights_endpoint(
     body: InsightsRequest,
     auth: AuthContext = Depends(get_auth_context),
