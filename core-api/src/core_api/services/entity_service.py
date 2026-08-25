@@ -204,13 +204,43 @@ async def get_entity(entity_id: UUID, tenant_id: str, caller_agent_id: str | Non
             )
         )
 
-    # Outgoing relations. Same scope contract as the linked memories above:
-    # without it, relations were emitted straight from the raw entity, so an
-    # agent credential could enumerate relation edges and evidence_memory_ids
-    # pointing at memories it cannot read (scope side-door, audit S5). A
-    # relation is visible iff its evidence memory is readable by the caller
-    # (relations with no evidence carry no memory-derived content and stay).
-    relations_raw = entity.get("relations", [])
+    # Outgoing relations. C23 — since v1.0.0 this read
+    # ``entity.get("relations", [])`` off the with-memories payload, which has
+    # NEVER carried a relations key (ENTITY_FIELDS has none), so relations were
+    # structurally always ``[]`` on REST and MCP alike while /graph showed the
+    # edges — the read-surface inconsistency two field reports hit. Fetch them
+    # from the storage endpoint built for exactly this (and until now unused).
+    # Failure degrades to ``[]`` — the pre-C23 behavior — rather than failing
+    # the whole entity read; same resilience contract as find_successors.
+    #
+    # Scope contract (audit S5 / C14), unchanged and now operating on real
+    # rows: an agent credential must not enumerate relation edges or
+    # evidence_memory_ids pointing at memories it cannot read. A relation is
+    # visible iff its evidence memory is readable by the caller (relations
+    # with no evidence carry no memory-derived content and stay).
+    try:
+        relation_rows = await sc.get_outgoing_relations(str(entity_id), tenant_id=tenant_id)
+    except Exception:
+        logger.warning(
+            "get_outgoing_relations failed for entity %s; returning entity without relations",
+            entity_id,
+            exc_info=True,
+        )
+        relation_rows = []
+    relations_raw = []
+    for row in relation_rows:
+        rel = row.get("relation", {}) or {}
+        target = row.get("target", {}) or {}
+        relations_raw.append(
+            {
+                "id": rel.get("id"),
+                "relation_type": rel.get("relation_type"),
+                "to_entity_id": rel.get("to_entity_id"),
+                "to_entity_name": target.get("canonical_name"),
+                "weight": rel.get("weight"),
+                "evidence_memory_id": rel.get("evidence_memory_id"),
+            }
+        )
     if caller_agent_id and relations_raw:
         from core_api.services.agent_service import memory_access_allowed_for_agent
 

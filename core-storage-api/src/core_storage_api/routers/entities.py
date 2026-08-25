@@ -66,10 +66,21 @@ async def create_entity(request: Request) -> dict:
 async def list_entities(
     tenant_id: str,
     fleet_id: str | None = None,
+    entity_type: str | None = None,
+    search: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict]:
-    entities = await _svc.entity_list(tenant_id, fleet_id=fleet_id, limit=limit, offset=offset)
+    # C22 — accept and forward the filters entity_list has always supported;
+    # core-api declared them publicly but this hop dropped them.
+    entities = await _svc.entity_list(
+        tenant_id,
+        fleet_id=fleet_id,
+        entity_type=entity_type,
+        search=search,
+        limit=limit,
+        offset=offset,
+    )
     return [orm_to_dict(e, ENTITY_FIELDS) for e in entities]
 
 

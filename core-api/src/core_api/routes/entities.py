@@ -41,7 +41,17 @@ async def list_entities(
     """
     auth.enforce_readable_tenant(tenant_id)
     sc = get_storage_client()
-    entities = await sc.list_entities(tenant_id, fleet_id=fleet_id, limit=limit)
+    # C22 — ``search`` and ``entity_type`` were declared on this route since
+    # day one but never forwarded, so ``GET /entities?search=foo`` silently
+    # returned the unfiltered list. The storage service always supported both
+    # (entity_list: ilike on canonical_name, equality on entity_type).
+    entities = await sc.list_entities(
+        tenant_id,
+        fleet_id=fleet_id,
+        entity_type=entity_type,
+        search=search,
+        limit=limit,
+    )
 
     # Count linked memories per entity
     eids = [e.get("id", "") for e in entities]

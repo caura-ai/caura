@@ -1371,12 +1371,18 @@ class CoreStorageClient:
         self,
         tenant_id: str,
         fleet_id: str | None = None,
+        entity_type: str | None = None,
+        search: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
         params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit, "offset": offset}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
+        if entity_type is not None:
+            params["entity_type"] = entity_type
+        if search is not None:
+            params["search"] = search
         return await self._get_list("/entities", **params)
 
     async def count_memories_per_entity(
@@ -1393,8 +1399,11 @@ class CoreStorageClient:
     async def get_entity_with_linked_memories(self, entity_id: str) -> dict | None:
         return await self._get(f"/entities/{entity_id}/with-memories")
 
-    async def get_outgoing_relations(self, entity_id: str) -> list[dict]:
-        return await self._get_list(f"/entities/{entity_id}/relations")
+    async def get_outgoing_relations(self, entity_id: str, tenant_id: str | None = None) -> list[dict]:
+        params: dict[str, Any] = {}
+        if tenant_id is not None:
+            params["tenant_id"] = tenant_id
+        return await self._get_list(f"/entities/{entity_id}/relations", **params)
 
     async def find_relation(
         self,
