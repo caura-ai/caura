@@ -28,6 +28,7 @@ import time
 
 from fastapi import HTTPException
 
+from common import duplicate_memory
 from common.constants import (
     SEMANTIC_DEDUP_AUTO_THRESHOLD,
     SEMANTIC_DEDUP_JUDGE_THRESHOLD,
@@ -163,7 +164,15 @@ class CheckSemanticDuplicate:
             )
             raise HTTPException(
                 status_code=409,
-                detail=f"Near-duplicate memory exists: {candidate_id}",
+                detail=duplicate_memory.core_api_detail(
+                    duplicate_memory.near_message(candidate_id),
+                    **duplicate_memory.duplicate_fields(
+                        reason=duplicate_memory.REASON_SEMANTIC,
+                        existing_id=candidate_id,
+                        existing_status=(sem_dup_dict.get("status") if sem_dup_dict else None),
+                        similarity=similarity,
+                    ),
+                ),
             )
 
         # A1 #17 — subject preflight. If both rows carry a non-NULL
@@ -207,7 +216,15 @@ class CheckSemanticDuplicate:
             )
             raise HTTPException(
                 status_code=409,
-                detail=f"Near-duplicate memory exists: {candidate_id}",
+                detail=duplicate_memory.core_api_detail(
+                    duplicate_memory.near_message(candidate_id),
+                    **duplicate_memory.duplicate_fields(
+                        reason=duplicate_memory.REASON_SEMANTIC,
+                        existing_id=candidate_id,
+                        existing_status=(sem_dup_dict.get("status") if sem_dup_dict else None),
+                        similarity=similarity,
+                    ),
+                ),
             )
 
         # Low-confidence "is duplicate" → write accepted, but the

@@ -44,6 +44,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import load_only
 
+from common import duplicate_memory
 from common.constants import (
     CONTRADICTION_CANDIDATE_MAX,
     CONTRADICTION_SIMILARITY_THRESHOLD,
@@ -552,7 +553,17 @@ class DuplicateContentHashError(ValueError):
 
     Subclasses ``ValueError`` so the 409 convention the entities routes already
     use (``except ValueError -> HTTPException(409)``) keeps working unchanged.
+
+    Carries the structured half of the answer alongside the message (C29). The
+    message stays exactly what it was — ``str(exc)`` is what the router used to
+    send and what core-api still reads when it is talking to an older storage —
+    while ``fields`` holds what the sentence could not: which row won, what
+    state that row is in, and why the write was refused.
     """
+
+    def __init__(self, message: str, fields: dict | None = None) -> None:
+        super().__init__(message)
+        self.fields: dict = fields or {}
 
 
 def _content_hash_fleet_scope(fleet_id: str | None):
@@ -689,10 +700,10 @@ class PostgresService:
             # manager" — which would turn every duplicate insert into the 500
             # this handler exists to prevent. The lookup below therefore opens a
             # fresh session of its own.
-            raise DuplicateContentHashError(await self._describe_content_hash_winner(data)) from exc
+            raise await self._describe_content_hash_winner(data) from exc
 
-    async def _describe_content_hash_winner(self, data: dict) -> str:
-        """Message naming the row that already holds this content.
+    async def _describe_content_hash_winner(self, data: dict) -> DuplicateContentHashError:
+        """The 409 naming the row that already holds this content.
 
         Re-SELECTed rather than omitted, and it is the whole reason this raises a
         message instead of a bare flag: ``CheckExactDuplicate``'s 409 says
@@ -710,7 +721,10 @@ class PostgresService:
         ``memory_find_by_content_hash`` returns — a 409 pointing at a different
         row than the lookup would give is worse than no id at all.
         """
-        stmt = select(Memory.id).where(
+        # ``status`` rides along because the prose form could not carry it, and
+        # "you duplicated an archived row" is a different situation from "you
+        # duplicated a live one" — see ``common.duplicate_memory``.
+        stmt = select(Memory.id, Memory.status).where(
             Memory.tenant_id == data["tenant_id"],
             Memory.content_hash == data.get("content_hash"),
             Memory.agent_id == data["agent_id"],
@@ -723,14 +737,24 @@ class PostgresService:
         async with get_session() as session:
             winner = (
                 await session.execute(stmt.order_by(Memory.created_at.asc(), Memory.id.asc()).limit(1))
-            ).scalar_one_or_none()
+            ).first()
         if winner is None:
             # The winner was soft-deleted between the conflict and this read, so
             # the content is free again. Reported honestly rather than retried
             # here: a retry inside the failed transaction's handler is a loop
             # waiting to happen, and the caller's own retry will now succeed.
-            return "Duplicate memory exists but is no longer live; retry the write"
-        return f"Duplicate memory exists: {winner}"
+            return DuplicateContentHashError(
+                duplicate_memory.NOT_LIVE_MESSAGE,
+                duplicate_memory.duplicate_fields(reason=duplicate_memory.REASON_RACE_NOT_LIVE),
+            )
+        return DuplicateContentHashError(
+            duplicate_memory.exact_message(winner.id),
+            duplicate_memory.duplicate_fields(
+                reason=duplicate_memory.REASON_EXACT,
+                existing_id=winner.id,
+                existing_status=winner.status,
+            ),
+        )
 
     async def memory_add_all(self, items: list[dict]) -> list[dict]:
         """Insert with per-attempt idempotency (CAURA-602).
@@ -853,7 +877,13 @@ class PostgresService:
                 )
                 raise DuplicateContentHashError(
                     "bulk insert rejected: an item's content already exists for "
-                    "this agent; nothing in this batch was written"
+                    "this agent; nothing in this batch was written",
+                    # No id: the constraint aborts the batch without telling us
+                    # WHICH item lost, and re-deriving it would mean re-running
+                    # the whole batch's hashes against the table. The reason is
+                    # still worth sending — it is the difference between "retry
+                    # this batch" and "your payload was malformed".
+                    duplicate_memory.duplicate_fields(reason=duplicate_memory.REASON_EXACT),
                 ) from exc
             inserted: dict[str, UUID] = {row.client_request_id: row.id for row in result.all()}
 

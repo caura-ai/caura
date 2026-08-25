@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 
+from common import duplicate_memory
 from core_api.clients.storage_client import DuplicateMemoryError, get_storage_client
 from core_api.config import settings
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot, per_tenant_storage_slot
@@ -385,7 +386,13 @@ async def _create_memory_or_409(payload: dict) -> dict:
     try:
         return await get_storage_client().create_memory(payload)
     except DuplicateMemoryError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        # ``exc.fields`` is storage's structured half, and is empty when talking
+        # to a storage that predates it — so this forwards what it has rather
+        # than asserting the fields are there.
+        raise HTTPException(
+            status_code=409,
+            detail=duplicate_memory.core_api_detail(str(exc), **exc.fields),
+        ) from exc
 
 
 async def _find_semantic_duplicate(
@@ -1332,7 +1339,14 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
     if dup:
         raise HTTPException(
             status_code=409,
-            detail=f"Duplicate memory exists: {dup.get('id')}",
+            detail=duplicate_memory.core_api_detail(
+                duplicate_memory.exact_message(dup.get("id")),
+                **duplicate_memory.duplicate_fields(
+                    reason=duplicate_memory.REASON_EXACT,
+                    existing_id=dup.get("id"),
+                    existing_status=dup.get("status"),
+                ),
+            ),
         )
 
     # Semantic dedup: catch near-duplicates (same meaning, different phrasing)
@@ -1349,7 +1363,14 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
         if sem_dup:
             raise HTTPException(
                 status_code=409,
-                detail=f"Near-duplicate memory exists: {sem_dup.get('id')}",
+                detail=duplicate_memory.core_api_detail(
+                    duplicate_memory.near_message(sem_dup.get("id")),
+                    **duplicate_memory.duplicate_fields(
+                        reason=duplicate_memory.REASON_SEMANTIC,
+                        existing_id=sem_dup.get("id"),
+                        existing_status=sem_dup.get("status"),
+                    ),
+                ),
             )
 
     if embedding is None:
@@ -2030,7 +2051,10 @@ async def create_memories_bulk(
                 # resolved every duplicate it could see, through
                 # ``existing_hashes`` and ``seen_hashes``. A retry re-runs those
                 # against the now-committed winner and succeeds.
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
+                raise HTTPException(
+                    status_code=409,
+                    detail=duplicate_memory.core_api_detail(str(exc), **exc.fields),
+                ) from exc
 
         # Map each storage result back to its source item via
         # ``client_request_id``. Postgres ``RETURNING`` order is
@@ -3470,7 +3494,17 @@ async def update_memory(
             exclude_id=str(memory_id),
         )
         if dup:
-            raise HTTPException(status_code=409, detail=f"Duplicate memory exists: {dup.get('id')}")
+            raise HTTPException(
+                status_code=409,
+                detail=duplicate_memory.core_api_detail(
+                    duplicate_memory.exact_message(dup.get("id")),
+                    **duplicate_memory.duplicate_fields(
+                        reason=duplicate_memory.REASON_EXACT,
+                        existing_id=dup.get("id"),
+                        existing_status=dup.get("status"),
+                    ),
+                ),
+            )
 
         # Semantic dedup on content change (exclude self; skip when new embedding is None)
         if tenant_config.semantic_dedup_enabled and new_embedding is not None:
@@ -3483,7 +3517,14 @@ async def update_memory(
             if sem_dup:
                 raise HTTPException(
                     status_code=409,
-                    detail=f"Near-duplicate memory exists: {sem_dup.get('id')}",
+                    detail=duplicate_memory.core_api_detail(
+                        duplicate_memory.near_message(sem_dup.get("id")),
+                        **duplicate_memory.duplicate_fields(
+                            reason=duplicate_memory.REASON_SEMANTIC,
+                            existing_id=sem_dup.get("id"),
+                            existing_status=sem_dup.get("status"),
+                        ),
+                    ),
                 )
 
         changes["content"] = {"old": mem.get("content", "")[:200], "new": data.content[:200]}

@@ -8,6 +8,7 @@ import time
 
 from fastapi import HTTPException
 
+from common import duplicate_memory
 from core_api.clients.storage_client import get_storage_client
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
@@ -38,8 +39,19 @@ class CheckExactDuplicate:
             (time.perf_counter() - dedup_t0) * 1000
         )
         if dup:
+            # The message is unchanged; the fields beside it are the point (C29).
+            # ``status`` in particular was never expressible in the sentence, and
+            # "you duplicated an archived row" needs a different response from
+            # "you duplicated a live one".
             raise HTTPException(
                 status_code=409,
-                detail=f"Duplicate memory exists: {dup['id']}",
+                detail=duplicate_memory.core_api_detail(
+                    duplicate_memory.exact_message(dup["id"]),
+                    **duplicate_memory.duplicate_fields(
+                        reason=duplicate_memory.REASON_EXACT,
+                        existing_id=dup["id"],
+                        existing_status=dup.get("status"),
+                    ),
+                ),
             )
         return None

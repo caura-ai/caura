@@ -7,6 +7,7 @@ import time
 
 from fastapi import HTTPException
 
+from common import duplicate_memory
 from core_api.clients.storage_client import DuplicateMemoryError, get_storage_client
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
@@ -100,7 +101,10 @@ class WriteMemoryRow:
             #
             # Nothing has been committed by THIS request at this point, so unlike
             # everything below, raising here is correct rather than a strand.
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=409,
+                detail=duplicate_memory.core_api_detail(str(exc), **exc.fields),
+            ) from exc
         timings["storage_ms"] = round((time.perf_counter() - storage_t0) * 1000)
 
         # H-05: the row above is COMMITTED, so everything after it degrades rather

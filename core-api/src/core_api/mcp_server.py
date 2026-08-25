@@ -25,6 +25,7 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import Field, ValidationError
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from common import duplicate_memory
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api.agent_ids import DEFAULT_AGENT_ID, effective_write_agent_id
 from core_api.auth import get_admin_key
@@ -412,15 +413,60 @@ def _refuse_reserved_memory_type(memory_type: str | None, *, index: int | None =
     return _error_response("INVALID_ARGUMENTS", detail)
 
 
+# C29 legacy path. Every duplicate 409 in this repo now carries its fields as
+# data, so this regex is only reachable while a deploy is mid-flight — a core-api
+# on this version talking to a storage that predates the structured body, which
+# still answers with the sentence and nothing else. Kept for exactly that window
+# rather than deleted, and deliberately anchored to the one message form
+# ``common.duplicate_memory.exact_message`` produces, so it cannot start matching
+# something else if the wording moves.
 _DUPLICATE_DETAIL_RE = re.compile(r"^Duplicate memory exists:\s*(?P<id>[0-9a-fA-F-]{36})\s*$")
 
 
-def _extract_duplicate_id(detail: str) -> str | None:
-    """Parse the duplicate-memory exception detail. Returns the existing
-    memory id, or None if the format doesn't match (semantic-duplicate
-    hits use a different prefix and stay opaque to callers)."""
-    m = _DUPLICATE_DETAIL_RE.match(detail or "")
-    return m.group("id") if m else None
+def _detail_text(detail: object) -> str:
+    """The human message, whichever shape the detail arrived in.
+
+    Details are now sometimes ``{"code", "message", "details"}`` (the shape
+    ``app.http_exception_handler`` expands into the canonical envelope). Passing
+    one of those to ``str()`` renders a Python dict repr — braces, quotes and
+    all — straight into a message a model reads, so every site that used to
+    stringify a detail goes through here instead.
+    """
+    if isinstance(detail, dict) and isinstance(detail.get("message"), str):
+        return detail["message"]
+    return str(detail)
+
+
+def _detail_code(detail: object, status_code: int) -> str:
+    """The error code the raiser chose, or the one its status implies.
+
+    A structured detail names its own code; anything else still derives one
+    from the status, exactly as before.
+    """
+    if isinstance(detail, dict) and isinstance(detail.get("code"), str):
+        return detail["code"]
+    return code_for_status(status_code)
+
+
+def _duplicate_info(detail: object) -> dict | None:
+    """What the 409 says about the row that already holds this content.
+
+    Returns ``None`` when the detail is not a duplicate answer at all.
+    Structured first — that is the whole point of C29, and it is also the only
+    path that can report ``existing_status`` or tell an exact hit from a
+    semantic one. The regex is the mid-deploy fallback described above, and it
+    can only ever recover the id.
+    """
+    if isinstance(detail, dict) and detail.get("code") == duplicate_memory.DUPLICATE_MEMORY_CODE:
+        fields = detail.get("details")
+        return dict(fields) if isinstance(fields, dict) else {}
+    m = _DUPLICATE_DETAIL_RE.match(_detail_text(detail))
+    if m:
+        return {
+            "existing_id": m.group("id"),
+            "reason": duplicate_memory.REASON_EXACT,
+        }
+    return None
 
 
 def _check_auth() -> CallToolResult | None:
@@ -747,7 +793,9 @@ async def caura_recall(
         return _with_latency(json.dumps(payload, indent=2, default=str), t0)
     except HTTPException as e:
         logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
-        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+        return _with_latency(
+            _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+        )
     except httpx.HTTPStatusError as e:
         # sc.get_agent() / enforce_fleet_read() are storage HTTP calls now —
         # surface a storage 4xx/5xx as the canonical envelope, not a raw raise.
@@ -968,20 +1016,34 @@ async def caura_write(
             # an error. Semantic-duplicate hits still surface as errors —
             # the caller wrote new content that we suppressed, which is a
             # semantically distinct outcome.
-            if e.status_code == 409 and (existing_id := _extract_duplicate_id(str(e.detail))):
+            dup = _duplicate_info(e.detail) if e.status_code == 409 else None
+            # Only an exact-hash hit is a retry no-op. A semantic hit means the
+            # caller wrote NEW content that we suppressed — a different outcome
+            # that must keep surfacing as an error. That distinction used to be
+            # made by the regex simply failing to match the near-duplicate
+            # wording, i.e. by accident; it is now explicit.
+            if dup is not None and dup.get("reason") == duplicate_memory.REASON_EXACT:
                 payload = {
                     "status": "duplicate",
-                    "existing_id": existing_id,
+                    "existing_id": dup.get("existing_id"),
                     "agent_id": agent_id,
                 }
+                # New in C29: which state the surviving row is in. A duplicate of
+                # an archived row is not the no-op a duplicate of a live row is,
+                # and the caller could not previously tell.
+                if dup.get("existing_status"):
+                    payload["existing_status"] = dup["existing_status"]
                 logger.info(
-                    "caura_write: idempotent duplicate hit existing=%s agent=%s",
-                    existing_id,
+                    "caura_write: idempotent duplicate hit existing=%s status=%s agent=%s",
+                    dup.get("existing_id"),
+                    dup.get("existing_status"),
                     agent_id,
                 )
                 return _with_latency(json.dumps(payload), t0)
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
-            return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+            return _with_latency(
+                _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+            )
 
 
 async def caura_manage(
@@ -1303,7 +1365,9 @@ async def caura_manage(
             return _with_latency(f"Memory {memory_id} deleted.", t0)
         except HTTPException as e:
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
-            return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+            return _with_latency(
+                _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+            )
         except httpx.HTTPStatusError as e:
             # storage_client raises on non-2xx — surface the upstream status +
             # detail in the canonical envelope (parity with sibling tools).
@@ -1332,7 +1396,9 @@ async def caura_entity_get(
     try:
         result = await get_entity(uid, _get_tenant(), caller_agent_id=_get_agent_id())
     except HTTPException as e:
-        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+        return _with_latency(
+            _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+        )
     except httpx.HTTPStatusError as e:
         return _storage_error_envelope(e, t0)
     except Exception as e:
@@ -1394,7 +1460,9 @@ async def caura_tune(
         return _with_latency(json.dumps({"agent_id": agent_id, "search_profile": current}, indent=2), t0)
     except HTTPException as e:
         logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
-        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+        return _with_latency(
+            _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+        )
     except httpx.HTTPStatusError as e:
         return _storage_error_envelope(e, t0)
 
@@ -2188,7 +2256,9 @@ async def caura_doc(
             )
         except HTTPException as e:
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
-            return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+            return _with_latency(
+                _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+            )
         except httpx.HTTPStatusError as e:
             return _storage_error_envelope(e, t0)
         except Exception as e:
@@ -2406,7 +2476,9 @@ async def caura_list(
             )
         except HTTPException as e:
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
-            return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+            return _with_latency(
+                _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+            )
         except httpx.HTTPStatusError as e:
             return _storage_error_envelope(e, t0)
         except Exception as e:
@@ -2706,7 +2778,9 @@ async def caura_insights(
         }
         return _with_latency(json.dumps(result, indent=2, default=str), t0)
     except HTTPException as e:
-        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+        return _with_latency(
+            _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+        )
     except Exception as e:
         logger.exception("Unhandled error in caura_insights")
         return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
@@ -2876,7 +2950,9 @@ async def caura_evolve(
             )
         return _with_latency(json.dumps(result, indent=2, default=str), t0)
     except HTTPException as e:
-        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+        return _with_latency(
+            _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+        )
     except Exception as e:
         logger.exception("Unhandled error in caura_evolve")
         return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
@@ -2943,7 +3019,9 @@ async def caura_keystones(
             agent_id=agent_id_effective if fleet_id else None,
         )
     except HTTPException as e:
-        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+        return _with_latency(
+            _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+        )
     except httpx.HTTPStatusError as e:
         # storage_client raises this on non-2xx — surface the upstream
         # status + detail so a 4xx from storage doesn't surface as a 500.
@@ -3318,7 +3396,9 @@ async def caura_keystones_set(
                 t0,
             )
         except HTTPException as e:
-            return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+            return _with_latency(
+                _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+            )
         except Exception as e:
             logger.exception("Unhandled error in caura_keystones_set")
             return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)

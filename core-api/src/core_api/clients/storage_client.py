@@ -35,7 +35,16 @@ class DuplicateMemoryError(Exception):
     ``CheckExactDuplicate``: that gate answers the duplicate it can see before
     the write, this answers the race it cannot, and callers should not have to
     tell the two apart.
+
+    ``fields`` carries storage's structured half (C29) — the winning id as data
+    rather than as a substring, plus its status and the reason. Empty when
+    talking to a storage that predates the structured body, which is why every
+    consumer must treat it as optional.
     """
+
+    def __init__(self, detail: str, fields: dict | None = None) -> None:
+        super().__init__(detail)
+        self.fields: dict = fields or {}
 
 
 def _storage_detail(response: httpx.Response) -> str:
@@ -50,6 +59,28 @@ def _storage_detail(response: httpx.Response) -> str:
     except (ValueError, AttributeError):
         return _DUPLICATE_FALLBACK_DETAIL
     return detail if isinstance(detail, str) and detail else _DUPLICATE_FALLBACK_DETAIL
+
+
+def _storage_duplicate_fields(response: httpx.Response) -> dict:
+    """The structured half of storage's 409, or ``{}`` from an older storage.
+
+    C29. Storage now sends ``reason`` / ``existing_id`` / ``existing_status``
+    beside ``detail`` instead of only naming the winning row inside an English
+    sentence. Returning ``{}`` rather than raising is what lets the two services
+    deploy in either order: against a storage that predates this, the caller
+    still gets the prose and simply has no fields to forward.
+
+    Same defensiveness as ``_storage_detail`` and for the same reason — this
+    runs on an error path, so a non-JSON body must not turn a clean 409 into a
+    JSONDecodeError raised from inside an exception handler.
+    """
+    try:
+        body = response.json()
+    except (ValueError, AttributeError):
+        return {}
+    if not isinstance(body, dict):
+        return {}
+    return {k: body[k] for k in ("reason", "existing_id", "existing_status") if k in body}
 
 
 def _reject_reserved_write_id(agent_id: str | None) -> None:
@@ -490,7 +521,9 @@ class CoreStorageClient:
             # own an HTTP contract translate it; see ``WriteMemoryRow``.
             if exc.response.status_code != 409:
                 raise
-            raise DuplicateMemoryError(_storage_detail(exc.response)) from exc
+            raise DuplicateMemoryError(
+                _storage_detail(exc.response), _storage_duplicate_fields(exc.response)
+            ) from exc
 
     async def create_memories(self, data: list[dict]) -> list[dict]:
         """Bulk-insert memories with per-attempt idempotency (CAURA-602).
@@ -527,7 +560,9 @@ class CoreStorageClient:
             # batch was written, unlike the per-item outcomes a success returns.
             if exc.response.status_code != 409:
                 raise
-            raise DuplicateMemoryError(_storage_detail(exc.response)) from exc
+            raise DuplicateMemoryError(
+                _storage_detail(exc.response), _storage_duplicate_fields(exc.response)
+            ) from exc
 
     async def get_memory(self, memory_id: str, *, read: bool = True) -> dict | None:
         """Fetch one memory by id.

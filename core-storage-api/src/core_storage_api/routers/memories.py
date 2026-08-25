@@ -19,7 +19,6 @@ from core_storage_api.routers._validation import _require, _require_dict
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import (
     BulkValidationError,
-    DuplicateContentHashError,
     PostgresService,
 )
 
@@ -85,20 +84,12 @@ def _validate_pg_regex(value: str | None, field: str) -> None:
 async def create_memory(request: Request) -> dict:
     body: dict = await request.json()
     _parse_datetimes(body)
-    try:
-        memory = await _svc.memory_add(body)
-    except DuplicateContentHashError as exc:
-        # Migration 040's unique index rejected the insert. 409, not 500: the
-        # dedup contract already promises this code — ``CheckExactDuplicate``
-        # raises it upstream when the duplicate is visible before the write, and
-        # this is the same answer for the race it cannot see. The detail carries
-        # the winning row's id, so a caller can use the row it should have got.
-        #
-        # Catches the dedicated subclass, NOT bare ``ValueError``, for the reason
-        # spelled out on ``BulkValidationError`` below: the try spans a call that
-        # opens a session, so a broad catch would relabel a server fault as a
-        # client error.
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # ``DuplicateContentHashError`` (migration 040's unique index) is handled
+    # app-wide so its 409 body can carry structured fields beside the message —
+    # see ``app._duplicate_content_hash_handler``. Nothing else here is caught:
+    # this call opens a session, and a broad catch would relabel a server fault
+    # as a client error.
+    memory = await _svc.memory_add(body)
     return orm_to_dict(memory, MEMORY_FIELDS)
 
 
@@ -120,13 +111,6 @@ async def create_memories_bulk(request: Request) -> list[dict]:
         _parse_datetimes(item)
     try:
         return await _svc.memory_add_all(body)
-    except DuplicateContentHashError as exc:
-        # Migration 040's constraint aborted the batch. 409 for the same reason
-        # the single-row route gives it: the content is already stored, and
-        # nothing here was written. Listed BEFORE ``BulkValidationError`` only
-        # for readability — the two are siblings under ``ValueError``, neither is
-        # a subclass of the other, so the order does not affect which one runs.
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except BulkValidationError as exc:
         # Malformed batch (an item missing ``client_request_id``, or mixed
         # ``tenant_id`` / ``fleet_id``). Unwrapped it escaped as a 500 — a

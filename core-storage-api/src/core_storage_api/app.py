@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from common.structlog_config import configure_logging
 from core_storage_api.config import settings
+from core_storage_api.services.postgres_service import DuplicateContentHashError
 
 # Must run before any other module-level import emits a log record —
 # database.init and the routers below pull in SQLAlchemy, httpx, etc., all
@@ -87,6 +88,26 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
         redirect_slashes=False,
     )
+
+    @app.exception_handler(DuplicateContentHashError)
+    async def _duplicate_content_hash_handler(
+        request: Request, exc: DuplicateContentHashError
+    ) -> JSONResponse:
+        # C29. Both memory-insert routes used to catch this and re-raise it as
+        # ``HTTPException(409, detail=str(exc))``. That could only ever send one
+        # string, which is why the winning row's id travelled as English and
+        # core-api's MCP server ended up regex-parsing it back out.
+        #
+        # ``detail`` is byte-identical to what those routes sent, so an older
+        # core-api reading this response is unaffected; the structured fields
+        # sit BESIDE it for anyone who wants the id without a regular
+        # expression. Registered for the dedicated subclass only — a bare
+        # ``ValueError`` handler would relabel genuine server faults as client
+        # errors, which is exactly what the routes were careful to avoid.
+        return JSONResponse(
+            status_code=409,
+            content={"detail": str(exc), **exc.fields},
+        )
 
     @app.exception_handler(json.JSONDecodeError)
     async def _malformed_json_handler(request: Request, exc: json.JSONDecodeError) -> JSONResponse:
