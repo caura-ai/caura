@@ -17,6 +17,39 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["stm"])
 
+# CAP-01 / F6 — surface honesty for STM.
+#
+# STM is advertised here and reachable nowhere. Three facts, all verified
+# against a running stack:
+#
+#   1. There is no REST WRITE route. POST /stm/notes and POST /stm/bulletin
+#      do not exist, so a caller who reads these docs and tries to put
+#      anything into short-term memory gets a bare 405 with no explanation.
+#      Writing is plugin-only.
+#   2. Every read, delete and promote below is gated on ``USE_STM``, which is
+#      off by default and is not tenant-toggleable — the setting appears
+#      nowhere in the hosted deployment, so a hosted customer cannot turn it
+#      on at any price.
+#   3. The gate's own message used to say "Set USE_STM=true to enable
+#      short-term memory", which is advice the reader it reaches cannot act
+#      on. Telling someone to flip a switch they cannot reach is worse than
+#      saying nothing.
+#
+# This block LABELS that. It does not enable STM, add the missing write
+# routes, or change any status code — STM stays dead by standing decision, and
+# A25 stays closed. The register's wording is the whole scope: label it, don't
+# build it.
+_PLUGIN_ONLY = (
+    "**Plugin-only — not available over hosted REST.** Short-term memory is "
+    "served by the OpenClaw plugin, not by this API. This operation is gated "
+    "on the server-side `USE_STM` setting, which is off in the hosted "
+    "deployment and cannot be enabled per tenant; it returns 422 there. "
+    "There is also no REST write route for STM (`POST /stm/notes` and "
+    "`POST /stm/bulletin` return 405), so nothing can be put into short-term "
+    "memory over REST even where reads are enabled. Self-hosted operators who "
+    "set `USE_STM=true` get the read, clear and promote operations only."
+)
+
 
 def _reject_reserved_memory_type(memory_type: str | None) -> None:
     """Twin of ``memories._reject_reserved_memory_type``, for the promote door.
@@ -36,10 +69,27 @@ def _reject_reserved_memory_type(memory_type: str | None) -> None:
 
 
 def _check_stm_enabled() -> None:
+    """Reject with a message the reader can actually act on.
+
+    The status stays 422 deliberately. It is arguably the wrong class — the
+    caller's arguments are fine, the capability is absent — but the code that
+    rides on it (``INVALID_ARGUMENTS``, derived from the status by
+    ``errors.STATUS_TO_CODE``) is part of the wire contract, and re-classing it
+    belongs with the error-design work in API-05 rather than here. What is in
+    scope is the message, which told hosted callers to set a variable they have
+    no way to reach.
+    """
     if not settings.use_stm:
         raise HTTPException(
             status_code=422,
-            detail="STM is not enabled. Set USE_STM=true to enable short-term memory.",
+            detail=(
+                "Short-term memory is not available on this deployment. STM is "
+                "plugin-only: it is served by the OpenClaw plugin, and the hosted "
+                "REST API cannot enable it (USE_STM is a server setting, not a "
+                "per-tenant one). Self-hosted operators can set USE_STM=true; "
+                "hosted callers should use the durable memory endpoints "
+                "(/memories, /search) instead."
+            ),
         )
 
 
@@ -54,7 +104,7 @@ def _require_tenant(auth: AuthContext) -> str:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/stm/notes")
+@router.get("/stm/notes", description=_PLUGIN_ONLY)
 async def get_notes(
     auth: AuthContext = Depends(get_auth_context),
     agent_id: str = Query(...),
@@ -85,7 +135,7 @@ async def get_notes(
     }
 
 
-@router.delete("/stm/notes")
+@router.delete("/stm/notes", description=_PLUGIN_ONLY)
 async def clear_notes(
     auth: AuthContext = Depends(get_auth_context),
     agent_id: str = Query(...),
@@ -111,7 +161,7 @@ async def clear_notes(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/stm/bulletin")
+@router.get("/stm/bulletin", description=_PLUGIN_ONLY)
 async def get_bulletin(
     auth: AuthContext = Depends(get_auth_context),
     fleet_id: str = Query(...),
@@ -130,7 +180,7 @@ async def get_bulletin(
     }
 
 
-@router.delete("/stm/bulletin")
+@router.delete("/stm/bulletin", description=_PLUGIN_ONLY)
 async def clear_bulletin(
     auth: AuthContext = Depends(get_auth_context),
     fleet_id: str = Query(...),
@@ -157,7 +207,7 @@ class PromoteRequest(BaseModel):
     visibility: str | None = None
 
 
-@router.post("/stm/promote")
+@router.post("/stm/promote", description=_PLUGIN_ONLY)
 async def promote_stm(
     body: PromoteRequest,
     auth: AuthContext = Depends(get_auth_context),

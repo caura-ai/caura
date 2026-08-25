@@ -534,12 +534,33 @@ async def lifespan(app):
         executor.shutdown(wait=False)
 
 
+# CAP-01 / F6. Tag-level labelling for capabilities whose REST surface is not
+# what its presence in this spec implies. Only STM qualifies today: it is
+# advertised here, gated on a server setting hosted tenants cannot reach, and
+# has no REST write route at all. The per-operation text lives in
+# ``routes/stm.py``; this is what a reader sees in the docs sidebar before
+# they open an operation.
+OPENAPI_TAGS = [
+    {
+        "name": "stm",
+        "description": (
+            "**Plugin-only — not available over hosted REST.** Short-term "
+            "memory is served by the OpenClaw plugin. These operations are "
+            "gated on the server-side `USE_STM` setting, which is off in the "
+            "hosted deployment and is not per-tenant, and there is no REST "
+            "write route for STM at all. Use `/memories` and `/search` for "
+            "durable memory."
+        ),
+    },
+]
+
 app = FastAPI(
     title="Caura",
     version=VERSION,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
+    openapi_tags=OPENAPI_TAGS,
     lifespan=lifespan,
 )
 
