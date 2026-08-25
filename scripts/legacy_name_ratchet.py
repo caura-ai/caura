@@ -71,6 +71,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -272,6 +273,20 @@ def _literal(path: str) -> str:
     read as pathspec magic. ``:(literal)`` disables both.
     """
     return f":(literal){path}"
+
+
+def _release_please_branch() -> bool:
+    """True when CI builds release-please's own PR branch.
+
+    release-please regenerates per-package CHANGELOGs by quoting merged PR
+    titles verbatim, so titles that legitimately carried the old brand
+    (history — rule 2 says never edit it) resurface as lines this tally
+    cannot tell from fresh minting. Only that bot's branches get the
+    exemption; a human editing a CHANGELOG still answers to the gate.
+    GITHUB_HEAD_REF is set by Actions on pull_request runs and absent
+    locally, so local runs keep full coverage.
+    """
+    return os.environ.get("GITHUB_HEAD_REF", "").startswith("release-please--")
 
 
 class Scan(NamedTuple):
@@ -690,10 +705,16 @@ def main() -> int:
 
     grown = {}
     excused: dict[str, Counter[str]] = {}
+    generated_changelogs: list[str] = []
+    release_branch = _release_please_branch()
     # Sorted: the budget is spent as files are visited, so the order decides which
     # destination is charged when one text lands in several. Arbitrary is fine;
     # unstable is not.
     for path in sorted(head):
+        if release_branch and path.rsplit("/", 1)[-1].upper().startswith("CHANGELOG"):
+            if head[path] > base.get(path, 0):
+                generated_changelogs.append(path)
+            continue
         before, n = base.get(path, 0), head[path]
         # Deliberately NOT gated on ``n > before``. A file that drops one branded
         # line and adds a different, brand-new one in the same edit comes out
@@ -708,6 +729,14 @@ def main() -> int:
             grown[path] = (before, n, minted)
 
     _report_excused_moves(excused, base_by_file, head_by_file)
+
+    if generated_changelogs:
+        print(
+            f"{len(generated_changelogs)} generated CHANGELOG file(s) exempt on this "
+            "release-please branch (titles quoted from history):"
+        )
+        for path in sorted(generated_changelogs):
+            print(f"  {path}")
 
     if not grown:
         removed = sum(max(0, c - head.get(p, 0)) for p, c in base.items())

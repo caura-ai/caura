@@ -12,6 +12,7 @@ case-insensitive match are all git's behaviour, not ours.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -50,13 +51,26 @@ def repo(tmp_path: Path) -> Path:
     return r
 
 
-def _run(repo: Path, *extra: str) -> subprocess.CompletedProcess:
+def _run(
+    repo: Path, *extra: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    """Run the script; ``env`` entries are merged over the inherited environment.
+
+    ``GITHUB_HEAD_REF`` is stripped from the inherited environment first. The
+    suite itself runs under Actions on pull_request builds, where that variable
+    names whatever branch the PR happens to be — including release-please's own,
+    which is exactly when its CHANGELOG exemption tests would otherwise flip.
+    Branch context is simulated explicitly via ``env``, never inherited.
+    """
+    merged = {k: v for k, v in os.environ.items() if k != "GITHUB_HEAD_REF"}
+    merged.update(env or {})
     return subprocess.run(
         [sys.executable, str(SCRIPT), "--base", "HEAD", *extra],
         cwd=repo,
         capture_output=True,
         text=True,
         check=False,  # a non-zero exit is the thing under test
+        env=merged,
     )
 
 
@@ -967,3 +981,51 @@ def test_an_untouched_exemption_is_not_reported(repo: Path) -> None:
     result = _run(repo)
 
     assert "exempt line(s) removed" not in result.stdout
+
+
+# ── release-please's own branches: generated CHANGELOGs are exempt ───────────
+#
+# release-please regenerates per-package CHANGELOGs by quoting merged PR titles
+# verbatim, so a title that legitimately carried the old brand (history — rule 2
+# says never edit it) resurfaces as a line the tally cannot tell from fresh
+# minting. The exemption is gated on GITHUB_HEAD_REF naming the bot's own
+# branch, and scoped to CHANGELOG files — nothing else on that branch, and no
+# CHANGELOG anywhere else, is excused.
+
+_RELEASE_ENV = {"GITHUB_HEAD_REF": "release-please--branches--main"}
+
+
+def test_a_changelog_passes_on_a_release_please_branch(repo: Path) -> None:
+    _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
+
+    result = _run(repo, env=_RELEASE_ENV)
+
+    assert result.returncode == 0, result.stdout
+    assert "1 generated CHANGELOG file(s) exempt on this" in result.stdout
+    assert "CHANGELOG.md" in result.stdout
+
+
+def test_the_same_changelog_fails_off_the_bot_branch(repo: Path) -> None:
+    """The exemption is the bot's, not the file's: a human minting the name in a
+    CHANGELOG on an ordinary branch — or locally, where GITHUB_HEAD_REF is
+    absent — still answers to the gate."""
+    _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "CHANGELOG.md" in result.stdout
+
+
+def test_the_exemption_is_path_scoped_to_changelogs(repo: Path) -> None:
+    """The bot's branch buys no headroom outside the files the bot generates: a
+    non-CHANGELOG mint on that branch fails exactly as it would anywhere."""
+    _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
+    _stage(repo, "new.py", f'KEY = "{LEGACY}-new-service"\n')
+
+    result = _run(repo, env=_RELEASE_ENV)
+
+    assert result.returncode == 1
+    offenders = result.stdout.split("adds the legacy name in", 1)[1]
+    assert "new.py" in offenders
+    assert "CHANGELOG.md" not in offenders
