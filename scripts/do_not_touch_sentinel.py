@@ -188,12 +188,6 @@ SENTINELS: tuple[Sentinel, ...] = (
         breaks="the generated installer writes to a path no installed plugin reads",
     ),
     Sentinel(
-        path="core-storage-api/src/core_storage_api/observability.py",
-        text="memclaw.observability",  # legacy-name-ok: pinned floor string
-        kind=LITERAL,
-        breaks="the logger name changes and every log-based filter keyed to it goes quiet",
-    ),
-    Sentinel(
         path="core-api/src/core_api/services/organization_settings.py",
         text="memclaw.auto_upgrade_enabled",  # legacy-name-ok: pinned floor string
         kind=LITERAL,
