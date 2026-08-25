@@ -34,6 +34,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -108,11 +109,16 @@ async def _wire_llm_fn():
     # the heavy DB/LLM deps. ImportError is the explicit fallback
     # signal: ``common.llm`` not installed (e.g. a packaging variant
     # without the LLM provider chain).
+    #
+    # Every name here is one ``common.llm`` actually exports. It used to ask for
+    # ``LLMRequest``, which has never existed in that module, so this import
+    # always raised and the ``except`` below always ran: the CLI has never once
+    # used a real LLM, and it said so in a warning that blamed a packaging
+    # variant rather than a wrong import. The fake fallback is a real feature
+    # here — the point is that it was reached unconditionally.
     try:
-        from common.llm import (  # type: ignore[import-not-found]
-            LLMRequest,
-            call_with_fallback,
-        )
+        from common.llm import LLMProvider, call_with_fallback
+        from common.provider_names import ProviderName
     except ImportError:
         logger.warning(
             "forge_dry_run: common.llm not importable; falling back to "
@@ -122,13 +128,28 @@ async def _wire_llm_fn():
         )
         return _fake_llm_fn
 
+    # Same selector the enrichment write path uses; see the matching comment in
+    # ``core_api.services.forge.cron_handler._wire_llm_fn``. Setting it to
+    # ``fake`` is the supported way to force placeholder output on a machine
+    # that DOES have provider keys configured.
+    provider_name = os.environ.get("ENTITY_EXTRACTION_PROVIDER", ProviderName.OPENAI)
+
     async def llm_fn(prompt: str) -> str:
-        # Tenant-resolution and provider chain are handled inside
-        # call_with_fallback. We pass the prompt as a single user
-        # message; the prompt itself carries the system framing.
-        request = LLMRequest(messages=[{"role": "user", "content": prompt}])
-        response = await call_with_fallback(request, expecting="json")
-        return response.text
+        async def _call(llm: LLMProvider) -> str:
+            # ``complete_text``, not ``complete_json``: ``LlmFn``'s contract is
+            # raw text, which ``parse_distill_response`` parses downstream.
+            return await llm.complete_text(prompt)
+
+        # ``fake_fn`` is the documented promise of this CLI — placeholder output
+        # rather than a failed run when no provider answers. That is the
+        # opposite of the cron's posture, which refuses to persist a stub; the
+        # difference is deliberate and is why the two do not share this wiring.
+        return await call_with_fallback(
+            primary_provider_name=provider_name,
+            call_fn=_call,
+            fake_fn=_fake_distill_json,
+            service_label="forge_dry_run",
+        )
 
     return llm_fn
 
@@ -140,12 +161,24 @@ _FAKE_LLM_COUNTER = {"n": 0}
 
 
 async def _fake_llm_fn(_prompt: str) -> str:
-    """Deterministic placeholder LLM. Returns a valid JSON response
-    that ``parse_distill_response`` will accept. Used when
-    ``common.llm`` is not importable (no LLM provider chain
-    available) so an operator can still smoke the
-    extraction → cluster → fingerprint → write pipeline without
-    needing API keys."""
+    """Deterministic placeholder LLM, as an ``LlmFn``.
+
+    Kept as the async shape ``run_forge_distill`` expects, for the path where
+    ``common.llm`` is not importable at all. When the provider chain IS
+    importable, the same payload is reached through ``call_with_fallback``'s
+    ``fake_fn`` seam, which requires a synchronous callable — hence the split.
+    """
+    return _fake_distill_json()
+
+
+def _fake_distill_json() -> str:
+    """The placeholder payload itself: a valid JSON response that
+    ``parse_distill_response`` will accept, so an operator can smoke the
+    extraction → cluster → fingerprint → write pipeline without API keys.
+
+    Synchronous because ``call_with_fallback`` types ``fake_fn`` as
+    ``Callable[[], T]`` and calls it without awaiting.
+    """
     _FAKE_LLM_COUNTER["n"] += 1
     n = _FAKE_LLM_COUNTER["n"]
     payload = {
@@ -306,8 +339,12 @@ async def _run(args: argparse.Namespace) -> int:
             max_writes_per_run=args.max_writes_per_run,
         )
 
+        # No positional argument: ``run_forge_distill`` is keyword-only and takes
+        # none. The session used to be its first parameter; when that was removed
+        # this call site was not updated, so every real invocation died on
+        # ``TypeError: too many positional arguments``. ``db`` is still needed —
+        # the wiring helpers above close over it — just not here.
         result = await run_forge_distill(
-            db,
             tenant_id=args.tenant,
             fleet_id=args.fleet,
             window_start=window_start,

@@ -387,6 +387,41 @@ class TestForgeDryRunFakeLLMFallback:
             assert key in parsed, f"fake-LLM missing required key: {key}"
 
     @pytest.mark.asyncio
+    async def test_wire_llm_fn_does_not_degrade_when_chain_importable(self):
+        """The fallback must be a fallback, not the only path.
+
+        ``_wire_llm_fn`` selects between the real provider chain and the
+        placeholder stub by catching ImportError. It asked ``common.llm`` for
+        ``LLMRequest``, a name that module has never exported, so the import
+        always raised and the CLI silently ran in FAKE-LLM mode on every
+        invocation — while logging a warning that blamed a packaging variant
+        rather than a wrong import. Nothing caught it for the file's whole
+        lifetime because the sibling tests here exercise ``_fake_llm_fn``
+        directly and deliberately skip the branch selection.
+
+        Asserting the negative is the point: with ``common.llm`` importable,
+        whatever comes back must NOT be the stub. Returns the callable without
+        calling it, so this stays hermetic — no provider is constructed and no
+        network is touched.
+        """
+        import importlib.util
+        import pathlib
+
+        pytest.importorskip("common.llm")
+
+        script_path = pathlib.Path("scripts/forge_dry_run.py")
+        spec = importlib.util.spec_from_file_location("forge_dry_run_3", script_path)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        llm_fn = await mod._wire_llm_fn()
+        assert llm_fn is not mod._fake_llm_fn, (
+            "_wire_llm_fn fell back to the fake stub even though common.llm "
+            "imports — the real-provider branch is unreachable again"
+        )
+
+    @pytest.mark.asyncio
     async def test_fake_llm_each_call_distinct_slug(self):
         # Two calls must yield distinct slugs so a multi-cluster run
         # doesn't collide on doc_id.
@@ -410,6 +445,52 @@ class TestForgeDryRunFakeLLMFallback:
         from core_api.services.forge.distill_prompt import _SLUG_RE
         assert _SLUG_RE.fullmatch(slug1)
         assert _SLUG_RE.fullmatch(slug2)
+
+
+@pytest.mark.unit
+class TestForgeCronLlmWiring:
+    """``cron_handler._wire_llm_fn`` is the production path, and it carried the
+    same wrong import as the CLI — asking ``common.llm`` for ``LLMRequest``,
+    which that module has never exported. Its ``except ImportError`` turns the
+    failure into ``RuntimeError``, so every tick died at the wiring step and the
+    distill cron could not run at all, while the message blamed a missing
+    provider chain rather than the import.
+
+    It was invisible to the type gate as well: ``core_api.services.forge.*`` is
+    deliberately opted IN to mypy (``ignore_errors = false``), but ``common/``
+    sits outside core-api's ``mypy_path``, so every ``common.*`` symbol resolves
+    to ``Any`` and neither the missing name nor the wrong call signature could be
+    reported. These two asserts are what stands in for that until the service
+    runs can see ``common/``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_wire_llm_fn_resolves(self):
+        """Wiring must succeed — not raise — when the provider chain imports."""
+        pytest.importorskip("common.llm")
+        from core_api.services.forge.cron_handler import _wire_llm_fn
+
+        llm_fn = await _wire_llm_fn()
+        assert callable(llm_fn)
+
+    @pytest.mark.asyncio
+    async def test_cron_refuses_to_persist_a_stub(self, monkeypatch):
+        """The cron must never mint placeholder skills.
+
+        ``call_with_fallback`` always has a ``fake_fn`` last resort, and this
+        tick PERSISTS what it returns as skill candidates. So the cron's
+        ``fake_fn`` raises in both of the contexts ``deliberate_fake_provider``
+        distinguishes — a deliberately-configured ``fake`` provider and a real
+        provider whose attempts all failed. Verified through the deliberate-fake
+        route because it needs no outage to reproduce.
+        """
+        pytest.importorskip("common.llm")
+        from core_api.services.forge.cron_handler import _wire_llm_fn
+
+        monkeypatch.setenv("ENTITY_EXTRACTION_PROVIDER", "fake")
+        llm_fn = await _wire_llm_fn()
+        with pytest.raises(RuntimeError, match="will not mint placeholder"):
+            await llm_fn("any prompt")
 
 
 # ── Clustering ────────────────────────────────────────────────────
