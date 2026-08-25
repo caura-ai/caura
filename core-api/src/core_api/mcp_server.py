@@ -666,6 +666,16 @@ def _with_latency(result: str, t0: float) -> str | CallToolResult:
             if isinstance(data.get("error"), dict):
                 return _as_error_result(payload)
             return payload
+        # C24 — valid JSON that is NOT a dict (``_serialize``'s list branch,
+        # or a bare scalar) must go back UNCHANGED. The old fall-through
+        # appended the plain-text ``_latency_ms`` line after the JSON,
+        # producing ``[...]\n\n_latency_ms: N`` — trailing junk that strict
+        # parsers reject (the likely source of the field-reported "invalid
+        # JSON" sighting; REST serialization cannot emit it). An array can't
+        # carry the stamp without changing its shape, and no client ever
+        # successfully parsed the stamped form anyway — so valid JSON wins
+        # over the telemetry line here. Prose payloads below keep the suffix.
+        return result
     except (json.JSONDecodeError, ValueError):
         pass
     return result + f"\n\n_latency_ms: {ms}"
