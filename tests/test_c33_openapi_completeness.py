@@ -128,6 +128,6 @@ def test_servers_block_absent_by_default(monkeypatch):
 def test_servers_block_present_when_configured(monkeypatch):
     from core_api.config import settings
 
-    monkeypatch.setattr(settings, "public_api_url", "https://memclaw.dev/")
+    monkeypatch.setattr(settings, "public_api_url", "https://api.caura.ai/")
     spec = _fresh_spec()
-    assert spec.get("servers") == [{"url": "https://memclaw.dev"}]
+    assert spec.get("servers") == [{"url": "https://api.caura.ai"}]

@@ -292,7 +292,7 @@ class SettingsResponse(BaseModel):
     chunking: dict
     write: WriteSettings
     agents: dict
-    memclaw: dict
+    memclaw: dict  # legacy-name-ok: documents the existing settings wire key
     security_audit: dict
     skills_factory: dict
     interviewer: dict
