@@ -24,7 +24,7 @@ no longer shown here, is published with its full notes at
 
 ### Bug Fixes
 
-* **api:** the OpenAPI titles four services publish still said MemClaw ([#901](https://github.com/caura-ai/caura/issues/901)) ([0ad6311](https://github.com/caura-ai/caura/commit/0ad63113363021808c9c5bcb8c32fb4d35e803e7))
+* **api:** the OpenAPI titles four services publish used the previous brand name ([#901](https://github.com/caura-ai/caura/issues/901)) ([0ad6311](https://github.com/caura-ai/caura/commit/0ad63113363021808c9c5bcb8c32fb4d35e803e7))
 * **apm:** stop Pub/Sub pull timeouts from reporting as error spans ([#949](https://github.com/caura-ai/caura/issues/949)) ([3cc6ea8](https://github.com/caura-ai/caura/commit/3cc6ea8dc15bc28748e9d2a466a67cc101db4561))
 * **ci:** pin the plugin's self-migration anchors in the do-not-touch sentinel ([#936](https://github.com/caura-ai/caura/issues/936)) ([bbac414](https://github.com/caura-ai/caura/commit/bbac41464eb6347f38165d24a1be22646ea865a1))
 * **events:** refuse a FLIPPED_FAMILIES entry that names no real family ([#914](https://github.com/caura-ai/caura/issues/914)) ([c40a558](https://github.com/caura-ai/caura/commit/c40a558267cad820feff4d19cea4f6cafc39f7d4))
@@ -33,7 +33,7 @@ no longer shown here, is published with its full notes at
 * **images:** stamp the current brand in the published image description ([#934](https://github.com/caura-ai/caura/issues/934)) ([b310136](https://github.com/caura-ai/caura/commit/b310136030ca6d72b024f4e2b170e5ceb8ae0ed7))
 * **mcp:** stop the identity surface misdescribing itself ([#951](https://github.com/caura-ai/caura/issues/951)) ([a28938d](https://github.com/caura-ai/caura/commit/a28938d34af3b501ec097dcacadb83f35e307f6f))
 * **plugin:** caura_list scope='all' spans fleets instead of narrowing to one ([#904](https://github.com/caura-ai/caura/issues/904)) ([2bdf359](https://github.com/caura-ai/caura/commit/2bdf35933e747cda1f57fb21a30b2d52e8c9b684))
-* **plugin:** the strings the plugin emits still said memclaw ([#902](https://github.com/caura-ai/caura/issues/902)) ([b8450a6](https://github.com/caura-ai/caura/commit/b8450a64c2780206fae5e65d0d40442487e492f0))
+* **plugin:** the strings the plugin emits used the previous brand name ([#902](https://github.com/caura-ai/caura/issues/902)) ([b8450a6](https://github.com/caura-ai/caura/commit/b8450a64c2780206fae5e65d0d40442487e492f0))
 * **ratchet:** git chooses which files the exemption report examines, not the tally ([#903](https://github.com/caura-ai/caura/issues/903)) ([c3ec9aa](https://github.com/caura-ai/caura/commit/c3ec9aab1f31ed1ec017629f72a4183853bc413f))
 * **ratchet:** report exempt lines this change removed ([#944](https://github.com/caura-ai/caura/issues/944)) ([5b5a8cb](https://github.com/caura-ai/caura/commit/5b5a8cb0cff3b9f9e2e0e93937260d91775a205a))
 * **ratchet:** the gate cannot be run on a non-UTF-8 workstation ([#892](https://github.com/caura-ai/caura/issues/892)) ([599b72b](https://github.com/caura-ai/caura/commit/599b72b3ad99f4c25bf527cb577f5535706fd46e))
@@ -59,7 +59,7 @@ no longer shown here, is published with its full notes at
 * teach CAURA_INTERVIEWER in the interviewer section ([#909](https://github.com/caura-ai/caura/issues/909)) ([739f1f2](https://github.com/caura-ai/caura/commit/739f1f2977de165b8373c4c4b0bedd8a552dd6e1))
 * teach the CAURA_* env names, with one surviving alias table ([#912](https://github.com/caura-ai/caura/issues/912)) ([34ab13e](https://github.com/caura-ai/caura/commit/34ab13e2f6a06f7beb274c0c63901e82eb61a43c))
 * teach the CAURA_* names everywhere humans read ([#929](https://github.com/caura-ai/caura/issues/929)) ([815221d](https://github.com/caura-ai/caura/commit/815221de4ac44e1db01e8b4c30b5eb53c1be9743))
-* the interviewer CLI ships in caura-client, not memclaw-client ([#907](https://github.com/caura-ai/caura/issues/907)) ([14b7e0c](https://github.com/caura-ai/caura/commit/14b7e0cbcd1257dc1ad24242f14d5ceb58c84088))
+* the interviewer CLI ships in caura-client, not the legacy client package ([#907](https://github.com/caura-ai/caura/issues/907)) ([14b7e0c](https://github.com/caura-ai/caura/commit/14b7e0cbcd1257dc1ad24242f14d5ceb58c84088))
 
 
 ### Code Refactoring

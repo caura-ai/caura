@@ -16,7 +16,7 @@ no longer shown here, is published with its full notes at
 
 * **mcp:** stop the identity surface misdescribing itself ([#951](https://github.com/caura-ai/caura/issues/951)) ([a28938d](https://github.com/caura-ai/caura/commit/a28938d34af3b501ec097dcacadb83f35e307f6f))
 * **plugin:** caura_list scope='all' spans fleets instead of narrowing to one ([#904](https://github.com/caura-ai/caura/issues/904)) ([2bdf359](https://github.com/caura-ai/caura/commit/2bdf35933e747cda1f57fb21a30b2d52e8c9b684))
-* **plugin:** the strings the plugin emits still said memclaw ([#902](https://github.com/caura-ai/caura/issues/902)) ([b8450a6](https://github.com/caura-ai/caura/commit/b8450a64c2780206fae5e65d0d40442487e492f0))
+* **plugin:** the strings the plugin emits used the previous brand name ([#902](https://github.com/caura-ai/caura/issues/902)) ([b8450a6](https://github.com/caura-ai/caura/commit/b8450a64c2780206fae5e65d0d40442487e492f0))
 * stop minting old-brand strings into new installs and registrations ([#928](https://github.com/caura-ai/caura/issues/928)) ([f877e09](https://github.com/caura-ai/caura/commit/f877e098076eae1d570b03a4c5e0c0c01fed1b2b))
 
 
