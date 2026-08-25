@@ -8,6 +8,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp as ASGIApplication
@@ -563,6 +564,96 @@ app = FastAPI(
     openapi_tags=OPENAPI_TAGS,
     lifespan=lifespan,
 )
+
+
+# ── Error responses in the spec (C32 / API-05) ────────────────────────────
+#
+# Before this, 422 was the ONLY documented error response on the whole surface.
+# Every other failure — every 401, every 403 — was absent from the spec, so a
+# generated client had no type for the body it will certainly receive, and an
+# agent reading the spec offline could reasonably conclude those statuses do not
+# occur. They occur constantly: authentication and authorization are checked on
+# essentially every route.
+#
+# Injected once over the generated schema rather than declared per route.
+# ``responses={401: ..., 403: ...}`` on ~91 path operations is the same fact
+# written ninety-one times, and the copy that gets forgotten is the one that
+# matters. Existing per-route declarations win — this only fills gaps.
+_ERROR_ENVELOPE_REF = "CauraError"
+
+_ERROR_ENVELOPE_SCHEMA: dict = {
+    "type": "object",
+    "title": "CauraError",
+    "description": (
+        "Canonical error envelope. ``detail`` is the human-readable message and "
+        "is retained for backwards compatibility; ``error.code`` is the stable "
+        "machine-readable identifier and is what clients should branch on."
+    ),
+    "properties": {
+        "detail": {"type": "string", "description": "Human-readable message."},
+        "error": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Stable UPPER_SNAKE identifier. Derived from the status "
+                        "code unless the raiser supplied a specific one — e.g. "
+                        "READ_ONLY_CREDENTIAL vs PLAN_LIMIT_READ_ONLY, which are "
+                        "both 403 and need different responses from the caller."
+                    ),
+                },
+                "message": {"type": "string"},
+                "details": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "description": "Optional structured context, e.g. remediation or existing_id.",
+                },
+            },
+            "required": ["code", "message"],
+        },
+    },
+    "required": ["detail", "error"],
+}
+
+# Status → description, for the statuses every authenticated route can return.
+_INJECTED_ERROR_RESPONSES: dict[str, str] = {
+    "401": "Authentication failed or was not supplied.",
+    "403": "Authenticated, but not permitted to perform this operation.",
+}
+
+
+def _openapi_with_error_responses() -> dict:
+    """Generate the spec, then document the errors every route can return."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        routes=app.routes,
+        tags=OPENAPI_TAGS,
+    )
+    schema.setdefault("components", {}).setdefault("schemas", {})[_ERROR_ENVELOPE_REF] = (
+        _ERROR_ENVELOPE_SCHEMA
+    )
+    ref = {"$ref": f"#/components/schemas/{_ERROR_ENVELOPE_REF}"}
+    for path_item in schema.get("paths", {}).values():
+        for method, operation in path_item.items():
+            if method not in {"get", "put", "post", "delete", "patch"}:
+                continue
+            responses = operation.setdefault("responses", {})
+            for status, description in _INJECTED_ERROR_RESPONSES.items():
+                if status in responses:
+                    continue  # a route that documented its own says it better
+                responses[status] = {
+                    "description": description,
+                    "content": {"application/json": {"schema": ref}},
+                }
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _openapi_with_error_responses  # type: ignore[method-assign]
 
 # slowapi reads limiter + handler from app.state; decorators in
 # middleware/rate_limit.py consult this at request time.

@@ -68,3 +68,49 @@ def make_error_payload(
     if details:
         payload["error"]["details"] = details
     return payload
+
+
+# ── Codes for the auth boundary (C32 / API-05) ────────────────────────────
+#
+# Why these exist at all. ``code_for_status`` maps every 403 to ``FORBIDDEN``
+# and every 401 to ``UNAUTHORIZED``, so the eight distinct reasons a request can
+# be refused at this boundary arrived at the caller as one word. An agent that
+# gets FORBIDDEN on a write cannot tell "this key is read-only" from "your org
+# is over its plan limit" from "this action needs an admin" — and the only move
+# left is to guess. One did: an agent was refused a write with a tenant key and
+# concluded that tenant keys cannot write, which is false, and then stopped
+# trying. A wrong general rule learned from a specific refusal is worse than no
+# answer, because the agent stops asking.
+#
+# Each code names one reason and each message says what would work instead.
+# ``MISSING_AGENT_ID`` in ``mcp_server`` is the shape being copied: what
+# happened, why, and the concrete way out.
+AUTH_READ_ONLY_KEY = "READ_ONLY_CREDENTIAL"
+AUTH_DEMO_SANDBOX = "DEMO_SANDBOX_READ_ONLY"
+AUTH_PLAN_LIMIT = "PLAN_LIMIT_READ_ONLY"
+AUTH_ADMIN_REQUIRED = "ADMIN_REQUIRED"
+AUTH_ORG_ADMIN_REQUIRED = "ORG_ADMIN_REQUIRED"
+AUTH_MISSING_API_KEY = "MISSING_API_KEY"
+AUTH_INVALID_API_KEY = "INVALID_API_KEY"
+AUTH_MISSING_TENANT_CONTEXT = "MISSING_TENANT_CONTEXT"
+AUTH_GATEWAY_ONLY = "GATEWAY_ONLY"
+AUTH_AGENT_CREDENTIAL_FORBIDDEN = "AGENT_CREDENTIAL_FORBIDDEN"
+AUTH_TENANT_MISMATCH = "TENANT_MISMATCH"
+AUTH_TENANT_NOT_READABLE = "TENANT_NOT_READABLE"
+AUTH_CROSS_TENANT_REQUIRED = "CROSS_TENANT_READ_REQUIRED"
+AUTH_ORG_SUSPENDED = "ORGANIZATION_SUSPENDED"
+
+
+def coded_detail(code: str, message: str, **details: object) -> dict:
+    """An ``HTTPException`` detail that keeps its own error code.
+
+    ``app.http_exception_handler`` recognises this shape and emits
+    ``{"detail": message, "error": {"code", "message", "details"}}`` — so the
+    top-level ``detail`` a client already reads is unchanged and stays a plain
+    string, while the code and any structured context ride alongside.
+
+    Use this instead of a bare string wherever the caller's next action depends
+    on WHICH refusal this is. A bare string is not wrong, it is just
+    indistinguishable: it collapses into the status-derived code above.
+    """
+    return {"code": code, "message": message, "details": dict(details)}

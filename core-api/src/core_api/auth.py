@@ -5,8 +5,10 @@ import logging
 from fastapi import HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 
+from core_api import errors
 from core_api.config import settings
 from core_api.constants import API_KEY_HEADER
+from core_api.errors import coded_detail
 from core_api.suppression import is_tenant_suppressed
 from core_api.tenant_context import set_current_tenant, set_readable_tenants
 
@@ -160,11 +162,27 @@ class AuthContext:
         the write target, not here.
         """
         if self.is_demo:
-            raise HTTPException(status_code=403, detail="Demo sandbox is read-only.")
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    errors.AUTH_DEMO_SANDBOX,
+                    "Demo sandbox is read-only.",
+                    remediation="Use a real tenant credential to write.",
+                ),
+            )
         if self.capabilities is not None and "write" not in self.capabilities:
             raise HTTPException(
                 status_code=403,
-                detail="This API key is read-only and cannot perform write operations.",
+                detail=coded_detail(
+                    errors.AUTH_READ_ONLY_KEY,
+                    "This API key is read-only and cannot perform write operations.",
+                    remediation=(
+                        "This is a property of the CREDENTIAL, not of the endpoint or "
+                        "of tenant keys in general — mint a key with the 'write' "
+                        "capability (Settings → Organization → API Credentials) and "
+                        "retry the same call."
+                    ),
+                ),
             )
 
     def enforce_usage_limits(self) -> None:
@@ -177,23 +195,39 @@ class AuthContext:
         if self.is_read_only:
             raise HTTPException(
                 status_code=403,
-                detail=(
+                detail=coded_detail(
+                    errors.AUTH_PLAN_LIMIT,
                     "Organization is in read-only mode: usage exceeds plan limits. "
-                    "Upgrade your plan or delete data to restore write access."
+                    "Upgrade your plan or delete data to restore write access.",
+                    remediation="Deletes stay permitted so you can get back under the limit.",
                 ),
             )
 
     def enforce_admin(self) -> None:
         """Raise 403 unless the caller is the system super admin."""
         if not self.is_admin:
-            raise HTTPException(status_code=403, detail="Admin access required")
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    errors.AUTH_ADMIN_REQUIRED,
+                    "Admin access required",
+                    remediation="This endpoint needs the system admin key; a tenant or agent credential cannot reach it.",
+                ),
+            )
 
     def enforce_org_admin(self) -> None:
         """Raise 403 unless the caller is an org admin (or super admin)."""
         if self.is_admin:
             return
         if self.org_role != "admin":
-            raise HTTPException(status_code=403, detail="Org admin access required")
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    errors.AUTH_ORG_ADMIN_REQUIRED,
+                    "Org admin access required",
+                    remediation="Your credential is authenticated but its org role is not 'admin'.",
+                ),
+            )
 
     def enforce_not_agent_credential(self, action: str = "perform this action") -> None:
         """Raise 403 if the caller is an agent-scoped credential.
@@ -212,7 +246,11 @@ class AuthContext:
         if self.agent_id:
             raise HTTPException(
                 status_code=403,
-                detail=f"Agent-scoped credentials cannot {action}; use an admin credential.",
+                detail=coded_detail(
+                    errors.AUTH_AGENT_CREDENTIAL_FORBIDDEN,
+                    f"Agent-scoped credentials cannot {action}; use an admin credential.",
+                    action=action,
+                ),
             )
 
     def enforce_tenant(self, requested_tenant: str) -> None:
@@ -222,7 +260,12 @@ class AuthContext:
         if self.tenant_id != requested_tenant:
             raise HTTPException(
                 status_code=403,
-                detail=f"API key is not authorized for tenant '{requested_tenant}'",
+                detail=coded_detail(
+                    errors.AUTH_TENANT_MISMATCH,
+                    f"API key is not authorized for tenant '{requested_tenant}'",
+                    requested_tenant=requested_tenant,
+                    remediation="The credential is valid; it is bound to a different tenant.",
+                ),
             )
 
     def enforce_readable_tenant(self, requested_tenant: str) -> None:
@@ -237,7 +280,11 @@ class AuthContext:
         if requested_tenant not in self.readable_tenant_ids:
             raise HTTPException(
                 status_code=403,
-                detail=f"API key is not authorized to read tenant '{requested_tenant}'",
+                detail=coded_detail(
+                    errors.AUTH_TENANT_NOT_READABLE,
+                    f"API key is not authorized to read tenant '{requested_tenant}'",
+                    requested_tenant=requested_tenant,
+                ),
             )
 
     def enforce_cross_tenant_read(self) -> None:
@@ -258,7 +305,10 @@ class AuthContext:
         if not self.is_cross_tenant_read:
             raise HTTPException(
                 status_code=403,
-                detail="Cross-tenant read privileges are required for this report.",
+                detail=coded_detail(
+                    errors.AUTH_CROSS_TENANT_REQUIRED,
+                    "Cross-tenant read privileges are required for this report.",
+                ),
             )
 
     def enforce_write_scope(self) -> None:
@@ -274,7 +324,14 @@ class AuthContext:
         if "write" not in self.capabilities:
             raise HTTPException(
                 status_code=403,
-                detail="This API key is read-only and cannot perform write operations.",
+                detail=coded_detail(
+                    errors.AUTH_READ_ONLY_KEY,
+                    "This API key is read-only and cannot perform write operations.",
+                    remediation=(
+                        "A property of the credential, not of the endpoint — mint a key "
+                        "with the 'write' capability and retry."
+                    ),
+                ),
             )
 
 
@@ -303,7 +360,13 @@ async def _block_if_suppressed(tenant_id: str | None) -> None:
     if await is_tenant_suppressed(tenant_id):
         raise HTTPException(
             status_code=403,
-            detail="Organization is suspended; access denied.",
+            # Deliberately says nothing more. The generic wording is the point —
+            # see this function's docstring — so the code carries the machine
+            # signal without the message leaking org lifecycle state.
+            detail=coded_detail(
+                errors.AUTH_ORG_SUSPENDED,
+                "Organization is suspended; access denied.",
+            ),
         )
 
 
@@ -406,9 +469,19 @@ async def get_auth_context(
         if not key:
             raise HTTPException(
                 status_code=401,
-                detail="Missing API key. Include X-API-Key header.",
+                detail=coded_detail(
+                    errors.AUTH_MISSING_API_KEY,
+                    "Missing API key. Include X-API-Key header.",
+                ),
             )
-        raise HTTPException(status_code=401, detail="Invalid API key.")
+        raise HTTPException(
+            status_code=401,
+            detail=coded_detail(
+                errors.AUTH_INVALID_API_KEY,
+                "Invalid API key.",
+                remediation="The key was sent but did not match. Check for a truncated paste or a rotated key.",
+            ),
+        )
 
     # ── Path 3: Standalone mode (no key required) ──
     if settings.is_standalone:
@@ -434,7 +507,11 @@ async def get_auth_context(
         if gw_secret and not hmac.compare_digest(request.headers.get("x-gateway-secret") or "", gw_secret):
             raise HTTPException(
                 status_code=401,
-                detail="Direct access to this service is not permitted.",
+                detail=coded_detail(
+                    errors.AUTH_GATEWAY_ONLY,
+                    "Direct access to this service is not permitted.",
+                    remediation="Route the request through the public gateway host.",
+                ),
             )
         await _block_if_suppressed(tenant_id)
         # Cross-tenant credentials carry a list of readable tenants via
@@ -497,5 +574,8 @@ async def get_auth_context(
     # Unscoped access without authentication is not allowed.
     raise HTTPException(
         status_code=401,
-        detail="Missing API key or X-Tenant-ID header.",
+        detail=coded_detail(
+            errors.AUTH_MISSING_TENANT_CONTEXT,
+            "Missing API key or X-Tenant-ID header.",
+        ),
     )

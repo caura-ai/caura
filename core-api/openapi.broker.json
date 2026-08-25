@@ -350,6 +350,42 @@
         "title": "BulkMemoryResponse",
         "type": "object"
       },
+      "CauraError": {
+        "description": "Canonical error envelope. ``detail`` is the human-readable message and is retained for backwards compatibility; ``error.code`` is the stable machine-readable identifier and is what clients should branch on.",
+        "properties": {
+          "detail": {
+            "description": "Human-readable message.",
+            "type": "string"
+          },
+          "error": {
+            "properties": {
+              "code": {
+                "description": "Stable UPPER_SNAKE identifier. Derived from the status code unless the raiser supplied a specific one — e.g. READ_ONLY_CREDENTIAL vs PLAN_LIMIT_READ_ONLY, which are both 403 and need different responses from the caller.",
+                "type": "string"
+              },
+              "details": {
+                "additionalProperties": true,
+                "description": "Optional structured context, e.g. remediation or existing_id.",
+                "type": "object"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "detail",
+          "error"
+        ],
+        "title": "CauraError",
+        "type": "object"
+      },
       "ContradictionInfo": {
         "description": "Summary of a contradiction detected on write.\n\n``old_memory_id`` always refers to the **pre-existing candidate**\n(never to ``new_memory``), regardless of which row ended up being\nthe older one in the supersession chain. The ``direction`` field\ndisambiguates the two cases:\n\n  - ``\"canonical\"`` — the candidate is older than ``new_memory``;\n    the candidate became outdated/conflicted, ``new_memory``\n    carries ``supersedes_id`` pointing at it. (Historical behaviour.)\n  - ``\"flipped\"`` — the candidate is newer than ``new_memory``;\n    ``new_memory`` is the row that became outdated/conflicted, and\n    the candidate now carries ``supersedes_id`` pointing back at\n    ``new_memory``. This branch was previously unreachable\n    (CAURA-125; gap A6) and is now exercised by deferred-embedding\n    races and ``created_at`` ties.",
         "properties": {
@@ -1481,6 +1517,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
           }
         },
         "summary": "Health",
@@ -1817,6 +1873,26 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1908,6 +1984,26 @@
             },
             "description": "Multi-Status"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1974,6 +2070,26 @@
           "204": {
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2029,6 +2145,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
           },
           "422": {
             "content": {
@@ -2131,6 +2267,26 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2177,6 +2333,26 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2210,6 +2386,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
           }
         },
         "summary": "Version",

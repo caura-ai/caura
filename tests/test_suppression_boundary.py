@@ -10,6 +10,16 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
+
+from core_api import errors
+
+# C32 / API-05: ``detail`` on an auth refusal is now
+# ``{"code", "message", "details"}`` so the eight distinct reasons this boundary
+# can refuse a request stop collapsing into the single status-derived
+# ``FORBIDDEN``. The human message is unchanged and lives under ``["message"]``;
+# these assertions follow it there, and additionally pin the code — which is the
+# part a caller is now expected to branch on.
+
 from fastapi import HTTPException
 
 from core_api import suppression
@@ -130,7 +140,8 @@ async def test_block_if_suppressed_raises_403_when_suppressed(
     # Detail wording is intentionally generic — avoids leaking the
     # specific lifecycle state to a partner whose key was provisioned
     # under that org.
-    assert "suspended" in exc.value.detail.lower()
+    assert "suspended" in exc.value.detail["message"].lower()
+    assert exc.value.detail["code"] == errors.AUTH_ORG_SUSPENDED
 
 
 @pytest.mark.asyncio
