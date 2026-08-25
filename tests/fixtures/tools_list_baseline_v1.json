@@ -97,7 +97,7 @@
         },
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },
@@ -210,7 +210,7 @@
         },
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },
@@ -273,7 +273,7 @@
         },
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         }
@@ -298,7 +298,7 @@
       "properties": {
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },
@@ -454,7 +454,7 @@
       "properties": {
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },
@@ -742,7 +742,7 @@
         },
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         }
@@ -772,7 +772,7 @@
         },
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },
@@ -883,7 +883,7 @@
         },
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },
@@ -937,7 +937,7 @@
       "properties": {
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },
@@ -1106,7 +1106,7 @@
         },
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },

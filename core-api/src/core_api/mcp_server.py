@@ -130,6 +130,28 @@ _ADMIN = "__admin__"
 _NO_AUTH = "__no_auth__"
 _DEFAULT_AGENT_ID = DEFAULT_AGENT_ID
 
+# The most consequential parameter on the tool surface: it decides which agent
+# a write is attributed to, and which rows an agent-scoped read can see. All
+# ten tools documented it as "Caller agent." - two words - while defaulting to
+# a value the hosted gateway path actively REFUSES
+# (``_refuse_default_agent_on_gateway``). So the schema advertised a default
+# that cannot be used where most callers run, and said nothing about what to
+# send instead. An agent reading the tool list had no way to learn that.
+#
+# The DEFAULT itself is deliberately unchanged. "mcp-agent" is a legitimate
+# standalone identity by design (see ``core_api.agent_ids``); removing it would
+# break every single-tenant caller and change the schema for all of them. What
+# changes is that the schema now tells the truth about when it applies.
+#
+# Kept deliberately short. tools/list is re-sent on every agent session, so
+# this text is paid ten times per call; the first draft was three times this
+# length and pushed the surface 498 tokens over the ceiling in
+# tests/test_mcp_token_budget.py. +117 is the price of the three facts that
+# matter: what it attributes, what it filters, and that hosted needs a real one.
+_AGENT_ID_DESC = (
+    "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one."
+)
+
 
 def _error_response(code: str, message: str, **details) -> str:
     """Return the canonical MCP error envelope as a JSON string.
@@ -371,9 +393,12 @@ def _refuse_default_agent_on_gateway(agent_id: str) -> str | None:
         return None
     return _error_response(
         "MISSING_AGENT_ID",
-        "Writes via the gateway with a tenant-scoped credential must specify "
-        "an agent_id explicitly; the reserved default "
-        f"'{_DEFAULT_AGENT_ID}' is not accepted on this path. Either pass "
+        "This call reached the gateway with a tenant-scoped credential, which "
+        "carries no agent identity, so agent_id must be supplied explicitly; "
+        f"the reserved default '{_DEFAULT_AGENT_ID}' is not accepted on this "
+        "path. This applies to reads as well as writes: agent-scoped reads "
+        "filter by agent_id, so a defaulted value would quietly query one "
+        "shared identity's rows rather than yours. Either pass "
         "agent_id=<your-agent-name> or provision an agent-scoped credential "
         "(POST /api/v1/admin/agent-keys/provision, or via the dashboard at "
         "Settings → Organization → API Credentials with kind=agent_key) — "
@@ -663,7 +688,7 @@ def _storage_error_envelope(e: httpx.HTTPStatusError, t0: float) -> str | CallTo
 
 async def caura_recall(
     query: Annotated[str, Field(description="NL query.")],
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     filter_agent_id: Annotated[str | None, Field(description="Filter by author.")] = None,
     memory_type: Annotated[str | None, Field(description="Filter by type.")] = None,
     status: Annotated[str | None, Field(description="Filter by status.")] = None,
@@ -807,7 +832,7 @@ async def caura_write(
     items: Annotated[
         list[dict] | None, Field(description="Batch of objects, ≤100; each needs 'content'.")
     ] = None,
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     fleet_id: Annotated[str | None, Field(description="Fleet scope.")] = None,
     visibility: Annotated[str | None, Field(description="scope_team|scope_org|scope_agent.")] = None,
     memory_type: Annotated[str | None, Field(description="Type (single only).")] = None,
@@ -1060,7 +1085,7 @@ async def caura_manage(
     title: Annotated[str | None, Field(description="op=update.")] = None,
     metadata: Annotated[dict | None, Field(description="op=update.")] = None,
     source_uri: Annotated[str | None, Field(description="op=update.")] = None,
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
 ) -> str:
     """Per-memory lifecycle: read | update | transition | delete | bulk_delete | lineage.
 
@@ -1409,7 +1434,7 @@ async def caura_entity_get(
 
 
 async def caura_tune(
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     top_k: Annotated[int | None, Field(description="1-20.")] = None,
     min_similarity: Annotated[float | None, Field(description="0.1-0.9.")] = None,
     fts_weight: Annotated[float | None, Field(description="0=semantic, 1=keyword.")] = None,
@@ -1612,7 +1637,7 @@ async def caura_doc(
     order: Annotated[str, Field(description="op=query: asc|desc.")] = "asc",
     limit: Annotated[int, Field(description="op=query.")] = 20,
     offset: Annotated[int, Field(description="op=query.")] = 0,
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     fleet_id: Annotated[
         str | None,
         Field(description="op=write; optional scoping filter for op=list_collections|search."),
@@ -2267,7 +2292,7 @@ async def caura_doc(
 
 
 async def caura_list(
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     scope: Annotated[
         str,
         Field(
@@ -2497,7 +2522,7 @@ async def caura_stats(
         str | None,
         Field(description="Filter by fleet. When scope='fleet' and omitted, defaults to your home fleet."),
     ] = None,
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     memory_type: Annotated[str | None, Field(description="Filter by type.")] = None,
     status: Annotated[str | None, Field(description="Filter by status.")] = None,
     include_deleted: Annotated[
@@ -2627,7 +2652,7 @@ async def caura_insights(
     ],
     scope: Annotated[str, Field(description="agent|fleet|all.")] = "agent",
     fleet_id: Annotated[str | None, Field(description="Required when scope='fleet'.")] = None,
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
 ) -> str:
     """Analyze the memory store for patterns, contradictions, stale knowledge,
     or unexpected clusters; persist findings as ``insight`` memories.
@@ -2794,7 +2819,7 @@ async def caura_evolve(
         Field(description="Memory UUIDs that influenced the action."),
     ] = None,
     scope: Annotated[str, Field(description="agent|fleet|all.")] = "agent",
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     fleet_id: Annotated[str | None, Field(description="Required when scope='fleet'.")] = None,
 ) -> str:
     """Record a real-world outcome against the memories that influenced the
@@ -2984,7 +3009,7 @@ async def caura_evolve(
 
 
 async def caura_keystones(
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     fleet_id: Annotated[
         str | None,
         Field(description="Scope filter; supply to include fleet- and agent-scoped rules."),
