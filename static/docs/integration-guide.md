@@ -283,10 +283,11 @@ Without the `contextEngine` slot, you still get all 11 agent-facing tools, promp
 **Verify** — restart OpenClaw and check startup logs:
 
 ```
-[memclaw] Auto-educated 20 workspace(s), SKILL.md in 20, TOOLS.md in 20, AGENTS.md in 20
-[memclaw] ContextEngine 'memclaw' registered
-[memclaw] Smoke test passed (score: 0.953)
+[caura] Auto-educated workspaces (TOOLS.md: 20, AGENTS.md: 20)
+[caura] Smoke test passed (score: 0.953)
 ```
+
+You will also see `ContextEngine 'memclaw' registered` in the same log — the context engine keeps the original plugin id. <!-- legacy-name-ok: frozen engine id shown in a log sample -->
 
 The node will appear in the Fleet page (`/ui/fleet.html`) within 60 seconds.
 

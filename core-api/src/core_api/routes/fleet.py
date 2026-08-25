@@ -361,7 +361,7 @@ KNOWN_BROKEN_DEPLOY_VERSIONS: frozenset[str] = frozenset({"2.3.0"})
 # Pre-cap a misbehaving / malicious plugin could send
 # ``deploy_blocked_until = Number.MAX_SAFE_INTEGER`` and DoS its own
 # upgrade path indefinitely. 7 days is comfortably above the longest
-# ``MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS`` an operator would set.
+# ``CAURA_DEPLOY_FAILURE_COOLDOWN_HOURS`` an operator would set.
 MAX_BLOCK_MS: int = 7 * 24 * 3600 * 1000
 
 
@@ -716,7 +716,7 @@ async def heartbeat(
             if not agent_key:
                 continue
             # Bound ``display_name`` at the API boundary. Storage column
-            # is ``Text`` (unlimited) and ``MEMCLAW_DISPLAY_NAME_OVERRIDE``
+            # is ``Text`` (unlimited) and ``CAURA_DISPLAY_NAME_OVERRIDE``
             # passes verbatim from the plugin, so a hostile or buggy
             # client could push an oversized blob into audit logs and UI
             # rendering. 255 chars is comfortably above any real

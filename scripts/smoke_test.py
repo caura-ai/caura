@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MemClaw smoke test — hits the live API and reports pass/fail.
+"""Caura smoke test — hits the live API and reports pass/fail.
 
 Usage:
     python scripts/smoke_test.py                          # default: localhost:8000
@@ -91,7 +91,7 @@ class SmokeTest:
         t_start = time.monotonic()
 
         if not self.json_output:
-            print(f"\n  MemClaw Smoke Test")
+            print(f"\n  Caura Smoke Test")
             print(f"  URL: {self.base}")
             print(f"  Tenant: {TENANT}")
             print()
@@ -2005,7 +2005,7 @@ class SmokeTest:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MemClaw smoke test")
+    parser = argparse.ArgumentParser(description="Caura smoke test")
     parser.add_argument(
         "--url", default=DEFAULT_URL, help=f"Base URL (default: {DEFAULT_URL})"
     )

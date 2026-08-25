@@ -85,15 +85,18 @@ describe("CAURA_TOOLS surface", () => {
     }
   });
 
-  test("STM and placeholder tools are NOT in CAURA_TOOLS", () => {
-    for (const hidden of [
-      "memclaw_notes_read",
-      "memclaw_bulletin_read",
-      "memclaw_promote",
-    ]) {
-      assert.ok(
-        !(CAURA_TOOLS as readonly string[]).includes(hidden),
-        `${hidden} should not be plugin-exposed`,
+  test("every listed tool name is canonical (caura_*)", () => {
+    // Legacy names are dispatch aliases on the server, never listed on
+    // the plugin surface — so the meaningful invariant is that every
+    // name here (and in tools.json) carries the canonical prefix.
+    for (const name of CAURA_TOOLS) {
+      assert.match(name, /^caura_/, `${name}: must carry the caura_ prefix`);
+    }
+    for (const spec of TOOL_SPECS) {
+      assert.match(
+        spec.name,
+        /^caura_/,
+        `${spec.name}: tools.json must list canonical names only`,
       );
     }
   });

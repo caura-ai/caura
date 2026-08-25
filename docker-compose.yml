@@ -1,4 +1,4 @@
-# MemClaw Local Development Stack
+# Caura Local Development Stack
 # Usage: docker compose up -d
 services:
 

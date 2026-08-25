@@ -1223,7 +1223,7 @@ async def write_memories_bulk(
     # session ``client_hash`` de-dup is the design contract per
     # cloud-data-plane.md §2.4 (gap G3). Server-derive a per-request
     # attempt id and attribute the write to the agent the batch's per-item
-    # metadata names (memclawd Layer 1 stamps ``metadata.agent_id``); a mixed
+    # metadata names (caura-daemon Layer 1 stamps ``metadata.agent_id``); a mixed
     # or pre-Layer-1 batch falls back to the install. Non-broker
     # callers (dashboard, SDK) keep the CAURA-602 invariants in full.
     if auth.is_install_credential:
@@ -1282,7 +1282,7 @@ def _broker_write_agent_id(items: list[BulkMemoryItem], install_uuid: str | None
     produced it, when the batch unambiguously names one.
 
     Each item's ``metadata.agent_id`` is stamped by the broker from the
-    capturing agent (memclawd Layer 1). When every item that carries an
+    capturing agent (caura-daemon Layer 1). When every item that carries an
     agent_id agrees on a single value, the write is attributed to that agent —
     so the memory view names the agent, not the bare install. Items with no
     agent_id abstain rather than veto, so a mixed pre-Layer-1/Layer-1 batch that
@@ -1345,7 +1345,7 @@ async def _write_memories_bulk_inner(
     # NOTE: unlike single-write (_write_memory_inner) and the MCP write tool,
     # bulk deliberately does NOT enforce the per-agent approval gate
     # (require_agent_approval / trust_level==0): it passes no require_approval and
-    # has no trust==0 check. Bulk is the broker (memclawd) fan-in path that
+    # has no trust==0 check. Bulk is the broker (caura-daemon) fan-in path that
     # auto-registers many agents from item metadata; gating each on admin
     # approval would create trust-0 rows and 403 whole batches, breaking capture.
     # Per-agent approval is an interactive / single-agent concern.

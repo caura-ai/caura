@@ -495,7 +495,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      # Read-only: this job reads a comment thread and writes to MemClaw, never to the PR.
+      # Read-only: this job reads a comment thread and writes to Caura, never to the PR.
       issues: read
       # Needed IN ADDITION to issues:read — listing comments on an issue that is actually a pull
       # request 403s without it.

@@ -82,7 +82,7 @@ async def test_bind_timer_isolates_per_task() -> None:
 
 
 async def test_log_request_uses_info_for_fast_queries(caplog: pytest.LogCaptureFixture) -> None:
-    caplog.set_level(logging.INFO, logger="memclaw.observability")
+    caplog.set_level(logging.INFO, logger="caura.observability")
     log_request("scored-search", tenant_id="t1", db_ms=10.0, total_ms=12.0, row_count=3)
     rec = caplog.records[-1]
     assert rec.levelno == logging.INFO
@@ -94,7 +94,7 @@ async def test_log_request_uses_info_for_fast_queries(caplog: pytest.LogCaptureF
 
 
 async def test_log_request_upgrades_to_warning_when_slow(caplog: pytest.LogCaptureFixture) -> None:
-    caplog.set_level(logging.INFO, logger="memclaw.observability")
+    caplog.set_level(logging.INFO, logger="caura.observability")
     log_request(
         "scored-search",
         tenant_id="t1",
@@ -119,7 +119,7 @@ async def test_log_request_rejects_reserved_kwargs() -> None:
 async def test_log_request_without_db_ms_stays_info(caplog: pytest.LogCaptureFixture) -> None:
     """GET hits that miss the cache don't always carry db_ms — the helper
     must not crash or upgrade severity when the field isn't present."""
-    caplog.set_level(logging.INFO, logger="memclaw.observability")
+    caplog.set_level(logging.INFO, logger="caura.observability")
     log_request("memory-get", tenant_id="t1", total_ms=5.0, hit=False)
     rec = caplog.records[-1]
     assert rec.levelno == logging.INFO
@@ -134,12 +134,12 @@ async def test_end_to_end_memory_get_404_emits_log_line(
     session.get() call."""
     from uuid import uuid4
 
-    caplog.set_level(logging.INFO, logger="memclaw.observability")
+    caplog.set_level(logging.INFO, logger="caura.observability")
     result = await sc.get_memory(uuid4())
     assert result is None
 
-    obs_records = [r for r in caplog.records if r.name == "memclaw.observability"]
-    assert obs_records, "expected at least one memclaw.observability log record"
+    obs_records = [r for r in caplog.records if r.name == "caura.observability"]
+    assert obs_records, "expected at least one caura.observability log record"
     rec = obs_records[-1]
     assert rec.path == "memory-get"
     assert rec.hit is False

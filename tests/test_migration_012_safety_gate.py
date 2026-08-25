@@ -85,6 +85,7 @@ def test_gate_proceeds_on_empty_db_without_opt_in(
 ) -> None:
     """Fresh install: row count == 0, env unset → upgrade() runs to
     completion (no RuntimeError)."""
+    monkeypatch.delenv("CAURA_RUN_DESTRUCTIVE_MIGRATIONS", raising=False)
     monkeypatch.delenv("MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS", raising=False)
     _patch_op(monkeypatch, existing_count=0)
     mig = _load_migration()
@@ -97,12 +98,16 @@ def test_gate_refuses_destructive_run_without_opt_in(
 ) -> None:
     """Populated DB, env unset → RuntimeError with the row count and
     the env var name in the message."""
+    monkeypatch.delenv("CAURA_RUN_DESTRUCTIVE_MIGRATIONS", raising=False)
     monkeypatch.delenv("MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS", raising=False)
     _patch_op(monkeypatch, existing_count=42_000)
     mig = _load_migration()
     with pytest.raises(RuntimeError) as ei:
         mig.upgrade()
     assert "42000" in str(ei.value)
+    # The refusal must teach the canonical name and still name the legacy
+    # alias operators may have in runbooks.
+    assert "CAURA_RUN_DESTRUCTIVE_MIGRATIONS" in str(ei.value)
     assert "MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS" in str(ei.value)
 
 
@@ -110,8 +115,8 @@ def test_gate_refuses_destructive_run_without_opt_in(
 def test_gate_proceeds_with_explicit_opt_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Populated DB, env set to 'true' → upgrade() proceeds."""
-    monkeypatch.setenv("MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS", "true")
+    """Populated DB, canonical env set to 'true' → upgrade() proceeds."""
+    monkeypatch.setenv("CAURA_RUN_DESTRUCTIVE_MIGRATIONS", "true")
     _patch_op(monkeypatch, existing_count=42_000)
     mig = _load_migration()
     mig.upgrade()  # must not raise
@@ -142,6 +147,18 @@ def test_gate_accepts_case_insensitive_true(
     """``MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS=TRUE`` (or ``True``) opts
     in. Operators commonly capitalize bool envs."""
     monkeypatch.setenv("MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS", val)
+    _patch_op(monkeypatch, existing_count=10)
+    mig = _load_migration()
+    mig.upgrade()  # must not raise
+
+
+@pytest.mark.unit
+def test_gate_accepts_legacy_env_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legacy opt-in spelling keeps working forever (rule 3)."""
+    monkeypatch.delenv("CAURA_RUN_DESTRUCTIVE_MIGRATIONS", raising=False)
+    monkeypatch.setenv("MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS", "true")
     _patch_op(monkeypatch, existing_count=10)
     mig = _load_migration()
     mig.upgrade()  # must not raise

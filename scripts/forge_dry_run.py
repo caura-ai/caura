@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""``memclawctl forge dry-run`` — Phase 1 manual harness (SF-106).
+"""Forge dry-run — Phase 1 manual harness (SF-106).
 
 Invokes the Forge resident pipeline against a live Caura deployment
 for one tenant + fleet and reports the run summary. Candidates always

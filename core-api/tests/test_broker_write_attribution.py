@@ -1,6 +1,6 @@
 """Unit tests for broker (install-credential) bulk-write agent attribution.
 
-memclawd Layer 1 stamps each capture's ``metadata.agent_id`` with the agent that
+caura-daemon Layer 1 stamps each capture's ``metadata.agent_id`` with the agent that
 produced it. Layer 2 (``_broker_write_agent_id``) attributes a broker bulk write
 to that agent when the batch unambiguously names one — so the memory view shows
 the agent instead of the bare install. A mixed batch, or a pre-Layer-1 broker

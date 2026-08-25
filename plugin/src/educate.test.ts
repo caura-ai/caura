@@ -319,7 +319,7 @@ describe("writeEducationFiles", () => {
     for (const wsPath of [ws.main, ws.hyphen, ws.customFromConfig, ws.subdir]) {
       const tools = readFileSync(join(wsPath, "TOOLS.md"), "utf-8");
       const agents = readFileSync(join(wsPath, "AGENTS.md"), "utf-8");
-      assert.ok(tools.includes("Caura"), `TOOLS.md missing MemClaw section in ${wsPath}`);
+      assert.ok(tools.includes("Caura"), `TOOLS.md missing Caura section in ${wsPath}`);
       assert.ok(agents.includes("## Memory V2"), `AGENTS.md missing '## Memory V2' anchor in ${wsPath}`);
     }
   });

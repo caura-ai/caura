@@ -139,7 +139,7 @@ class BulkMemoryItem(BaseModel):
 class BulkMemoryCreate(BaseModel):
     tenant_id: str
     fleet_id: str | None = None
-    # Optional on the wire so memclawd broker calls (cloud-data-plane.md
+    # Optional on the wire so caura-daemon broker calls (cloud-data-plane.md
     # §2.4) can omit it — the route handler defaults to
     # ``broker:<install_uuid>`` when the caller authenticates with an
     # install credential. Non-broker callers (dashboard / SDK) still

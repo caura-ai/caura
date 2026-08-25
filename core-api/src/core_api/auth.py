@@ -74,7 +74,7 @@ class AuthContext:
         # after a subscription cancellation. Blocks creates/updates but allows
         # deletes (so users can reduce usage) and reads.
         self.is_read_only = is_read_only
-        # True when the gateway authenticated the call with a memclawd
+        # True when the gateway authenticated the call with a caura-daemon
         # install credential (kind=install_credential; HMAC-derived
         # ``mci_v1_`` prefix on the wire — intentional carve-out from
         # the unified ``mc_`` surface for retry idempotency). Drives
@@ -522,7 +522,7 @@ async def get_auth_context(
         await _block_if_any_readable_suppressed(tenant_id, readable_tenants)
         # The gateway's /_auth subrequest plumbs the api_key's ``kind``
         # so this layer can branch on credential provenance without
-        # an extra DB hop. ``install_credential`` is what memclawd
+        # an extra DB hop. ``install_credential`` is what caura-daemon
         # uses; ``user_api_key`` (the default) is the dashboard /
         # SDK path.
         credential_kind = (request.headers.get("x-caura-credential-kind") or "").lower()

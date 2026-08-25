@@ -1,9 +1,10 @@
-name: Publish memclaw-client to PyPI
+name: Publish caura-client to PyPI
 
 # Publishes the Python client SDK to PyPI via trusted publishing (OIDC — no token).
 #
 # One-time setup by a maintainer:
-#   1. Create the PyPI project `memclaw-client`.
+#   1. Create the PyPI project `caura-client` (this workflow builds and
+#      publishes clients/python, whose distribution name is `caura-client`).
 #   2. On PyPI, add a Trusted Publisher: repo `caura-ai/caura`,
 #      workflow `publish-python-client.yml`, environment `pypi`.
 #   3. Create a GitHub environment named `pypi`.

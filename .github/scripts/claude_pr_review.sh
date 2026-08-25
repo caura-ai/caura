@@ -57,7 +57,7 @@ if [ -z "$DIFF" ]; then
   exit 0
 fi
 
-# Learned guidance from the shared code-review MemClaw fleet, so this repo stops re-raising
+# Learned guidance from the shared code-review Caura fleet, so this repo stops re-raising
 # findings a maintainer has already judged wrong — here and in the six repos on the org's shared
 # pipeline, which write into the same fleet.
 #
@@ -100,7 +100,7 @@ recall_review_guidance() {
   resp=$(curl -sS --max-time 20 "${caura_url%/}/mcp" \
     -H "X-API-Key: ${agents_key}" \
     -H "Content-Type: application/json" -H "Accept: application/json" \
-    -d "$req") || { echo "::warning::memclaw recall failed — reviewing without learned guidance"; return 0; }
+    -d "$req") || { echo "::warning::caura recall failed — reviewing without learned guidance"; return 0; }
   local guidance
   guidance=$(printf '%s' "$resp" | jq -r '
     ((.result.content[0].text) // "{}") | (fromjson? // {})
@@ -109,7 +109,7 @@ recall_review_guidance() {
     | map("- " + ((.content // "") | gsub("[\r\n]+"; " ") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | .[0:500]))
     | .[0:12] | .[]' 2>/dev/null || true)
   [ -n "$guidance" ] || return 0
-  echo "::notice::Injected $(printf '%s\n' "$guidance" | grep -c '^- ' || true) learned-guidance item(s) from MemClaw"
+  echo "::notice::Injected $(printf '%s\n' "$guidance" | grep -c '^- ' || true) learned-guidance item(s) from Caura"
   # Recalled content is treated as UNTRUSTED even though the fleet is our own. Two defences, one
   # solid and one soft: angle brackets are entity-escaped above so a bullet cannot close the
   # wrapper and escape into the prompt body, and the wrapper frames the block as data. The

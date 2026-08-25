@@ -1,5 +1,5 @@
 # Dockerfile for Core API service
-# The main MemClaw API — auth, agents, memory, MCP, etc.
+# The main Caura API — auth, agents, memory, MCP, etc.
 
 # Optional Datadog serverless-init source (CAURA-0000 observability POC).
 # The Caura SaaS deploy builds with --build-arg DD_APM_ENABLED=true to pull in
@@ -65,16 +65,16 @@ RUN if [ "$WITH_RERANK_LOCAL" = "1" ]; then \
     fi
 
 # Stamp the service version into a file the app reads at runtime. Source of
-# truth is pyproject.toml; an optional MEMCLAW_VERSION build-arg (e.g. the
-# release tag) overrides it. Deterministic and independent of installed-
+# truth is pyproject.toml; an optional CAURA_VERSION build-arg (e.g. the
+# release tag) overrides it (MEMCLAW_VERSION keeps working — legacy-name-ok: rule 3 dual-read alias).
+# Deterministic and independent of installed-
 # package metadata — deps install via ``--no-emit-project`` so core-api is
 # never installed as a package, leaving importlib.metadata with no version
 # to find (the endpoint silently served "dev"). Read by
 # core_api.constants._resolve_version().
+ARG CAURA_VERSION=
 ARG MEMCLAW_VERSION=
-RUN VER="${MEMCLAW_VERSION:-$(python -c "import tomllib; print(tomllib.load(open('core-api/pyproject.toml','rb'))['project']['version'])")}" \
-    && printf '%s' "$VER" > /app/VERSION \
-    && echo "Stamped MemClaw version: $VER"
+RUN VER="${CAURA_VERSION:-${MEMCLAW_VERSION:-$(python -c "import tomllib; print(tomllib.load(open('core-api/pyproject.toml','rb'))['project']['version'])")}}" && printf '%s' "$VER" > /app/VERSION && echo "Stamped Caura version: $VER" # legacy-name-ok: rule 3 dual-read alias
 
 # Copy actual source
 COPY common/ /app/common/

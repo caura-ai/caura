@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────
-# wet-test-install.sh — Install MemClaw plugin from a Git branch
+# wet-test-install.sh — Install the Caura plugin from a Git branch
 # directly into a remote OpenClaw fleet for testing.
 #
 # Usage (on the remote machine):
@@ -62,7 +62,7 @@ fi
 
 echo ""
 echo "╔══════════════════════════════════════════════════╗"
-echo "║  MemClaw Wet-Test Installer                     ║"
+echo "║  Caura Wet-Test Installer                       ║"
 echo "╚══════════════════════════════════════════════════╝"
 echo ""
 echo "  Branch:    $BRANCH"
@@ -127,7 +127,7 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 cat > "$ENV_FILE" << ENVEOF
-# MemClaw wet-test config — generated $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# Caura wet-test config — generated $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # Branch: $BRANCH
 CAURA_API_URL=$CAURA_API_URL
 CAURA_API_KEY=$CAURA_API_KEY
@@ -211,7 +211,7 @@ echo "╚═══════════════════════�
 echo ""
 echo "To verify:"
 echo "  openclaw gateway status"
-echo "  # or check logs for: [memclaw] Smoke test passed"
+echo "  # or check logs for: [caura] Smoke test passed"
 echo ""
 echo "To uninstall:"
 echo "  rm -rf $PLUGIN_DIR $CLONE_DIR"

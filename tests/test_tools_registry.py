@@ -3,7 +3,7 @@
 Every assertion here is meant to make a design contract concrete so
 future refactors can't silently break it:
 
-- Every spec name has the ``memclaw_`` prefix.
+- Every spec name has the ``caura_`` prefix.
 - Trust values live in [0, 3].
 - ``impl_status="reserved"`` implies ``plugin_exposed=False``.
 - Every ``OpSpec.required_params`` references a real handler parameter.
@@ -54,7 +54,7 @@ EXPECTED_PLACEHOLDERS: set[str] = set()
 # REST endpoints land (the plugin dispatches via REST).
 
 
-def test_all_specs_have_memclaw_prefix():
+def test_all_specs_have_caura_prefix():
     from core_api.tools import REGISTRY
 
     for name in REGISTRY:
@@ -196,12 +196,19 @@ def test_descriptions_no_leftover_tool_descriptions_import():
     import core_api.tools as pkg
 
     tool_dir = Path(pkg.__file__).parent
-    for info in pkgutil.iter_modules([str(tool_dir)]):
-        if not info.name.startswith("memclaw_"):
-            continue
-        src = (tool_dir / f"{info.name}.py").read_text()
+    # ``caura_`` is the canonical module prefix; there are no legacy-named
+    # spec modules (the legacy tool names are dispatch aliases in
+    # mcp_server, not modules), so this filter is the whole surface.
+    spec_modules = [
+        info.name
+        for info in pkgutil.iter_modules([str(tool_dir)])
+        if info.name.startswith("caura_")
+    ]
+    assert spec_modules, "no caura_* spec modules found — the guard went vacuous"
+    for name in spec_modules:
+        src = (tool_dir / f"{name}.py").read_text()
         assert "TOOL_DESCRIPTIONS" not in src, (
-            f"{info.name}.py still imports TOOL_DESCRIPTIONS; "
+            f"{name}.py still imports TOOL_DESCRIPTIONS; "
             "descriptions should live inline in each spec module."
         )
 

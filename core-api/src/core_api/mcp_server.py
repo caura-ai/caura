@@ -115,7 +115,7 @@ _readable_tenant_ids_var: contextvars.ContextVar[list[str] | None] = contextvars
     "mcp_readable_tenant_ids", default=None
 )
 _scopes_var: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar("mcp_scopes", default=None)
-# memclawd (broker) identity, plumbed from the gateway on the verified path.
+# caura-daemon (broker) identity, plumbed from the gateway on the verified path.
 # X-Caura-Credential-Kind distinguishes ``install_credential`` (broker) from
 # ``user_api_key`` (dashboard/SDK); X-Install-UUID is the broker's install id.
 # Drives the agent-ownership boundary on MCP writes (parity with REST auth).
@@ -354,7 +354,7 @@ def _get_scopes() -> set[str] | None:
 
 
 def _is_install_credential() -> bool:
-    """True when the gateway authenticated this call with a memclawd install
+    """True when the gateway authenticated this call with a caura-daemon install
     credential (kind=install_credential) — mirrors ``AuthContext.is_install_credential``."""
     return _credential_kind_var.get(None) == "install_credential"
 

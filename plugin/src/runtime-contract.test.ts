@@ -1017,7 +1017,7 @@ describe("ContextEngine.compact contract (delegation + persistence)", () => {
     assert.match(String(result.reason || ""), /sessionId\/sessionFile/);
   });
 
-  test("compact() with a summary attempts MemClaw persist but does not throw on failure", async () => {
+  test("compact() with a summary attempts Caura persist but does not throw on failure", async () => {
     // Persistence target is unconfigured (no CAURA_API_KEY in test env),
     // so the POST /memories call fails. compact() must catch that and still
     // return a CompactResult. This is the production-safety contract:

@@ -11,7 +11,7 @@
 # a fleet of individual major PRs was the main source of backlog (15 open bot PRs, 2026-07).
 # The uv services share ONE multi-directory entry for the same reason: four separate
 # entries emitted four near-identical group PRs every week.
-# Mirrors the caura-memclaw-enterprise grouping strategy.
+# Mirrors the caura-enterprise grouping strategy.
 #
 # No auto-merge workflow here. The minor/patch carve-out was revoked 2026-08-09, and the
 # `*-minor-patch` group names below no longer feed one — every Dependabot PR merges by hand

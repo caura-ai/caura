@@ -1,6 +1,6 @@
 """Forge cron tick — the production scheduler entry point (SF-CR3).
 
-Mirrors the manual ``memclawctl forge dry-run`` CLI but wired into the
+Mirrors the manual ``scripts/forge_dry_run.py`` harness but wired into the
 ``memclaw.lifecycle.forge-distill-requested`` consumer so the autonomous
 scheduler (Cloud Scheduler / k8s CronJob → ``POST /admin/lifecycle/
 fanout/forge-distill``) drives one tick per opted-in tenant.
@@ -216,8 +216,8 @@ async def _wire_llm_fn() -> LlmFn:
         raise RuntimeError(
             "forge_cron: common.llm not importable — the production "
             "cron requires a configured LLM provider chain. The fake-"
-            "LLM fallback is intentionally CLI-only (memclawctl forge "
-            "dry-run); see scripts/forge_dry_run.py."
+            "LLM fallback is intentionally CLI-only; see "
+            "scripts/forge_dry_run.py."
         ) from exc
 
     # Same selector the enrichment write path uses. Forge has no provider

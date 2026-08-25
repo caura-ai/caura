@@ -104,7 +104,7 @@ jobs:
 
       # --- Broker↔cloud API-versioning gate (Gate C / Phase 1, deliverables A+B) ---
       # core-api/openapi.broker.json is the FROZEN v1 contract for the
-      # broker-facing gateway operations that memclawd calls against Caura
+      # broker-facing gateway operations that caura-daemon calls against Caura
       # cloud. The authoritative list is BROKER_OPERATIONS in
       # core-api/scripts/gen_broker_openapi.py — deliberately not duplicated
       # here, because this comment listed four endpoints while the broker had
@@ -133,7 +133,7 @@ jobs:
         # merge main has no baseline yet — the gate detects that and skips.
         run: |
           set -euo pipefail
-          # caura-memclaw is public, so anonymous fetch works even though
+          # this repo (caura-ai/caura) is public, so anonymous fetch works even though
           # actions/checkout ran with persist-credentials: false.
           git fetch --no-tags --depth=1 origin main
           if git cat-file -e origin/main:core-api/openapi.broker.json 2>/dev/null; then
@@ -209,7 +209,7 @@ jobs:
         run: uv run ruff format --check core-worker/src/ core-worker/tests/
 
       - name: Run Ruff formatter check (vendored common/ files at ruff defaults)
-        # This list mirrors the policy=identical entries of caura-memclaw-enterprise's
+        # This list mirrors the policy=identical entries of caura-enterprise's
         # scripts/vendored_files_manifest.json — the source of truth; keep in sync.
         # Enterprise CI format-checks the vendored copies at ruff DEFAULTS (88 cols),
         # so gate them here too or a merge turns enterprise CI red until a reflow

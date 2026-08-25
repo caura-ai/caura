@@ -1,5 +1,5 @@
 /**
- * MemClaw ContextEngine — lifecycle hooks for OpenClaw memory integration.
+ * Caura ContextEngine — lifecycle hooks for OpenClaw memory integration.
  *
  * Provides: bootstrap (smoke test), ingest (message buffering +
  * persistence), assemble (token-budget-aware recall injection),

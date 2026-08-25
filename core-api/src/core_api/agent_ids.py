@@ -42,7 +42,7 @@ INSIGHTER_TRUST_LEVEL = 3
 DOC_INDEXER_AGENT_ID = "memclaw-doc-indexer"
 
 # Bare ``"main"`` is the OpenClaw plugin's *unset* default agent_id: when an
-# operator never sets ``MEMCLAW_AGENT_ID`` every install collapses onto this one
+# operator never sets ``CAURA_AGENT_ID`` every install collapses onto this one
 # shared identity (the eToro "firehose"). Unlike ``DEFAULT_AGENT_ID``
 # ("mcp-agent", legitimate on the standalone path), bare ``"main"`` is never a
 # valid *persisted* write identity and is refused on every write path.

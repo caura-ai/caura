@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MemClaw Gateway Integration Test — validates the plugin running INSIDE OpenClaw.
+"""Caura Gateway Integration Test — validates the plugin running INSIDE OpenClaw.
 
 Unlike smoke_test.py (which hits the backend API directly), this script validates
 that the plugin is loaded in the gateway, lifecycle hooks fire, education files
@@ -8,7 +8,7 @@ are written, heartbeats include setup_status, and fleet commands are processed.
 Prerequisites:
   - Plugin installed via wet-test-install.sh (or manually)
   - OpenClaw gateway running with the plugin loaded
-  - MemClaw backend API reachable
+  - Caura backend API reachable
 
 Usage:
     python scripts/gateway_integration_test.py \\
@@ -149,7 +149,7 @@ class GatewayIntegrationTest:
 
         if not self.json_output:
             print()
-            print("  MemClaw Gateway Integration Test")
+            print("  Caura Gateway Integration Test")
             print(f"  URL:       {self.base}")
             print(f"  Tenant:    {self.tenant_id}")
             print(f"  Node:      {self.node_name}")
@@ -957,7 +957,7 @@ class GatewayIntegrationTest:
                 "node_id": self._node_id,
                 "command": "educate",
                 "payload": {
-                    "prompt": "Integration test education: You have access to MemClaw memory tools. "
+                    "prompt": "Integration test education: You have access to Caura memory tools. "
                     "Always search before starting work. Always write findings after completing work.",
                 },
             },
@@ -1062,10 +1062,10 @@ class GatewayIntegrationTest:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MemClaw Gateway Integration Test",
+        description="Caura Gateway Integration Test",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--url", required=True, help="MemClaw API base URL")
+    parser.add_argument("--url", required=True, help="Caura API base URL")
     parser.add_argument("--api-key", required=True, help="API key")
     parser.add_argument("--tenant-id", required=True, help="Tenant ID")
     parser.add_argument(

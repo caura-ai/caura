@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Capture DECLINED review findings from a just-merged pull request into the shared code-review
-# MemClaw fleet, so future reviews stop re-raising findings a maintainer already judged wrong.
+# Caura fleet, so future reviews stop re-raising findings a maintainer already judged wrong.
 # The write half of the loop; recall in claude_pr_review.sh is the read half.
 #
 # WHY THIS FILE EXISTS HERE RATHER THAN BEING INHERITED
@@ -269,7 +269,7 @@ while IFS= read -r NOTE; do
   RESP=$(curl -sS --max-time 20 "${CAURA_URL%/}/mcp" \
     -H "X-API-Key: ${AGENTS_KEY}" \
     -H "Content-Type: application/json" -H "Accept: application/json" \
-    -d "$REQ") || { echo "::warning::MemClaw unreachable — note dropped"; continue; }
+    -d "$REQ") || { echo "::warning::Caura unreachable — note dropped"; continue; }
   if printf '%s' "$RESP" | jq -e 'has("result") and (.error | not)' >/dev/null 2>&1; then
     SAVED=$((SAVED + 1))
   else

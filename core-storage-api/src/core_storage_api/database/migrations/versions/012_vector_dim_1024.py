@@ -75,7 +75,8 @@ Safety gate
 -----------
 ``upgrade()`` runs a pre-flight check that aborts the migration if
 existing 768-dim rows are present and
-``MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS`` is not set to ``"true"``. On a
+``CAURA_RUN_DESTRUCTIVE_MIGRATIONS`` (or its legacy alias — see the
+dual-read in ``upgrade()``) is not set to ``"true"``. On a
 fresh DB (no rows) the gate is a no-op and the migration runs
 unchanged. On a populated DB an operator must explicitly opt in by
 setting the env var for the migration run (and unset it afterwards).
@@ -119,7 +120,7 @@ def upgrade() -> None:
     # so without this gate a ``docker compose pull && up`` on an
     # existing install would silently destroy embeddings the moment
     # the container starts. Refuse to proceed unless the operator has
-    # opted in explicitly via ``MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS=true``.
+    # opted in explicitly via ``CAURA_RUN_DESTRUCTIVE_MIGRATIONS=true``.
     #
     # On a fresh DB (no existing 768-dim rows), the gate is a no-op:
     # there is nothing to destroy. The check is row-count-based, not
@@ -154,7 +155,9 @@ def upgrade() -> None:
                 f"alembic 012_vector_dim_1024 is destructive: "
                 f"{existing} row(s) currently hold 768-dim embeddings that "
                 f"will be NULL'd. To proceed, set "
-                f"MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS=true and ensure a "
+                f"CAURA_RUN_DESTRUCTIVE_MIGRATIONS=true (the legacy "
+                f"MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS name is also "  # legacy-name-ok: rule 3 dual-read alias
+                f"honoured) and ensure a "
                 f"backfill is queued to re-embed the rows after migration "
                 f"completes (see the 'Upgrading from v1.x' section of "
                 f"README.md). Refusing to run automatically."

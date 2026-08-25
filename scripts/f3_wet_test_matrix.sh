@@ -14,7 +14,7 @@
 #
 # Pre-reqs:
 #   - Enterprise stack up via memclaw-local-dev skill
-#   - Real OPENAI_API_KEY in caura-memclaw/.env so embed + enrich actually fire
+#   - Real OPENAI_API_KEY in this repo's .env so embed + enrich actually fire
 #   - User authenticated (/tmp/local-dev.token, /tmp/local-dev.cookies)
 #
 # Env-flag override strategy: the script writes a temporary
@@ -25,7 +25,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENT_DIR="${REPO_ROOT}/../caura-memclaw-enterprise"
+ENT_DIR="${REPO_ROOT}/../caura-enterprise"
 ENV_FILE="${REPO_ROOT}/.env"
 COMPOSE_OVERRIDE="${ENT_DIR}/docker-compose.override.yml"
 OUTPUT_DIR="${REPO_ROOT}/.f3-phase0-baseline"
@@ -93,7 +93,7 @@ EOF
   done
 
   local got
-  got=$(docker exec caura-memclaw-enterprise-core-api-1 \
+  got=$(docker exec caura-enterprise-core-api-1 \
         sh -c 'echo "EMBED=${EMBED_ON_HOT_PATH:-unset} ENRICH=${ENRICH_ON_HOT_PATH:-unset}"')
   printf '  in-container: %s\n' "${got}"
 }

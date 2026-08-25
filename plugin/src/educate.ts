@@ -1,6 +1,6 @@
 /**
  * Agent education — write education prompts to HEARTBEAT.md in agent
- * workspaces, and append MemClaw sections to TOOLS.md and AGENTS.md.
+ * workspaces, and append Caura sections to TOOLS.md and AGENTS.md.
  *
  * SKILL.md is no longer written per-workspace: it ships as a static file at
  * `<plugin-root>/skills/memclaw/SKILL.md` and is discovered by OpenClaw via
@@ -302,7 +302,7 @@ export function educateAgents(
 //
 // Content is intentionally transport-neutral: no host ("plugin" / "gateway" /
 // host-product) references, no env-var interpolation, no version tag.
-// These files are the canonical MemClaw agent education payload and may be
+// These files are the canonical Caura agent education payload and may be
 // loaded by host-managed workspaces or served to MCP/REST callers through
 // other transports.
 //
@@ -650,7 +650,7 @@ export function spliceFencedBlock(
 }
 
 /**
- * Append MemClaw sections to TOOLS.md and AGENTS.md in each agent workspace.
+ * Append Caura sections to TOOLS.md and AGENTS.md in each agent workspace.
  *
  * SKILL.md is no longer written here: it ships as a static file at
  * `<plugin-root>/skills/memclaw/SKILL.md` and is discovered by OpenClaw

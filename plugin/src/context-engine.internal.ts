@@ -1,5 +1,5 @@
 /**
- * MemClaw ContextEngine internal helpers — extracted from
+ * Caura ContextEngine internal helpers — extracted from
  * ``context-engine.ts`` so the session-buffer key contract can be
  * exercised by ``runtime-contract.test.ts`` without exposing a
  * ``_internal`` namespace from the production module. Anything in
