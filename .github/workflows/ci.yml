@@ -259,6 +259,32 @@ jobs:
             exit 1
           fi
 
+      # The four steps below check each service against common/ as well as
+      # against its own src/, because every service pyproject now carries
+      # ``mypy_path = "src:.."`` — ``..`` being the repo root, where common/
+      # lives. Before that, ``common.*`` resolved to nothing, and
+      # ``ignore_missing_imports = true`` (which every service sets, and needs)
+      # turned that silence into Any rather than an error. So the step below was
+      # a gate over 200 files that could not see a single one of the ~40
+      # common/ symbols they import.
+      #
+      # What it cost: ``core_api.services.forge.*`` is deliberately opted back
+      # IN to the type gate (``ignore_errors = false``, one of few carve-outs
+      # from the broad ``core_api.services.*`` exemption), and this step still
+      # reported "no issues found in 200 source files" while
+      # ``forge/cron_handler.py`` imported ``LLMRequest`` from ``common.llm`` —
+      # a name that has never existed there — and called ``call_with_fallback``
+      # with a signature it has never had. The forge distill cron raised
+      # RuntimeError on every tick and had never once run; the error blamed a
+      # missing provider chain, so it read as a misconfiguration. Repaired in
+      # #955. Being inside a gated tree proved nothing, and that is the
+      # assumption worth distrusting.
+      #
+      # The setting is in each pyproject rather than an env var here on purpose:
+      # a ``MYPYPATH`` set only on these steps would leave the local
+      # ``mypy src/``, the contributor's IDE, and any future pre-commit hook
+      # disagreeing with the gate — which is the shape of the failure this
+      # closes, not a fix for it.
       - name: Run mypy (core-api)
         run: cd core-api && uv run mypy src/
 
@@ -279,14 +305,20 @@ jobs:
 
       - name: Run mypy (common/)
         # common/ was type-checked by NOTHING before this step. Each mypy step
-        # above ``cd``s into one service and checks that service's own src/, so
-        # no invocation's path ever resolved to common/ — while 40 files under
-        # core-api/src alone import it. Those imports were not caught either:
+        # above ``cd``s into one service and, until ``mypy_path = "src:.."``
+        # landed, checked only that service's own src/ — so no invocation's path
+        # ever resolved to common/, while 40 files under core-api/src alone
+        # import it. Those imports were not caught either:
         # ``ignore_missing_imports = true`` (every service sets it) plus a
-        # ``mypy_path`` of just that service's src/ means an unresolved
-        # ``common.*`` import degrades to Any in silence rather than failing.
+        # ``mypy_path`` of just that service's src/ meant an unresolved
+        # ``common.*`` import degraded to Any in silence rather than failing.
         # ``cd core-api && mypy src/`` reported 199 files and none of them were
         # common/'s 94.
+        #
+        # This step is still the one that OWNS common/. The service steps reach
+        # it only through the imports they happen to follow, so a common/ module
+        # no service imports — or a branch of one none of them exercises — is
+        # covered here and nowhere else. Keep it.
         #
         # Nor did the hook cover it: .pre-commit-config.yaml deliberately runs no
         # mypy, deferring to "CI is the authoritative type-check" — which pointed

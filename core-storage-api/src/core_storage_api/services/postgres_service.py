@@ -22,7 +22,9 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    ColumnElement,
     String,
+    Table,
     and_,
     bindparam,
     case,
@@ -43,6 +45,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import load_only
+from sqlalchemy.sql.dml import ReturningInsert
 
 from common import duplicate_memory
 from common.constants import (
@@ -68,6 +71,7 @@ from common.models import (
     AuditChainHead,
     AuditLog,
     BackgroundTaskLog,
+    Base,
     CrystallizationReport,
     DedupReview,
     Document,
@@ -177,6 +181,27 @@ def _scope_sql(
         clause += f" AND {table}.fleet_id = :fleet_id"
         params["fleet_id"] = fleet_id
     return clause, params
+
+
+def _table(model: type[Base]) -> Table:
+    """The mapped ``Table`` behind a declarative model.
+
+    ``DeclarativeBase.__table__`` is annotated ``FromClause``, which has no
+    ``.delete()`` and is not accepted by ``insert()`` / ``update()`` — but every
+    mapped class here is table-mapped, so at runtime it is always a ``Table``.
+    Going through here says that once, in one place, instead of at each of the
+    seven core-statement sites that build DML from ``__table__`` directly.
+
+    ``type[Base]`` rather than ``type[Any]`` so passing something that is not a
+    mapped class is a type error here rather than an ``AttributeError`` at the
+    call site. The cost is the ignore below — the one place where the
+    ``FromClause``-is-really-a-``Table`` claim is made, which is the point of
+    having a single helper.
+
+    Nothing reported this until the services could see ``common/``: the models
+    live in ``common.models``, so every ``__table__`` here was ``Any``.
+    """
+    return model.__table__  # type: ignore[return-value]
 
 
 def _as_json_str(value: Any) -> str:
@@ -486,6 +511,11 @@ def _verify_audit_chain_rows(
                     "created_at": row.created_at.astimezone(UTC).isoformat(),
                 },
             }
+        # ``event_hash`` is ``Mapped[bytes | None]`` — the column is nullable —
+        # but a NULL one cannot reach here: the ``else`` branch above compares it
+        # against ``compute_event_hash(...)``, which returns ``bytes``, so a NULL
+        # row is reported ``event_hash_mismatch`` and returns before this line.
+        assert row.event_hash is not None  # narrow for mypy after the branch above
         expected_prev = row.event_hash
         expected_seq += 1
 
@@ -2763,7 +2793,7 @@ class PostgresService:
             )
             if node_ids:
                 cmd_result = await session.execute(
-                    FleetCommand.__table__.delete().where(FleetCommand.node_id.in_(node_ids))
+                    _table(FleetCommand).delete().where(FleetCommand.node_id.in_(node_ids))
                 )
                 counts["fleet_commands"] = cmd_result.rowcount  # type: ignore[attr-defined]
             else:
@@ -3247,7 +3277,7 @@ class PostgresService:
         shows up in operator profiles.
         """
         async with get_session() as session:
-            base_filters = [
+            base_filters: list[ColumnElement[bool]] = [
                 Memory.embedding.is_(None),
                 Memory.deleted_at.is_(None),
             ]
@@ -3918,7 +3948,10 @@ class PostgresService:
         admin ``/admin/fleets`` (``exclude_scope_agent`` False, cross-tenant
         when ``tenant_id`` is None). Read-only (reader replica).
         """
-        filters = [Memory.deleted_at.is_(None), Memory.fleet_id.isnot(None)]
+        filters: list[ColumnElement[bool]] = [
+            Memory.deleted_at.is_(None),
+            Memory.fleet_id.isnot(None),
+        ]
         if exclude_scope_agent:
             # ``Memory.visibility`` is NOT NULL with a server default, so the
             # three-valued-logic NULL pitfall doesn't apply.
@@ -4495,7 +4528,7 @@ class PostgresService:
         what it shared. Ignored when ``agent_id`` is set (that path already
         scopes visibility to the named agent).
         """
-        scope_filters = []
+        scope_filters: list[ColumnElement[bool]] = []
         if readable_tenant_ids:
             scope_filters.append(Memory.tenant_id.in_(readable_tenant_ids))
         else:
@@ -4759,7 +4792,7 @@ class PostgresService:
         (reader replica).
         """
         # ── Scope/visibility — MUST mirror memory_stats_breakdown. ──
-        scope_filters = []
+        scope_filters: list[ColumnElement[bool]] = []
         if readable_tenant_ids:
             scope_filters.append(Memory.tenant_id.in_(readable_tenant_ids))
         else:
@@ -4991,8 +5024,12 @@ class PostgresService:
                 idx = it["input_idx"]
                 if idx in matched_idxs:
                     continue
-                key = canonical_match_key(it["canonical_name"])
-                if not key:
+                # Named ``match_key``, not ``key``: ``key`` is already bound in this
+                # function to the Phase-1 lookup tuple
+                # ``(canonical_name, entity_type, fleet_id)``. Rebinding it to a str
+                # is harmless at runtime but reads as the same thing and is not.
+                match_key = canonical_match_key(it["canonical_name"])
+                if not match_key:
                     continue
                 # Candidate prefetch only: lower(name) ending in the key
                 # catches both directions (existing "new analytics service"
@@ -5001,7 +5038,7 @@ class PostgresService:
                 # The DECIDER is the Python-side key equality below — the
                 # suffix LIKE can never merge on its own ("data analytics
                 # service" is prefetched but rejected: its own key differs).
-                escaped = key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                escaped = match_key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 cand_stmt = (
                     select(Entity)
                     .where(
@@ -5022,7 +5059,7 @@ class PostgresService:
                     cand_stmt = cand_stmt.where(Entity.fleet_id.is_(None))
 
                 candidates = (await session.execute(cand_stmt)).scalars().all()
-                verified = [e for e in candidates if canonical_match_key(e.canonical_name) == key]
+                verified = [e for e in candidates if canonical_match_key(e.canonical_name) == match_key]
                 if not verified:
                     continue
                 # Prefer a pure case/whitespace variant (no qualifier was
@@ -5323,11 +5360,12 @@ class PostgresService:
                         else Entity.fleet_id.is_(None),
                     )
                 )
-                entity = result.scalar_one_or_none()
-                if entity is None:
+                winner = result.scalar_one_or_none()
+                if winner is None:
                     raise ValueError(
                         f"Entity '{data.get('canonical_name')}' conflict but re-select returned nothing"
                     )
+                entity = winner
             return entity
 
     async def entity_update(self, entity_id: UUID, data: dict) -> Entity | None:
@@ -5820,7 +5858,9 @@ class PostgresService:
                 mid = UUID(mid)
             if not isinstance(eid, UUID):
                 eid = UUID(eid)
-            ins_stmt = (
+            # Annotated because ``literal_column("xmax")`` types as ``Any``, and
+            # mypy will not infer a variable whose type is partly ``Any``.
+            ins_stmt: ReturningInsert[tuple[UUID, UUID, str, Any]] = (
                 pg_insert(MemoryEntityLink)
                 .values(memory_id=mid, entity_id=eid, role=it["role"])
                 .on_conflict_do_update(
@@ -6650,7 +6690,9 @@ class PostgresService:
                 # entities.id`` (prod 2026-06-16). ``update(Entity.__table__)`` is a
                 # plain Core executemany UPDATE that honours the custom bindparams and
                 # has no ORM bulk-by-PK or session-synchronisation behaviour at all.
-                sql_update(Entity.__table__)
+                # ``_table(Entity)`` IS ``Entity.__table__`` — it only narrows the
+                # declared type; the Core-not-ORM target above is unchanged.
+                sql_update(_table(Entity))
                 .where(
                     Entity.__table__.c.id == bindparam("eid"),
                     Entity.__table__.c.tenant_id == tenant_id,
@@ -7001,6 +7043,7 @@ class PostgresService:
         span every collection across the readable set (collections with the
         same name across multiple tenants merge into one row).
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -7036,6 +7079,7 @@ class PostgresService:
         not advertise non-active skills in the count. ``readable_tenant_ids``
         widens to ``ANY($readable)`` over the same scope the listing used.
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -7076,6 +7120,7 @@ class PostgresService:
         equality filter. Returns ``(Document, similarity)`` pairs where
         ``similarity = 1 - cosine_distance``.
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -7115,6 +7160,7 @@ class PostgresService:
         sibling tenants; ``tenant_id`` stays the binding/home tenant.
         Mirrors core-api ``document_repository.get_by_doc_id``.
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -7147,6 +7193,7 @@ class PostgresService:
         for cross-tenant credentials. Mirrors core-api
         ``document_repository.query``.
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -8713,12 +8760,12 @@ class PostgresService:
             node_ids = list(result.scalars().all())
 
             if node_ids:
-                await session.execute(
-                    FleetCommand.__table__.delete().where(FleetCommand.node_id.in_(node_ids))
-                )
+                await session.execute(_table(FleetCommand).delete().where(FleetCommand.node_id.in_(node_ids)))
 
             await session.execute(
-                FleetNode.__table__.delete().where(
+                _table(FleetNode)
+                .delete()
+                .where(
                     FleetNode.tenant_id == tenant_id,
                     FleetNode.fleet_id == fleet_id,
                 )
@@ -8732,7 +8779,7 @@ class PostgresService:
         values: dict[str, Any],
     ) -> UUID:
         async with get_session() as session:
-            stmt = pg_insert(FleetNode.__table__).values(**values)
+            stmt = pg_insert(_table(FleetNode)).values(**values)
             stmt = stmt.on_conflict_do_update(  # type: ignore[assignment]
                 constraint="uq_fleet_nodes_tenant_node",
                 set_={k: v for k, v in values.items() if k not in ("tenant_id", "node_name")},
@@ -8990,7 +9037,7 @@ class PostgresService:
         if not node_ids:
             return
         async with get_session() as session:
-            await session.execute(FleetCommand.__table__.delete().where(FleetCommand.node_id.in_(node_ids)))
+            await session.execute(_table(FleetCommand).delete().where(FleetCommand.node_id.in_(node_ids)))
 
     # ══════════════════════════════════════════════════════════════════════
     #  AUDIT
@@ -9074,7 +9121,7 @@ class PostgresService:
             # head exists; the unconditional FOR UPDATE select below is what
             # actually serializes writers.
             await session.execute(
-                pg_insert(AuditChainHead.__table__)
+                pg_insert(_table(AuditChainHead))
                 .values(tenant_id=tenant_id, last_seq=0, last_hash=GENESIS_PREV_HASH)
                 .on_conflict_do_nothing(index_elements=["tenant_id"])
             )

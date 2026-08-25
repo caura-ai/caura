@@ -138,7 +138,15 @@ indent-style = "space"
 
 [tool.mypy]
 python_version = "3.12"
-mypy_path = "src"
+# ``..`` is the repo root, where ``common/`` lives. common/ is not an installed
+# distribution — it is PYTHONPATH-mounted (the Dockerfile COPYs it to
+# /app/common), so without the repo root here every ``common.*`` import degrades
+# to Any under ``ignore_missing_imports`` and this service's use of the shared
+# library is checked by nothing. That is what let ``from common.llm import
+# LLMRequest`` — a name that has never existed there — ship in the forge cron and
+# raise on every tick (#955) while ``mypy src/`` reported no issues in 200 files.
+# Relative to this file, so CI, a local ``mypy src/`` and an IDE all agree.
+mypy_path = "src:.."
 explicit_package_bases = true
 warn_return_any = false
 warn_unused_ignores = false
