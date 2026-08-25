@@ -693,6 +693,18 @@
             ],
             "title": "Supersedes Id"
           },
+          "system_metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Metadata"
+          },
           "tenant_id": {
             "title": "Tenant Id",
             "type": "string"
