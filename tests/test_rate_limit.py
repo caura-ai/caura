@@ -226,14 +226,19 @@ async def test_every_rate_limited_route_survives_header_injection(client):
     every call 500'd on staging the moment #976 deployed (2026-08-25 17:51Z),
     while CI stayed green because conftest disables the limiter suite-wide.
 
-    One request per limited route, limiter ON: assert it doesn't 500 and that
-    the success actually carries the X-RateLimit headers D14 promised."""
+    One request per limited route, limiter ON: assert it succeeds and that
+    the success actually carries the X-RateLimit headers D14 promised. The
+    write's content is unique per run so the dedup 409 path can't mask the
+    header assertion on a reused database."""
+    import uuid
+
     key = {"x-api-key": "mc_hdr_inject_probe"}
+    nonce = uuid.uuid4().hex
 
     cases = [
         (
             "/api/v1/recall",
-            {"tenant_id": "default", "query": "header injection probe"},
+            {"tenant_id": "default", "query": f"header injection probe {nonce}"},
         ),
         (
             "/api/v1/ingest/commit",
@@ -241,7 +246,7 @@ async def test_every_rate_limited_route_survives_header_injection(client):
         ),
         (
             "/api/v1/search",
-            {"tenant_id": "default", "query": "header injection probe"},
+            {"tenant_id": "default", "query": f"header injection probe {nonce}"},
         ),
         (
             "/api/v1/memories",
@@ -249,14 +254,15 @@ async def test_every_rate_limited_route_survives_header_injection(client):
                 "tenant_id": "default",
                 "agent_id": "hdr-inject-agent",
                 "memory_type": "fact",
-                "content": "header injection probe memory",
+                "content": f"header injection probe memory {nonce}",
             },
         ),
     ]
     for path, body in cases:
         resp = await client.post(path, json=body, headers=key)
-        assert resp.status_code < 500, (
-            f"{path} must not 500 under headers_enabled=True: {resp.text}"
+        assert resp.status_code < 300, (
+            f"{path} must succeed under headers_enabled=True: "
+            f"{resp.status_code} {resp.text}"
         )
         assert "x-ratelimit-limit" in resp.headers, (
             f"{path} success must carry X-RateLimit headers (D14), "
