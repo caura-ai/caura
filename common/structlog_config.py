@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+import warnings
 from typing import Any
 
 import structlog
@@ -96,6 +97,9 @@ _configured_log_file: str | None = None
 # or a library that ran before us.
 _installed_handler: logging.Handler | None = None
 _installed_file_handler: logging.Handler | None = None
+# True only when this module changed warning capture from disabled to enabled.
+# A caller that enabled capture before us still owns that process-global state.
+_installed_warning_capture = False
 # RLock so a custom `warnings.showwarning` hook that re-enters
 # `configure_logging` on the same thread won't deadlock. The mismatch
 # warning below is the only user-visible call site that could plausibly
@@ -441,8 +445,6 @@ def configure_logging(
                 or json_logs != _configured_json_logs
                 or log_file != _configured_log_file
             ):
-                import warnings
-
                 warnings.warn(
                     f"configure_logging re-called with different arguments: "
                     f"({environment!r}, {log_level!r}, json_logs={json_logs!r}, "
@@ -608,7 +610,7 @@ def _reset_for_testing() -> None:
     """
     global _configured, _configured_environment, _configured_log_level
     global _configured_json_logs, _configured_log_file
-    global _installed_handler, _installed_file_handler
+    global _installed_handler, _installed_file_handler, _installed_warning_capture
     with _configure_lock:
         structlog.reset_defaults()
         # Drop any bound contextvars so test fixtures don't leak request-scoped
@@ -630,6 +632,10 @@ def _reset_for_testing() -> None:
         _installed_handler = None
         _installed_file_handler = None
         root.setLevel(logging.WARNING)
+        # Undo only the process-global warning capture installed by this module.
+        if _installed_warning_capture:
+            logging.captureWarnings(False)
+        _installed_warning_capture = False
         # Clear the per-logger WARNING overrides that _configure_logging_impl
         # installs at INFO level. Without this, a test that reconfigures at
         # DEBUG would see root at DEBUG but these four stuck at WARNING —
@@ -746,7 +752,7 @@ def _configure_logging_impl(
             foreign_renderer,
         ],
     )
-    global _installed_handler, _installed_file_handler
+    global _installed_handler, _installed_file_handler, _installed_warning_capture
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
     root = logging.getLogger()
@@ -818,6 +824,32 @@ def _configure_logging_impl(
                 )
 
     root.setLevel(min_level)
+
+    # Route `warnings.warn()` through logging instead of letting it write
+    # straight to stderr. Cloud Run derives a log's status from the stream it
+    # arrived on, so a bare stderr warning lands in Datadog as
+    # ``status:error`` — same false-error mechanism this module's header
+    # describes for uvicorn's supervisor lines, reaching Datadog by a
+    # different route.
+    #
+    # Measured before this: 1,543 of 1,550 error-status logs from staging
+    # core-api over 6h (99.5%) were one third-party DeprecationWarning-class
+    # warning, at ~257/hour. Error rate and Error Tracking for that service
+    # were almost entirely this.
+    #
+    # captureWarnings sends them to the `py.warnings` logger, which has no
+    # handler of its own and propagates to the root handler installed above —
+    # so they emit as JSON at WARNING, and stay visible without counting as
+    # errors.
+    #
+    # Only warnings raised AFTER this call are captured, which makes the
+    # import order in each service's app.py load-bearing: configure_logging()
+    # runs before the heavyweight imports, so warnings raised while those
+    # modules are defined are caught. Moving an import above that call would
+    # silently send its warnings back to stderr.
+    previous_showwarning = warnings.showwarning
+    logging.captureWarnings(True)
+    _installed_warning_capture = warnings.showwarning is not previous_showwarning
 
     # Silence noisy dependency loggers so INFO traffic from httpx's
     # per-request lines and google-auth token refreshes doesn't drown the

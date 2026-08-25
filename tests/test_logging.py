@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import warnings
 
 import pytest
 
@@ -634,7 +635,105 @@ def test_uvicorn_error_lifecycle_line_emits_info_status(_json_log_buffer) -> Non
     # Filter on the quoted message so only the JSON handler's line matches — the
     # buffer also holds pytest's plain-format capture-handler copies (same
     # buffer, swapped by the fixture), which lack the surrounding quotes.
-    records = [json.loads(line) for line in lines if '"Started parent process [8]"' in line]
+    records = [
+        json.loads(line) for line in lines if '"Started parent process [8]"' in line
+    ]
     assert len(records) == 1, f"expected one uvicorn.error JSON record, got: {lines}"
     assert records[0]["severity"] == "INFO"
     assert records[0]["status"] == "info"
+
+
+def test_configure_logging_captures_warnings(_json_log_buffer) -> None:
+    """``configure_logging()`` must route ``warnings.warn()`` into logging.
+
+    Cloud Run derives a log's status from the stream it arrived on, so a bare
+    stderr warning lands in Datadog as ``status:error``. Measured before this:
+    1,543 of 1,550 error-status logs from staging core-api over 6h (99.5%)
+    were one third-party warning about an unresolved forward reference in a
+    pydantic-settings model — that service's error rate was almost entirely
+    this, and the same false-error mechanism as the uvicorn supervisor lines
+    above, arriving by a different route.
+
+    Asserted on logging's capture flag rather than by raising a warning:
+    pytest's own warnings plugin wraps each test in a recorder that replaces
+    ``warnings.showwarning``, so a ``warnings.warn()`` here would be swallowed
+    by the plugin and never reach ``py.warnings``, and ``showwarning`` itself
+    reads as the recorder's rather than logging's. Re-enabling capture inside
+    the test to work around that would only assert that the test called
+    ``captureWarnings`` — vacuous. The rendering half is covered by
+    ``test_py_warnings_logger_emits_warning_status``.
+
+    ``logging._warnings_showwarning`` is private, but it is the flag
+    ``captureWarnings`` actually toggles (it holds the displaced
+    ``showwarning`` while capture is on) and the recorder does not save or
+    restore it. If a future CPython renames it this fails with AttributeError
+    — loudly, which is the right failure for a test whose job is to notice.
+    """
+    assert logging._warnings_showwarning is not None, (
+        "configure_logging() must call logging.captureWarnings(True), or "
+        "warnings go to stderr and Datadog files them as errors"
+    )
+
+
+def test_py_warnings_logger_emits_warning_status(_json_log_buffer) -> None:
+    """A captured warning must render as ``status:warning``, never error.
+
+    The pairing to the test above: that one pins that warnings are routed
+    into logging, this one pins where they land once they are. Driven through
+    the ``py.warnings`` logger directly — the same approach as the
+    ``uvicorn.error`` test above — so it exercises our pipeline without
+    depending on the interpreter's warning filters or pytest's capture.
+    """
+    logging.getLogger("py.warnings").warning(
+        "cfg.py:47: UserWarning: stand-in for the pydantic-settings warning"
+    )
+
+    lines = _json_log_buffer.getvalue().strip().splitlines()
+    # Filter on the quoted text so only the JSON handler's line matches — the
+    # buffer also holds pytest's plain-format capture-handler copies.
+    needle = '"cfg.py:47: UserWarning: stand-in for the pydantic-settings warning"'
+    records = [json.loads(line) for line in lines if needle in line]
+    assert len(records) == 1, f"expected one py.warnings JSON record, got: {lines}"
+    assert records[0]["status"] == "warning", "a warning must not count as an error"
+    assert records[0]["severity"] == "WARNING"
+
+
+def test_reset_for_testing_undoes_warning_capture() -> None:
+    """A reset must undo warning capture installed by ``configure_logging``.
+
+    Deliberately does not use ``_json_log_buffer``: that fixture resets on the
+    way in and out, which is the very behaviour under test.
+    """
+    _reset_for_testing()
+    logging.captureWarnings(False)
+    previous_showwarning = warnings.showwarning
+    configure_logging(environment="test", log_level="INFO", json_logs=True)
+    try:
+        assert warnings.showwarning is not previous_showwarning, "capture should be on"
+
+        _reset_for_testing()
+
+        assert warnings.showwarning is previous_showwarning, (
+            "_reset_for_testing() must call logging.captureWarnings(False), or "
+            "warning routing leaks past the reset that claims to undo it"
+        )
+    finally:
+        _reset_for_testing()
+        logging.captureWarnings(False)
+
+
+def test_reset_for_testing_preserves_preexisting_warning_capture() -> None:
+    """A reset must not disable warning capture owned by another caller."""
+    _reset_for_testing()
+    logging.captureWarnings(False)
+    logging.captureWarnings(True)
+    captured_showwarning = warnings.showwarning
+    try:
+        configure_logging(environment="test", log_level="INFO", json_logs=True)
+
+        _reset_for_testing()
+
+        assert warnings.showwarning is captured_showwarning
+    finally:
+        _reset_for_testing()
+        logging.captureWarnings(False)
