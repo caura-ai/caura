@@ -218,6 +218,36 @@ It has to be the whole token — `legacy-name-okay` in a sentence does not exemp
 anything — but the casing is up to you, and the reason is asked for rather than
 enforced.
 
+### Two markers: which claim are you making?
+
+`legacy-name-ok` is for something new that **bears** the old name — the alias,
+the redirect, the pinned wire format above.
+
+Often the line is not declaring anything. It just **names** something the rename
+will never reach, and cannot be correct without the literal: a command a reader
+pastes, a path on disk, a mirror URL. Use `legacy-name-floor` instead:
+
+```markdown
+| macOS | `~/Library/Application Support/...` | <!-- legacy-name-floor: the app dir name -->
+```
+
+Both exempt the line identically — nothing about pass or fail changes, and
+picking the wrong one cannot turn a build red or green. They are counted apart
+so the aliases stay readable: a documentation sweep can easily add ten mentions
+around one alias, and under a single marker that alias is the eleventh line
+nobody reads.
+
+**When both are true of one line, use `legacy-name-ok`.** Some lines name a
+frozen thing and declare a dual-read at once — an image tag whose repository
+name is permanent while its version is read from either spelling. One line takes
+one marker, and the alias is the claim rule 3 wants eyes on, so it wins.
+
+There is a third case, and it takes no marker at all. Ask what breaks if the old
+spelling is not on that line. If the answer is nothing — it is prose that happens
+to name the thing — **reword it and take no exemption.** That is the test the
+floor marker's claim has to pass: reword the line, and if it is still correct,
+the marker was false.
+
 Marking a line exempt frees a slot in that file, so every new exemption is
 printed in the CI output whether the check passes or not. That is deliberate: it
 is the one move the ratchet cannot adjudicate for itself, so it is the one that

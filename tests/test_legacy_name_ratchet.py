@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -193,6 +194,320 @@ def test_the_marker_exempts_only_its_own_line(repo: Path) -> None:
     offenders = result.stdout.split("adds the legacy name in", 1)[1]
     assert "OTHER" in offenders
     assert "ALIAS" not in offenders
+
+
+# ── the floor marker: same exemption, a different claim ──────────────────────
+#
+# ``legacy-name-floor`` exempts a line exactly as ``legacy-name-ok`` does. The
+# gate cannot tell them apart and no build changes colour because of which one is
+# used; only the report reads the difference. It exists because the two
+# populations grow from different work — an alias arrives when something is
+# renamed, a floor mention whenever a document mentioning the product's own name
+# is EDITED — so under one marker the mentions bury the aliases. Measured on
+# caura-daemon#136: eleven exemptions in one PR, four of them aliases.
+
+
+# One regex serves both markers, with the boundaries outside the alternation, so
+# there is no second code path for a per-marker copy of these to cover — a
+# loosened bound loosens both at once. These are parametrized rather than cloned
+# so that is what gets asserted, and so a third marker is one list entry.
+#
+# The ``legacy-name-ok`` cases above are deliberately left standing and unedited.
+# They pin that marker's own contract independently of this table, which is worth
+# keeping on a gate where the whole promise is that nothing about the existing
+# marker changed.
+class _Marker(NamedTuple):
+    """One marker and the two things a boundary test needs beside it."""
+
+    marker: str
+    near_miss: str
+    label: str
+
+
+_MARKERS = [
+    _Marker("legacy-name-ok", "legacy-name-okay", "compat alias(es)"),
+    _Marker("legacy-name-floor", "legacy-name-floored", "floor mention(s)"),
+]
+_EACH = pytest.mark.parametrize("m", _MARKERS, ids=lambda m: m.marker)
+
+# Comfortably above the script's ``_EXEMPTION_GROUP_AT``, so a list of this many
+# identical reasons is collapsed to a "Nx <reason>" header rather than printed
+# line by line.
+_GROUPED = 6
+
+
+@_EACH
+def test_every_marker_exempts_its_own_line(repo: Path, m: _Marker) -> None:
+    """The whole premise: a marker exempts, or it is not a marker."""
+    _stage(repo, "cli.md", f"    {LEGACY} setup --non-interactive  # {m.marker}: why\n")
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "No new lines" in result.stdout
+
+
+@_EACH
+def test_every_marker_needs_no_reason_to_work(repo: Path, m: _Marker) -> None:
+    """Asked for, not enforced — and end-of-line is a boundary, so a bare marker
+    still exempts rather than failing on a technicality."""
+    _stage(repo, "cli.md", f"    {LEGACY} setup  # {m.marker}\n")
+
+    assert _run(repo).returncode == 0
+
+
+@_EACH
+def test_every_marker_must_be_a_whole_token(repo: Path, m: _Marker) -> None:
+    """The right-hand bound, asserted for every marker at once.
+
+    One pattern matches them all, so a loosened lookahead silently loosens every
+    marker — which is exactly the shape of hole a per-marker test cannot see,
+    because it passes for the marker it names while the other is already open.
+    """
+    _stage(repo, "new.py", f'KEY = "{LEGACY}"  # not {m.near_miss} to leave in\n')
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "new.py" in result.stdout
+
+
+@_EACH
+def test_every_marker_must_not_be_glued_to_the_token_before_it(
+    repo: Path, m: _Marker
+) -> None:
+    """The mirror bound, and a separate check: a right-hand boundary alone stops
+    ``legacy-name-okay`` but not ``somelegacy-name-ok``."""
+    _stage(repo, "new.py", f'KEY = "{LEGACY}"  # some{m.marker}\n')
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "new.py" in result.stdout
+
+
+@_EACH
+def test_every_marker_is_classified_whatever_its_casing(repo: Path, m: _Marker) -> None:
+    """Matched case-insensitively, so a line somebody deliberately annotated is
+    never failed on its capitalisation.
+
+    The exit code is the weaker half and on its own is nearly worthless. A kind
+    that does not normalise back to a marker literal still exempts the line — it
+    is not ``None`` — so the gate stays green while the report, which looks the
+    kind up to decide which list it belongs in, finds no match and drops the line
+    silently. Exempt but invisible is the one outcome this report exists to
+    prevent, so the classification is asserted too. Parametrizing extends that
+    assertion to ``legacy-name-ok``, whose own casing test above checks only the
+    exit code.
+    """
+    _stage(repo, "cli.md", f"    {LEGACY} setup  # {m.marker.upper()}: the command\n")
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert f"1 {m.label} — " in result.stdout
+    assert "cli.md:1" in result.stdout
+
+
+@_EACH
+def test_an_oddly_cased_marker_still_yields_its_reason(repo: Path, m: _Marker) -> None:
+    """The reason is sliced off the winning marker's own match, so that match has
+    to be found under any casing.
+
+    Asserted through the GROUPED path on purpose. Below the grouping threshold
+    the report prints each line verbatim, and the line contains its own reason
+    text — so a reason that failed to parse is invisible, and an assertion there
+    passes whether the slicing works or not. Only the grouped header prints the
+    parsed reason on its own, which is where a silent degrade to
+    "(no reason given)" can actually be seen.
+    """
+    _stage(
+        repo,
+        "many.py",
+        "".join(
+            f'A{i} = "{LEGACY}_x"  # {m.marker.upper()}: a permanent name\n'
+            for i in range(_GROUPED)
+        ),
+    )
+
+    out = _run(repo).stdout
+
+    assert f"{_GROUPED}x  a permanent name" in out
+    assert "(no reason given)" not in out
+
+
+@pytest.mark.parametrize(
+    "line_suffix",
+    [
+        "# legacy-name-ok: dual-read alias  legacy-name-floor: the command",
+        "# legacy-name-floor: the command  legacy-name-ok: dual-read alias",
+    ],
+    ids=["alias-first", "floor-first"],
+)
+def test_a_doubly_marked_reason_stops_at_the_next_marker(
+    repo: Path, line_suffix: str
+) -> None:
+    """A reason is bounded by the NEXT marker, not by end of line.
+
+    Both orders, because the bug only appears in one of them: with the winning
+    marker written first, slicing to end-of-line swallows the other marker's
+    literal and its reason too. The grouped header is where that shows, so this
+    writes enough identical lines to trip the grouping — and the reason is also
+    the grouping KEY, so a polluted one stops identical claims collapsing
+    together, which is what the grouping exists to do.
+    """
+    _stage(
+        repo,
+        "many.py",
+        "".join(f'A{i} = "{LEGACY}_x"  {line_suffix}\n' for i in range(_GROUPED)),
+    )
+
+    out = _run(repo).stdout
+
+    assert f"{_GROUPED}x  dual-read alias" in out
+    # The other marker's literal must not have bled into this one's reason.
+    assert "dual-read alias  legacy-name-floor" not in out
+    assert "the command  legacy-name-ok" not in out
+
+
+def test_a_doubly_marked_line_is_filed_as_an_alias_whatever_the_order(
+    repo: Path,
+) -> None:
+    """Precedence is by table order, not by position on the line.
+
+    28 lines across the fleet make both claims at once — an image tag whose
+    repository name is frozen while its version is dual-read, say — so which
+    marker an author reaches for is a real question rather than a degenerate
+    one. Breaking the tie by whichever was typed first makes the report depend
+    on line order; breaking it toward the alias means the expensive mistake
+    (a rule 3 decision filed where nobody is looking for it) cannot happen.
+
+    The floor marker is written FIRST here deliberately: with positional
+    precedence this line files as a floor mention and the assertion below fails.
+    """
+    _stage(
+        repo,
+        "cli.md",
+        f"    {LEGACY} setup  # legacy-name-floor: command  legacy-name-ok: alias\n",
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "1 compat alias(es) — " in result.stdout
+    assert "floor mention(s)" not in result.stdout
+    # The reason quoted is the winning marker's own, not the other one's.
+    assert "alias" in result.stdout
+
+
+def test_a_floor_marker_buys_no_headroom_either(repo: Path) -> None:
+    """Rule 7 stays armed, and the new marker is not a softer way past it.
+
+    The exempt-and-add swap, run through the floor marker: mark one line, fill
+    the freed slot with a new unmarked one. It fails for the same reason the
+    older marker's version does — the text comparison charges non-exempt text the
+    repo never had, and the marker's kind is not part of that comparison.
+    """
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: the served mirror path\n'
+        f'SNUCK = "{LEGACY}-new-service"\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    offenders = result.stdout.split("adds the legacy name in", 1)[1]
+    assert "SNUCK" in offenders
+
+
+def test_the_report_counts_the_two_kinds_apart(repo: Path) -> None:
+    """The change's whole purpose, in the shape caura-daemon#136 landed.
+
+    Undifferentiated, eleven exemptions are a wall a reviewer scrolls past — the
+    same failure the reason-grouping exists to prevent, one level up. The counts
+    have to be separable at a glance or the split bought nothing.
+    """
+    _stage(
+        repo,
+        "env.md",
+        f"Also read as `{LEGACY.upper()}_HOME`.<!-- legacy-name-ok: rule 3 dual-read alias -->\n"
+        f"    {LEGACY} policy show  <!-- legacy-name-floor: the command name -->\n"
+        f"    {LEGACY} uninstall  <!-- legacy-name-floor: the command name -->\n",
+    )
+
+    out = _run(repo).stdout
+
+    # The total still counts every kind, so it can never disagree with the lists.
+    assert "3 exempt line(s) written by this change in 1 file(s)" in out
+    assert "1 compat alias(es), 2 floor mention(s)." in out
+    assert "1 compat alias(es) — rule 3's escape hatch" in out
+    assert "2 floor mention(s) — a permanent name in text" in out
+
+
+def test_aliases_are_listed_before_floor_mentions(repo: Path) -> None:
+    """Fixed order, not sorted by size.
+
+    Mentions outnumber aliases in the ordinary case — that is the whole reason
+    the split exists — so a count-ordered report would put the four lines rule 3
+    wants eyes on underneath six that it does not. Position must not depend on a
+    tally.
+    """
+    _stage(
+        repo,
+        "env.md",
+        f"Also read as `{LEGACY.upper()}_HOME`.<!-- legacy-name-ok: the one alias -->\n"
+        + "".join(
+            f"    {LEGACY} verb{i}  <!-- legacy-name-floor: a command name -->\n"
+            for i in range(3)
+        ),
+    )
+
+    out = _run(repo).stdout
+
+    assert out.index("compat alias(es) — ") < out.index("floor mention(s) — ")
+
+
+def test_one_kind_alone_gets_no_redundant_split_line(repo: Path) -> None:
+    """Most PRs write one exemption of one kind. Printing "1 compat alias(es)"
+    twice running — once as the split, once as the section header — reads as a
+    form rather than a finding, and the section header already says it."""
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # legacy-name-ok: gateway mirror\n',
+    )
+
+    out = _run(repo).stdout
+
+    assert "1 exempt line(s) written by this change in 1 file(s)" in out
+    assert "1 compat alias(es) — rule 3's escape hatch" in out
+    # The comma-joined split line, which only earns its place with two kinds.
+    # Matched as a WHOLE line: a substring test would separate it from the
+    # section header by nothing but the trailing "." versus " —", and would
+    # start misfiring the moment that punctuation is reworded.
+    assert "1 compat alias(es)." not in out.splitlines()
+
+
+def test_a_removed_floor_mention_is_still_reported(repo: Path) -> None:
+    """Removal is reported for both kinds, under guidance true of both.
+
+    A floor mention has no alias to survive, so the old wording — "confirm each
+    alias still exists" — would be a false instruction on a real removal, which
+    is precisely the corruption this marker split exists to stop.
+    """
+    line = f"    {LEGACY} uninstall  # legacy-name-floor: the command name\n"
+    (repo / "cli.md").write_text(line)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add a floor mention")
+    _stage(repo, "cli.md", "    caura uninstall\n")
+
+    result = _run(repo)
+
+    assert result.returncode == 0
+    assert "exempt line(s) removed" in result.stdout
+    assert "the command name" in result.stdout
 
 
 # ── what must NOT fail ───────────────────────────────────────────────────────
