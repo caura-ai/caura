@@ -66,6 +66,12 @@ migrated, each by a sequence that is deliberate rather than optional:
   itself is a single short window. The old role is kept.
 - **Cloud Run** — the services are being decoupled from build-time configuration
   first, so that a rename is a deploy rather than a rebuild.
+- **The broker's default cloud host** — the compile-time default in the daemon and
+  the release mirror derived from it move together, and only once the gateway serves
+  the new host. The mirror is the auto-updater's only source for a broker that never
+  registered, so flipping before the new host serves `/…/latest.txt` and `/…/<tag>/`
+  breaks update for exactly the installs with no other way to recover. Carried in the
+  daemon as the repository's only `TODO(rebrand cutover)`.
 
 If you are about to change one of these, the sequence matters more than the change.
 
