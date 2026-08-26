@@ -4,6 +4,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.19.1](https://github.com/caura-ai/caura/compare/plugin-v2.19.0...plugin-v2.19.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* **api:** reject unknown fields on write bodies instead of dropping them (SAFE-01) ([#1005](https://github.com/caura-ai/caura/issues/1005)) ([94cd4f1](https://github.com/caura-ai/caura/commit/94cd4f1d5a2fbfb72dea157a49a5212990bdabf7))
+* **keystones:** correct keystone_trust_hint's stored-shape claim ([#1004](https://github.com/caura-ai/caura/issues/1004)) ([92768f4](https://github.com/caura-ai/caura/commit/92768f4459f30a453db8c460f43312c05c3e4cb1))
+
+
+### Documentation
+
+* **keystones:** the self-author tier needs an explicit agent_id ([#1001](https://github.com/caura-ai/caura/issues/1001)) ([a79a2ea](https://github.com/caura-ai/caura/commit/a79a2eaa1e0c2855c8650f8c786e949bedb0e4f8))
+
 ## [2.19.0](https://github.com/caura-ai/caura/compare/plugin-v2.18.0...plugin-v2.19.0) (2026-08-25)
 
 

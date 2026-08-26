@@ -10,6 +10,40 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.33.0](https://github.com/caura-ai/caura/compare/backend-v2.32.0...backend-v2.33.0) (2026-08-26)
+
+
+### Features
+
+* **api:** complete the OpenAPI spec — response schemas + servers block (C33) ([#990](https://github.com/caura-ai/caura/issues/990)) ([8af9fc0](https://github.com/caura-ai/caura/commit/8af9fc0c95e2d99cd1504be02eab3eb73fc5722f))
+* **ratchet:** a floor mention is not a compat alias — give it its own marker ([#982](https://github.com/caura-ai/caura/issues/982)) ([48162c0](https://github.com/caura-ai/caura/commit/48162c06025fe01c0420386dc2ab34c4aa86f768))
+
+
+### Bug Fixes
+
+* **api:** /recall and /ingest/commit 500 under headers_enabled=True (D14 follow-up) ([#984](https://github.com/caura-ai/caura/issues/984)) ([9a3147a](https://github.com/caura-ai/caura/commit/9a3147aecbe74028875cf2290c83243657b0093c))
+* **api:** admin credential gets 400/explicit-tenant on skills-inbox, not 401 (WT-4) ([#987](https://github.com/caura-ai/caura/issues/987)) ([2d34dad](https://github.com/caura-ai/caura/commit/2d34dadb204fa3d0d7a6a9156550bece1504ab83))
+* **api:** every 429 carries Retry-After (D14) ([#976](https://github.com/caura-ai/caura/issues/976)) ([a2cd6e3](https://github.com/caura-ai/caura/commit/a2cd6e30b47c178e3888a255d59c2f51ba25a0c4))
+* **api:** PATCH with an explicit null on a NOT NULL field is 400, not 500 ([#996](https://github.com/caura-ai/caura/issues/996)) ([fc1d9e5](https://github.com/caura-ai/caura/commit/fc1d9e561298f4cccfc9f01ca416b5d2aa8758d2))
+* **api:** rate-limited routes without a Response param 500 on every call ([#985](https://github.com/caura-ai/caura/issues/985)) ([a2642ce](https://github.com/caura-ai/caura/commit/a2642ce853967b118b1403ad0fe3da41ea81a387))
+* **api:** reject unknown fields on write bodies instead of dropping them (SAFE-01) ([#1005](https://github.com/caura-ai/caura/issues/1005)) ([94cd4f1](https://github.com/caura-ai/caura/commit/94cd4f1d5a2fbfb72dea157a49a5212990bdabf7))
+* **api:** stm admin credential gets 400/explicit-tenant, not a false 401 (WT-4) ([#1002](https://github.com/caura-ai/caura/issues/1002)) ([36a96b5](https://github.com/caura-ai/caura/commit/36a96b587cedb5c22d4397f720cf753d82e76e50))
+* **contradictions:** Path C preflight drops only true name collisions, fails open on canonicalisation splits (WT-3) ([#988](https://github.com/caura-ai/caura/issues/988)) ([44e7ed6](https://github.com/caura-ai/caura/commit/44e7ed6618a5ac13ef01d8a5a5145cb57bb3c14a))
+* **core-api:** raise the uvicorn worker healthcheck timeout to 30s ([#999](https://github.com/caura-ai/caura/issues/999)) ([203068e](https://github.com/caura-ai/caura/commit/203068e88963250122b5639569be213392f1e0de))
+* **entities:** one subject, one entity — canonical match on resolve + link dedup (WT-2) ([#989](https://github.com/caura-ai/caura/issues/989)) ([71e9981](https://github.com/caura-ai/caura/commit/71e99811d3226acfdcbe135a2ecf030d18700c7c))
+* **events:** bound and narrow the broadcast-subscription release ([#997](https://github.com/caura-ai/caura/issues/997)) ([fce51b1](https://github.com/caura-ai/caura/commit/fce51b18aad8f5e76e03fae94d2cfd5b3f5cd871))
+* **events:** release ephemeral subscriptions before the slow shutdown steps ([#991](https://github.com/caura-ai/caura/issues/991)) ([5e673ba](https://github.com/caura-ai/caura/commit/5e673ba041d995ab62f8c867ddea320d4f57ac18))
+* **keystones:** correct keystone_trust_hint's stored-shape claim ([#1004](https://github.com/caura-ai/caura/issues/1004)) ([92768f4](https://github.com/caura-ai/caura/commit/92768f4459f30a453db8c460f43312c05c3e4cb1))
+* **recall:** surface the answer, not the reasoning scaffold (WT-1) ([#986](https://github.com/caura-ai/caura/issues/986)) ([2172114](https://github.com/caura-ai/caura/commit/217211419ba228be1c2487ba1ea53ab5c25c3e90))
+* **search:** retrieval contract for genuine contradictions — newer value wins (A34) ([#981](https://github.com/caura-ai/caura/issues/981)) ([7bd79a4](https://github.com/caura-ai/caura/commit/7bd79a46f72654b42d6794cb4fa64cb46fc6c842))
+* **worker,storage:** enrichment completion observable in the C25 view (B7) ([#978](https://github.com/caura-ai/caura/issues/978)) ([afa96b7](https://github.com/caura-ai/caura/commit/afa96b715499fa2de7a7f97122e7d368ecb39258))
+
+
+### Documentation
+
+* align the API docs with tonight's behaviour changes ([#1003](https://github.com/caura-ai/caura/issues/1003)) ([0508d1e](https://github.com/caura-ai/caura/commit/0508d1e0d5ebddbfd000b6f758e16359f85558aa))
+* **keystones:** the self-author tier needs an explicit agent_id ([#1001](https://github.com/caura-ai/caura/issues/1001)) ([a79a2ea](https://github.com/caura-ai/caura/commit/a79a2eaa1e0c2855c8650f8c786e949bedb0e4f8))
+
 ## [2.32.0](https://github.com/caura-ai/caura/compare/backend-v2.31.0...backend-v2.32.0) (2026-08-25)
 
 
