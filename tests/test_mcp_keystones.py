@@ -559,6 +559,10 @@ async def test_set_agent_scope_without_agent_id_error_names_the_remedy(mcp_env, 
     # …and the remedy is spelled out, naming the caller's own id.
     assert "agent_id='agent-A'" in message, message
     assert "self-author" in message, message
+    # …without promising the retry succeeds. The hint cannot see stored
+    # rule state or caller verification, so it must disclaim being the
+    # whole story rather than issue an instruction that may not work.
+    assert "independently require trust >= 2" in message, message
 
 
 async def test_fleet_scope_refusal_has_no_self_scope_hint(mcp_env, monkeypatch):
@@ -609,3 +613,76 @@ async def test_cross_agent_refusal_has_no_self_scope_hint(mcp_env, monkeypatch):
     )
     message = parse_envelope(out)["error"]["message"]
     assert message == "Agent 'agent-A' (trust_level=1) < required 2.", message
+
+
+async def test_hint_is_blind_to_stored_rule_state(mcp_env, monkeypatch):
+    """No probing oracle: the hint must read ONLY the caller's own
+    submission, so its text is byte-identical whether or not a broader
+    rule already occupies the doc_id.
+
+    This is why ``keystone_trust_hint`` is not given the stored shape
+    even though that would let it suppress itself on refusals the
+    caller cannot fix. Branching on stored state would make
+    hint-present vs hint-absent a readable signal for "is there a
+    fleet/tenant rule at this doc_id?" — exactly what running the trust
+    gate BEFORE the storage read is designed to withhold from a trust-1
+    caller. The wording carries the imprecision instead; the gate keeps
+    its secret.
+    """
+    messages = []
+    for stored in (None, {"data": {"scope": "fleet"}}, {"data": {"scope": "tenant"}}):
+        mcp_env["monkeypatch"].setattr(mcp_server, "_get_agent_id", lambda: "agent-A")
+        _capture_trust(monkeypatch, allow=True, trust_level=1)
+        _stub_storage_client(
+            monkeypatch,
+            get_document=stored,
+            upsert_keystone={"id": "11111111-1111-4111-8111-111111111111", "doc_id": "r"},
+        )
+        out = await mcp_server.caura_keystones_set(
+            op="set",
+            doc_id="r",
+            title="T",
+            content="C",
+            scope="agent",
+            weight="med",
+            fleet_id="fleet-X",
+        )
+        payload = parse_envelope(out)
+        assert payload["error"]["code"] == "FORBIDDEN", payload
+        messages.append(payload["error"]["message"])
+
+    assert len(set(messages)) == 1, (
+        "refusal text differs by stored rule shape — that leaks doc_id "
+        f"occupancy to a trust-1 caller: {messages}"
+    )
+
+
+async def test_hint_does_not_promise_a_retry_it_cannot_guarantee(mcp_env, monkeypatch):
+    """The stored-shape case, stated plainly. Here the floor is 2
+    because a ``scope=fleet`` rule already sits at the doc_id — adding
+    ``agent_id`` would NOT lower it. The hint still fires (it is blind
+    to that), so its wording must stay descriptive: it may name what
+    ``agent_id`` means, but must not instruct the caller to retry.
+    """
+    mcp_env["monkeypatch"].setattr(mcp_server, "_get_agent_id", lambda: "agent-A")
+    _capture_trust(monkeypatch, allow=True, trust_level=1)
+    _stub_storage_client(
+        monkeypatch,
+        get_document={"data": {"scope": "fleet"}},
+        upsert_keystone={"id": "11111111-1111-4111-8111-111111111111", "doc_id": "r"},
+    )
+    out = await mcp_server.caura_keystones_set(
+        op="set",
+        doc_id="r",
+        title="T",
+        content="C",
+        scope="agent",
+        weight="med",
+        fleet_id="fleet-X",
+    )
+    message = parse_envelope(out)["error"]["message"]
+    # The disclaimer is what keeps this message honest in this case.
+    assert "independently require trust >= 2" in message, message
+    # No imperative promising the retry works.
+    for imperative in ("Pass agent_id=", "Set agent_id=", "to author a rule for yourself"):
+        assert imperative not in message, (imperative, message)

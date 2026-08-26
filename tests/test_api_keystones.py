@@ -622,6 +622,12 @@ async def test_agent_scope_without_agent_id_403_explains_the_remedy(client):
     detail = str(resp.json()["detail"])
     assert f"agent_id='{agent_id}'" in detail, detail
     assert "self-author" in detail, detail
+    # The hint is blind to stored rule state and to caller verification,
+    # so it disclaims being the whole reason rather than instructing a
+    # retry that those constraints could independently defeat. (This
+    # very request is such a case: the OSS admin-key path is unverified,
+    # so supplying agent_id would not have lowered the floor either.)
+    assert "independently require trust >= 2" in detail, detail
 
 
 async def test_fleet_scope_403_carries_no_agent_id_hint(client):

@@ -39,6 +39,14 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # already terse; the +96 is structural schema cost (three params × name/
 # type/default/title). Ceiling 5200 → 5350 keeps ~50 tokens of headroom
 # so the next accidental description bloat still trips this guard.
+#
+# 2026-08-26: 5321 cl100k (+25) after ``caura_keystones_set`` spelled out
+# that the self-author tier needs an EXPLICIT agent_id, and that
+# overwriting an existing doc_id also costs whatever its stored shape
+# requires. A wet test read the old text as promising trust 1 for any
+# "self" rule and filed the resulting 403 as a bug. Ceiling deliberately
+# NOT raised — but note this spends half the margin above, leaving ~29.
+# Trim before adding, or move the ceiling with a reason of your own.
 CEILING_TOKENS = 5350
 
 

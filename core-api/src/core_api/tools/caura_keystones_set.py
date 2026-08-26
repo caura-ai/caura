@@ -38,7 +38,8 @@ _DESCRIPTION = (
     "Trust gating is dynamic: scope=agent with an explicit TARGET agent_id "
     "matching the caller is trust ≥ 1 (self-author); anything else (scope=fleet, "
     "scope=tenant, scope=agent targeting a different agent, or scope=agent with "
-    "agent_id omitted) is trust ≥ 2."
+    "agent_id omitted) is trust ≥ 2. Overwriting an existing doc_id also needs "
+    "the trust its STORED shape requires."
 )
 
 _SPEC = ToolSpec(

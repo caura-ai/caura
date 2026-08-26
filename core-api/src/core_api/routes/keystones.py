@@ -21,12 +21,23 @@ Trust gating is dynamic per the targeted rule's scope:
   which names no target and so cannot claim the self-author tier
   (storage rejects that shape too: "scope=agent requires agent_id").
 
-The self-author tier additionally needs a **verified** caller identity —
-an agent-scoped credential, not an ``X-Agent-ID`` header asserted
-alongside an admin/tenant key. See ``_effective_min_for_caller``: an
-unverified caller is held at ≥ 2 even with a correctly-shaped
-self-authored rule, because otherwise an admin-key holder could forge
-a rule in any agent's name.
+That matrix reads the **submitted** shape. Two further constraints can
+raise the floor above it, so a correctly-shaped self-authored rule is
+not guaranteed to pass at trust 1:
+
+* **The stored shape.** ``effective_keystone_min_trust`` takes the max
+  of the submitted floor and the floor the rule ALREADY persisted under
+  that ``doc_id`` requires. Overwriting a ``scope=fleet`` rule needs ≥ 2
+  however the new body is shaped — that is the escalation guard.
+* **Caller verification.** The self-author tier needs a *verified*
+  identity — an agent-scoped credential, not an ``X-Agent-ID`` header
+  asserted alongside an admin/tenant key. See
+  ``_effective_min_for_caller``: an unverified caller is held at ≥ 2
+  even with a correctly-shaped self-authored rule, because otherwise an
+  admin-key holder could forge a rule in any agent's name.
+
+Neither is visible to ``keystone_trust_hint``, by design — see its
+docstring for why the hint stays blind to stored state.
 
 Surface the ``X-Truncated`` header from core-storage so callers can warn
 operators when rules are being silently dropped.

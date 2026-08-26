@@ -101,26 +101,48 @@ def keystone_trust_hint(
     ``Agent '…' (trust_level=N) < required M.`` shape is untouched and
     anything parsing that prefix keeps working.
 
-    Returns ``""`` for every other refusal (``scope=fleet``,
-    ``scope=tenant``, cross-agent ``scope=agent``, the stored-shape
-    escalation guard) — those messages are already accurate and the
-    self-author tier genuinely does not apply to them.
+    Returns ``""`` for the other submitted shapes (``scope=fleet``,
+    ``scope=tenant``, cross-agent ``scope=agent``) — those messages are
+    already accurate and the self-author tier genuinely does not apply
+    to them.
 
-    The wording states what ``agent_id`` *means* rather than promising
-    the retry will succeed: on REST, an identity asserted through the
-    ``X-Agent-ID`` header alone is unverified and
-    ``_effective_min_for_caller`` holds the floor at ≥ 2 even for a
-    correctly-shaped self-authored rule. Naming the
-    gateway-verified-identity precondition keeps the hint true on both
-    paths instead of sending an admin-key caller round a loop that
-    cannot close.
+    **This function is deliberately blind to stored rule state**, and
+    the wording is written to stay true because of it. It sees only the
+    three submitted values; it cannot tell whether a rule already exists
+    at the ``doc_id`` or what scope that rule has. So it CAN fire on a
+    refusal the caller cannot fix by adding ``agent_id`` — submit
+    ``scope=agent`` with no ``agent_id`` against a ``doc_id`` whose
+    stored rule is ``scope=fleet`` and ``effective_keystone_min_trust``
+    returns 2 on the stored shape, independently of anything the caller
+    sends.
+
+    That blindness is a feature, not a limitation to route around.
+    Branching on stored shape would make the hint's presence a probing
+    oracle: hint-absent would tell a trust-1 caller "a broader rule
+    exists at this doc_id". The trust gate runs BEFORE the storage read
+    precisely so that caller learns nothing about ``doc_id`` occupancy
+    (see ``routes/keystones.py``), and a stored-state-aware hint would
+    hand back exactly what that ordering withholds.
+
+    The text therefore describes what ``agent_id`` *means* for the
+    self-author tier and explicitly disclaims being the whole story —
+    it never tells the caller a retry will succeed. Two independent
+    constraints can hold the floor at ≥ 2 no matter what is resubmitted:
+    the stored shape above, and an unverified caller identity (on REST,
+    ``X-Agent-ID`` asserted alongside an admin/tenant key —
+    ``_effective_min_for_caller``).
     """
     if scope == "agent" and target_agent_id is None:
+        # Every clause below is constant or derived from the caller's own
+        # submission, so the string is identical for a given request
+        # whatever the store holds. Keep it that way.
         return (
-            " Note: scope=agent with agent_id omitted is not a self-authored rule — "
-            "the self-author tier (trust >= 1) covers only scope=agent carrying an "
-            "explicit agent_id equal to the caller, asserted through a "
-            f"gateway-verified agent identity. Set agent_id='{caller_agent_id}' to "
-            "target yourself; every other shape needs trust >= 2."
+            " Note: the submitted rule is scope=agent with agent_id omitted, which is "
+            "not a self-authored rule — the self-author tier (trust >= 1) covers only "
+            "scope=agent carrying an explicit agent_id equal to the caller, asserted "
+            f"through a gateway-verified agent identity; agent_id='{caller_agent_id}' "
+            "is the value that names you. This describes the submitted shape alone: "
+            "an existing rule at this doc_id, or an unverified caller identity, can "
+            "independently require trust >= 2."
         )
     return ""
