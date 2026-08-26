@@ -225,6 +225,13 @@ curl -X POST http://localhost:8000/api/v1/search \
   -d '{"tenant_id": "default", "query": "authentication token lifetime"}'
 ```
 
+A write body accepts only the fields the API declares. Send one it doesn't — a
+typo, or a plausible-looking key like `tags` — and you get a `422` naming it in
+`error.details.unknown_fields`, rather than a `201` with your data quietly
+dropped. Search and filter bodies still ignore unknown fields on purpose; the
+asymmetry is explained in
+[`docs/api-surfaces.md`](docs/api-surfaces.md#request-body-contract-writes-are-strict-searches-are-not).
+
 The write response carries an LLM-inferred `memory_type`, `title`, `summary`, `tags`, `status`, and a `weight` (the importance score) — all derived from a single `content` field. On the default fast-write path, enrichment is applied asynchronously: the immediate response is marked `enrichment_pending` and the inferred fields populate within moments.
 
 `POST /search` returns matches under an `items` array, each entry the full memory plus a `similarity` score:

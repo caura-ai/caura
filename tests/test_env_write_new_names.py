@@ -35,7 +35,12 @@ def _env_block(script: str) -> str:
 async def _script(client) -> str:
     resp = await client.post(
         "/api/v1/install-plugin",
-        json={"fleet_id": "f1", "api_key": "mc_testkey123456", "tenant_id": "t1"},
+        # No ``tenant_id``: ``InstallPluginRequest`` has never declared one — the
+        # route resolves the tenant from the credential (``_resolve_tenant_id``),
+        # so this key was accepted and discarded on every call, and the endpoint
+        # now rejects it (SAFE-01). The ``CAURA_TENANT_ID=`` line the tests below
+        # assert on comes from that resolution, not from the request body.
+        json={"fleet_id": "f1", "api_key": "mc_testkey123456"},
     )
     assert resp.status_code == 200
     return resp.text

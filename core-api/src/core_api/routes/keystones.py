@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.config import settings as app_settings
+from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.audit_service import log_action
 from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
@@ -49,6 +50,8 @@ class KeystoneSetRequest(BaseModel):
     """Payload shape mirrors the storage-api validator one-for-one so we
     don't need to re-do the scope/weight/fleet shape checks here — the
     storage 422 propagates through."""
+
+    model_config = STRICT_WRITE_BODY
 
     tenant_id: str
     fleet_id: str | None = None

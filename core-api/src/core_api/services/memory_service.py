@@ -82,6 +82,7 @@ from core_api.constants import (
 from core_api.schemas import (
     BulkItemResult,
     BulkMemoryCreate,
+    BulkMemoryItem,
     BulkMemoryResponse,
     ContradictionInfo,
     EntityLinkOut,
@@ -1646,6 +1647,22 @@ async def create_memories_bulk(
         for i, item in enumerate(items)
         if item.memory_type is not None and item.memory_type not in MEMORY_TYPES
     }
+    # SAFE-01. A key the item schema doesn't declare used to be dropped in
+    # silence, so ``{"content": "...", "meta_data": {...}}`` came back
+    # ``status="created"`` with the metadata gone and nothing saying so.
+    # ``BulkMemoryItem`` is ``extra="allow"`` (NOT ``extra="forbid"`` — see the
+    # note on the model) precisely so the unknown keys land in ``model_extra``
+    # and can be reported HERE, per item, instead of 422-ing the whole batch
+    # and taking the valid siblings down with the typo.
+    unknown_field_errors: dict[int, str] = {
+        i: (
+            "unknown field(s) not permitted: "
+            + ", ".join(sorted(item.model_extra))
+            + f". Allowed fields: {', '.join(sorted(BulkMemoryItem.model_fields))}"
+        )
+        for i, item in enumerate(items)
+        if item.model_extra
+    }
 
     # -- Resolve per-tenant config once --
     from core_api.services.organization_settings import resolve_config
@@ -1663,6 +1680,7 @@ async def create_memories_bulk(
         and i not in weight_errors
         and i not in status_errors
         and i not in memory_type_errors
+        and i not in unknown_field_errors
     ]
 
     # -- Deterministic governance gate (eToro). Runs BEFORE embeddings +
@@ -1857,8 +1875,10 @@ async def create_memories_bulk(
 
         # Input-validation errors surface as per-item error rows (never embedded,
         # enriched, deduped, or written — they're excluded from valid_indices):
-        # content length (short/oversized), weight range, status enum. These were
-        # all whole-batch 422s at the schema before the additive-tolerance work.
+        # content length (short/oversized), weight range, status enum, and
+        # unrecognised field names (SAFE-01). These were all whole-batch 422s at
+        # the schema before the additive-tolerance work — or, for unknown fields,
+        # not an error at all: the key was dropped and the row written without it.
         # ALL applicable messages for the item are aggregated into one row so a
         # caller sees every problem at once rather than one per round-trip.
         item_errors = [
@@ -1869,6 +1889,7 @@ async def create_memories_bulk(
                 oversized_content_errors,
                 weight_errors,
                 status_errors,
+                unknown_field_errors,
             )
             if i in errs
         ]

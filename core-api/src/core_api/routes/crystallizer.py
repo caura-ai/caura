@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.crystallizer_service import start_crystallization
 
 router = APIRouter(tags=["Memory Crystallizer"])
@@ -16,6 +17,8 @@ router = APIRouter(tags=["Memory Crystallizer"])
 
 
 class CrystallizeRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
 

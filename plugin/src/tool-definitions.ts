@@ -400,6 +400,23 @@ function searchBody(params: Record<string, unknown>): Record<string, unknown> {
   return body;
 }
 
+// ``caura_write`` params the SINGLE-write body accepts and the BULK envelope
+// does not — the per-item spellings live inside each ``items[]`` object, not at
+// the top level. Kept next to the dispatch that strips them so the two can't
+// drift; the tool schema above already marks each one "single-write only" in
+// its description, which is exactly the kind of documentation the server used
+// to enforce by silently discarding the field.
+const SINGLE_WRITE_ONLY_FIELDS = [
+  "content",
+  "memory_type",
+  "weight",
+  "source_uri",
+  "run_id",
+  "metadata",
+  "status",
+  "write_mode",
+] as const;
+
 const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   caura_recall: async (params, signal) => {
     const body = await enrichBody(searchBody(params));
@@ -416,7 +433,20 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     // reserved "main" default. ``resolveIdentity`` supplies the install-scoped
     // id this dispatch used to build inline.
     const body = await enrichBody(params, { resolveIdentity: true });
+    // SAFE-01. ``caura_write`` is ONE tool with two bodies behind it, and this
+    // dispatch forwards the caller's params wholesale — so whichever half's
+    // fields the caller didn't use rode along into the other half's endpoint.
+    // The server used to drop them in silence; POST /memories and
+    // POST /memories/bulk now 422 on a field they don't declare, so the split
+    // has to happen here instead of at the server's expense.
+    //
+    // Batch: everything marked "single-write only" in the tool schema
+    // (BulkMemoryCreate accepts only tenant_id/fleet_id/agent_id/items/
+    // visibility — the per-item spellings belong inside each item object).
+    // Single: ``items``, which reaches here only when it is present but not an
+    // array (``isBatch`` is false), i.e. already malformed.
     if (isBatch) {
+      for (const k of SINGLE_WRITE_ONLY_FIELDS) delete body[k];
       // POST /memories/bulk requires a per-attempt idempotency token via
       // the `X-Bulk-Attempt-Id` header (CAURA-602). The server derives each
       // row's `client_request_id` from `${X-Bulk-Attempt-Id}:${index}`, so a
@@ -430,6 +460,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
         "X-Bulk-Attempt-Id": randomUUID(),
       });
     }
+    delete body.items;
     return apiCall("POST", "/memories", body, undefined, signal);
   },
 
@@ -479,13 +510,16 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     const collection = enriched.collection as string | undefined;
     const tenant_id = enriched.tenant_id as string;
     if (op === "write") {
+      // SAFE-01: no ``agent_id``. ``DocWriteRequest`` has never declared one —
+      // the document routes take the writer's identity from the authenticated
+      // credential, not the body — so this key was accepted and dropped on
+      // every plugin-routed doc write, and POST /documents now 422s on it.
       return apiCall("POST", "/documents", {
         tenant_id,
         collection,
         doc_id: enriched.doc_id,
         data: enriched.data,
         fleet_id: enriched.fleet_id,
-        agent_id: enriched.agent_id,
       }, undefined, signal);
     }
     if (op === "read") {

@@ -187,6 +187,11 @@ curl "$CAURA_URL/api/v1/memories?tenant_id=default" \
   -H "X-API-Key: $KEY"
 ```
 
+Write bodies are strict: a field the API doesn't declare comes back `422`
+naming it, not a `201` that silently drops it. Search and filter bodies stay
+permissive. See
+[`docs/api-surfaces.md`](docs/api-surfaces.md#request-body-contract-writes-are-strict-searches-are-not).
+
 ## Available Tools
 
 Once connected via MCP or the OpenClaw plugin, you have these tools:

@@ -572,7 +572,12 @@ export class CauraContextEngine {
         agent_id: "__health_check__",
         content: testContent,
         memory_type: "fact",
-        tags: ["__smoke_test__"],
+        // SAFE-01: ``tags`` is not a MemoryCreate field and never has been —
+        // the server dropped it in silence on every one of these writes. The
+        // caller-owned bag is ``metadata`` (its ``tags`` key is explicitly
+        // preserved from enrichment overwrite, C25), and POST /memories now
+        // 422s on an undeclared top-level key.
+        metadata: { tags: ["__smoke_test__"] },
       })) as Record<string, unknown>;
       writtenId =
         (wr?.id as string) ||
@@ -696,7 +701,8 @@ export class CauraContextEngine {
           fleet_id: CAURA_FLEET_ID || undefined,
           content: truncated,
           memory_type: "episode",
-          tags: ["auto-ingest", "user-message"],
+          // SAFE-01 — see the bootstrap smoke-test write above.
+          metadata: { tags: ["auto-ingest", "user-message"] },
         });
         sessionIngestCounts.set(sessionKey, writeCount + 1);
       } catch (e: unknown) {
@@ -1126,7 +1132,8 @@ export class CauraContextEngine {
           fleet_id: CAURA_FLEET_ID || undefined,
           content: summary,
           memory_type: "episode",
-          tags: ["auto-compaction"],
+          // SAFE-01 — see the bootstrap smoke-test write above.
+          metadata: { tags: ["auto-compaction"] },
         });
       } catch (e: unknown) {
         logError("Failed to persist compaction summary", e);
@@ -1320,7 +1327,8 @@ export class CauraContextEngine {
         fleet_id: CAURA_FLEET_ID || undefined,
         content: turnSummary,
         memory_type: "episode",
-        tags: ["auto-turn-summary"],
+        // SAFE-01 — see the bootstrap smoke-test write above.
+        metadata: { tags: ["auto-turn-summary"] },
       });
     } catch (e: unknown) {
       // 409 dedup rejection is expected when the same agent emits identical

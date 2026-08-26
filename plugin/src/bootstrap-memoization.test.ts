@@ -9,7 +9,8 @@
  * lifetime (with retry-on-failure preserved).
  *
  * The tests mock ``globalThis.fetch`` and count "smoke-shaped" requests
- * (``POST /memories`` with ``__smoke_test__`` tag in the body) — this
+ * (``POST /memories`` with the ``__smoke_test__`` marker in
+ * ``metadata.tags``) — this
  * isolates the memoization contract from the rest of the smoke test's
  * internal mechanics (parseSearchItems, similarity threshold, etc.).
  */
@@ -111,7 +112,12 @@ function countSmokeWrites(): number {
       c.method === "POST" &&
       c.url.includes("/memories") &&
       !c.url.includes("/memories/") && // exclude DELETE /memories/{id}
-      (c.body as { tags?: string[] })?.tags?.includes("__smoke_test__") === true,
+      // SAFE-01: the marker moved from a top-level ``tags`` key — which
+      // POST /memories never declared, and silently discarded — into
+      // ``metadata.tags``, the caller-owned bag that actually persists.
+      (c.body as { metadata?: { tags?: string[] } })?.metadata?.tags?.includes(
+        "__smoke_test__",
+      ) === true,
   ).length;
 }
 

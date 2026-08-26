@@ -10,6 +10,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
+from core_api.schemas import STRICT_WRITE_BODY
 from core_api.version_compat import MIN_AUTO_DEPLOY_PLUGIN_VERSION
 
 logger = logging.getLogger(__name__)
@@ -617,6 +618,8 @@ echo ""
 
 
 class InstallPluginRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     fleet_id: str = ""
     # F4/AX-03. Was ``"http://localhost:8000"``. That default is correct for
     # exactly one caller — someone running the API on their own machine — and

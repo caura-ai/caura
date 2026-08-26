@@ -73,6 +73,7 @@
         "type": "object"
       },
       "BulkMemoryCreate": {
+        "additionalProperties": false,
         "properties": {
           "agent_id": {
             "anyOf": [
@@ -130,6 +131,7 @@
         "type": "object"
       },
       "BulkMemoryItem": {
+        "additionalProperties": true,
         "description": "Single item in a bulk write request. tenant_id/fleet_id/agent_id inherited from parent.",
         "properties": {
           "content": {
@@ -426,6 +428,7 @@
         "type": "object"
       },
       "EntityLinkIn": {
+        "additionalProperties": false,
         "properties": {
           "entity_id": {
             "format": "uuid",
@@ -1122,6 +1125,7 @@
         "type": "string"
       },
       "MemoryUpdate": {
+        "additionalProperties": false,
         "properties": {
           "content": {
             "anyOf": [

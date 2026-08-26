@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import NODE_OFFLINE_SECONDS, NODE_STALE_SECONDS
+from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.audit_service import log_action
 from core_api.services.organization_settings import get_raw_settings
 from core_api.version_compat import (
@@ -86,6 +87,8 @@ router = APIRouter(tags=["Fleet"])
 
 
 class FleetCreateIn(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str  # alphanumeric + hyphens, 3-50 chars
     display_name: str | None = None
@@ -128,6 +131,23 @@ def _cap_or_drop(v: dict | None, limit: int, field: str) -> dict | None:
 
 
 class HeartbeatIn(BaseModel):
+    # DELIBERATELY PERMISSIVE (SAFE-01), even though this IS a write. Two
+    # reasons, both specific to this endpoint:
+    #
+    # 1. Nothing a caller owns is lost. The body is node telemetry the plugin
+    #    reports about itself. An unknown key here costs an observability field,
+    #    not a memory — the data-loss the SAFE-01 fix exists to stop.
+    # 2. A 422 costs far more than the field would. There is NO version
+    #    handshake between plugin and backend (RELEASING.md § Compatibility):
+    #    installs in the field roll forward on their own cadence, and the
+    #    command channel rides the heartbeat RESPONSE. Rejecting the request
+    #    over an unrecognised key would take the node offline in fleet views
+    #    AND cut its command channel — including the deploy command that would
+    #    have upgraded it. Unrecoverable without a manual touch on every node.
+    #
+    # This model already declares every field the current plugin sends, and it
+    # caps the two free-form blobs by DROPPING them rather than rejecting (see
+    # the validators below) — the same fail-soft posture as this config.
     tenant_id: str
     node_name: str
     fleet_id: str | None = None
@@ -199,6 +219,8 @@ class HeartbeatIn(BaseModel):
 
 
 class CommandIn(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str | None = None
     node_id: UUID
     command: str
@@ -206,6 +228,10 @@ class CommandIn(BaseModel):
 
 
 class CommandResultIn(BaseModel):
+    # DELIBERATELY PERMISSIVE (SAFE-01) — the command-ack path, same reasoning
+    # as ``HeartbeatIn`` above: plugin-produced, no version handshake, and a 422
+    # would strand the command as permanently un-acked in the backend rather
+    # than surfacing anything a caller could act on.
     status: str  # done | failed
     result: dict | None = None
 

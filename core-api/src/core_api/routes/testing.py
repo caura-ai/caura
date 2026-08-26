@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from core_api.auth import AuthContext, get_auth_context
+from core_api.schemas import STRICT_WRITE_BODY
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,8 @@ ALLOWED_FIELDS: dict[str, set[str]] = {
 
 
 class TimeWarpRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     action: str
 
     # For set_field

@@ -56,6 +56,27 @@ The client is a context manager (`with Caura(...) as mc:`) and raises
 `AuthError` (401/403), `NotFoundError` (404), or `CauraAPIError` on failures.
 Every result also exposes the full API payload on `.raw`.
 
+### Unknown fields on writes are rejected
+
+`write()` forwards any extra keyword arguments straight into the request body
+(`mc.write("...", some_field=1)`). The API rejects a field it does not declare
+with **422** and names it:
+
+```python
+try:
+    mc.write("a memory", tags=["alpha"])   # `tags` is not a write field
+except CauraAPIError as exc:
+    exc.payload["error"]["details"]["unknown_fields"]   # ["tags"]
+```
+
+This used to return `201` with the field silently discarded, so an integration
+that "worked" may start failing here — the data it sent was never being stored.
+Caller-owned keys belong under `metadata` (`mc.write("...", metadata={"tags": [...]})`).
+
+`search()` and `recall()` are unaffected: filter bodies still accept unknown
+fields, deliberately. See
+[api-surfaces.md](https://github.com/caura-ai/caura/blob/main/docs/api-surfaces.md#request-body-contract-writes-are-strict-searches-are-not).
+
 ### Fetching a document
 
 `get_document()` returns the full `DocOut` envelope — the stored record is

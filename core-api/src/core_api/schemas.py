@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import AliasChoices, BaseModel, Field, create_model, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, create_model, model_validator
 
 from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
 from core_api.constants import (
@@ -21,15 +21,50 @@ from core_api.constants import (
     MemoryType,
 )
 
+# --- Request-body strictness (SAFE-01) ---
+#
+# WRITE request bodies reject unknown fields; SEARCH / FILTER / QUERY request
+# bodies keep accepting them. That asymmetry is deliberate and is the whole
+# point of this constant existing instead of a bare ``extra="forbid"`` sprinkled
+# around — a future "tidy-up" that makes the two sides match would reintroduce
+# one of the two bugs below, so each side is pinned by its own test
+# (``tests/test_unknown_field_rejection.py``).
+#
+# WHY WRITES ARE STRICT. Pydantic's default is ``extra="ignore"``: a field the
+# model does not declare is dropped without a word. On a write that means a
+# misspelled key ("contnet", "memory_typ", "meta_data") returns 201 Created with
+# the caller's data silently missing, and nothing in the response says so. Found
+# wet-testing register/write (SAFE-01). ``extra="forbid"`` turns that into a 422
+# naming the offending field — see ``app.validation_exception_handler``, which
+# lifts ``extra_forbidden`` errors into the canonical envelope's message and a
+# ``details.unknown_fields`` list.
+#
+# WHY SEARCH IS NOT. A filter that arrives misspelled returns *more* rows, not
+# corrupted ones — the caller sees the wrong answer, not a wrong write. And the
+# C1+C2 incident (see ``SearchRequest`` below) left the search surface carrying
+# historical spellings that are absorbed by ``AliasChoices``; the permissiveness
+# there is a compatibility promise to existing integrators, not an oversight.
+# Product decision, not a detail to optimise.
+#
+# Declared aliases are NOT extra fields, so ``forbid`` never breaks an
+# ``AliasChoices`` spelling. No model in the strict set below declares one
+# today; the alias-safety test pins that the search aliases still work.
+STRICT_WRITE_BODY = ConfigDict(extra="forbid")
+
+
 # --- Memory ---
 
 
 class EntityLinkIn(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     entity_id: UUID
     role: str
 
 
 class MemoryCreate(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
     # Optional like ``BulkMemoryCreate.agent_id``: omitting it is allowed only
@@ -95,6 +130,20 @@ class BulkMemoryItem(BaseModel):
     #     ``min_length=1``) + oversized_content_errors (``> MAX_CONTENT_LENGTH``).
     #   - weight range [0.0, 1.0] → weight_errors.
     #   - status enum → status_errors.
+    #   - unknown field names → unknown_field_errors (SAFE-01).
+    #
+    # SAFE-01 note. This model is the one write body that is NOT
+    # ``extra="forbid"``, and the reason is the policy above, not an oversight:
+    # ``forbid`` raises during parsing of the whole ``BulkMemoryCreate``, so one
+    # item with a typo'd key would 422 the entire batch and discard its valid
+    # siblings — exactly what this model exists to prevent. ``extra="allow"``
+    # instead of the pydantic default ``extra="ignore"`` so the unknown keys
+    # survive parsing into ``model_extra``; ``create_memories_bulk`` reads them
+    # there and emits one ``status="error"`` row per offending item. Same
+    # outcome as ``forbid`` — the caller is told, by name, which field was not
+    # understood — delivered per item instead of per batch.
+    model_config = ConfigDict(extra="allow")
+
     memory_type: str | None = Field(default=None, description=MEMORY_TYPES_WRITE_DESCRIPTION)
     content: str
     weight: float | None = Field(default=None)
@@ -137,6 +186,11 @@ class BulkMemoryItem(BaseModel):
 
 
 class BulkMemoryCreate(BaseModel):
+    # Strict at the ENVELOPE level only: a typo among the five keys below is a
+    # whole-request mistake, so 422-ing the request is the right answer. Per-item
+    # unknown keys are handled inside ``BulkMemoryItem`` (see its note).
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
     # Optional on the wire so caura-daemon broker calls (cloud-data-plane.md
@@ -200,6 +254,8 @@ class BulkMemoryResponse(BaseModel):
 
 
 class RedistributeRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     memory_ids: list[UUID] = Field(..., min_length=1, max_length=500)
     target_agent_id: str = Field(..., min_length=1, max_length=256)
 
@@ -213,6 +269,8 @@ class RedistributeResponse(BaseModel):
 
 
 class MemoryUpdate(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     content: str | None = Field(default=None, min_length=1, max_length=MAX_CONTENT_LENGTH)
     memory_type: MemoryType | None = Field(default=None, description=MEMORY_TYPES_WRITE_DESCRIPTION)
     weight: float | None = Field(default=None, ge=0.0, le=1.0)
@@ -516,6 +574,12 @@ class SearchResponse(BaseModel):
 
 
 class SearchRequest(BaseModel):
+    # DELIBERATELY PERMISSIVE — do not add ``STRICT_WRITE_BODY`` here. SAFE-01
+    # made every WRITE body ``extra="forbid"`` and deliberately left the
+    # search/filter/query bodies alone; see the note at the top of this file for
+    # why the two sides differ. ``tests/test_unknown_field_rejection.py`` pins an
+    # unknown field on /search returning 2xx precisely so a later pass that
+    # "finishes the job" fails loudly instead of quietly breaking integrators.
     tenant_id: str
     fleet_ids: list[str] | None = None
     query: str = Field(min_length=1, max_length=MAX_QUERY_LENGTH)
@@ -566,6 +630,8 @@ class SearchRequest(BaseModel):
 
 
 class EntityUpsert(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
     entity_type: str
@@ -601,6 +667,8 @@ class EntityOut(BaseModel):
 
 
 class RelationUpsert(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
     from_entity_id: UUID
@@ -614,6 +682,8 @@ class RelationUpsert(BaseModel):
 
 
 class IngestRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
     agent_id: str = "ingest-agent"
@@ -630,6 +700,8 @@ class IngestRequest(BaseModel):
 
 
 class IngestFact(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     content: str
     suggested_type: str = DEFAULT_MEMORY_TYPE
     # Provenance: ``ingest_preview`` stamps this on every fact it returns
@@ -648,6 +720,8 @@ class IngestFact(BaseModel):
 
 
 class IngestCommitRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
     agent_id: str = "ingest-agent"
@@ -692,6 +766,8 @@ class AgentOut(BaseModel):
 
 
 class AgentTrustUpdate(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     trust_level: int = Field(ge=MIN_TRUST_LEVEL, le=MAX_TRUST_LEVEL)
     fleet_id: str | None = None
 
@@ -717,9 +793,16 @@ _PROFILE_FIELDS: dict[str, Any] = {
     for name in AGENT_TUNABLE_KEYS
 }
 
+# ``__config__`` rather than a ``model_config`` entry in ``_PROFILE_FIELDS``:
+# ``create_model`` treats every kwarg it doesn't recognise as a FIELD, so a
+# ``model_config`` key there would declare a field literally named
+# "model_config". Strict for the same reason as every other mutation body — a
+# tune that misspells ``min_similarity`` currently returns 200 with the knob
+# untouched, which reads as "the knob did nothing" rather than "you typo'd it".
 SearchProfileUpdate = create_model(
     "SearchProfileUpdate",
     __doc__="Per-agent search tuning knobs. All fields optional — only override what you set.",
+    __config__=STRICT_WRITE_BODY,
     **_PROFILE_FIELDS,
 )
 

@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.audit_service import log_action
 from core_api.services.forge.poison import write_rejected_fingerprint
 from core_api.services.forge.sentinel_scan import scan_skill_doc
@@ -264,6 +265,8 @@ class InboxListResponse(BaseModel):
 
 
 class RejectRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     reason: str = Field(..., min_length=1, max_length=2000)
     cooloff_days: int | None = Field(
         default=None,
@@ -274,14 +277,20 @@ class RejectRequest(BaseModel):
 
 
 class QuarantineRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     reason: str = Field(..., min_length=1, max_length=2000)
 
 
 class DeferRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     reason: str | None = Field(default=None, max_length=2000)
 
 
 class EditRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     content: str | None = None
     description: str | None = None
     summary: str | None = None

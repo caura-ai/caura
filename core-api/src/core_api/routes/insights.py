@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.constants import INSIGHTS_FOCUS_MODES, VALID_SCOPES
+from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.audit_service import log_action
 from core_api.services.caller_identity import resolve_caller_and_gate
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
@@ -18,6 +19,8 @@ router = APIRouter(tags=["Insights"])
 
 
 class InsightsRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     focus: str = Field(
         description=(

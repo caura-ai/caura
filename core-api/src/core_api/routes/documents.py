@@ -13,6 +13,7 @@ from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.middleware.idempotency import IDEMPOTENCY_HEADER, idempotency_for
 from core_api.middleware.rate_limit import write_limit
+from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.agent_service import enforce_delete
 from core_api.services.audit_service import log_action, log_cross_tenant_read
 
@@ -85,6 +86,8 @@ SKILLS_ROLLBACK_COLLECTION = "skills_rollback"
 
 
 class DocWriteRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
     collection: str = Field(min_length=1, max_length=200)
@@ -96,6 +99,8 @@ class DocWriteRequest(BaseModel):
 
 
 class DocQueryRequest(BaseModel):
+    # DELIBERATELY PERMISSIVE (SAFE-01): a QUERY body, not a write. See
+    # ``core_api.schemas.STRICT_WRITE_BODY`` for why the two sides differ.
     tenant_id: str
     fleet_id: str | None = None
     collection: str = Field(min_length=1, max_length=200)
@@ -114,6 +119,8 @@ class InstallableSkillsRequest(BaseModel):
     caller cannot widen it), so a harness can't ask for non-active skills.
     """
 
+    # DELIBERATELY PERMISSIVE (SAFE-01): a QUERY body, not a write. See
+    # ``core_api.schemas.STRICT_WRITE_BODY`` for why the two sides differ.
     tenant_id: str
     fleet_id: str | None = None
     limit: int = Field(default=1000, ge=1, le=1000)
@@ -129,6 +136,8 @@ class DocSearchRequest(BaseModel):
     non-NULL embedding column) are considered.
     """
 
+    # DELIBERATELY PERMISSIVE (SAFE-01): a QUERY body, not a write. See
+    # ``core_api.schemas.STRICT_WRITE_BODY`` for why the two sides differ.
     tenant_id: str
     fleet_id: str | None = None
     collection: str | None = Field(default=None, min_length=1, max_length=200)

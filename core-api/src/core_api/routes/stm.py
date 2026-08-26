@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings
+from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.agent_service import enforce_fleet_write, resolve_write_agent
 from core_api.services.usage_service import check_and_increment
 
@@ -200,6 +201,8 @@ async def clear_bulletin(
 
 
 class PromoteRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     agent_id: str
     content: str
     fleet_id: str | None = None

@@ -86,3 +86,67 @@ independently of ownership decisions:
   different payloads. Pick one and align.
 - **Tenant resolution**: REST takes `body.tenant_id`; MCP infers from auth
   header. Both are reasonable; document the convention.
+
+---
+
+## Request-body contract: writes are strict, searches are not
+
+This is a deliberate asymmetry, and the one place it is written down.
+
+**Write bodies reject fields they do not declare.** `POST /api/v1/memories`,
+`POST /api/v1/documents`, `PATCH /api/v1/memories/{id}` and every other
+write/mutation endpoint respond **422** to an unrecognised key, naming it:
+
+```json
+{
+  "error": {
+    "code": "INVALID_ARGUMENTS",
+    "message": "unknown field 'contnet' is not permitted on this request body (at 'contnet')",
+    "details": { "unknown_fields": ["contnet"] }
+  }
+}
+```
+
+`error.details.unknown_fields` carries the offending names as dotted paths, so
+a nested one reads `facts.0.saliance`. The back-compat `detail` array still
+carries pydantic's verbatim entries, with the field in `loc`.
+
+Until this changed, an undeclared key was **silently discarded**: a write with
+a misspelled field returned `201 Created` and stored the row without it. The
+caller was told it had succeeded. That is worse than a 422, because there is
+nothing to notice.
+
+**Search, filter and query bodies still accept unknown fields.**
+`POST /api/v1/search`, `/api/v1/recall`, `/api/v1/documents/query` and
+`/api/v1/documents/search` ignore what they do not recognise, and will keep
+doing so. The two cases are not symmetric:
+
+| | unknown field on a **write** | unknown field on a **search** |
+|---|---|---|
+| What breaks | stored data is missing what the caller sent | the result set is wider than intended |
+| Can the caller see it? | no — the response says `201` | yes — the results are visibly wrong |
+| Recoverable after the fact? | only by re-writing, if anyone notices | re-run the query |
+
+Search bodies also carry historical spellings absorbed by `AliasChoices`
+(`memory_type` ↔ `memory_type_filter`, `status` ↔ `status_filter` — the C1+C2
+incident). Those are a standing compatibility promise, not an oversight.
+
+### Two write bodies are deliberately permissive
+
+- **`POST /api/v1/memories/bulk` items.** The *envelope* is strict, but an
+  unknown key inside one `items[]` entry is reported as that item's own
+  `status="error"` row in the 207 response — not as a 422 for the batch. One
+  item's typo must not discard its valid siblings.
+- **`POST /api/v1/fleet/heartbeat`** and **`POST /api/v1/fleet/commands/{id}/result`.**
+  Plugin-produced telemetry, and there is no version handshake between plugin
+  and backend (`RELEASING.md` § Compatibility). The body carries nothing the
+  caller owns, and rejecting it would take the node offline in fleet views and
+  cut the command channel that carries its own upgrade.
+
+### For integrators
+
+If you send a field the API does not document, you will now get a 422 where
+you used to get a 2xx. That is the point — the field was never being stored —
+but it is a behaviour change. Check write payloads against the OpenAPI schema
+(`/openapi.json`); anything not in a request model's `properties` was already
+being thrown away.

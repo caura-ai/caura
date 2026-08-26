@@ -73,6 +73,31 @@ installed plugin with **plugin's** version (`plugin/package.json`), not
 backend's `VERSION`. Both are reported in heartbeat payloads
 (`plugin_version`, `openclaw_version`).
 
+## API compatibility (REST request bodies)
+
+Separate from the plugin/backend question above: the REST surface has a
+request-body contract that integrators depend on, and it is asymmetric on
+purpose.
+
+- **Write and mutation bodies are strict.** A field a request model does not
+  declare returns `422` naming it (`error.details.unknown_fields`). Adding a
+  new OPTIONAL field to a write model is additive and safe. REMOVING or
+  RENAMING one is breaking twice over: the old spelling stops being accepted
+  *and* stops being ignored.
+- **Search / filter / query bodies are permissive** and stay that way. They
+  absorb historical spellings via `AliasChoices`.
+
+The full contract, including the two write bodies deliberately left permissive
+(bulk `items[]` and the plugin telemetry endpoints), is in
+[`docs/api-surfaces.md`](docs/api-surfaces.md#request-body-contract-writes-are-strict-searches-are-not).
+
+Announce a change to this contract the way every other breaking change is
+announced — a `BREAKING CHANGE:` footer on the conventional commit, which
+release-please renders as a "⚠ BREAKING CHANGES" section in `CHANGELOG.md` and
+bumps the major. Do not hand-edit `CHANGELOG.md`: release-please regenerates
+it from merged PR titles, and the legacy-name ratchet only exempts that file on
+release branches.
+
 ## Manual emergency release
 
 If release-please is unavailable, bump the affected package's version

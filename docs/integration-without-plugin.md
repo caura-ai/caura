@@ -243,11 +243,44 @@ Cross-agent writes of identical content no longer collide — each agent gets it
 
 ---
 
+## Write bodies reject unknown fields
+
+Every write endpoint (`POST /api/v1/memories`, `/api/v1/documents`,
+`PATCH /api/v1/memories/{id}`, …) responds **422** to a field it does not
+declare, and names it:
+
+```json
+{
+  "error": {
+    "code": "INVALID_ARGUMENTS",
+    "message": "unknown field 'tags' is not permitted on this request body (at 'tags')",
+    "details": { "unknown_fields": ["tags"] }
+  }
+}
+```
+
+This used to be a silent `201`: the key was dropped and the write reported
+success without it. If you are porting an integration that predates this, run
+your write payloads once and fix whatever comes back 422 — those fields were
+never being stored.
+
+Search and filter bodies (`/api/v1/search`, `/api/v1/recall`,
+`/api/v1/documents/query`, `/api/v1/documents/search`) still ignore unknown
+fields, deliberately. See
+[`api-surfaces.md`](api-surfaces.md#request-body-contract-writes-are-strict-searches-are-not)
+for why the two differ.
+
+---
+
 ## Common pitfalls
 
 - **`POST /provision` returns the raw key once.** Save it before the response goes out of scope.
 - **`PATCH /agents/{id}/trust` returns 404 immediately after provisioning.** This should not happen post-2026-05-13; if it does, the Agent row was not materialized atomically. Check `whoami` and `GET /api/v1/agents/{id}`.
 - **`/mcp` returns 401 with an `Authorization: Bearer mc_…` (or legacy `mca_…`) header but works with `X-API-Key`.** Make sure you're hitting a Caura build dated 2026-05-13 or later — earlier builds rejected non-JWT bearer tokens.
+- **A write that used to return `201` now returns `422`.** Read
+  `error.details.unknown_fields`. The named field is not part of the request
+  model — it was being discarded before, so the fix is to remove it or move it
+  under `metadata`, not to retry.
 - **Streaming client hangs on initialize.** If hitting `/mcp` (no slash) caused a hang on older builds, append the trailing slash or upgrade — current builds serve both paths without redirect.
 
 ---

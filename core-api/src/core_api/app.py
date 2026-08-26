@@ -576,9 +576,52 @@ OPENAPI_TAGS = [
     },
 ]
 
+# SAFE-01. Stated once at the API level rather than on ~25 write operations,
+# for the same reason the 401/403 responses below are injected once: the same
+# fact written twenty-five times has twenty-five chances to go stale, and the
+# copy that gets forgotten is the one someone reads. The per-model half of the
+# contract is already machine-readable — a strict request schema carries
+# ``additionalProperties: false``, a permissive one does not — so this text
+# exists to say what that means and why the two kinds differ.
+_API_DESCRIPTION = """
+Governed shared memory for AI agent fleets.
+
+### Request bodies: writes are strict, searches are not
+
+**Write and mutation bodies reject fields they do not declare.** An
+unrecognised key returns `422` with the canonical error envelope, naming it in
+`error.message` and listing every offender as a dotted path in
+`error.details.unknown_fields`:
+
+```json
+{"error": {"code": "INVALID_ARGUMENTS",
+           "message": "unknown field 'contnet' is not permitted on this request body (at 'contnet')",
+           "details": {"unknown_fields": ["contnet"]}}}
+```
+
+Such a field used to be **silently discarded** — the write returned `201` and
+stored the row without it. Any request schema below carrying
+`additionalProperties: false` is strict.
+
+**Search, filter and query bodies still ignore unknown fields**, deliberately:
+a misspelled filter returns a visibly wrong result set, while a misspelled
+write field corrupts stored data invisibly. Only the second justifies a
+breaking change. `/search`, `/recall`, `/documents/query` and
+`/documents/search` stay permissive, as do the historical `AliasChoices`
+spellings on `/search` (`memory_type` ↔ `memory_type_filter`, `status` ↔
+`status_filter`).
+
+Two write bodies are also deliberately permissive: an unknown key inside a
+`POST /memories/bulk` **item** becomes that item's own `status="error"` row in
+the 207 rather than a 422 for the whole batch, and the plugin telemetry
+endpoints (`/fleet/heartbeat`, `/fleet/commands/{id}/result`) accept unknown
+keys because plugin and backend have no version handshake.
+"""
+
 app = FastAPI(
     title="Caura",
     version=VERSION,
+    description=_API_DESCRIPTION,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
@@ -754,16 +797,47 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     contains Pydantic's underlying ``ValueError`` instance for
     ``value_error`` types). ``jsonable_encoder`` flattens those before
     we hand off to ``JSONResponse``.
+
+    SAFE-01 — unknown fields on write bodies. Every write request model is
+    ``extra="forbid"`` (``core_api.schemas.STRICT_WRITE_BODY``), so a
+    misspelled key now lands here as a pydantic ``extra_forbidden`` error.
+    Pydantic's own ``msg`` for those is the field-less "Extra inputs are not
+    permitted", which would make the envelope's aggregated ``message`` say
+    nothing about WHICH key was wrong — the caller would be told their write
+    failed and left to diff the payload against the docs to find out why. So
+    those entries get a message naming the field, and the offending names are
+    also lifted into ``details.unknown_fields`` for programmatic clients. The
+    ``detail`` array keeps pydantic's verbatim entries (``loc`` already carries
+    the field name there) because it is the back-compat surface.
     """
     from fastapi.encoders import jsonable_encoder
 
     from core_api.errors import make_error_payload
 
     errs = jsonable_encoder(exc.errors())
-    summary = "; ".join(e.get("msg", "") for e in errs) or "validation error"
+
+    unknown_fields: list[str] = []
+    messages: list[str] = []
+    for e in errs:
+        if e.get("type") == "extra_forbidden":
+            # ``loc`` is ("body", "<field>") — or deeper for a nested model /
+            # list item, e.g. ("body", "items", 3, "<field>"). Report the leaf
+            # as the name and the dotted path so a nested typo is locatable.
+            loc = [str(part) for part in e.get("loc", []) if str(part) != "body"]
+            name = loc[-1] if loc else "<unknown>"
+            path = ".".join(loc) or name
+            unknown_fields.append(path)
+            messages.append(f"unknown field '{name}' is not permitted on this request body (at '{path}')")
+        else:
+            messages.append(e.get("msg", ""))
+
+    summary = "; ".join(messages) or "validation error"
+    details: dict = {"errors": errs}
+    if unknown_fields:
+        details["unknown_fields"] = unknown_fields
     body = {
         "detail": errs,  # original FastAPI shape
-        **make_error_payload("INVALID_ARGUMENTS", summary, details={"errors": errs}),
+        **make_error_payload("INVALID_ARGUMENTS", summary, details=details),
     }
     return JSONResponse(body, status_code=422)
 
