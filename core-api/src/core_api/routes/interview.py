@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings as app_settings
 from core_api.constants import INTERVIEW_EVENT_MAX_CHARS, INTERVIEW_MAX_EVENTS_PER_SUBMIT
+from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.interview_service import (
     InterviewJobPermanentlyFailedError,
     advance_watermark,
@@ -83,6 +84,8 @@ def _log_task_exc(task: asyncio.Task) -> None:
 class InterviewEventIn(BaseModel):
     """One normalized trail event (contract C2)."""
 
+    model_config = STRICT_WRITE_BODY
+
     seq: int = Field(ge=0)
     ts: datetime
     session_id: str | None = None
@@ -97,6 +100,8 @@ class InterviewEventIn(BaseModel):
 
 
 class InterviewSubmitIn(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str | None = None
     fleet_id: str | None = None
     node_id: str = Field(min_length=1, max_length=200)

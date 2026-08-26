@@ -26,7 +26,7 @@ describe("interview buffer", () => {
   let bufPath: string;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "memclaw-interview-buffer-"));
+    tmp = mkdtempSync(join(tmpdir(), "caura-interview-buffer-"));
     bufPath = join(tmp, "interview-buffer.jsonl");
     __INTERVIEW_BUFFER_INTERNALS__.setPathForTests(bufPath);
   });
@@ -165,7 +165,7 @@ describe("interview buffer — wet-test regressions (task #6)", () => {
   let bufPath: string;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "memclaw-interview-wet-"));
+    tmp = mkdtempSync(join(tmpdir(), "caura-interview-wet-"));
     bufPath = join(tmp, "interview-buffer.jsonl");
     __INTERVIEW_BUFFER_INTERNALS__.setPathForTests(bufPath);
   });

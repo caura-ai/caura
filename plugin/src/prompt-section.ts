@@ -1,5 +1,5 @@
 /**
- * MemClaw Memory Prompt Section Builder
+ * Caura Memory Prompt Section Builder
  *
  * Produces the system-prompt fragment that is injected on every turn
  * via the OpenClaw memory-prompt-section API. Two consumers:
@@ -16,19 +16,19 @@
  * non-negotiable identity reminder, and a pointer to SKILL.md.
  *
  * On hosts that do NOT bootstrap-inject TOOLS.md / AGENTS.md, this
- * fragment is the agent's only direct prompt-time signal that MemClaw
+ * fragment is the agent's only direct prompt-time signal that Caura
  * exists; the agent is still expected to read SKILL.md before its
- * first MemClaw call to pick up the operating contract.
+ * first Caura call to pick up the operating contract.
  */
 
-import { MEMCLAW_TOOLS } from "./tools.js";
+import { CAURA_TOOLS } from "./tools.js";
 
 function buildRecallLines(availableTools: Set<string>): string[] {
-  const present = MEMCLAW_TOOLS.filter((t) => availableTools.has(t));
+  const present = CAURA_TOOLS.filter((t) => availableTools.has(t));
   if (present.length === 0) return [];
 
   const lines: string[] = [];
-  lines.push("## MemClaw Memory");
+  lines.push("## Caura Memory");
   lines.push("");
   lines.push(
     "Persistent cross-session memory. Available tools: " +
@@ -41,7 +41,7 @@ function buildRecallLines(availableTools: Set<string>): string[] {
       "outcomes, supersede don't delete), quality rules, and per-tool " +
       "reference live in the " +
       "**memclaw** skill, which your runtime loads automatically — open " +
-      "it via your skill system before your first MemClaw call this " +
+      "it via your skill system before your first Caura call this " +
       "session. Do NOT search the filesystem for it.",
   );
   lines.push("");
@@ -55,7 +55,7 @@ function buildRecallLines(availableTools: Set<string>): string[] {
  * Signature matches OpenClaw's expected:
  *   ({ availableTools: Set<string>, citationsMode?: string }) => string[]
  */
-export function memclawPromptSectionBuilder(params: {
+export function cauraPromptSectionBuilder(params: {
   availableTools: Set<string>;
   citationsMode?: string;
 }): string[] {
@@ -66,7 +66,7 @@ export function memclawPromptSectionBuilder(params: {
  * Flatten the prompt section into a single string for use as
  * `prependSystemContext` in the before_prompt_build fallback path.
  */
-export function memclawPromptSectionText(
+export function cauraPromptSectionText(
   availableTools: Set<string>,
 ): string {
   return buildRecallLines(availableTools).join("\n");

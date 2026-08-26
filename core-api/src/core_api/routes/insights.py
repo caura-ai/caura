@@ -5,8 +5,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.constants import INSIGHTS_FOCUS_MODES, VALID_SCOPES
+from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.audit_service import log_action
 from core_api.services.caller_identity import resolve_caller_and_gate
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
@@ -18,6 +20,8 @@ router = APIRouter(tags=["Insights"])
 
 
 class InsightsRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     focus: str = Field(
         description=(
@@ -60,7 +64,7 @@ class InsightsRequest(BaseModel):
 # ── Routes ──
 
 
-@router.post("/insights/generate")
+@router.post("/insights/generate", responses={200: {"model": _oar.InsightsResponse}})
 async def generate_insights_endpoint(
     body: InsightsRequest,
     auth: AuthContext = Depends(get_auth_context),

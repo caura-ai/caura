@@ -65,7 +65,7 @@ def test_reject_raises_domain_error_with_actionable_guidance(policy):
         enforce_reserved_write_id("main")
     detail = str(exc.value)
     # The message must tell the agent where its identity comes from.
-    assert "MEMCLAW_AGENT_ID" in detail
+    assert "CAURA_AGENT_ID" in detail
     assert "install.json" in detail
     assert 'main-<install_id>' in detail
 

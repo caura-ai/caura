@@ -6,6 +6,7 @@ import re
 from uuid import UUID
 
 from common.embedding import get_embedding
+from common.entity_naming import canonical_match_key
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     CROSS_LINK_MEMORY_BATCH_SIZE,
@@ -136,15 +137,24 @@ async def process_entity_extraction(
         # mentions) collapse to the FIRST occurrence here — preserves
         # today's role binding (``entity_roles[ent.canonical_name] =
         # ent.role`` in the old serial path also picked first-wins).
+        #
+        # WT-2: dedupe on ``canonical_match_key`` rather than the raw
+        # string, so one extraction that returns two surface forms of the
+        # SAME subject — ``analytics service`` twice, ``Analytics Service``
+        # vs ``analytics service``, or ``new analytics service`` alongside
+        # ``analytics service`` — mints ONE entity and ONE link instead of
+        # duplicating both. First occurrence wins (surface form, type, and
+        # role alike), same first-wins contract as before.
         filtered: list[tuple[str, str, str]] = []  # (canonical_name, entity_type, role)
         seen_names: set[str] = set()
         for ent in graph.entities:
             if not _is_valid_entity(ent.canonical_name, blocklist):
                 logger.debug("Skipping invalid entity name '%s'", ent.canonical_name)
                 continue
-            if ent.canonical_name in seen_names:
+            match_key = canonical_match_key(ent.canonical_name)
+            if match_key in seen_names:
                 continue
-            seen_names.add(ent.canonical_name)
+            seen_names.add(match_key)
             filtered.append((ent.canonical_name, ent.entity_type, ent.role))
 
         if not filtered:
@@ -364,16 +374,28 @@ async def process_entity_extraction(
             # / no entity_id) would produce non-contiguous indexes and
             # trip the 422. Use a dedicated ``link_idx`` counter so the
             # response idxs always tile the payload contiguously.
+            # WT-2 Fix A: dedupe at the write site — two DIFFERENT surface
+            # forms in one batch can resolve to the SAME entity row (via the
+            # normalised match or embedding similarity), and the same
+            # (memory, entity) pair must never be sent twice. The DB's
+            # composite PK ``(memory_id, entity_id)`` is the backstop
+            # (migration 001 — no new migration needed); this keeps the
+            # batch itself clean and the role binding first-wins.
             link_items = []
             link_idx = 0
+            linked_entity_ids: set[UUID] = set()
             for name, _et, role in filtered:
                 if name not in name_to_id:
                     continue
+                entity_id = name_to_id[name]
+                if entity_id in linked_entity_ids:
+                    continue
+                linked_entity_ids.add(entity_id)
                 link_items.append(
                     {
                         "input_idx": link_idx,
                         "memory_id": str(memory_id),
-                        "entity_id": str(name_to_id[name]),
+                        "entity_id": str(entity_id),
                         "role": role,
                     }
                 )
@@ -394,11 +416,16 @@ async def process_entity_extraction(
                         memory_id,
                     )
 
-        # Upsert relations
+        # Upsert relations. Endpoints resolve by raw name first (today's
+        # contract), then by ``canonical_match_key`` — the WT-2 dedupe above
+        # can collapse a surface form out of ``filtered`` (e.g. ``analytics
+        # service`` deduped under ``new analytics service``), and a relation
+        # that names the collapsed form must still land on the merged row.
+        key_to_id: dict[str, UUID] = {canonical_match_key(n): i for n, i in name_to_id.items()}
         rel_count = 0
         for rel in graph.relations:
-            from_id = name_to_id.get(rel.from_entity)
-            to_id = name_to_id.get(rel.to_entity)
+            from_id = name_to_id.get(rel.from_entity) or key_to_id.get(canonical_match_key(rel.from_entity))
+            to_id = name_to_id.get(rel.to_entity) or key_to_id.get(canonical_match_key(rel.to_entity))
             if from_id and to_id:
                 await upsert_relation(
                     RelationUpsert(

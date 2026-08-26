@@ -1,0 +1,17 @@
+{
+  "name": "@caura/sdk",
+  "version": "1.0.0",
+  "description": "Caura — governed shared memory for AI agent fleets. Alias for @caura/client.",
+  "license": "Apache-2.0",
+  "author": "Caura <hello@caura.ai>",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts", "README.md"],
+  "dependencies": {
+    "@caura/client": "^1.0.0"
+  },
+  "homepage": "https://caura.ai",
+  "repository": { "type": "git", "url": "git+https://github.com/caura-ai/caura.git", "directory": "clients/npm-sdk" },
+  "keywords": ["caura", "agent-memory", "ai-agents", "mcp", "multi-agent"]
+}

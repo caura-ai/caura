@@ -5,14 +5,14 @@ within the window with a ``run_id`` matching the trace is a near-
 certain SUCCESS; a CI run that failed with the same ``run_id`` is
 a near-certain FAILURE. Plan §6 signal #6, weight 0.85.
 
-**MVP**: the OSS MemClaw deployment has no built-in hook to ingest
+**MVP**: the OSS Caura deployment has no built-in hook to ingest
 external events from git / GitHub / CI today. The extractor ships
 with the contract finalised but the body returns [] until an
 optional ``external_hooks`` table or webhook ingest is wired.
 
 The Phase-5 OpenClaw bridge integration is the natural place to
 ingest these — OpenClaw plugins surface workflow-completion events
-that already carry a ``run_id`` correlatable to MemClaw memory
+that already carry a ``run_id`` correlatable to Caura memory
 writes. When that lands, this extractor becomes a SELECT against
 the ingested-events table.
 

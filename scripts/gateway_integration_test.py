@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MemClaw Gateway Integration Test — validates the plugin running INSIDE OpenClaw.
+"""Caura Gateway Integration Test — validates the plugin running INSIDE OpenClaw.
 
 Unlike smoke_test.py (which hits the backend API directly), this script validates
 that the plugin is loaded in the gateway, lifecycle hooks fire, education files
@@ -8,7 +8,7 @@ are written, heartbeats include setup_status, and fleet commands are processed.
 Prerequisites:
   - Plugin installed via wet-test-install.sh (or manually)
   - OpenClaw gateway running with the plugin loaded
-  - MemClaw backend API reachable
+  - Caura backend API reachable
 
 Usage:
     python scripts/gateway_integration_test.py \\
@@ -149,7 +149,7 @@ class GatewayIntegrationTest:
 
         if not self.json_output:
             print()
-            print("  MemClaw Gateway Integration Test")
+            print("  Caura Gateway Integration Test")
             print(f"  URL:       {self.base}")
             print(f"  Tenant:    {self.tenant_id}")
             print(f"  Node:      {self.node_name}")
@@ -188,7 +188,7 @@ class GatewayIntegrationTest:
             # ── Section 5: Education files ──
             self.test_educated_flag_exists,
             self.test_skill_md_exists,
-            self.test_tools_md_has_memclaw,
+            self.test_tools_md_has_tools_section,
             self.test_agents_md_has_memclaw,
             self.test_heartbeat_md_exists,
             # ── Section 6: Memory prompt section injection ──
@@ -301,13 +301,13 @@ class GatewayIntegrationTest:
             content = env_path.read_text()
             self.check(
                 "Plugin .env: has API_URL",
-                "MEMCLAW_API_URL=" in content,
-                "MEMCLAW_API_URL",
+                "CAURA_API_URL=" in content,
+                "CAURA_API_URL",
             )
             self.check(
                 "Plugin .env: has API_KEY",
-                "MEMCLAW_API_KEY=" in content,
-                "MEMCLAW_API_KEY",
+                "CAURA_API_KEY=" in content,
+                "CAURA_API_KEY",
             )
 
     def test_openclaw_config_allowlist(self):
@@ -412,7 +412,7 @@ class GatewayIntegrationTest:
 
         self.check(
             "Gateway log: plugin loaded",
-            "[memclaw]" in log_content,
+            "[caura]" in log_content,
             "searched journalctl + log files",
         )
 
@@ -671,20 +671,25 @@ class GatewayIntegrationTest:
                 "expected 3-Layer Memory Capture section",
             )
 
-    def test_tools_md_has_memclaw(self):
-        """Check TOOLS.md in at least one workspace mentions MemClaw."""
+    def test_tools_md_has_tools_section(self):
+        """Check TOOLS.md in at least one workspace has the Tools Available section."""
         workspaces = self._find_workspaces()
         if not workspaces:
-            self.skip("Education: TOOLS.md has MemClaw", "no workspaces found")
+            self.skip("Education: TOOLS.md has Tools Available", "no workspaces found")
             return
         found = False
         for ws in workspaces:
             tools_md = ws / "TOOLS.md"
-            if tools_md.exists() and "MemClaw" in tools_md.read_text():
+            if not tools_md.exists():
+                continue
+            content = tools_md.read_text()
+            if "Caura — Tools Available" in content or (
+                "MemClaw — Tools Available" in content  # legacy-name-ok: matches education files old plugin versions wrote
+            ):
                 found = True
                 break
         self.check(
-            "Education: TOOLS.md has MemClaw section",
+            "Education: TOOLS.md has Tools Available section",
             found,
             f"checked {len(workspaces)} workspace(s)",
         )
@@ -952,7 +957,7 @@ class GatewayIntegrationTest:
                 "node_id": self._node_id,
                 "command": "educate",
                 "payload": {
-                    "prompt": "Integration test education: You have access to MemClaw memory tools. "
+                    "prompt": "Integration test education: You have access to Caura memory tools. "
                     "Always search before starting work. Always write findings after completing work.",
                 },
             },
@@ -1057,16 +1062,16 @@ class GatewayIntegrationTest:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MemClaw Gateway Integration Test",
+        description="Caura Gateway Integration Test",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--url", required=True, help="MemClaw API base URL")
+    parser.add_argument("--url", required=True, help="Caura API base URL")
     parser.add_argument("--api-key", required=True, help="API key")
     parser.add_argument("--tenant-id", required=True, help="Tenant ID")
     parser.add_argument(
         "--node-name",
         required=True,
-        help="Node name (must match the gateway's MEMCLAW_NODE_NAME)",
+        help="Node name (must match the gateway's CAURA_NODE_NAME)",
     )
     parser.add_argument("--fleet-id", default="", help="Fleet ID")
     parser.add_argument(

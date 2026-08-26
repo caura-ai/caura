@@ -73,6 +73,7 @@
         "type": "object"
       },
       "BulkMemoryCreate": {
+        "additionalProperties": false,
         "properties": {
           "agent_id": {
             "anyOf": [
@@ -130,6 +131,7 @@
         "type": "object"
       },
       "BulkMemoryItem": {
+        "additionalProperties": true,
         "description": "Single item in a bulk write request. tenant_id/fleet_id/agent_id inherited from parent.",
         "properties": {
           "content": {
@@ -350,6 +352,42 @@
         "title": "BulkMemoryResponse",
         "type": "object"
       },
+      "CauraError": {
+        "description": "Canonical error envelope. ``detail`` is the human-readable message and is retained for backwards compatibility; ``error.code`` is the stable machine-readable identifier and is what clients should branch on.",
+        "properties": {
+          "detail": {
+            "description": "Human-readable message.",
+            "type": "string"
+          },
+          "error": {
+            "properties": {
+              "code": {
+                "description": "Stable UPPER_SNAKE identifier. Derived from the status code unless the raiser supplied a specific one — e.g. READ_ONLY_CREDENTIAL vs PLAN_LIMIT_READ_ONLY, which are both 403 and need different responses from the caller.",
+                "type": "string"
+              },
+              "details": {
+                "additionalProperties": true,
+                "description": "Optional structured context, e.g. remediation or existing_id.",
+                "type": "object"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "detail",
+          "error"
+        ],
+        "title": "CauraError",
+        "type": "object"
+      },
       "ContradictionInfo": {
         "description": "Summary of a contradiction detected on write.\n\n``old_memory_id`` always refers to the **pre-existing candidate**\n(never to ``new_memory``), regardless of which row ended up being\nthe older one in the supersession chain. The ``direction`` field\ndisambiguates the two cases:\n\n  - ``\"canonical\"`` — the candidate is older than ``new_memory``;\n    the candidate became outdated/conflicted, ``new_memory``\n    carries ``supersedes_id`` pointing at it. (Historical behaviour.)\n  - ``\"flipped\"`` — the candidate is newer than ``new_memory``;\n    ``new_memory`` is the row that became outdated/conflicted, and\n    the candidate now carries ``supersedes_id`` pointing back at\n    ``new_memory``. This branch was previously unreachable\n    (CAURA-125; gap A6) and is now exercised by deferred-embedding\n    races and ``created_at`` ties.",
         "properties": {
@@ -390,6 +428,7 @@
         "type": "object"
       },
       "EntityLinkIn": {
+        "additionalProperties": false,
         "properties": {
           "entity_id": {
             "format": "uuid",
@@ -438,6 +477,68 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "properties": {
+          "event_bus": {
+            "description": "ok, unhealthy, or error.",
+            "title": "Event Bus",
+            "type": "string"
+          },
+          "platform_init_errors": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only when platform init recorded errors and all dependencies are up (status=degraded).",
+            "title": "Platform Init Errors"
+          },
+          "redis": {
+            "description": "connected, unavailable, or not configured.",
+            "title": "Redis",
+            "type": "string"
+          },
+          "status": {
+            "description": "ok, degraded, or unhealthy (unhealthy is served as 503).",
+            "title": "Status",
+            "type": "string"
+          },
+          "storage": {
+            "description": "connected or unreachable.",
+            "title": "Storage",
+            "type": "string"
+          },
+          "unhealthy_dependencies": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only on 503: names of failing dependencies.",
+            "title": "Unhealthy Dependencies"
+          }
+        },
+        "required": [
+          "status",
+          "storage",
+          "redis",
+          "event_bus"
+        ],
+        "title": "HealthResponse",
         "type": "object"
       },
       "MemoryDetailResponse": {
@@ -656,6 +757,18 @@
               }
             ],
             "title": "Supersedes Id"
+          },
+          "system_metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Metadata"
           },
           "tenant_id": {
             "title": "Tenant Id",
@@ -879,6 +992,27 @@
             ],
             "title": "Scope"
           },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "score_parts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoreParts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "similarity": {
             "anyOf": [
               {
@@ -943,6 +1077,18 @@
               }
             ],
             "title": "Supersedes Id"
+          },
+          "system_metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Metadata"
           },
           "tenant_id": {
             "title": "Tenant Id",
@@ -1041,6 +1187,7 @@
         "type": "string"
       },
       "MemoryUpdate": {
+        "additionalProperties": false,
         "properties": {
           "content": {
             "anyOf": [
@@ -1265,6 +1412,165 @@
         "title": "PaginatedMemoryResponse",
         "type": "object"
       },
+      "ScoreParts": {
+        "description": "D12 — per-factor breakdown of the ranking composite ``MemoryOut.score``.\n\nEvery factor mirrors a column the scored-search SQL already computes and\nreturns per row; this model only surfaces them. All fields are nullable:\nFTS-only rows have no ``vec_sim``, entity-lookup short-circuit rows have no\nFTS rank, and successor-injected rows were never scored at all.",
+        "properties": {
+          "entity_boost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Boost"
+          },
+          "freshness": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Freshness"
+          },
+          "fts_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fts Score"
+          },
+          "recall_boost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recall Boost"
+          },
+          "status_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Penalty"
+          },
+          "temporal_boost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temporal Boost"
+          },
+          "vec_sim": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vec Sim"
+          }
+        },
+        "title": "ScoreParts",
+        "type": "object"
+      },
+      "SearchDiagnostic": {
+        "description": "D12 — retrieval trace returned when ``SearchRequest.diagnostic`` is true.\n\nAnswers \"why did each result appear (and what got cut)\": the full widened\ncandidate set with per-row score factors and exclusion reasons, the applied\nknobs, and the strategy the classifier picked. Requesting it does NOT change\nthe ``items`` a caller gets back, and a diagnostic call never bumps\n``recall_count`` — it is inspection, not use.",
+        "properties": {
+          "all_candidates": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "All Candidates",
+            "type": "array"
+          },
+          "candidates_considered": {
+            "default": 0,
+            "title": "Candidates Considered",
+            "type": "integer"
+          },
+          "excluded_below_min_similarity": {
+            "default": 0,
+            "title": "Excluded Below Min Similarity",
+            "type": "integer"
+          },
+          "excluded_by_top_k_trim": {
+            "default": 0,
+            "title": "Excluded By Top K Trim",
+            "type": "integer"
+          },
+          "min_similarity_applied": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Similarity Applied"
+          },
+          "retrieval_strategy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieval Strategy"
+          },
+          "returned": {
+            "default": 0,
+            "title": "Returned",
+            "type": "integer"
+          },
+          "search_params": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "Search Params",
+            "type": "object"
+          },
+          "top_k_requested": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top K Requested"
+          }
+        },
+        "title": "SearchDiagnostic",
+        "type": "object"
+      },
       "SearchRequest": {
         "properties": {
           "diagnostic": {
@@ -1307,6 +1613,20 @@
               }
             ],
             "description": "Filter results to a single memory type. Valid values: fact, episode, decision, preference, task, semantic, intention, plan, commitment, action, outcome, cancellation, rule, insight."
+          },
+          "min_similarity": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-request similarity floor (0.0-1.0) applied to the raw cosine; overrides the agent/tenant search-profile value for this call.",
+            "title": "Min Similarity"
           },
           "query": {
             "maxLength": 5000,
@@ -1361,6 +1681,16 @@
       "SearchResponse": {
         "description": "Envelope for search results — matches PaginatedMemoryResponse shape.",
         "properties": {
+          "diagnostic": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SearchDiagnostic"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/MemoryOut"
@@ -1453,6 +1783,19 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "VersionResponse": {
+        "properties": {
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "title": "VersionResponse",
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -1464,7 +1807,7 @@
     }
   },
   "info": {
-    "title": "MemClaw core-api broker contract",
+    "title": "Caura core-api broker contract",
     "version": "v1"
   },
   "openapi": "3.1.0",
@@ -1477,10 +1820,32 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
           }
         },
         "summary": "Health",
@@ -1817,6 +2182,26 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1908,6 +2293,26 @@
             },
             "description": "Multi-Status"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1974,6 +2379,26 @@
           "204": {
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2029,6 +2454,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
           },
           "422": {
             "content": {
@@ -2131,6 +2576,26 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2177,6 +2642,26 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2206,10 +2691,32 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/VersionResponse"
+                }
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
           }
         },
         "summary": "Version",

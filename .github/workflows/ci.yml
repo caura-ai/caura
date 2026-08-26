@@ -36,7 +36,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node.js (for plugin version-sync + type-check)
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
 
@@ -56,6 +56,18 @@ jobs:
         # the client SDK, not /plugin — so without this step the plugin has no
         # type-check gate in CI.
         run: cd plugin && npm ci && npm run build
+
+      - name: Run plugin tests (node:test)
+        # The plugin had 423 tests and CI ran NONE of them. The step above
+        # proves it compiles; nothing proved it behaves. `client-typescript-ci.yml`
+        # is path-scoped to clients/typescript, so its `npm test` never touched
+        # /plugin — which is how the caura_tune identity bug (F5) reached a
+        # release: `tool-definitions.ts` shipped a literal "unknown-agent"
+        # fallback that a two-line test would have caught.
+        #
+        # `npm ci` is not repeated — the build step above installed into the
+        # same workspace, and `npm test` re-runs tsc itself via `pretest`.
+        run: cd plugin && npm test
 
       - name: Install uv
         uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5.4.2
@@ -92,7 +104,7 @@ jobs:
 
       # --- Broker↔cloud API-versioning gate (Gate C / Phase 1, deliverables A+B) ---
       # core-api/openapi.broker.json is the FROZEN v1 contract for the
-      # broker-facing gateway operations that memclawd calls against Caura
+      # broker-facing gateway operations that caura-daemon calls against Caura
       # cloud. The authoritative list is BROKER_OPERATIONS in
       # core-api/scripts/gen_broker_openapi.py — deliberately not duplicated
       # here, because this comment listed four endpoints while the broker had
@@ -121,7 +133,7 @@ jobs:
         # merge main has no baseline yet — the gate detects that and skips.
         run: |
           set -euo pipefail
-          # caura-memclaw is public, so anonymous fetch works even though
+          # this repo (caura-ai/caura) is public, so anonymous fetch works even though
           # actions/checkout ran with persist-credentials: false.
           git fetch --no-tags --depth=1 origin main
           if git cat-file -e origin/main:core-api/openapi.broker.json 2>/dev/null; then
@@ -197,7 +209,7 @@ jobs:
         run: uv run ruff format --check core-worker/src/ core-worker/tests/
 
       - name: Run Ruff formatter check (vendored common/ files at ruff defaults)
-        # This list mirrors the policy=identical entries of caura-memclaw-enterprise's
+        # This list mirrors the policy=identical entries of caura-enterprise's
         # scripts/vendored_files_manifest.json — the source of truth; keep in sync.
         # Enterprise CI format-checks the vendored copies at ruff DEFAULTS (88 cols),
         # so gate them here too or a merge turns enterprise CI red until a reflow
@@ -229,6 +241,50 @@ jobs:
             exit 1
           fi
 
+      - name: Guard against stringified exception details (C29)
+        # ``HTTPException.detail`` is sometimes ``{code, message, details}`` now
+        # (``common.duplicate_memory.core_api_detail``). ``str()`` on that shape
+        # renders a Python dict repr — braces, quotes and all — straight into a
+        # message a model reads, and neither git nor mypy sees anything wrong:
+        # the types line up, the tests that assert on prose still pass, and the
+        # damage only shows in what the caller is told.
+        #
+        # This is aimed at the merge window specifically. Work already in flight
+        # was written when every detail was a string, so a rebase can
+        # reintroduce ``str(e.detail)`` with no conflict marker to warn anyone.
+        # ``_detail_text`` / ``_detail_code`` handle both shapes.
+        run: |
+          if grep -nE 'str\((e|exc)\.detail\)' core-api/src/core_api/mcp_server.py | grep -vE '^[0-9]+:\s*#'; then
+            echo "::error::Stringified exception detail found. Details may be structured — use _detail_text(...) / _detail_code(...) instead."
+            exit 1
+          fi
+
+      # The four steps below check each service against common/ as well as
+      # against its own src/, because every service pyproject now carries
+      # ``mypy_path = "src:.."`` — ``..`` being the repo root, where common/
+      # lives. Before that, ``common.*`` resolved to nothing, and
+      # ``ignore_missing_imports = true`` (which every service sets, and needs)
+      # turned that silence into Any rather than an error. So the step below was
+      # a gate over 200 files that could not see a single one of the ~40
+      # common/ symbols they import.
+      #
+      # What it cost: ``core_api.services.forge.*`` is deliberately opted back
+      # IN to the type gate (``ignore_errors = false``, one of few carve-outs
+      # from the broad ``core_api.services.*`` exemption), and this step still
+      # reported "no issues found in 200 source files" while
+      # ``forge/cron_handler.py`` imported ``LLMRequest`` from ``common.llm`` —
+      # a name that has never existed there — and called ``call_with_fallback``
+      # with a signature it has never had. The forge distill cron raised
+      # RuntimeError on every tick and had never once run; the error blamed a
+      # missing provider chain, so it read as a misconfiguration. Repaired in
+      # #955. Being inside a gated tree proved nothing, and that is the
+      # assumption worth distrusting.
+      #
+      # The setting is in each pyproject rather than an env var here on purpose:
+      # a ``MYPYPATH`` set only on these steps would leave the local
+      # ``mypy src/``, the contributor's IDE, and any future pre-commit hook
+      # disagreeing with the gate — which is the shape of the failure this
+      # closes, not a fix for it.
       - name: Run mypy (core-api)
         run: cd core-api && uv run mypy src/
 
@@ -246,6 +302,73 @@ jobs:
         # ``mypy_path = "src"`` and mypy as a dev dep — the config was there all
         # along, nothing ever ran it.
         run: cd core-worker && uv run mypy src/
+
+      - name: Run mypy (common/)
+        # common/ was type-checked by NOTHING before this step. Each mypy step
+        # above ``cd``s into one service and, until ``mypy_path = "src:.."``
+        # landed, checked only that service's own src/ — so no invocation's path
+        # ever resolved to common/, while 40 files under core-api/src alone
+        # import it. Those imports were not caught either:
+        # ``ignore_missing_imports = true`` (every service sets it) plus a
+        # ``mypy_path`` of just that service's src/ meant an unresolved
+        # ``common.*`` import degraded to Any in silence rather than failing.
+        # ``cd core-api && mypy src/`` reported 199 files and none of them were
+        # common/'s 94.
+        #
+        # This step is still the one that OWNS common/. The service steps reach
+        # it only through the imports they happen to follow, so a common/ module
+        # no service imports — or a branch of one none of them exercises — is
+        # covered here and nowhere else. Keep it.
+        #
+        # Nor did the hook cover it: .pre-commit-config.yaml deliberately runs no
+        # mypy, deferring to "CI is the authoritative type-check" — which pointed
+        # at a check that did not include this directory.
+        #
+        # What it was hiding: 12 errors in 7 files, all fixed in the commit that
+        # added this step. Two were ``# type: ignore[...]`` comments naming an
+        # error code mypy does not report here (``arg-type`` for an overload
+        # failure, ``import-untyped`` for a namespace-package attribute), so they
+        # suppressed nothing — nobody could have known, because nothing ever ran
+        # mypy over these files to say so.
+        #
+        # ``--config-file`` is required, not stylistic: common/ has no
+        # pyproject.toml and the repo root has no [tool.mypy], and mypy resolves
+        # config from the CWD rather than walking up from the files it checks
+        # (ruff does walk up, which is why common/ruff.toml needs no flag). Drop
+        # the flag and this runs at mypy's bare defaults, which reports 17 —
+        # the 12 plus 5 missing-stub errors for optional deps — so the failure
+        # mode is a noisier gate, not an absent one. See common/mypy.ini.
+        run: uv run mypy --config-file common/mypy.ini common/
+
+      - name: Run mypy (scripts/)
+        # Repo-root scripts/ was type-checked by nothing, for the same structural
+        # reason common/ was: not a service src/ tree, no pyproject.toml of its
+        # own, and no root [tool.mypy], so it appeared in no mypy scope above.
+        #
+        # It is not an idle tree. scripts/forge_dry_run.py carried the other half
+        # of the forge cron outage — the same ``from common.llm import
+        # LLMRequest`` as core-api's cron_handler, a name that has never existed
+        # there, with an ``except`` that returned a stub so the CLI had never used
+        # a real LLM either. #955 repaired both halves; #983 gated the service
+        # one. This is the same gate one layer out, and re-injecting that import
+        # confirms it fires:
+        #
+        #   scripts/forge_dry_run.py:120: error: Module "common.llm" has no
+        #   attribute "LLMRequest"  [attr-defined]
+        #
+        # MUST run from the repo root. ``mypy_path`` in scripts/mypy.ini is
+        # resolved against the CWD, not against the config file, so a step that
+        # ``cd``s into scripts/ first would silently degrade every core_api.*
+        # import to Any under ignore_missing_imports — the exact gap #983 closed
+        # for the services. ``--config-file`` is required for the usual reason
+        # (mypy resolves config from the CWD and does not walk up); without it
+        # this reports 84 errors in 38 files at bare defaults instead of the 29
+        # files it owns.
+        #
+        # Six modules are exempt BY NAME in scripts/mypy.ini, not by glob, so a
+        # new script is gated the day it lands. Shrinking that list is the
+        # backlog; the gate deliberately landed without it.
+        run: uv run mypy --config-file scripts/mypy.ini scripts/
 
       - name: Enable pgvector extension
         run: PGPASSWORD=changeme psql -h localhost -U memclaw -d memclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
@@ -416,7 +539,7 @@ jobs:
           COVERAGE_FILE: .coverage.core-worker
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: ./coverage.xml
           fail_ci_if_error: false
@@ -513,3 +636,29 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin main
           python3 scripts/legacy_name_ratchet.py --base origin/main
+
+  do-not-touch-sentinel:
+    # The other half of hard rule 4. The ratchet above is directional — it fails a
+    # file whose old-brand count goes UP — so a sweep that DELETES a load-bearing
+    # string reads as progress and passes. This job asserts the same list in the
+    # other direction, and must exist before the Phase 1.3 and Phase 7 sweeps.
+    #
+    # Not every string it guards carries the brand: three are ordinary English
+    # that a CRITICAL production Datadog monitor matches on as a regex substring.
+    # Reword one and the alert stops firing with nothing in the tree to fail.
+    #
+    # No fetch and no base. Unlike the ratchet this is not a comparison — the
+    # question is whether the strings are in the tree being built, so the
+    # checkout alone answers it.
+    name: Do-not-touch sentinel
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Load-bearing strings survive
+        run: python3 scripts/do_not_touch_sentinel.py

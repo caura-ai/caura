@@ -1,5 +1,5 @@
 # Dockerfile for Core API service
-# The main MemClaw API — auth, agents, memory, MCP, etc.
+# The main Caura API — auth, agents, memory, MCP, etc.
 
 # Optional Datadog serverless-init source (CAURA-0000 observability POC).
 # The Caura SaaS deploy builds with --build-arg DD_APM_ENABLED=true to pull in
@@ -65,16 +65,16 @@ RUN if [ "$WITH_RERANK_LOCAL" = "1" ]; then \
     fi
 
 # Stamp the service version into a file the app reads at runtime. Source of
-# truth is pyproject.toml; an optional MEMCLAW_VERSION build-arg (e.g. the
-# release tag) overrides it. Deterministic and independent of installed-
+# truth is pyproject.toml; an optional CAURA_VERSION build-arg (e.g. the
+# release tag) overrides it (MEMCLAW_VERSION keeps working — legacy-name-ok: rule 3 dual-read alias).
+# Deterministic and independent of installed-
 # package metadata — deps install via ``--no-emit-project`` so core-api is
 # never installed as a package, leaving importlib.metadata with no version
 # to find (the endpoint silently served "dev"). Read by
 # core_api.constants._resolve_version().
+ARG CAURA_VERSION=
 ARG MEMCLAW_VERSION=
-RUN VER="${MEMCLAW_VERSION:-$(python -c "import tomllib; print(tomllib.load(open('core-api/pyproject.toml','rb'))['project']['version'])")}" \
-    && printf '%s' "$VER" > /app/VERSION \
-    && echo "Stamped MemClaw version: $VER"
+RUN VER="${CAURA_VERSION:-${MEMCLAW_VERSION:-$(python -c "import tomllib; print(tomllib.load(open('core-api/pyproject.toml','rb'))['project']['version'])")}}" && printf '%s' "$VER" > /app/VERSION && echo "Stamped Caura version: $VER" # legacy-name-ok: rule 3 dual-read alias
 
 # Copy actual source
 COPY common/ /app/common/
@@ -127,4 +127,16 @@ ENTRYPOINT ["/app/docker-entrypoint.sh"]
 # supervisor/parent configures structlog before starting — otherwise its
 # lifecycle lines ("Started parent process", "Received SIGTERM", ...) bypass
 # the JSON pipeline and land in Datadog as status:error. See common/serve.py.
-CMD ["python", "-m", "common.serve", "core_api.app:app", "--settings", "core_api.config:settings", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "65"]
+#
+# --timeout-worker-healthcheck 30 (uvicorn's default is 5). With --workers 2
+# the supervisor pings each worker every 0.5s and SIGKILLs one that has not
+# answered in time. SIGKILL skips lifespan shutdown, so this app's ephemeral
+# Pub/Sub broadcast subscriptions are never released and hold project-wide
+# quota for 24h — a worker recycle is not free here, and 5s is a tight budget
+# for a Python worker's pong thread (a GC pause or a stalled scheduler is
+# enough). 30s is still far inside Cloud Run's 120s request timeout, so a
+# genuinely hung worker is still recycled well before a request could hang on
+# it. This is defence in depth, not the primary fix for the staging
+# crash-loop; that is the missing --no-cpu-throttling on the Cloud Run
+# service (caura-enterprise#1321).
+CMD ["python", "-m", "common.serve", "core_api.app:app", "--settings", "core_api.config:settings", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "65", "--timeout-worker-healthcheck", "30"]

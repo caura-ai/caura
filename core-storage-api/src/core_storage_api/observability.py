@@ -23,7 +23,7 @@ from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from typing import Any
 
-logger = logging.getLogger("memclaw.observability")
+logger = logging.getLogger("caura.observability")
 
 # db_ms above this gets upgraded to WARNING so slow queries surface in
 # Cloud Run's error-filtered log views (where on-call lives) without us

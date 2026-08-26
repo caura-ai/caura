@@ -75,7 +75,7 @@ describe("getDisplayName", () => {
     assert.ok(out.length >= "main".length);
   });
 
-  test("MEMCLAW_DISPLAY_NAME_OVERRIDE wins verbatim", () => {
+  test("CAURA_DISPLAY_NAME_OVERRIDE wins verbatim", () => {
     // Operator-supplied label takes precedence over hostname-derived
     // default. The trim is intentional — env-var values often have
     // accidental whitespace; an empty / whitespace-only override

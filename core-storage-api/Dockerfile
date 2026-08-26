@@ -1,5 +1,5 @@
 # Dockerfile for Core Storage API service
-# PostgreSQL CRUD service for MemClaw core tables
+# PostgreSQL CRUD service for Caura core tables
 
 # Optional Datadog serverless-init source (CAURA-0000 observability POC).
 # SaaS builds pass --build-arg DD_APM_ENABLED=true to pull in Datadog's

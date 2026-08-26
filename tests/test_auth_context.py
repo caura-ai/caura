@@ -3,6 +3,16 @@
 from __future__ import annotations
 
 import pytest
+
+from core_api import errors
+
+# C32 / API-05: ``detail`` on an auth refusal is now
+# ``{"code", "message", "details"}`` so the eight distinct reasons this boundary
+# can refuse a request stop collapsing into the single status-derived
+# ``FORBIDDEN``. The human message is unchanged and lives under ``["message"]``;
+# these assertions follow it there, and additionally pin the code — which is the
+# part a caller is now expected to branch on.
+
 from fastapi import HTTPException
 
 from core_api.auth import AuthContext
@@ -18,7 +28,8 @@ def test_enforce_read_only_blocks_demo():
     with pytest.raises(HTTPException) as exc_info:
         ctx.enforce_read_only()
     assert exc_info.value.status_code == 403
-    assert "demo" in exc_info.value.detail.lower()
+    assert "demo" in exc_info.value.detail["message"].lower()
+    assert exc_info.value.detail["code"] == errors.AUTH_DEMO_SANDBOX
 
 
 def test_enforce_usage_limits_allows_normal_org():
@@ -31,8 +42,9 @@ def test_enforce_usage_limits_blocks_read_only_org():
     with pytest.raises(HTTPException) as exc_info:
         ctx.enforce_usage_limits()
     assert exc_info.value.status_code == 403
-    assert "read-only" in exc_info.value.detail.lower()
-    assert "upgrade" in exc_info.value.detail.lower()
+    assert "read-only" in exc_info.value.detail["message"].lower()
+    assert "upgrade" in exc_info.value.detail["message"].lower()
+    assert exc_info.value.detail["code"] == errors.AUTH_PLAN_LIMIT
 
 
 def test_read_only_is_independent_of_demo():
@@ -122,7 +134,8 @@ def test_enforce_write_scope_blocks_read_only_scopes():
     with pytest.raises(HTTPException) as exc_info:
         ctx.enforce_write_scope()
     assert exc_info.value.status_code == 403
-    assert "read-only" in exc_info.value.detail.lower()
+    assert "read-only" in exc_info.value.detail["message"].lower()
+    assert exc_info.value.detail["code"] == errors.AUTH_READ_ONLY_KEY
 
 
 # ── enforce_read_only also enforces scope (composite gate) ───────────
@@ -140,7 +153,8 @@ def test_enforce_read_only_blocks_scope_restricted_keys():
     with pytest.raises(HTTPException) as exc_info:
         ctx.enforce_read_only()
     assert exc_info.value.status_code == 403
-    assert "read-only" in exc_info.value.detail.lower()
+    assert "read-only" in exc_info.value.detail["message"].lower()
+    assert exc_info.value.detail["code"] == errors.AUTH_READ_ONLY_KEY
 
 
 def test_enforce_read_only_passes_when_write_in_scopes():

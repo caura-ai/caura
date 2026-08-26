@@ -113,7 +113,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     app = FastAPI(
-        title="MemClaw Core Worker",
+        title="Caura Core Worker",
         description=(
             "Async-embed event consumer.\n\n"
             "Subscribes to ``Topics.Memory.EMBED_REQUESTED`` and PATCHes "

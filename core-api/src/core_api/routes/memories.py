@@ -23,6 +23,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
+from core_api import openapi_responses as _oar
 from core_api.agent_ids import DEFAULT_AGENT_ID
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
@@ -54,6 +55,7 @@ from core_api.schemas import (
     PaginatedMemoryResponse,
     RedistributeRequest,
     RedistributeResponse,
+    SearchDiagnostic,
     SearchRequest,
     SearchResponse,
     STMWriteResponse,
@@ -91,9 +93,14 @@ from core_api.services.memory_service import (
     soft_delete_memory,
     update_memory,
 )
+from core_api.services.system_metadata import extract_system_metadata
 from core_api.services.tenants import list_active_tenant_ids
 from core_api.services.trust_service import parse_trust_error, require_trust
-from core_api.services.usage_service import bulk_check_and_increment, check_and_increment
+from core_api.services.usage_service import (
+    bulk_check_and_increment,
+    check_and_increment,
+    recall_operation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +160,7 @@ def _missing_agent_id_error() -> RequestValidationError:
     )
 
 
-@router.get("/tenants")
+@router.get("/tenants", responses={200: {"model": list[str]}})
 async def list_tenants(
     auth: AuthContext = Depends(get_auth_context),
 ):
@@ -162,7 +169,7 @@ async def list_tenants(
     return sorted(await get_storage_client().list_active_tenants())
 
 
-@router.get("/fleets")
+@router.get("/fleets", responses={200: {"model": list[_oar.FleetDistributionItem]}})
 async def list_fleets(
     tenant_id: str | None = Query(default=None),
     auth: AuthContext = Depends(get_auth_context),
@@ -456,7 +463,7 @@ async def list_memories(
     return PaginatedMemoryResponse(items=items, next_cursor=next_cursor)
 
 
-@router.get("/memories/stats")
+@router.get("/memories/stats", responses={200: {"model": _oar.MemoryStatsResponse}})
 async def memory_stats(
     tenant_id: str | None = Query(default=None),
     fleet_id: str | None = Query(default=None),
@@ -549,7 +556,7 @@ async def memory_stats(
     )
 
 
-@router.get("/memories/count")
+@router.get("/memories/count", responses={200: {"model": _oar.MemoryCountResponse}})
 async def memory_count(
     tenant_id: str | None = Query(default=None),
     fleet_id: str | None = Query(default=None),
@@ -594,6 +601,14 @@ async def delete_all_memories(
     agent_id: str | None = Query(default=None),
     memory_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    confirm_scope: str | None = Query(
+        default=None,
+        description=(
+            "Required, with the value 'tenant', when this call would delete an "
+            "entire tenant corpus — i.e. no fleet_id and no other narrowing "
+            "filter. Ignored otherwise."
+        ),
+    ),
     auth: AuthContext = Depends(get_auth_context),
     body: dict | None = Body(default=None),
 ):
@@ -607,6 +622,26 @@ async def delete_all_memories(
       harness, tagging rows with ``metadata.load_test_run_id``) clean
       up by tag in one round-trip instead of paginated enumerate +
       per-row delete. All entries combine with AND.
+
+    **Blast radius.** With no ``fleet_id`` and no other narrowing filter this
+    deletes EVERY memory the tenant has. That is a supported operation — it is
+    the dashboard's "reset workspace" — but it was reachable by omission: leave
+    one query parameter off a fleet-scoped call and the same request wipes the
+    tenant, with nothing in the request to distinguish the two intents. Agent
+    credentials have been gated at trust >= 3 since the BFLA fix below; tenant
+    and user credentials were not gated at all.
+
+    So the unbounded case now requires ``confirm_scope=tenant`` (SAFE-03 /
+    C28). Every narrowed call is unaffected: pass a ``fleet_id``, ``agent_id``,
+    ``memory_type``, ``status``, ``exclude_ids`` or ``metadata_filter`` and
+    nothing changes. This deliberately does not widen C13 — the trust ladder is
+    untouched, and the confirmation is a statement of intent, not a permission.
+
+    **Recovery.** Deletes here are SOFT: rows are marked deleted, not removed,
+    and stay readable with ``include_deleted=true``. There is no self-serve
+    restore endpoint today (API-08), so undoing a mistaken tenant-wide delete
+    is an operator task against the store. Treat the confirmation as the last
+    cheap step before an expensive one.
     """
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
@@ -619,6 +654,32 @@ async def delete_all_memories(
         await enforce_delete(tenant_id, auth.agent_id)
     exclude_ids = (body or {}).get("exclude_ids", [])
     metadata_filter = (body or {}).get("metadata_filter") or {}
+    # SAFE-03 / C28. "Unbounded" means every narrowing input is absent, so the
+    # filter set degenerates to the tenant alone. Listed explicitly rather than
+    # inferred, because a new filter parameter added later must be a deliberate
+    # entry here: forgetting it would silently classify a narrowed call as
+    # unbounded (annoying), while inferring from ``locals()`` would silently do
+    # the reverse the day someone adds a non-filter parameter (dangerous).
+    is_tenant_wide = not any((fleet_id, agent_id, memory_type, status, exclude_ids, metadata_filter))
+    if is_tenant_wide and confirm_scope != "tenant":
+        logger.warning(
+            "Refused unconfirmed tenant-wide delete",
+            extra={
+                "tenant_id": tenant_id,
+                "principal_agent_id": auth.agent_id,
+                "confirm_scope": confirm_scope,
+            },
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This request would soft-delete every memory in the tenant. "
+                "No fleet_id and no other narrowing filter was supplied. "
+                "Pass confirm_scope=tenant to proceed, or narrow the request "
+                "with fleet_id / agent_id / memory_type / status / exclude_ids "
+                "/ metadata_filter."
+            ),
+        )
     if metadata_filter:
         # Validation stays in core-api so the exact 400 messages are preserved;
         # the storage endpoint builds the JSONB predicate via SQLAlchemy bound
@@ -672,11 +733,15 @@ async def delete_all_memories(
             "memory_type": memory_type,
             "status_filter": status,
             "metadata_filter": metadata_filter or None,
+            # Without this the audit row for a tenant wipe is shaped exactly
+            # like the row for a narrow delete that happened to match a lot.
+            "tenant_wide": is_tenant_wide,
+            "confirm_scope": confirm_scope,
         },
     )
 
 
-@router.post("/memories/bulk-delete")
+@router.post("/memories/bulk-delete", responses={200: {"model": _oar.BulkDeleteResponse}})
 async def bulk_delete_by_ids(
     body: dict = Body(...),
     auth: AuthContext = Depends(get_auth_context),
@@ -788,6 +853,8 @@ async def get_memory(
         # Storage serialises the JSONB column under ``metadata_``; the API
         # response exposes it as ``metadata``.
         "metadata": memory.get("metadata_"),
+        # C25 — platform-written view (derived for historical rows too).
+        "system_metadata": extract_system_metadata(memory.get("metadata_")),
         "content_hash": memory["content_hash"],
         "created_at": memory["created_at"],
         "expires_at": memory["expires_at"],
@@ -808,7 +875,10 @@ async def get_memory(
     }
 
 
-@router.get("/memories/{memory_id}/contradictions")
+@router.get(
+    "/memories/{memory_id}/contradictions",
+    responses={200: {"model": _oar.MemoryContradictionsResponse}},
+)
 async def get_contradictions(
     memory_id: UUID,
     tenant_id: str = Query(...),
@@ -1157,7 +1227,7 @@ async def write_memories_bulk(
     # session ``client_hash`` de-dup is the design contract per
     # cloud-data-plane.md §2.4 (gap G3). Server-derive a per-request
     # attempt id and attribute the write to the agent the batch's per-item
-    # metadata names (memclawd Layer 1 stamps ``metadata.agent_id``); a mixed
+    # metadata names (caura-daemon Layer 1 stamps ``metadata.agent_id``); a mixed
     # or pre-Layer-1 batch falls back to the install. Non-broker
     # callers (dashboard, SDK) keep the CAURA-602 invariants in full.
     if auth.is_install_credential:
@@ -1216,7 +1286,7 @@ def _broker_write_agent_id(items: list[BulkMemoryItem], install_uuid: str | None
     produced it, when the batch unambiguously names one.
 
     Each item's ``metadata.agent_id`` is stamped by the broker from the
-    capturing agent (memclawd Layer 1). When every item that carries an
+    capturing agent (caura-daemon Layer 1). When every item that carries an
     agent_id agrees on a single value, the write is attributed to that agent —
     so the memory view names the agent, not the bare install. Items with no
     agent_id abstain rather than veto, so a mixed pre-Layer-1/Layer-1 batch that
@@ -1279,7 +1349,7 @@ async def _write_memories_bulk_inner(
     # NOTE: unlike single-write (_write_memory_inner) and the MCP write tool,
     # bulk deliberately does NOT enforce the per-agent approval gate
     # (require_agent_approval / trust_level==0): it passes no require_approval and
-    # has no trust==0 check. Bulk is the broker (memclawd) fan-in path that
+    # has no trust==0 check. Bulk is the broker (caura-daemon) fan-in path that
     # auto-registers many agents from item metadata; gating each on admin
     # approval would create trust-0 rows and 403 whole batches, breaking capture.
     # Per-agent approval is an interactive / single-agent concern.
@@ -1463,7 +1533,10 @@ async def delete_memory(
     )
 
 
-@router.patch("/memories/{memory_id}/status")
+@router.patch(
+    "/memories/{memory_id}/status",
+    responses={200: {"model": _oar.MemoryStatusPatchResponse}},
+)
 async def update_memory_status(
     memory_id: UUID,
     body: dict,
@@ -1664,6 +1737,10 @@ async def _search_inner(
     t_start = time.perf_counter()
     success = True
     results: list = []
+    # D12 — the pipeline fills this when ``body.diagnostic`` is set; it feeds
+    # the typed ``SearchResponse.diagnostic`` block below. Results themselves
+    # are unchanged by diagnostic mode, and no recall_count is bumped.
+    diagnostic_ctx: dict = {}
     try:
         config = await resolve_config(body.tenant_id)
         # Widen the read predicate when the caller authenticated with
@@ -1688,6 +1765,9 @@ async def _search_inner(
             tenant_config=config,
             search_profile=_agent.get("search_profile") if _agent else None,
             readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
+            diagnostic=body.diagnostic,
+            diagnostic_ctx=diagnostic_ctx if body.diagnostic else None,
+            min_similarity=body.min_similarity,
         )
     except HTTPException:
         # Auth / tenant errors raised downstream are expected outcomes,
@@ -1709,10 +1789,29 @@ async def _search_inner(
                     "error": not success,
                 },
             )
-    return SearchResponse(items=results)
+    if not body.diagnostic:
+        return SearchResponse(items=results)
+    counts = diagnostic_ctx.get("counts", {}) or {}
+    return SearchResponse(
+        items=results,
+        diagnostic=SearchDiagnostic(
+            retrieval_strategy=diagnostic_ctx.get("retrieval_strategy"),
+            top_k_requested=diagnostic_ctx.get("diagnostic_original_top_k"),
+            min_similarity_applied=diagnostic_ctx.get("min_similarity_applied"),
+            candidates_considered=counts.get("candidates_considered", 0),
+            returned=counts.get("returned", len(results)),
+            excluded_below_min_similarity=counts.get("excluded_below_min_similarity", 0),
+            excluded_by_top_k_trim=counts.get("excluded_by_top_k_trim", 0),
+            search_params={
+                k: (float(v) if isinstance(v, (int, float)) else v)
+                for k, v in (diagnostic_ctx.get("search_params", {}) or {}).items()
+            },
+            all_candidates=diagnostic_ctx.get("all_candidates", []) or [],
+        ),
+    )
 
 
-@router.post("/ingest/preview")
+@router.post("/ingest/preview", responses={200: {"model": _oar.IngestPreviewResponse}})
 async def ingest_preview_endpoint(
     body: IngestRequest,
     auth: AuthContext = Depends(get_auth_context),
@@ -1727,11 +1826,12 @@ async def ingest_preview_endpoint(
     return await ingest_preview(body)
 
 
-@router.post("/ingest/commit")
+@router.post("/ingest/commit", responses={200: {"model": _oar.IngestCommitResponse}})
 @write_limit
 async def ingest_commit_endpoint(
     request: Request,
     body: IngestCommitRequest,
+    response: Response,
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Write previewed facts as memories."""
@@ -1749,7 +1849,7 @@ async def ingest_commit_endpoint(
     return await ingest_commit(body)
 
 
-@router.post("/ingest/file")
+@router.post("/ingest/file", responses={200: {"model": _oar.IngestPreviewResponse}})
 async def ingest_file_endpoint(
     file: UploadFile = File(...),
     tenant_id: str = Form(...),
@@ -1809,7 +1909,7 @@ async def ingest_file_endpoint(
     return await ingest_preview(req)
 
 
-@router.post("/ingest/undo/{run_id}")
+@router.post("/ingest/undo/{run_id}", responses={200: {"model": _oar.IngestUndoResponse}})
 async def ingest_undo_endpoint(
     run_id: str,
     tenant_id: str = Query(...),
@@ -1864,11 +1964,12 @@ async def ingest_undo_endpoint(
     return {"deleted": deleted_count, "run_id": run_id}
 
 
-@router.post("/recall")
+@router.post("/recall", responses={200: {"model": _oar.RecallResponse}})
 @search_limit
 async def recall_endpoint(
     request: Request,
     body: SearchRequest,
+    response: Response,
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Search memories and return an LLM-synthesized context summary.
@@ -1896,13 +1997,22 @@ async def recall_endpoint(
                 body.fleet_ids = [_agent["fleet_id"]]
             if body.fleet_ids and len(body.fleet_ids) == 1:
                 await enforce_fleet_read(body.tenant_id, body.filter_agent_id, body.fleet_ids[0])
-        await check_and_increment(body.tenant_id, "search")
+        # D13 — a recall is a recall, not a search: plans meter them separately
+        # and the recalls counter never moved because this site (and the MCP
+        # twin) billed "search". Flag-gated; see ``recall_operation``.
+        await check_and_increment(body.tenant_id, recall_operation())
 
     from core_api.services.memory_service import search_memories
     from core_api.services.organization_settings import resolve_config
     from core_api.services.recall_service import summarize_memories
 
     t0 = time.perf_counter()
+
+    # D12 — same wiring as /search: the pipeline fills the ctx when
+    # ``body.diagnostic`` is set, and ``summarize_memories`` folds it into the
+    # response's ``diagnostic`` block (the recall-flavoured shape, which also
+    # carries the prompt/model/provider fields).
+    diagnostic_ctx: dict = {}
 
     # ── Phase 1: DB-bound — config + search ──────────────────────
     config = await resolve_config(body.tenant_id)
@@ -1921,6 +2031,9 @@ async def recall_endpoint(
         entity_retrieval=config.entity_retrieval,
         tenant_config=config,
         readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
+        diagnostic=body.diagnostic,
+        diagnostic_ctx=diagnostic_ctx if body.diagnostic else None,
+        min_similarity=body.min_similarity,
     )
 
     # Release the pooled DB connection before the LLM round-trip.
@@ -1933,6 +2046,8 @@ async def recall_endpoint(
         body.query,
         config,
         valid_at=body.valid_at,
+        diagnostic=body.diagnostic,
+        diagnostic_ctx=diagnostic_ctx,
         top_k=body.top_k,
         t0=t0,
     )

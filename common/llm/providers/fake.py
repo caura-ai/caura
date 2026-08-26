@@ -35,9 +35,11 @@ class FakeLLMProvider:
         temperature: float = 0.0,
         seed: int | None = None,
         response_schema: dict | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict:
-        """Return an empty JSON object (``seed`` / ``response_schema``
-        accepted-and-ignored, matching the provider contract)."""
+        """Return an empty JSON object (``seed`` / ``response_schema`` /
+        ``reasoning_effort`` accepted-and-ignored, matching the provider
+        contract)."""
         return {}
 
     async def complete_text(

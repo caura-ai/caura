@@ -116,6 +116,22 @@ async def _meter(tenant_id: str, operation: OperationType, count: int) -> UsageC
     return result if result is not None else _allowed(operation)
 
 
+def recall_operation() -> OperationType:
+    """D13 — which counter a recall (search + LLM brief) bills against.
+
+    Plans have carried separate ``searches`` / ``recalls`` limits since the
+    initial schema, and the platform hook maps ``"recall"`` to the ``recalls``
+    counter — but every recall call site passed ``"search"``, so the recalls
+    counter never moved and the per-plan recall cap could never fire
+    (canonical D13). The correct operation is gated behind
+    ``settings.meter_recall_as_recall`` (default off) because the recalls
+    counter feeds over-plan enforcement; see the setting's comment.
+    """
+    from core_api.config import settings
+
+    return "recall" if settings.meter_recall_as_recall else "search"
+
+
 async def check_and_increment(
     tenant_id: str,
     operation: OperationType,

@@ -19,8 +19,8 @@ import sys
 import time
 import urllib.request
 
-CONTAINER_CORE_API = "caura-memclaw-enterprise-core-api-1"
-CONTAINER_POSTGRES = "caura-memclaw-enterprise-postgres-1"
+CONTAINER_CORE_API = "caura-enterprise-core-api-1"
+CONTAINER_POSTGRES = "caura-enterprise-postgres-1"
 TENANT = "dev-41fddf"
 
 

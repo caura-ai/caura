@@ -68,10 +68,29 @@ def fake_storage(monkeypatch):
                     "entity_type": "person",
                     "canonical_name": "X",
                     "attributes": {},
-                    "relations": relations,
+                    # C23: with-memories NEVER carried relations; get_entity now
+                    # fetches them from the relations endpoint below. Kept absent
+                    # here to mirror the real payload.
                 },
                 "linked_memories": linked,
             }
+        )
+        # C23 — relations arrive as {"relation": ..., "target": ...} rows from
+        # GET /entities/{id}/relations; adapt the flat test dicts.
+        sc.get_outgoing_relations = AsyncMock(
+            return_value=[
+                {
+                    "relation": {
+                        "id": r["id"],
+                        "relation_type": r["relation_type"],
+                        "to_entity_id": r["to_entity_id"],
+                        "weight": r["weight"],
+                        "evidence_memory_id": r["evidence_memory_id"],
+                    },
+                    "target": {"canonical_name": r["to_entity_name"]},
+                }
+                for r in relations
+            ]
         )
         sc.bulk_get_memories = AsyncMock(return_value=bulk_rows or [])
         from core_api.services import entity_service

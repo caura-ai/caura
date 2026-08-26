@@ -19,7 +19,7 @@ ceiling only when a feature genuinely needs it.
 ## Reproducing
 
 ```bash
-cd memclaw
+cd caura
 PYTHONPATH=core-api/src:core-storage-api/src:. python capture_baselines.py
 ```
 

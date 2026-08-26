@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_ENTITY_LIMIT, MAX_LIST_LIMIT
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Knowledge Graph"])
 
 
-@router.get("/entities")
+@router.get("/entities", responses={200: {"model": list[_oar.EntityListItem]}})
 async def list_entities(
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
@@ -41,7 +42,17 @@ async def list_entities(
     """
     auth.enforce_readable_tenant(tenant_id)
     sc = get_storage_client()
-    entities = await sc.list_entities(tenant_id, fleet_id=fleet_id, limit=limit)
+    # C22 — ``search`` and ``entity_type`` were declared on this route since
+    # day one but never forwarded, so ``GET /entities?search=foo`` silently
+    # returned the unfiltered list. The storage service always supported both
+    # (entity_list: ilike on canonical_name, equality on entity_type).
+    entities = await sc.list_entities(
+        tenant_id,
+        fleet_id=fleet_id,
+        entity_type=entity_type,
+        search=search,
+        limit=limit,
+    )
 
     # Count linked memories per entity
     eids = [e.get("id", "") for e in entities]
@@ -70,7 +81,7 @@ async def list_entities(
     ]
 
 
-@router.get("/graph")
+@router.get("/graph", responses={200: {"model": _oar.GraphResponse}})
 async def get_graph(
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),

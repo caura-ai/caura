@@ -14,6 +14,15 @@ Terraform can't pre-provision them, so ``_ensure_broadcast_subscription``
 creates one at ``start()`` (with an ``expiration_policy`` backstop) and
 deletes it at ``stop()``.
 
+That per-process id is a claimed *slot* (see ``_claim_broadcast_slot``),
+not a random value. The distinction is the difference between a leak
+bounded by how many workers are alive and a leak bounded by how many
+workers have ever died: a SIGKILLed worker's replacement re-derives the
+same name and reuses the subscription, where a random name orphans one
+per death for a full ``BROADCAST_SUBSCRIPTION_TTL_SECONDS``. Deletion at
+``stop()`` is still load-bearing and is NOT made redundant by this — the
+two cover different exits. See ``release_broadcast_subscriptions``.
+
 Import is lazy so `common.events` can be imported in OSS standalone
 installs that don't have `google-cloud-pubsub` installed.
 
@@ -38,16 +47,23 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import functools
 import json
 import logging
+import os
+import tempfile
+import threading
 import uuid
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
+from common.events import trace_filters
 from common.events.base import Event, EventBus, EventHandler
+from common.events.topics import publish_name, subscribe_names, unbound_publish_topics
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +82,252 @@ SOURCE_ENV_ATTRIBUTE = "source_env"
 # long, so a crashed process can't leak its subscription forever. 1 day is the
 # Pub/Sub minimum for ``expiration_policy``.
 BROADCAST_SUBSCRIPTION_TTL_SECONDS = 86400
+
+# Per-call ceiling on the delete RPC in ``release_broadcast_subscriptions()``.
+#
+# The SDK's generated default is 60s, with a retry deadline also 60s — six times
+# Cloud Run's entire 10s SIGTERM budget for a single call. Since that method
+# exists precisely to finish inside that budget, inheriting the default defeats
+# it: one slow Pub/Sub call and the process is killed mid-release, leaking the
+# subscriptions the method was added to reclaim.
+#
+# A timed-out delete costs nothing that matters. ``expiration_policy`` still
+# reaps the subscription, so bounding the call only trades a slow failure mode
+# for a fast one — which is the entire point. Prefer failing fast and leaving
+# the TTL to clean up over blocking a shutdown that has nine seconds to live.
+BROADCAST_RELEASE_TIMEOUT_SECONDS = 2.0
+
+# Directory holding the broadcast slot-claim files. See
+# ``_claim_broadcast_slot`` for what they are and why they exist.
+#
+# **Precondition, and the only one that matters**: this directory must be
+# INSTANCE-LOCAL — shared by every worker process of one instance, and shared
+# with nothing else. On Cloud Run it is the instance's own in-memory
+# filesystem, which is exactly that: the two ``--workers 2`` children see one
+# ``/tmp``, and a different instance is a different container with a different
+# ``/tmp``. The same holds for a plain Docker container or a VM.
+#
+# If this were ever backed by a volume shared BETWEEN instances *and* that
+# volume did not enforce ``flock`` (GCS FUSE, say), two instances' slot-0
+# workers would agree on both the token and the slot, land on one subscription,
+# and broadcast would silently become load-balanced. That is the failure this
+# whole scheme exists to prevent, so do not point this at a mounted volume.
+BROADCAST_SLOT_DIR = Path(tempfile.gettempdir()) / "caura-broadcast-slots"
+
+# Ceiling on how many slots a single instance will probe.
+#
+# Deliberately larger than any real ``--workers`` count. uvicorn can exceed its
+# configured worker count transiently — ``Multiprocess.restart_all`` (SIGHUP)
+# starts a replacement and waits for it to be READY *before* retiring the
+# worker it replaces, so both are live at once — and ``handle_ttin`` (SIGTTIN)
+# raises the count outright. Sizing this to ``--workers`` exactly would push
+# those overlap workers onto the uuid4 fallback for no reason. Slots are
+# reclaimed lowest-first, so the population self-compacts back down and this is
+# a ceiling, not a steady state.
+BROADCAST_MAX_SLOTS = 16
+
+# Process-scoped memo for ``_process_broadcast_slot_id``. The identity is a
+# property of the PROCESS, not of a bus object: a start/stop/start cycle must
+# reuse the same name, or the restart mints a fresh subscription and reopens
+# the leak this exists to close.
+_slot_id: str | None = None
+# Guards the claim so two threads racing through a first ``start()`` cannot
+# each take a slot and strand one of them flocked-but-unused.
+_slot_lock = threading.Lock()
+
+
+def _instance_token(slot_dir: Path) -> str | None:
+    """Return the token shared by every worker process of THIS instance.
+
+    Distinguishes slot 0 here from slot 0 on every other instance — without it
+    two instances' slot-0 workers would land on one subscription and broadcast
+    would quietly become load-balanced.
+
+    Deliberately derived from the same directory the slot locks live in, rather
+    than from the Cloud Run metadata server. The token and the mutual exclusion
+    must describe the SAME boundary; if the token said "instance" while the
+    locks coordinated over some wider or narrower scope, the two would disagree
+    and the disagreement would show up as a silent delivery bug rather than an
+    error. One filesystem, one coordination domain, one token.
+
+    Published by hard-linking a fully-written temp file into place: the link is
+    atomic and refuses to overwrite, so a reader either sees no file or sees the
+    complete token, and the first writer's value is the one everybody gets. A
+    plain create-then-write would let a second worker read the file in the
+    window before the contents landed.
+    """
+    token_path = slot_dir / "instance"
+
+    def _read() -> str:
+        try:
+            return token_path.read_text().strip()
+        except OSError:
+            # ``OSError``, not just ``FileNotFoundError``. Missing is the
+            # ordinary case, but a ``PermissionError`` or ``IsADirectoryError``
+            # on this read is still just "no token available", and it must
+            # degrade to the same ``None`` the rest of this module returns —
+            # this runs on the service startup path, and an escape here would
+            # crash boot rather than fall back to a random id.
+            return ""
+
+    token = _read()
+    if token:
+        return token
+    # Missing (we are the first worker on this instance) — or present but
+    # empty, which this function never produces and so cannot be trusted.
+    # Either way, try to publish one; the hard link decides who wins.
+    tmp_path = slot_dir / f"instance.{os.getpid()}.tmp"
+    try:
+        tmp_path.write_text(uuid.uuid4().hex[:12])
+        # FileExistsError means a sibling published first, so the re-read
+        # below adopts that sibling's token instead of ours. The link
+        # refusing to overwrite is the point — it is what makes the first
+        # writer's value the one every worker converges on.
+        with contextlib.suppress(FileExistsError):
+            token_path.hardlink_to(tmp_path)
+    except OSError:
+        return None
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    # Exactly one re-read, not a retry loop: whoever won, the token is now
+    # published, so a second publish attempt could only overwrite nothing and
+    # confuse the next reader.
+    return _read() or None
+
+
+def _claim_broadcast_slot(slot_dir: Path, max_slots: int) -> str | None:
+    """Claim a broadcast identity for this process, or None if none is free.
+
+    Returns ``"{instance_token}-{slot}"``. The identity has to satisfy three
+    properties at once, and the reason this is a lock rather than a computation
+    is that no two of them are satisfiable by the same simpler thing:
+
+    1. **Stable** across respawns of the same slot. uvicorn SIGKILLs a worker
+       that misses its healthcheck and spawns a replacement; the replacement
+       must land on its predecessor's subscription and take the ``AlreadyExists``
+       path. Otherwise every worker death orphans a subscription for the full
+       ``BROADCAST_SUBSCRIPTION_TTL_SECONDS``.
+    2. **Distinct** between workers of one instance that are live AT THE SAME
+       TIME. Two live consumers on one subscription do not both get every
+       message — Pub/Sub load-balances between them — so a broadcast silently
+       degrades to "roughly half the events each". For ``org.settings-changed``
+       that is a process serving stale org settings with nothing red anywhere.
+    3. **Distinct** across instances, via the instance token.
+
+    ``flock`` gives 1 and 2 together and gives them as a kernel guarantee, not a
+    probability. The kernel releases the lock when the holder dies *however* it
+    dies, so a SIGKILLed worker frees its slot with no cooperation from a
+    shutdown path that never ran — which is the property that makes this
+    independent of whether shutdown runs at all. And it cannot hand a slot to a
+    newcomer while the incumbent is alive, which is what keeps property 2 from
+    being traded away for property 1.
+
+    Slots are probed lowest-first so the population self-compacts after a
+    transient overlap instead of drifting upward.
+
+    The obvious alternative — have the supervisor hand each child its index —
+    is not available and is worth ruling out explicitly, because it is the
+    first thing anyone proposes. ``common/serve.py`` only calls
+    ``uvicorn.run(workers=N)``; uvicorn's own ``Multiprocess`` spawns the
+    children and passes them ``(config, sockets)``, keeping the index purely
+    in the parent's list. Reaching it would mean subclassing uvicorn
+    internals. Claiming a slot is supervisor-agnostic and survives a uvicorn
+    upgrade.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - no flock on this platform
+        # Not Windows-specific speculation: ``None`` is this function's
+        # already-required degradation path, shared with an unwritable
+        # directory, an unreadable token and slot exhaustion below. Any
+        # environment where the claim cannot be made degrades identically.
+        return None
+    try:
+        slot_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    token = _instance_token(slot_dir)
+    if token is None:
+        return None
+    for slot in range(max_slots):
+        try:
+            fd = os.open(slot_dir / f"slot-{slot}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError:
+            # Degrade per slot, not globally: one unopenable lock file must not
+            # abandon the usable slots after it. If every slot is unopenable the
+            # loop falls through to the same ``None`` anyway.
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            # Held by a live sibling. Never fall through to "use it anyway":
+            # sharing a slot is the silent-delivery bug, and leaking a
+            # subscription is merely expensive.
+            os.close(fd)
+            continue
+        # ``fd`` is deliberately never closed, and there is deliberately no
+        # release path. The flock lasts exactly as long as the open file
+        # description, so holding the fd for the process's lifetime is what
+        # keeps a sibling worker off this slot while we are still consuming
+        # from its subscription; the kernel drops it at exit, however we exit.
+        # Do not "fix" the apparent leak — closing it hands a live slot away.
+        return f"{token}-{slot}"
+    return None
+
+
+def _process_broadcast_slot_id() -> str:
+    """This process's broadcast identity: a claimed slot, or a random fallback.
+
+    Always returns an id, and always the SAME id for the life of the process —
+    including on the fallback path. That matters: two buses in one process that
+    disagreed about their identity would create two subscriptions where one is
+    wanted, and the ``start()`` comment about start/stop/start reusing the same
+    names silently would not hold.
+
+    The fallback direction is the load-bearing decision here and must not be
+    inverted. When no slot can be proven ours, take a random id and accept the
+    leak; never reuse a slot we could not claim. A leak is bounded, visible in
+    quota, and reaped in a day. Two live workers on one subscription is a
+    silent halving of broadcast delivery that nothing alerts on.
+    """
+    global _slot_id
+    with _slot_lock:
+        if _slot_id is None:
+            try:
+                _slot_id = _claim_broadcast_slot(
+                    BROADCAST_SLOT_DIR, BROADCAST_MAX_SLOTS
+                )
+            except Exception:
+                # The guard belongs HERE, not at the call site in ``start()``.
+                # This function is the one that promises "always returns an
+                # id"; enforcing that where it is promised makes it true for
+                # every caller, present and future, instead of for the one
+                # call site that remembered to wrap it.
+                #
+                # Not a substitute for the specific handling in the callees —
+                # each expected failure is still caught where it happens and
+                # named there. This is the backstop for the unforeseen one, on
+                # a path where the alternative is a service that will not boot.
+                # ``Exception``, not ``BaseException``: a cancellation or a
+                # KeyboardInterrupt during startup must still propagate.
+                logger.exception(
+                    "pubsub: broadcast slot claim raised; falling back to a "
+                    "random per-process id"
+                )
+                _slot_id = None
+        if _slot_id is None:
+            logger.warning(
+                "pubsub: no broadcast slot could be claimed under %s; falling "
+                "back to a random per-process id. Delivery is unaffected, but "
+                "each unclean restart will orphan a subscription for %ds "
+                "instead of reusing this slot's.",
+                BROADCAST_SLOT_DIR,
+                BROADCAST_SUBSCRIPTION_TTL_SECONDS,
+            )
+            # Memoised like any other outcome, so the warning fires once per
+            # process rather than once per bus, and so the id stays stable.
+            _slot_id = uuid.uuid4().hex[:12]
+        return _slot_id
 
 
 class PubSubEventBus(EventBus):
@@ -126,6 +388,19 @@ class PubSubEventBus(EventBus):
         error_backoff: float = 5.0,
         publish_concurrency: int = 32,
         topic_prefix: str = "",
+        # Bind each subscribed topic under its renamed twin as well as its
+        # current name, so a publisher flip later cannot land a message on a
+        # name nothing is pulling. Defaults OFF, and the default is the whole
+        # safety argument: with it off this bus's subscription set is
+        # byte-identical to what it was, so the code can be merged, vendored
+        # and deployed everywhere before any environment has the twin
+        # subscriptions. Turning it ON in an environment whose Terraform has
+        # not been applied is NOT a soft failure — the twin subscription is
+        # absent, the pull loop takes a permanent NotFound and halts, and
+        # ``is_healthy`` turns the readiness endpoint red. Set
+        # EVENT_BUS_DUAL_SUBSCRIBE per environment only after the expand apply
+        # has landed there, and verify it per service.
+        dual_subscribe: bool = False,
     ) -> None:
         # No SDK import at construction: the factory can return this
         # instance even in environments where google-cloud-pubsub isn't
@@ -142,6 +417,29 @@ class PubSubEventBus(EventBus):
         # (via the factory) to isolate topics across environments that share one GCP
         # project, eliminating cross-env message fan-out. See _topic_name().
         self._topic_prefix = topic_prefix
+        self._dual_subscribe = dual_subscribe
+        # Refuse to exist in the one combination that fails silently: publishing
+        # a flipped family under its renamed name while binding only the current
+        # one. See ``unbound_publish_topics`` for why the check compares the two
+        # names instead of asking whether ``FLIPPED_FAMILIES`` is empty.
+        #
+        # At construction, not at ``start()``: publishing does not require
+        # ``start()`` (a publish-only process never calls it), so a check there
+        # would leave exactly the write side of the hazard unguarded. Raising
+        # here also means a misconfigured process dies before it can report
+        # itself ready. This is the loud direction of a fault that otherwise has
+        # no signal, so a hard failure is the point rather than a side effect.
+        if unbound := unbound_publish_topics(dual=dual_subscribe):
+            raise ValueError(
+                f"dual_subscribe is off, but {len(unbound)} topic(s) would be "
+                f"published under a name this bus does not bind: {sorted(unbound)}. "
+                "Nothing would be delivered and nothing would raise. Either those "
+                "families were flipped before this environment could bind their "
+                "twins, or this environment's twin subscriptions exist and its "
+                "configuration has not caught up — the two halves are set "
+                "independently, which is what lets them disagree. Resolve which "
+                "one is wrong; do not start a publisher in this state."
+            )
         self._max_messages = max_messages
         self._pull_timeout = pull_timeout
         self._error_backoff = error_backoff
@@ -202,12 +500,24 @@ class PubSubEventBus(EventBus):
         # Topics registered with ``broadcast=True`` get a PER-PROCESS
         # subscription so every process receives every message (fan-out),
         # instead of the shared per-service subscription that delivers each
-        # message to a single consumer. ``_instance_id`` makes this process's
-        # subscription name unique; ``_broadcast_sub_paths`` records the ones
-        # this process created so ``stop()`` can delete them.
+        # message to a single consumer. ``_broadcast_slot_id`` makes this
+        # process's subscription name unique; ``_broadcast_sub_paths`` records
+        # the ones this process created so ``stop()`` can delete them.
         self._broadcast_topics: set[str] = set()
         self._broadcast_sub_paths: list[str] = []
-        self._instance_id = uuid.uuid4().hex[:12]
+        # Short names of subscriptions THIS bus deliberately deleted, so a pull
+        # loop that is still running when the delete lands can tell "I released
+        # this myself" from "this was never provisioned". Both surface as
+        # NotFound on the next pull; only the second is an error worth the loud
+        # halting-the-loop log. Short names because that is what ``_pull_loop``
+        # is given — ``_broadcast_sub_paths`` holds full resource paths.
+        self._released_subscriptions: set[str] = set()
+        # Resolved lazily in ``start()``, and only when a broadcast topic is
+        # actually registered — claiming a slot touches the filesystem, and a
+        # publisher-only bus would pay for an identity it never puts in a name.
+        # ``_process_broadcast_slot_id`` memoises per process, so resolving it
+        # late costs nothing and keeps the id stable across a restart.
+        self._broadcast_slot_id: str | None = None
 
     def _spawn_background_task(self, coro: Any) -> asyncio.Task[Any]:
         """Schedule a fire-and-forget task; see ``_background_tasks`` for why."""
@@ -221,7 +531,12 @@ class PubSubEventBus(EventBus):
     @staticmethod
     def _ensure_pubsub_sdk() -> Any:
         try:
-            from google.cloud import pubsub_v1  # type: ignore[import-untyped]
+            # ``attr-defined``, not ``import-untyped``: ``google.cloud`` is a
+            # namespace package, so with google-cloud-pubsub installed (as CI
+            # has it, via the storage-api ``pubsub`` extra) mypy resolves the
+            # parent and rejects the submodule as a missing attribute. The
+            # absent case is already covered by ignore_missing_imports.
+            from google.cloud import pubsub_v1  # type: ignore[attr-defined]
 
             return pubsub_v1
         except ImportError as exc:
@@ -424,7 +739,14 @@ class PubSubEventBus(EventBus):
                 "events. Call `await bus.start()` at service startup."
             )
         publisher = await self._ensure_publisher()
-        topic_path = publisher.topic_path(self._project_id, self._topic_name(topic))
+        # ``publish_name`` resolves the ONE name this topic's family currently
+        # publishes under — the old one until that family is flipped. Resolved
+        # here rather than at each publisher call site so the flip is a single
+        # decision per family in one file, instead of a sweep across every
+        # publisher at the riskiest moment of the cutover.
+        topic_path = publisher.topic_path(
+            self._project_id, self._topic_name(publish_name(topic))
+        )
         payload = event.model_dump_json().encode("utf-8")
         # Fire the publish into the client's internal batch queue and
         # return — do NOT block on the returned Future. .result(timeout=30)
@@ -475,11 +797,27 @@ class PubSubEventBus(EventBus):
                 "PubSubEventBus.subscribe() must be called before start(); "
                 "the pull loop for this topic won't be created otherwise."
             )
-        self._handlers[topic].append(handler)
-        # ``broadcast`` topics get a per-process subscription at start() so
-        # every process receives every message (fan-out), not just one.
-        if broadcast:
-            self._broadcast_topics.add(topic)
+        # Brand rename: with dual-subscribe on, one subscribe() binds the
+        # handler to both the current topic and its renamed twin, so a
+        # publisher can be flipped later without a message landing on a name
+        # nothing is listening to. Applied here rather than at each call site
+        # on purpose — the failure this guards against is ONE consumer that
+        # nobody remembered to update, and a bus-level expansion cannot miss
+        # one. It also means a subscribe() added next week inherits it.
+        for name in subscribe_names(topic, dual=self._dual_subscribe):
+            self._handlers[name].append(handler)
+            # ``broadcast`` topics get a per-process subscription at start() so
+            # every process receives every message (fan-out), not just one.
+            #
+            # The flag MUST carry to the twin. A broadcast topic has no durable
+            # subscription by design, so a twin left out of this set is treated
+            # as an ordinary work queue at start(): the pull loop looks for a
+            # ``<prefix>--<twin>`` subscription that was never provisioned and
+            # never will be, gets NotFound, and halts — turning the health
+            # endpoint red on a topic whose whole point is that it degrades
+            # quietly.
+            if broadcast:
+                self._broadcast_topics.add(name)
 
     async def start(self) -> None:
         # Idempotent guard — a second call would leak the old
@@ -491,6 +829,12 @@ class PubSubEventBus(EventBus):
         if self._started:
             logger.warning("PubSubEventBus.start() called more than once; ignoring")
             return
+        # Clear the released-subscription record. Names are deterministic in
+        # ``_broadcast_slot_id``, which is per-PROCESS, so a start/stop/start
+        # cycle recreates the SAME names — a leftover entry here would silence
+        # a genuine NotFound on the second run, turning this suppression into
+        # the blind spot it was written to avoid.
+        self._released_subscriptions.clear()
         pubsub_v1 = self._ensure_pubsub_sdk()
         topic_count = len(self._handlers)
         # SubscriberClient construction can block the event loop for
@@ -504,6 +848,24 @@ class PubSubEventBus(EventBus):
         # gRPC channel. publish() handles the off-loop construction
         # lazily on the first call (see ``_ensure_publisher``).
         if topic_count > 0:
+            # Inside this branch, not at the top of start(): the spans this
+            # corrects come from the pull loop, so a publisher-only bus can
+            # never produce one and shouldn't pay for the filter — and
+            # registering it calls tracer.configure(), which recreates the
+            # trace writer.
+            #
+            # Registered here rather than at import for the same reason.
+            # Idempotent, never raises, and a no-op when ddtrace isn't
+            # installed. See trace_filters for the measurement that motivated
+            # it. Logged either way so "pull spans are still showing as errors"
+            # is one grep from the answer instead of a guess about whether the
+            # filter ever loaded. The negative branch doesn't name a cause:
+            # False means ddtrace is absent OR registration failed, and
+            # install() warns about the latter itself.
+            if trace_filters.install():
+                logger.debug("Pub/Sub pull-timeout span filter registered")
+            else:
+                logger.debug("Pub/Sub pull-timeout span filter not registered")
             loop = asyncio.get_running_loop()
             # Snapshot the stop generation BEFORE the shielded await.
             # A clean ``stop()`` resets both ``_stopped`` and
@@ -582,7 +944,9 @@ class PubSubEventBus(EventBus):
                     # Per-process subscription (unique suffix) for fan-out; skip
                     # the pull loop if it can't be created (see the helper — it
                     # degrades to TTL rather than crashing startup).
-                    sub_name = f"{sub_name}--{self._instance_id}"
+                    if self._broadcast_slot_id is None:
+                        self._broadcast_slot_id = _process_broadcast_slot_id()
+                    sub_name = f"{sub_name}--{self._broadcast_slot_id}"
                     if not await self._ensure_broadcast_subscription(topic, sub_name):
                         continue
                 task = asyncio.create_task(self._pull_loop(sub_name, handlers))
@@ -620,10 +984,34 @@ class PubSubEventBus(EventBus):
         try:
             await loop.run_in_executor(self._pull_executor, _create)
         except gexc.AlreadyExists:
-            # A prior unclean shutdown left this process's subscription (same
-            # _instance_id) around — reuse it. The create failed, so its
-            # expiration_policy TTL is NOT reset here; the pull loop's ongoing
-            # activity is what keeps Pub/Sub from expiring it.
+            # The predecessor in this slot left its subscription behind — reuse
+            # it. Since ``_broadcast_slot_id`` is slot-stable this is the
+            # EXPECTED path after a SIGKILLed worker is respawned, not a rare
+            # one, and it is what bounds the subscription population by live
+            # slots instead of by cumulative worker deaths.
+            #
+            # Three things it deliberately does NOT do:
+            #
+            # - **It does not reset the expiration_policy TTL.** The create
+            #   failed, so nothing was written. That is fine: the TTL measures
+            #   subscriber inactivity, and the pull loop this returns True for
+            #   is about to start pulling. Activity, not the create call, is
+            #   what keeps Pub/Sub from expiring it.
+            # - **It does not seek past the predecessor's backlog.** A reused
+            #   subscription may carry messages the dead worker never acked.
+            #   Draining them is right, not merely tolerable: handlers here are
+            #   required to be idempotent, a fresh process has an empty cache so
+            #   replayed invalidations are no-ops, and a seek would discard
+            #   exactly the ``org.settings-changed`` events whose loss is the
+            #   stale-settings bug. Under the old random naming nobody drained
+            #   that backlog at all — it sat on the orphan until the TTL.
+            # - **It does not reconcile configuration.** A reused subscription
+            #   keeps whatever ``ack_deadline_seconds`` it was created with.
+            #   Worth knowing before changing that value, and worth knowing that
+            #   a subscription ``filter`` — which the module docstring floats
+            #   for server-side ``source_env`` dropping — is IMMUTABLE in
+            #   Pub/Sub. Adding one means changing this name, not updating the
+            #   subscription in place.
             pass
         except Exception:
             logger.error(
@@ -777,7 +1165,27 @@ class PubSubEventBus(EventBus):
                 gexc.NotFound,
                 gexc.PermissionDenied,
                 gexc.InvalidArgument,
-            ):
+            ) as exc:
+                # We deleted this one ourselves. ``release_broadcast_subscriptions()``
+                # runs ahead of the rest of teardown so it fits inside the
+                # SIGTERM budget, which means this loop can still be mid-pull
+                # when the subscription disappears. That is an orderly exit, not
+                # a configuration fault: staying on the loud path below would
+                # log an ERROR and flip ``is_healthy`` false on every graceful
+                # shutdown, which is how a real alert gets tuned out.
+                #
+                # NotFound ONLY, deliberately. "We deleted it" explains a
+                # subsequent NotFound and nothing else. PermissionDenied means an
+                # IAM grant changed and InvalidArgument means we built a bad
+                # request — neither becomes benign because this process happened
+                # to release that name, and both are exactly what the loud path
+                # below exists to surface. Widening this back to the whole
+                # exception group would let a real IAM regression exit silently
+                # with ``is_healthy`` still true.
+                if isinstance(exc, gexc.NotFound) and (
+                    subscription_name in self._released_subscriptions
+                ):
+                    return
                 # Permanent configuration errors: subscription doesn't
                 # exist, service account lacks permission, or the
                 # request shape is wrong. Retrying spins the log forever
@@ -897,6 +1305,103 @@ class PubSubEventBus(EventBus):
             raise cancelled
         return all_ok
 
+    async def release_broadcast_subscriptions(self) -> None:
+        """Delete this process's ephemeral broadcast subscriptions.
+
+        Split out of ``stop()`` so a shutdown path can run it FIRST, ahead of
+        anything slow. That ordering is the whole point, and it is worth stating
+        why rather than leaving it to be rediscovered.
+
+        Each process creates its own ephemeral subscription per broadcast topic
+        — a broadcast needs one subscription per consumer, or the messages
+        load-balance and only one process sees each. The ``expiration_policy``
+        set at creation is the backstop, but its floor is
+        ``BROADCAST_SUBSCRIPTION_TTL_SECONDS`` (1 day, the Pub/Sub minimum), so
+        a subscription this misses occupies project quota for a full day.
+
+        That quota is **per project**, not per topic, and it is shared with
+        every other environment. A service that leaks these steadily will
+        eventually refuse subscription creation somewhere else entirely —
+        which is not a hypothetical: staging's leak exhausted the project cap
+        and the failure surfaced in prod, on a different topic, in a different
+        service.
+
+        So this must run inside the platform's SIGTERM budget (10s on Cloud
+        Run) even when the rest of teardown cannot. It needs only the subscriber
+        client and the recorded paths — no pull loops stopped, no queues
+        flushed, no storage open. Idempotent: the paths are cleared, so calling
+        it again, or calling ``stop()`` afterwards, is a no-op.
+
+        **Still worth doing now that names are slot-stable.** Slot stability
+        means a subscription survives a worker's death to be reused by that
+        slot's next occupant — but only on the SAME instance, because the
+        instance token in the name does not outlive the instance. A clean
+        shutdown is overwhelmingly an instance going away (Cloud Run scaling
+        down, a revision cutover), and that instance's token never returns, so
+        anything left behind is a pure orphan with nobody to inherit it.
+
+        So the two mechanisms cover disjoint exits and neither subsumes the
+        other: slot-stable naming handles the death where shutdown CANNOT run
+        (SIGKILL, where the process is simply gone), and this handles the exit
+        where it can and where reuse is impossible anyway. Deleting also drops
+        the backlog on a subscription no successor will ever drain.
+
+        One case sits between the two and is deliberately accepted: a single
+        worker shut down cleanly while its INSTANCE survives (uvicorn's SIGHUP
+        restart, SIGTTOU). There the delete is churn — the replacement claims
+        the freed slot and recreates the same name — and it discards a backlog
+        the successor could have drained. Cloud Run sends neither signal, so
+        this costs a pair of RPCs in a case that does not arise in the
+        deployment this is written for; special-casing it would add a branch
+        nothing exercises.
+        """
+        if self._subscriber is None or not self._broadcast_sub_paths:
+            return
+        loop = asyncio.get_running_loop()
+        # Record before deleting, not after. The pull loop for a subscription
+        # can hit NotFound the instant the delete lands, and if it reaches the
+        # error branch before this set is updated it takes the loud path for a
+        # deletion we performed on purpose.
+        self._released_subscriptions.update(
+            path.rsplit("/", 1)[-1] for path in self._broadcast_sub_paths
+        )
+
+        async def _release_one(sub_path: str) -> None:
+            try:
+                await loop.run_in_executor(
+                    None,
+                    functools.partial(
+                        self._subscriber.delete_subscription,
+                        request={"subscription": sub_path},
+                        timeout=BROADCAST_RELEASE_TIMEOUT_SECONDS,
+                    ),
+                )
+            except Exception:
+                logger.warning(
+                    "pubsub: failed to delete ephemeral broadcast "
+                    "subscription %s; expiration_policy will reap it in up to "
+                    "%ds, during which it holds project subscription quota",
+                    sub_path,
+                    BROADCAST_SUBSCRIPTION_TTL_SECONDS,
+                    exc_info=True,
+                )
+
+        # Concurrently, not sequentially. Under dual-subscribe every broadcast
+        # topic has two names, so even one topic is two deletes — and a
+        # sequential loop multiplies the per-call ceiling by the subscription
+        # count, which is how a bounded call still overruns an unbounded
+        # budget. Fanning out keeps the wall-clock at roughly one timeout no
+        # matter how many there are.
+        #
+        # ``return_exceptions=True`` because ``_release_one`` already logs and
+        # swallows; this is belt-and-braces so an unexpected escape cannot
+        # abort the remaining deletes or propagate out of a shutdown path.
+        await asyncio.gather(
+            *(_release_one(p) for p in self._broadcast_sub_paths),
+            return_exceptions=True,
+        )
+        self._broadcast_sub_paths.clear()
+
     async def stop(self) -> None:
         # Flip `_stopped` first so `_get_publish_executor` / `_pull_loop`
         # refuse to spin up new resources after this point — closes the
@@ -940,29 +1445,11 @@ class PubSubEventBus(EventBus):
         # the in-flight stop() would then close out from under the caller.
         try:
             # Delete this process's ephemeral broadcast subscriptions BEFORE
-            # closing the subscriber (the delete needs the client). Best-effort:
-            # the ``expiration_policy`` set at creation reaps any subscription
-            # this misses (unclean shutdown). The close below then wakes the
-            # pull threads via the gRPC channel error, so they exit through the
-            # ``if self._stopping: return`` path rather than logging NotFound.
-            if self._subscriber is not None and self._broadcast_sub_paths:
-                for sub_path in self._broadcast_sub_paths:
-                    try:
-                        await loop.run_in_executor(
-                            None,
-                            functools.partial(
-                                self._subscriber.delete_subscription,
-                                request={"subscription": sub_path},
-                            ),
-                        )
-                    except Exception:
-                        logger.warning(
-                            "pubsub: failed to delete ephemeral broadcast "
-                            "subscription %s; expiration_policy will reap it",
-                            sub_path,
-                            exc_info=True,
-                        )
-                self._broadcast_sub_paths.clear()
+            # closing the subscriber (the delete needs the client). The close
+            # below then wakes the pull threads via the gRPC channel error, so
+            # they exit through the ``if self._stopping: return`` path rather
+            # than logging NotFound.
+            await self.release_broadcast_subscriptions()
             # Close the subscriber BEFORE cancelling/awaiting the pull
             # tasks. Pull threads are blocked inside a synchronous
             # `subscriber.pull(timeout=pull_timeout)` — asyncio

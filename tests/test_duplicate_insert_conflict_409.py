@@ -21,6 +21,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+
+from common import duplicate_memory
 from fastapi import HTTPException
 
 from core_api.clients.storage_client import (
@@ -124,6 +126,13 @@ async def test_every_other_status_propagates_unchanged(status) -> None:
 
 @pytest.mark.asyncio
 async def test_the_helper_maps_the_duplicate_to_409_with_the_id() -> None:
+    """The message-only case, which is also the older-storage case (C29).
+
+    ``DuplicateMemoryError`` carries structured fields now, but a storage that
+    predates them sends only the sentence — as constructed here. The helper must
+    still produce a 409 that names the winning row, with an empty ``details``
+    rather than a failure, or the two services could not deploy independently.
+    """
     sc = MagicMock()
     sc.create_memory = AsyncMock(
         side_effect=DuplicateMemoryError(f"Duplicate memory exists: {WINNER}")
@@ -134,7 +143,38 @@ async def test_the_helper_maps_the_duplicate_to_409_with_the_id() -> None:
             await memory_service._create_memory_or_409({"tenant_id": "t"})
 
     assert caught.value.status_code == 409
-    assert WINNER in caught.value.detail
+    # ``detail`` is the structured shape now; the id lives in the message, and
+    # ``app.http_exception_handler`` is what flattens it back to a plain string
+    # for the top-level ``detail`` field clients read.
+    assert WINNER in caught.value.detail["message"]
+    assert caught.value.detail["code"] == duplicate_memory.DUPLICATE_MEMORY_CODE
+    assert caught.value.detail["details"] == {}
+
+
+@pytest.mark.asyncio
+async def test_the_helper_forwards_storage_structured_fields() -> None:
+    """The current-storage case: the id arrives as data and is passed through
+    rather than being re-derived from the sentence."""
+    sc = MagicMock()
+    sc.create_memory = AsyncMock(
+        side_effect=DuplicateMemoryError(
+            f"Duplicate memory exists: {WINNER}",
+            {
+                "reason": duplicate_memory.REASON_EXACT,
+                "existing_id": WINNER,
+                "existing_status": "active",
+            },
+        )
+    )
+
+    with patch.object(memory_service, "get_storage_client", lambda: sc):
+        with pytest.raises(HTTPException) as caught:
+            await memory_service._create_memory_or_409({"tenant_id": "t"})
+
+    details = caught.value.detail["details"]
+    assert details["existing_id"] == WINNER
+    assert details["existing_status"] == "active"
+    assert details["reason"] == duplicate_memory.REASON_EXACT
 
 
 @pytest.mark.asyncio

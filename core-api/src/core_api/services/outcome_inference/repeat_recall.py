@@ -4,7 +4,7 @@ When an agent issues the same (or near-same) recall query multiple
 times within a session, the first answer didn't land. Plan §6
 signal #3.
 
-**Data source gap (acknowledged)**: MemClaw does not currently
+**Data source gap (acknowledged)**: Caura does not currently
 persist a per-recall log keyed by (session, agent, query, ts) with
 the query string preserved. Two reasonable proxies are available
 today:

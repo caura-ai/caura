@@ -117,7 +117,7 @@ def test_documents_every_tool_by_name() -> None:
 
 def test_does_not_reintroduce_signature_cards() -> None:
     """Regression guard for the schema-deferral decision: the adapter should
-    NOT carry per-tool signature cards (``memclaw_x(arg, ...)``) that merely
+    NOT carry per-tool signature cards (``caura_x(arg, ...)``) that merely
     duplicate the always-in-context MCP tool schemas."""
     skill = _read_adapter()
     assert "`caura_recall(" not in skill and "`caura_write(" not in skill, (

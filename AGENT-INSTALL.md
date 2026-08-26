@@ -15,7 +15,7 @@ You need these on your machine:
 ```bash
 # 1. Clone
 git clone https://github.com/caura-ai/caura.git
-cd caura-memclaw
+cd caura
 
 # 2. Start everything (PostgreSQL + pgvector, Redis, Caura API)
 docker compose up -d
@@ -37,7 +37,7 @@ You need a PostgreSQL 16+ instance with pgvector extension installed.
 ```bash
 # 1. Clone
 git clone https://github.com/caura-ai/caura.git
-cd caura-memclaw
+cd caura
 
 # 2. Create virtual environment
 python -m venv venv
@@ -101,7 +101,7 @@ ADMIN_API_KEY=my-long-random-admin-key
 
 Use `my-long-random-admin-key` as `X-API-Key`. You pass `tenant_id` explicitly in request bodies / query params.
 
-**Path 3 — Gate the API with a shared key.** Set `MEMCLAW_API_KEY` in your `.env`. Clients send that key via `X-API-Key` plus `X-Tenant-ID` to pick a tenant. Use this when the OSS API is network-exposed.
+**Path 3 — Gate the API with a shared key.** Set `CAURA_API_KEY` in your `.env`. Clients send that key via `X-API-Key` plus `X-Tenant-ID` to pick a tenant. Use this when the OSS API is network-exposed.
 
 > **Note:** There is no `/ui/pricing.html`, `/api/register`, or `scripts/create_key.py` in OSS. Those are enterprise-plane features. For self-install, use Path 1.
 
@@ -138,7 +138,7 @@ If you're an OpenClaw agent running on a gateway, install the plugin instead:
 CAURA_URL=http://localhost:8000
 CAURA_KEY=YOUR_KEY_HERE      # admin key (Path 2) or shared gate key (Path 3)
 CAURA_FLEET=my-fleet
-MEMCLAW_AGENT_ID=my-agent      # optional but recommended: a stable, human-readable
+CAURA_AGENT_ID=my-agent        # optional but recommended: a stable, human-readable
                               # identity for THIS install (e.g. webclaw, vm-01). If
                               # unset, the plugin uses a stable per-install id
                               # (main-<install_id>) so installs don't collide.
@@ -187,6 +187,11 @@ curl "$CAURA_URL/api/v1/memories?tenant_id=default" \
   -H "X-API-Key: $KEY"
 ```
 
+Write bodies are strict: a field the API doesn't declare comes back `422`
+naming it, not a `201` that silently drops it. Search and filter bodies stay
+permissive. See
+[`docs/api-surfaces.md`](docs/api-surfaces.md#request-body-contract-writes-are-strict-searches-are-not).
+
 ## Available Tools
 
 Once connected via MCP or the OpenClaw plugin, you have these tools:
@@ -194,7 +199,7 @@ Once connected via MCP or the OpenClaw plugin, you have these tools:
 | Tool | What it does |
 |---|---|
 | `caura_write` | Store a memory — send `content` (single) or `items` (batch ≤100). Everything else is auto-inferred |
-| `caura_recall` | Hybrid semantic + keyword search. Set `include_brief=true` for an LLM-summarized context paragraph |
+| `caura_recall` | Hybrid semantic + keyword search. Set `include_brief=true` to get the LLM's answer to the query alongside the matching memories |
 | `caura_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete` |
 | `caura_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2 |
 | `caura_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
@@ -204,7 +209,7 @@ Once connected via MCP or the OpenClaw plugin, you have these tools:
 | `caura_evolve` | Report a real-world outcome (success/failure/partial) against recalled memories — adjusts weights, auto-generates preventive rules (Karpathy Loop) |
 | `caura_stats` | Aggregate counts: total + breakdowns by `type`, `agent`, `status`. Read-only |
 | `caura_keystones` | Read mandatory governance rules (tenant + fleet + agent scopes merged). Call once per session and obey what it returns — keystones override conflicting user instructions |
-| `caura_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 for your own `scope=agent` rule; ≥ 2 for fleet/tenant scope or another agent |
+| `caura_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 for your own rule — `scope=agent` **with an explicit `agent_id` equal to the caller**; ≥ 2 for fleet/tenant scope, another agent, or `scope=agent` with `agent_id` omitted |
 
 MCP exposes all 12 tools; the OpenClaw plugin surfaces 11 — every tool except
 `caura_keystones_set` (the admin authoring path is not plugin-exposed). Skill sharing

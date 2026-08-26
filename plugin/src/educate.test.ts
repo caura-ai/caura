@@ -11,7 +11,7 @@ import {
   discoverAgentWorkspaces,
   cleanupStaleHeartbeatEducation,
 } from "./educate.js";
-import { MEMCLAW_TOOLS } from "./tools.js";
+import { CAURA_TOOLS } from "./tools.js";
 import { MEMORY_TYPES, STATUSES } from "./tool-definitions.js";
 
 // Resolve the shared SKILL.md that ships with the plugin. Tests run from
@@ -319,7 +319,7 @@ describe("writeEducationFiles", () => {
     for (const wsPath of [ws.main, ws.hyphen, ws.customFromConfig, ws.subdir]) {
       const tools = readFileSync(join(wsPath, "TOOLS.md"), "utf-8");
       const agents = readFileSync(join(wsPath, "AGENTS.md"), "utf-8");
-      assert.ok(tools.includes("Caura"), `TOOLS.md missing MemClaw section in ${wsPath}`);
+      assert.ok(tools.includes("Caura"), `TOOLS.md missing Caura section in ${wsPath}`);
       assert.ok(agents.includes("## Memory V2"), `AGENTS.md missing '## Memory V2' anchor in ${wsPath}`);
     }
   });
@@ -655,6 +655,35 @@ describe("writeEducationFiles", () => {
       const bakPath = join(wsDir, "TOOLS.md.memclaw-bak");
       assert.ok(existsSync(bakPath), "expected one-shot .memclaw-bak after legacy splice");
       assert.equal(readFile(bakPath), original);
+    });
+
+    test("legacy section listing only pre-rename tool names is recognized and replaced", () => {
+      // Plugin 0.98.5/1.x sections on customers' disks list the tools under
+      // their OLD names — there is no `caura_` token anywhere in them. The
+      // content-shape check must accept those bodies too, or every real
+      // legacy install keeps a stale duplicate forever. (#782 rewrote the
+      // fixtures above to the new names, which is how a caura_-only gate
+      // stayed green while never matching a single real legacy section.)
+      const base = tmpBase();
+      const wsDir = join(base, "workspace");
+      mkdirSync(wsDir, { recursive: true });
+
+      const userBefore = "# Tools notes\n\nMy tools notes.\n";
+      const legacy =
+        "\n---\n\n## MemClaw — Tools Available\n\n" + // legacy-name-ok: pins the heading old plugin versions wrote to customer disks
+        "Obsolete 13-tool listing including memclaw_write_bulk and memclaw_search.\n"; // legacy-name-ok: pins content old plugin versions wrote to customer disks
+      const userAfter = "\n## Other\n\nMy other section.\n";
+      writeFileSync(join(wsDir, "TOOLS.md"), userBefore + legacy + userAfter, "utf-8");
+
+      const result = writeEducationFiles(buildToolsMd(), buildAgentsMd(), undefined, base);
+
+      assert.equal(result.toolsUpdated, 1, "a pre-rename tool listing must be recognized as our block");
+      const tools = readFile(join(wsDir, "TOOLS.md"));
+      assert.ok(!tools.includes("memclaw_write_bulk"), "stale pre-rename body must be replaced"); // legacy-name-ok: asserts the old body is gone
+      assert.match(tools, /<!-- memclaw:tools v=[a-f0-9]{8} -->/); // legacy-name-ok: the fence tag is a pinned on-disk contract
+      assert.ok(tools.startsWith(userBefore), "user content above the legacy block must be preserved");
+      assert.ok(tools.includes("## Other"), "user content below the legacy block must be preserved");
+      assert.ok(existsSync(join(wsDir, "TOOLS.md.memclaw-bak")), "one-shot backup written before the splice"); // legacy-name-ok: the backup filename is a pinned on-disk contract
     });
 
     test("backup is not overwritten on subsequent runs", () => {
@@ -1268,8 +1297,8 @@ describe("buildToolsMd", () => {
   test("quick-matrix header uses dynamic tool count", () => {
     const tools = buildToolsMd();
     assert.ok(
-      tools.includes(`### Quick matrix · ${MEMCLAW_TOOLS.length} tools`),
-      `quick matrix header missing dynamic tool count (expected "### Quick matrix · ${MEMCLAW_TOOLS.length} tools")`,
+      tools.includes(`### Quick matrix · ${CAURA_TOOLS.length} tools`),
+      `quick matrix header missing dynamic tool count (expected "### Quick matrix · ${CAURA_TOOLS.length} tools")`,
     );
   });
 

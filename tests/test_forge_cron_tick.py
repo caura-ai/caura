@@ -376,11 +376,28 @@ class TestRunForgeCronTick:
             # The real production path will hit the same branch when
             # the LLM provider chain is uninstalled.
             with pytest.raises(RuntimeError, match="common.llm not importable"):
-                # Force the import by deleting the cached module first.
+                # ``patch.dict`` alone, and the alone is the point: a
+                # ``sys.modules`` entry of None makes ``import`` raise
+                # ImportError, which is the branch under test, and patch.dict
+                # restores the real module on exit.
+                #
+                # There used to be a ``sys.modules.pop("common.llm", None)``
+                # here, OUTSIDE the patch.dict, to "force the import by
+                # deleting the cached module first". It was both unnecessary
+                # and unrestored: popping before patch.dict takes its snapshot
+                # means the snapshot records "absent", so the real module never
+                # came back and every later test in the session saw a
+                # ``common.llm`` it had to re-import. That re-import rebinds the
+                # package without rebinding its ``retry`` submodule attribute,
+                # so an unrelated
+                # ``monkeypatch.setattr("common.llm.retry.LLM_RETRY_DELAY_S", …)``
+                # in tests/test_llm_provider_sdk_retries.py failed with
+                # "'module' object at common.llm.retry has no attribute
+                # 'retry'". It only started firing once _wire_llm_fn was fixed
+                # to import successfully — before that its import always raised,
+                # so nothing downstream ever completed the re-import.
                 import sys
 
-                sys.modules.pop("common.llm", None)
-                # Replace common with a stub missing ``llm``.
                 with patch.dict(sys.modules, {"common.llm": None}):
                     await _wire_llm_fn()
 

@@ -1,4 +1,4 @@
-"""Benchmark OpenAI LLMs for MemClaw enrichment + entity extraction tasks.
+"""Benchmark OpenAI LLMs for Caura enrichment + entity extraction tasks.
 
 Tests speed, cost, and output quality across all available OpenAI models.
 Requires OPENAI_API_KEY env var (or .env file).
@@ -29,7 +29,7 @@ EMBEDDING_MODELS: list[tuple[str, float, int]] = [
     ("text-embedding-3-large", 0.13, 3072),
 ]
 
-VECTOR_DIM = 768  # MemClaw's configured dimension
+VECTOR_DIM = 768  # Caura's configured dimension
 
 # ── LLM models to benchmark ─────────────────────────────────────────────────
 # (model_id, input_price_per_1M, output_price_per_1M)
@@ -52,7 +52,7 @@ MODELS: list[tuple[str, float, float]] = [
     ("o4-mini",        1.10,   4.40),
 ]
 
-# ── Test prompts (same ones MemClaw actually sends) ──────────────────────────
+# ── Test prompts (same ones Caura actually sends) ────────────────────────────
 ENRICHMENT_PROMPT = """\
 You are a memory classifier for a business agent memory system.
 
@@ -730,11 +730,11 @@ def print_embedding_report(summaries: list[EmbeddingSummary]):
             print(f"  Both models have equal similarity accuracy ({sim_s*100:.0f}%)")
 
     print(f"\n  Current model: text-embedding-3-small (${EMBEDDING_MODELS[0][1]}/1M)")
-    print(f"  MemClaw vector dimension: {VECTOR_DIM}")
+    print(f"  Caura vector dimension: {VECTOR_DIM}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark OpenAI LLMs + Embeddings for MemClaw")
+    parser = argparse.ArgumentParser(description="Benchmark OpenAI LLMs + Embeddings for Caura")
     parser.add_argument("--rounds", type=int, default=1, help="Number of rounds per model (default: 1)")
     parser.add_argument("--models", nargs="*", help="Specific LLM model IDs to test (default: all)")
     parser.add_argument("--embeddings-only", action="store_true", help="Only run embedding benchmark")
@@ -757,7 +757,7 @@ def main():
                     print(f"WARNING: Unknown model '{name}', add pricing to MODELS dict. Skipping.")
 
         if models:
-            print(f"MemClaw OpenAI LLM Benchmark")
+            print(f"Caura OpenAI LLM Benchmark")
             print(f"Models: {len(models)} | Samples: {len(TEST_SAMPLES)} | Rounds: {args.rounds}")
             print(f"Tasks per sample: 2 (enrichment + entity extraction)")
             print(f"Total API calls: {len(models) * len(TEST_SAMPLES) * 2 * args.rounds}")

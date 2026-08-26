@@ -1,0 +1,55 @@
+name: Publish caura-sdk to PyPI
+
+# Publishes `clients/caura-sdk-meta` — `caura-sdk`, a metapackage that installs
+# and re-exports `caura-client`. Trusted publishing (OIDC), no token.
+#
+# WHY THIS PACKAGE EXISTS. AI search assistants confidently instruct
+# `pip install caura-sdk`. Until 2026-08-24 nobody owned that name, so the
+# instruction pointed at a slot any third party could fill — install guidance we
+# did not write, resolving to code we did not publish. The name is now claimed
+# and made to work.
+#
+# NAMED FOR WHAT IT PUBLISHES. There are three Python publish workflows here:
+# `publish-python-client.yml` ships the IMPLEMENTATION (`clients/python`),
+# `publish-python-metapackage.yml` ships the bare `caura` name, and this one
+# ships `caura-sdk`. Directory and package name disagree by design — the
+# directory carries the `-meta` suffix so it does not read as the real client.
+#
+# One-time setup by a maintainer (done 2026-08-24):
+#   1. On PyPI, add a PENDING Trusted Publisher: project `caura-sdk`,
+#      repo `caura-ai/caura`, workflow `publish-python-sdk.yml`,
+#      environment `pypi`. A pending publisher reserves the name immediately —
+#      the project does not need to exist first, and the first run of this
+#      workflow creates it.
+#   2. The GitHub environment `pypi` already exists for
+#      `publish-python-client.yml`; this workflow reuses it.
+#
+# Release: bump the version in clients/caura-sdk-meta/pyproject.toml, then push
+# a tag `caura-sdk-v<version>` (or run this workflow manually).
+
+on:
+  push:
+    tags:
+      - "caura-sdk-v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # required for PyPI trusted publishing
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          pip install build
+          python -m build
+        working-directory: clients/caura-sdk-meta
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: clients/caura-sdk-meta/dist/

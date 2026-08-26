@@ -1,6 +1,6 @@
-"""MCP (Model Context Protocol) server for MemClaw.
+"""MCP (Model Context Protocol) server for Caura.
 
-Exposes MemClaw tools over Streamable HTTP so any MCP client
+Exposes Caura tools over Streamable HTTP so any MCP client
 (Claude Desktop, Claude Code, Cursor, etc.) can connect with just a URL + API key.
 
 Mounted onto the main FastAPI app at /mcp.
@@ -25,6 +25,7 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import Field, ValidationError
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from common import duplicate_memory
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api.agent_ids import DEFAULT_AGENT_ID, effective_write_agent_id
 from core_api.auth import get_admin_key
@@ -93,7 +94,12 @@ from core_api.services.recall_service import summarize_memories
 from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
-from core_api.trust_utils import effective_keystone_min_trust, keystone_min_trust
+from core_api.services.usage_service import recall_operation
+from core_api.trust_utils import (
+    effective_keystone_min_trust,
+    keystone_min_trust,
+    keystone_trust_hint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +119,7 @@ _readable_tenant_ids_var: contextvars.ContextVar[list[str] | None] = contextvars
     "mcp_readable_tenant_ids", default=None
 )
 _scopes_var: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar("mcp_scopes", default=None)
-# memclawd (broker) identity, plumbed from the gateway on the verified path.
+# caura-daemon (broker) identity, plumbed from the gateway on the verified path.
 # X-Caura-Credential-Kind distinguishes ``install_credential`` (broker) from
 # ``user_api_key`` (dashboard/SDK); X-Install-UUID is the broker's install id.
 # Drives the agent-ownership boundary on MCP writes (parity with REST auth).
@@ -128,6 +134,28 @@ _UNAUTH = "__unauthenticated__"
 _ADMIN = "__admin__"
 _NO_AUTH = "__no_auth__"
 _DEFAULT_AGENT_ID = DEFAULT_AGENT_ID
+
+# The most consequential parameter on the tool surface: it decides which agent
+# a write is attributed to, and which rows an agent-scoped read can see. All
+# ten tools documented it as "Caller agent." - two words - while defaulting to
+# a value the hosted gateway path actively REFUSES
+# (``_refuse_default_agent_on_gateway``). So the schema advertised a default
+# that cannot be used where most callers run, and said nothing about what to
+# send instead. An agent reading the tool list had no way to learn that.
+#
+# The DEFAULT itself is deliberately unchanged. "mcp-agent" is a legitimate
+# standalone identity by design (see ``core_api.agent_ids``); removing it would
+# break every single-tenant caller and change the schema for all of them. What
+# changes is that the schema now tells the truth about when it applies.
+#
+# Kept deliberately short. tools/list is re-sent on every agent session, so
+# this text is paid ten times per call; the first draft was three times this
+# length and pushed the surface 498 tokens over the ceiling in
+# tests/test_mcp_token_budget.py. +117 is the price of the three facts that
+# matter: what it attributes, what it filters, and that hosted needs a real one.
+_AGENT_ID_DESC = (
+    "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one."
+)
 
 
 def _error_response(code: str, message: str, **details) -> str:
@@ -330,7 +358,7 @@ def _get_scopes() -> set[str] | None:
 
 
 def _is_install_credential() -> bool:
-    """True when the gateway authenticated this call with a memclawd install
+    """True when the gateway authenticated this call with a caura-daemon install
     credential (kind=install_credential) — mirrors ``AuthContext.is_install_credential``."""
     return _credential_kind_var.get(None) == "install_credential"
 
@@ -370,9 +398,12 @@ def _refuse_default_agent_on_gateway(agent_id: str) -> str | None:
         return None
     return _error_response(
         "MISSING_AGENT_ID",
-        "Writes via the gateway with a tenant-scoped credential must specify "
-        "an agent_id explicitly; the reserved default "
-        f"'{_DEFAULT_AGENT_ID}' is not accepted on this path. Either pass "
+        "This call reached the gateway with a tenant-scoped credential, which "
+        "carries no agent identity, so agent_id must be supplied explicitly; "
+        f"the reserved default '{_DEFAULT_AGENT_ID}' is not accepted on this "
+        "path. This applies to reads as well as writes: agent-scoped reads "
+        "filter by agent_id, so a defaulted value would quietly query one "
+        "shared identity's rows rather than yours. Either pass "
         "agent_id=<your-agent-name> or provision an agent-scoped credential "
         "(POST /api/v1/admin/agent-keys/provision, or via the dashboard at "
         "Settings → Organization → API Credentials with kind=agent_key) — "
@@ -412,15 +443,60 @@ def _refuse_reserved_memory_type(memory_type: str | None, *, index: int | None =
     return _error_response("INVALID_ARGUMENTS", detail)
 
 
+# C29 legacy path. Every duplicate 409 in this repo now carries its fields as
+# data, so this regex is only reachable while a deploy is mid-flight — a core-api
+# on this version talking to a storage that predates the structured body, which
+# still answers with the sentence and nothing else. Kept for exactly that window
+# rather than deleted, and deliberately anchored to the one message form
+# ``common.duplicate_memory.exact_message`` produces, so it cannot start matching
+# something else if the wording moves.
 _DUPLICATE_DETAIL_RE = re.compile(r"^Duplicate memory exists:\s*(?P<id>[0-9a-fA-F-]{36})\s*$")
 
 
-def _extract_duplicate_id(detail: str) -> str | None:
-    """Parse the duplicate-memory exception detail. Returns the existing
-    memory id, or None if the format doesn't match (semantic-duplicate
-    hits use a different prefix and stay opaque to callers)."""
-    m = _DUPLICATE_DETAIL_RE.match(detail or "")
-    return m.group("id") if m else None
+def _detail_text(detail: object) -> str:
+    """The human message, whichever shape the detail arrived in.
+
+    Details are now sometimes ``{"code", "message", "details"}`` (the shape
+    ``app.http_exception_handler`` expands into the canonical envelope). Passing
+    one of those to ``str()`` renders a Python dict repr — braces, quotes and
+    all — straight into a message a model reads, so every site that used to
+    stringify a detail goes through here instead.
+    """
+    if isinstance(detail, dict) and isinstance(detail.get("message"), str):
+        return detail["message"]
+    return str(detail)
+
+
+def _detail_code(detail: object, status_code: int) -> str:
+    """The error code the raiser chose, or the one its status implies.
+
+    A structured detail names its own code; anything else still derives one
+    from the status, exactly as before.
+    """
+    if isinstance(detail, dict) and isinstance(detail.get("code"), str):
+        return detail["code"]
+    return code_for_status(status_code)
+
+
+def _duplicate_info(detail: object) -> dict | None:
+    """What the 409 says about the row that already holds this content.
+
+    Returns ``None`` when the detail is not a duplicate answer at all.
+    Structured first — that is the whole point of C29, and it is also the only
+    path that can report ``existing_status`` or tell an exact hit from a
+    semantic one. The regex is the mid-deploy fallback described above, and it
+    can only ever recover the id.
+    """
+    if isinstance(detail, dict) and detail.get("code") == duplicate_memory.DUPLICATE_MEMORY_CODE:
+        fields = detail.get("details")
+        return dict(fields) if isinstance(fields, dict) else {}
+    m = _DUPLICATE_DETAIL_RE.match(_detail_text(detail))
+    if m:
+        return {
+            "existing_id": m.group("id"),
+            "reason": duplicate_memory.REASON_EXACT,
+        }
+    return None
 
 
 def _check_auth() -> CallToolResult | None:
@@ -594,6 +670,16 @@ def _with_latency(result: str, t0: float) -> str | CallToolResult:
             if isinstance(data.get("error"), dict):
                 return _as_error_result(payload)
             return payload
+        # C24 — valid JSON that is NOT a dict (``_serialize``'s list branch,
+        # or a bare scalar) must go back UNCHANGED. The old fall-through
+        # appended the plain-text ``_latency_ms`` line after the JSON,
+        # producing ``[...]\n\n_latency_ms: N`` — trailing junk that strict
+        # parsers reject (the likely source of the field-reported "invalid
+        # JSON" sighting; REST serialization cannot emit it). An array can't
+        # carry the stamp without changing its shape, and no client ever
+        # successfully parsed the stamped form anyway — so valid JSON wins
+        # over the telemetry line here. Prose payloads below keep the suffix.
+        return result
     except (json.JSONDecodeError, ValueError):
         pass
     return result + f"\n\n_latency_ms: {ms}"
@@ -617,7 +703,7 @@ def _storage_error_envelope(e: httpx.HTTPStatusError, t0: float) -> str | CallTo
 
 async def caura_recall(
     query: Annotated[str, Field(description="NL query.")],
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     filter_agent_id: Annotated[str | None, Field(description="Filter by author.")] = None,
     memory_type: Annotated[str | None, Field(description="Filter by type.")] = None,
     status: Annotated[str | None, Field(description="Filter by status.")] = None,
@@ -626,11 +712,49 @@ async def caura_recall(
     top_k: Annotated[
         int, Field(description="Max results, default 5. Values above 20 are capped to 20.")
     ] = DEFAULT_SEARCH_TOP_K,
+    valid_at: Annotated[
+        str | None,
+        Field(description="As-of ISO 8601 date: filter to rows valid at that time."),
+    ] = None,
+    min_similarity: Annotated[
+        float | None,
+        Field(description="Cosine floor 0.0-1.0; overrides the tuned profile for this call."),
+    ] = None,
+    diagnostic: Annotated[
+        bool,
+        Field(description="Return retrieval trace; results unchanged, never bumps recall_count."),
+    ] = False,
 ) -> str:
     """Hybrid semantic+keyword recall, with optional LLM brief."""
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
+    # C31/D2 — MCP gains the formerly REST-only knobs; validate like the
+    # sibling filters so a bad value is a structured refusal, not a 500.
+    parsed_valid_at = None
+    if valid_at:
+        try:
+            parsed_valid_at = _dt.fromisoformat(valid_at.replace("Z", "+00:00"))
+        except ValueError:
+            return _with_latency(
+                _error_response(
+                    "INVALID_ARGUMENTS",
+                    f"Invalid valid_at '{valid_at}'. Must be an ISO 8601 datetime.",
+                    field="valid_at",
+                    value=valid_at,
+                ),
+                t0,
+            )
+    if min_similarity is not None and not (0.0 <= min_similarity <= 1.0):
+        return _with_latency(
+            _error_response(
+                "INVALID_ARGUMENTS",
+                f"Invalid min_similarity '{min_similarity}'. Must be between 0.0 and 1.0.",
+                field="min_similarity",
+                value=str(min_similarity),
+            ),
+            t0,
+        )
     if memory_type and memory_type not in MEMORY_TYPES:
         return _with_latency(
             _error_response(
@@ -678,7 +802,8 @@ async def caura_recall(
         # the agent lookup + write quota pin to the HOME tenant, while the READ
         # (search + audit) widens via ``readable_tenant_ids`` exactly as before.
         sc = get_storage_client()
-        await check_and_increment(tenant_id, "search")
+        # D13 — same fix as REST /recall: bill the recall counter (flag-gated).
+        await check_and_increment(tenant_id, recall_operation())
         config = await resolve_config(tenant_id)
         # Agent profile + fleet-scope signals are HOME-tenant only — never
         # widened by the readable set.
@@ -702,6 +827,8 @@ async def caura_recall(
         # gateway plumbs ``X-Readable-Tenant-IDs`` and the MCP middleware parks
         # it on ``_readable_tenant_ids_var``. Single-tenant credentials leave
         # the var empty; ``search_memories`` falls back to the home tenant only.
+        # C31/D12 — diagnostic trace context, filled by the pipeline when requested.
+        diagnostic_ctx: dict = {}
         results = await search_memories(
             tenant_id=tenant_id,
             query=query,
@@ -711,6 +838,7 @@ async def caura_recall(
             memory_type_filter=memory_type,
             status_filter=status,
             top_k=capped_top_k,
+            valid_at=parsed_valid_at,
             recall_boost=config.recall_boost,
             graph_expand=config.graph_expand,
             entity_retrieval=config.entity_retrieval,
@@ -718,6 +846,9 @@ async def caura_recall(
             search_profile=agent_profile,
             readable_tenant_ids=_get_readable_tenants() or None,
             source="mcp_recall",
+            diagnostic=diagnostic,
+            diagnostic_ctx=diagnostic_ctx if diagnostic else None,
+            min_similarity=min_similarity,
         )
         # Cross-tenant read audit (F2): emit one event per source tenant when
         # the credential widened beyond home. Async queue — non-blocking.
@@ -732,9 +863,28 @@ async def caura_recall(
                 query_summary=(query or "")[:200],
             )
         # The LLM brief (when requested) runs without any DB connection held.
+        _rows = [r.model_dump(mode="json") for r in results] if results else []
+        # C31/D1 — ``items`` is the canonical list key everywhere; ``results``
+        # stays as a permanent dual-emit alias (same list object, two keys) so
+        # existing consumers keep working. ``count`` per the contract.
         payload: dict = {
-            "results": [r.model_dump(mode="json") for r in results] if results else [],
+            "results": _rows,
+            "items": _rows,
+            "count": len(_rows),
         }
+        if diagnostic:
+            counts = diagnostic_ctx.get("counts", {}) or {}
+            payload["diagnostic"] = {
+                "retrieval_strategy": diagnostic_ctx.get("retrieval_strategy"),
+                "top_k_requested": diagnostic_ctx.get("diagnostic_original_top_k"),
+                "min_similarity_applied": diagnostic_ctx.get("min_similarity_applied"),
+                **counts,
+                "search_params": {
+                    k: (float(v) if isinstance(v, (int, float)) else v)
+                    for k, v in (diagnostic_ctx.get("search_params", {}) or {}).items()
+                },
+                "all_candidates": diagnostic_ctx.get("all_candidates", []) or [],
+            }
         if top_k > MAX_SEARCH_TOP_K:
             payload["warning"] = f"top_k was capped at the maximum allowed value of {MAX_SEARCH_TOP_K}."
         if include_brief:
@@ -747,7 +897,9 @@ async def caura_recall(
         return _with_latency(json.dumps(payload, indent=2, default=str), t0)
     except HTTPException as e:
         logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
-        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+        return _with_latency(
+            _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+        )
     except httpx.HTTPStatusError as e:
         # sc.get_agent() / enforce_fleet_read() are storage HTTP calls now —
         # surface a storage 4xx/5xx as the canonical envelope, not a raw raise.
@@ -759,7 +911,7 @@ async def caura_write(
     items: Annotated[
         list[dict] | None, Field(description="Batch of objects, ≤100; each needs 'content'.")
     ] = None,
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     fleet_id: Annotated[str | None, Field(description="Fleet scope.")] = None,
     visibility: Annotated[str | None, Field(description="scope_team|scope_org|scope_agent.")] = None,
     memory_type: Annotated[str | None, Field(description="Type (single only).")] = None,
@@ -968,20 +1120,34 @@ async def caura_write(
             # an error. Semantic-duplicate hits still surface as errors —
             # the caller wrote new content that we suppressed, which is a
             # semantically distinct outcome.
-            if e.status_code == 409 and (existing_id := _extract_duplicate_id(str(e.detail))):
+            dup = _duplicate_info(e.detail) if e.status_code == 409 else None
+            # Only an exact-hash hit is a retry no-op. A semantic hit means the
+            # caller wrote NEW content that we suppressed — a different outcome
+            # that must keep surfacing as an error. That distinction used to be
+            # made by the regex simply failing to match the near-duplicate
+            # wording, i.e. by accident; it is now explicit.
+            if dup is not None and dup.get("reason") == duplicate_memory.REASON_EXACT:
                 payload = {
                     "status": "duplicate",
-                    "existing_id": existing_id,
+                    "existing_id": dup.get("existing_id"),
                     "agent_id": agent_id,
                 }
+                # New in C29: which state the surviving row is in. A duplicate of
+                # an archived row is not the no-op a duplicate of a live row is,
+                # and the caller could not previously tell.
+                if dup.get("existing_status"):
+                    payload["existing_status"] = dup["existing_status"]
                 logger.info(
-                    "caura_write: idempotent duplicate hit existing=%s agent=%s",
-                    existing_id,
+                    "caura_write: idempotent duplicate hit existing=%s status=%s agent=%s",
+                    dup.get("existing_id"),
+                    dup.get("existing_status"),
                     agent_id,
                 )
                 return _with_latency(json.dumps(payload), t0)
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
-            return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+            return _with_latency(
+                _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+            )
 
 
 async def caura_manage(
@@ -998,7 +1164,7 @@ async def caura_manage(
     title: Annotated[str | None, Field(description="op=update.")] = None,
     metadata: Annotated[dict | None, Field(description="op=update.")] = None,
     source_uri: Annotated[str | None, Field(description="op=update.")] = None,
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
 ) -> str:
     """Per-memory lifecycle: read | update | transition | delete | bulk_delete | lineage.
 
@@ -1303,7 +1469,9 @@ async def caura_manage(
             return _with_latency(f"Memory {memory_id} deleted.", t0)
         except HTTPException as e:
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
-            return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+            return _with_latency(
+                _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+            )
         except httpx.HTTPStatusError as e:
             # storage_client raises on non-2xx — surface the upstream status +
             # detail in the canonical envelope (parity with sibling tools).
@@ -1332,7 +1500,9 @@ async def caura_entity_get(
     try:
         result = await get_entity(uid, _get_tenant(), caller_agent_id=_get_agent_id())
     except HTTPException as e:
-        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+        return _with_latency(
+            _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+        )
     except httpx.HTTPStatusError as e:
         return _storage_error_envelope(e, t0)
     except Exception as e:
@@ -1343,7 +1513,7 @@ async def caura_entity_get(
 
 
 async def caura_tune(
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     top_k: Annotated[int | None, Field(description="1-20.")] = None,
     min_similarity: Annotated[float | None, Field(description="0.1-0.9.")] = None,
     fts_weight: Annotated[float | None, Field(description="0=semantic, 1=keyword.")] = None,
@@ -1394,7 +1564,9 @@ async def caura_tune(
         return _with_latency(json.dumps({"agent_id": agent_id, "search_profile": current}, indent=2), t0)
     except HTTPException as e:
         logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
-        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+        return _with_latency(
+            _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+        )
     except httpx.HTTPStatusError as e:
         return _storage_error_envelope(e, t0)
 
@@ -1544,7 +1716,7 @@ async def caura_doc(
     order: Annotated[str, Field(description="op=query: asc|desc.")] = "asc",
     limit: Annotated[int, Field(description="op=query.")] = 20,
     offset: Annotated[int, Field(description="op=query.")] = 0,
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     fleet_id: Annotated[
         str | None,
         Field(description="op=write; optional scoping filter for op=list_collections|search."),
@@ -2188,7 +2360,9 @@ async def caura_doc(
             )
         except HTTPException as e:
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
-            return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+            return _with_latency(
+                _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+            )
         except httpx.HTTPStatusError as e:
             return _storage_error_envelope(e, t0)
         except Exception as e:
@@ -2197,7 +2371,7 @@ async def caura_doc(
 
 
 async def caura_list(
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     scope: Annotated[
         str,
         Field(
@@ -2406,7 +2580,9 @@ async def caura_list(
             )
         except HTTPException as e:
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
-            return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+            return _with_latency(
+                _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+            )
         except httpx.HTTPStatusError as e:
             return _storage_error_envelope(e, t0)
         except Exception as e:
@@ -2425,7 +2601,7 @@ async def caura_stats(
         str | None,
         Field(description="Filter by fleet. When scope='fleet' and omitted, defaults to your home fleet."),
     ] = None,
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     memory_type: Annotated[str | None, Field(description="Filter by type.")] = None,
     status: Annotated[str | None, Field(description="Filter by status.")] = None,
     include_deleted: Annotated[
@@ -2555,7 +2731,7 @@ async def caura_insights(
     ],
     scope: Annotated[str, Field(description="agent|fleet|all.")] = "agent",
     fleet_id: Annotated[str | None, Field(description="Required when scope='fleet'.")] = None,
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
 ) -> str:
     """Analyze the memory store for patterns, contradictions, stale knowledge,
     or unexpected clusters; persist findings as ``insight`` memories.
@@ -2706,7 +2882,9 @@ async def caura_insights(
         }
         return _with_latency(json.dumps(result, indent=2, default=str), t0)
     except HTTPException as e:
-        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+        return _with_latency(
+            _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+        )
     except Exception as e:
         logger.exception("Unhandled error in caura_insights")
         return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
@@ -2720,7 +2898,7 @@ async def caura_evolve(
         Field(description="Memory UUIDs that influenced the action."),
     ] = None,
     scope: Annotated[str, Field(description="agent|fleet|all.")] = "agent",
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     fleet_id: Annotated[str | None, Field(description="Required when scope='fleet'.")] = None,
 ) -> str:
     """Record a real-world outcome against the memories that influenced the
@@ -2876,7 +3054,9 @@ async def caura_evolve(
             )
         return _with_latency(json.dumps(result, indent=2, default=str), t0)
     except HTTPException as e:
-        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+        return _with_latency(
+            _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+        )
     except Exception as e:
         logger.exception("Unhandled error in caura_evolve")
         return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
@@ -2899,16 +3079,25 @@ async def caura_evolve(
 #   * Different trust profiles. Read is open (``trust_required=0``).
 #     Write declares ``trust_required=1`` as the minimum any successful
 #     call needs, then the handler computes the per-call floor from
-#     the rule's scope/agent_id: ``scope=agent`` for the caller's own
-#     agent_id is the self-author tier (≥1); everything else
-#     (``scope=fleet``, ``scope=tenant``, or cross-agent ``scope=agent``)
-#     stays at the cross-agent governance bar (≥2). The ≥2 tier is what
-#     blocks a prompt-injected freshly-registered agent from planting
-#     a tenant-wide rule or impersonating another agent.
+#     the rule's scope/agent_id: ``scope=agent`` carrying an EXPLICIT
+#     ``agent_id`` equal to the caller is the self-author tier (≥1);
+#     everything else stays at the cross-agent governance bar (≥2) —
+#     ``scope=fleet``, ``scope=tenant``, cross-agent ``scope=agent``,
+#     and also ``scope=agent`` with ``agent_id`` OMITTED, which names
+#     no target and therefore cannot be self-authored. The ≥2 tier is
+#     what blocks a prompt-injected freshly-registered agent from
+#     planting a tenant-wide rule or impersonating another agent.
+#
+#     The omitted-agent_id case is the one callers trip over: the rule
+#     shape is invalid anyway (storage: "scope=agent requires agent_id")
+#     but the trust gate runs first, so the 403 lands before the 422.
+#     ``keystone_trust_hint`` appends the remedy to that 403 rather
+#     than reordering the checks — the gate must stay ahead of the
+#     storage read for anti-probing reasons.
 
 
 async def caura_keystones(
-    agent_id: Annotated[str, Field(description="Caller agent.")] = "mcp-agent",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     fleet_id: Annotated[
         str | None,
         Field(description="Scope filter; supply to include fleet- and agent-scoped rules."),
@@ -2943,7 +3132,9 @@ async def caura_keystones(
             agent_id=agent_id_effective if fleet_id else None,
         )
     except HTTPException as e:
-        return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+        return _with_latency(
+            _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+        )
     except httpx.HTTPStatusError as e:
         # storage_client raises this on non-2xx — surface the upstream
         # status + detail so a 4xx from storage doesn't surface as a 500.
@@ -3000,12 +3191,13 @@ async def caura_keystones_set(
     ``scope=agent``; passing it for ``scope=tenant`` or ``scope=fleet``
     returns ``INVALID_ARGUMENTS``.
 
-    Trust gating is dynamic: ``scope=agent`` where the target
-    ``agent_id`` matches the caller is the self-author tier (trust ≥
-    1); everything else (``scope=fleet``, ``scope=tenant``, or
-    ``scope=agent`` targeting a different agent) stays at the
-    cross-agent governance bar (trust ≥ 2). Mirror of the REST policy
-    in ``routes/keystones.py``.
+    Trust gating is dynamic: ``scope=agent`` carrying an **explicit**
+    ``agent_id`` that matches the caller is the self-author tier (trust
+    ≥ 1); everything else stays at the cross-agent governance bar
+    (trust ≥ 2) — ``scope=fleet``, ``scope=tenant``, ``scope=agent``
+    targeting a different agent, and ``scope=agent`` with ``agent_id``
+    omitted (no target named, so nothing to self-author). Mirror of the
+    REST policy in ``routes/keystones.py``.
 
     Use this rarely and deliberately — keystones override conflicting
     user instructions and apply to every future session in scope.
@@ -3134,10 +3326,14 @@ async def caura_keystones_set(
                     caller_agent_id=caller_agent_id,
                 )
                 if trust < min_level:
+                    # Append (never replace) the self-scope remedy so the
+                    # pinned ``Agent '…' (trust_level=N) < required M.``
+                    # shape survives for anything parsing it.
                     return _with_latency(
                         _error_response(
                             "FORBIDDEN",
-                            f"Agent '{caller_agent_id}' (trust_level={trust}) < required {min_level}.",
+                            f"Agent '{caller_agent_id}' (trust_level={trust}) < required {min_level}."
+                            + keystone_trust_hint(new_scope_str, agent_id, caller_agent_id),
                         ),
                         t0,
                     )
@@ -3318,7 +3514,9 @@ async def caura_keystones_set(
                 t0,
             )
         except HTTPException as e:
-            return _with_latency(_error_response(code_for_status(e.status_code), str(e.detail)), t0)
+            return _with_latency(
+                _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
+            )
         except Exception as e:
             logger.exception("Unhandled error in caura_keystones_set")
             return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)

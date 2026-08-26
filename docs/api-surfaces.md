@@ -32,7 +32,7 @@ when to add or move an operation.
 | Knowledge graph / `/graph` | REST only | Aggregation surface for UIs and analytics tools. Agents that need entity context use `caura_entity_get` (single entity) and `caura_recall` (with entity_links in results). |
 | Memory stats | REST + MCP (`caura_stats`) | Aggregate counts (total + breakdown by type, agent, status; opt-in `include_deleted=true` adds `deleted` and `total_including_deleted`) — useful for admin/dashboard usage on REST and for agent self-introspection on MCP. Read-only aggregations don't need a use-case gate. |
 | Skill sharing | REST (`/documents` + `/documents/search` on `collection="skills"`) + MCP (`caura_doc op=write\|read\|query\|delete\|search collection=skills`) | Skill sharing rides the generic document surface. Slugs (`doc_id`) are constrained to `^[a-z0-9][a-z0-9._-]{0,99}$` (filesystem-safe), and skills writes require `data["summary"]` (with back-compat fallback to `data["description"]`) so the catalog is semantic-searchable without ceremony. The dedicated `memclaw_share_skill`/`memclaw_unshare_skill` tools and `/skills/*` REST routes were dropped 2026-05; fleet auto-install (push to every node) is restored by Phase A's plugin-side reconciler. Trust ≥ 1 (inherited from `caura_doc`). |
-| Keystones (mandatory rules) | REST (`/memclaw/keystones`) + MCP (`caura_keystones` read, `caura_keystones_set` set\|delete) | Governance policies that agents MUST obey — fetched deterministically (no semantic search) and injected into every session by the OpenClaw plugin. Storage lives in the system-managed `_keystones` collection on `documents`; the dedicated surface exists so the read tool stays discoverable in MCP `instructions` and the write surface can be trust-gated separately. Reads are open. Writes are tiered: a freshly-registered (trust ≥ 1) agent can author its own `scope=agent` rule — self-authored autonomy — but `scope=fleet`, `scope=tenant`, and cross-agent `scope=agent` stay at trust ≥ 2 so a default-trust agent (or a prompt-injected one) can't plant a tenant-wide rule. |
+| Keystones (mandatory rules) | REST (`/keystones`; permanent legacy alias `/memclaw/keystones` <!-- legacy-name-ok: taught as legacy alias -->) + MCP (`caura_keystones` read, `caura_keystones_set` set\|delete) | Governance policies that agents MUST obey — fetched deterministically (no semantic search) and injected into every session by the OpenClaw plugin. Storage lives in the system-managed `_keystones` collection on `documents`; the dedicated surface exists so the read tool stays discoverable in MCP `instructions` and the write surface can be trust-gated separately. Reads are open. Writes are tiered: a freshly-registered (trust ≥ 1) agent can author its own rule — `scope=agent` carrying an explicit `agent_id` equal to the caller, i.e. self-authored autonomy — but `scope=fleet`, `scope=tenant`, cross-agent `scope=agent`, and `scope=agent` with `agent_id` omitted all stay at trust ≥ 2 so a default-trust agent (or a prompt-injected one) can't plant a tenant-wide rule. The explicit `agent_id` is the precondition for the self-author tier: a payload that names no target agent isn't self-authored, so it gets the ≥ 2 bar (and storage rejects the shape anyway — "scope=agent requires agent_id"). |
 | Tenant settings | REST only | Settings are a tenant-administrator concern; not safe for arbitrary agents to flip global config. |
 | Redistribute (mass reassign) | REST only | Destructive bulk op requires `trust_level >= 3`. Admin operation, not agent-driven. |
 | Ingest preview/commit | REST only (revisit per use case) | Pipeline workflow; expose to MCP only if "agent crawls a URL and writes memories" becomes a real use case. |
@@ -76,13 +76,89 @@ mirror "for symmetry."
 The following inconsistencies span surfaces and should be addressed
 independently of ownership decisions:
 
-- **Error contracts**: REST raises `HTTPException` with status codes; MCP
-  returns string error prefixes (`"Error (422): ..."`). Cross-surface clients
-  must special-case. Pick one canonical shape and align both surfaces.
+- **Error contracts**: largely closed. Both surfaces now emit the canonical
+  `{"error": {"code", "message", "details"?}}` envelope from
+  `core_api.errors.make_error_payload` — REST alongside the legacy
+  top-level `detail`, MCP as the tool's JSON string inside a
+  `CallToolResult(isError=True)`. What remains is the transport: REST
+  carries the HTTP status, MCP has only the `code`, so a cross-surface
+  client still branches on one or the other.
 - **Response shape drift on `recall`**: REST `/recall` returns
-  `{query, summary, memory_count, memories, recall_ms}`; MCP
+  `{query, summary, memory_count, memories, items, recall_ms}`; MCP
   `caura_recall(include_brief=true)` returns
-  `{results, brief: <REST-recall-response>}`. Same conceptual operation,
-  different payloads. Pick one and align.
+  `{results, items, count, brief: <REST-recall-response>}`. Both dual-emit
+  the row list under `items` now, so that key is the safe one to read on
+  either surface — but the rest of the envelope (and the nesting of the
+  brief) still differs for one conceptual operation. Pick one and align.
+  `summary` behaves the same on both: the model is prompted to reason step
+  by step and to close with a `**Answer:**` line, and the server surfaces
+  only that final answer — callers get the answer, not the scaffold, and
+  never have to parse the marker themselves. If a completion carries no
+  marker (no-LLM fallback, truncation, a model that ignored the format),
+  the full completion is returned unchanged.
 - **Tenant resolution**: REST takes `body.tenant_id`; MCP infers from auth
   header. Both are reasonable; document the convention.
+
+---
+
+## Request-body contract: writes are strict, searches are not
+
+This is a deliberate asymmetry, and the one place it is written down.
+
+**Write bodies reject fields they do not declare.** `POST /api/v1/memories`,
+`POST /api/v1/documents`, `PATCH /api/v1/memories/{id}` and every other
+write/mutation endpoint respond **422** to an unrecognised key, naming it:
+
+```json
+{
+  "error": {
+    "code": "INVALID_ARGUMENTS",
+    "message": "unknown field 'contnet' is not permitted on this request body (at 'contnet')",
+    "details": { "unknown_fields": ["contnet"] }
+  }
+}
+```
+
+`error.details.unknown_fields` carries the offending names as dotted paths, so
+a nested one reads `facts.0.saliance`. The back-compat `detail` array still
+carries pydantic's verbatim entries, with the field in `loc`.
+
+Until this changed, an undeclared key was **silently discarded**: a write with
+a misspelled field returned `201 Created` and stored the row without it. The
+caller was told it had succeeded. That is worse than a 422, because there is
+nothing to notice.
+
+**Search, filter and query bodies still accept unknown fields.**
+`POST /api/v1/search`, `/api/v1/recall`, `/api/v1/documents/query` and
+`/api/v1/documents/search` ignore what they do not recognise, and will keep
+doing so. The two cases are not symmetric:
+
+| | unknown field on a **write** | unknown field on a **search** |
+|---|---|---|
+| What breaks | stored data is missing what the caller sent | the result set is wider than intended |
+| Can the caller see it? | no — the response says `201` | yes — the results are visibly wrong |
+| Recoverable after the fact? | only by re-writing, if anyone notices | re-run the query |
+
+Search bodies also carry historical spellings absorbed by `AliasChoices`
+(`memory_type` ↔ `memory_type_filter`, `status` ↔ `status_filter` — the C1+C2
+incident). Those are a standing compatibility promise, not an oversight.
+
+### Two write bodies are deliberately permissive
+
+- **`POST /api/v1/memories/bulk` items.** The *envelope* is strict, but an
+  unknown key inside one `items[]` entry is reported as that item's own
+  `status="error"` row in the 207 response — not as a 422 for the batch. One
+  item's typo must not discard its valid siblings.
+- **`POST /api/v1/fleet/heartbeat`** and **`POST /api/v1/fleet/commands/{id}/result`.**
+  Plugin-produced telemetry, and there is no version handshake between plugin
+  and backend (`RELEASING.md` § Compatibility). The body carries nothing the
+  caller owns, and rejecting it would take the node offline in fleet views and
+  cut the command channel that carries its own upgrade.
+
+### For integrators
+
+If you send a field the API does not document, you will now get a 422 where
+you used to get a 2xx. That is the point — the field was never being stored —
+but it is a behaviour change. Check write payloads against the OpenAPI schema
+(`/openapi.json`); anything not in a request model's `properties` was already
+being thrown away.

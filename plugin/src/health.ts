@@ -1,8 +1,8 @@
 /**
- * MemClaw backend-reachability tracker.
+ * Caura backend-reachability tracker.
  *
- * Process-wide state that remembers whether the MemClaw server (configured via
- * MEMCLAW_API_URL) is currently reachable from this plugin. Fed by:
+ * Process-wide state that remembers whether the Caura server (configured via
+ * CAURA_API_URL) is currently reachable from this plugin. Fed by:
  *   - `markReachable()` — called after any successful `apiCall` via the
  *     transport helpers, or by the heartbeat's periodic health probe.
  *   - `markUnreachable(reason)` — called when an `apiCall` throws a

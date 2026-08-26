@@ -48,6 +48,9 @@ _WIRE_KEY_ORDER = [
     "source_uri",
     "run_id",
     "metadata",
+    # C25 — platform-written view added 2026-08-25 (additive; a new key is a
+    # deliberate wire change, which is exactly what this list exists to notice).
+    "system_metadata",
     "content_hash",
     "created_at",
     "expires_at",

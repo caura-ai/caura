@@ -22,7 +22,9 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    ColumnElement,
     String,
+    Table,
     and_,
     bindparam,
     case,
@@ -43,7 +45,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import load_only
+from sqlalchemy.sql.dml import ReturningInsert
 
+from common import duplicate_memory
 from common.constants import (
     CONTRADICTION_CANDIDATE_MAX,
     CONTRADICTION_SIMILARITY_THRESHOLD,
@@ -59,6 +63,7 @@ from common.constants import (
     SEMANTIC_DEDUP_THRESHOLD,
     TYPE_DECAY_DAYS,
 )
+from common.entity_naming import canonical_match_key, normalize_entity_name
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.models import (
     Agent,
@@ -66,6 +71,7 @@ from common.models import (
     AuditChainHead,
     AuditLog,
     BackgroundTaskLog,
+    Base,
     CrystallizationReport,
     DedupReview,
     Document,
@@ -175,6 +181,27 @@ def _scope_sql(
         clause += f" AND {table}.fleet_id = :fleet_id"
         params["fleet_id"] = fleet_id
     return clause, params
+
+
+def _table(model: type[Base]) -> Table:
+    """The mapped ``Table`` behind a declarative model.
+
+    ``DeclarativeBase.__table__`` is annotated ``FromClause``, which has no
+    ``.delete()`` and is not accepted by ``insert()`` / ``update()`` — but every
+    mapped class here is table-mapped, so at runtime it is always a ``Table``.
+    Going through here says that once, in one place, instead of at each of the
+    seven core-statement sites that build DML from ``__table__`` directly.
+
+    ``type[Base]`` rather than ``type[Any]`` so passing something that is not a
+    mapped class is a type error here rather than an ``AttributeError`` at the
+    call site. The cost is the ignore below — the one place where the
+    ``FromClause``-is-really-a-``Table`` claim is made, which is the point of
+    having a single helper.
+
+    Nothing reported this until the services could see ``common/``: the models
+    live in ``common.models``, so every ``__table__`` here was ``Any``.
+    """
+    return model.__table__  # type: ignore[return-value]
 
 
 def _as_json_str(value: Any) -> str:
@@ -484,6 +511,11 @@ def _verify_audit_chain_rows(
                     "created_at": row.created_at.astimezone(UTC).isoformat(),
                 },
             }
+        # ``event_hash`` is ``Mapped[bytes | None]`` — the column is nullable —
+        # but a NULL one cannot reach here: the ``else`` branch above compares it
+        # against ``compute_event_hash(...)``, which returns ``bytes``, so a NULL
+        # row is reported ``event_hash_mismatch`` and returns before this line.
+        assert row.event_hash is not None  # narrow for mypy after the branch above
         expected_prev = row.event_hash
         expected_seq += 1
 
@@ -552,7 +584,17 @@ class DuplicateContentHashError(ValueError):
 
     Subclasses ``ValueError`` so the 409 convention the entities routes already
     use (``except ValueError -> HTTPException(409)``) keeps working unchanged.
+
+    Carries the structured half of the answer alongside the message (C29). The
+    message stays exactly what it was — ``str(exc)`` is what the router used to
+    send and what core-api still reads when it is talking to an older storage —
+    while ``fields`` holds what the sentence could not: which row won, what
+    state that row is in, and why the write was refused.
     """
+
+    def __init__(self, message: str, fields: dict | None = None) -> None:
+        super().__init__(message)
+        self.fields: dict = fields or {}
 
 
 def _content_hash_fleet_scope(fleet_id: str | None):
@@ -689,10 +731,10 @@ class PostgresService:
             # manager" — which would turn every duplicate insert into the 500
             # this handler exists to prevent. The lookup below therefore opens a
             # fresh session of its own.
-            raise DuplicateContentHashError(await self._describe_content_hash_winner(data)) from exc
+            raise await self._describe_content_hash_winner(data) from exc
 
-    async def _describe_content_hash_winner(self, data: dict) -> str:
-        """Message naming the row that already holds this content.
+    async def _describe_content_hash_winner(self, data: dict) -> DuplicateContentHashError:
+        """The 409 naming the row that already holds this content.
 
         Re-SELECTed rather than omitted, and it is the whole reason this raises a
         message instead of a bare flag: ``CheckExactDuplicate``'s 409 says
@@ -710,7 +752,10 @@ class PostgresService:
         ``memory_find_by_content_hash`` returns — a 409 pointing at a different
         row than the lookup would give is worse than no id at all.
         """
-        stmt = select(Memory.id).where(
+        # ``status`` rides along because the prose form could not carry it, and
+        # "you duplicated an archived row" is a different situation from "you
+        # duplicated a live one" — see ``common.duplicate_memory``.
+        stmt = select(Memory.id, Memory.status).where(
             Memory.tenant_id == data["tenant_id"],
             Memory.content_hash == data.get("content_hash"),
             Memory.agent_id == data["agent_id"],
@@ -723,14 +768,24 @@ class PostgresService:
         async with get_session() as session:
             winner = (
                 await session.execute(stmt.order_by(Memory.created_at.asc(), Memory.id.asc()).limit(1))
-            ).scalar_one_or_none()
+            ).first()
         if winner is None:
             # The winner was soft-deleted between the conflict and this read, so
             # the content is free again. Reported honestly rather than retried
             # here: a retry inside the failed transaction's handler is a loop
             # waiting to happen, and the caller's own retry will now succeed.
-            return "Duplicate memory exists but is no longer live; retry the write"
-        return f"Duplicate memory exists: {winner}"
+            return DuplicateContentHashError(
+                duplicate_memory.NOT_LIVE_MESSAGE,
+                duplicate_memory.duplicate_fields(reason=duplicate_memory.REASON_RACE_NOT_LIVE),
+            )
+        return DuplicateContentHashError(
+            duplicate_memory.exact_message(winner.id),
+            duplicate_memory.duplicate_fields(
+                reason=duplicate_memory.REASON_EXACT,
+                existing_id=winner.id,
+                existing_status=winner.status,
+            ),
+        )
 
     async def memory_add_all(self, items: list[dict]) -> list[dict]:
         """Insert with per-attempt idempotency (CAURA-602).
@@ -853,7 +908,13 @@ class PostgresService:
                 )
                 raise DuplicateContentHashError(
                     "bulk insert rejected: an item's content already exists for "
-                    "this agent; nothing in this batch was written"
+                    "this agent; nothing in this batch was written",
+                    # No id: the constraint aborts the batch without telling us
+                    # WHICH item lost, and re-deriving it would mean re-running
+                    # the whole batch's hashes against the table. The reason is
+                    # still worth sending — it is the difference between "retry
+                    # this batch" and "your payload was malformed".
+                    duplicate_memory.duplicate_fields(reason=duplicate_memory.REASON_EXACT),
                 ) from exc
             inserted: dict[str, UUID] = {row.client_request_id: row.id for row in result.all()}
 
@@ -1050,13 +1111,33 @@ class PostgresService:
                 # ``deleted_at IS NULL`` guard mirrors the column-set
                 # branch above so a PATCH never resurrects a deleted
                 # row via the metadata-merge path either.
-                await session.execute(
-                    text(
-                        "UPDATE memories "
-                        "SET metadata = COALESCE(metadata::jsonb, '{}'::jsonb) || (:patch)::jsonb "
-                        "WHERE id = :id AND tenant_id = :tenant_id AND deleted_at IS NULL"
-                    ).bindparams(patch=json.dumps(metadata_patch), id=memory_id, tenant_id=tenant_id),
-                )
+                if "_system" in metadata_patch:
+                    # B7 x C25 — ``||`` is a SHALLOW merge: a patch carrying the
+                    # ``_system`` namespace would REPLACE the stored sub-object,
+                    # clobbering sibling platform keys (write_latency_ms,
+                    # write_mode, …) whenever the worker clears a *_pending
+                    # flag. Deep-merge that one level: top-level keys merge as
+                    # before, then ``_system`` is re-set to old||new.
+                    await session.execute(
+                        text(
+                            "UPDATE memories "
+                            "SET metadata = jsonb_set("
+                            "  COALESCE(metadata::jsonb, '{}'::jsonb) || (:patch)::jsonb, "
+                            "  '{_system}', "
+                            "  COALESCE(metadata::jsonb -> '_system', '{}'::jsonb) "
+                            "    || COALESCE((:patch)::jsonb -> '_system', '{}'::jsonb)"
+                            ") "
+                            "WHERE id = :id AND tenant_id = :tenant_id AND deleted_at IS NULL"
+                        ).bindparams(patch=json.dumps(metadata_patch), id=memory_id, tenant_id=tenant_id),
+                    )
+                else:
+                    await session.execute(
+                        text(
+                            "UPDATE memories "
+                            "SET metadata = COALESCE(metadata::jsonb, '{}'::jsonb) || (:patch)::jsonb "
+                            "WHERE id = :id AND tenant_id = :tenant_id AND deleted_at IS NULL"
+                        ).bindparams(patch=json.dumps(metadata_patch), id=memory_id, tenant_id=tenant_id),
+                    )
         return True
 
     async def memory_update_status(
@@ -2712,7 +2793,7 @@ class PostgresService:
             )
             if node_ids:
                 cmd_result = await session.execute(
-                    FleetCommand.__table__.delete().where(FleetCommand.node_id.in_(node_ids))
+                    _table(FleetCommand).delete().where(FleetCommand.node_id.in_(node_ids))
                 )
                 counts["fleet_commands"] = cmd_result.rowcount  # type: ignore[attr-defined]
             else:
@@ -3196,7 +3277,7 @@ class PostgresService:
         shows up in operator profiles.
         """
         async with get_session() as session:
-            base_filters = [
+            base_filters: list[ColumnElement[bool]] = [
                 Memory.embedding.is_(None),
                 Memory.deleted_at.is_(None),
             ]
@@ -3867,7 +3948,10 @@ class PostgresService:
         admin ``/admin/fleets`` (``exclude_scope_agent`` False, cross-tenant
         when ``tenant_id`` is None). Read-only (reader replica).
         """
-        filters = [Memory.deleted_at.is_(None), Memory.fleet_id.isnot(None)]
+        filters: list[ColumnElement[bool]] = [
+            Memory.deleted_at.is_(None),
+            Memory.fleet_id.isnot(None),
+        ]
         if exclude_scope_agent:
             # ``Memory.visibility`` is NOT NULL with a server default, so the
             # three-valued-logic NULL pitfall doesn't apply.
@@ -4444,7 +4528,7 @@ class PostgresService:
         what it shared. Ignored when ``agent_id`` is set (that path already
         scopes visibility to the named agent).
         """
-        scope_filters = []
+        scope_filters: list[ColumnElement[bool]] = []
         if readable_tenant_ids:
             scope_filters.append(Memory.tenant_id.in_(readable_tenant_ids))
         else:
@@ -4708,7 +4792,7 @@ class PostgresService:
         (reader replica).
         """
         # ── Scope/visibility — MUST mirror memory_stats_breakdown. ──
-        scope_filters = []
+        scope_filters: list[ColumnElement[bool]] = []
         if readable_tenant_ids:
             scope_filters.append(Memory.tenant_id.in_(readable_tenant_ids))
         else:
@@ -4847,19 +4931,22 @@ class PostgresService:
         """Bulk version of the two-phase resolution in entity_service.upsert_entity.
 
         Replicates the same precedence — Phase 1 exact match by
-        ``(tenant_id, fleet_id, canonical_name, entity_type)``; Phase 2
-        embedding cosine similarity (top-N by distance, first ≥ threshold
-        wins) — but in one round-trip and one DB connection. Phase 1 is
-        a single batched SELECT keyed by row tuple; Phase 2 issues one
-        similarity SELECT per unresolved item with a non-null embedding,
-        all sharing the same session.
+        ``(tenant_id, fleet_id, canonical_name, entity_type)``; Phase 1.5
+        conservative normalised match (WT-2 — case/whitespace and a small
+        fixed leading-qualifier strip, see ``common.entity_naming``);
+        Phase 2 embedding cosine similarity (top-N by distance, first ≥
+        threshold wins) — but in one round-trip and one DB connection.
+        Phase 1 is a single batched SELECT keyed by row tuple; Phases 1.5
+        and 2 issue one SELECT per still-unresolved item, all sharing the
+        same session.
 
         Each input item: ``{"input_idx": int, "fleet_id": str|None,
         "canonical_name": str, "entity_type": str, "name_embedding":
         list[float]|None}``. Returns a list aligned to input order where
         each element is either ``None`` (no match) or
         ``{"entity_id", "canonical_name", "attributes", "matched_by",
-        "similarity"}`` — ``matched_by`` ∈ {"exact", "similarity"}.
+        "similarity"}`` — ``matched_by`` ∈ {"exact", "normalized",
+        "similarity"}.
 
         Threshold is required, not defaulted — the resolution rule lives
         in the core-api layer; the storage service is the executor.
@@ -4919,6 +5006,76 @@ class PostgresService:
                         "similarity": 1.0,
                     }
                     matched_idxs.add(idx)
+
+            # Phase 1.5 (WT-2): conservative normalised match. An extracted
+            # surface form and an existing row that differ only by case,
+            # whitespace, or a small fixed set of leading determiners /
+            # temporal qualifiers ("the new analytics service" vs
+            # "analytics service") are the SAME subject; minting a second
+            # row splits the knowledge graph and blinds entity-scoped
+            # contradiction detection (WT-3). Deterministic and symmetric:
+            # a match fires iff ``canonical_match_key`` of both names is
+            # equal (see common/entity_naming.py for the exact rule and the
+            # two-token "new york" guard — "new york" does NOT reduce to
+            # "york", in either direction). Runs BEFORE Phase 2 because a
+            # deterministic string match outranks embedding similarity.
+            # Same tenant / entity_type / fleet scoping as Phase 1.
+            for it in items:
+                idx = it["input_idx"]
+                if idx in matched_idxs:
+                    continue
+                # Named ``match_key``, not ``key``: ``key`` is already bound in this
+                # function to the Phase-1 lookup tuple
+                # ``(canonical_name, entity_type, fleet_id)``. Rebinding it to a str
+                # is harmless at runtime but reads as the same thing and is not.
+                match_key = canonical_match_key(it["canonical_name"])
+                if not match_key:
+                    continue
+                # Candidate prefetch only: lower(name) ending in the key
+                # catches both directions (existing "new analytics service"
+                # for incoming "analytics service", and existing
+                # "analytics service" for incoming "new analytics service").
+                # The DECIDER is the Python-side key equality below — the
+                # suffix LIKE can never merge on its own ("data analytics
+                # service" is prefetched but rejected: its own key differs).
+                escaped = match_key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                cand_stmt = (
+                    select(Entity)
+                    .where(
+                        Entity.tenant_id == tenant_id,
+                        Entity.entity_type == it["entity_type"],
+                        func.lower(Entity.canonical_name).like(f"%{escaped}", escape="\\"),
+                    )
+                    # Deterministic candidate order; cap keeps a pathological
+                    # tenant from turning the prefetch into a seq-scan dump.
+                    # A true match beyond the cap degrades to today's
+                    # behaviour (similarity / create), never to a bad merge.
+                    .order_by(Entity.id)
+                    .limit(50)
+                )
+                if it.get("fleet_id") is not None:
+                    cand_stmt = cand_stmt.where(Entity.fleet_id == it["fleet_id"])
+                else:
+                    cand_stmt = cand_stmt.where(Entity.fleet_id.is_(None))
+
+                candidates = (await session.execute(cand_stmt)).scalars().all()
+                verified = [e for e in candidates if canonical_match_key(e.canonical_name) == match_key]
+                if not verified:
+                    continue
+                # Prefer a pure case/whitespace variant (no qualifier was
+                # stripped on either side) over a qualifier-stripped match;
+                # ties broken by the deterministic id ordering above.
+                norm_incoming = normalize_entity_name(it["canonical_name"])
+                exact_norm = [e for e in verified if normalize_entity_name(e.canonical_name) == norm_incoming]
+                chosen = (exact_norm or verified)[0]
+                out[idx] = {
+                    "entity_id": str(chosen.id),
+                    "canonical_name": chosen.canonical_name,
+                    "attributes": chosen.attributes or {},
+                    "matched_by": "normalized",
+                    "similarity": 1.0,
+                }
+                matched_idxs.add(idx)
 
             # Phase 2: per-unmatched-item similarity SELECT, all in this
             # session. N queries one HTTP — the win is HTTP-roundtrip
@@ -5203,11 +5360,12 @@ class PostgresService:
                         else Entity.fleet_id.is_(None),
                     )
                 )
-                entity = result.scalar_one_or_none()
-                if entity is None:
+                winner = result.scalar_one_or_none()
+                if winner is None:
                     raise ValueError(
                         f"Entity '{data.get('canonical_name')}' conflict but re-select returned nothing"
                     )
+                entity = winner
             return entity
 
     async def entity_update(self, entity_id: UUID, data: dict) -> Entity | None:
@@ -5700,7 +5858,9 @@ class PostgresService:
                 mid = UUID(mid)
             if not isinstance(eid, UUID):
                 eid = UUID(eid)
-            ins_stmt = (
+            # Annotated because ``literal_column("xmax")`` types as ``Any``, and
+            # mypy will not infer a variable whose type is partly ``Any``.
+            ins_stmt: ReturningInsert[tuple[UUID, UUID, str, Any]] = (
                 pg_insert(MemoryEntityLink)
                 .values(memory_id=mid, entity_id=eid, role=it["role"])
                 .on_conflict_do_update(
@@ -6530,7 +6690,9 @@ class PostgresService:
                 # entities.id`` (prod 2026-06-16). ``update(Entity.__table__)`` is a
                 # plain Core executemany UPDATE that honours the custom bindparams and
                 # has no ORM bulk-by-PK or session-synchronisation behaviour at all.
-                sql_update(Entity.__table__)
+                # ``_table(Entity)`` IS ``Entity.__table__`` — it only narrows the
+                # declared type; the Core-not-ORM target above is unchanged.
+                sql_update(_table(Entity))
                 .where(
                     Entity.__table__.c.id == bindparam("eid"),
                     Entity.__table__.c.tenant_id == tenant_id,
@@ -6881,6 +7043,7 @@ class PostgresService:
         span every collection across the readable set (collections with the
         same name across multiple tenants merge into one row).
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -6916,6 +7079,7 @@ class PostgresService:
         not advertise non-active skills in the count. ``readable_tenant_ids``
         widens to ``ANY($readable)`` over the same scope the listing used.
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -6956,6 +7120,7 @@ class PostgresService:
         equality filter. Returns ``(Document, similarity)`` pairs where
         ``similarity = 1 - cosine_distance``.
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -6995,6 +7160,7 @@ class PostgresService:
         sibling tenants; ``tenant_id`` stays the binding/home tenant.
         Mirrors core-api ``document_repository.get_by_doc_id``.
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -7027,6 +7193,7 @@ class PostgresService:
         for cross-tenant credentials. Mirrors core-api
         ``document_repository.query``.
         """
+        tenant_pred: ColumnElement[bool]
         if readable_tenant_ids:
             tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
         else:
@@ -8593,12 +8760,12 @@ class PostgresService:
             node_ids = list(result.scalars().all())
 
             if node_ids:
-                await session.execute(
-                    FleetCommand.__table__.delete().where(FleetCommand.node_id.in_(node_ids))
-                )
+                await session.execute(_table(FleetCommand).delete().where(FleetCommand.node_id.in_(node_ids)))
 
             await session.execute(
-                FleetNode.__table__.delete().where(
+                _table(FleetNode)
+                .delete()
+                .where(
                     FleetNode.tenant_id == tenant_id,
                     FleetNode.fleet_id == fleet_id,
                 )
@@ -8612,7 +8779,7 @@ class PostgresService:
         values: dict[str, Any],
     ) -> UUID:
         async with get_session() as session:
-            stmt = pg_insert(FleetNode.__table__).values(**values)
+            stmt = pg_insert(_table(FleetNode)).values(**values)
             stmt = stmt.on_conflict_do_update(  # type: ignore[assignment]
                 constraint="uq_fleet_nodes_tenant_node",
                 set_={k: v for k, v in values.items() if k not in ("tenant_id", "node_name")},
@@ -8870,7 +9037,7 @@ class PostgresService:
         if not node_ids:
             return
         async with get_session() as session:
-            await session.execute(FleetCommand.__table__.delete().where(FleetCommand.node_id.in_(node_ids)))
+            await session.execute(_table(FleetCommand).delete().where(FleetCommand.node_id.in_(node_ids)))
 
     # ══════════════════════════════════════════════════════════════════════
     #  AUDIT
@@ -8954,7 +9121,7 @@ class PostgresService:
             # head exists; the unconditional FOR UPDATE select below is what
             # actually serializes writers.
             await session.execute(
-                pg_insert(AuditChainHead.__table__)
+                pg_insert(_table(AuditChainHead))
                 .values(tenant_id=tenant_id, last_seq=0, last_hash=GENESIS_PREV_HASH)
                 .on_conflict_do_nothing(index_elements=["tenant_id"])
             )

@@ -1,5 +1,5 @@
 /**
- * MemClaw tool definitions — current surface (10 tools).
+ * Caura tool definitions — current surface (10 tools).
  *
  * One `createToolFromSpec(name)` factory wires together three sources:
  *
@@ -22,14 +22,14 @@
 import { randomUUID } from "crypto";
 import { apiCall, textResult } from "./transport.js";
 import {
-  MEMCLAW_FLEET_ID,
-  MEMCLAW_AGENT_ID,
+  CAURA_FLEET_ID,
+  CAURA_AGENT_ID,
   ensureTenantId,
   getToolDescription,
 } from "./env.js";
 import { assertSafePathSegment } from "./validation.js";
+import { resolveAgentIdQuiet } from "./resolve-agent.js";
 import { getSpec } from "./tool-specs.js";
-import { getInstallId } from "./install-id.js";
 
 interface ToolResult {
   content: Array<{ type: string; text: string }>;
@@ -50,13 +50,75 @@ export interface AgentTool {
 
 // --- Helpers ---
 
+interface EnrichOptions {
+  /**
+   * Set on the tools whose ``fleet_id`` is *only* a read filter, so an
+   * explicit ``scope: "all"`` is honoured instead of being narrowed back to
+   * the configured fleet.
+   *
+   * ``caura_list`` and ``caura_stats`` are the two. Server-side they apply
+   * ``fleet_id`` as a row filter OUTSIDE any scope branch
+   * (``memory_list_by_filters`` / ``memory_stats_breakdown``:
+   * ``if fleet_id: Memory.fleet_id == fleet_id``), and their shared ladder
+   * ``resolve_read_fleet_gate`` passes it through untouched for 'all'. So a
+   * defaulted ``fleet_id`` turns a tenant-wide read into a single-fleet one —
+   * and being a strict equality it drops fleet-less (``NULL``) rows too, with
+   * nothing in the response to signal it.
+   *
+   * NOT set on ``caura_insights`` / ``caura_evolve``, which also take
+   * ``scope: "all"``. Their reads branch on ``scope`` and ignore ``fleet_id``
+   * entirely under 'all' (``_insights_scope_filters`` /
+   * ``evolve_service._filter_by_scope``), so there is no read to widen — and
+   * for them ``fleet_id`` doubles as a WRITE target: the fleet persisted
+   * findings and outcome rules land in, and the key insights supersedes priors
+   * under. Withholding it there relocates a write instead of widening a read.
+   */
+  fleetIsReadFilterOnly?: boolean;
+
+  /**
+   * Set on the tools that SEND ``agent_id`` to the server, so identity is
+   * resolved once here instead of each dispatch inventing its own fallback.
+   *
+   * Three of them did invent one, and they disagreed: ``caura_write`` fell
+   * back to ``main-${installId}`` (correct — it mirrors ``resolve-agent.ts``
+   * step 5), while ``caura_manage`` op=update and ``caura_tune`` fell back to
+   * the literal ``"unknown-agent"``. That literal is not an identity: tune
+   * PATCHes ``/agents/unknown-agent/tune`` and 404s, and update passes it as
+   * the ``agent_id`` query param where the server feeds it to trust and fleet
+   * enforcement (``routes/memories.py``: ``auth.agent_id or agent_id``) — so
+   * it does not fail loudly there, it authorizes as the wrong principal.
+   *
+   * Deliberately opt-in rather than applied to every call. Reads do not send
+   * ``agent_id`` today, and adding one would narrow their visibility scoping —
+   * a silent behaviour change dressed up as a bug fix.
+   */
+  resolveIdentity?: boolean;
+}
+
 async function enrichBody(
   params: Record<string, unknown>,
+  opts: EnrichOptions = {},
 ): Promise<Record<string, unknown>> {
   const body = { ...params };
   if (!body.tenant_id) body.tenant_id = await ensureTenantId();
-  if (!body.agent_id && MEMCLAW_AGENT_ID) body.agent_id = MEMCLAW_AGENT_ID;
-  if (!body.fleet_id && MEMCLAW_FLEET_ID) body.fleet_id = MEMCLAW_FLEET_ID;
+  // ``resolveAgentIdQuiet`` covers the env var too (its step 4), so the
+  // identity-bearing branch subsumes the plain one rather than racing it.
+  // Quiet, not loud: the install-scoped default IS the design for a tool call,
+  // which carries no session context to resolve a richer identity from. The
+  // loud variant is for the per-turn paths, where a fall-through is a real bug.
+  if (!body.agent_id) {
+    if (opts.resolveIdentity) body.agent_id = resolveAgentIdQuiet(params);
+    else if (CAURA_AGENT_ID) body.agent_id = CAURA_AGENT_ID;
+  }
+  // The configured fleet below is a DEFAULT, for callers that did not say
+  // which fleet they meant — so it must not override a caller that asked to
+  // span every fleet. Three cases deliberately keep it: an omitted ``scope``
+  // (that default is what makes ordinary calls fleet-scoped in the first
+  // place), ``scope='agent'`` / ``'fleet'`` (a fleet-scoped read is what they
+  // ask for), and a caller-supplied ``fleet_id`` — this withholds a default,
+  // it never strips a value.
+  if (opts.fleetIsReadFilterOnly && body.scope === "all") return body;
+  if (!body.fleet_id && CAURA_FLEET_ID) body.fleet_id = CAURA_FLEET_ID;
   return body;
 }
 
@@ -208,9 +270,20 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     required: [],
     properties: {
       agent_id: { type: "string", description: "Caller agent ID (trust + visibility scoping)" },
-      scope: { type: "string", enum: ["agent", "fleet", "all"], description: "'agent' (default) = your memories only (trust ≥ 1). 'fleet'/'all' = cross-agent (trust ≥ 2)." },
+      // Deliberately NO schema ``default``. ``GET /memories`` declares
+      // ``scope`` as an opt-in query param (``Query(default=None)``), and an
+      // omitted one skips the trust ladder and takes its author filter from
+      // ``written_by ?? agent_id``. Declaring 'agent' here would make a
+      // schema-honouring client start sending it, which adds the trust-1 gate
+      // and, on an install with no agent id, turns a working tenant-wide
+      // team/org read into a 400 ("scope='agent' requires an agent identity").
+      // The two requests are near-identical once an agent id is configured,
+      // but they are not the same request — so the description says what
+      // omitting does instead of calling either one the default.
+      // ``caura_stats`` below has the same shape.
+      scope: { type: "string", enum: ["agent", "fleet", "all"], description: "Optional. Omitted: filtered by agent_id if one is set, with no trust gate — not the same request as 'agent'. 'agent' = your memories only (trust ≥ 1). 'fleet'/'all' = cross-agent (trust ≥ 2)." },
       fleet_id: { type: "string", description: "Restrict to a fleet" },
-      written_by: { type: "string", description: "Filter by author agent_id (ignored when scope='agent')" },
+      written_by: { type: "string", description: "Filter by author agent_id. With scope='agent' it must be omitted or match your own agent_id — a different author is rejected, not ignored." },
       memory_type: MEMORY_TYPE_SCHEMA,
       status: STATUS_SCHEMA,
       weight_min: { type: "number" },
@@ -285,7 +358,8 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     type: "object",
     required: [],
     properties: {
-      scope: { type: "string", enum: ["agent", "fleet", "all"], description: "'agent' (default, trust ≥ 1) | 'fleet'/'all' (trust ≥ 2)" },
+      // No schema ``default`` — see the note on ``caura_list.scope`` above.
+      scope: { type: "string", enum: ["agent", "fleet", "all"], description: "Optional. Omitted: aggregated over agent_id if one is set, with no trust gate — not the same request as 'agent'. 'agent' = only memories visible to you (trust ≥ 1). 'fleet'/'all' = cross-agent (trust ≥ 2)." },
       agent_id: { type: "string", description: "Caller agent ID" },
       fleet_id: { type: "string", description: "Restrict aggregate to a fleet" },
       memory_type: MEMORY_TYPE_SCHEMA,
@@ -326,6 +400,23 @@ function searchBody(params: Record<string, unknown>): Record<string, unknown> {
   return body;
 }
 
+// ``caura_write`` params the SINGLE-write body accepts and the BULK envelope
+// does not — the per-item spellings live inside each ``items[]`` object, not at
+// the top level. Kept next to the dispatch that strips them so the two can't
+// drift; the tool schema above already marks each one "single-write only" in
+// its description, which is exactly the kind of documentation the server used
+// to enforce by silently discarding the field.
+const SINGLE_WRITE_ONLY_FIELDS = [
+  "content",
+  "memory_type",
+  "weight",
+  "source_uri",
+  "run_id",
+  "metadata",
+  "status",
+  "write_mode",
+] as const;
+
 const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   caura_recall: async (params, signal) => {
     const body = await enrichBody(searchBody(params));
@@ -338,14 +429,24 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
 
   caura_write: async (params, signal) => {
     const isBatch = Array.isArray(params.items);
-    const body = await enrichBody(params);
-    // Write-scoped identity default: never send an empty agent_id, which on the
-    // gateway path collapses onto the reserved "main" default. enrichBody set it
-    // from MEMCLAW_AGENT_ID if present; otherwise fall back to a stable
-    // install-scoped id (mirrors resolve-agent.ts step 5). Scoped to writes so
-    // read visibility scoping is unchanged.
-    if (!body.agent_id) body.agent_id = `main-${getInstallId()}`;
+    // Never send an empty agent_id: on the gateway path it collapses onto the
+    // reserved "main" default. ``resolveIdentity`` supplies the install-scoped
+    // id this dispatch used to build inline.
+    const body = await enrichBody(params, { resolveIdentity: true });
+    // SAFE-01. ``caura_write`` is ONE tool with two bodies behind it, and this
+    // dispatch forwards the caller's params wholesale — so whichever half's
+    // fields the caller didn't use rode along into the other half's endpoint.
+    // The server used to drop them in silence; POST /memories and
+    // POST /memories/bulk now 422 on a field they don't declare, so the split
+    // has to happen here instead of at the server's expense.
+    //
+    // Batch: everything marked "single-write only" in the tool schema
+    // (BulkMemoryCreate accepts only tenant_id/fleet_id/agent_id/items/
+    // visibility — the per-item spellings belong inside each item object).
+    // Single: ``items``, which reaches here only when it is present but not an
+    // array (``isBatch`` is false), i.e. already malformed.
     if (isBatch) {
+      for (const k of SINGLE_WRITE_ONLY_FIELDS) delete body[k];
       // POST /memories/bulk requires a per-attempt idempotency token via
       // the `X-Bulk-Attempt-Id` header (CAURA-602). The server derives each
       // row's `client_request_id` from `${X-Bulk-Attempt-Id}:${index}`, so a
@@ -359,11 +460,13 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
         "X-Bulk-Attempt-Id": randomUUID(),
       });
     }
+    delete body.items;
     return apiCall("POST", "/memories", body, undefined, signal);
   },
 
   caura_manage: async (params, signal) => {
-    const enriched = await enrichBody(params);
+    // op=update sends ``agent_id`` as a query param; the other ops ignore it.
+    const enriched = await enrichBody(params, { resolveIdentity: true });
     const op = enriched.op as string;
     const memory_id = enriched.memory_id as string;
     assertSafePathSegment(memory_id, "memory_id");
@@ -385,7 +488,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
       return apiCall("DELETE", `/memories/${id}`, undefined, { tenant_id }, signal);
     }
     // op === "update"
-    const agent_id = (enriched.agent_id as string) || "unknown-agent";
+    const agent_id = enriched.agent_id as string;
     const updateFields: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(enriched)) {
       if (v === undefined) continue;
@@ -407,13 +510,16 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     const collection = enriched.collection as string | undefined;
     const tenant_id = enriched.tenant_id as string;
     if (op === "write") {
+      // SAFE-01: no ``agent_id``. ``DocWriteRequest`` has never declared one —
+      // the document routes take the writer's identity from the authenticated
+      // credential, not the body — so this key was accepted and dropped on
+      // every plugin-routed doc write, and POST /documents now 422s on it.
       return apiCall("POST", "/documents", {
         tenant_id,
         collection,
         doc_id: enriched.doc_id,
         data: enriched.data,
         fleet_id: enriched.fleet_id,
-        agent_id: enriched.agent_id,
       }, undefined, signal);
     }
     if (op === "read") {
@@ -464,7 +570,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   },
 
   caura_list: async (params, signal) => {
-    const enriched = await enrichBody(params);
+    const enriched = await enrichBody(params, { fleetIsReadFilterOnly: true });
     const query: Record<string, string> = {};
     for (const [k, v] of Object.entries(enriched)) {
       if (v === undefined || v === null) continue;
@@ -488,9 +594,9 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   },
 
   caura_tune: async (params, signal) => {
-    const enriched = await enrichBody(params);
+    const enriched = await enrichBody(params, { resolveIdentity: true });
     const tenant_id = enriched.tenant_id as string;
-    const agent_id = (enriched.agent_id as string) || "unknown-agent";
+    const agent_id = enriched.agent_id as string;
     assertSafePathSegment(agent_id, "agent_id");
     const body = { ...enriched };
     delete body.agent_id;
@@ -517,7 +623,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   },
 
   caura_stats: async (params, signal) => {
-    const enriched = await enrichBody(params);
+    const enriched = await enrichBody(params, { fleetIsReadFilterOnly: true });
     const query: Record<string, string> = {};
     for (const [k, v] of Object.entries(enriched)) {
       if (v === undefined || v === null) continue;
@@ -563,10 +669,10 @@ export function createToolFromSpec(name: string): AgentTool {
   const parameters = PARAM_SCHEMAS[name];
   const execute = ENDPOINT_DISPATCH[name];
   if (!parameters) {
-    throw new Error(`[memclaw] Missing PARAM_SCHEMAS entry for '${name}'`);
+    throw new Error(`[caura] Missing PARAM_SCHEMAS entry for '${name}'`);
   }
   if (!execute) {
-    throw new Error(`[memclaw] Missing ENDPOINT_DISPATCH entry for '${name}'`);
+    throw new Error(`[caura] Missing ENDPOINT_DISPATCH entry for '${name}'`);
   }
   const label = labelFor(name);
   const fallbackDescription = spec.description;

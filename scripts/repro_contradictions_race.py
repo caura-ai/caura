@@ -41,9 +41,9 @@ Method:
   on entity extraction).
 
 Usage:
-    export MEMCLAW_API_URL=https://caura.ai
-    export MEMCLAW_API_KEY=mc_...
-    export MEMCLAW_TENANT_ID=ran-test
+    export CAURA_API_URL=https://caura.ai
+    export CAURA_API_KEY=mc_...
+    export CAURA_TENANT_ID=ran-test
     python scripts/repro_contradictions_race.py
 
     # poll longer if your env is slow
@@ -63,6 +63,10 @@ import uuid
 
 import httpx
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _env_compat import env_required as _env  # noqa: E402  (path shim above must run first)
+
 _STEMS = (
     "Lumenwave",
     "Trident",
@@ -81,14 +85,6 @@ def _mint_proper_noun() -> str:
     stem = random.choice(_STEMS)
     tail = "".join(random.choices(string.ascii_lowercase, k=6))
     return f"Project {stem}{tail.capitalize()}"
-
-
-def _env(name: str) -> str:
-    val = os.environ.get(name)
-    if not val:
-        print(f"ERROR: ${name} must be set", file=sys.stderr)
-        sys.exit(2)
-    return val
 
 
 def _detected(target_id: str, resp: dict) -> bool:
@@ -225,9 +221,9 @@ def main() -> int:
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
-    base = _env("MEMCLAW_API_URL").rstrip("/")
-    key = _env("MEMCLAW_API_KEY")
-    tenant = _env("MEMCLAW_TENANT_ID")
+    base = _env("CAURA_API_URL").rstrip("/")
+    key = _env("CAURA_API_KEY")
+    tenant = _env("CAURA_TENANT_ID")
 
     agent = f"repro-race-{uuid.uuid4().hex[:6]}"
     common = {

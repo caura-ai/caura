@@ -679,7 +679,7 @@ def main():
     parser = argparse.ArgumentParser(description="HyperAgent Search Benchmark")
     parser.add_argument("--universe", required=True, choices=["acme", "wiki", "mixed"],
                         help="Test universe to use")
-    parser.add_argument("--api-key", required=True, help="MemClaw API key")
+    parser.add_argument("--api-key", required=True, help="Caura API key")
     parser.add_argument("--url", default=DEFAULT_URL, help=f"Base URL (default: {DEFAULT_URL})")
     parser.add_argument("--profiles", type=int, default=len(PROFILES),
                         help=f"Number of profiles to test (default: {len(PROFILES)})")

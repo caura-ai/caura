@@ -586,6 +586,46 @@ class TestSqliteBackend:
 
         return SqliteBackend(":memory:")
 
+    def test_default_db_path_is_rebranded(self, tmp_path, monkeypatch):
+        """A fresh install (no pre-existing db) uses the new-brand default path."""
+        import os as _os
+
+        from core_api.providers import sqlite_backend
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        backend = sqlite_backend.SqliteBackend()
+        expected = _os.path.expanduser(sqlite_backend._DEFAULT_DB_PATH)
+        assert backend._db_path == expected
+
+    def test_default_db_path_falls_back_to_legacy_install(self, tmp_path, monkeypatch):
+        """A pre-rename install keeps reading the database it already has."""
+        import os as _os
+
+        from core_api.providers import sqlite_backend
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        legacy = _os.path.expanduser(sqlite_backend._LEGACY_DB_PATH)
+        _os.makedirs(_os.path.dirname(legacy), exist_ok=True)
+        with open(legacy, "wb"):
+            pass
+        backend = sqlite_backend.SqliteBackend()
+        assert backend._db_path == legacy
+
+    def test_default_db_path_prefers_new_when_both_exist(self, tmp_path, monkeypatch):
+        """Once the new-brand database exists, the legacy one is ignored."""
+        import os as _os
+
+        from core_api.providers import sqlite_backend
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for tilde_path in (sqlite_backend._LEGACY_DB_PATH, sqlite_backend._DEFAULT_DB_PATH):
+            path = _os.path.expanduser(tilde_path)
+            _os.makedirs(_os.path.dirname(path), exist_ok=True)
+            with open(path, "wb"):
+                pass
+        backend = sqlite_backend.SqliteBackend()
+        assert backend._db_path == _os.path.expanduser(sqlite_backend._DEFAULT_DB_PATH)
+
     @pytest.mark.asyncio
     async def test_store_and_get(self, backend):
         mid = await backend.store("t1", "hello world", metadata={"key": "val"})

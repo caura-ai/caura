@@ -13,7 +13,7 @@ recommended version; no hard rejection — operators decide when to upgrade.
 # side #564 — all preserved) plus Interviewer task-trail capture (#658, fix for
 # #654): OpenClaw task_runs are mirrored into the interview buffer so tool/
 # write-pipeline-driven agents produce non-empty interviews. Still gated by
-# MEMCLAW_INTERVIEWER (buffer) + MEMCLAW_INTERVIEWER_TASKS (default on) per node
+# CAURA_INTERVIEWER (buffer) + CAURA_INTERVIEWER_TASKS (default on) per node
 # AND per-tenant interviewer.enabled, so auto-upgrading the fleet to 2.16.0
 # changes no behavior until those are set. Bumping the floor pulls the fleet onto 2.16.0.
 MIN_RECOMMENDED_PLUGIN_VERSION = "2.16.0"

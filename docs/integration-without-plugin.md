@@ -1,6 +1,6 @@
-# Integrate with memclaw without the plugin
+# Integrate with Caura without the plugin
 
-**Audience:** developers building Python, Node, or any other SDK client against `caura.ai` or a self-hosted memclaw instance, without installing the OpenClaw plugin runtime.
+**Audience:** developers building Python, Node, or any other SDK client against `caura.ai` or a self-hosted Caura (formerly MemClaw) instance, without installing the OpenClaw plugin runtime. <!-- legacy-name-ok: taught as legacy alias -->
 
 **Time to first tool call:** ~5 minutes.
 
@@ -59,7 +59,7 @@ Save `raw_key` immediately — it's only returned once. The returned credential 
 
 ## 2. Verify your identity (`/whoami`)
 
-Before making real tool calls, confirm memclaw resolves your credentials the way you expect:
+Before making real tool calls, confirm Caura resolves your credentials the way you expect:
 
 ```bash
 curl https://caura.ai/api/v1/whoami \
@@ -78,7 +78,7 @@ curl https://caura.ai/api/v1/whoami \
 If `agent_id` is `null` or doesn't match what you provisioned, your credential isn't recognized as agent-scoped. Common causes:
 - You're sending a tenant-scoped credential, not the agent-scoped one you provisioned.
 - The credential was revoked or rotated.
-- A proxy in front of memclaw is stripping the `X-API-Key` header.
+- A proxy in front of Caura is stripping the `X-API-Key` header.
 
 > **Latency expectation:** `POST /search` returns 23 ms p50 / 27 ms p95 warm on our reference benchmarks. Recall (`caura_recall` / `POST /recall`) sits in the same band — it wraps search plus a small scoring step. See [`performance.md`](performance.md) for the full numbers and methodology.
 
@@ -86,18 +86,18 @@ If `agent_id` is `null` or doesn't match what you provisioned, your credential i
 
 ## 3. Open an MCP session
 
-memclaw speaks MCP streamable-http at `/mcp` (the trailing slash is optional; both `/mcp` and `/mcp/` work).
+Caura speaks MCP streamable-http at `/mcp` (the trailing slash is optional; both `/mcp` and `/mcp/` work).
 
 ### Authentication: two headers, your choice
 
-memclaw accepts the credential on either of these — pick whichever your SDK supports:
+Caura accepts the credential on either of these — pick whichever your SDK supports:
 
 | Header | When to use |
 |---|---|
 | `X-API-Key: mc_…` | Canonical. Use if you control the request shape. |
 | `Authorization: Bearer mc_…` | OAuth-style. Required by Anthropic's remote-MCP integration and other SDKs that only emit `Authorization` headers. |
 
-Legacy `mca_…` / `mci_…` keys continue to authenticate on both headers via back-compat. JWTs from the dashboard are also accepted via `Authorization: Bearer <jwt>`; memclaw distinguishes them by trying JWT decode first.
+Legacy `mca_…` / `mci_…` keys continue to authenticate on both headers via back-compat. JWTs from the dashboard are also accepted via `Authorization: Bearer <jwt>`; Caura distinguishes them by trying JWT decode first.
 
 ### Python (the `mcp` library)
 
@@ -140,7 +140,7 @@ msg = client.messages.create(
             {
                 "type": "url",
                 "url": "https://caura.ai/mcp/",
-                "name": "memclaw",
+                "name": "caura",
                 "authorization_token": "mc_...",   # agent-scoped credential
             }
         ]
@@ -149,7 +149,7 @@ msg = client.messages.create(
 print(msg.content)
 ```
 
-The SDK forwards `authorization_token` as `Authorization: Bearer mc_…`. memclaw recognises that shape and resolves your tenant + agent identity from the credential row.
+The SDK forwards `authorization_token` as `Authorization: Bearer mc_…`. Caura recognises that shape and resolves your tenant + agent identity from the credential row.
 
 ---
 
@@ -177,10 +177,27 @@ If you provisioned with `initial_trust`, this step is already done — confirm w
 ## 5. Author a keystone (governance rule)
 
 Keystones are mandatory rules that override conflicting instructions. Authoring a
-`scope=fleet`/`scope=tenant` rule needs trust ≥ 2 (see above).
+`scope=fleet`/`scope=tenant` rule needs trust ≥ 2 (see above). The one tier below
+that is self-authoring: `scope=agent` **with an explicit `agent_id` equal to the
+calling agent** drops to trust ≥ 1. Omitting `agent_id` on a `scope=agent` rule
+does not mean "myself" — it names no target, so it falls back to the trust ≥ 2
+bar (and is rejected by shape validation regardless).
+
+Two things can hold the floor at ≥ 2 even for a correctly-shaped self rule, so
+treat trust 1 as the floor for the *shape* rather than a guarantee for the call:
+
+- **An existing rule at the same `doc_id`.** The required trust is the higher of
+  what your new body needs and what the already-stored rule needs. Overwriting a
+  `scope=fleet` rule takes trust ≥ 2 no matter how you shape the replacement —
+  this is what stops a trust-1 agent quietly replacing a fleet-wide rule with a
+  private one.
+- **An unverified caller identity.** The self-author tier needs an agent-scoped
+  credential (`POST /admin/agent-keys/provision`), not an `X-Agent-ID` header
+  sent alongside a tenant/admin key, so that an admin-key holder can't forge a
+  rule in another agent's name.
 
 ```bash
-curl -X POST "https://caura.ai/api/v1/memclaw/keystones" \
+curl -X POST "https://caura.ai/api/v1/keystones" \
   -H "X-API-Key: $MC_TENANT_KEY" \
   -H "X-Agent-ID: quote-agent-na" \
   -H "Content-Type: application/json" \
@@ -243,11 +260,44 @@ Cross-agent writes of identical content no longer collide — each agent gets it
 
 ---
 
+## Write bodies reject unknown fields
+
+Every write endpoint (`POST /api/v1/memories`, `/api/v1/documents`,
+`PATCH /api/v1/memories/{id}`, …) responds **422** to a field it does not
+declare, and names it:
+
+```json
+{
+  "error": {
+    "code": "INVALID_ARGUMENTS",
+    "message": "unknown field 'tags' is not permitted on this request body (at 'tags')",
+    "details": { "unknown_fields": ["tags"] }
+  }
+}
+```
+
+This used to be a silent `201`: the key was dropped and the write reported
+success without it. If you are porting an integration that predates this, run
+your write payloads once and fix whatever comes back 422 — those fields were
+never being stored.
+
+Search and filter bodies (`/api/v1/search`, `/api/v1/recall`,
+`/api/v1/documents/query`, `/api/v1/documents/search`) still ignore unknown
+fields, deliberately. See
+[`api-surfaces.md`](api-surfaces.md#request-body-contract-writes-are-strict-searches-are-not)
+for why the two differ.
+
+---
+
 ## Common pitfalls
 
 - **`POST /provision` returns the raw key once.** Save it before the response goes out of scope.
 - **`PATCH /agents/{id}/trust` returns 404 immediately after provisioning.** This should not happen post-2026-05-13; if it does, the Agent row was not materialized atomically. Check `whoami` and `GET /api/v1/agents/{id}`.
-- **`/mcp` returns 401 with an `Authorization: Bearer mc_…` (or legacy `mca_…`) header but works with `X-API-Key`.** Make sure you're hitting a memclaw build dated 2026-05-13 or later — earlier builds rejected non-JWT bearer tokens.
+- **`/mcp` returns 401 with an `Authorization: Bearer mc_…` (or legacy `mca_…`) header but works with `X-API-Key`.** Make sure you're hitting a Caura build dated 2026-05-13 or later — earlier builds rejected non-JWT bearer tokens.
+- **A write that used to return `201` now returns `422`.** Read
+  `error.details.unknown_fields`. The named field is not part of the request
+  model — it was being discarded before, so the fix is to remove it or move it
+  under `metadata`, not to retry.
 - **Streaming client hangs on initialize.** If hitting `/mcp` (no slash) caused a hang on older builds, append the trailing slash or upgrade — current builds serve both paths without redirect.
 
 ---

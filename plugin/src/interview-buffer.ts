@@ -199,7 +199,7 @@ export function appendInterviewEvent(input: InterviewEventInput): Promise<number
       const events = await _load();
       const keep = events.slice(Math.floor(events.length / 2));
       console.warn(
-        `[memclaw] interview buffer exceeded ${INTERVIEW_BUFFER_MAX_BYTES} bytes; ` +
+        `[caura] interview buffer exceeded ${INTERVIEW_BUFFER_MAX_BYTES} bytes; ` +
           `compacted ${events.length} -> ${keep.length} events (oldest dropped)`,
       );
       // Meta BEFORE the rename — same crash-ordering rule as

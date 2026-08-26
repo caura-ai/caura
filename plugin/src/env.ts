@@ -1,5 +1,5 @@
 /**
- * Environment configuration and tenant resolution for MemClaw plugin.
+ * Environment configuration and tenant resolution for Caura plugin.
  *
  * Security fixes:
  * - .env parse errors are logged (no silent swallow)
@@ -7,13 +7,38 @@
  */
 
 import { readFileSync, existsSync } from "fs";
-import { join } from "path";
-import { homedir } from "os";
+import { getPluginEnvPath } from "./paths.js";
 import { warnIfInsecureUrl } from "./validation.js";
+
+/**
+ * Keys a plugin ``.env`` file may inject into ``process.env``. Fully anchored
+ * on purpose — without the bound a ``.env`` could hijack PATH, NODE_OPTIONS,
+ * etc. This is the security boundary; keep it strict.
+ *
+ * Both prefixes are accepted so a ``CAURA_*`` line is not silently dropped;
+ * the old prefix keeps working forever.
+ */
+export function isPluginEnvKey(key: string): boolean {
+  return /^(?:CAURA|MEMCLAW)_[A-Z_]+$/.test(key);  // legacy-name-ok: rule 3 dual-read alias
+}
+
+/**
+ * Whether a key belongs to the plugin's ``.env`` at all — deliberately looser
+ * than ``isPluginEnvKey``: it answers "is this ours to carry", not "may this
+ * reach process.env".
+ *
+ * Kept permissive because ``deploy.ts`` uses it to PRESERVE an operator's
+ * existing keys across a redeploy. Tightening it here would quietly delete
+ * anything the strict form rejects (``CAURA_FOO2``, lowercase) from a file we
+ * do not own the contents of.
+ */
+export function hasPluginEnvPrefix(key: string): boolean {
+  return /^(?:CAURA|MEMCLAW)_/.test(key);  // legacy-name-ok: rule 3 dual-read alias
+}
 
 // --- Load .env file from plugin directory ---
 try {
-  const envPath = join(homedir(), ".openclaw", "plugins", "memclaw", ".env");
+  const envPath = getPluginEnvPath();
   if (existsSync(envPath)) {
     for (const line of readFileSync(envPath, "utf-8").split("\n")) {
       const trimmed = line.trim();
@@ -29,42 +54,59 @@ try {
       ) {
         val = val.slice(1, -1);
       }
-      // Only set MEMCLAW_* vars — prevent .env from hijacking PATH, NODE_OPTIONS, etc.
-      if (!/^MEMCLAW_[A-Z_]+$/.test(key)) continue;
+      if (!isPluginEnvKey(key)) continue;
       process.env[key] = val;
     }
   }
 } catch (e: unknown) {
   const msg = e instanceof Error ? e.message : String(e);
-  console.warn("[memclaw] Failed to parse .env file:", msg);
+  console.warn("[caura] Failed to parse .env file:", msg);
 }
 
-export const MEMCLAW_API_URL =
-  process.env.MEMCLAW_API_URL || "http://localhost:8000";
+/**
+ * Read the first alias that carries a value. Aliases are listed new name
+ * first, so ``CAURA_X`` wins when both are set.
+ *
+ * A blank alias never shadows a working one, but a lone ``CAURA_X=`` still
+ * resolves to ``""`` rather than "unset" — the distinction only matters to
+ * ``_readBoolEnv`` below, where ``""`` means off and unset means the default.
+ */
+export function readEnv(names: readonly string[]): string | undefined {
+  let sawBlank = false;
+  for (const name of names) {
+    const value = process.env[name];
+    if (value) return value;
+    if (value !== undefined) sawBlank = true;
+  }
+  return sawBlank ? "" : undefined;
+}
+
+export const CAURA_API_URL =
+  readEnv(["CAURA_API_URL", "MEMCLAW_API_URL"]) || "http://localhost:8000";  // legacy-name-ok: rule 3 dual-read alias
 
 /**
- * Prefix for all MemClaw REST routes. Single source of truth for API
+ * Prefix for all Caura REST routes. Single source of truth for API
  * versioning — bump to "/api/v2" here when the backend ships a new version.
  *
  * The transport layer auto-prepends this to relative paths. Raw fetch
  * sites use it via template literal.
  */
-export const MEMCLAW_API_PREFIX = process.env.MEMCLAW_API_PREFIX || "/api/v1";
-export const MEMCLAW_API_KEY = process.env.MEMCLAW_API_KEY || "";
-export const MEMCLAW_FLEET_ID = process.env.MEMCLAW_FLEET_ID || "";
-export let MEMCLAW_TENANT_ID = process.env.MEMCLAW_TENANT_ID || "";
-export const MEMCLAW_NODE_NAME = process.env.MEMCLAW_NODE_NAME || "";
-export const MEMCLAW_AGENT_ID = process.env.MEMCLAW_AGENT_ID || "";
+export const CAURA_API_PREFIX = readEnv(["CAURA_API_PREFIX", "MEMCLAW_API_PREFIX"]) || "/api/v1";  // legacy-name-ok: rule 3 dual-read alias
+export const CAURA_API_KEY = readEnv(["CAURA_API_KEY", "MEMCLAW_API_KEY"]) || "";  // legacy-name-ok: rule 3 dual-read alias
+export const CAURA_FLEET_ID = readEnv(["CAURA_FLEET_ID", "MEMCLAW_FLEET_ID"]) || "";  // legacy-name-ok: rule 3 dual-read alias
+export let CAURA_TENANT_ID = readEnv(["CAURA_TENANT_ID", "MEMCLAW_TENANT_ID"]) || "";  // legacy-name-ok: rule 3 dual-read alias
+export const CAURA_NODE_NAME = readEnv(["CAURA_NODE_NAME", "MEMCLAW_NODE_NAME"]) || "";  // legacy-name-ok: rule 3 dual-read alias
+export const CAURA_AGENT_ID = readEnv(["CAURA_AGENT_ID", "MEMCLAW_AGENT_ID"]) || "";  // legacy-name-ok: rule 3 dual-read alias
 // Default to true — auto-writing turn summaries is the core fix for the
 // "100% dark matter" problem (memories written but never recalled).
-// Users can opt out with MEMCLAW_AUTO_WRITE_TURNS=false.
-export const MEMCLAW_AUTO_WRITE_TURNS =
-  process.env.MEMCLAW_AUTO_WRITE_TURNS !== "false";
+// Users can opt out with CAURA_AUTO_WRITE_TURNS=false.
+export const CAURA_AUTO_WRITE_TURNS =
+  readEnv(["CAURA_AUTO_WRITE_TURNS", "MEMCLAW_AUTO_WRITE_TURNS"]) !== "false";  // legacy-name-ok: rule 3 dual-read alias
 
 // HMAC signature enforcement on incoming fleet commands. Default is
 // **opt-in** because the OSS server doesn't sign commands at all (the
 // signing infra is reserved for enterprise gateways that proxy commands
-// through a signing layer). Setting MEMCLAW_API_KEY for tenant auth
+// through a signing layer). Setting CAURA_API_KEY for tenant auth
 // shouldn't auto-trigger strict signature requirements that the server
 // can't satisfy — that would silently break educate / deploy /
 // install_skill / uninstall_skill on every OSS install with auth on.
@@ -74,8 +116,8 @@ export const MEMCLAW_AUTO_WRITE_TURNS =
 // DOES carry a signature is still verified end-to-end (so a tampered
 // signature still fails). When **true**: missing-or-invalid signatures
 // fail closed (the original strict behavior).
-export const MEMCLAW_REQUIRE_SIGNED_COMMANDS =
-  process.env.MEMCLAW_REQUIRE_SIGNED_COMMANDS === "true";
+export const CAURA_REQUIRE_SIGNED_COMMANDS =
+  readEnv(["CAURA_REQUIRE_SIGNED_COMMANDS", "MEMCLAW_REQUIRE_SIGNED_COMMANDS"]) === "true";  // legacy-name-ok: rule 3 dual-read alias
 
 // Interviewer Phase 1 opt-in. Default OFF: enabling starts writing the
 // node's conversation events to the durable on-disk interview buffer
@@ -83,7 +125,7 @@ export const MEMCLAW_REQUIRE_SIGNED_COMMANDS =
 // privacy change an operator must choose, mirroring the server-side
 // per-tenant ``interviewer.enabled`` flag. Both must be on for the
 // feature to function end-to-end.
-export const MEMCLAW_INTERVIEWER = process.env.MEMCLAW_INTERVIEWER === "true";
+export const CAURA_INTERVIEWER = readEnv(["CAURA_INTERVIEWER", "MEMCLAW_INTERVIEWER"]) === "true";  // legacy-name-ok: rule 3 dual-read alias
 
 // Interviewer Phase 1.5 (issue #654): mirror OpenClaw's ``task_runs``
 // SQLite trail into the interview buffer at interview time, so task /
@@ -91,16 +133,16 @@ export const MEMCLAW_INTERVIEWER = process.env.MEMCLAW_INTERVIEWER === "true";
 // Default ON whenever the interviewer itself is on — this is the fix
 // for the empty-interview gap, not a separate feature. ``"false"`` is
 // the escape hatch if a node's task DB misbehaves.
-export const MEMCLAW_INTERVIEWER_TASKS = process.env.MEMCLAW_INTERVIEWER_TASKS !== "false";
+export const CAURA_INTERVIEWER_TASKS = readEnv(["CAURA_INTERVIEWER_TASKS", "MEMCLAW_INTERVIEWER_TASKS"]) !== "false";  // legacy-name-ok: rule 3 dual-read alias
 
 // Operator override for the task_runs database location. Normally
 // discovered (legacy <base>/tasks/runs.sqlite, else a shallow scan for
 // a task_runs table — the >= 2026.6 consolidated state DB has no stable
 // filename); set this when a deployment relocates OpenClaw state.
-export const MEMCLAW_TASK_DB_PATH = process.env.MEMCLAW_TASK_DB_PATH || "";
+export const CAURA_TASK_DB_PATH = readEnv(["CAURA_TASK_DB_PATH", "MEMCLAW_TASK_DB_PATH"]) || "";  // legacy-name-ok: rule 3 dual-read alias
 
 // Warn at import time if API key is set but URL is HTTP
-warnIfInsecureUrl(MEMCLAW_API_URL, MEMCLAW_API_KEY);
+warnIfInsecureUrl(CAURA_API_URL, CAURA_API_KEY);
 
 // --- Tenant resolution ---
 
@@ -124,8 +166,8 @@ warnIfInsecureUrl(MEMCLAW_API_URL, MEMCLAW_API_KEY);
 const TENANT_RESOLVE_TIMEOUT_MS = 10_000;
 
 export async function resolveTenantId(): Promise<string> {
-  if (MEMCLAW_TENANT_ID) return MEMCLAW_TENANT_ID;
-  if (!MEMCLAW_API_KEY) return "";
+  if (CAURA_TENANT_ID) return CAURA_TENANT_ID;
+  if (!CAURA_API_KEY) return "";
 
   const MAX_RETRIES = 3;
   const BASE_DELAY_MS = 2000;
@@ -133,11 +175,11 @@ export async function resolveTenantId(): Promise<string> {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const res = await fetch(
-        new URL(`${MEMCLAW_API_PREFIX}/auth/verify`, MEMCLAW_API_URL).toString(),
+        new URL(`${CAURA_API_PREFIX}/auth/verify`, CAURA_API_URL).toString(),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ key: MEMCLAW_API_KEY }),
+          body: JSON.stringify({ key: CAURA_API_KEY }),
           // Bound per-attempt wall-clock; see TENANT_RESOLVE_TIMEOUT_MS
           // docstring above for why this is critical to liveness.
           signal: AbortSignal.timeout(TENANT_RESOLVE_TIMEOUT_MS),
@@ -146,27 +188,27 @@ export async function resolveTenantId(): Promise<string> {
       if (res.ok) {
         const data = (await res.json()) as Record<string, unknown>;
         if (data.tenant_id && typeof data.tenant_id === "string") {
-          MEMCLAW_TENANT_ID = data.tenant_id;
+          CAURA_TENANT_ID = data.tenant_id;
           return data.tenant_id;
         }
         console.warn(
-          `[memclaw] tenant_id resolution failed: server returned 200 but response lacks tenant_id field`,
+          `[caura] tenant_id resolution failed: server returned 200 but response lacks tenant_id field`,
         );
         break; // permanent server-side issue; retrying won't help
       } else if (res.status >= 400 && res.status < 500) {
         console.error(
-          `[memclaw] tenant_id resolution failed: HTTP ${res.status} (client error, not retrying)`,
+          `[caura] tenant_id resolution failed: HTTP ${res.status} (client error, not retrying)`,
         );
         break;
       } else if (attempt < MAX_RETRIES) {
         const delay = BASE_DELAY_MS * Math.pow(2, attempt);
         console.warn(
-          `[memclaw] tenant_id resolution attempt ${attempt + 1}/${MAX_RETRIES + 1} failed: HTTP ${res.status} — retrying in ${delay}ms`,
+          `[caura] tenant_id resolution attempt ${attempt + 1}/${MAX_RETRIES + 1} failed: HTTP ${res.status} — retrying in ${delay}ms`,
         );
         await new Promise((r) => setTimeout(r, delay));
       } else {
         console.error(
-          `[memclaw] tenant_id resolution failed after ${MAX_RETRIES + 1} attempts: HTTP ${res.status}`,
+          `[caura] tenant_id resolution failed after ${MAX_RETRIES + 1} attempts: HTTP ${res.status}`,
         );
       }
     } catch (e: unknown) {
@@ -176,10 +218,10 @@ export async function resolveTenantId(): Promise<string> {
       // backend is unreachable now, it'll be unreachable 14s from now too.
       // Short-circuit with one clear line instead of four noisy retries.
       // This is the common OSS/standalone case: API key set but no backend
-      // running (or MEMCLAW_API_URL points at something unreachable).
+      // running (or CAURA_API_URL points at something unreachable).
       if (e instanceof TypeError) {
         console.warn(
-          `[memclaw] tenant_id resolution skipped: ${msg} (backend at ${MEMCLAW_API_URL} unreachable; set MEMCLAW_TENANT_ID in .env to run in standalone mode)`,
+          `[caura] tenant_id resolution skipped: ${msg} (backend at ${CAURA_API_URL} unreachable; set CAURA_TENANT_ID in .env to run in standalone mode)`,
         );
         break;
       }
@@ -198,17 +240,17 @@ export async function resolveTenantId(): Promise<string> {
         e instanceof Error &&
         (e.name === "TimeoutError" || e.name === "AbortError");
       const reason = isTimeout
-        ? `timed out after ${TENANT_RESOLVE_TIMEOUT_MS}ms (backend at ${MEMCLAW_API_URL} accepted the connection but did not respond)`
+        ? `timed out after ${TENANT_RESOLVE_TIMEOUT_MS}ms (backend at ${CAURA_API_URL} accepted the connection but did not respond)`
         : msg;
       if (attempt < MAX_RETRIES) {
         const delay = BASE_DELAY_MS * Math.pow(2, attempt);
         console.warn(
-          `[memclaw] tenant_id resolution attempt ${attempt + 1}/${MAX_RETRIES + 1} failed: ${reason} — retrying in ${delay}ms`,
+          `[caura] tenant_id resolution attempt ${attempt + 1}/${MAX_RETRIES + 1} failed: ${reason} — retrying in ${delay}ms`,
         );
         await new Promise((r) => setTimeout(r, delay));
       } else {
         console.error(
-          `[memclaw] tenant_id resolution failed after ${MAX_RETRIES + 1} attempts: ${reason}`,
+          `[caura] tenant_id resolution failed after ${MAX_RETRIES + 1} attempts: ${reason}`,
         );
       }
     }
@@ -219,7 +261,7 @@ export async function resolveTenantId(): Promise<string> {
 let _tenantPromise: Promise<string> | null = null;
 
 export async function ensureTenantId(): Promise<string> {
-  if (MEMCLAW_TENANT_ID) return MEMCLAW_TENANT_ID;
+  if (CAURA_TENANT_ID) return CAURA_TENANT_ID;
   if (!_tenantPromise) {
     _tenantPromise = resolveTenantId();
   }
@@ -227,7 +269,7 @@ export async function ensureTenantId(): Promise<string> {
   if (!tid) {
     _tenantPromise = null;
     throw new Error(
-      "MemClaw: Failed to resolve tenant_id from API key. Set MEMCLAW_TENANT_ID in .env.",
+      "Caura: Failed to resolve tenant_id from API key. Set CAURA_TENANT_ID in .env.",
     );
   }
   return tid;
@@ -240,9 +282,9 @@ let toolDescriptions: Record<string, string> = {};
 export async function fetchToolDescriptions(): Promise<void> {
   try {
     const headers: Record<string, string> = {};
-    if (MEMCLAW_API_KEY) headers["X-API-Key"] = MEMCLAW_API_KEY;
+    if (CAURA_API_KEY) headers["X-API-Key"] = CAURA_API_KEY;
     const res = await fetch(
-      new URL(`${MEMCLAW_API_PREFIX}/tool-descriptions`, MEMCLAW_API_URL).toString(),
+      new URL(`${CAURA_API_PREFIX}/tool-descriptions`, CAURA_API_URL).toString(),
       // Bound the fetch — same rationale as resolveTenantId. Less
       // critical here (cold path, called at registration not per-turn)
       // but a hung registration still blocks plugin load.
@@ -252,7 +294,7 @@ export async function fetchToolDescriptions(): Promise<void> {
       toolDescriptions = (await res.json()) as Record<string, string>;
     }
   } catch {
-    console.warn("[memclaw] Failed to fetch tool descriptions, using defaults");
+    console.warn("[caura] Failed to fetch tool descriptions, using defaults");
     toolDescriptions = {
       remember: "Store a memory for future retrieval",
       recall: "Search and retrieve relevant memories",
@@ -310,10 +352,10 @@ export const INTERVIEW_TASK_SIDECAR_RETENTION_MS = 8 * 24 * 60 * 60_000;
 // The ContextEngine fetches keystones from ``/memclaw/keystones`` and
 // prepends them to every system prompt. Operators get three knobs:
 //
-// - ``MEMCLAW_KEYSTONES_ENABLED`` (default ``"true"``) — kill switch so
+// - ``CAURA_KEYSTONES_ENABLED`` (default ``"true"``) — kill switch so
 //   ops can disable the auto-inject without redeploying if something
 //   misfires. Set to ``"false"`` to turn it off.
-// - ``MEMCLAW_KEYSTONES_TOKEN_CAP`` (default 1500 tokens, ~6000 chars)
+// - ``CAURA_KEYSTONES_TOKEN_CAP`` (default 1500 tokens, ~6000 chars)
 //   — hard ceiling on the injected block. Lowest-weight rules are
 //   dropped first when the cap is hit so a runaway rule set can't crowd
 //   out recall or the operator prompt. The default of 1500 comfortably
@@ -322,12 +364,12 @@ export const INTERVIEW_TASK_SIDECAR_RETENTION_MS = 8 * 24 * 60 * 60_000;
 //   rule sets can raise it further, and operators on small-context
 //   models can lower it. Previously 500 — bumped after a customer
 //   with 16 rules saw 4 dropped at every turn (CAURA-000).
-// - ``MEMCLAW_KEYSTONES_CACHE_TTL_MS`` (default 5 minutes) — per-identity
+// - ``CAURA_KEYSTONES_CACHE_TTL_MS`` (default 5 minutes) — per-identity
 //   cache TTL. ``caura_keystones_set`` invocations bust the cache for
 //   the current session so a freshly authored rule takes effect on the
 //   next turn.
-function _readBoolEnv(name: string, defaultValue: boolean): boolean {
-  const v = process.env[name];
+function _readBoolEnv(names: readonly string[], defaultValue: boolean): boolean {
+  const v = readEnv(names);
   if (v === undefined) return defaultValue;
   // Treat the standard set of "off" idioms as off: ``"false"``, ``"0"``,
   // the empty string, ``"no"``, ``"off"``, and ``"disabled"``. The last
@@ -348,24 +390,24 @@ function _readBoolEnv(name: string, defaultValue: boolean): boolean {
     lower !== "disabled"
   );
 }
-function _readIntEnv(name: string, defaultValue: number, min: number): number {
-  const raw = process.env[name];
+function _readIntEnv(names: readonly string[], defaultValue: number, min: number): number {
+  const raw = readEnv(names);
   if (!raw) return defaultValue;
   const n = parseInt(raw, 10);
   if (!Number.isFinite(n) || n < min) return defaultValue;
   return n;
 }
-export const MEMCLAW_KEYSTONES_ENABLED: boolean = _readBoolEnv(
-  "MEMCLAW_KEYSTONES_ENABLED",
+export const CAURA_KEYSTONES_ENABLED: boolean = _readBoolEnv(
+  ["CAURA_KEYSTONES_ENABLED", "MEMCLAW_KEYSTONES_ENABLED"],  // legacy-name-ok: rule 3 dual-read alias
   true,
 );
-export const MEMCLAW_KEYSTONES_TOKEN_CAP: number = _readIntEnv(
-  "MEMCLAW_KEYSTONES_TOKEN_CAP",
+export const CAURA_KEYSTONES_TOKEN_CAP: number = _readIntEnv(
+  ["CAURA_KEYSTONES_TOKEN_CAP", "MEMCLAW_KEYSTONES_TOKEN_CAP"],  // legacy-name-ok: rule 3 dual-read alias
   1500,
   1,
 );
-export const MEMCLAW_KEYSTONES_CACHE_TTL_MS: number = _readIntEnv(
-  "MEMCLAW_KEYSTONES_CACHE_TTL_MS",
+export const CAURA_KEYSTONES_CACHE_TTL_MS: number = _readIntEnv(
+  ["CAURA_KEYSTONES_CACHE_TTL_MS", "MEMCLAW_KEYSTONES_CACHE_TTL_MS"],  // legacy-name-ok: rule 3 dual-read alias
   300_000,
   1_000,
 );
@@ -375,7 +417,7 @@ export const KEYSTONES_TIMEOUT_MS = 5_000;
 //
 // The OpenClaw runtime calls our context engine on every prompt assembly
 // (heartbeats, tool follow-ups, no-reply lurk turns, trivial pings — all
-// of them). Without gating, every call hits the MemClaw backend with a
+// of them). Without gating, every call hits the Caura backend with a
 // `/search` regardless of whether the turn would benefit from LTM. These
 // knobs let operators tune when recall fires.
 
@@ -389,20 +431,21 @@ const _validPolicies: ReadonlySet<RecallPolicy> = new Set([
 ]);
 
 function _readPolicy(): RecallPolicy {
-  if (process.env.MEMCLAW_RECALL_FORCE === "true") return "always";
-  const raw = (process.env.MEMCLAW_RECALL_POLICY || "auto").toLowerCase();
+  if (readEnv(["CAURA_RECALL_FORCE", "MEMCLAW_RECALL_FORCE"]) === "true") return "always";  // legacy-name-ok: rule 3 dual-read alias
+  const raw = (readEnv(["CAURA_RECALL_POLICY", "MEMCLAW_RECALL_POLICY"]) || "auto").toLowerCase();  // legacy-name-ok: rule 3 dual-read alias
   return _validPolicies.has(raw as RecallPolicy)
     ? (raw as RecallPolicy)
     : "auto";
 }
 
 function _readMinPromptChars(): number {
-  const raw = parseInt(process.env.MEMCLAW_RECALL_MIN_PROMPT_CHARS || "", 10);
+  const raw = parseInt(readEnv(["CAURA_RECALL_MIN_PROMPT_CHARS", "MEMCLAW_RECALL_MIN_PROMPT_CHARS"]) || "", 10);  // legacy-name-ok: rule 3 dual-read alias
   return Number.isFinite(raw) && raw >= 0 ? raw : 14;
 }
 
 const DEFAULT_TRIGGER_KEYWORDS = [
-  "memclaw",
+  "caura",
+  "memclaw", // legacy-name-ok: rule 3 — old name keeps triggering
   "ltm",
   "long term",
   "long-term",
@@ -422,7 +465,7 @@ const DEFAULT_TRIGGER_KEYWORDS = [
 ] as const;
 
 function _readTriggerKeywords(): readonly string[] {
-  const raw = process.env.MEMCLAW_RECALL_TRIGGER_KEYWORDS;
+  const raw = readEnv(["CAURA_RECALL_TRIGGER_KEYWORDS", "MEMCLAW_RECALL_TRIGGER_KEYWORDS"]);  // legacy-name-ok: rule 3 dual-read alias
   if (!raw) return DEFAULT_TRIGGER_KEYWORDS;
   const tokens = raw
     .split(",")
@@ -432,7 +475,7 @@ function _readTriggerKeywords(): readonly string[] {
 }
 
 function _readDenySessions(): readonly string[] {
-  const raw = process.env.MEMCLAW_RECALL_DENY_SESSIONS;
+  const raw = readEnv(["CAURA_RECALL_DENY_SESSIONS", "MEMCLAW_RECALL_DENY_SESSIONS"]);  // legacy-name-ok: rule 3 dual-read alias
   if (!raw) return [];
   return raw
     .split(",")
@@ -445,7 +488,7 @@ function _readDenySessions(): readonly string[] {
 // information-seeking question — recalling on it just injects noise. The set
 // is DEPLOYMENT-TUNABLE (a term that's noise here may be real business content
 // elsewhere, e.g. "health check" for an ops product), so operators can
-// override the whole list via MEMCLAW_RECALL_MACHINE_PATTERNS (comma-separated
+// override the whole list via CAURA_RECALL_MACHINE_PATTERNS (comma-separated
 // regex sources). Defaults are seeded from observed eToro automation traffic.
 const DEFAULT_MACHINE_PATTERNS = [
   "heartbeat",
@@ -465,7 +508,7 @@ const DEFAULT_MACHINE_PATTERNS = [
 ] as const;
 
 function _readMachinePatterns(): readonly RegExp[] {
-  const raw = process.env.MEMCLAW_RECALL_MACHINE_PATTERNS;
+  const raw = readEnv(["CAURA_RECALL_MACHINE_PATTERNS", "MEMCLAW_RECALL_MACHINE_PATTERNS"]);  // legacy-name-ok: rule 3 dual-read alias
   const sources = raw
     ? raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0)
     : [...DEFAULT_MACHINE_PATTERNS];
@@ -486,7 +529,7 @@ export const RECALL_TRIGGER_KEYWORDS: readonly string[] = _readTriggerKeywords()
 export const RECALL_DENY_SESSIONS: readonly string[] = _readDenySessions();
 export const RECALL_MACHINE_PATTERNS: readonly RegExp[] = _readMachinePatterns();
 
-// Noise-skip gate rollout mode (MEMCLAW_RECALL_GATE):
+// Noise-skip gate rollout mode (CAURA_RECALL_GATE):
 //   "off"    (default) — new noise-skip rules (machine / agent-name /
 //              mention-only / subagent-context / 3rd-party-instruction) are
 //              NOT applied. Merge is behavior-neutral; opt-in required.
@@ -497,7 +540,7 @@ export const RECALL_MACHINE_PATTERNS: readonly RegExp[] = _readMachinePatterns()
 // deployment until an operator opts in (cross-customer safety not yet validated).
 export type RecallGateMode = "off" | "shadow" | "on";
 function _readGateMode(): RecallGateMode {
-  const raw = (process.env.MEMCLAW_RECALL_GATE || "off").toLowerCase();
+  const raw = (readEnv(["CAURA_RECALL_GATE", "MEMCLAW_RECALL_GATE"]) || "off").toLowerCase();  // legacy-name-ok: rule 3 dual-read alias
   return raw === "shadow" || raw === "on" ? raw : "off";
 }
 export const RECALL_GATE_MODE: RecallGateMode = _readGateMode();
@@ -506,4 +549,4 @@ export const RECALL_GATE_MODE: RecallGateMode = _readGateMode();
 // the server-side fleet/trust scope). Default false — this changes read
 // isolation and must ship alongside the freshness cap (A43), else a
 // future-dated hub memory dominates cross-agent results. Opt-in.
-export const RECALL_CROSS_AGENT: boolean = _readBoolEnv("MEMCLAW_RECALL_CROSS_AGENT", false);
+export const RECALL_CROSS_AGENT: boolean = _readBoolEnv(["CAURA_RECALL_CROSS_AGENT", "MEMCLAW_RECALL_CROSS_AGENT"], false);  // legacy-name-ok: rule 3 dual-read alias

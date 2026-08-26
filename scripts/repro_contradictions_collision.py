@@ -29,9 +29,9 @@ The verdict logic inspects the entity_links after the writes settle
 and reports which arm fired.
 
 Usage:
-    export MEMCLAW_API_URL=https://caura.ai
-    export MEMCLAW_API_KEY=mc_...
-    export MEMCLAW_TENANT_ID=rantaig-...
+    export CAURA_API_URL=https://caura.ai
+    export CAURA_API_KEY=mc_...
+    export CAURA_TENANT_ID=rantaig-...
     python scripts/repro_contradictions_collision.py
 """
 
@@ -47,13 +47,9 @@ import uuid
 
 import httpx
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-def _env(name: str) -> str:
-    val = os.environ.get(name)
-    if not val:
-        print(f"ERROR: ${name} must be set", file=sys.stderr)
-        sys.exit(2)
-    return val
+from _env_compat import env_required as _env  # noqa: E402  (path shim above must run first)
 
 
 def _detected(target_id: str, resp: dict) -> bool:
@@ -85,9 +81,9 @@ def main() -> int:
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
-    base = _env("MEMCLAW_API_URL").rstrip("/")
-    key = _env("MEMCLAW_API_KEY")
-    tenant = _env("MEMCLAW_TENANT_ID")
+    base = _env("CAURA_API_URL").rstrip("/")
+    key = _env("CAURA_API_KEY")
+    tenant = _env("CAURA_TENANT_ID")
 
     # Generate two distinguishable contexts that share a common given
     # name. Use a uniqued suffix to avoid polluting prior runs.

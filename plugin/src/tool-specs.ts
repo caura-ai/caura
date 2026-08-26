@@ -1,6 +1,6 @@
 /**
  * Typed loader for `plugin/tools.json` — the single source of truth for
- * MemClaw MCP tool metadata, exported from core-api by
+ * Caura MCP tool metadata, exported from core-api by
  * `scripts/export_tool_specs.py` and kept in sync via CI.
  *
  * This module reads the file at runtime (not at compile time) because
@@ -52,7 +52,7 @@ export function getSpec(name: string): ToolSpecEntry {
   const spec = TOOL_SPECS_BY_NAME[name];
   if (!spec) {
     throw new Error(
-      `[memclaw] Unknown tool '${name}' — not present in tools.json`,
+      `[caura] Unknown tool '${name}' — not present in tools.json`,
     );
   }
   return spec;

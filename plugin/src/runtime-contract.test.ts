@@ -3,7 +3,7 @@
  *
  * The runtime object passed to `api.registerMemoryRuntime(...)` is inline
  * inside `register()` and cannot be imported directly. These tests construct
- * a minimal fake OpenClaw API, invoke `memclawPlugin.register(fakeApi)`, and
+ * a minimal fake OpenClaw API, invoke `cauraPlugin.register(fakeApi)`, and
  * then exercise the captured runtime under known reachability states.
  *
  * The invariants pinned here are the ones that were silently broken before
@@ -28,7 +28,7 @@
 
 import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import memclawPlugin from "./index.js";
+import cauraPlugin from "./index.js";
 import {
   _resetReachabilityForTests,
   getReachability,
@@ -62,9 +62,9 @@ function buildFakeApi(): { api: Record<string, unknown>; captured: { runtime?: R
 
 function loadRuntime(): RegisteredRuntime {
   const { api, captured } = buildFakeApi();
-  memclawPlugin.register(api);
+  cauraPlugin.register(api);
   if (!captured.runtime) {
-    throw new Error("memclawPlugin.register did not call registerMemoryRuntime");
+    throw new Error("cauraPlugin.register did not call registerMemoryRuntime");
   }
   return captured.runtime;
 }
@@ -243,7 +243,7 @@ describe("memory-runtime contract (OpenClaw MemoryPluginRuntime)", () => {
     assert.equal(r, r); // non-null
     assert.equal(typeof r.text, "string");
     assert.equal(typeof r.path, "string");
-    // MemClaw does not back readFile with content; empty text is the honest
+    // Caura does not back readFile with content; empty text is the honest
     // answer. What matters is the SHAPE, not the content.
   });
 });
@@ -275,7 +275,7 @@ function _loadFlushPlanResolver(): _FlushPlanResolver {
     registerContextEngine: () => {},
     on: () => {},
   };
-  memclawPlugin.register(api);
+  cauraPlugin.register(api);
   if (!captured) throw new Error("registerMemoryFlushPlan was not called");
   return captured;
 }
@@ -472,15 +472,15 @@ describe("MemoryFlushPlan resolver — negative-timestamp guard (review 2026-05-
 // in unit tests, the catch guarantees we never surface ``messages:
 // undefined`` to OpenClaw.
 
-import { MemClawContextEngine } from "./context-engine.js";
+import { CauraContextEngine } from "./context-engine.js";
 
 describe("ContextEngine.assemble contract (OpenClaw AssembleResult)", () => {
-  function makeEngine(): MemClawContextEngine {
+  function makeEngine(): CauraContextEngine {
     // Tenant-less config — bootstrap's educate POST will fail-fast
-    // against MEMCLAW_API_URL, but assemble's own try/catch swallows
+    // against CAURA_API_URL, but assemble's own try/catch swallows
     // it so the test still exercises the return shape. We're testing
     // the contract surface, not the bootstrap success path.
-    return new MemClawContextEngine({});
+    return new CauraContextEngine({});
   }
 
   test("returns AssembleResult shape with `messages` and `estimatedTokens` (skip-recall path)", async () => {
@@ -576,7 +576,7 @@ describe("ContextEngine.assemble contract (OpenClaw AssembleResult)", () => {
 // --- Per-call agent-id resolution contract (v2.8.1 hotfix) ---
 //
 // Customer report 2026-06-02: webclaw agent's gateway log emitted
-// ``[memclaw] Could not resolve agent ID — using install-default
+// ``[caura] Could not resolve agent ID — using install-default
 // 'main-e5366d79a926'`` 4-5 times per turn. Root cause: 3 of our 6
 // ``resolveAgentId`` call sites passed only ``this.config`` (the
 // factory-time ``factoryCtx`` wrapper, containing only
@@ -606,8 +606,8 @@ describe("ContextEngine.assemble contract (OpenClaw AssembleResult)", () => {
 // the structural assertions above; this is intentional.
 
 describe("ContextEngine.assemble agent-id resolution (v2.8.1)", () => {
-  function makeEngine(): MemClawContextEngine {
-    return new MemClawContextEngine({});
+  function makeEngine(): CauraContextEngine {
+    return new CauraContextEngine({});
   }
 
   test("resolves agent_id from params.sessionKey 'agent:NAME:...' format", async () => {
@@ -652,7 +652,7 @@ describe("ContextEngine.assemble agent-id resolution (v2.8.1)", () => {
       tokenBudget: 4000,
     });
     // Either "main-<12-hex>" (install-default) OR whatever
-    // MEMCLAW_AGENT_ID env var is set to. Don't pin the exact
+    // CAURA_AGENT_ID env var is set to. Don't pin the exact
     // value; just assert the contract still produces SOMETHING.
     assert.match(
       result.systemPromptAddition ?? "",
@@ -770,7 +770,7 @@ describe("ContextEngine session-key consistency (ingest ↔ assemble)", () => {
 // Customer escalation 2026-05-28: a different agent (``dbaclaw``)
 // on the same gateway emitted:
 //
-//     [memclaw] assemble: unexpected error (returning safe fallback)
+//     [caura] assemble: unexpected error (returning safe fallback)
 //     TypeError: Cannot read properties of undefined (reading 'tenantId')
 //         at getTenantPrefix (...context-engine.js:29:19)
 //         at getSessionKey   (...context-engine.js:32:26)
@@ -796,15 +796,15 @@ describe("ContextEngine session-key consistency (ingest ↔ assemble)", () => {
 //      cleanly, so future turns get full keystones + recall instead
 //      of silent degradation.
 
-describe("MemClawContextEngine.constructor — undefined-config tolerance (v2.6.5)", () => {
+describe("CauraContextEngine.constructor — undefined-config tolerance (v2.6.5)", () => {
   test("constructed with undefined: assemble does NOT throw and does NOT take the safe-fallback path", async () => {
     // Pass undefined where the type-system expects a config object —
     // exactly the shape that triggered the dbaclaw production
     // TypeError. Without the constructor coercion, this turn would
-    // surface ``[memclaw] assemble: unexpected error (returning safe
+    // surface ``[caura] assemble: unexpected error (returning safe
     // fallback)`` in the log; with it, the inner code completes and
     // we get the normal AssembleResult.
-    const engine = new MemClawContextEngine(
+    const engine = new CauraContextEngine(
       undefined as unknown as Record<string, unknown>,
     );
     const result = await engine.assemble({
@@ -833,7 +833,7 @@ describe("MemClawContextEngine.constructor — undefined-config tolerance (v2.6.
   });
 
   test("constructed with null: same tolerance (defense-in-depth)", async () => {
-    const engine = new MemClawContextEngine(
+    const engine = new CauraContextEngine(
       null as unknown as Record<string, unknown>,
     );
     const result = await engine.assemble({
@@ -875,7 +875,7 @@ describe("MemClawContextEngine.constructor — undefined-config tolerance (v2.6.
 //      return would break compaction silently again).
 //   2. ``compact()`` returns a structured ``CompactResult`` shape
 //      regardless of whether the SDK is discoverable.
-//   3. ``compact()`` still persists the summary into MemClaw as a
+//   3. ``compact()`` still persists the summary into Caura as a
 //      side effect (existing behavior preserved).
 //   4. The bridge's resolver cache works — second call doesn't
 //      repeat the filesystem walk.
@@ -892,13 +892,13 @@ describe("MemClawContextEngine.constructor — undefined-config tolerance (v2.6.
 // the wet test on the GCE VM exercises the success path against a
 // real openclaw install.
 
-// MemClawContextEngine already imported above for the assemble-contract
+// CauraContextEngine already imported above for the assemble-contract
 // block. Import only what's new for the compaction-bridge contract.
 import { _resetSdkBridgeCache, getOpenClawSdk } from "./openclaw-sdk-bridge.js";
 
 describe("ContextEngine.info compaction-ownership (v2.6.4)", () => {
   test("info.ownsCompaction === true (we own compaction by delegating to SDK)", () => {
-    const engine = new MemClawContextEngine({});
+    const engine = new CauraContextEngine({});
     assert.equal(
       engine.info.ownsCompaction,
       true,
@@ -909,7 +909,7 @@ describe("ContextEngine.info compaction-ownership (v2.6.4)", () => {
   });
 
   test("info.id === 'memclaw' (slot resolver depends on this)", () => {
-    const engine = new MemClawContextEngine({});
+    const engine = new CauraContextEngine({});
     assert.equal(engine.info.id, "memclaw");
   });
 });
@@ -951,7 +951,7 @@ describe("openclaw-sdk-bridge resolver", () => {
 describe("ContextEngine.compact contract (delegation + persistence)", () => {
   test("returns a CompactResult-shaped object (not undefined)", async () => {
     _resetSdkBridgeCache();
-    const engine = new MemClawContextEngine({});
+    const engine = new CauraContextEngine({});
     // In the test runtime, the bridge returns null, so compact() takes
     // the structured-fallback path. We must still get the v2.6.4 shape
     // — not a regression to v2.6.3's `undefined`.
@@ -981,7 +981,7 @@ describe("ContextEngine.compact contract (delegation + persistence)", () => {
 
   test("compact() with no summary returns the fallback without throwing", async () => {
     _resetSdkBridgeCache();
-    const engine = new MemClawContextEngine({});
+    const engine = new CauraContextEngine({});
     const result = await engine.compact({ sessionId: "test-session" });
     assert.equal(result.ok, false);
     assert.equal(result.compacted, false);
@@ -997,7 +997,7 @@ describe("ContextEngine.compact contract (delegation + persistence)", () => {
     // ``pi-embedded-X0afS0ip.js:2447``) ALWAYS provides both
     // fields, so this guard never fires on the happy path.
     _resetSdkBridgeCache();
-    const engine = new MemClawContextEngine({});
+    const engine = new CauraContextEngine({});
     const result = await engine.compact({ sessionFile: "/tmp/test.jsonl" }); // no sessionId
     assert.equal(result.ok, false);
     assert.equal(result.compacted, false);
@@ -1010,21 +1010,21 @@ describe("ContextEngine.compact contract (delegation + persistence)", () => {
 
   test("compact() with missing sessionFile skips SDK delegation entirely (defensive guard)", async () => {
     _resetSdkBridgeCache();
-    const engine = new MemClawContextEngine({});
+    const engine = new CauraContextEngine({});
     const result = await engine.compact({ sessionId: "test-id" }); // no sessionFile
     assert.equal(result.ok, false);
     assert.equal(result.compacted, false);
     assert.match(String(result.reason || ""), /sessionId\/sessionFile/);
   });
 
-  test("compact() with a summary attempts MemClaw persist but does not throw on failure", async () => {
-    // Persistence target is unconfigured (no MEMCLAW_API_KEY in test env),
+  test("compact() with a summary attempts Caura persist but does not throw on failure", async () => {
+    // Persistence target is unconfigured (no CAURA_API_KEY in test env),
     // so the POST /memories call fails. compact() must catch that and still
     // return a CompactResult. This is the production-safety contract:
     // compaction must NEVER break a turn just because the memory write
     // failed.
     _resetSdkBridgeCache();
-    const engine = new MemClawContextEngine({});
+    const engine = new CauraContextEngine({});
     const result = await engine.compact({
       summary: "synthetic compaction summary for the contract test",
       sessionId: "test-session",

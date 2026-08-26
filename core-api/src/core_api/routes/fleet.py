@@ -11,9 +11,11 @@ from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
+from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import NODE_OFFLINE_SECONDS, NODE_STALE_SECONDS
+from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.audit_service import log_action
 from core_api.services.organization_settings import get_raw_settings
 from core_api.version_compat import (
@@ -86,6 +88,8 @@ router = APIRouter(tags=["Fleet"])
 
 
 class FleetCreateIn(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str  # alphanumeric + hyphens, 3-50 chars
     display_name: str | None = None
@@ -128,6 +132,23 @@ def _cap_or_drop(v: dict | None, limit: int, field: str) -> dict | None:
 
 
 class HeartbeatIn(BaseModel):
+    # DELIBERATELY PERMISSIVE (SAFE-01), even though this IS a write. Two
+    # reasons, both specific to this endpoint:
+    #
+    # 1. Nothing a caller owns is lost. The body is node telemetry the plugin
+    #    reports about itself. An unknown key here costs an observability field,
+    #    not a memory — the data-loss the SAFE-01 fix exists to stop.
+    # 2. A 422 costs far more than the field would. There is NO version
+    #    handshake between plugin and backend (RELEASING.md § Compatibility):
+    #    installs in the field roll forward on their own cadence, and the
+    #    command channel rides the heartbeat RESPONSE. Rejecting the request
+    #    over an unrecognised key would take the node offline in fleet views
+    #    AND cut its command channel — including the deploy command that would
+    #    have upgraded it. Unrecoverable without a manual touch on every node.
+    #
+    # This model already declares every field the current plugin sends, and it
+    # caps the two free-form blobs by DROPPING them rather than rejecting (see
+    # the validators below) — the same fail-soft posture as this config.
     tenant_id: str
     node_name: str
     fleet_id: str | None = None
@@ -199,6 +220,8 @@ class HeartbeatIn(BaseModel):
 
 
 class CommandIn(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str | None = None
     node_id: UUID
     command: str
@@ -206,6 +229,10 @@ class CommandIn(BaseModel):
 
 
 class CommandResultIn(BaseModel):
+    # DELIBERATELY PERMISSIVE (SAFE-01) — the command-ack path, same reasoning
+    # as ``HeartbeatIn`` above: plugin-produced, no version handshake, and a 422
+    # would strand the command as permanently un-acked in the backend rather
+    # than surfacing anything a caller could act on.
     status: str  # done | failed
     result: dict | None = None
 
@@ -213,7 +240,11 @@ class CommandResultIn(BaseModel):
 # ── Fleet CRUD ──
 
 
-@router.post("/fleet", status_code=201)
+@router.post(
+    "/fleet",
+    status_code=201,
+    responses={201: {"model": _oar.FleetCreateResponse}},
+)
 async def create_fleet(
     body: FleetCreateIn,
     auth: AuthContext = Depends(get_auth_context),
@@ -255,7 +286,7 @@ async def create_fleet(
     return {"ok": True, "fleet_id": body.fleet_id, "tenant_id": body.tenant_id}
 
 
-@router.get("/fleet")
+@router.get("/fleet", responses={200: {"model": list[_oar.FleetListItem]}})
 async def list_fleets(
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
@@ -306,7 +337,7 @@ async def delete_fleet(
     )
 
 
-@router.post("/fleet/{fleet_id}/purge")
+@router.post("/fleet/{fleet_id}/purge", responses={200: {"model": _oar.FleetPurgeResponse}})
 async def purge_fleet(
     fleet_id: str,
     tenant_id: str = Query(...),
@@ -361,7 +392,7 @@ KNOWN_BROKEN_DEPLOY_VERSIONS: frozenset[str] = frozenset({"2.3.0"})
 # Pre-cap a misbehaving / malicious plugin could send
 # ``deploy_blocked_until = Number.MAX_SAFE_INTEGER`` and DoS its own
 # upgrade path indefinitely. 7 days is comfortably above the longest
-# ``MEMCLAW_DEPLOY_FAILURE_COOLDOWN_HOURS`` an operator would set.
+# ``CAURA_DEPLOY_FAILURE_COOLDOWN_HOURS`` an operator would set.
 MAX_BLOCK_MS: int = 7 * 24 * 3600 * 1000
 
 
@@ -614,7 +645,7 @@ async def _maybe_queue_auto_upgrade(
         return False
 
 
-@router.post("/fleet/heartbeat")
+@router.post("/fleet/heartbeat", responses={200: {"model": _oar.HeartbeatResponse}})
 async def heartbeat(
     body: HeartbeatIn,
     auth: AuthContext = Depends(get_auth_context),
@@ -716,7 +747,7 @@ async def heartbeat(
             if not agent_key:
                 continue
             # Bound ``display_name`` at the API boundary. Storage column
-            # is ``Text`` (unlimited) and ``MEMCLAW_DISPLAY_NAME_OVERRIDE``
+            # is ``Text`` (unlimited) and ``CAURA_DISPLAY_NAME_OVERRIDE``
             # passes verbatim from the plugin, so a hostile or buggy
             # client could push an oversized blob into audit logs and UI
             # rendering. 255 chars is comfortably above any real
@@ -836,7 +867,10 @@ async def heartbeat(
 # ── Command result ──
 
 
-@router.post("/fleet/commands/{command_id}/result")
+@router.post(
+    "/fleet/commands/{command_id}/result",
+    responses={200: {"model": _oar.OkResponse}},
+)
 async def command_result(
     command_id: UUID,
     body: CommandResultIn,
@@ -866,7 +900,7 @@ async def command_result(
 # ── Fleet nodes (frontend reads) ──
 
 
-@router.get("/fleet/nodes")
+@router.get("/fleet/nodes", responses={200: {"model": list[_oar.FleetNode]}})
 async def list_nodes(
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
@@ -927,7 +961,7 @@ async def list_nodes(
 # ── Fleet & agent stats ──
 
 
-@router.get("/fleet/stats")
+@router.get("/fleet/stats", responses={200: {"model": _oar.FleetStatsResponse}})
 async def fleet_stats(
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
@@ -942,7 +976,11 @@ async def fleet_stats(
 # ── Queue command (frontend posts) ──
 
 
-@router.post("/fleet/commands", status_code=201)
+@router.post(
+    "/fleet/commands",
+    status_code=201,
+    responses={201: {"model": _oar.CommandCreateResponse}},
+)
 async def create_command(
     body: CommandIn,
     auth: AuthContext = Depends(get_auth_context),
@@ -975,7 +1013,7 @@ async def create_command(
 # ── Command history ──
 
 
-@router.get("/fleet/commands")
+@router.get("/fleet/commands", responses={200: {"model": list[_oar.FleetCommand]}})
 async def list_commands(
     tenant_id: str = Query(...),
     node_id: UUID | None = Query(default=None),

@@ -28,6 +28,7 @@ import time
 
 from fastapi import HTTPException
 
+from common import duplicate_memory
 from common.constants import (
     SEMANTIC_DEDUP_AUTO_THRESHOLD,
     SEMANTIC_DEDUP_JUDGE_THRESHOLD,
@@ -42,6 +43,7 @@ from core_api.services.dedup_judge import (
 )
 from core_api.services.memory_service import _find_semantic_duplicate
 from core_api.services.subject_preflight import _subjects_differ_with_certainty
+from core_api.services.system_metadata import set_system_value
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +135,7 @@ class CheckSemanticDuplicate:
                 min_similarity=SEMANTIC_DEDUP_JUDGE_THRESHOLD,
             )
         )
-        metadata["semantic_dedup_ms"] = round((time.perf_counter() - t_dedup) * 1000, 1)
+        set_system_value(metadata, "semantic_dedup_ms", round((time.perf_counter() - t_dedup) * 1000, 1))
 
         if sem_dup is None:
             return None
@@ -163,7 +165,15 @@ class CheckSemanticDuplicate:
             )
             raise HTTPException(
                 status_code=409,
-                detail=f"Near-duplicate memory exists: {candidate_id}",
+                detail=duplicate_memory.core_api_detail(
+                    duplicate_memory.near_message(candidate_id),
+                    **duplicate_memory.duplicate_fields(
+                        reason=duplicate_memory.REASON_SEMANTIC,
+                        existing_id=candidate_id,
+                        existing_status=(sem_dup_dict.get("status") if sem_dup_dict else None),
+                        similarity=similarity,
+                    ),
+                ),
             )
 
         # A1 #17 — subject preflight. If both rows carry a non-NULL
@@ -207,7 +217,15 @@ class CheckSemanticDuplicate:
             )
             raise HTTPException(
                 status_code=409,
-                detail=f"Near-duplicate memory exists: {candidate_id}",
+                detail=duplicate_memory.core_api_detail(
+                    duplicate_memory.near_message(candidate_id),
+                    **duplicate_memory.duplicate_fields(
+                        reason=duplicate_memory.REASON_SEMANTIC,
+                        existing_id=candidate_id,
+                        existing_status=(sem_dup_dict.get("status") if sem_dup_dict else None),
+                        similarity=similarity,
+                    ),
+                ),
             )
 
         # Low-confidence "is duplicate" → write accepted, but the

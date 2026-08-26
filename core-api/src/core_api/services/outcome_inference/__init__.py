@@ -2,7 +2,7 @@
 
 The lake produces a memory stream. This package mines that stream
 for passive outcome evidence — no ``caura_evolve`` call required.
-Each signal module reads existing MemClaw data (memories table
+Each signal module reads existing Caura data (memories table
 columns, recall counters, contradiction status, audit log) and
 emits :class:`SignalEvidence` events keyed by ``(tenant_id, run_id,
 agent_id)``. The session-trace builder (SF-102) consumes these

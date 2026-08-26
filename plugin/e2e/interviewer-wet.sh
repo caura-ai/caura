@@ -4,20 +4,20 @@
 # Runs the crash/idempotency matrix against a live backend using the
 # real plugin modules (see interviewer-wet.mjs). Expects to run from the
 # plugin/ directory with dist/ built and the backend up on
-# $MEMCLAW_API_URL. Exits non-zero on the first failed assertion.
+# $CAURA_API_URL. Exits non-zero on the first failed assertion.
 set -u
 # pipefail so H()'s `node ... | tail -1` propagates node's exit code —
 # without it the P0 `|| exit` guards never fire (tail always exits 0) and
 # a dead backend surfaces as confusing downstream assertion mismatches.
 set -o pipefail
 
-: "${MEMCLAW_API_URL:=http://localhost:8000}"
-: "${MEMCLAW_API_KEY:?set MEMCLAW_API_KEY (admin key)}"
-: "${MEMCLAW_TENANT_ID:=t-wet}"
-: "${MEMCLAW_FLEET_ID:=wet-fleet}"
-: "${MEMCLAW_NODE_NAME:=wet-node-1}"
-export MEMCLAW_API_URL MEMCLAW_API_KEY MEMCLAW_TENANT_ID MEMCLAW_FLEET_ID MEMCLAW_NODE_NAME
-export MEMCLAW_INTERVIEWER=true
+: "${CAURA_API_URL:=http://localhost:8000}"
+: "${CAURA_API_KEY:?set CAURA_API_KEY (admin key)}"
+: "${CAURA_TENANT_ID:=t-wet}"
+: "${CAURA_FLEET_ID:=wet-fleet}"
+: "${CAURA_NODE_NAME:=wet-node-1}"
+export CAURA_API_URL CAURA_API_KEY CAURA_TENANT_ID CAURA_FLEET_ID CAURA_NODE_NAME
+export CAURA_INTERVIEWER=true
 
 # The plugin modules log progress lines to stdout; the harness's JSON is
 # always the LAST line — capture just that.

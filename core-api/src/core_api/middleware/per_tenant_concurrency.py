@@ -128,6 +128,11 @@ async def per_tenant_slot(
         raise HTTPException(
             status_code=429,
             detail=f"Too many concurrent {scope} requests; retry shortly.",
+            # D14 — a 429 that says "retry shortly" must SAY how shortly. The
+            # bulkhead frees a slot as soon as any in-flight request finishes;
+            # 1s matches the acquire-timeout granularity and the per-second
+            # rate zones elsewhere on the surface.
+            headers={"Retry-After": "1"},
         )
     try:
         yield

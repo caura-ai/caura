@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 
+from common import duplicate_memory
 from core_api.clients.storage_client import DuplicateMemoryError, get_storage_client
 from core_api.config import settings
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot, per_tenant_storage_slot
@@ -81,12 +82,14 @@ from core_api.constants import (
 from core_api.schemas import (
     BulkItemResult,
     BulkMemoryCreate,
+    BulkMemoryItem,
     BulkMemoryResponse,
     ContradictionInfo,
     EntityLinkOut,
     MemoryCreate,
     MemoryOut,
     MemoryUpdate,
+    ScoreParts,
 )
 from core_api.search_trim import trim_reserving_fts_only
 from core_api.services.entity_extraction_worker import process_entity_extraction
@@ -101,6 +104,11 @@ from core_api.services.governance_gate import (
 )
 from core_api.services.hooks import get_hooks
 from core_api.services.organization_settings import validate_search_profile
+from core_api.services.system_metadata import (
+    extract_system_metadata,
+    sanitize_caller_metadata,
+    set_system_value,
+)
 from core_api.services.task_tracker import tracked_task
 
 logger = logging.getLogger(__name__)
@@ -134,6 +142,18 @@ class BlankQuery(ValueError):
     healthy, which is what happened for the whole 2026-08-18 17:00-18:59
     window.
     """
+
+
+# ``MemoryUpdate`` fields whose backing column on ``Memory`` is NOT NULL, so an
+# explicit ``null`` in a PATCH body has no way to be honoured. Kept as a literal
+# rather than derived from ``Memory.__table__`` at import time: the schema field
+# names and column names coincide for these five but not in general (``metadata``
+# maps to ``metadata_``), so a derivation would need its own mapping table and
+# would fail silently if that drifted. ``test_patch_null_non_nullable`` asserts
+# this tuple still matches the model, which is the check that actually holds it
+# in sync — add a NOT NULL column with a ``MemoryUpdate`` field and that test
+# fails until it is listed here.
+NON_NULLABLE_UPDATE_FIELDS = ("content", "memory_type", "weight", "status", "visibility")
 
 
 def _content_hash(tenant_id: str, fleet_id: str | None, content: str) -> str:
@@ -385,7 +405,13 @@ async def _create_memory_or_409(payload: dict) -> dict:
     try:
         return await get_storage_client().create_memory(payload)
     except DuplicateMemoryError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        # ``exc.fields`` is storage's structured half, and is empty when talking
+        # to a storage that predates it — so this forwards what it has rather
+        # than asserting the fields are there.
+        raise HTTPException(
+            status_code=409,
+            detail=duplicate_memory.core_api_detail(str(exc), **exc.fields),
+        ) from exc
 
 
 async def _find_semantic_duplicate(
@@ -434,6 +460,7 @@ def _dict_to_memory_out(
     raw_meta = mem.get("metadata_")
     metadata = raw_meta if raw_meta is not None else mem.get("metadata")
     return MemoryOut(
+        system_metadata=extract_system_metadata(metadata),
         id=mem.get("id"),
         tenant_id=mem.get("tenant_id"),
         fleet_id=mem.get("fleet_id"),
@@ -476,6 +503,8 @@ def _memory_to_out(
     entity_links: list[EntityLinkOut] | None = None,
     similarity: float | None = None,
     contradictions: list[ContradictionInfo] | None = None,
+    score: float | None = None,
+    score_parts: ScoreParts | None = None,
 ) -> MemoryOut:
     # See ``_dict_to_memory_out`` for the falsy-``{}`` trap.
     if isinstance(memory, dict):
@@ -484,6 +513,7 @@ def _memory_to_out(
     else:
         metadata = _mem_attr(memory, "metadata_")
     return MemoryOut(
+        system_metadata=extract_system_metadata(metadata),
         id=_mem_attr(memory, "id"),
         tenant_id=_mem_attr(memory, "tenant_id"),
         fleet_id=_mem_attr(memory, "fleet_id"),
@@ -500,6 +530,8 @@ def _memory_to_out(
         expires_at=_mem_attr(memory, "expires_at"),
         entity_links=entity_links or [],
         similarity=similarity,
+        score=score,
+        score_parts=score_parts,
         subject_entity_id=_mem_attr(memory, "subject_entity_id"),
         predicate=_mem_attr(memory, "predicate"),
         object_value=_mem_attr(memory, "object_value"),
@@ -523,6 +555,15 @@ async def create_memory(data: MemoryCreate) -> MemoryOut:
         enforce_reserved_write_id(data.agent_id)
     except ReservedAgentIdError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # C25 — sanitize caller metadata at the single entry chokepoint, BEFORE any
+    # platform writer touches it: forgeable platform-only keys (llm_ms,
+    # write_latency_ms, pii flags, …) and the _system namespace are stripped
+    # from caller input here, so everything a downstream step (governance
+    # gate, enrichment merge, row writer) adds is authentically
+    # platform-written. Doing this later — e.g. in MergeEnrichmentFields —
+    # would nuke the governance gate's own PII flags along with the forgeries.
+    if data.metadata:
+        data.metadata = sanitize_caller_metadata(data.metadata)
     if _USE_PIPELINE_WRITE:
         return await _create_memory_pipeline(data)
     logger.warning("legacy write path invoked; this path is deprecated and scheduled for removal")
@@ -815,7 +856,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         parent_metadata = dict(fields["metadata"])
         parent_metadata["auto_chunked"] = True
         parent_metadata["child_count"] = len(facts)
-        parent_metadata["write_latency_ms"] = round((time.perf_counter() - t0) * 1000)
+        set_system_value(parent_metadata, "write_latency_ms", round((time.perf_counter() - t0) * 1000))
         # #856: in a deferred deployment ``ParallelEmbedEnrich`` skipped both
         # provider calls, so this row is incomplete. ``MemoryOut.metadata``
         # documents absent flags as "that stage ran inline", which for this row
@@ -825,9 +866,9 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         # and ``MergeEnrichmentFields`` sets ``enrichment_pending``.
         defer_enrichment = _enrichment_backfill_needed(ctx.data.get("enrichment"), tenant_config)
         if embedding is None:
-            parent_metadata["embedding_pending"] = True
+            set_system_value(parent_metadata, "embedding_pending", True)
         if defer_enrichment:
-            parent_metadata["enrichment_pending"] = True
+            set_system_value(parent_metadata, "enrichment_pending", True)
 
         # Auto-chunk parent insert — wrapped in the storage bulkhead
         # like the regular single-write path. Auto-chunk fires two
@@ -1332,7 +1373,14 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
     if dup:
         raise HTTPException(
             status_code=409,
-            detail=f"Duplicate memory exists: {dup.get('id')}",
+            detail=duplicate_memory.core_api_detail(
+                duplicate_memory.exact_message(dup.get("id")),
+                **duplicate_memory.duplicate_fields(
+                    reason=duplicate_memory.REASON_EXACT,
+                    existing_id=dup.get("id"),
+                    existing_status=dup.get("status"),
+                ),
+            ),
         )
 
     # Semantic dedup: catch near-duplicates (same meaning, different phrasing)
@@ -1349,7 +1397,14 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
         if sem_dup:
             raise HTTPException(
                 status_code=409,
-                detail=f"Near-duplicate memory exists: {sem_dup.get('id')}",
+                detail=duplicate_memory.core_api_detail(
+                    duplicate_memory.near_message(sem_dup.get("id")),
+                    **duplicate_memory.duplicate_fields(
+                        reason=duplicate_memory.REASON_SEMANTIC,
+                        existing_id=sem_dup.get("id"),
+                        existing_status=sem_dup.get("status"),
+                    ),
+                ),
             )
 
     if embedding is None:
@@ -1592,6 +1647,22 @@ async def create_memories_bulk(
         for i, item in enumerate(items)
         if item.memory_type is not None and item.memory_type not in MEMORY_TYPES
     }
+    # SAFE-01. A key the item schema doesn't declare used to be dropped in
+    # silence, so ``{"content": "...", "meta_data": {...}}`` came back
+    # ``status="created"`` with the metadata gone and nothing saying so.
+    # ``BulkMemoryItem`` is ``extra="allow"`` (NOT ``extra="forbid"`` — see the
+    # note on the model) precisely so the unknown keys land in ``model_extra``
+    # and can be reported HERE, per item, instead of 422-ing the whole batch
+    # and taking the valid siblings down with the typo.
+    unknown_field_errors: dict[int, str] = {
+        i: (
+            "unknown field(s) not permitted: "
+            + ", ".join(sorted(item.model_extra))
+            + f". Allowed fields: {', '.join(sorted(BulkMemoryItem.model_fields))}"
+        )
+        for i, item in enumerate(items)
+        if item.model_extra
+    }
 
     # -- Resolve per-tenant config once --
     from core_api.services.organization_settings import resolve_config
@@ -1609,6 +1680,7 @@ async def create_memories_bulk(
         and i not in weight_errors
         and i not in status_errors
         and i not in memory_type_errors
+        and i not in unknown_field_errors
     ]
 
     # -- Deterministic governance gate (eToro). Runs BEFORE embeddings +
@@ -1803,8 +1875,10 @@ async def create_memories_bulk(
 
         # Input-validation errors surface as per-item error rows (never embedded,
         # enriched, deduped, or written — they're excluded from valid_indices):
-        # content length (short/oversized), weight range, status enum. These were
-        # all whole-batch 422s at the schema before the additive-tolerance work.
+        # content length (short/oversized), weight range, status enum, and
+        # unrecognised field names (SAFE-01). These were all whole-batch 422s at
+        # the schema before the additive-tolerance work — or, for unknown fields,
+        # not an error at all: the key was dropped and the row written without it.
         # ALL applicable messages for the item are aggregated into one row so a
         # caller sees every problem at once rather than one per round-trip.
         item_errors = [
@@ -1815,6 +1889,7 @@ async def create_memories_bulk(
                 oversized_content_errors,
                 weight_errors,
                 status_errors,
+                unknown_field_errors,
             )
             if i in errs
         ]
@@ -2030,7 +2105,10 @@ async def create_memories_bulk(
                 # resolved every duplicate it could see, through
                 # ``existing_hashes`` and ``seen_hashes``. A retry re-runs those
                 # against the now-committed winner and succeeds.
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
+                raise HTTPException(
+                    status_code=409,
+                    detail=duplicate_memory.core_api_detail(str(exc), **exc.fields),
+                ) from exc
 
         # Map each storage result back to its source item via
         # ``client_request_id``. Postgres ``RETURNING`` order is
@@ -3024,6 +3102,10 @@ async def _enrich_memory_background(
             patch["status"] = enrichment.status
 
         meta.pop("enrichment_pending", None)
+        # B7 x C25 — this path REPLACES metadata wholesale, so clear the
+        # namespaced copy too or the C25 read view stays pending forever.
+        if isinstance(meta.get("_system"), dict):
+            meta["_system"].pop("enrichment_pending", None)
         patch["metadata_"] = meta
 
         # Apply patch via storage client -- use update_memory_status for status
@@ -3451,6 +3533,34 @@ async def update_memory(
     if not fields_set:
         raise HTTPException(status_code=400, detail="No fields to update")
 
+    # Explicit ``null`` on a column the row cannot hold NULL in. Every
+    # ``MemoryUpdate`` field is typed ``X | None`` because that is how an
+    # optional PATCH field is spelled, so ``{"weight": null}`` validates and
+    # arrives here indistinguishable from a real value — the field-level
+    # constraints (``min_length``, ``ge``/``le``, ``pattern``) only bind the
+    # non-None branch of the union.
+    #
+    # Nine sibling fields DO honour null-as-clear (title, source_uri,
+    # predicate, object_value, subject_entity_id, the three timestamps,
+    # entity_links); those are nullable columns and the ``simple_fields`` loop
+    # below writes the NULL deliberately. These five are not, and left
+    # unguarded each one produced a 500 rather than a 4xx: ``content`` raised
+    # ``TypeError: 'NoneType' object is not subscriptable`` building the audit
+    # diff, and the other four reached Postgres and came back as
+    # ``NotNullViolationError``. Reachable from any caller that serialises the
+    # whole schema rather than only the fields it set — the plugin's update
+    # tool drops ``undefined`` but forwards ``null`` verbatim.
+    #
+    # 400 rather than a schema-level 422, to match ``metadata=null`` below,
+    # which is the same "this null has no valid meaning" rule and is already
+    # answered that way a hundred lines down.
+    nulled = [f for f in NON_NULLABLE_UPDATE_FIELDS if f in fields_set and getattr(data, f) is None]
+    if nulled:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{', '.join(nulled)} cannot be null; omit the field to leave it unchanged",
+        )
+
     # Snapshot old values for audit diff
     changes: dict = {}
     content_changed = "content" in fields_set and data.content != mem.get("content")
@@ -3470,7 +3580,17 @@ async def update_memory(
             exclude_id=str(memory_id),
         )
         if dup:
-            raise HTTPException(status_code=409, detail=f"Duplicate memory exists: {dup.get('id')}")
+            raise HTTPException(
+                status_code=409,
+                detail=duplicate_memory.core_api_detail(
+                    duplicate_memory.exact_message(dup.get("id")),
+                    **duplicate_memory.duplicate_fields(
+                        reason=duplicate_memory.REASON_EXACT,
+                        existing_id=dup.get("id"),
+                        existing_status=dup.get("status"),
+                    ),
+                ),
+            )
 
         # Semantic dedup on content change (exclude self; skip when new embedding is None)
         if tenant_config.semantic_dedup_enabled and new_embedding is not None:
@@ -3483,7 +3603,14 @@ async def update_memory(
             if sem_dup:
                 raise HTTPException(
                     status_code=409,
-                    detail=f"Near-duplicate memory exists: {sem_dup.get('id')}",
+                    detail=duplicate_memory.core_api_detail(
+                        duplicate_memory.near_message(sem_dup.get("id")),
+                        **duplicate_memory.duplicate_fields(
+                            reason=duplicate_memory.REASON_SEMANTIC,
+                            existing_id=sem_dup.get("id"),
+                            existing_status=sem_dup.get("status"),
+                        ),
+                    ),
                 )
 
         changes["content"] = {"old": mem.get("content", "")[:200], "new": data.content[:200]}
@@ -4269,6 +4396,7 @@ async def search_memories(
     diagnostic_ctx: dict | None = None,
     readable_tenant_ids: list[str] | None = None,
     source: str = "search",
+    min_similarity: float | None = None,
 ) -> list[MemoryOut]:
     # Diagnostic mode requires the pipeline path for score introspection
     if _USE_PIPELINE_SEARCH or diagnostic:
@@ -4291,6 +4419,7 @@ async def search_memories(
             diagnostic_ctx=diagnostic_ctx,
             readable_tenant_ids=readable_tenant_ids,
             source=source,
+            min_similarity=min_similarity,
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     return await _search_memories_legacy(
@@ -4308,6 +4437,7 @@ async def search_memories(
         entity_retrieval=entity_retrieval,
         tenant_config=tenant_config,
         search_profile=search_profile,
+        min_similarity=min_similarity,
     )
 
 
@@ -4330,6 +4460,7 @@ async def _search_memories_pipeline(
     diagnostic_ctx: dict | None = None,
     readable_tenant_ids: list[str] | None = None,
     source: str = "search",
+    min_similarity: float | None = None,
 ) -> list[MemoryOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.search import build_search_pipeline
@@ -4355,6 +4486,9 @@ async def _search_memories_pipeline(
             "tenant_config": tenant_config,
             "search_profile": search_profile,
             "diagnostic": diagnostic,
+            # D12 — per-request cosine floor; ResolveSearchProfile applies it
+            # OVER the resolved profile (request beats profile beats tenant).
+            "min_similarity_override": min_similarity,
             "readable_tenant_ids": readable_tenant_ids,
             "source": source,
         },
@@ -4383,6 +4517,11 @@ async def _search_memories_pipeline(
             ctx.data["retrieval_plan"].strategy.value if ctx.data.get("retrieval_plan") else None
         )
         diagnostic_ctx["diagnostic_original_top_k"] = ctx.data.get("diagnostic_original_top_k")
+        # D12 — exclusion tallies written by PostFilterResults, and the floor
+        # the gate actually used (post-override), so callers can see both.
+        diagnostic_ctx["counts"] = ctx.data.get("diagnostic_counts", {})
+        sp_applied = ctx.data.get("search_params") or {}
+        diagnostic_ctx["min_similarity_applied"] = sp_applied.get("min_similarity")
 
     return ctx.data["results"]
 
@@ -4411,6 +4550,7 @@ async def _search_memories_legacy(
     entity_retrieval: bool = True,
     tenant_config=None,
     search_profile: dict | None = None,
+    min_similarity: float | None = None,
 ) -> list[MemoryOut]:
     """Legacy search -- uses scored_search storage API endpoint."""
     sc = get_storage_client()
@@ -4418,7 +4558,9 @@ async def _search_memories_legacy(
     # Same resolver the pipeline step uses — see ``resolve_search_params``.
     sp = resolve_search_params(search_profile, query=query, top_k=top_k, tenant_config=tenant_config)
     _top_k = sp["top_k"]
-    _min_similarity = sp["min_similarity"]
+    # D12 — per-request floor beats the resolved profile, same precedence as
+    # ResolveSearchProfile applies on the pipeline path.
+    _min_similarity = min_similarity if min_similarity is not None else sp["min_similarity"]
 
     # Temporal hint
     temporal_window = _extract_temporal_hint(query)

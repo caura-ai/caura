@@ -1,5 +1,5 @@
 /**
- * Validation helpers for MemClaw plugin security.
+ * Validation helpers for Caura plugin security.
  *
  * Covers: UUID format, HTTPS enforcement, path containment,
  * HMAC command signature verification, and prompt length caps.
@@ -38,7 +38,7 @@ export function assertSafePathSegment(
 export function warnIfInsecureUrl(apiUrl: string, apiKey: string): void {
   if (apiKey && apiUrl.startsWith("http://")) {
     console.warn(
-      "[memclaw] WARNING: MEMCLAW_API_KEY is set but MEMCLAW_API_URL uses plain HTTP. " +
+      "[caura] WARNING: CAURA_API_KEY is set but CAURA_API_URL uses plain HTTP. " +
         "API key will be transmitted in cleartext. Use https:// in production.",
     );
   }
@@ -70,7 +70,7 @@ let _unsignedWarned = false;
  *
  * The OSS server doesn't sign commands — signing is reserved for
  * enterprise gateways that proxy commands through a signing layer.
- * Defaulting to "fail closed when MEMCLAW_API_KEY is set" (the prior
+ * Defaulting to "fail closed when CAURA_API_KEY is set" (the prior
  * behavior) silently broke every fleet command (educate / deploy /
  * install_skill / uninstall_skill) on every OSS install with auth on,
  * because the secret used for tenant auth is not a command-signing
@@ -102,7 +102,7 @@ export function verifyCommandSignature(
     }
     if (!_unsignedWarned) {
       console.warn(
-        `[memclaw] accepting unsigned commands (no MEMCLAW_API_KEY); set the key to enable verification.`,
+        `[caura] accepting unsigned commands (no CAURA_API_KEY); set the key to enable verification.`,
       );
       _unsignedWarned = true;
     }
@@ -115,12 +115,12 @@ export function verifyCommandSignature(
     }
     // Permissive (default): server-side command-signing is opt-in
     // infra; reject only when the operator has explicitly demanded it
-    // via MEMCLAW_REQUIRE_SIGNED_COMMANDS=true. Warn once so the gap
+    // via CAURA_REQUIRE_SIGNED_COMMANDS=true. Warn once so the gap
     // is visible without flooding logs every 60s heartbeat.
     if (!_unsignedWarned) {
       console.warn(
-        `[memclaw] accepting unsigned command "${cmd.command}" — server is not signing commands. ` +
-          `Set MEMCLAW_REQUIRE_SIGNED_COMMANDS=true to fail closed once your gateway signs.`,
+        `[caura] accepting unsigned command "${cmd.command}" — server is not signing commands. ` +
+          `Set CAURA_REQUIRE_SIGNED_COMMANDS=true to fail closed once your gateway signs.`,
       );
       _unsignedWarned = true;
     }

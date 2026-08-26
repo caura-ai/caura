@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+from typing import cast
 
 import httpx
 
@@ -284,4 +285,12 @@ class RemoteRanker:
                 failures[0],
             )
 
-        return [score for chunk_scores in results for score in chunk_scores]
+        # ``failures`` is empty here, so every element is a ``list[float]`` —
+        # but that follows from the raise above, which mypy cannot carry back
+        # into ``results``. Re-testing each element would imply the exception
+        # case is still reachable; the cast says it is not.
+        return [
+            score
+            for chunk_scores in cast("list[list[float]]", results)
+            for score in chunk_scores
+        ]

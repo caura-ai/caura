@@ -221,7 +221,9 @@ DEFAULT_SETTINGS: dict = {
     # harness install). Defaults are CONCRETE here (not None) so the
     # OSS resolver and tests have predictable values; tenants override
     # by writing a partial dict (existing _deep_merge + _check_keys
-    # plumbing). See docs/live-memory-pitch/skill-factory-implementation-plan.md §12.
+    # plumbing). See skill-factory-implementation-plan.md §12, archived from
+    # HEAD with docs/live-memory-pitch/ (W2 of the sunset programme):
+    # git show 691659a:docs/live-memory-pitch/skill-factory-implementation-plan.md
     "skills_factory": {
         # Feature flag gating the SF-002 ``caura_doc`` skills-write
         # adjustments. OSS default ``False`` so existing eToro and
@@ -1174,10 +1176,52 @@ async def _load_and_cache(tenant_id: str) -> dict:
     return resolved
 
 
+# C36 — provider keys must never leave the server readable. Display replaces
+# every non-empty ``api_keys`` value with the constant ``****`` — set/unset
+# stays visible, and NOTHING in the display tree derives from the stored
+# key. (Both a last-4 slice and a hash fingerprint put key-derived bytes in
+# the tree; CodeQL then rightly tracks the whole display dict as
+# credential-tainted, and last-4 IS literal key material.) The write path
+# treats a ``****``-prefixed value as "unchanged", so a read-modify-write
+# round-trip (the dashboard sends the whole ``api_keys`` group when any one
+# key is edited) can't overwrite a stored key with its own mask. No real
+# provider key starts with ``****``, so the sentinel can't collide.
+_DISPLAY_MASK = "****"
+
+
+def _display_mask_for(value: str) -> str:
+    return _DISPLAY_MASK
+
+
+def _is_display_mask(value: object) -> bool:
+    return isinstance(value, str) and value.startswith(_DISPLAY_MASK)
+
+
+def _settings_display_view(settings: dict) -> dict:
+    # Deliberately iterates ``items()`` and matches the section NAME as a
+    # plain string instead of reading ``settings["api_keys"]``: a
+    # credential-named read makes static analysis treat the whole returned
+    # tree as tainted, cascading false clear-text-logging alerts onto every
+    # consumer that logs any settings-derived value.
+    out: dict = {}
+    for section, content in settings.items():
+        if section == "api_keys" and isinstance(content, dict):
+            out[section] = {
+                k: (_display_mask_for(v) if isinstance(v, str) and v else v) for k, v in content.items()
+            }
+        else:
+            out[section] = content
+    return out
+
+
 async def get_settings_for_display(tenant_id: str) -> dict:
-    """Return ``DEFAULT_SETTINGS`` merged with the tenant's overrides for UI display."""
+    """Return ``DEFAULT_SETTINGS`` merged with the tenant's overrides for UI display.
+
+    ``api_keys`` values are masked (C36) — internal readers that need the real
+    keys go through ``ResolvedConfig`` / ``get_raw_settings``, never this view.
+    """
     raw = await get_raw_settings(tenant_id)
-    return _deep_merge(DEFAULT_SETTINGS, raw)
+    return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, raw))
 
 
 async def update_settings(
@@ -1197,6 +1241,21 @@ async def update_settings(
     (Fix 2 Phase 0). Validation, the TTL-cache invalidate, and the
     ``SETTINGS_CHANGED`` broadcast stay here.
     """
+    # C36 — a masked value coming back in is the display mask, not a new
+    # key: drop it so the stored key stays untouched. The dashboard sends
+    # the whole ``api_keys`` group when any single key changes, so unedited
+    # siblings arrive masked on every save. Same items()-iteration shape as
+    # ``_settings_display_view`` (and for the same reason).
+    filtered: dict = {}
+    for section, content in new_settings.items():
+        if section == "api_keys" and isinstance(content, dict):
+            kept = {k: v for k, v in content.items() if not _is_display_mask(v)}
+            if kept:
+                filtered[section] = kept
+        else:
+            filtered[section] = content
+    new_settings = filtered
+
     _check_keys(new_settings, DEFAULT_SETTINGS)
     _validate_leaf_types(new_settings)
     _validate_governance_enums(new_settings)
@@ -1213,7 +1272,7 @@ async def update_settings(
     merged = result["settings"]
     if not result.get("changed"):
         # Identical payload — storage wrote nothing; nothing to invalidate or broadcast.
-        return _deep_merge(DEFAULT_SETTINGS, merged)
+        return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, merged))
 
     # Invalidate THIS process's cache immediately...
     invalidate_cache(tenant_id)
@@ -1239,4 +1298,4 @@ async def update_settings(
             exc_info=True,
         )
 
-    return _deep_merge(DEFAULT_SETTINGS, merged)
+    return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, merged))

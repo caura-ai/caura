@@ -8,6 +8,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp as ASGIApplication
@@ -156,7 +157,7 @@ def _validate_production_settings(app_settings) -> None:  # type: ignore[no-unty
         raise RuntimeError("ADMIN_API_KEY must be set for production")
     if not app_settings.gateway_shared_secret and not app_settings.memclaw_api_key:
         # What production actually requires is A PERIMETER — not specifically the
-        # gateway one. ``MEMCLAW_API_KEY`` is the other way to have one: when it
+        # gateway one. ``CAURA_API_KEY`` is the other way to have one: when it
         # is set, auth.py's "Path 2" either authenticates the request against
         # that key or raises 401 for everything else, so "Path 4" below it is
         # UNREACHABLE and there is no header-trust surface left to protect. That
@@ -180,12 +181,13 @@ def _validate_production_settings(app_settings) -> None:  # type: ignore[no-unty
         # unnoticed in the first place — whereas a service that will not start
         # gets caught at deploy.
         raise RuntimeError(
-            "GATEWAY_SHARED_SECRET (or MEMCLAW_API_KEY) must be set when "
-            "ENVIRONMENT=production. With neither, the X-Tenant-ID header-trust "
-            "auth path accepts caller-supplied identity headers from anyone who "
-            "can reach this service directly. Set GATEWAY_SHARED_SECRET to the "
-            "same value the gateway injects as X-Gateway-Secret, or set "
-            "MEMCLAW_API_KEY if this deployment is not fronted by the gateway."
+            "GATEWAY_SHARED_SECRET (or CAURA_API_KEY, legacy: MEMCLAW_API_KEY) "  # legacy-name-ok: taught as legacy alias
+            "must be set when ENVIRONMENT=production. With neither, the "
+            "X-Tenant-ID header-trust auth path accepts caller-supplied identity "
+            "headers from anyone who can reach this service directly. Set "
+            "GATEWAY_SHARED_SECRET to the same value the gateway injects as "
+            "X-Gateway-Secret, or set CAURA_API_KEY if this deployment is not "
+            "fronted by the gateway."
         )
 
 
@@ -506,7 +508,28 @@ async def lifespan(app):
         # Bus stop also happens before storage-client close because
         # the bus's pull-loops may still be issuing storage calls
         # mid-cancel.
-        shutdown_steps: list = []
+        # FIRST, ahead of every flush below: hand back this process's ephemeral
+        # broadcast subscriptions.
+        #
+        # Cloud Run allows 10s between SIGTERM and SIGKILL. The steps below are
+        # awaited SEQUENTIALLY and the first three carry 5s timeouts each, so on
+        # any shutdown where a queue has work the budget is gone before
+        # event_bus.stop() — which is where the delete used to live — is even
+        # reached. The process is killed, the subscription survives, and its
+        # expiration_policy holds project quota for a full day.
+        #
+        # That is not theory. core-api accumulated 6,571 orphaned subscriptions
+        # in staging against a live instance count in the low tens, exhausted
+        # the 10,000 subscriptions-per-project cap — which is shared with prod —
+        # and prod core-api then began failing to create its own subscription
+        # and degrading cross-process cache invalidation to the TTL.
+        # platform-auth-api, same library and same TTL, awaits its bus stop
+        # early and holds 2-6.
+        #
+        # This step needs nothing that the flushes below need, so it is cheap
+        # and cannot be starved by them. event_bus.stop() still calls it; this
+        # is an idempotent hoist, not a move.
+        shutdown_steps: list = [event_bus.release_broadcast_subscriptions()]
         if audit_queue is not None:
             shutdown_steps.append(audit_queue.stop(timeout=5.0))
         if capability_usage_agg is not None:
@@ -533,19 +556,178 @@ async def lifespan(app):
         executor.shutdown(wait=False)
 
 
+# CAP-01 / F6. Tag-level labelling for capabilities whose REST surface is not
+# what its presence in this spec implies. Only STM qualifies today: it is
+# advertised here, gated on a server setting hosted tenants cannot reach, and
+# has no REST write route at all. The per-operation text lives in
+# ``routes/stm.py``; this is what a reader sees in the docs sidebar before
+# they open an operation.
+OPENAPI_TAGS = [
+    {
+        "name": "stm",
+        "description": (
+            "**Plugin-only — not available over hosted REST.** Short-term "
+            "memory is served by the OpenClaw plugin. These operations are "
+            "gated on the server-side `USE_STM` setting, which is off in the "
+            "hosted deployment and is not per-tenant, and there is no REST "
+            "write route for STM at all. Use `/memories` and `/search` for "
+            "durable memory."
+        ),
+    },
+]
+
+# SAFE-01. Stated once at the API level rather than on ~25 write operations,
+# for the same reason the 401/403 responses below are injected once: the same
+# fact written twenty-five times has twenty-five chances to go stale, and the
+# copy that gets forgotten is the one someone reads. The per-model half of the
+# contract is already machine-readable — a strict request schema carries
+# ``additionalProperties: false``, a permissive one does not — so this text
+# exists to say what that means and why the two kinds differ.
+_API_DESCRIPTION = """
+Governed shared memory for AI agent fleets.
+
+### Request bodies: writes are strict, searches are not
+
+**Write and mutation bodies reject fields they do not declare.** An
+unrecognised key returns `422` with the canonical error envelope, naming it in
+`error.message` and listing every offender as a dotted path in
+`error.details.unknown_fields`:
+
+```json
+{"error": {"code": "INVALID_ARGUMENTS",
+           "message": "unknown field 'contnet' is not permitted on this request body (at 'contnet')",
+           "details": {"unknown_fields": ["contnet"]}}}
+```
+
+Such a field used to be **silently discarded** — the write returned `201` and
+stored the row without it. Any request schema below carrying
+`additionalProperties: false` is strict.
+
+**Search, filter and query bodies still ignore unknown fields**, deliberately:
+a misspelled filter returns a visibly wrong result set, while a misspelled
+write field corrupts stored data invisibly. Only the second justifies a
+breaking change. `/search`, `/recall`, `/documents/query` and
+`/documents/search` stay permissive, as do the historical `AliasChoices`
+spellings on `/search` (`memory_type` ↔ `memory_type_filter`, `status` ↔
+`status_filter`).
+
+Two write bodies are also deliberately permissive: an unknown key inside a
+`POST /memories/bulk` **item** becomes that item's own `status="error"` row in
+the 207 rather than a 422 for the whole batch, and the plugin telemetry
+endpoints (`/fleet/heartbeat`, `/fleet/commands/{id}/result`) accept unknown
+keys because plugin and backend have no version handshake.
+"""
+
 app = FastAPI(
-    title="MemClaw",
+    title="Caura",
     version=VERSION,
+    description=_API_DESCRIPTION,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
+    openapi_tags=OPENAPI_TAGS,
     lifespan=lifespan,
 )
 
+
+# ── Error responses in the spec (C32 / API-05) ────────────────────────────
+#
+# Before this, 422 was the ONLY documented error response on the whole surface.
+# Every other failure — every 401, every 403 — was absent from the spec, so a
+# generated client had no type for the body it will certainly receive, and an
+# agent reading the spec offline could reasonably conclude those statuses do not
+# occur. They occur constantly: authentication and authorization are checked on
+# essentially every route.
+#
+# Injected once over the generated schema rather than declared per route.
+# ``responses={401: ..., 403: ...}`` on ~91 path operations is the same fact
+# written ninety-one times, and the copy that gets forgotten is the one that
+# matters. Existing per-route declarations win — this only fills gaps.
+_ERROR_ENVELOPE_REF = "CauraError"
+
+_ERROR_ENVELOPE_SCHEMA: dict = {
+    "type": "object",
+    "title": "CauraError",
+    "description": (
+        "Canonical error envelope. ``detail`` is the human-readable message and "
+        "is retained for backwards compatibility; ``error.code`` is the stable "
+        "machine-readable identifier and is what clients should branch on."
+    ),
+    "properties": {
+        "detail": {"type": "string", "description": "Human-readable message."},
+        "error": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Stable UPPER_SNAKE identifier. Derived from the status "
+                        "code unless the raiser supplied a specific one — e.g. "
+                        "READ_ONLY_CREDENTIAL vs PLAN_LIMIT_READ_ONLY, which are "
+                        "both 403 and need different responses from the caller."
+                    ),
+                },
+                "message": {"type": "string"},
+                "details": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "description": "Optional structured context, e.g. remediation or existing_id.",
+                },
+            },
+            "required": ["code", "message"],
+        },
+    },
+    "required": ["detail", "error"],
+}
+
+# Status → description, for the statuses every authenticated route can return.
+_INJECTED_ERROR_RESPONSES: dict[str, str] = {
+    "401": "Authentication failed or was not supplied.",
+    "403": "Authenticated, but not permitted to perform this operation.",
+}
+
+
+def _openapi_with_error_responses() -> dict:
+    """Generate the spec, then document the errors every route can return."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        routes=app.routes,
+        tags=OPENAPI_TAGS,
+        servers=([{"url": app_settings.public_api_url.rstrip("/")}] if app_settings.public_api_url else None),
+    )
+    schema.setdefault("components", {}).setdefault("schemas", {})[_ERROR_ENVELOPE_REF] = (
+        _ERROR_ENVELOPE_SCHEMA
+    )
+    ref = {"$ref": f"#/components/schemas/{_ERROR_ENVELOPE_REF}"}
+    for path_item in schema.get("paths", {}).values():
+        for method, operation in path_item.items():
+            if method not in {"get", "put", "post", "delete", "patch"}:
+                continue
+            responses = operation.setdefault("responses", {})
+            for status, description in _INJECTED_ERROR_RESPONSES.items():
+                if status in responses:
+                    continue  # a route that documented its own says it better
+                responses[status] = {
+                    "description": description,
+                    "content": {"application/json": {"schema": ref}},
+                }
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _openapi_with_error_responses  # type: ignore[method-assign]
+
 # slowapi reads limiter + handler from app.state; decorators in
-# middleware/rate_limit.py consult this at request time.
-# SlowAPIMiddleware emits X-RateLimit-Limit/Remaining + Retry-After on
-# every response so clients can back off before hitting 429.
+# middleware/rate_limit.py consult this at request time. There is no
+# SlowAPIMiddleware — the per-route decorators do the injecting, into the
+# endpoint's ``response: Response`` parameter, which is why every
+# rate-limited handler must declare one (D14; enforced by
+# tests/test_d14_rate_limited_response_param.py). With headers_enabled=True
+# that puts X-RateLimit-Limit/Remaining/Reset + Retry-After on SUCCESS
+# responses too, so clients can back off before hitting 429.
 app.state.limiter = limiter
 
 
@@ -620,16 +802,47 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     contains Pydantic's underlying ``ValueError`` instance for
     ``value_error`` types). ``jsonable_encoder`` flattens those before
     we hand off to ``JSONResponse``.
+
+    SAFE-01 — unknown fields on write bodies. Every write request model is
+    ``extra="forbid"`` (``core_api.schemas.STRICT_WRITE_BODY``), so a
+    misspelled key now lands here as a pydantic ``extra_forbidden`` error.
+    Pydantic's own ``msg`` for those is the field-less "Extra inputs are not
+    permitted", which would make the envelope's aggregated ``message`` say
+    nothing about WHICH key was wrong — the caller would be told their write
+    failed and left to diff the payload against the docs to find out why. So
+    those entries get a message naming the field, and the offending names are
+    also lifted into ``details.unknown_fields`` for programmatic clients. The
+    ``detail`` array keeps pydantic's verbatim entries (``loc`` already carries
+    the field name there) because it is the back-compat surface.
     """
     from fastapi.encoders import jsonable_encoder
 
     from core_api.errors import make_error_payload
 
     errs = jsonable_encoder(exc.errors())
-    summary = "; ".join(e.get("msg", "") for e in errs) or "validation error"
+
+    unknown_fields: list[str] = []
+    messages: list[str] = []
+    for e in errs:
+        if e.get("type") == "extra_forbidden":
+            # ``loc`` is ("body", "<field>") — or deeper for a nested model /
+            # list item, e.g. ("body", "items", 3, "<field>"). Report the leaf
+            # as the name and the dotted path so a nested typo is locatable.
+            loc = [str(part) for part in e.get("loc", []) if str(part) != "body"]
+            name = loc[-1] if loc else "<unknown>"
+            path = ".".join(loc) or name
+            unknown_fields.append(path)
+            messages.append(f"unknown field '{name}' is not permitted on this request body (at '{path}')")
+        else:
+            messages.append(e.get("msg", ""))
+
+    summary = "; ".join(messages) or "validation error"
+    details: dict = {"errors": errs}
+    if unknown_fields:
+        details["unknown_fields"] = unknown_fields
     body = {
         "detail": errs,  # original FastAPI shape
-        **make_error_payload("INVALID_ARGUMENTS", summary, details={"errors": errs}),
+        **make_error_payload("INVALID_ARGUMENTS", summary, details=details),
     }
     return JSONResponse(body, status_code=422)
 

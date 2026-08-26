@@ -16,7 +16,8 @@ _DESCRIPTION = (
     "visibility: scope_team (default) / scope_org / scope_agent. Prefer team/org for sharing. "
     "If the response has metadata.embedding_pending=true the memory is saved but not yet "
     "semantically searchable (~15-20s); it is already findable by keyword and in caura_list, "
-    "so do not re-write it. Pass write_mode='strong' to embed inline when you must recall it now."
+    "so do not re-write it. Pass write_mode='strong' to embed inline when you must recall it now. "
+    "Unknown keys are rejected, not ignored: put your own under metadata."
 )
 
 _SPEC = ToolSpec(

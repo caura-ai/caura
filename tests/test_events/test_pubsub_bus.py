@@ -8,14 +8,25 @@ are replaced by stand-ins so these tests run without GCP.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import multiprocessing
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from queue import Empty
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from common.events import Event, PubSubEventBus, Topics
-from common.events.pubsub import BROADCAST_SUBSCRIPTION_TTL_SECONDS
+from common.events.pubsub import (
+    BROADCAST_MAX_SLOTS,
+    BROADCAST_SUBSCRIPTION_TTL_SECONDS,
+    _claim_broadcast_slot,
+    _process_broadcast_slot_id,
+)
 
 
 @pytest.fixture
@@ -1250,3 +1261,488 @@ async def test_stop_deletes_broadcast_subscriptions(bus: PubSubEventBus) -> None
     req = fake_sub.delete_subscription.call_args.kwargs["request"]
     assert req["subscription"] == "projects/proj/subscriptions/core-api--x--abc"
     assert bus._broadcast_sub_paths == []
+
+
+async def test_release_broadcast_subscriptions_needs_nothing_else_torn_down(
+    bus: PubSubEventBus,
+) -> None:
+    """The release must work on a fully live bus, with no teardown run first.
+
+    This is the property the fix depends on. Cloud Run allows 10s between
+    SIGTERM and SIGKILL; core-api's shutdown awaits three 5s-timeout flushes
+    sequentially before it reaches the bus, so anything that can only run after
+    them does not run at all on a busy shutdown. That is how 6,571 orphaned
+    subscriptions accumulated in staging against a live instance count in the
+    low tens, exhausting a project-wide cap shared with prod.
+
+    So this asserts the release is callable in isolation — no stop(), no
+    cancelled pull tasks, no closed clients — and that it is the delete alone.
+    """
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    bus._started = True
+    bus._broadcast_sub_paths = [
+        "projects/proj/subscriptions/core-api--a--1",
+        "projects/proj/subscriptions/core-api--b--2",
+    ]
+
+    await bus.release_broadcast_subscriptions()
+
+    assert fake_sub.delete_subscription.call_count == 2
+    assert bus._broadcast_sub_paths == []
+    # It must not have torn the bus down as a side effect: stop() still has
+    # work to do afterwards, and a release that closed the subscriber would
+    # break the very ordering it exists to enable.
+    fake_sub.close.assert_not_called()
+    assert bus._started is True
+    assert bus._stopped is False
+
+
+async def test_released_subscription_exits_pull_loop_quietly(
+    bus: PubSubEventBus,
+) -> None:
+    """A pull loop that outlives the release must not report a fault.
+
+    The release runs ahead of the rest of teardown so it fits inside the 10s
+    SIGTERM budget, which means a pull loop can still be mid-cycle when its
+    subscription disappears. Without this the loop takes the permanent-error
+    branch — ERROR log, ``_failed_subscriptions``, ``is_healthy`` false — on
+    EVERY graceful shutdown, which is how a real alert gets tuned out.
+    """
+    from google.api_core import exceptions as gexc
+
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    bus._broadcast_sub_paths = ["projects/proj/subscriptions/core-api--x--abc"]
+    await bus.release_broadcast_subscriptions()
+
+    fake_sub.pull = MagicMock(side_effect=gexc.NotFound("gone"))
+    bus._pull_executor = ThreadPoolExecutor(max_workers=1)
+    await bus._pull_loop("core-api--x--abc", [])
+
+    assert bus._failed_subscriptions == set()
+    assert bus.is_healthy is True
+
+
+async def test_unprovisioned_subscription_still_reports_loudly(
+    bus: PubSubEventBus,
+) -> None:
+    """The suppression must be scoped to what we deleted, and nothing else.
+
+    A NotFound on a subscription this process never released is a real
+    configuration fault — never provisioned, or deleted by someone else — and
+    must keep the loud halting path. A blanket suppression would trade one
+    silent failure for another.
+    """
+    from google.api_core import exceptions as gexc
+
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    fake_sub.pull = MagicMock(side_effect=gexc.NotFound("never existed"))
+    bus._pull_executor = ThreadPoolExecutor(max_workers=1)
+
+    await bus._pull_loop("core-api--never-provisioned", [])
+
+    assert "core-api--never-provisioned" in bus._failed_subscriptions
+    assert bus.is_healthy is False
+
+
+async def test_release_bounds_the_delete_rpc(bus: PubSubEventBus) -> None:
+    """The delete must carry an explicit short timeout, not the SDK default.
+
+    This method exists to finish inside Cloud Run's 10s SIGTERM budget. The
+    SDK's generated default is 60s per call with a 60s retry deadline — six
+    times the whole budget for one call — so inheriting it defeats the reason
+    the method was split out: one slow Pub/Sub call and the process is killed
+    mid-release, leaking exactly what this reclaims.
+
+    A timed-out delete costs nothing that matters; ``expiration_policy`` still
+    reaps the subscription. Bounding only trades a slow failure for a fast one.
+    """
+    from common.events.pubsub import BROADCAST_RELEASE_TIMEOUT_SECONDS
+
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    bus._broadcast_sub_paths = [
+        "projects/proj/subscriptions/a--x--abc",
+        "projects/proj/subscriptions/b--x--abc",
+    ]
+
+    await bus.release_broadcast_subscriptions()
+
+    assert fake_sub.delete_subscription.call_count == 2
+    for call in fake_sub.delete_subscription.call_args_list:
+        assert call.kwargs["timeout"] == BROADCAST_RELEASE_TIMEOUT_SECONDS
+    # Small enough that even a sequential worst case fits the budget.
+    assert BROADCAST_RELEASE_TIMEOUT_SECONDS <= 5.0
+
+
+async def test_release_survives_one_failing_delete(bus: PubSubEventBus) -> None:
+    """One subscription failing must not strand the others.
+
+    The deletes are fanned out concurrently; a single raise must neither abort
+    its siblings nor escape into the shutdown path that called this.
+    """
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    fake_sub.delete_subscription = MagicMock(
+        side_effect=[RuntimeError("pubsub blip"), None]
+    )
+    bus._broadcast_sub_paths = [
+        "projects/proj/subscriptions/a--x--abc",
+        "projects/proj/subscriptions/b--x--abc",
+    ]
+
+    await bus.release_broadcast_subscriptions()
+
+    assert fake_sub.delete_subscription.call_count == 2
+    # Both are recorded as released regardless: the pull loops must exit
+    # quietly either way, and the TTL reaps whatever the delete missed.
+    assert bus._released_subscriptions == {"a--x--abc", "b--x--abc"}
+    assert bus._broadcast_sub_paths == []
+
+
+@pytest.mark.parametrize("exc_name", ["PermissionDenied", "InvalidArgument"])
+async def test_released_subscription_still_reports_non_notfound_loudly(
+    bus: PubSubEventBus,
+    exc_name: str,
+) -> None:
+    """Releasing a name excuses a later NotFound on it, and nothing else.
+
+    "We deleted this one ourselves" explains a subsequent NotFound. It does not
+    explain a PermissionDenied — an IAM grant changed — or an InvalidArgument —
+    we built a malformed request. Neither becomes benign because this process
+    happened to release that name, and both are precisely what the halting path
+    exists to surface.
+
+    The original suppression sat inside the shared handler for all three, so a
+    real IAM regression against a released name would exit the loop silently with
+    ``is_healthy`` still true. ``test_unprovisioned_subscription_still_reports_loudly``
+    does NOT cover this: it varies the *name* (never released) while holding the
+    exception at NotFound, so it constrains only one of the two axes.
+    """
+    from google.api_core import exceptions as gexc
+
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    bus._broadcast_sub_paths = ["projects/proj/subscriptions/core-api--x--abc"]
+    await bus.release_broadcast_subscriptions()
+    assert "core-api--x--abc" in bus._released_subscriptions
+
+    fake_sub.pull = MagicMock(side_effect=getattr(gexc, exc_name)("still a fault"))
+    bus._pull_executor = ThreadPoolExecutor(max_workers=1)
+    await bus._pull_loop("core-api--x--abc", [])
+
+    assert "core-api--x--abc" in bus._failed_subscriptions
+    assert bus.is_healthy is False
+
+
+async def test_restart_clears_the_released_record(bus: PubSubEventBus) -> None:
+    """Subscription names are deterministic per bus object, so a second start()
+    recreates the same names. A leftover entry would silence a genuine NotFound
+    on the next run — the suppression becoming the blind spot it exists to
+    avoid."""
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    bus._broadcast_sub_paths = ["projects/proj/subscriptions/core-api--x--abc"]
+    await bus.release_broadcast_subscriptions()
+    assert "core-api--x--abc" in bus._released_subscriptions
+
+    bus._started = False
+    with contextlib.suppress(Exception):
+        await bus.start()
+
+    assert "core-api--x--abc" not in bus._released_subscriptions
+
+
+async def test_release_broadcast_subscriptions_is_idempotent(
+    bus: PubSubEventBus,
+) -> None:
+    """stop() still calls it, so it runs twice on every clean shutdown.
+
+    A second delete of an already-deleted subscription would log a NotFound
+    warning per topic on every graceful exit — noise that would train readers
+    to ignore the one warning that matters.
+    """
+    fake_sub = MagicMock()
+    bus._subscriber = fake_sub
+    bus._broadcast_sub_paths = ["projects/proj/subscriptions/core-api--x--abc"]
+
+    await bus.release_broadcast_subscriptions()
+    await bus.release_broadcast_subscriptions()
+    await bus.stop()
+
+    fake_sub.delete_subscription.assert_called_once()
+
+
+# ── broadcast slot identity ──────────────────────────────────────────
+#
+# The subscription name has to satisfy three properties AT ONCE. Each test
+# below pins exactly one, because the properties trade against each other and a
+# scheme that buys one by giving up another is the failure mode to guard:
+# trading away "distinct between concurrent workers" turns a broadcast into a
+# load-balanced queue, silently.
+#
+# These use real spawned processes, matching uvicorn's own supervisor
+# (``multiprocessing.get_context("spawn")``). They have to: the property under
+# test is that the KERNEL releases a claim when a process is SIGKILLed, and a
+# mock cannot exhibit that.
+
+
+def _slot_child(slot_dir: Path, queue: Any) -> None:
+    """Claim a slot, report it, then block until killed — like a live worker."""
+    queue.put(_claim_broadcast_slot(slot_dir, BROADCAST_MAX_SLOTS))
+    time.sleep(300)
+
+
+@pytest.fixture
+def spawn_worker(tmp_path: Path) -> Any:
+    """Spawn ``_slot_child`` processes into ``tmp_path`` and reap them all."""
+    ctx = multiprocessing.get_context("spawn")
+    queue = ctx.Queue()
+    started: list[Any] = []
+
+    def _spawn() -> tuple[Any, str | None]:
+        proc = ctx.Process(target=_slot_child, args=(tmp_path, queue))
+        proc.start()
+        started.append(proc)
+        # Watch the child alongside the queue rather than just blocking on the
+        # queue. A child that dies before reporting — an import failure under
+        # spawn, an unwritable slot dir — would otherwise burn the entire
+        # timeout per spawn before surfacing as an unhelpful Empty, turning an
+        # already-failing run into a multi-minute one. A live child reports in
+        # ~100ms; the generous ceiling is only there for a cold CI box.
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            try:
+                return proc, queue.get(timeout=0.1)
+            except Empty:
+                if proc.exitcode is not None:
+                    # It may have reported and exited before we looked.
+                    with contextlib.suppress(Empty):
+                        return proc, queue.get(timeout=1)
+                    raise AssertionError(
+                        f"slot child exited {proc.exitcode} without reporting"
+                    ) from None
+        raise AssertionError("slot child never reported")
+
+    yield _spawn
+    for proc in started:
+        if proc.is_alive():
+            proc.kill()
+        proc.join(timeout=10)
+
+
+def test_broadcast_slot_is_stable_across_a_sigkilled_respawn(
+    spawn_worker: Any,
+) -> None:
+    # PROPERTY 1 — stability. uvicorn SIGKILLs a worker that misses its 5s
+    # healthcheck ping and spawns a replacement (``Multiprocess.
+    # keep_subprocess_alive``). The replacement must re-derive its
+    # predecessor's identity so ``_ensure_broadcast_subscription`` takes the
+    # AlreadyExists path instead of minting a fresh subscription that orphans
+    # the old one for a day. This is the property a random id fails, and it is
+    # the entire leak.
+    victim, first = spawn_worker()
+    assert first is not None
+
+    # Exactly what uvicorn does: SIGKILL, reap, spawn a brand-new process.
+    # No shutdown hook runs — that is the point.
+    victim.kill()
+    victim.join(timeout=10)
+    _replacement, second = spawn_worker()
+
+    assert second == first, (
+        f"respawned worker took identity {second!r}, predecessor held {first!r}; "
+        "a changed identity orphans the predecessor's subscription for "
+        f"{BROADCAST_SUBSCRIPTION_TTL_SECONDS}s"
+    )
+
+
+def test_broadcast_slot_is_distinct_between_concurrently_live_workers(
+    tmp_path: Path, spawn_worker: Any
+) -> None:
+    # PROPERTY 2 — THE TRAP. Two live workers sharing one subscription does not
+    # fail loudly: Pub/Sub load-balances between them and each sees roughly half
+    # the events. For org.settings-changed that is a process serving stale
+    # settings with nothing red anywhere. Worse than the leak, so stability must
+    # never be bought at this property's expense.
+    _first, ident_a = spawn_worker()
+    _second, ident_b = spawn_worker()
+    assert ident_a is not None and ident_b is not None
+    assert ident_a != ident_b, (
+        f"two concurrently-live workers both claimed {ident_a!r}; they would "
+        "share one subscription and each receive only part of the broadcast"
+    )
+
+    # And the stronger form: a THIRD claimant, arriving while both incumbents
+    # are still alive, must not be handed either of their identities. This is
+    # the uvicorn ``restart_all`` (SIGHUP) shape, where the replacement is
+    # started and waited on BEFORE the worker it replaces is terminated, so the
+    # configured worker count is transiently exceeded.
+    third = _claim_broadcast_slot(tmp_path, BROADCAST_MAX_SLOTS)
+    assert third not in {ident_a, ident_b}, (
+        f"overlap claimant got {third!r}, already held by a live worker"
+    )
+
+
+def test_broadcast_slot_is_distinct_across_instances(tmp_path: Path) -> None:
+    # PROPERTY 3 — cross-instance distinctness. Every instance's slot 0 is a
+    # different consumer. A bare slot index, or a bare Cloud Run instance id,
+    # each satisfies two of the three properties and fails this one or
+    # property 2; only the token+slot pair satisfies all three.
+    # Two never-used directories stand in for two instances' filesystems, so
+    # each of these is by construction the FIRST claim on its own instance —
+    # the same slot on different instances, which is exactly the colliding
+    # case. Asserted on the whole identity rather than on its parts: pinning
+    # the slot component's shape here would couple this test to the id format
+    # and make it fire for mutations that leave cross-instance distinctness
+    # perfectly intact.
+    ident_a = _claim_broadcast_slot(tmp_path / "instance-a", BROADCAST_MAX_SLOTS)
+    ident_b = _claim_broadcast_slot(tmp_path / "instance-b", BROADCAST_MAX_SLOTS)
+    assert ident_a is not None and ident_b is not None
+    assert ident_a != ident_b, (
+        f"the first slot on two separate instances both resolved to "
+        f"{ident_a!r}; those two workers would share one subscription"
+    )
+
+
+def test_broadcast_slot_falls_back_rather_than_sharing_when_exhausted(
+    tmp_path: Path,
+) -> None:
+    # The fallback DIRECTION, which must never be inverted. When no slot can be
+    # proven free, the claim fails and the caller takes a random id — accepting
+    # a bounded, quota-visible, day-lived leak. It must never wrap around and
+    # reuse a held slot, which would be the silent collision.
+    held = [_claim_broadcast_slot(tmp_path, 2) for _ in range(2)]
+    assert None not in held and len(set(held)) == 2
+    assert _claim_broadcast_slot(tmp_path, 2) is None
+
+
+def test_identity_falls_back_to_a_random_id_when_no_slot_can_be_claimed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An unclaimable slot must degrade to the pre-existing random-id behaviour,
+    # not crash a service at boot. Delivery is unaffected; only the leak returns.
+    monkeypatch.setattr("common.events.pubsub._slot_id", None)
+    monkeypatch.setattr(
+        "common.events.pubsub._claim_broadcast_slot", lambda *_a, **_k: None
+    )
+    assert len(_process_broadcast_slot_id()) == 12
+
+
+def test_identity_is_stable_per_process_even_on_the_fallback_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The fallback must be memoised, not re-rolled per caller. An unmemoised
+    # failure gives each bus in a process its OWN random id, which is exactly
+    # the per-process property the memo exists to provide — two buses would
+    # then create two subscriptions where one is wanted, and start()'s claim
+    # that a start/stop/start cycle recreates the same names would be false.
+    monkeypatch.setattr("common.events.pubsub._slot_id", None)
+    monkeypatch.setattr(
+        "common.events.pubsub._claim_broadcast_slot", lambda *_a, **_k: None
+    )
+    assert _process_broadcast_slot_id() == _process_broadcast_slot_id()
+
+
+def test_claim_returns_none_rather_than_raising_on_an_unreadable_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Pins the WIDENING specifically, at the layer where it happens. Reading
+    # the token file is the one filesystem call in this module that did not
+    # degrade to None: every other one catches OSError, while this caught only
+    # FileNotFoundError, so a PermissionError escaped the whole call chain.
+    #
+    # Deliberately asserted here rather than only through start(): the guard in
+    # _process_broadcast_slot_id also catches this, so an end-to-end test stays
+    # green with the narrow except restored and proves nothing about it. Two
+    # isolation layers, so each needs its own test or neither is really pinned.
+    real_read_text = Path.read_text
+
+    def _unreadable(self: Path, *a: Any, **k: Any) -> str:
+        if self.name == "instance":
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", _unreadable)
+    assert _claim_broadcast_slot(tmp_path, BROADCAST_MAX_SLOTS) is None
+
+
+async def test_start_survives_an_unreadable_instance_token(
+    bus: PubSubEventBus, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The module's stated contract is that ANY environment where the slot
+    # cannot be claimed degrades to a random id. An unreadable token file is
+    # such an environment, and it is reachable: the slot directory lives in a
+    # shared tmpdir, so a file owned by another uid, or a directory where a
+    # regular file is expected, both surface as OSError rather than as the
+    # FileNotFoundError that the ordinary "first worker" case raises.
+    #
+    # This runs on the startup path, so the failure mode being pinned is a
+    # service that will not boot — the exact opposite of the degradation the
+    # docstring promises.
+    #
+    # A characterization test for the end-to-end contract, stated as such: two
+    # layers now prevent this (the widened except in _read, and the guard in
+    # _process_broadcast_slot_id), so it stays green if either one alone is
+    # removed. The layer-specific tests above and below are what actually pin
+    # them. Dressing this up as a regression guard for either is how the gap in
+    # #991 got through.
+    import types
+    from unittest.mock import patch
+
+    monkeypatch.setattr("common.events.pubsub._slot_id", None)
+    monkeypatch.setattr("common.events.pubsub.BROADCAST_SLOT_DIR", tmp_path)
+
+    real_read_text = Path.read_text
+
+    def _unreadable(self: Path, *a: Any, **k: Any) -> str:
+        if self.name == "instance":
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", _unreadable)
+
+    class FakeSubscriberClient:
+        def subscription_path(self, proj: str, name: str) -> str:
+            return f"projects/{proj}/subscriptions/{name}"
+
+        def create_subscription(self, request: dict[str, Any]) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    async def _h(_e: Event) -> None:
+        return None
+
+    bus.subscribe(Topics.Org.SETTINGS_CHANGED, _h, broadcast=True)
+    with patch.object(
+        PubSubEventBus,
+        "_ensure_pubsub_sdk",
+        return_value=types.SimpleNamespace(SubscriberClient=FakeSubscriberClient),
+    ):
+        await bus.start()
+
+    # Booted, and with a usable identity rather than none at all.
+    assert bus._started is True
+    assert bus._broadcast_slot_id is not None
+    assert len(bus._broadcast_slot_id) == 12  # the random fallback, not a slot
+    bus._stopping = True  # keep teardown of the fake client quiet
+
+
+def test_identity_survives_an_unexpected_error_in_the_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The totality guard lives in _process_broadcast_slot_id, not at the
+    # start() call site, so it holds for every caller rather than for the one
+    # that remembered to wrap it. Pinned with an exception the callees do not
+    # anticipate at all, since the point is the unforeseen case.
+    monkeypatch.setattr("common.events.pubsub._slot_id", None)
+
+    def _boom(*_a: Any, **_k: Any) -> str:
+        raise RuntimeError("something no callee anticipated")
+
+    monkeypatch.setattr("common.events.pubsub._claim_broadcast_slot", _boom)
+    assert len(_process_broadcast_slot_id()) == 12

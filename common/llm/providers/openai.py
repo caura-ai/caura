@@ -22,7 +22,9 @@ import time
 import httpx
 import openai
 
+from common.llm.call_context import llm_call_label
 from common.llm.constants import (
+    LLM_JSON_MAX_OUTPUT_TOKENS,
     LLM_PROVIDER_MAX_RETRIES,
     OPENAI_CHAT_BASE_URL,
     OPENAI_HTTPX_CONNECT_TIMEOUT_SECONDS,
@@ -32,6 +34,7 @@ from common.llm.constants import (
     OPENAI_REQUEST_TIMEOUT_SECONDS,
 )
 from common.llm.providers._shape_error import ProviderResponseShapeError
+from common.llm.providers._truncation import raise_if_truncated
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +52,40 @@ class OpenAIResponseShapeError(ProviderResponseShapeError):
     def __reduce__(self) -> tuple:
         # See VertexResponseShapeError.__reduce__ for rationale.
         return (type(self), (self.args[1], self.args[2]))
+
+
+def _usage_tokens(response) -> tuple[int, int, int]:
+    """``(prompt, completion, reasoning)`` token counts from a chat response.
+
+    E3 — OpenAI bills tokens, not calls, so per-call cost has to be visible
+    in the logs to make a spend fix verifiable in dollars. ``reasoning``
+    (inside ``completion_tokens_details``, gpt-5-family reasoning models
+    only) is broken out because it is billed as output while never
+    appearing in the visible content — it is the invisible majority of the
+    contradiction judge's spend. Every field is optional on OpenAI-
+    compatible endpoints, so absence degrades to 0 rather than raising.
+    """
+
+    def _int(value: object) -> int:
+        # Coerce defensively: OpenAI-compatible endpoints return None or
+        # omit fields, and unit-test stubs return non-numeric attributes.
+        # The ignore code is ``call-overload``, not ``arg-type``: ``int`` is
+        # overloaded, so passing ``object`` fails overload resolution rather
+        # than a single argument's type. It read ``arg-type`` until common/
+        # entered the mypy gate, which is the first thing that ran mypy here
+        # and reported the mismatch.
+        try:
+            return int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            return 0
+
+    usage = getattr(response, "usage", None)
+    details = getattr(usage, "completion_tokens_details", None)
+    return (
+        _int(getattr(usage, "prompt_tokens", 0)),
+        _int(getattr(usage, "completion_tokens", 0)),
+        _int(getattr(details, "reasoning_tokens", 0)),
+    )
 
 
 class OpenAILLMProvider:
@@ -152,6 +189,7 @@ class OpenAILLMProvider:
         temperature: float = 0.0,
         seed: int | None = None,
         response_schema: dict | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict:
         """Send a prompt and return a parsed JSON dict.
 
@@ -175,6 +213,17 @@ class OpenAILLMProvider:
         mode requirements (additionalProperties=false everywhere); the
         client-side Pydantic parse is the real guardrail. Passing
         ``None`` preserves today's shape-less behaviour.
+
+        ``reasoning_effort`` (E3): forwarded to the chat completions API
+        only when set, so callers doing bounded classification work (the
+        contradiction judge) can bound hidden reasoning-token spend —
+        billed as output, invisible in the content. Valid values are
+        MODEL-SPECIFIC (gpt-5.4 family, wet-tested: ``"none"`` /
+        ``"low"`` / ``"medium"`` / ``"high"`` / ``"xhigh"``); an
+        unsupported value is a 400 on every call. ``None`` (the default)
+        omits the parameter entirely, because non-reasoning models
+        reject it with a 400. Sending it also drops ``temperature`` —
+        see the inline note at the call.
         """
         t0 = time.perf_counter()
         if response_schema is not None:
@@ -193,19 +242,45 @@ class OpenAILLMProvider:
             "messages": [{"role": "user", "content": prompt}],
             "response_format": response_format,
             "temperature": temperature,
+            # Runaway guard — same failure mode as the Gemini-backed
+            # providers: an uncapped looping generation comes back as
+            # truncated JSON (finish_reason="length").
+            "max_completion_tokens": LLM_JSON_MAX_OUTPUT_TOKENS,
         }
         if seed is not None:
             create_kwargs["seed"] = seed
+        if reasoning_effort is not None:
+            create_kwargs["reasoning_effort"] = reasoning_effort
+            # Wet-tested against gpt-5.4-nano: sending reasoning_effort
+            # switches the model into reasoning mode, which rejects any
+            # non-default temperature with a 400 ("only the default (1)
+            # value is supported") — and call_with_fallback would swallow
+            # that into the abstain fallback, silently disabling the
+            # judge. Temperature is a no-op in reasoning mode anyway, so
+            # drop it rather than fail the call.
+            create_kwargs.pop("temperature", None)
         response = await self._client.chat.completions.create(**create_kwargs)
         llm_ms = int((time.perf_counter() - t0) * 1000)
+        tokens_in, tokens_out, tokens_reasoning = _usage_tokens(response)
         logger.info(
-            "OpenAI-compatible complete_json (%s) took %dms",
+            "OpenAI-compatible complete_json (%s) took %dms "
+            "tokens_in=%d tokens_out=%d tokens_reasoning=%d service=%s",
             self._model,
             llm_ms,
+            tokens_in,
+            tokens_out,
+            tokens_reasoning,
+            llm_call_label.get() or "-",
         )
         content = response.choices[0].message.content
         if not content:
             raise ValueError(f"OpenAI returned empty content for model {self._model}")
+        raise_if_truncated(
+            response,
+            provider="OpenAI-compatible",
+            model=self._model,
+            max_tokens=LLM_JSON_MAX_OUTPUT_TOKENS,
+        )
         parsed = json.loads(content)
         if not isinstance(parsed, dict):
             raise OpenAIResponseShapeError(content, type(parsed).__name__)
@@ -227,9 +302,15 @@ class OpenAILLMProvider:
             max_completion_tokens=max_tokens,
         )
         llm_ms = int((time.perf_counter() - t0) * 1000)
+        tokens_in, tokens_out, tokens_reasoning = _usage_tokens(response)
         logger.info(
-            "OpenAI-compatible complete_text (%s) took %dms",
+            "OpenAI-compatible complete_text (%s) took %dms "
+            "tokens_in=%d tokens_out=%d tokens_reasoning=%d service=%s",
             self._model,
             llm_ms,
+            tokens_in,
+            tokens_out,
+            tokens_reasoning,
+            llm_call_label.get() or "-",
         )
         return response.choices[0].message.content or ""

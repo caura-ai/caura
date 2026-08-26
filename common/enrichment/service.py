@@ -118,11 +118,12 @@ def _validate_enrichment(raw: dict, llm_ms: int) -> EnrichmentResult:
     parsed_ts: dict[str, datetime | None] = {}
     for ts_field in ("ts_valid_start", "ts_valid_end"):
         val = raw.get(ts_field)
-        if val and isinstance(val, str):
-            parsed_ts[ts_field] = _parse_temporal(val)
-        else:
-            parsed_ts[ts_field] = None
-        raw[ts_field] = parsed_ts[ts_field].isoformat() if parsed_ts[ts_field] else None
+        parsed = _parse_temporal(val) if val and isinstance(val, str) else None
+        parsed_ts[ts_field] = parsed
+        # Via the local, not a repeated ``parsed_ts[ts_field]`` subscript: the
+        # guard and the use were two separate index expressions, which mypy does
+        # not narrow against each other.
+        raw[ts_field] = parsed.isoformat() if parsed else None
     # Ensure end > start; drop invalid end
     start, end = parsed_ts["ts_valid_start"], parsed_ts["ts_valid_end"]
     if start and end and end <= start:
@@ -210,11 +211,11 @@ def fake_enrich(content: str) -> EnrichmentResult:
     if any(
         kw in lower for kw in ("decided", "chose", "going with", "approved", "we will")
     ):
-        mt, w = "decision", 0.85
+        mt, w = MemoryType.DECISION, 0.85
     elif any(
         kw in lower for kw in ("prefers", "likes", "always wants", "rather", "favorite")
     ):
-        mt, w = "preference", 0.70
+        mt, w = MemoryType.PREFERENCE, 0.70
     elif any(
         kw in lower
         for kw in (
@@ -237,28 +238,28 @@ def fake_enrich(content: str) -> EnrichmentResult:
             "mandatory",
         )
     ):
-        mt, w = "rule", 0.85
+        mt, w = MemoryType.RULE, 0.85
     elif any(
         kw in lower
         for kw in ("deployed", "happened", "launched", "met with", "incident")
     ):
-        mt, w = "episode", 0.65
+        mt, w = MemoryType.EPISODE, 0.65
     elif any(kw in lower for kw in ("task", "todo", "assigned", "need to", "must")):
-        mt, w, st = "task", 0.70, "pending"
+        mt, w, st = MemoryType.TASK, 0.70, "pending"
     elif any(kw in lower for kw in ("plan", "steps", "roadmap", "strategy")):
-        mt, w, st = "plan", 0.75, "pending"
+        mt, w, st = MemoryType.PLAN, 0.75, "pending"
     elif any(kw in lower for kw in ("commit", "promise", "guarantee", "agreed to")):
-        mt, w, st = "commitment", 0.80, "pending"
+        mt, w, st = MemoryType.COMMITMENT, 0.80, "pending"
     elif any(kw in lower for kw in ("cancelled", "abandoned", "stopped", "withdrew")):
-        mt, w = "cancellation", 0.65
+        mt, w = MemoryType.CANCELLATION, 0.65
     elif any(kw in lower for kw in ("result", "outcome", "achieved", "completed")):
-        mt, w, st = "outcome", 0.70, "confirmed"
+        mt, w, st = MemoryType.OUTCOME, 0.70, "confirmed"
     elif any(kw in lower for kw in ("intend", "aim", "goal", "want to")):
-        mt, w = "intention", 0.65
+        mt, w = MemoryType.INTENTION, 0.65
     elif any(kw in lower for kw in ("did", "executed", "performed", "ran")):
-        mt, w = "action", 0.65
+        mt, w = MemoryType.ACTION, 0.65
     else:
-        mt, w = "fact", 0.70
+        mt, w = MemoryType.FACT, 0.70
 
     words = content.split()
     title = " ".join(words[:10]) + ("..." if len(words) > 10 else "")

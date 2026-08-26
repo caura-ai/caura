@@ -22,7 +22,7 @@ body:
     id: proposal
     attributes:
       label: Proposed solution
-      description: What would you like MemClaw to do? API shape, user-facing behavior, configuration changes.
+      description: What would you like Caura to do? API shape, user-facing behavior, configuration changes.
     validations:
       required: true
   - type: textarea

@@ -11,7 +11,7 @@ Pins:
 - the allowlist — values outside the org-membership model are dropped
   (a smuggled third role must never reach ``== "admin"`` gates),
 - absent header → ``org_role is None`` (pre-rollout gateways),
-- the MEMCLAW_API_KEY path (Path 2) ignores the header — API-key
+- the CAURA_API_KEY path (Path 2) ignores the header — API-key
   callers must NOT gain inbox-action rights from a spoofable header,
 - end-to-end: a gateway-shaped request opens the Skills Inbox admin
   gate with the role and is 403'd without it.
@@ -71,7 +71,7 @@ async def test_path4_absent_header_is_none(monkeypatch):
     assert ctx.org_role is None
 
 
-async def test_memclaw_key_path_ignores_org_role_header(monkeypatch):
+async def test_api_key_path_ignores_org_role_header(monkeypatch):
     """Path 2 (API-key callers) must not gain a role from the header —
     approving skills stays a human decision; agent keys can't act on
     admin-only routes by self-asserting X-Org-Role."""

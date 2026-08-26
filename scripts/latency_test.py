@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MemClaw latency benchmark — measures write, search, and recall latency.
+"""Caura latency benchmark — measures write, search, and recall latency.
 
 Usage:
     python scripts/latency_test.py                              # default: localhost:8000
@@ -206,7 +206,7 @@ def run_benchmark(base_url: str, api_key: str | None, runs: int, fleet_id: str |
 
     # ── Report ──
     print("=" * 64)
-    print("  MEMCLAW LATENCY REPORT")
+    print("  CAURA LATENCY REPORT")
     print("=" * 64)
     print(f"  Target:   {base_url}")
     print(f"  Runs:     {runs} per tool")
@@ -248,7 +248,7 @@ def run_benchmark(base_url: str, api_key: str | None, runs: int, fleet_id: str |
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MemClaw latency benchmark")
+    parser = argparse.ArgumentParser(description="Caura latency benchmark")
     parser.add_argument("--url", default=DEFAULT_URL, help=f"API base URL (default: {DEFAULT_URL})")
     parser.add_argument("--api-key", default=None, help="API key (admin or tenant-scoped)")
     parser.add_argument("--runs", type=int, default=DEFAULT_RUNS, help=f"Number of runs per tool (default: {DEFAULT_RUNS})")
@@ -256,7 +256,7 @@ def main():
     args = parser.parse_args()
 
     print()
-    print("  MemClaw Latency Benchmark")
+    print("  Caura Latency Benchmark")
     print()
 
     run_benchmark(args.url, args.api_key, args.runs, args.fleet_id)

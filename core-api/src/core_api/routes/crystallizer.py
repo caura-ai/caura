@@ -5,8 +5,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.crystallizer_service import start_crystallization
 
 router = APIRouter(tags=["Memory Crystallizer"])
@@ -16,6 +18,8 @@ router = APIRouter(tags=["Memory Crystallizer"])
 
 
 class CrystallizeRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
 
@@ -122,7 +126,10 @@ async def list_reports(
     ]
 
 
-@router.get("/crystallize/reports/{report_id}")
+@router.get(
+    "/crystallize/reports/{report_id}",
+    responses={200: {"model": _oar.CrystallizeReport}},
+)
 async def get_report(
     report_id: UUID,
     auth: AuthContext = Depends(get_auth_context),
@@ -160,7 +167,10 @@ async def get_report(
     }
 
 
-@router.get("/crystallize/latest")
+@router.get(
+    "/crystallize/latest",
+    responses={200: {"model": _oar.CrystallizeReport | None}},
+)
 async def get_latest_report(
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),

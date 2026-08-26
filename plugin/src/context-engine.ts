@@ -1,5 +1,5 @@
 /**
- * MemClaw ContextEngine — lifecycle hooks for OpenClaw memory integration.
+ * Caura ContextEngine — lifecycle hooks for OpenClaw memory integration.
  *
  * Provides: bootstrap (smoke test), ingest (message buffering +
  * persistence), assemble (token-budget-aware recall injection),
@@ -7,16 +7,17 @@
  * OpenClaw runtime via ``openclaw-sdk-bridge``).
  *
  * Security:
- * - afterTurn enabled by default; opt out with MEMCLAW_AUTO_WRITE_TURNS=false
+ * - afterTurn enabled by default; opt out with CAURA_AUTO_WRITE_TURNS=false
  * - Recall timeout enforced via AbortController
  */
 
 import { createHash } from "crypto";
 import { apiCall, parseSearchItems } from "./transport.js";
+import { PLUGIN_ID } from "./config.js";
 import {
-  MEMCLAW_FLEET_ID,
-  MEMCLAW_TENANT_ID,
-  MEMCLAW_AUTO_WRITE_TURNS,
+  CAURA_FLEET_ID,
+  CAURA_TENANT_ID,
+  CAURA_AUTO_WRITE_TURNS,
   ensureTenantId,
   RECALL_CACHE_TTL_MS,
   RECALL_TIMEOUT_MS,
@@ -30,12 +31,13 @@ import {
   RECALL_MACHINE_PATTERNS,
   RECALL_GATE_MODE,
   RECALL_CROSS_AGENT,
-  MEMCLAW_INTERVIEWER,
+  CAURA_INTERVIEWER,
   type RecallPolicy,
+  readEnv,
 } from "./env.js";
 import { appendInterviewEvent } from "./interview-buffer.js";
-import { memclawPromptSectionText } from "./prompt-section.js";
-import { MEMCLAW_TOOLS } from "./tools.js";
+import { cauraPromptSectionText } from "./prompt-section.js";
+import { CAURA_TOOLS } from "./tools.js";
 import { resolveAgentId, resolveAgentIdQuiet } from "./resolve-agent.js";
 import { getTenantPrefix, getSessionKey } from "./context-engine.internal.js";
 import { logError, logErrorCritical } from "./logger.js";
@@ -421,7 +423,7 @@ function _recordDecision(decision: ShouldRecallResult, sessionHash: string): voi
     const last = _lastLoggedAt.get(k) || 0;
     if (Date.now() - last > _SKIP_LOG_INTERVAL_MS) {
       console.log(
-        `[memclaw] recall skipped: reason=${decision.reason} ` +
+        `[caura] recall skipped: reason=${decision.reason} ` +
           `policy=${RECALL_POLICY} session=${sessionHash}`,
       );
       _lastLoggedAt.set(k, Date.now());
@@ -484,7 +486,7 @@ const recallCache = new Map<string, { text: string; ts: number }>();
 
 // --- ContextEngine class ---
 
-export class MemClawContextEngine {
+export class CauraContextEngine {
   private config: Record<string, unknown>;
 
   /**
@@ -501,8 +503,8 @@ export class MemClawContextEngine {
    * it ``true``.
    */
   readonly info = {
-    id: "memclaw",
-    name: "MemClaw Context Engine",
+    id: PLUGIN_ID,
+    name: "Caura Context Engine",
     ownsCompaction: true,
   };
 
@@ -554,8 +556,8 @@ export class MemClawContextEngine {
     // 100% of residual warn noise comes from this exact bootstrap path.)
     const bootAgentId = resolveAgentIdQuiet(this.config);
     console.log(
-      `[memclaw] ContextEngine bootstrap: agent=${bootAgentId}, ` +
-        `fleet=${MEMCLAW_FLEET_ID || "(unset)"}, ` +
+      `[caura] ContextEngine bootstrap: agent=${bootAgentId}, ` +
+        `fleet=${CAURA_FLEET_ID || "(unset)"}, ` +
         `config keys=${Object.keys(this.config || {}).join(",") || "(empty)"}`,
     );
 
@@ -571,7 +573,12 @@ export class MemClawContextEngine {
         agent_id: "__health_check__",
         content: testContent,
         memory_type: "fact",
-        tags: ["__smoke_test__"],
+        // SAFE-01: ``tags`` is not a MemoryCreate field and never has been —
+        // the server dropped it in silence on every one of these writes. The
+        // caller-owned bag is ``metadata`` (its ``tags`` key is explicitly
+        // preserved from enrichment overwrite, C25), and POST /memories now
+        // 422s on an undeclared top-level key.
+        metadata: { tags: ["__smoke_test__"] },
       })) as Record<string, unknown>;
       writtenId =
         (wr?.id as string) ||
@@ -579,7 +586,7 @@ export class MemClawContextEngine {
         ((wr?.data as Record<string, unknown>)?.id as string) ||
         null;
       if (!writtenId) {
-        console.warn("[memclaw] bootstrap: could not extract memory ID — smoke test memory may not be cleaned up");
+        console.warn("[caura] bootstrap: could not extract memory ID — smoke test memory may not be cleaned up");
       }
 
       let top: Record<string, unknown> | undefined;
@@ -599,15 +606,15 @@ export class MemClawContextEngine {
 
       if (!top) {
         console.error(
-          "[memclaw] SMOKE TEST FAILED: search returned no results — check EMBEDDING_PROVIDER",
+          "[caura] SMOKE TEST FAILED: search returned no results — check EMBEDDING_PROVIDER",
         );
       } else if (score < 0.7) {
         console.error(
-          `[memclaw] SMOKE TEST WARNING: score ${score.toFixed(3)} < 0.7 — embeddings may be degraded`,
+          `[caura] SMOKE TEST WARNING: score ${score.toFixed(3)} < 0.7 — embeddings may be degraded`,
         );
       } else {
         console.log(
-          `[memclaw] Smoke test passed (score: ${score.toFixed(3)})`,
+          `[caura] Smoke test passed (score: ${score.toFixed(3)})`,
         );
       }
     } catch (e: unknown) {
@@ -647,7 +654,7 @@ export class MemClawContextEngine {
     // on-disk buffer the interview_request handler reads. Fire-and-forget —
     // the write chain inside the buffer preserves ordering, and a disk
     // error must never break the turn.
-    if (MEMCLAW_INTERVIEWER) {
+    if (CAURA_INTERVIEWER) {
       const bufContent =
         typeof message.content === "string"
           ? message.content
@@ -692,10 +699,11 @@ export class MemClawContextEngine {
         await apiCall("POST", "/memories", {
           tenant_id: tid,
           agent_id: agentId,
-          fleet_id: MEMCLAW_FLEET_ID || undefined,
+          fleet_id: CAURA_FLEET_ID || undefined,
           content: truncated,
           memory_type: "episode",
-          tags: ["auto-ingest", "user-message"],
+          // SAFE-01 — see the bootstrap smoke-test write above.
+          metadata: { tags: ["auto-ingest", "user-message"] },
         });
         sessionIngestCounts.set(sessionKey, writeCount + 1);
       } catch (e: unknown) {
@@ -771,7 +779,7 @@ export class MemClawContextEngine {
       const stack =
         err instanceof Error && err.stack ? err.stack : String(err);
       console.error(
-        `[memclaw] assemble: unexpected error (returning safe fallback)\n${stack}`,
+        `[caura] assemble: unexpected error (returning safe fallback)\n${stack}`,
       );
       return { messages: safeMessages, systemPromptAddition: "", estimatedTokens: 0 };
     }
@@ -820,16 +828,16 @@ export class MemClawContextEngine {
       params as unknown as Record<string, unknown>,
       this.config,
     );
-    const fleetId = MEMCLAW_FLEET_ID || undefined;
+    const fleetId = CAURA_FLEET_ID || undefined;
 
     // --- Section 1: Education (always emitted; cheap, static) ---
-    const educationText = memclawPromptSectionText(new Set(MEMCLAW_TOOLS));
+    const educationText = cauraPromptSectionText(new Set(CAURA_TOOLS));
     const identityBlock =
       `\n**Your identity**: agent_id=\`${agentId}\`` +
       (fleetId ? `, fleet_id=\`${fleetId}\`` : "") +
-      (MEMCLAW_TENANT_ID ? `, tenant_id=\`${MEMCLAW_TENANT_ID}\`` : "") +
+      (CAURA_TENANT_ID ? `, tenant_id=\`${CAURA_TENANT_ID}\`` : "") +
       "\n";
-    const operatorPrompt = process.env.MEMCLAW_EDUCATION_PROMPT || "";
+    const operatorPrompt = readEnv(["CAURA_EDUCATION_PROMPT", "MEMCLAW_EDUCATION_PROMPT"]) || "";  // legacy-name-ok: rule 3 dual-read alias
     const operatorBlock = operatorPrompt
       ? `\n## Operator Instructions\n${operatorPrompt}\n`
       : "";
@@ -983,7 +991,7 @@ export class MemClawContextEngine {
           );
           recallBlock =
             "\n## Recalled Memory Context\n" +
-            "The following memories were retrieved from MemClaw for this session:\n" +
+            "The following memories were retrieved from Caura for this session:\n" +
             lines.join("\n") +
             "\n";
         }
@@ -1049,7 +1057,7 @@ export class MemClawContextEngine {
    *
    *   1. **Persist** any pre-computed summary (passed in by OpenClaw
    *      when its compaction pipeline ran the summarization step
-   *      before invoking us) as a MemClaw episode memory tagged
+   *      before invoking us) as a Caura episode memory tagged
    *      ``auto-compaction``. This is the long-standing
    *      observability side-effect — surviving summaries get
    *      recallable later via ``caura_recall``.
@@ -1106,7 +1114,7 @@ export class MemClawContextEngine {
   async compact(
     context: CompactContext,
   ): Promise<{ ok: boolean; compacted: boolean; reason?: string; result?: unknown }> {
-    // 1. Persist OpenClaw's summary into MemClaw as an episode
+    // 1. Persist OpenClaw's summary into Caura as an episode
     // memory. This runs regardless of whether the delegation
     // succeeds below — even on a degraded environment the summary
     // is worth keeping if we can. Failure here is logged and
@@ -1122,10 +1130,11 @@ export class MemClawContextEngine {
         await apiCall("POST", "/memories", {
           tenant_id: tid,
           agent_id: agentId,
-          fleet_id: MEMCLAW_FLEET_ID || undefined,
+          fleet_id: CAURA_FLEET_ID || undefined,
           content: summary,
           memory_type: "episode",
-          tags: ["auto-compaction"],
+          // SAFE-01 — see the bootstrap smoke-test write above.
+          metadata: { tags: ["auto-compaction"] },
         });
       } catch (e: unknown) {
         logError("Failed to persist compaction summary", e);
@@ -1288,9 +1297,9 @@ export class MemClawContextEngine {
     };
   }
 
-  /** afterTurn — auto-write turn summary. Enabled by default; opt out with MEMCLAW_AUTO_WRITE_TURNS=false. */
+  /** afterTurn — auto-write turn summary. Enabled by default; opt out with CAURA_AUTO_WRITE_TURNS=false. */
   async afterTurn(context: AfterTurnContext): Promise<void> {
-    if (!MEMCLAW_AUTO_WRITE_TURNS) return;
+    if (!CAURA_AUTO_WRITE_TURNS) return;
 
     const lastAssistant = context?.messages
       ?.filter((m) => m.role === "assistant")
@@ -1316,10 +1325,11 @@ export class MemClawContextEngine {
       await apiCall("POST", "/memories", {
         tenant_id: tid,
         agent_id: agentId,
-        fleet_id: MEMCLAW_FLEET_ID || undefined,
+        fleet_id: CAURA_FLEET_ID || undefined,
         content: turnSummary,
         memory_type: "episode",
-        tags: ["auto-turn-summary"],
+        // SAFE-01 — see the bootstrap smoke-test write above.
+        metadata: { tags: ["auto-turn-summary"] },
       });
     } catch (e: unknown) {
       // 409 dedup rejection is expected when the same agent emits identical
@@ -1331,15 +1341,58 @@ export class MemClawContextEngine {
     }
   }
 
-  async prepareSubagentSpawn(
-    context: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return {
-      memclawAgentId: resolveAgentId(context, this.config),
-      memclawFleetId: MEMCLAW_FLEET_ID,
-    };
+  /**
+   * Nothing is prepared here, so there is nothing to roll back.
+   *
+   * OpenClaw's contract (``src/context-engine/types.ts``) is
+   * ``Promise<SubagentSpawnPreparation | undefined>``, where the preparation is
+   * ``{ rollback: () => void | Promise<void> }`` — a handle it invokes if the
+   * spawn fails after preparation succeeded.
+   *
+   * This previously returned two identity fields instead, and both problems
+   * with that were invisible to every gate we have:
+   *
+   * 1. The object was truthy but carried no ``rollback``. OpenClaw calls
+   *    ``await preparation?.rollback()`` inside a best-effort ``try/catch``, so
+   *    the optional chain did NOT short-circuit, the resulting TypeError was
+   *    swallowed, and its cleanup helper reported failure on every failed spawn
+   *    rather than "nothing to undo".
+   * 2. Nothing read either field — not this repo, not OpenClaw, no test. They
+   *    were computed and dropped. And the agent id could never resolve from
+   *    what OpenClaw passes: the params carry ``parentSessionKey`` /
+   *    ``childSessionKey``, while the resolver looks for a bare ``sessionKey``,
+   *    so every spawn fell through to the install default and emitted the loud
+   *    "could not resolve agent ID" warning that ``resolveAgentIdQuiet``'s
+   *    docstring calls a real bug. It was: we were reading the wrong key.
+   *
+   * ``undefined`` is the honest answer. The optional chain short-circuits and
+   * the rollback path becomes a correct no-op.
+   *
+   * If subagent identity propagation is ever actually wanted, this return value
+   * is not the channel for it — OpenClaw never reads it. The parent's identity
+   * is available, but as ``parentSessionKey``.
+   *
+   * The parameter is typed to OpenClaw's real shape rather than
+   * ``Record<string, unknown>`` so the next reader can see what arrives. ``tsc``
+   * cannot check that for us: the plugin has no ``openclaw`` dependency and
+   * reaches the SDK at runtime (see ``openclaw-sdk-bridge.ts``).
+   */
+  async prepareSubagentSpawn(_params: {
+    parentSessionKey: string;
+    childSessionKey: string;
+    contextMode?: "isolated" | "fork";
+    parentSessionId?: string;
+    parentSessionFile?: string;
+    childSessionId?: string;
+    childSessionFile?: string;
+    ttlMs?: number;
+  }): Promise<undefined> {
+    return undefined;
   }
 
   async onSubagentEnded(_context: unknown): Promise<void> {}
 }
 
+// The pre-rename class name is public API — dist/ is consumed outside this repo.
+export const MemClawContextEngine = CauraContextEngine;  // legacy-name-ok: rule 3 exported API alias
+export type MemClawContextEngine = CauraContextEngine;  // legacy-name-ok: rule 3 exported API alias

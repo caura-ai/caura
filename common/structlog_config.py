@@ -22,7 +22,7 @@ their own `environment` and `log_level` so this module stays agnostic of
 per-service settings schemas.
 
 Vendoring constraint: this file is copied byte-identically into
-caura-memclaw-enterprise (scripts/vendored_files_manifest.json there,
+caura-enterprise (scripts/vendored_files_manifest.json there,
 policy=identical), whose CI runs `ruff format --check common/` at ruff's
 default 88-column width — OSS CI does not format-check common/ at all.
 Keep code format-stable at 88 columns (magic-trailing-comma collections

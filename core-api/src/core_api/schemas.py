@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, create_model, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, create_model, model_validator
 
 from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
 from core_api.constants import (
@@ -21,15 +21,50 @@ from core_api.constants import (
     MemoryType,
 )
 
+# --- Request-body strictness (SAFE-01) ---
+#
+# WRITE request bodies reject unknown fields; SEARCH / FILTER / QUERY request
+# bodies keep accepting them. That asymmetry is deliberate and is the whole
+# point of this constant existing instead of a bare ``extra="forbid"`` sprinkled
+# around — a future "tidy-up" that makes the two sides match would reintroduce
+# one of the two bugs below, so each side is pinned by its own test
+# (``tests/test_unknown_field_rejection.py``).
+#
+# WHY WRITES ARE STRICT. Pydantic's default is ``extra="ignore"``: a field the
+# model does not declare is dropped without a word. On a write that means a
+# misspelled key ("contnet", "memory_typ", "meta_data") returns 201 Created with
+# the caller's data silently missing, and nothing in the response says so. Found
+# wet-testing register/write (SAFE-01). ``extra="forbid"`` turns that into a 422
+# naming the offending field — see ``app.validation_exception_handler``, which
+# lifts ``extra_forbidden`` errors into the canonical envelope's message and a
+# ``details.unknown_fields`` list.
+#
+# WHY SEARCH IS NOT. A filter that arrives misspelled returns *more* rows, not
+# corrupted ones — the caller sees the wrong answer, not a wrong write. And the
+# C1+C2 incident (see ``SearchRequest`` below) left the search surface carrying
+# historical spellings that are absorbed by ``AliasChoices``; the permissiveness
+# there is a compatibility promise to existing integrators, not an oversight.
+# Product decision, not a detail to optimise.
+#
+# Declared aliases are NOT extra fields, so ``forbid`` never breaks an
+# ``AliasChoices`` spelling. No model in the strict set below declares one
+# today; the alias-safety test pins that the search aliases still work.
+STRICT_WRITE_BODY = ConfigDict(extra="forbid")
+
+
 # --- Memory ---
 
 
 class EntityLinkIn(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     entity_id: UUID
     role: str
 
 
 class MemoryCreate(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
     # Optional like ``BulkMemoryCreate.agent_id``: omitting it is allowed only
@@ -95,6 +130,20 @@ class BulkMemoryItem(BaseModel):
     #     ``min_length=1``) + oversized_content_errors (``> MAX_CONTENT_LENGTH``).
     #   - weight range [0.0, 1.0] → weight_errors.
     #   - status enum → status_errors.
+    #   - unknown field names → unknown_field_errors (SAFE-01).
+    #
+    # SAFE-01 note. This model is the one write body that is NOT
+    # ``extra="forbid"``, and the reason is the policy above, not an oversight:
+    # ``forbid`` raises during parsing of the whole ``BulkMemoryCreate``, so one
+    # item with a typo'd key would 422 the entire batch and discard its valid
+    # siblings — exactly what this model exists to prevent. ``extra="allow"``
+    # instead of the pydantic default ``extra="ignore"`` so the unknown keys
+    # survive parsing into ``model_extra``; ``create_memories_bulk`` reads them
+    # there and emits one ``status="error"`` row per offending item. Same
+    # outcome as ``forbid`` — the caller is told, by name, which field was not
+    # understood — delivered per item instead of per batch.
+    model_config = ConfigDict(extra="allow")
+
     memory_type: str | None = Field(default=None, description=MEMORY_TYPES_WRITE_DESCRIPTION)
     content: str
     weight: float | None = Field(default=None)
@@ -137,9 +186,14 @@ class BulkMemoryItem(BaseModel):
 
 
 class BulkMemoryCreate(BaseModel):
+    # Strict at the ENVELOPE level only: a typo among the five keys below is a
+    # whole-request mistake, so 422-ing the request is the right answer. Per-item
+    # unknown keys are handled inside ``BulkMemoryItem`` (see its note).
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
-    # Optional on the wire so memclawd broker calls (cloud-data-plane.md
+    # Optional on the wire so caura-daemon broker calls (cloud-data-plane.md
     # §2.4) can omit it — the route handler defaults to
     # ``broker:<install_uuid>`` when the caller authenticates with an
     # install credential. Non-broker callers (dashboard / SDK) still
@@ -200,6 +254,8 @@ class BulkMemoryResponse(BaseModel):
 
 
 class RedistributeRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     memory_ids: list[UUID] = Field(..., min_length=1, max_length=500)
     target_agent_id: str = Field(..., min_length=1, max_length=256)
 
@@ -213,6 +269,8 @@ class RedistributeResponse(BaseModel):
 
 
 class MemoryUpdate(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     content: str | None = Field(default=None, min_length=1, max_length=MAX_CONTENT_LENGTH)
     memory_type: MemoryType | None = Field(default=None, description=MEMORY_TYPES_WRITE_DESCRIPTION)
     weight: float | None = Field(default=None, ge=0.0, le=1.0)
@@ -276,6 +334,24 @@ class UsageSummary(BaseModel):
     writes_remaining: int | None = None
 
 
+class ScoreParts(BaseModel):
+    """D12 — per-factor breakdown of the ranking composite ``MemoryOut.score``.
+
+    Every factor mirrors a column the scored-search SQL already computes and
+    returns per row; this model only surfaces them. All fields are nullable:
+    FTS-only rows have no ``vec_sim``, entity-lookup short-circuit rows have no
+    FTS rank, and successor-injected rows were never scored at all.
+    """
+
+    vec_sim: float | None = None
+    fts_score: float | None = None
+    freshness: float | None = None
+    entity_boost: float | None = None
+    recall_boost: float | None = None
+    temporal_boost: float | None = None
+    status_penalty: float | None = None
+
+
 class MemoryOut(BaseModel):
     id: UUID
     tenant_id: str
@@ -314,10 +390,27 @@ class MemoryOut(BaseModel):
     # embedding only, enrichment defers either way, and the bulk path sets neither
     # flag — so a bulk caller cannot read pendingness off its own write response.
     metadata: dict | None
+    # C25 — platform-written telemetry/enrichment (llm_ms, write_latency_ms,
+    # semantic_dedup_ms, summary, tags, pii flags, write-mode flags …) exposed
+    # under their own namespace. For one release the same keys ALSO remain in
+    # ``metadata`` (dual-emit) — reading them from ``metadata`` is deprecated.
+    # Derived for historical rows too; None when nothing platform-written
+    # exists. A caller's own ``metadata.summary`` / ``metadata.tags`` are no
+    # longer overwritten by enrichment (the platform's copy lives here).
+    system_metadata: dict | None = None
     created_at: datetime
     expires_at: datetime | None
     entity_links: list[EntityLinkOut] = []
     similarity: float | None = None
+    # D12 — the multiplicative ranking composite (similarity * freshness *
+    # entity/recall/temporal boosts * status_penalty) that actually ordered
+    # this row, plus its factors. ``similarity`` above stays the raw 0..1
+    # cosine (the ``min_similarity``-comparable value); ``score`` routinely
+    # exceeds 1.0 and is for explaining rank, not for threshold gating.
+    # Populated only on scored-search hits; None on list/get reads and on
+    # successor-injected rows, which were never scored.
+    score: float | None = None
+    score_parts: ScoreParts | None = None
     # RDF triple
     subject_entity_id: UUID | None = None
     predicate: str | None = None
@@ -387,6 +480,8 @@ class MemoryDetailResponse(BaseModel):
     # Exposed as ``metadata``; storage serialises the JSONB column as ``metadata_``
     # and the route renames it on the way out.
     metadata: dict | None = None
+    # C25 — platform-written view; same contract as ``MemoryOut.system_metadata``.
+    system_metadata: dict | None = None
     content_hash: str | None = None
     created_at: str | None = None
     expires_at: str | None = None
@@ -445,22 +540,65 @@ class PaginatedMemoryResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class SearchDiagnostic(BaseModel):
+    """D12 — retrieval trace returned when ``SearchRequest.diagnostic`` is true.
+
+    Answers "why did each result appear (and what got cut)": the full widened
+    candidate set with per-row score factors and exclusion reasons, the applied
+    knobs, and the strategy the classifier picked. Requesting it does NOT change
+    the ``items`` a caller gets back, and a diagnostic call never bumps
+    ``recall_count`` — it is inspection, not use.
+    """
+
+    retrieval_strategy: str | None = None
+    top_k_requested: int | None = None
+    min_similarity_applied: float | None = None
+    candidates_considered: int = 0
+    returned: int = 0
+    excluded_below_min_similarity: int = 0
+    excluded_by_top_k_trim: int = 0
+    # The resolved knob set the scoring SQL ran with (profile → tenant → constant,
+    # after any per-request ``min_similarity`` override).
+    search_params: dict = {}
+    # One entry per widened candidate: id/title/type/status + score + factors +
+    # ``excluded`` (None | "below_min_similarity" | "trimmed_by_top_k").
+    all_candidates: list[dict] = []
+
+
 class SearchResponse(BaseModel):
     """Envelope for search results — matches PaginatedMemoryResponse shape."""
 
     items: list[MemoryOut]
+    # D12 — present only when the request set ``diagnostic=true``.
+    diagnostic: SearchDiagnostic | None = None
 
 
 class SearchRequest(BaseModel):
+    # DELIBERATELY PERMISSIVE — do not add ``STRICT_WRITE_BODY`` here. SAFE-01
+    # made every WRITE body ``extra="forbid"`` and deliberately left the
+    # search/filter/query bodies alone; see the note at the top of this file for
+    # why the two sides differ. ``tests/test_unknown_field_rejection.py`` pins an
+    # unknown field on /search returning 2xx precisely so a later pass that
+    # "finishes the job" fails loudly instead of quietly breaking integrators.
     tenant_id: str
     fleet_ids: list[str] | None = None
     query: str = Field(min_length=1, max_length=MAX_QUERY_LENGTH)
     filter_agent_id: str | None = None
+    # C31/D2 — the short names are canonical (the spellings the MCP tools use);
+    # the historical `*_filter` forms stay accepted forever as aliases. Before
+    # this, `memory_type=fact` (the MCP spelling) was silently DROPPED by the
+    # extra="ignore" contract — the C1+C2 trap. When both spellings arrive,
+    # the long form wins (first in AliasChoices).
     memory_type_filter: MemoryType | None = Field(
         default=None,
+        validation_alias=AliasChoices("memory_type_filter", "memory_type"),
         description=MEMORY_TYPES_FILTER_DESCRIPTION,
     )
-    status_filter: str | None = Field(default=None, pattern=MEMORY_STATUSES_PATTERN)
+    status_filter: str | None = Field(
+        default=None,
+        pattern=MEMORY_STATUSES_PATTERN,
+        validation_alias=AliasChoices("status_filter", "status"),
+    )
     valid_at: datetime | None = None
     top_k: int = Field(
         default=DEFAULT_SEARCH_TOP_K,
@@ -468,6 +606,23 @@ class SearchRequest(BaseModel):
         le=MAX_SEARCH_TOP_K,
         description=f"Maximum results to return (1-{MAX_SEARCH_TOP_K}, default {DEFAULT_SEARCH_TOP_K}).",
     )
+    # D12 — per-request cosine floor. Overrides the resolved profile/tenant
+    # default for THIS call only (request beats profile beats tenant beats
+    # constant). Gates on the raw ``vec_sim`` — the same value returned in
+    # ``MemoryOut.similarity`` — never on the boosted composite ``score``.
+    # FTS-only rows (no embedding yet) bypass the floor by contract.
+    min_similarity: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Per-request similarity floor (0.0-1.0) applied to the raw cosine; "
+            "overrides the agent/tenant search-profile value for this call."
+        ),
+    )
+    # D12 — when true, the response carries a ``diagnostic`` retrieval trace
+    # (full candidate set, score factors, exclusion reasons, applied knobs).
+    # Results are unchanged and no recall_count is bumped on a diagnostic call.
     diagnostic: bool = False
 
 
@@ -475,6 +630,8 @@ class SearchRequest(BaseModel):
 
 
 class EntityUpsert(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
     entity_type: str
@@ -510,6 +667,8 @@ class EntityOut(BaseModel):
 
 
 class RelationUpsert(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
     from_entity_id: UUID
@@ -523,6 +682,8 @@ class RelationUpsert(BaseModel):
 
 
 class IngestRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
     agent_id: str = "ingest-agent"
@@ -539,6 +700,8 @@ class IngestRequest(BaseModel):
 
 
 class IngestFact(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     content: str
     suggested_type: str = DEFAULT_MEMORY_TYPE
     # Provenance: ``ingest_preview`` stamps this on every fact it returns
@@ -557,6 +720,8 @@ class IngestFact(BaseModel):
 
 
 class IngestCommitRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
     agent_id: str = "ingest-agent"
@@ -601,6 +766,8 @@ class AgentOut(BaseModel):
 
 
 class AgentTrustUpdate(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     trust_level: int = Field(ge=MIN_TRUST_LEVEL, le=MAX_TRUST_LEVEL)
     fleet_id: str | None = None
 
@@ -626,9 +793,16 @@ _PROFILE_FIELDS: dict[str, Any] = {
     for name in AGENT_TUNABLE_KEYS
 }
 
+# ``__config__`` rather than a ``model_config`` entry in ``_PROFILE_FIELDS``:
+# ``create_model`` treats every kwarg it doesn't recognise as a FIELD, so a
+# ``model_config`` key there would declare a field literally named
+# "model_config". Strict for the same reason as every other mutation body — a
+# tune that misspells ``min_similarity`` currently returns 200 with the knob
+# untouched, which reads as "the knob did nothing" rather than "you typo'd it".
 SearchProfileUpdate = create_model(
     "SearchProfileUpdate",
     __doc__="Per-agent search tuning knobs. All fields optional — only override what you set.",
+    __config__=STRICT_WRITE_BODY,
     **_PROFILE_FIELDS,
 )
 

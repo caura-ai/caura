@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.schemas import AgentOut, AgentTrustUpdate, SearchProfileUpdate
@@ -69,7 +70,10 @@ async def patch_agent_trust(
     return AgentOut.model_validate(agent)
 
 
-@router.patch("/agents/{agent_id}/fleet")
+@router.patch(
+    "/agents/{agent_id}/fleet",
+    responses={200: {"model": _oar.AgentFleetPatchResponse}},
+)
 async def update_agent_fleet(
     agent_id: str,
     body: dict,

@@ -1,7 +1,7 @@
 /**
- * Tests for the MemClaw plugin tool surface.
+ * Tests for the Caura plugin tool surface.
  *
- * Guards the contract between `plugin/tools.json` (SoT), `MEMCLAW_TOOLS`
+ * Guards the contract between `plugin/tools.json` (SoT), `CAURA_TOOLS`
  * (registration order), `PARAM_SCHEMAS` (runtime input validation), and
  * `ENDPOINT_DISPATCH` (HTTP routing).
  */
@@ -10,11 +10,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { MEMCLAW_TOOLS } from "./tools.js";
+import { CAURA_TOOLS } from "./tools.js";
 import { createToolFromSpec } from "./tool-definitions.js";
 import { TOOL_SPECS, TOOL_SPECS_BY_NAME, getSpec } from "./tool-specs.js";
 import { buildToolsMd } from "./educate.js";
-import { memclawPromptSectionText } from "./prompt-section.js";
+import { cauraPromptSectionText } from "./prompt-section.js";
 
 describe("tool-specs loader", () => {
   test("loads a non-empty ordered spec list from tools.json", () => {
@@ -46,9 +46,9 @@ describe("tool-specs loader", () => {
   });
 });
 
-describe("MEMCLAW_TOOLS surface", () => {
+describe("CAURA_TOOLS surface", () => {
   test("is the expected list of plugin tools", () => {
-    assert.deepEqual([...MEMCLAW_TOOLS], [
+    assert.deepEqual([...CAURA_TOOLS], [
       "caura_recall",
       "caura_write",
       "caura_manage",
@@ -68,32 +68,35 @@ describe("MEMCLAW_TOOLS surface", () => {
   });
 
   test("every listed tool is plugin_exposed in tools.json", () => {
-    for (const name of MEMCLAW_TOOLS) {
+    for (const name of CAURA_TOOLS) {
       const spec = TOOL_SPECS_BY_NAME[name];
       assert.ok(spec, `${name} missing from tools.json`);
       assert.equal(spec.plugin_exposed, true);
     }
   });
 
-  test("every plugin_exposed tool in tools.json is listed in MEMCLAW_TOOLS", () => {
+  test("every plugin_exposed tool in tools.json is listed in CAURA_TOOLS", () => {
     const exposed = TOOL_SPECS.filter((s) => s.plugin_exposed).map((s) => s.name);
     for (const name of exposed) {
       assert.ok(
-        (MEMCLAW_TOOLS as readonly string[]).includes(name),
-        `${name} is plugin_exposed in tools.json but absent from MEMCLAW_TOOLS`,
+        (CAURA_TOOLS as readonly string[]).includes(name),
+        `${name} is plugin_exposed in tools.json but absent from CAURA_TOOLS`,
       );
     }
   });
 
-  test("STM and placeholder tools are NOT in MEMCLAW_TOOLS", () => {
-    for (const hidden of [
-      "memclaw_notes_read",
-      "memclaw_bulletin_read",
-      "memclaw_promote",
-    ]) {
-      assert.ok(
-        !(MEMCLAW_TOOLS as readonly string[]).includes(hidden),
-        `${hidden} should not be plugin-exposed`,
+  test("every listed tool name is canonical (caura_*)", () => {
+    // Legacy names are dispatch aliases on the server, never listed on
+    // the plugin surface — so the meaningful invariant is that every
+    // name here (and in tools.json) carries the canonical prefix.
+    for (const name of CAURA_TOOLS) {
+      assert.match(name, /^caura_/, `${name}: must carry the caura_ prefix`);
+    }
+    for (const spec of TOOL_SPECS) {
+      assert.match(
+        spec.name,
+        /^caura_/,
+        `${spec.name}: tools.json must list canonical names only`,
       );
     }
   });
@@ -101,7 +104,7 @@ describe("MEMCLAW_TOOLS surface", () => {
 
 describe("createToolFromSpec factory", () => {
   test("produces a valid AgentTool for every listed name", () => {
-    for (const name of MEMCLAW_TOOLS) {
+    for (const name of CAURA_TOOLS) {
       const tool = createToolFromSpec(name);
       assert.equal(tool.name, name);
       assert.ok(tool.label.startsWith("Caura "), `${name}: label`);
@@ -154,10 +157,39 @@ describe("createToolFromSpec factory", () => {
     assert.ok(list.properties.include_deleted);
   });
 
-  test("openclaw.plugin.json contracts.tools matches MEMCLAW_TOOLS exactly", () => {
+  // ``GET /memories`` and ``GET /memories/stats`` declare ``scope`` as an
+  // OPT-IN query param (``Query(default=None)``), and an omitted one is a
+  // different request from ``scope='agent'``: it skips the trust ladder and
+  // takes its author filter from ``written_by ?? agent_id``. So neither may
+  // declare a schema default — a client honouring it would start sending
+  // 'agent', which adds the trust-1 gate and turns an agent-less install's
+  // tenant-wide team/org read into a 400. Nor may the description call any
+  // value "the default", which is what it used to claim.
+  //
+  // ``caura_insights`` / ``caura_evolve`` are deliberately not covered: their
+  // ``scope`` travels in a JSON body whose Pydantic model really does
+  // ``Field(default="agent")``, so calling 'agent' the default is true there.
+  test("caura_list / caura_stats declare no default for scope", () => {
+    for (const name of ["caura_list", "caura_stats"]) {
+      const schema = createToolFromSpec(name).parameters as any;
+      const scope = schema.properties.scope;
+      assert.ok(scope, `${name}: scope property missing`);
+      assert.deepEqual(scope.enum, ["agent", "fleet", "all"], `${name}: scope enum`);
+      assert.ok(
+        !("default" in scope),
+        `${name}: scope must not declare a schema default — an omitted scope is not scope='agent'`,
+      );
+      assert.ok(
+        !/\(default/.test(scope.description),
+        `${name}: scope description must not call a value "the default": ${scope.description}`,
+      );
+    }
+  });
+
+  test("openclaw.plugin.json contracts.tools matches CAURA_TOOLS exactly", () => {
     // OpenClaw runtime requires plugins to declare ``contracts.tools``
     // before it accepts ``api.registerTool`` calls. The list MUST match
-    // ``MEMCLAW_TOOLS`` — drift here means OpenClaw silently rejects
+    // ``CAURA_TOOLS`` — drift here means OpenClaw silently rejects
     // tool registration at boot ("plugin must declare contracts.tools
     // before registering agent tools" in the gateway log) and every
     // agent loses access to the tool.
@@ -171,8 +203,8 @@ describe("createToolFromSpec factory", () => {
     assert.ok(Array.isArray(declared), "manifest must declare contracts.tools");
     assert.deepEqual(
       [...declared].sort(),
-      [...MEMCLAW_TOOLS].sort(),
-      "contracts.tools in openclaw.plugin.json must match MEMCLAW_TOOLS",
+      [...CAURA_TOOLS].sort(),
+      "contracts.tools in openclaw.plugin.json must match CAURA_TOOLS",
     );
   });
 
@@ -193,7 +225,7 @@ describe("drift checks across tool surface artefacts", () => {
   // asserts presence by name (not a signature card). Without it, adding a
   // tool (e.g. caura_stats in #64) silently leaves SKILL.md a version
   // behind and agents see the wrong tool surface.
-  test("SKILL.md names every tool in MEMCLAW_TOOLS", () => {
+  test("SKILL.md names every tool in CAURA_TOOLS", () => {
     const skillPath = join(
       import.meta.dirname,
       "..",
@@ -202,7 +234,7 @@ describe("drift checks across tool surface artefacts", () => {
       "SKILL.md",
     );
     const skill = readFileSync(skillPath, "utf-8");
-    for (const name of MEMCLAW_TOOLS) {
+    for (const name of CAURA_TOOLS) {
       assert.ok(
         skill.includes(name),
         `SKILL.md does not mention ${name}`,
@@ -243,9 +275,9 @@ describe("drift checks across tool surface artefacts", () => {
 
   // TOOLS.md (per-workspace bootstrap) is built from buildToolsMd() and
   // injected into every turn. It must mention every exposed tool by name.
-  test("buildToolsMd output mentions every tool in MEMCLAW_TOOLS", () => {
+  test("buildToolsMd output mentions every tool in CAURA_TOOLS", () => {
     const md = buildToolsMd();
-    for (const name of MEMCLAW_TOOLS) {
+    for (const name of CAURA_TOOLS) {
       assert.ok(
         md.includes("`" + name + "`"),
         `buildToolsMd output missing ${name}`,
@@ -255,18 +287,18 @@ describe("drift checks across tool surface artefacts", () => {
 
   // PARAM_SCHEMAS / ENDPOINT_DISPATCH are not exported, but
   // createToolFromSpec throws when either is missing — iterating
-  // MEMCLAW_TOOLS via the factory covers the "MEMCLAW_TOOLS ⊆ {schemas,
+  // CAURA_TOOLS via the factory covers the "CAURA_TOOLS ⊆ {schemas,
   // dispatch}" direction (already in the createToolFromSpec test
   // above). The reverse direction — extra entries in either map that
-  // are NOT in MEMCLAW_TOOLS — is guarded indirectly: any extra entry
+  // are NOT in CAURA_TOOLS — is guarded indirectly: any extra entry
   // would still need a tools.json spec to be reachable, and the
   // existing "every plugin_exposed tool in tools.json is listed in
-  // MEMCLAW_TOOLS" test catches that.
-  test("MEMCLAW_TOOLS == plugin-exposed tools in tools.json (set equality)", () => {
+  // CAURA_TOOLS" test catches that.
+  test("CAURA_TOOLS == plugin-exposed tools in tools.json (set equality)", () => {
     const exposed = new Set(
       TOOL_SPECS.filter((s) => s.plugin_exposed).map((s) => s.name),
     );
-    const listed = new Set(MEMCLAW_TOOLS);
+    const listed = new Set(CAURA_TOOLS);
     assert.deepEqual(listed, exposed);
   });
 
@@ -275,10 +307,10 @@ describe("drift checks across tool surface artefacts", () => {
   // (per-turn), AGENTS.md (per-turn), and SKILL.md (on-demand).
   // Regression guard against the pre-C3 verbose form.
   describe("prompt-section.ts (per-turn system-prompt fragment)", () => {
-    const tools = memclawPromptSectionText(new Set(MEMCLAW_TOOLS));
+    const tools = cauraPromptSectionText(new Set(CAURA_TOOLS));
 
     test("includes header, identity, and pointer to the memclaw skill (by name)", () => {
-      assert.ok(tools.includes("## MemClaw Memory"), "missing header");
+      assert.ok(tools.includes("## Caura Memory"), "missing header");
       assert.ok(tools.includes("`agent_id`"), "missing agent_id mention");
       assert.ok(tools.includes("never fabricate") || tools.includes("Never fabricate"),
         "missing identity 'never fabricate' clause");
@@ -303,7 +335,7 @@ describe("drift checks across tool surface artefacts", () => {
     });
 
     test("lists all currently-available MemClaw tools by name", () => {
-      for (const name of MEMCLAW_TOOLS) {
+      for (const name of CAURA_TOOLS) {
         assert.ok(
           tools.includes(name),
           `prompt-section must list ${name} in available-tools cue`,
@@ -352,7 +384,7 @@ describe("drift checks across tool surface artefacts", () => {
     });
 
     test("emits nothing when no MemClaw tools are available", () => {
-      const empty = memclawPromptSectionText(new Set());
+      const empty = cauraPromptSectionText(new Set());
       assert.equal(empty, "", "must emit empty string when no tools available");
     });
   });

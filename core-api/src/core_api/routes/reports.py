@@ -2,7 +2,7 @@
 
 Daily/weekly governed activity report — "what each agent did" — backing the
 report → product-page → agent-self-report flow (an agent fetches its own report
-and surfaces it in its 1:1 with its owner, or in its group). MemClaw returns the
+and surfaces it in its 1:1 with its owner, or in its group). Caura returns the
 governed data; the agent's runtime does the messaging.
 
 Two-check governed read (order matters):
@@ -444,7 +444,7 @@ async def get_report(
         ][:_LEARNING_LIMIT]
 
         # Value highlights: the most-reused (all-time) durable knowledge authored
-        # in-window. NOTE: recall_count is a lifetime counter — MemClaw has no
+        # in-window. NOTE: recall_count is a lifetime counter — Caura has no
         # per-period recall log — so this is not "reused *this* period".
         value_highlights = [
             {

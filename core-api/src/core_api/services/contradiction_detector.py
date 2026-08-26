@@ -1092,6 +1092,21 @@ def _judge_contradiction(raw) -> tuple[bool, float]:
 # ---------------------------------------------------------------------------
 
 
+def _judge_effort_kwargs() -> dict:
+    """``complete_json`` kwargs for every contradiction-judge call (E3).
+
+    The judge is the dominant OpenAI spend (up to 20 candidates per write,
+    ~80% of the bill in OUTPUT tokens — mostly hidden reasoning tokens on
+    gpt-5-family models). ``contradiction_reasoning_effort`` caps that
+    per-call reasoning budget. Returned as a kwargs dict, EMPTY when
+    unset, rather than passing ``reasoning_effort=None`` positionally:
+    an unset knob must not change the wire request, and test doubles that
+    predate the parameter keep working without it.
+    """
+    effort = settings.contradiction_reasoning_effort
+    return {"reasoning_effort": effort} if effort else {}
+
+
 async def _llm_contradiction_check(
     new_content: str,
     old_content: str,
@@ -1117,7 +1132,7 @@ async def _llm_contradiction_check(
     prompt = CONTRADICTION_PROMPT.format(new_content=new_content[:500], old_content=old_content[:500])
 
     async def _do_check(llm) -> tuple[bool, float]:
-        raw = await llm.complete_json(prompt)
+        raw = await llm.complete_json(prompt, **_judge_effort_kwargs())
         return _judge_contradiction(raw)
 
     return await call_with_fallback(
@@ -1137,9 +1152,17 @@ async def _llm_contradiction_check(
 # single call (~Nx fewer LLM calls, the prod cost driver). The per-candidate raw
 # output is fed through the SAME ``_judge_contradiction`` gates by the caller, so
 # verdict semantics — Gate 1 (cross-subject), Gate 2 (non_conflict_reason),
-# ``_pick_older`` direction — are unchanged. It also emits ``relationship`` /
-# ``diagnosis`` per candidate so a downstream conflict-record write (A55 engine
-# path) can reuse it with no second LLM call.
+# ``_pick_older`` direction — are unchanged.
+#
+# E4 — the reply is SPARSE: a full judgment only for contradicting candidates
+# (``hits``), a bare index for everything else (``clean``). Rationale, measured
+# on prod-shaped 20-candidate batches: the dense reply cost ~35 output tokens x
+# 20 candidates (~700/call) when typically 0-4 candidates contradict — the
+# filler was ~80% of the judge's OpenAI bill. Same candidates judged, same
+# gates on every hit; only the answer got shorter. The two fields this dropped
+# (``relationship``/``diagnosis``) were emitted "for A55 reuse" but never
+# consumed — ``record_detected_conflicts`` receives only (candidate, path,
+# confidence) and the A55 engine derives its own classification.
 BATCH_CONTRADICTION_PROMPT = """\
 You are a contradiction detector for a business memory system.
 
@@ -1174,19 +1197,65 @@ For EACH candidate index decide, applying the rules in order:
    non_conflict_reason is "none" AND the two assert mutually exclusive states in
    the same time frame. Updates / corrections about the same subject ARE
    contradictions ("X lives in Tel Aviv" vs "X lives in Haifa").
-4. relationship (exactly one): "exact_value" (same attribute, different single
-   value); "negation" (asserts P vs not-P); "entailed" (one implies or restates
-   the other); "constraint" (multi-valued predicate, both hold); "probabilistic"
-   (hedged/uncertain); "scope_apparent" (same attribute, different implicit
-   qualifiers); "refinement" (one more specific).
-5. diagnosis (exactly one): "correction" (old was wrong); "temporal_change"
-   (state changed over time); "scope_difference"; "entity_mismatch" (actually
-   different entities); "write_error"; "unresolved".
 
-Reply with ONLY a JSON object mapping each candidate index (as a STRING) to its
-judgment, no prose, no markdown fences:
-{{"0": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true, "relationship": "exact_value", "diagnosis": "temporal_change"}}, "1": {{...}}}}
+Reply with ONLY a JSON object, no prose, no markdown fences, with exactly two
+keys. EVERY candidate index from 0 to N-1 must appear in exactly one of them:
+- "clean": array of every candidate index (integers) where contradicts is false.
+- "hits": object mapping each contradicting candidate index (as a STRING) to
+  its judgment with the three fields above.
+{{"clean": [1, 2, 4], "hits": {{"0": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true}}, "3": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true}}}}}}
+Calibration: in most batches FEW OR NO candidates contradict — an empty "hits"
+is the normal answer, not a failure to find something. Apply the three rules to
+every candidate independently, exactly as if you were judging that one pair on
+its own. A candidate goes in "hits" ONLY when all three rules pass decisively;
+uncertainty, partial overlap, related-but-compatible claims, or any applicable
+non_conflict_reason put it in "clean". Never add a hit because a batch "should"
+contain one. If NO candidate contradicts, "hits" is {{}} and "clean" lists every
+index.
 """
+
+
+def _expand_sparse_batch(obj: object, n: int) -> list[dict]:
+    """Expand a batch judge reply into one raw judgment dict per candidate,
+    aligned to input order (E4).
+
+    Primary shape is the sparse contract — ``{"clean": [indices], "hits":
+    {"idx": {judgment}}}`` — where only contradicting candidates carry a full
+    judgment. Every index that is not a well-formed ``hits`` entry (listed
+    clean, listed nowhere, or malformed) expands to ``{"contradicts": False}``:
+    byte-identical to what the dense parser produced for a non-hit, so
+    ``_judge_contradiction`` scores it exactly as before. Hits pass through
+    verbatim so Gate 1 / Gate 2 still veto an incoherent one.
+
+    The pre-E4 DENSE shape — index keys at the top level — is still accepted:
+    a fallback provider (or a stale prompt cache) that answers in the old
+    format must degrade to old behaviour, never to "everything is clean".
+    Detection order matters: ``clean``/``hits`` keys mark the sparse shape;
+    otherwise top-level index keys are read densely; anything else expands to
+    the safe default for every candidate.
+    """
+    if not isinstance(obj, dict):
+        return [{"contradicts": False} for _ in range(n)]
+
+    if "hits" in obj or "clean" in obj:
+        hits_raw = obj.get("hits")
+        hits = hits_raw if isinstance(hits_raw, dict) else {}
+        out: list[dict] = []
+        for i in range(n):
+            entry = hits.get(str(i))
+            if entry is None:
+                entry = hits.get(i)  # tolerate int keys
+            out.append(entry if isinstance(entry, dict) else {"contradicts": False})
+        return out
+
+    # Dense back-compat: the pre-E4 per-index mapping.
+    out = []
+    for i in range(n):
+        entry = obj.get(str(i))
+        if entry is None:
+            entry = obj.get(i)  # tolerate int keys
+        out.append(entry if isinstance(entry, dict) else {"contradicts": False})
+    return out
 
 
 async def _llm_contradiction_check_batch(
@@ -1199,7 +1268,8 @@ async def _llm_contradiction_check_batch(
     order; a missing / malformed entry defaults to a safe non-contradiction
     (``{"contradicts": False}``) so a partial response never fabricates or drops
     a contradiction. The caller runs each raw through ``_judge_contradiction``,
-    so the safety gates are identical to the per-candidate path."""
+    so the safety gates are identical to the per-candidate path. E4: the reply
+    is sparse — see ``_expand_sparse_batch``."""
     provider_name = (
         tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
     )
@@ -1208,19 +1278,9 @@ async def _llm_contradiction_check_batch(
         new_content=new_content[:500], candidates_block=candidates_block
     )
 
-    def _align(obj: object) -> list[dict]:
-        by_index = obj if isinstance(obj, dict) else {}
-        out: list[dict] = []
-        for i in range(len(candidates)):
-            entry = by_index.get(str(i))
-            if entry is None:
-                entry = by_index.get(i)  # tolerate int keys
-            out.append(entry if isinstance(entry, dict) else {"contradicts": False})
-        return out
-
     async def _do_check(llm) -> list[dict]:
-        raw = await llm.complete_json(prompt)
-        return _align(raw)
+        raw = await llm.complete_json(prompt, **_judge_effort_kwargs())
+        return _expand_sparse_batch(raw, len(candidates))
 
     return await call_with_fallback(
         primary_provider_name=provider_name,
@@ -1272,7 +1332,7 @@ def _skip_contradiction_pairwise() -> tuple[bool, float]:
 def _skip_contradiction_batch(count: int) -> list[dict]:
     """The no-LLM verdict for the batch path: abstain for every candidate.
 
-    An EMPTY dict per candidate, deliberately — not ``_align``'s
+    An EMPTY dict per candidate, deliberately — not ``_expand_sparse_batch``'s
     ``{"contradicts": False}``. Every batch raw is fed straight to
     ``_judge_contradiction``, and the two shapes score differently there:
     ``{"contradicts": False}`` is a non-empty dict, so it misses the malformed
@@ -1284,7 +1344,7 @@ def _skip_contradiction_batch(count: int) -> list[dict]:
     A4 #13 gates on confidence, when an abstain would otherwise present as a
     high-confidence clean verdict.
 
-    (``_align`` is right to use ``{"contradicts": False}``: there the model DID
+    (``_expand_sparse_batch`` is right to use ``{"contradicts": False}``: there the model DID
     answer, just not for that index. This path has no answer at all.)
 
     The previous fallback hardcoded ``same_subject: True`` for every candidate,
@@ -1486,6 +1546,20 @@ def _format_entity_context(entities: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _normalize_subject_name(name: str | None) -> str:
+    """WT-3 — normalise a canonical subject name for the L3.4 preflight's
+    name-equality check: lowercase, collapse internal whitespace, strip.
+
+    Returns ``""`` when the name is missing or is the
+    ``_extract_subject_canonical_identity`` ``"<unknown>"`` placeholder —
+    an unresolvable name can never *establish* a collision, so callers
+    treat ``""`` as "names do not match" (fail open to the judge).
+    """
+    if not name or name == "<unknown>":
+        return ""
+    return " ".join(name.lower().split())
+
+
 def _extract_subject_canonical_identity(
     entities: list[dict],
 ) -> tuple[str, str, str] | None:
@@ -1501,10 +1575,14 @@ def _extract_subject_canonical_identity(
     see the inline TODO at the preflight site for the original
     ``priya``-collision write-up).
 
-    Identity is keyed on ``entity_id`` ONLY — two ``priya`` rows with
-    the same canonical name but different entity rows ARE distinct
-    subjects (that's the whole point). The canonical name + type are
-    returned for logging / debugging, not for equality.
+    Identity is keyed on ``entity_id`` — two ``priya`` rows with the
+    same canonical name but different entity rows ARE distinct subjects
+    (that's the whole point). WT-3: the canonical name (index 0,
+    compared via ``_normalize_subject_name``) additionally scopes the
+    preflight's drop to that same-name collision class — differing ids
+    under DIFFERING names may be a canonicalisation split of one
+    subject, and the preflight fails open there. ``entity_type`` stays
+    logging/debugging-only.
     """
     if not entities:
         return None
@@ -1633,7 +1711,7 @@ async def _llm_entity_aware_contradiction_check(
     )
 
     async def _do_check(llm) -> tuple[bool, float]:
-        raw = await llm.complete_json(prompt)
+        raw = await llm.complete_json(prompt, **_judge_effort_kwargs())
         return _judge_contradiction(raw)
 
     return await call_with_fallback(
@@ -1704,14 +1782,20 @@ For EACH candidate index decide, applying the rules in order:
    non_conflict_reason is "none" AND the two assert mutually exclusive
    states in the same time frame. Corrections / updates about the same
    subject ARE contradictions.
-4. relationship (exactly one): "exact_value"; "negation"; "entailed";
-   "constraint"; "probabilistic"; "scope_apparent"; "refinement".
-5. diagnosis (exactly one): "correction"; "temporal_change";
-   "scope_difference"; "entity_mismatch"; "write_error"; "unresolved".
-
-Reply with ONLY a JSON object mapping each candidate index (as a STRING)
-to its judgment, no prose, no markdown fences:
-{{"0": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true, "relationship": "exact_value", "diagnosis": "temporal_change"}}, "1": {{...}}}}
+Reply with ONLY a JSON object, no prose, no markdown fences, with exactly two
+keys. EVERY candidate index from 0 to N-1 must appear in exactly one of them:
+- "clean": array of every candidate index (integers) where contradicts is false.
+- "hits": object mapping each contradicting candidate index (as a STRING) to
+  its judgment with the three fields above.
+{{"clean": [1, 2, 4], "hits": {{"0": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true}}, "3": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true}}}}}}
+Calibration: in most batches FEW OR NO candidates contradict — an empty "hits"
+is the normal answer, not a failure to find something. Apply the three rules to
+every candidate independently, exactly as if you were judging that one pair on
+its own. A candidate goes in "hits" ONLY when all three rules pass decisively;
+uncertainty, partial overlap, related-but-compatible claims, or any applicable
+non_conflict_reason put it in "clean". Never add a hit because a batch "should"
+contain one. If NO candidate contradicts, "hits" is {{}} and "clean" lists every
+index.
 """
 
 
@@ -1746,19 +1830,9 @@ async def _llm_entity_aware_contradiction_check_batch(
         candidates_block=candidates_block,
     )
 
-    def _align(obj: object) -> list[dict]:
-        by_index = obj if isinstance(obj, dict) else {}
-        out: list[dict] = []
-        for i in range(len(candidates)):
-            entry = by_index.get(str(i))
-            if entry is None:
-                entry = by_index.get(i)  # tolerate int keys
-            out.append(entry if isinstance(entry, dict) else {"contradicts": False})
-        return out
-
     async def _do_check(llm) -> list[dict]:
-        raw = await llm.complete_json(prompt)
-        return _align(raw)
+        raw = await llm.complete_json(prompt, **_judge_effort_kwargs())
+        return _expand_sparse_batch(raw, len(candidates))
 
     return await call_with_fallback(
         primary_provider_name=provider_name,
@@ -2295,11 +2369,25 @@ async def detect_contradictions_by_entities_async(
         # (the ``priya``-collision class from the original followup
         # TODO). Now that the contexts are fetched once above, the
         # preflight is a cheap dict lookup.
+        #
+        # WT-3 — the drop is scoped to the NAME-COLLISION class the
+        # gate was built for: same canonical subject name (under
+        # ``_normalize_subject_name``) resolving to DISTINCT entity
+        # rows ("priya" vs "priya"). When the canonical NAMES differ
+        # as well as the ids, the two rows may instead be a
+        # canonicalisation SPLIT of one real-world subject ("new
+        # analytics service" vs "analytics service" — the WT-2 class);
+        # dropping there silently eats real contradictions, so we
+        # FAIL OPEN and let the LLM judge decide. Costs judge spend on
+        # genuinely-different subjects; the judge is the correct
+        # arbiter for those, the preflight is not.
         if contexts_fetched and new_ctx:
             new_identity = _extract_subject_canonical_identity(new_ctx)
             if new_identity is not None:
                 new_eid = new_identity[2]
+                new_name = _normalize_subject_name(new_identity[0])
                 drop_ids: set[str] = set()
+                n_failopen_id_mismatch = 0
                 for c in candidates:
                     if new_subject is not None and c.get("subject_entity_id") is not None:
                         # Both sides had non-NULL subject_entity_id — A1
@@ -2309,16 +2397,36 @@ async def detect_contradictions_by_entities_async(
                     cand_identity = _extract_subject_canonical_identity(cand_ctx)
                     if cand_identity is None:
                         continue  # No subject resolved — fail open.
-                    if cand_identity[2] != new_eid:
+                    if cand_identity[2] == new_eid:
+                        continue  # Same entity row — same subject.
+                    cand_name = _normalize_subject_name(cand_identity[0])
+                    if new_name and cand_name and new_name == cand_name:
+                        # Same canonical name, distinct entity rows —
+                        # the name-collision class. Drop.
                         drop_ids.add(str(c.get("id")))
+                    else:
+                        # Names differ (or one is unresolvable) — may
+                        # be a canonicalisation split of ONE subject
+                        # (WT-3). Fail open: keep the candidate.
+                        n_failopen_id_mismatch += 1
                 if drop_ids:
                     before = len(candidates)
                     candidates = [c for c in candidates if str(c.get("id")) not in drop_ids]
                     n_entity_links_skipped = before - len(candidates)
                     logger.info(
                         "Path C entity-links preflight dropped %d candidate(s) "
-                        "for memory %s (canonical subjects differ by entity_id)",
+                        "for memory %s (same canonical subject name, entity_id "
+                        "differs — name-collision class)",
                         n_entity_links_skipped,
+                        memory_id,
+                    )
+                if n_failopen_id_mismatch:
+                    logger.info(
+                        "Path C entity-links preflight retained %d candidate(s) "
+                        "for memory %s despite entity_id mismatch (canonical "
+                        "subject names differ — possible canonicalisation "
+                        "split; failing open to the LLM judge)",
+                        n_failopen_id_mismatch,
                         memory_id,
                     )
 

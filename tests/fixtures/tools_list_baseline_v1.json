@@ -97,7 +97,7 @@
         },
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },
@@ -210,7 +210,7 @@
         },
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },
@@ -273,7 +273,7 @@
         },
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         }
@@ -298,7 +298,7 @@
       "properties": {
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },
@@ -328,7 +328,7 @@
   {
     "name": "caura_keystones_set",
     "title": null,
-    "description": "Author or remove keystone rules. op: set|delete. set requires {doc_id, title, content, scope, weight}; scope ∈ {tenant, fleet, agent}; weight ∈ {low, med, high}. scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id — and ``agent_id`` here names the TARGET agent the rule binds to, NOT the caller (caller identity comes from the API key / gateway headers). For scope=tenant and scope=fleet you must OMIT ``agent_id``; passing it returns INVALID_ARGUMENTS. delete requires {doc_id}. Trust gating is dynamic: scope=agent where the TARGET agent_id matches the caller is trust ≥ 1 (self-author); anything else (scope=fleet, scope=tenant, or scope=agent targeting a different agent) is trust ≥ 2.",
+    "description": "Author or remove keystone rules. op: set|delete. set requires {doc_id, title, content, scope, weight}; scope ∈ {tenant, fleet, agent}; weight ∈ {low, med, high}. scope=fleet|agent requires fleet_id; scope=agent additionally requires agent_id — and ``agent_id`` here names the TARGET agent the rule binds to, NOT the caller (caller identity comes from the API key / gateway headers). For scope=tenant and scope=fleet you must OMIT ``agent_id``; passing it returns INVALID_ARGUMENTS. delete requires {doc_id}. Trust gating is dynamic: scope=agent with an explicit TARGET agent_id matching the caller is trust ≥ 1 (self-author); anything else (scope=fleet, scope=tenant, scope=agent targeting a different agent, or scope=agent with agent_id omitted) is trust ≥ 2. Overwriting an existing doc_id also needs the trust its STORED shape requires.",
     "inputSchema": {
       "properties": {
         "op": {
@@ -449,12 +449,12 @@
   {
     "name": "caura_list",
     "title": null,
-    "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' (default) lists your memories at trust ≥ 1; scope='fleet' reads your OWN fleet at trust ≥ 1, a different fleet at trust ≥ 2; scope='all' (tenant-wide) requires trust ≥ 2. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use caura_recall.",
+    "description": "Browse memories by metadata (non-semantic). Filter+sort+paginate by fleet, author, type, status, weight, created-at. scope='agent' lists your memories at trust ≥ 1; scope='fleet' reads your OWN fleet at trust ≥ 1, a different fleet at trust ≥ 2; scope='all' (tenant-wide) requires trust ≥ 2. Omitted scope means 'agent' on MCP; over REST/plugin it filters by agent_id with no trust gate. Trust 3 unlocks include_deleted. Cursor pagination requires sort=created_at order=desc. For semantic search use caura_recall.",
     "inputSchema": {
       "properties": {
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },
@@ -742,7 +742,7 @@
         },
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         }
@@ -772,7 +772,7 @@
         },
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },
@@ -842,6 +842,38 @@
           "description": "Max results, default 5. Values above 20 are capped to 20.",
           "title": "Top K",
           "type": "integer"
+        },
+        "valid_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "As-of ISO 8601 date: filter to rows valid at that time.",
+          "title": "Valid At"
+        },
+        "min_similarity": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cosine floor 0.0-1.0; overrides the tuned profile for this call.",
+          "title": "Min Similarity"
+        },
+        "diagnostic": {
+          "default": false,
+          "description": "Return retrieval trace; results unchanged, never bumps recall_count.",
+          "title": "Diagnostic",
+          "type": "boolean"
         }
       },
       "required": [
@@ -859,7 +891,7 @@
   {
     "name": "caura_stats",
     "title": null,
-    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' (default) counts only memories visible to YOU (trust ≥ 1); scope='fleet' aggregates your OWN fleet at trust ≥ 1, a different fleet at trust ≥ 2; scope='all' (tenant-wide) requires trust ≥ 2. Counts exclude soft-deleted memories by default; set include_deleted=true for additional 'deleted' and 'total_including_deleted' fields. Read-only — useful for self-introspection and dashboard-style summaries.",
+    "description": "Aggregate counts of memories: total + breakdowns by type, agent, status. scope='agent' counts only memories visible to YOU (trust ≥ 1); scope='fleet' aggregates your OWN fleet at trust ≥ 1, a different fleet at trust ≥ 2; scope='all' (tenant-wide) requires trust ≥ 2. Omitted scope means 'agent' on MCP; over REST/plugin it aggregates over agent_id with no trust gate. Counts exclude soft-deleted memories by default; set include_deleted=true for additional 'deleted' and 'total_including_deleted' fields. Read-only — useful for self-introspection and dashboard-style summaries.",
     "inputSchema": {
       "properties": {
         "scope": {
@@ -883,7 +915,7 @@
         },
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },
@@ -937,7 +969,7 @@
       "properties": {
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },
@@ -1071,7 +1103,7 @@
   {
     "name": "caura_write",
     "title": null,
-    "description": "Store NEW memories. Provide exactly one of {content, items} (batch ≤100). System auto-classifies type, importance, title, tags, dates. visibility: scope_team (default) / scope_org / scope_agent. Prefer team/org for sharing. If the response has metadata.embedding_pending=true the memory is saved but not yet semantically searchable (~15-20s); it is already findable by keyword and in caura_list, so do not re-write it. Pass write_mode='strong' to embed inline when you must recall it now.",
+    "description": "Store NEW memories. Provide exactly one of {content, items} (batch ≤100). System auto-classifies type, importance, title, tags, dates. visibility: scope_team (default) / scope_org / scope_agent. Prefer team/org for sharing. If the response has metadata.embedding_pending=true the memory is saved but not yet semantically searchable (~15-20s); it is already findable by keyword and in caura_list, so do not re-write it. Pass write_mode='strong' to embed inline when you must recall it now. Unknown keys are rejected, not ignored: put your own under metadata.",
     "inputSchema": {
       "properties": {
         "content": {
@@ -1106,7 +1138,7 @@
         },
         "agent_id": {
           "default": "mcp-agent",
-          "description": "Caller agent.",
+          "description": "Agent this call is attributed to; agent-scoped reads filter by it. Hosted callers must pass a real one.",
           "title": "Agent Id",
           "type": "string"
         },

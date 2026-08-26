@@ -1,9 +1,9 @@
 """memclaw-interviewer CLI — run / status / hook.
 
 Config precedence: flags > env > defaults. Env vars:
-  MEMCLAW_API_KEY (required)      MEMCLAW_TENANT_ID (required)
-  MEMCLAW_BASE_URL                MEMCLAW_AGENT_ID (default user@host)
-  MEMCLAW_FLEET_ID                MEMCLAW_INTERVIEWER_PROJECTS (comma-sep globs)
+  CAURA_API_KEY (required)      CAURA_TENANT_ID (required)
+  CAURA_BASE_URL                CAURA_AGENT_ID (default user@host)
+  CAURA_FLEET_ID                CAURA_INTERVIEWER_PROJECTS (comma-sep globs)
 
 Exit codes: 0 success / nothing to do; 1 every attempted file failed;
 2 configuration or authorization error. ``hook`` ALWAYS exits 0 — a
@@ -48,31 +48,58 @@ def _default_agent_id() -> str:
     return f"cc-{getpass.getuser()}@{socket.gethostname()}"
 
 
+def _read_env(*names: str, default: str = "") -> str:
+    """First alias carrying a value, new names before old ones.
+
+    A blank alias never shadows a working one, but a lone ``X=`` still means
+    "empty" rather than falling back to ``default`` — which is what
+    ``os.environ.get(name, default)`` did before the aliases existed.
+    """
+    saw_blank = False
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+        if value is not None:
+            saw_blank = True
+    return "" if saw_blank else default
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="memclaw-interviewer",
+        prog="caura-interviewer",
         description="Caura Interviewer adapter for Claude Code transcripts (read-only).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     def common(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--base-url", default=os.environ.get("MEMCLAW_BASE_URL", DEFAULT_BASE_URL))
-        p.add_argument("--api-key", default=os.environ.get("MEMCLAW_API_KEY", ""))
-        p.add_argument("--tenant-id", default=os.environ.get("MEMCLAW_TENANT_ID", ""))
-        p.add_argument("--agent-id", default=os.environ.get("MEMCLAW_AGENT_ID", "") or _default_agent_id())
-        p.add_argument("--fleet-id", default=os.environ.get("MEMCLAW_FLEET_ID", "") or None)
+        p.add_argument(
+            "--base-url",
+            default=_read_env("CAURA_BASE_URL", "MEMCLAW_BASE_URL", default=DEFAULT_BASE_URL),  # legacy-name-ok: rule 3 dual-read alias
+        )
+        p.add_argument("--api-key", default=_read_env("CAURA_API_KEY", "MEMCLAW_API_KEY"))  # legacy-name-ok: rule 3 dual-read alias
+        p.add_argument("--tenant-id", default=_read_env("CAURA_TENANT_ID", "MEMCLAW_TENANT_ID"))  # legacy-name-ok: rule 3 dual-read alias
+        p.add_argument(
+            "--agent-id",
+            default=_read_env("CAURA_AGENT_ID", "MEMCLAW_AGENT_ID") or _default_agent_id(),  # legacy-name-ok: rule 3 dual-read alias
+        )
+        p.add_argument("--fleet-id", default=_read_env("CAURA_FLEET_ID", "MEMCLAW_FLEET_ID") or None)  # legacy-name-ok: rule 3 dual-read alias
         p.add_argument(
             "--projects",
             nargs="+",
             default=None,
-            help="project-dir globs to allow (default: MEMCLAW_INTERVIEWER_PROJECTS env; DEFAULT-DENY without either)",
+            help="project-dir globs to allow (default: CAURA_INTERVIEWER_PROJECTS env; DEFAULT-DENY without either)",
         )
         p.add_argument("--all-projects", action="store_true", help="explicit opt-in: harvest every project dir")
         p.add_argument(
             "--harness",
             choices=(HARNESS_CLAUDE_CODE, HARNESS_CURSOR),
-            default=os.environ.get("MEMCLAW_INTERVIEWER_HARNESS", HARNESS_CLAUDE_CODE),
-            help="which agent's transcripts to harvest (default: claude-code; env MEMCLAW_INTERVIEWER_HARNESS)",
+            default=_read_env(
+                "CAURA_INTERVIEWER_HARNESS",
+                "MEMCLAW_INTERVIEWER_HARNESS",  # legacy-name-ok: rule 3 dual-read alias
+                default=HARNESS_CLAUDE_CODE,
+            ),
+            help="which agent's transcripts to harvest (default: claude-code; env CAURA_INTERVIEWER_HARNESS)",
         )
         p.add_argument(
             "--projects-root",
@@ -121,15 +148,15 @@ def _projects_root(args: argparse.Namespace) -> Path:
 def _resolve_allowlist(args: argparse.Namespace) -> list[str]:
     if args.projects is not None:
         return list(args.projects)
-    env = os.environ.get("MEMCLAW_INTERVIEWER_PROJECTS", "")
+    env = _read_env("CAURA_INTERVIEWER_PROJECTS", "MEMCLAW_INTERVIEWER_PROJECTS")  # legacy-name-ok: rule 3 dual-read alias
     return [g.strip() for g in env.split(",") if g.strip()]
 
 
 def _require_config(args: argparse.Namespace) -> Optional[str]:
     if not args.api_key:
-        return "MEMCLAW_API_KEY (or --api-key) is required"
+        return "CAURA_API_KEY (or --api-key) is required"
     if not args.tenant_id:
-        return "MEMCLAW_TENANT_ID (or --tenant-id) is required"
+        return "CAURA_TENANT_ID (or --tenant-id) is required"
     return None
 
 
@@ -138,7 +165,7 @@ def _deny_guidance(args: argparse.Namespace) -> str:
     lines = [
         "No project allowlist configured - refusing to harvest by default.",
         "Agent transcripts can contain sensitive work across ALL projects;",
-        "opt in explicitly with --projects <glob...>, MEMCLAW_INTERVIEWER_PROJECTS,",
+        "opt in explicitly with --projects <glob...>, CAURA_INTERVIEWER_PROJECTS,",
         "or --all-projects.",
         "",
         "Discovered project dirs:",
@@ -330,7 +357,7 @@ def _cmd_hook(args: argparse.Namespace) -> int:
             # session; exit code stays 0 (never fail the session hook).
             print(
                 f"[interviewer] hook: project '{transcript.project}' not in allowlist; skipping "
-                "(set MEMCLAW_INTERVIEWER_PROJECTS or --all-projects)",
+                "(set CAURA_INTERVIEWER_PROJECTS or --all-projects)",
                 file=sys.stderr,
             )
             return 0
@@ -358,7 +385,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
     if not installer.cron_available():
         print(
             "[interviewer] `crontab` not found — cron install is unsupported here "
-            "(Windows: use Task Scheduler to run `memclaw-interviewer run` on a timer).",
+            "(Windows: use Task Scheduler to run `caura-interviewer run` on a timer).",
             file=sys.stderr,
         )
         return 2
@@ -376,15 +403,17 @@ def _cmd_install(args: argparse.Namespace) -> int:
         print(f"[interviewer] {exc}", file=sys.stderr)
         return 2
 
+    # New installs are written with the new names only. Existing env files keep
+    # their old names and keep working — every reader above accepts both.
     env = {
-        "MEMCLAW_BASE_URL": args.base_url,
-        "MEMCLAW_API_KEY": args.api_key,
-        "MEMCLAW_TENANT_ID": args.tenant_id,
-        "MEMCLAW_AGENT_ID": args.agent_id,
-        "MEMCLAW_FLEET_ID": args.fleet_id or "",
+        "CAURA_BASE_URL": args.base_url,
+        "CAURA_API_KEY": args.api_key,
+        "CAURA_TENANT_ID": args.tenant_id,
+        "CAURA_AGENT_ID": args.agent_id,
+        "CAURA_FLEET_ID": args.fleet_id or "",
     }
     if not args.all_projects:
-        env["MEMCLAW_INTERVIEWER_PROJECTS"] = ",".join(allow)
+        env["CAURA_INTERVIEWER_PROJECTS"] = ",".join(allow)
 
     env_file = installer.env_file_path()
     log_file = installer.log_file_path()
@@ -422,7 +451,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
     print(f"[interviewer] scheduled: {schedule}  (harness={args.harness})")
     print(f"  env file: {env_file} (0600)")
     print(f"  log:      {log_file}")
-    print("  remove with: memclaw-interviewer uninstall")
+    print("  remove with: caura-interviewer uninstall")
     if sys.platform == "darwin":
         print(
             "  note (macOS): if the job can't read the transcripts, grant Full Disk "
@@ -467,7 +496,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     # argparse's choices= only validates values passed on the command line,
     # NOT a default sourced from os.environ — so a bad
-    # MEMCLAW_INTERVIEWER_HARNESS (wrong case "Cursor", a typo) would slip
+    # CAURA_INTERVIEWER_HARNESS (wrong case "Cursor", a typo) would slip
     # through and silently fall back to Claude Code behavior. Fail loudly —
     # but ONLY for run/status: parser.error() exits 2, and `hook` both
     # ignores --harness (it infers from path shape) and must ALWAYS exit 0.
@@ -477,7 +506,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         and args.harness not in (HARNESS_CLAUDE_CODE, HARNESS_CURSOR)
     ):
         parser.error(
-            f"Invalid harness '{args.harness}' — set MEMCLAW_INTERVIEWER_HARNESS to "
+            f"Invalid harness '{args.harness}' — set CAURA_INTERVIEWER_HARNESS to "
             f"'{HARNESS_CLAUDE_CODE}' or '{HARNESS_CURSOR}'"
         )
     if args.command == "run":

@@ -8,15 +8,15 @@
  * Each subcommand prints a single JSON line on stdout for the
  * orchestrating shell script (interviewer-wet.sh) to assert on.
  *
- * Required env (set by the orchestrator): MEMCLAW_API_URL,
- * MEMCLAW_API_KEY (admin), MEMCLAW_TENANT_ID, MEMCLAW_FLEET_ID,
- * MEMCLAW_NODE_NAME, MEMCLAW_INTERVIEWER=true.
+ * Required env (set by the orchestrator): CAURA_API_URL,
+ * CAURA_API_KEY (admin), CAURA_TENANT_ID, CAURA_FLEET_ID,
+ * CAURA_NODE_NAME, CAURA_INTERVIEWER=true.
  */
 
-const API = process.env.MEMCLAW_API_URL || "http://localhost:8000";
-const KEY = process.env.MEMCLAW_API_KEY || "";
-const TENANT = process.env.MEMCLAW_TENANT_ID || "";
-const NODE_NAME = process.env.MEMCLAW_NODE_NAME || "";
+const API = process.env.CAURA_API_URL || "http://localhost:8000";
+const KEY = process.env.CAURA_API_KEY || "";
+const TENANT = process.env.CAURA_TENANT_ID || "";
+const NODE_NAME = process.env.CAURA_NODE_NAME || "";
 
 function out(obj) {
   console.log(JSON.stringify(obj));

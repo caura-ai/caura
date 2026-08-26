@@ -4,15 +4,17 @@ import logging
 import re
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from common.embedding import get_embedding
+from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.middleware.idempotency import IDEMPOTENCY_HEADER, idempotency_for
 from core_api.middleware.rate_limit import write_limit
+from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.agent_service import enforce_delete
 from core_api.services.audit_service import log_action, log_cross_tenant_read
 
@@ -85,6 +87,8 @@ SKILLS_ROLLBACK_COLLECTION = "skills_rollback"
 
 
 class DocWriteRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
     tenant_id: str
     fleet_id: str | None = None
     collection: str = Field(min_length=1, max_length=200)
@@ -96,6 +100,8 @@ class DocWriteRequest(BaseModel):
 
 
 class DocQueryRequest(BaseModel):
+    # DELIBERATELY PERMISSIVE (SAFE-01): a QUERY body, not a write. See
+    # ``core_api.schemas.STRICT_WRITE_BODY`` for why the two sides differ.
     tenant_id: str
     fleet_id: str | None = None
     collection: str = Field(min_length=1, max_length=200)
@@ -114,6 +120,8 @@ class InstallableSkillsRequest(BaseModel):
     caller cannot widen it), so a harness can't ask for non-active skills.
     """
 
+    # DELIBERATELY PERMISSIVE (SAFE-01): a QUERY body, not a write. See
+    # ``core_api.schemas.STRICT_WRITE_BODY`` for why the two sides differ.
     tenant_id: str
     fleet_id: str | None = None
     limit: int = Field(default=1000, ge=1, le=1000)
@@ -129,6 +137,8 @@ class DocSearchRequest(BaseModel):
     non-NULL embedding column) are considered.
     """
 
+    # DELIBERATELY PERMISSIVE (SAFE-01): a QUERY body, not a write. See
+    # ``core_api.schemas.STRICT_WRITE_BODY`` for why the two sides differ.
     tenant_id: str
     fleet_id: str | None = None
     collection: str | None = Field(default=None, min_length=1, max_length=200)
@@ -192,6 +202,9 @@ def _dict_to_out(d: dict) -> DocOut:
 @write_limit
 async def upsert_document(
     request: Request,
+    # slowapi with headers_enabled needs an injectable Response to attach
+    # X-RateLimit-*/Retry-After; without this param every call 500s (D14).
+    response: Response,
     body: DocWriteRequest,
     auth: AuthContext = Depends(get_auth_context),
     idempotency_key: str | None = Header(None, alias=IDEMPOTENCY_HEADER),
@@ -391,7 +404,10 @@ async def upsert_document(
 # because FastAPI matches in declaration order — without this ordering,
 # `GET /documents/collections` would match `/documents/{doc_id}` with
 # doc_id="collections" and require the `collection=` query param, returning 422.
-@router.get("/documents/collections")
+@router.get(
+    "/documents/collections",
+    responses={200: {"model": _oar.DocumentCollectionsResponse}},
+)
 async def list_collections(
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
@@ -421,7 +437,7 @@ async def list_collections(
     )
 
 
-@router.get("/documents/{doc_id}")
+@router.get("/documents/{doc_id}", responses={200: {"model": DocOut}})
 async def get_document(
     doc_id: str,
     tenant_id: str = Query(...),
@@ -442,7 +458,7 @@ async def get_document(
     return _dict_to_out(doc)
 
 
-@router.post("/documents/query")
+@router.post("/documents/query", responses={200: {"model": list[DocOut]}})
 async def query_documents(
     body: DocQueryRequest,
     auth: AuthContext = Depends(get_auth_context),
@@ -472,7 +488,7 @@ async def query_documents(
     return [_dict_to_out(d) for d in docs]
 
 
-@router.post("/skills/installable")
+@router.post("/skills/installable", responses={200: {"model": list[DocOut]}})
 async def installable_skills(
     body: InstallableSkillsRequest,
     auth: AuthContext = Depends(get_auth_context),
@@ -536,7 +552,7 @@ async def installable_skills(
     return [_dict_to_out(d) for d in docs]
 
 
-@router.get("/documents")
+@router.get("/documents", responses={200: {"model": list[DocOut]}})
 async def list_documents(
     tenant_id: str = Query(...),
     collection: str = Query(...),
@@ -595,7 +611,7 @@ async def delete_document(
 # See docs/api-surfaces.md for surface ownership rationale.
 
 
-@router.post("/documents/search")
+@router.post("/documents/search", responses={200: {"model": _oar.DocumentSearchResponse}})
 async def search_documents(
     body: DocSearchRequest,
     auth: AuthContext = Depends(get_auth_context),
@@ -657,11 +673,18 @@ async def search_documents(
             result_count_by_tenant=counts,
             query_summary=(body.query or "")[:200],
         )
+    # C30 / wire-contract D1 (ratified 2026-08-25): ``items`` is the canonical
+    # list key everywhere — /search always used it, this route used
+    # ``results``, and the mismatch cost the SupportHive builder a
+    # zero-hit-parsing bug (FR-1, ranked #1 by time cost). Dual-emit: both
+    # keys reference the same list; ``results`` stays until a separate,
+    # announced deprecation wave.
     return JSONResponse(
         {
             "collection": body.collection,
             "count": len(items),
             "results": items,
+            "items": items,
         }
     )
 

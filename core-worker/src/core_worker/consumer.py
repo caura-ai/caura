@@ -485,7 +485,14 @@ def _build_patch(
     # — without it, a fallback redelivery would silently keep the row
     # marked pending forever). Storage's JSONB ``||`` merge overwrites
     # a prior ``True`` with ``False`` cleanly.
-    metadata_patch: dict = {"enrichment_pending": False}
+    # B7 x C25 — clear the flag in BOTH homes. The C25 boundary gives the
+    # ``_system`` namespace precedence on the read side
+    # (``extract_system_metadata``: nested wins over legacy), so clearing only
+    # the legacy top-level key would leave ``system_metadata.enrichment_pending``
+    # True FOREVER on fast-mode rows — polling would never observe completion.
+    # Storage deep-merges the ``_system`` sub-object (one level) when present
+    # in the patch, so sibling ``_system`` keys survive.
+    metadata_patch: dict = {"enrichment_pending": False, "_system": {"enrichment_pending": False}}
     for field in _ENRICHMENT_METADATA_FIELDS:
         if field in skip:
             continue
@@ -503,6 +510,7 @@ def _build_patch(
             # ``llm_ms=0`` so the proxy is reliable.
             if result.llm_ms > 0 and value is not None:
                 metadata_patch[field] = value
+                metadata_patch["_system"][field] = value
             continue
         # Other metadata fields: drop the specific defaults that carry
         # no information — heuristic-fallback ``"summary": ""``,
@@ -512,6 +520,7 @@ def _build_patch(
         if value is None or value in (False, 0, "", []):
             continue
         metadata_patch[field] = value
+        metadata_patch["_system"][field] = value
     if metadata_patch:
         patch["metadata_patch"] = metadata_patch
 

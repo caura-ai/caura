@@ -20,9 +20,9 @@ import { tmpdir } from "os";
 // Pattern matches ``keystones.test.ts`` / ``transport.test.ts``: env is
 // fixed BEFORE the dynamic import so env.js captures it (its exports are
 // bound at module-evaluation time — a static import would evaluate first).
-process.env.MEMCLAW_API_KEY = "mc_test_interview";
-process.env.MEMCLAW_API_URL = "http://localhost:8000";
-process.env.MEMCLAW_TENANT_ID = "t-test";
+process.env.CAURA_API_KEY = "mc_test_interview";
+process.env.CAURA_API_URL = "http://localhost:8000";
+process.env.CAURA_TENANT_ID = "t-test";
 
 const { __DEPLOY_INTERNALS__ } = await import("./heartbeat.js");
 const { __TASK_TRAIL_INTERNALS__ } = await import("./task-trail.js");
@@ -50,7 +50,7 @@ describe("interview_request command handler", () => {
   }
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "memclaw-interview-cmd-"));
+    tmp = mkdtempSync(join(tmpdir(), "caura-interview-cmd-"));
     __INTERVIEW_BUFFER_INTERNALS__.setPathForTests(join(tmp, "buf.jsonl"));
     // Point the Phase-1.5 task-trail at the empty tmp dir so the handler's
     // pre-read sync can never discover a REAL ~/.openclaw task DB on the
@@ -106,7 +106,7 @@ describe("interview_request command handler", () => {
     assert.equal(rp!.body!.status, "failed");
     assert.match(
       String((rp!.body!.result as Record<string, unknown>).error),
-      /MEMCLAW_INTERVIEWER/,
+      /CAURA_INTERVIEWER/,
     );
     // Buffer untouched.
     assert.equal((await readInterviewEvents(0, 500)).length, 1);

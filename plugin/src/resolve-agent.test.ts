@@ -17,7 +17,7 @@ import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 // Clear any inherited test pollution so the fallback path actually runs.
-delete process.env.MEMCLAW_AGENT_ID;
+delete process.env.CAURA_AGENT_ID;
 
 const { resolveAgentId, resolveAgentIdQuiet } = await import(
   "./resolve-agent.js"

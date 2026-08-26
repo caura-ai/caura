@@ -28,18 +28,14 @@ _METHODS = ("get", "post", "patch", "delete", "put")
 # with the reason. Adding an entry is a conscious decision to leave a response
 # shape unguarded — that is the point of listing them here.
 #
-#   GET /health, GET /version   — liveness/handshake payloads with no
-#       response_model on the route; trivial, stable shapes.
-#
 # ``GET /memories/{memory_id}`` was listed here until its handler stopped returning
 # a ``JSONResponse`` (FastAPI skips response validation for a Response object, so a
 # ``response_model`` alongside one documents a guarantee the code does not make).
 # It now returns a dict against ``MemoryDetailResponse`` and is genuinely typed —
 # and the assertion below FAILS on a stale entry, which is what removed it.
-_UNTYPED_200 = {
-    ("get", "/api/v1/health"),
-    ("get", "/api/v1/version"),
-}
+# ``GET /health`` and ``GET /version`` came off the list when C33 gave them
+# documented schemas (spec-only ``responses=`` in ``openapi_responses.py``).
+_UNTYPED_200: set[tuple[str, str]] = set()
 
 
 def _baseline() -> dict:

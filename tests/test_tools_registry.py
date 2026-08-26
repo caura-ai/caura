@@ -3,7 +3,7 @@
 Every assertion here is meant to make a design contract concrete so
 future refactors can't silently break it:
 
-- Every spec name has the ``memclaw_`` prefix.
+- Every spec name has the ``caura_`` prefix.
 - Trust values live in [0, 3].
 - ``impl_status="reserved"`` implies ``plugin_exposed=False``.
 - Every ``OpSpec.required_params`` references a real handler parameter.
@@ -54,7 +54,7 @@ EXPECTED_PLACEHOLDERS: set[str] = set()
 # REST endpoints land (the plugin dispatches via REST).
 
 
-def test_all_specs_have_memclaw_prefix():
+def test_all_specs_have_caura_prefix():
     from core_api.tools import REGISTRY
 
     for name in REGISTRY:
@@ -159,6 +159,35 @@ def test_descriptions_are_non_empty():
         assert spec.description.strip(), f"{spec.name}: description is empty"
 
 
+def test_query_param_scope_tools_do_not_claim_a_default():
+    """``caura_list`` / ``caura_stats`` must not call any ``scope`` value "the
+    default" (#908).
+
+    One description string is served to BOTH surfaces — it feeds
+    ``/tool-descriptions`` and the generated ``plugin/tools.json`` — and only
+    MCP defaults ``scope``. ``mcp_server.caura_list`` declares
+    ``scope=... = "agent"``; ``GET /memories`` declares it
+    ``Query(default=None)`` and consults the trust ladder only when the caller
+    supplied one, so an omitted ``scope`` there takes its author filter from
+    ``written_by ?? agent_id`` and skips ``require_trust``. Naming a default
+    without naming the surface is therefore false for every plugin caller.
+
+    ``caura_insights`` / ``caura_evolve`` are excluded on purpose: their
+    ``scope`` arrives in a request body whose model really does
+    ``Field(default="agent")``, so the claim is true on every surface there.
+    Mirrors the plugin-side guard in ``plugin/src/tool-definitions.test.ts``.
+    """
+    from core_api.tools import REGISTRY
+
+    for name in ("caura_list", "caura_stats"):
+        description = REGISTRY[name].description
+        assert "(default)" not in description, (
+            f"{name}: description calls a scope value \"(default)\", but an "
+            "omitted scope is not scope='agent' on the REST/plugin path. "
+            "State the ladder per value and name the per-surface default."
+        )
+
+
 def test_descriptions_no_leftover_tool_descriptions_import():
     """After Phase 4, no spec module should import TOOL_DESCRIPTIONS."""
     import pkgutil
@@ -167,12 +196,19 @@ def test_descriptions_no_leftover_tool_descriptions_import():
     import core_api.tools as pkg
 
     tool_dir = Path(pkg.__file__).parent
-    for info in pkgutil.iter_modules([str(tool_dir)]):
-        if not info.name.startswith("memclaw_"):
-            continue
-        src = (tool_dir / f"{info.name}.py").read_text()
+    # ``caura_`` is the canonical module prefix; there are no legacy-named
+    # spec modules (the legacy tool names are dispatch aliases in
+    # mcp_server, not modules), so this filter is the whole surface.
+    spec_modules = [
+        info.name
+        for info in pkgutil.iter_modules([str(tool_dir)])
+        if info.name.startswith("caura_")
+    ]
+    assert spec_modules, "no caura_* spec modules found — the guard went vacuous"
+    for name in spec_modules:
+        src = (tool_dir / f"{name}.py").read_text()
         assert "TOOL_DESCRIPTIONS" not in src, (
-            f"{info.name}.py still imports TOOL_DESCRIPTIONS; "
+            f"{name}.py still imports TOOL_DESCRIPTIONS; "
             "descriptions should live inline in each spec module."
         )
 

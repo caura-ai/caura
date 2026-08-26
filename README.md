@@ -45,7 +45,7 @@ Agents write plain text. Caura turns it into searchable, governed, self-improvin
 </p>
 
 <p align="center">
-  <img src="static/images/memclaw-demo.gif" alt="Caura demo — write, recall, and governed cross-fleet memory in action" width="700" />
+  <img src="static/images/caura-demo.gif" alt="Caura demo — write, recall, and governed cross-fleet memory in action" width="700" />
 </p>
 
 ---
@@ -58,7 +58,7 @@ The fastest way to see Caura work. Standalone mode runs single-tenant with auth 
 
 ```bash
 git clone https://github.com/caura-ai/caura.git
-cd caura-memclaw
+cd caura
 cp .env.example .env && echo "IS_STANDALONE=true" >> .env   # single-tenant, no API key
 docker compose up -d                                        # Postgres + pgvector + Redis + API (~30s)
 
@@ -114,7 +114,7 @@ Get up and running in minutes — no infrastructure, automatic updates, usage an
 
 The fastest path is Docker Compose — one command brings up Postgres + pgvector + Redis + the API.
 
-> **Prefer not to use Docker?** Skip to [Manual deployment (Python + Postgres)](#manual-deployment) below for the bare-Python path.
+> **Prefer not to use Docker?** Skip to [Manual deployment (without Docker)](#manual-deployment-without-docker) below for the bare-Python path.
 >
 > **No cloud API key, no external calls?** v2.0+ supports a self-hosted local embedder (`BAAI/bge-m3` via HuggingFace TEI) — see [`docs/local-embedder.md`](docs/local-embedder.md). The setup below walks through the OpenAI default; the local-embedder doc walks through the alternative.
 
@@ -129,7 +129,7 @@ The fastest path is Docker Compose — one command brings up Postgres + pgvector
 
 ```bash
 git clone https://github.com/caura-ai/caura.git
-cd caura-memclaw
+cd caura
 cp .env.example .env
 ```
 
@@ -173,7 +173,7 @@ Anthropic, Gemini, and OpenRouter don't offer embedding APIs here — pair them 
 docker compose up -d
 ```
 
-By default this **pulls the multi-arch images from `ghcr.io`** (`linux/amd64` + `linux/arm64`) on first run — takes ~30 seconds. Subsequent `up` commands re-use the cached image (no registry round-trip, works offline). To pin a specific version, set `MEMCLAW_VERSION=v1.2.3` in your `.env`. To build from local source instead (e.g. when iterating on a fork), run `docker compose up --build --no-pull`.
+By default this **pulls the multi-arch images from `ghcr.io`** (`linux/amd64` + `linux/arm64`) on first run — takes ~30 seconds. Subsequent `up` commands re-use the cached image (no registry round-trip, works offline). To pin a specific version, set `CAURA_VERSION=v1.2.3` in your `.env`. To build from local source instead (e.g. when iterating on a fork), run `docker compose up --build --no-pull`.
 
 To upgrade to a newer image at the same tag (e.g. `:latest` after we cut a new release), run `docker compose pull && docker compose up -d`. Without an explicit `pull`, the local cache wins — there's no silent version drift.
 
@@ -224,6 +224,13 @@ curl -X POST http://localhost:8000/api/v1/search \
   -H "Content-Type: application/json" \
   -d '{"tenant_id": "default", "query": "authentication token lifetime"}'
 ```
+
+A write body accepts only the fields the API declares. Send one it doesn't — a
+typo, or a plausible-looking key like `tags` — and you get a `422` naming it in
+`error.details.unknown_fields`, rather than a `201` with your data quietly
+dropped. Search and filter bodies still ignore unknown fields on purpose; the
+asymmetry is explained in
+[`docs/api-surfaces.md`](docs/api-surfaces.md#request-body-contract-writes-are-strict-searches-are-not).
 
 The write response carries an LLM-inferred `memory_type`, `title`, `summary`, `tags`, `status`, and a `weight` (the importance score) — all derived from a single `content` field. On the default fast-write path, enrichment is applied asynchronously: the immediate response is marked `enrichment_pending` and the inferred fields populate within moments.
 
@@ -292,7 +299,7 @@ Pass `X-API-Key: your-long-random-admin-key` and include `tenant_id` in request 
 
 **Shared gate** — for network-exposed OSS deployments:
 ```env
-MEMCLAW_API_KEY=your-shared-key
+CAURA_API_KEY=your-shared-key
 ```
 Clients send `X-API-Key: your-shared-key` plus `X-Tenant-ID: <tenant>`.
 
@@ -360,22 +367,25 @@ A thin wrapper over the REST API — see [`clients/python/`](clients/python/) fo
 
 ### TypeScript client
 
-Same, from TypeScript / JavaScript (Node 18+, zero dependencies):
+Same, from TypeScript / JavaScript (Node 18+, no third-party dependencies):
 
 ```bash
-npm install @caura/memclaw-client
+npm install @caura/client
 ```
 
 ```ts
-import { Caura } from "@caura/memclaw-client";
+import { Caura } from "@caura/client";
 
 const mc = new Caura("mc_xxx", { tenantId: "my-team", agentId: "my-agent" });
 await mc.write("Q3 revenue target is $4M, set on 2026-04-15.");
 console.log((await mc.recall("Q3 revenue target")).summary);
 ```
 
-`MemClaw` remains a permanent alias of `Caura`, and `npm install caura`
-works too (a re-export of this package).
+`MemClaw` remains a permanent alias of `Caura`.
+
+The bare `caura` name on npm is held up by the registry's package-name
+similarity filter, so install the scoped package above. On the Python side,
+`pip install caura` works and pulls the same client.
 
 See [`clients/typescript/`](clients/typescript/) for the full client.
 
@@ -394,8 +404,8 @@ See [`clients/typescript/`](clients/typescript/) for the full client.
 ### Memory Pipeline
 
 - **Single-pass LLM enrichment** — every write auto-classifies into one of 14 memory types, generates title/summary/tags, scores importance, flags PII, and extracts entities — from a single `content` field
-- **Hybrid search** — pgvector semantic similarity + full-text keyword matching + knowledge graph expansion (up to 2 hops), ranked by composite score of similarity, importance, freshness, and graph boost
-- **Live knowledge graph** — people, orgs, locations, and concepts extracted into entities and relations on every write. Semantic entity resolution (>0.85 cosine) auto-merges duplicates
+- **Hybrid search** — pgvector semantic similarity + full-text keyword matching + knowledge graph expansion (up to 2 hops), ranked by composite score of similarity, importance, freshness, and graph boost. When a result set holds both a superseded memory and the memory that replaced it, the replacement is always ranked immediately above it — a stale row can surface, but never above its own correction
+- **Live knowledge graph** — people, orgs, locations, and concepts extracted into entities and relations on every write. Entity resolution runs exact name match first, then a deterministic canonical-name match (case- and whitespace-insensitive, and ignoring a leading `the`/`a`/`an`/`new`/`old`/`current`/`existing`/`legacy` — so "the new analytics service" and "analytics service" are one entity), then semantic similarity (>0.85 cosine). A qualifier is only dropped while two or more words remain, so "new york" never collapses into "york". Every surface form seen is kept as an alias on the entity
 - **Contradiction detection** — RDF triple comparison + LLM semantic analysis detects conflicting memories and automatically supersedes them, with full contradiction chain tracking
 
 ### Self-Improving Memory
@@ -512,7 +522,7 @@ The client discovers 12 tools automatically:
 | `caura_evolve` | Report outcomes against recalled memories — adjusts weights, generates rules (Karpathy Loop) |
 | `caura_stats` | Aggregate counts: total + breakdowns by type, agent, status. Read-only |
 | `caura_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
-| `caura_keystones_set` | Author or remove keystone rules (`op=set\|delete`). `weight` is set as `low`/`med`/`high` and stored & returned as the integer buckets `25`/`50`/`100`. Trust ≥ 1 for your own `scope=agent` rule; ≥ 2 for `scope=fleet`/`scope=tenant` or another agent |
+| `caura_keystones_set` | Author or remove keystone rules (`op=set\|delete`). `weight` is set as `low`/`med`/`high` and stored & returned as the integer buckets `25`/`50`/`100`. Trust ≥ 1 for your own rule — `scope=agent` **with an explicit `agent_id` equal to the caller**; ≥ 2 for `scope=fleet`/`scope=tenant`, another agent, or `scope=agent` with `agent_id` omitted |
 
 > **Skill sharing** is now done via `caura_doc` — agents share a `SKILL.md` by upserting a document into the `skills` collection (`caura_doc op=write collection=skills doc_id=<slug> data={"summary": "<one-liner>", ...}`). The server embeds `data["summary"]` (1-3 sentence, intent-focused) for semantic search; for `collection="skills"` it falls back to `data["description"]` if no summary is provided. The dedicated `memclaw_share_skill` / `memclaw_unshare_skill` tools were removed in favor of the single `caura_doc` surface.
 
@@ -577,9 +587,9 @@ settings.
   with the trail's real event timestamps preserved.
 - **How activity is captured.** Two families, one submit protocol:
   - **Plugin-buffer** — the OpenClaw plugin keeps a durable node-local buffer
-    and submits windows (add `MEMCLAW_INTERVIEWER=true` to the plugin env).
-  - **Disk-parser** — the `memclaw-interviewer` CLI (shipped in the
-    `memclaw-client` package) reads a harness's on-disk transcript read-only
+    and submits windows (add `CAURA_INTERVIEWER=true` to the plugin env).
+  - **Disk-parser** — the `caura-interviewer` CLI (shipped in the
+    `caura-client` package) reads a harness's on-disk transcript read-only
     and submits windows. Ships for **Claude Code** (`~/.claude/projects`) and
     **Cursor** (`~/.cursor/…/agent-transcripts`) today; **Hermes** and others
     are planned.
@@ -599,8 +609,8 @@ wiring, and the protocol are in the
 
 ### The Caura Broker
 
-The **Caura Broker** is a local daemon (`memclawd`, driven by the `memclaw`
-CLI) that runs on a developer's machine and connects coding agents — Claude
+The **Caura Broker** is a local daemon (`caura-daemon`, formerly `memclawd`, <!-- legacy-name-ok: taught as legacy alias -->
+driven by the `caura` CLI) that runs on a developer's machine and connects coding agents — Claude
 Code, Codex, Cursor, Gemini — to Caura. Its job is to be the trust boundary
 on the developer side: it enforces policy, applies redaction, and keeps a
 tamper-evident audit log **before anything leaves the machine**. The Broker
@@ -767,7 +777,7 @@ The **reader/writer split** is an opt-in topology for high-write-rate deploys th
 
 2. **Snapshot the database.** A `pg_dump` is the safest fallback. Replace
    `<container>` with the running PostgreSQL container name (typically
-   `caura-memclaw-db-1`):
+   `caura-db-1`):
    ```bash
    docker compose up -d db    # bring just the DB back
    docker exec <container> pg_dump -U memclaw memclaw > backup-pre-v2.sql
@@ -779,7 +789,7 @@ The **reader/writer split** is an opt-in topology for high-write-rate deploys th
    a populated DB:
    ```bash
    docker compose pull
-   MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS=true docker compose up -d
+   CAURA_RUN_DESTRUCTIVE_MIGRATIONS=true docker compose up -d
    ```
    The `core-storage-api` container will run `alembic upgrade head` on
    startup. The migration runs in seconds-to-minutes for typical OSS
@@ -829,10 +839,10 @@ The **reader/writer split** is an opt-in topology for high-write-rate deploys th
      so self-hosters on the stock stack should use the `core-storage-api`
      variant above, which works as documented.
 
-6. **Once stable, unset `MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS`** so subsequent
+6. **Once stable, unset `CAURA_RUN_DESTRUCTIVE_MIGRATIONS`** so subsequent
    `up` commands don't carry the opt-in:
    ```bash
-   unset MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS  # if exported in the shell
+   unset CAURA_RUN_DESTRUCTIVE_MIGRATIONS  # if exported in the shell
    # or remove the line from your .env file
    ```
 
@@ -849,7 +859,7 @@ explicitly downgrade:
 
 ```bash
 docker compose run --rm \
-  -e MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS=true \
+  -e CAURA_RUN_DESTRUCTIVE_MIGRATIONS=true \
   core-storage-api alembic downgrade 011
 ```
 
@@ -886,7 +896,7 @@ All routes are versioned under `/api/v1/`. Interactive Swagger docs at `/api/doc
 | `/memories` | DELETE | Bulk soft-delete |
 | `/memories/stats` | GET | Counts by type, agent, and status |
 | `/search` | POST | Hybrid semantic + keyword search with graph-enhanced retrieval |
-| `/recall` | POST | Search + LLM summarization — returns context paragraph + source memories |
+| `/recall` | POST | Search + LLM synthesis — `summary` is the answer to the query (the model reasons step by step internally; only its final answer is surfaced), alongside the source memories under both `memories` and `items` |
 | `/ingest/preview` | POST | Extract 5-20 atomic facts from a URL or text (no writes) |
 | `/ingest/commit` | POST | Write previewed facts as memories |
 
@@ -978,13 +988,13 @@ All routes are versioned under `/api/v1/`. Interactive Swagger docs at `/api/doc
 |---|---|
 | `X-Agent-ID` | Scopes the request to this agent |
 | `X-Org-Read-Only: true` | Read-only mode — creates/updates return 403 |
-| `X-Tenant-ID` | Tenant identity when using the shared `MEMCLAW_API_KEY` gate |
+| `X-Tenant-ID` | Tenant identity when using the shared `CAURA_API_KEY` gate |
 
 These headers are honored unconditionally — `core-api` must not be network-exposed without a gateway that strips them from untrusted callers.
 
 **Rate limiting (managed platform)**
 
-These limits apply to the managed platform at `caura.ai`. In the OSS edition, rate limiting is a no-op — see the [Rate limiting](#rate-limiting) section below.
+These limits apply to the managed platform at `caura.ai`. A self-hosted deployment enforces its own, looser per-route limits out of the box — see the [Rate limiting](#rate-limiting) section below.
 
 | Scope | Limit |
 |---|---|
@@ -994,7 +1004,7 @@ These limits apply to the managed platform at `caura.ai`. In the OSS edition, ra
 | Auth endpoints | 10 req/min per IP |
 | Global DDoS floor | 1000 req/min per IP |
 
-Exceeded limits return HTTP 429 with a `Retry-After` header.
+Exceeded limits return HTTP 429 with a `Retry-After` header. Rate-limited routes also carry `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` on **successful** responses, so a client can back off before it is throttled rather than after.
 
 </details>
 
@@ -1043,7 +1053,7 @@ All configuration is via environment variables or `.env`. See `.env.example` for
 <summary>Project structure</summary>
 
 ```
-memclaw/
+caura/
 ├── core-api/                      # Main FastAPI service
 │   └── src/core_api/
 │       ├── app.py                 # FastAPI app, lifespan, middleware
@@ -1125,7 +1135,7 @@ The MCP server is mounted at `/mcp`. Tool names, parameter names, and the docume
 | `caura_evolve` | Karpathy-Loop feedback: record an outcome (`success` \| `failure` \| `partial`) against memories. |
 | `caura_stats` | Aggregate counts: total + breakdowns by `type` / `agent` / `status`. Read-only. |
 | `caura_keystones` | Read mandatory governance rules for the current scope (tenant + fleet + agent merged). Call once per session. |
-| `caura_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 for self-authored `scope=agent`; ≥ 2 otherwise. |
+| `caura_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 for self-authored `scope=agent` (requires an explicit `agent_id` equal to the caller); ≥ 2 otherwise, including `scope=agent` with `agent_id` omitted. |
 
 > Skill sharing uses the generic `caura_doc` surface — write/read/query/search/delete on `collection="skills"`. The server validates the slug and embeds `data["summary"]` for semantic discovery (with a back-compat fallback to `data["description"]` for skills).
 
@@ -1138,7 +1148,7 @@ All paths are prefixed with `/api/v1` unless noted. Request and response shapes 
 | Memory | `GET/POST /memories`, `PATCH /memories/{id}`, `DELETE /memories/{id}`, `PATCH /memories/{id}/status`, `POST /memories/bulk`, `POST /memories/bulk-delete`, `GET /memories/stats`, `GET /memories/{id}`, `GET /memories/{id}/contradictions`, `POST /search`, `POST /recall`, `POST /ingest/preview`, `POST /ingest/commit` |
 | Knowledge graph | `GET /entities`, `GET /entities/{id}`, `POST /entities/upsert`, `GET /graph`, `POST /relations/upsert` |
 | Documents | `POST /documents`, `GET /documents`, `GET /documents/{id}`, `POST /documents/query`, `DELETE /documents/{id}` |
-| Keystones | `GET /memclaw/keystones`, `POST /memclaw/keystones`, `DELETE /memclaw/keystones/{doc_id}` |
+| Keystones | `GET /keystones`, `POST /keystones`, `DELETE /keystones/{doc_id}` (permanent legacy alias: `/memclaw/keystones`) | <!-- legacy-name-ok: taught as legacy alias -->
 | Fleet | `POST /fleet/heartbeat`, `GET /fleet/nodes`, `POST /fleet/commands`, `GET /fleet/commands` |
 | Agents | `GET /agents`, `GET /agents/{id}`, `PATCH /agents/{id}/trust`, `POST /admin/agent-keys/provision` (atomic key + row + trust + fleet), `GET /whoami` (identity probe) |
 | Insights | `POST /insights/generate` |
@@ -1155,12 +1165,17 @@ Read by the OpenClaw plugin. The plugin's published name (`memclaw`) and these v
 
 | Var | Purpose |
 |---|---|
-| `MEMCLAW_API_URL` | Base URL of the core-api server. |
-| `MEMCLAW_API_KEY` | Tenant or admin API key sent in `X-API-Key`. |
-| `MEMCLAW_TENANT_ID` | Optional pre-resolved tenant id; bypasses lookup. |
-| `MEMCLAW_FLEET_ID` | Default fleet id for writes/heartbeat. |
-| `MEMCLAW_NODE_NAME` | Fleet node identifier reported on heartbeat. |
-| `MEMCLAW_AUTO_WRITE_TURNS` | Auto-write turn summaries (default `true`). |
+| `CAURA_API_URL` | Base URL of the core-api server. |
+| `CAURA_API_KEY` | Tenant or admin API key sent in `X-API-Key`. |
+| `CAURA_TENANT_ID` | Optional pre-resolved tenant id; bypasses lookup. |
+| `CAURA_FLEET_ID` | Default fleet id for writes/heartbeat. |
+| `CAURA_NODE_NAME` | Fleet node identifier reported on heartbeat. |
+| `CAURA_AUTO_WRITE_TURNS` | Auto-write turn summaries (default `true`). |
+
+**Legacy spellings.** Every `CAURA_*` variable in this document — the table above, the `CAURA_API_KEY` server gate, and `CAURA_VERSION` in compose — also answers to its pre-rename `MEMCLAW_*` name and will keep doing so: swap the prefix, and the rest of the name is unchanged (`CAURA_API_URL` ⇄ `MEMCLAW_API_URL`). Where both are set the first **non-empty** value wins — deliberately, rather than the first one *defined* — so an unfilled `CAURA_FOO=` in a deploy template cannot blank out a working `MEMCLAW_FOO`. <!-- legacy-name-ok: rule 3 dual-read alias — the one surviving alias table -->
+
+New installs are written with the `CAURA_*` names. Variables without the prefix
+(`ADMIN_API_KEY`, `POSTGRES_*`, `IS_STANDALONE`, …) never had a branded spelling.
 
 #### Server environment variables
 
@@ -1169,7 +1184,7 @@ These mirror the Configuration table above. See it for defaults.
 | Group | Vars |
 |---|---|
 | Database | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_USE_IAM_AUTH`, `POSTGRES_REQUIRE_SSL` |
-| Auth | `ADMIN_API_KEY`, `MEMCLAW_API_KEY`, `IS_STANDALONE` |
+| Auth | `ADMIN_API_KEY`, `CAURA_API_KEY`, `IS_STANDALONE` |
 | Providers | `EMBEDDING_PROVIDER`, `ENTITY_EXTRACTION_PROVIDER`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `USE_LLM_FOR_MEMORY_CREATION` |
 | Runtime | `CORS_ORIGINS`, `ENVIRONMENT`, `SETTINGS_ENCRYPTION_KEY`, `REDIS_URL` |
 
@@ -1179,7 +1194,7 @@ These mirror the Configuration table above. See it for defaults.
 |---|---|---|
 | Standalone | `IS_STANDALONE=true` | Single-tenant self-host; auth bypassed. |
 | Multi-tenant admin | `ADMIN_API_KEY=…` | Operator key for multi-tenant deployments. |
-| Shared gate | `MEMCLAW_API_KEY=…` | Optional shared secret required on every non-admin request. |
+| Shared gate | `CAURA_API_KEY=…` | Optional shared secret required on every non-admin request. |
 
 See [AGENT-INSTALL.md](AGENT-INSTALL.md) for installation flows that exercise each mode.
 
@@ -1189,7 +1204,7 @@ Anything not listed above is internal and may change in any release without a ma
 
 - Python module layout (`core_api.middleware.*`, `core_api.providers.*`, `core_api.pipeline.*`, `core_api.services.*`, `common/*`)
 - Database schema, table names, migration paths
-- Gateway-injected HTTP headers (`X-Memclaw-Gateway`, `X-Tenant-ID`, `X-Agent-ID`, `X-Org-Read-Only`)
+- Gateway-injected HTTP headers (`X-Gateway-Secret`, `X-Tenant-ID`, `X-Agent-ID`, `X-Org-Read-Only`)
 - Most `/api/v1/admin/*` and all `/api/v1/testing/*` routes (the documented exception is `POST /admin/agent-keys/provision`, which is part of the stable identity-bootstrap surface — see the Agents row above)
 - The `core-storage-api` microservice (internal, not user-facing)
 - The plugin's TypeScript module structure
@@ -1224,10 +1239,24 @@ See [static/docs/integration-guide.md](static/docs/integration-guide.md) for ful
 
 ## Rate limiting
 
-Rate limiting in the OSS edition is a **no-op** — all rate-limit decorators are identity
-functions that accept every request without throttling. For production deployments exposed to
-the internet, add rate limiting at your reverse proxy (nginx, Caddy, Cloudflare) or implement
-application-level limiting in `core-api/src/core_api/middleware/rate_limit.py`.
+Rate limiting is enforced in-process by [slowapi](https://github.com/laurentS/slowapi), keyed by
+API key where one is present and by remote IP otherwise. It is applied per route, not globally —
+`/health`, `/version`, and `/mcp` are never throttled:
+
+| Route | Default | Setting |
+|---|---|---|
+| `POST /memories`, `POST /documents`, `POST /ingest/commit` | 10/second | `RATE_LIMIT_WRITE` |
+| `POST /memories/bulk` | 2/second | `RATE_LIMIT_WRITE_BULK` |
+| `POST /search`, `POST /recall` | 30/second | `RATE_LIMIT_SEARCH` |
+
+Every response from a rate-limited route carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and
+`X-RateLimit-Reset`; a rejected request gets HTTP 429 with `Retry-After`. Counters live in Redis when
+`REDIS_URL` is set — which is what makes the limit hold across replicas — and in process memory
+otherwise, so a multi-instance deployment without Redis limits each instance separately. A Redis
+outage fails open: requests pass through un-throttled rather than erroring.
+
+Add limiting at your reverse proxy (nginx, Caddy, Cloudflare) as well if you need per-IP DDoS
+floors or limits the application layer can't see.
 
 ## Telemetry
 
@@ -1264,7 +1293,7 @@ Mem0 and Zep focus on memory for individual agents; accuracy benchmarks
 cluster all three tools in a narrow band. Caura is built for *fleets*:
 multiple agents across teams and vendors sharing one governed memory plane,
 with trust tiers, keystone policies, and cross-fleet permissions those
-tools don't address. See [How Caura compares](#how-memclaw-compares).
+tools don't address. See [How Caura compares](#how-caura-compares).
 
 **Does Caura work with Claude Desktop, Claude Code, Cursor, or Windsurf?**
 Yes — Caura is MCP-native. Paste a JSON config with a URL and API key

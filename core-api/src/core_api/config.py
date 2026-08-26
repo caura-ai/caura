@@ -26,7 +26,19 @@ class Settings(BaseSettings):
     # ``db_pool_*`` settings + ``database_url`` were removed with the engine.
     api_key: str | None = None  # legacy, deprecated
     admin_api_key: str | None = None
-    memclaw_api_key: str | None = None  # Optional: when set, all non-admin requests must present this key
+    # Optional: when set, all non-admin requests must present this key. Both
+    # spellings are accepted as INPUTS; ``_prefer_the_new_api_key_name`` below
+    # collapses them onto the second field, the only one downstream code reads —
+    # the first is None whenever the operator set the old name.
+    #
+    # Deliberately NOT ``AliasChoices``: that resolves to the first alias that is
+    # DEFINED, and the empty string counts. A deploy template carrying an
+    # unfilled ``CAURA_API_KEY=`` next to a working old name would resolve to
+    # ``""``, and auth.py's ``if mclaw_key:`` would skip the whole Path-2
+    # perimeter without a word. For a secret, blank and unset mean the same
+    # thing, so first-NON-EMPTY is the only safe rule.
+    caura_api_key: str | None = None
+    memclaw_api_key: str | None = None  # legacy-name-ok: rule 3 dual-read alias
     # Perimeter secret shared with the enterprise gateway. When set, the
     # header-trust auth path (X-Tenant-ID) additionally requires a matching
     # ``X-Gateway-Secret`` header — so a caller who reaches core-api directly
@@ -97,6 +109,19 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     entity_extraction_provider: str = "openai"  # none | fake | openai | anthropic | openrouter | gemini
     entity_extraction_model: str = "gpt-5.4-nano"
+    # E3 — reasoning-effort for the contradiction judge's LLM calls.
+    # Valid values are MODEL-SPECIFIC (gpt-5.4 family, wet-tested:
+    # "none" | "low" | "medium" | "high" | "xhigh"; some models take
+    # "minimal" instead of "none") — verify against the configured
+    # entity_extraction_model before setting, because an unsupported
+    # value 400s on every call and call_with_fallback silently degrades
+    # the judge to abstention. The judge is bounded classification work,
+    # so a low tier bounds hidden reasoning-token spend (billed as
+    # output) without changing which candidates are considered; use the
+    # per-call tokens_reasoning log field to compare tiers in dollars.
+    # None (the default) sends no parameter at all — REQUIRED for
+    # non-reasoning models, which reject the parameter outright.
+    contradiction_reasoning_effort: str | None = None
     # Default for the ``search.entity_retrieval`` org setting: query-time entity
     # lookup + graph search. A tenant override wins; this is the fleet-wide
     # fallback so an operator can disable entity/graph reads on a whole box
@@ -319,6 +344,10 @@ class Settings(BaseSettings):
     # routes GET + tagged-read POST calls here instead of ``core_storage_api_url``;
     # empty keeps today's single-service behaviour (OSS + pre-split deploys).
     core_storage_read_url: str = ""
+    # Public base URL of THIS API as callers reach it (e.g. https://api.caura.ai).
+    # When set, the OpenAPI spec gains a ``servers`` block so generated clients
+    # and agents resolve relative paths correctly; empty emits no servers block.
+    public_api_url: str = ""
     settings_encryption_key: str = ""  # Required in production (Fernet key)
     jwt_secret: str = "change-me-in-production"  # Required in production
     paddle_client_token: str | None = None
@@ -329,6 +358,13 @@ class Settings(BaseSettings):
     paddle_business_monthly_price_id: str | None = None
     paddle_business_annual_price_id: str | None = None
     use_stm: bool = False
+    # D13 — meter /recall and MCP caura_recall against the "recall" counter
+    # instead of "search". Off by default because the recalls counter feeds
+    # plan enforcement (`_is_over_plan_limits` → x-org-read-only → 403 on
+    # write routes): flipping this makes the per-plan recall cap computable
+    # for the first time, so enabling it is a deliberate billing decision,
+    # not a deploy side effect. Off = the historical (miscounted) behavior.
+    meter_recall_as_recall: bool = False
     stm_backend: str = "memory"  # memory | redis
     stm_notes_ttl: int = 86400  # 24h
     stm_bulletin_ttl: int = 172800  # 48h
@@ -355,6 +391,16 @@ class Settings(BaseSettings):
     security_audit_alert_score_below: float | None = None
     security_audit_alert_critical_findings_min: int | None = None
     security_audit_alert_score_drop_delta: float | None = None
+
+    @model_validator(mode="after")
+    def _prefer_the_new_api_key_name(self) -> "Settings":
+        """Collapse the two accepted spellings onto the field auth.py reads.
+
+        First non-empty wins, new name first — so the old spelling keeps working
+        forever and a blank new one can never shadow it.
+        """
+        self.memclaw_api_key = self.caura_api_key or self.memclaw_api_key  # legacy-name-ok: rule 3 alias
+        return self
 
     @field_validator("log_level", mode="before")
     @classmethod

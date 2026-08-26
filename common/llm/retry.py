@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, TypeVar
 
+from common.llm.call_context import llm_call_label
 from common.llm.constants import (
     LLM_MAX_RETRY_AFTER_S,
     LLM_RETRY_ATTEMPTS,
@@ -99,6 +100,39 @@ def retry_after_seconds(exc: BaseException) -> float | None:
 
 
 async def call_with_retry(
+    coro_fn: Callable[[], Coroutine[Any, Any, T]],
+    label: str,
+    max_attempts: int = LLM_RETRY_ATTEMPTS,
+    base_delay: float = LLM_RETRY_DELAY_S,
+    timeout: float | None = None,
+    non_retryable: tuple[type[BaseException], ...] = (),
+    budget_s: float | None = None,
+) -> T:
+    """Call *coro_fn* with retry and linear backoff — see
+    :func:`_call_with_retry_impl` for the full parameter contract.
+
+    This thin wrapper additionally publishes *label* as the ambient
+    :data:`common.llm.call_context.llm_call_label` for the duration of the
+    call (E4-prep), so the provider's per-call token log can attribute
+    cost to its service without any signature changes. Reset in
+    ``finally`` — the label must not leak into a sibling task's log lines.
+    """
+    _label_token = llm_call_label.set(label)
+    try:
+        return await _call_with_retry_impl(
+            coro_fn,
+            label,
+            max_attempts=max_attempts,
+            base_delay=base_delay,
+            timeout=timeout,
+            non_retryable=non_retryable,
+            budget_s=budget_s,
+        )
+    finally:
+        llm_call_label.reset(_label_token)
+
+
+async def _call_with_retry_impl(
     coro_fn: Callable[[], Coroutine[Any, Any, T]],
     label: str,
     max_attempts: int = LLM_RETRY_ATTEMPTS,

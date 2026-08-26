@@ -17,8 +17,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
-
 from core_api.services.doc_indexing import resolve_doc_memory
+from fastapi import Response
 
 pytestmark = [pytest.mark.unit]
 
@@ -43,16 +43,15 @@ def test_both_surfaces_share_one_rule():
 
     assert mcp_spec == rest_spec
     assert mcp_spec is not None
-    assert mcp_spec.content == _BODY  # verbatim on both
+    assert _BODY in mcp_spec.content  # same render on both
 
 
 def test_rule_lives_in_one_module_only():
     """Guard against a surface growing its own derivation logic."""
     import inspect
 
-    from core_api.routes import documents as rest_module
-
     from core_api import mcp_server
+    from core_api.routes import documents as rest_module
 
     for module in (rest_module, mcp_server):
         src = inspect.getsource(module)
@@ -138,6 +137,7 @@ async def test_unindexed_branch_mints(rest_env):
 
     await mod.upsert_document.__wrapped__(
         request=AsyncMock(),
+        response=Response(),
         body=_body(mod),
         auth=_auth(),
         idempotency_key=None,
@@ -146,8 +146,8 @@ async def test_unindexed_branch_mints(rest_env):
     rest_env["sc"].upsert_document.assert_awaited_once()
     rest_env["spy"].assert_awaited_once()
     spec = rest_env["spy"].call_args.args[0]
-    assert spec.content == _BODY
-    assert spec.source_uri == "memclaw-doc://runbooks/pg-tuning"
+    assert _BODY in spec.content
+    assert spec.source_uri == "caura-doc://runbooks/pg-tuning"
 
 
 async def test_indexed_branch_mints(rest_env, monkeypatch):
@@ -158,6 +158,7 @@ async def test_indexed_branch_mints(rest_env, monkeypatch):
 
     await mod.upsert_document.__wrapped__(
         request=AsyncMock(),
+        response=Response(),
         body=_body(mod, data={"summary": "Postgres tuning.", "content": _BODY}),
         auth=_auth(),
         idempotency_key=None,
@@ -165,25 +166,50 @@ async def test_indexed_branch_mints(rest_env, monkeypatch):
 
     rest_env["sc"].upsert_document_xmax.assert_awaited_once()
     rest_env["spy"].assert_awaited_once()
-    assert rest_env["spy"].call_args.args[0].content == _BODY
+    assert _BODY in rest_env["spy"].call_args.args[0].content
 
 
 async def test_caller_agent_id_is_forwarded(rest_env):
     mod = rest_env["module"]
 
     await mod.upsert_document.__wrapped__(
-        request=AsyncMock(), body=_body(mod), auth=_auth(), idempotency_key=None
+        request=AsyncMock(),
+        response=Response(),
+        body=_body(mod),
+        auth=_auth(),
+        idempotency_key=None,
     )
 
     assert rest_env["spy"].call_args.kwargs["agent_id"] == "agent-a"
 
 
-async def test_skips_mint_for_bodyless_doc(rest_env):
+async def test_bodyless_structured_record_now_mints(rest_env):
+    """CAURA-717: a record with no ``content``/``body`` key used to skip. It now
+    renders its fields instead — the change that unblocked eToro's doc feed."""
     mod = rest_env["module"]
 
     await mod.upsert_document.__wrapped__(
         request=AsyncMock(),
+        response=Response(),
         body=_body(mod, collection="customers", data={"plan": "business", "seats": 40}),
+        auth=_auth(),
+        idempotency_key=None,
+    )
+
+    rest_env["spy"].assert_awaited_once()
+    content = rest_env["spy"].call_args.args[0].content
+    assert "plan: business" in content
+    assert "seats: 40" in content
+
+
+async def test_skips_mint_for_empty_payload(rest_env):
+    """The only content-based skip left: nothing usable to render."""
+    mod = rest_env["module"]
+
+    await mod.upsert_document.__wrapped__(
+        request=AsyncMock(),
+        response=Response(),
+        body=_body(mod, collection="customers", data={}),
         auth=_auth(),
         idempotency_key=None,
     )
@@ -198,7 +224,11 @@ async def test_raising_mint_does_not_fail_the_doc_write(rest_env):
     rest_env["spy"].side_effect = RuntimeError("memory subsystem down")
 
     out = await mod.upsert_document.__wrapped__(
-        request=AsyncMock(), body=_body(mod), auth=_auth(), idempotency_key=None
+        request=AsyncMock(),
+        response=Response(),
+        body=_body(mod),
+        auth=_auth(),
+        idempotency_key=None,
     )
 
     rest_env["spy"].assert_awaited_once()

@@ -114,7 +114,7 @@ class TestInstallCredentialAuthContext:
 
 @pytest.mark.unit
 class TestBulkMemoryCreateAgentIdOptional:
-    """``agent_id`` is now Optional on the wire so memclawd broker
+    """``agent_id`` is now Optional on the wire so caura-daemon broker
     calls (per cloud-data-plane.md §2.4) can omit it. The route
     handler fills in ``broker:{install_uuid}`` when the caller
     authenticates as an install credential; non-install callers

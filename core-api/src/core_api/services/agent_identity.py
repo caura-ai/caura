@@ -1,7 +1,7 @@
 """Reserved-agent-id write guard (Phase 1 of the `main` identity fix).
 
 Bare ``agent_id="main"`` is the OpenClaw plugin's unset default; without a
-per-install ``MEMCLAW_AGENT_ID`` every install collapses onto one shared
+per-install ``CAURA_AGENT_ID`` every install collapses onto one shared
 identity (the eToro "firehose"). This module reserves it on the write path so
 new writes can't keep refilling that bucket, and returns an actionable message
 telling the agent how to set a real identity.
@@ -40,7 +40,7 @@ class ReservedAgentIdError(Exception):
 RESERVED_WRITE_ID_MESSAGE = (
     'agent_id "{agent_id}" is reserved and no longer accepts writes — it is the '
     "unset plugin default and collides across every install. Retry with a "
-    "unique, STABLE agent_id for THIS install: (1) set MEMCLAW_AGENT_ID in "
+    "unique, STABLE agent_id for THIS install: (1) set CAURA_AGENT_ID in "
     '~/.openclaw/plugins/memclaw/.env to a stable name (e.g. "webclaw") and '
     "restart the plugin; (2) or pass a unique agent_id argument on each write "
     'call now; (3) if you have no name, use "main-<install_id>" with '

@@ -117,7 +117,7 @@ describe("task-trail sync", () => {
   let legacyDbPath: string;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "memclaw-task-trail-"));
+    tmp = mkdtempSync(join(tmpdir(), "caura-task-trail-"));
     __TASK_TRAIL_INTERNALS__.setBaseDirForTests(tmp);
     __TASK_TRAIL_INTERNALS__.setSidecarPathForTests(join(tmp, "sidecar.json"));
     __INTERVIEW_BUFFER_INTERNALS__.setPathForTests(join(tmp, "buf.jsonl"));
@@ -140,7 +140,7 @@ describe("task-trail sync", () => {
     assert.equal(events.length, 0);
   });
 
-  test("MEMCLAW_TASK_DB_PATH override: valid path is exclusive, broken path is named in the note", async () => {
+  test("CAURA_TASK_DB_PATH override: valid path is exclusive, broken path is named in the note", async () => {
     // Valid override: used exclusively, even though a legacy DB also exists.
     makeDb(legacyDbPath);
     insertRow(legacyDbPath, { task_id: "t-legacy" });
@@ -158,7 +158,7 @@ describe("task-trail sync", () => {
       __TASK_TRAIL_INTERNALS__.setTaskDbPathForTests(join(tmp, "does-not-exist.sqlite"));
       const broken = await syncTaskTrail();
       assert.equal(broken.synced, 0);
-      assert.match(broken.note ?? "", /MEMCLAW_TASK_DB_PATH=.*does-not-exist\.sqlite/);
+      assert.match(broken.note ?? "", /CAURA_TASK_DB_PATH=.*does-not-exist\.sqlite/);
     } finally {
       __TASK_TRAIL_INTERNALS__.setTaskDbPathForTests(undefined);
     }

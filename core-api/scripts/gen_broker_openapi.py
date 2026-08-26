@@ -2,13 +2,13 @@
 """Generate / verify the frozen v1 broker OpenAPI contract for core-api.
 
 The baseline (``core-api/openapi.broker.json``) is the FROZEN v1 contract for
-the broker-facing gateway operations that memclawd (the on-prem broker) calls
+the broker-facing gateway operations that caura-daemon (the on-prem broker) calls
 against Caura cloud. It is a *subset* of core-api's full ~91-path OpenAPI
 surface: only the broker operations plus the schema / security components
 those operations reach (transitively).
 
 Broker operations (gateway paths), all of them called by ``internal/cloud``
-in caura-ai/memclawd:
+in caura-ai/caura-daemon:
 
     POST   /api/v1/memories/bulk
     POST   /api/v1/search
@@ -63,8 +63,8 @@ from pathlib import Path
 # this PR's own gate on unrelated changes to those operations and train people
 # to ignore it.
 #
-# Each entry must correspond to something memclawd actually calls -- see the
-# ``internal/cloud`` client in caura-ai/memclawd:
+# Each entry must correspond to something caura-daemon actually calls -- see the
+# ``internal/cloud`` client in caura-ai/caura-daemon:
 #
 #   /memories/bulk        POST    cloud.Client.SaveMemory  (memory_save, mirror)
 #   /search               POST    cloud.Client.Search      (memory_search)
@@ -91,7 +91,7 @@ _NON_OPERATION_KEYS = frozenset(
 # Frozen broker-contract version, deliberately decoupled from core-api's
 # package version. Bump ONLY for an intentional contract major per the RFC.
 CONTRACT_VERSION = "v1"
-CONTRACT_TITLE = "MemClaw core-api broker contract"
+CONTRACT_TITLE = "Caura core-api broker contract"
 
 BASELINE_PATH = Path(__file__).resolve().parent.parent / "openapi.broker.json"
 

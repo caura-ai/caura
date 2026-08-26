@@ -1,5 +1,5 @@
 /**
- * MemClaw ContextEngine internal helpers — extracted from
+ * Caura ContextEngine internal helpers — extracted from
  * ``context-engine.ts`` so the session-buffer key contract can be
  * exercised by ``runtime-contract.test.ts`` without exposing a
  * ``_internal`` namespace from the production module. Anything in
@@ -12,14 +12,14 @@
  * the session-key consistency tests guard against.
  */
 
-import { MEMCLAW_TENANT_ID } from "./env.js";
+import { CAURA_TENANT_ID } from "./env.js";
 import { resolveAgentId } from "./resolve-agent.js";
 
 export function getTenantPrefix(
   config: Record<string, unknown> | undefined | null,
 ): string {
   // Optional chaining — config may be missing entirely (CAURA-000).
-  return ((config?.tenantId as string) || MEMCLAW_TENANT_ID || "default");
+  return ((config?.tenantId as string) || CAURA_TENANT_ID || "default");
 }
 
 export function getSessionKey(

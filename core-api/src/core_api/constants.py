@@ -1,4 +1,4 @@
-"""Centralised constants for the MemClaw API."""
+"""Centralised constants for the Caura API."""
 
 import importlib.metadata
 import os
@@ -73,7 +73,8 @@ def _resolve_version() -> str:
 
     Precedence (most to least authoritative):
 
-    1. ``MEMCLAW_VERSION`` env — explicit deploy/ad-hoc override.
+    1. ``CAURA_VERSION`` env, or its legacy alias below — explicit deploy /
+       ad-hoc override. The new name wins when both are set.
     2. ``VERSION`` file baked into the image at build time from
        ``pyproject.toml`` (see ``core-api/Dockerfile``). Deterministic and
        independent of installed-package metadata — the prod Dockerfile
@@ -83,7 +84,7 @@ def _resolve_version() -> str:
     3. Installed package metadata — editable dev installs (``pip install -e``).
     4. ``"dev"`` — source-only checkout with none of the above.
     """
-    env = os.environ.get("MEMCLAW_VERSION")
+    env = os.environ.get("CAURA_VERSION") or os.environ.get("MEMCLAW_VERSION")  # legacy-name-ok: alias
     if env and env.strip():
         return env.strip()
     # constants.py → core_api → src → core-api → repo root (image: /app).
@@ -177,10 +178,13 @@ MAX_QUERY_LENGTH = 5000
 # ``memories.content`` directly). Docs themselves are only searchable via their
 # ``data["summary"]`` embedding, and ``caura_recall`` never returns documents.
 #
-# The memory content is the doc body VERBATIM, so the cutoff is simply the
-# memory schema ceiling: mint whenever the body fits in a memory at all.
-# Over-cutoff bodies are SKIPPED rather than truncated — a truncated body reads
-# as complete and would produce confidently wrong downstream conclusions.
+# The memory content is the whole ``data`` payload rendered as text (CAURA-717),
+# so the cutoff is simply the memory schema ceiling: mint whenever the RENDER
+# fits in a memory at all. Note the render is slightly longer than any one field
+# — ``key: `` labels and blank-line separators — so a doc can be under the cap
+# on its body and over it once rendered. Over-cutoff payloads are SKIPPED rather
+# than truncated: a truncated payload reads as complete and would produce
+# confidently wrong downstream conclusions.
 DOC_MEMORY_MAX_CHARS = MAX_CONTENT_LENGTH
 
 # NOTE: there is deliberately no ``DOC_MEMORY_TYPE``. Doc-derived memories pass
@@ -192,10 +196,19 @@ DOC_MEMORY_MAX_CHARS = MAX_CONTENT_LENGTH
 # migration 013 would reject it.)
 
 # Provenance only — written to ``memories.source_uri`` as
-# ``memclaw-doc://<collection>/<doc_id>``. Nothing queries it yet (that would
+# ``caura-doc://<collection>/<doc_id>``. Nothing queries it yet (that would
 # need a storage-side filter + index); it exists so a later reconciliation
 # mechanism has a stable key to match a doc to the memories minted from it.
-DOC_MEMORY_URI_SCHEME = "memclaw-doc"
+DOC_MEMORY_URI_SCHEME = "caura-doc"
+
+# Rows minted before the rename carry the old scheme in ``source_uri`` and are
+# never rewritten (rule 2 — customer data is not migrated for a brand). All
+# minting uses ``DOC_MEMORY_URI_SCHEME``; anything that ever grows a
+# recognizer for doc-memory URIs (the reconciliation pass above) must accept
+# these schemes alongside it.
+LEGACY_DOC_MEMORY_URI_SCHEMES = (
+    "memclaw-doc",  # legacy-name-ok: scheme already persisted in customers' memories.source_uri
+)
 
 assert DOC_MEMORY_MAX_CHARS <= MAX_CONTENT_LENGTH, (
     "DOC_MEMORY_MAX_CHARS must not exceed MemoryCreate.content max_length "

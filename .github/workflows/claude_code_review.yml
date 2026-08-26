@@ -48,7 +48,9 @@
 #     policy is "drafts get opt-in review, not automatic review" — which is
 #     deliberate (drafts are unfinished; each review costs real budget), and
 #     is the intended way to request one. It is not discoverable from the
-#     skip message, which is why it is written down here.
+#     skip message, which is why it is written down here. It stops being a
+#     draft when it is marked ready, and ``ready_for_review`` reviews it
+#     then — see the note on the trigger list.
 #   * The ``MAX_FILES`` cap is likewise bypassed on the comment path, so an
 #     "@claude" comment can review a PR of any size. Left as-is on purpose:
 #     it is a useful escape hatch for a large but genuinely reviewable PR.
@@ -100,11 +102,19 @@ on:
     branches: [main, dev]
     # `closed` feeds claude-capture ONLY (merged PRs). pre-checks excludes it, which is
     # what stops a merge triggering a fresh review.
-    types: [opened, reopened, synchronize, closed]
+    #
+    # `ready_for_review` reviews a draft at the moment it stops being one. Without it a
+    # draft-first PR is never reviewed automatically at all: `opened` hits the draft skip
+    # by design, the promotion fires an event nobody listens for, and the next push fires
+    # `synchronize`, which is skipped deliberately. This does not weaken the drafts-are-
+    # opt-in policy described above — it applies exactly when the PR is no longer a draft,
+    # and `pull_request.draft` is already false by the time the event fires, so the draft
+    # skip in pre-checks is untouched.
+    types: [opened, reopened, synchronize, closed, ready_for_review]
   issue_comment:
     types: [created]
   # Manual backfill for claude-capture, mirroring the shared pipeline's caller. Two uses: it makes
-  # capture verifiable the moment MEMCLAW_AGENTS_KEY is added — the on-merge path cannot be tested
+  # capture verifiable the moment CAURA_AGENTS_KEY is added — the on-merge path cannot be tested
   # on demand, since it needs a real merge that happens to carry a declined finding — and it can
   # extract declines from pull requests that merged BEFORE capture existed here.
   #
@@ -126,7 +136,11 @@ permissions:
 env:
   EXTRA_PROMPT: "This is a FastAPI + PostgreSQL (pgvector) backend with a TypeScript OpenClaw plugin. Uses requirements.txt (not uv/pyproject.toml). Tests are in tests/ directory."
   REVIEW_PROMPT: |
-    Do NOT review files under tests/ or test_* files. Focus only on source code.
+    Do NOT review files under tests/ or test_* files — EXCEPT conftest.py
+    and tests/_*.py shared fixtures/helpers, which you MUST review like
+    source code: they are the highest-fan-in files in the suite, and the
+    Aug 22 handover recorded a PR where "No issues found" actually meant
+    "diff was excluded". Focus otherwise on source code.
 
     Review this PR for real issues only — not style preferences.
 
@@ -262,8 +276,20 @@ jobs:
           # Paginated for the same reason as the count above, and here the failure is worse than
           # a dead cap: unpaginated, a pull request whose first 30 files are all docs would be
           # skipped as "no source files" even with source changes on page two.
+          #
+          # `conftest.py` and `tests/_*.py` count as SOURCE here, which is the other half of the
+          # carve-out #872 made to REVIEW_PROMPT. Telling the reviewer to review them achieved
+          # nothing on its own: a change confined to those files still counted zero here, so the
+          # job skipped and the prompt was never read. #866 was exactly that, and #872 itself was
+          # too — a lone workflow `.yml` is config, so the PR fixing the exclusion was not
+          # reviewed either. They earn it: they are the highest-fan-in files in the suite
+          # (`tests/_scoped_module.py` is imported by five test files), and a defect in one is a
+          # defect in everything that imports it.
+          #
+          # The expression is pinned by tests/test_review_source_filter.py, which extracts THIS
+          # line from THIS file and runs it — a copy in a test would only prove the copy works.
           SRC_FILES=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" \
-            --jq '[.[] | select(.filename | (startswith("tests/") or startswith("test_") or test("^(Dockerfile|helm/|docs/|.*\\.(md|toml|lock|ya?ml)$)")) | not)] | length' \
+            --jq '[.[] | select(.filename | if (test("(^|/)conftest\\.py$") or test("^tests/_[^/]*\\.py$")) then true else ((startswith("tests/") or startswith("test_") or test("^(Dockerfile|helm/|docs/|.*\\.(md|toml|lock|ya?ml)$)")) | not) end)] | length' \
             | awk '{s+=$1} END {print s+0}')
           if [[ "$SRC_FILES" -eq 0 ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -334,7 +360,7 @@ jobs:
           # is unreadable — which is TODAY, because the org secret is `private` visibility and
           # this repo is public — and recall is then a silent no-op leaving the review
           # byte-for-byte unchanged. Adding a repo-level secret turns it on with no code change.
-          MEMCLAW_AGENTS_KEY: ${{ secrets.MEMCLAW_AGENTS_KEY }}
+          CAURA_AGENTS_KEY: ${{ secrets.CAURA_AGENTS_KEY || secrets.MEMCLAW_AGENTS_KEY }}  # legacy-name-ok: rule 3 dual-read alias
         run: bash .github/scripts/claude_pr_review.sh
 
   # Runs on @claude comment — only for public org members (MEMBER or OWNER).
@@ -442,7 +468,7 @@ jobs:
           # is unreadable — which is TODAY, because the org secret is `private` visibility and
           # this repo is public — and recall is then a silent no-op leaving the review
           # byte-for-byte unchanged. Adding a repo-level secret turns it on with no code change.
-          MEMCLAW_AGENTS_KEY: ${{ secrets.MEMCLAW_AGENTS_KEY }}
+          CAURA_AGENTS_KEY: ${{ secrets.CAURA_AGENTS_KEY || secrets.MEMCLAW_AGENTS_KEY }}  # legacy-name-ok: rule 3 dual-read alias
         run: bash .github/scripts/claude_pr_review.sh
 
   # Runs on MERGE, and only on merge: extracts findings a maintainer DECLINED into the shared
@@ -453,7 +479,7 @@ jobs:
   # accepted judgement, and capturing declines from an abandoned branch would teach the reviewer
   # from a decision nobody stood behind.
   #
-  # Dark and silent without MEMCLAW_AGENTS_KEY, which is the state on the day this lands — the
+  # Dark and silent without CAURA_AGENTS_KEY, which is the state on the day this lands — the
   # org secret is `private` visibility and this repo is public, so it reads as ''. The job still
   # runs and exits 0 having logged that it was dark, which is the diagnosable outcome.
   # Only this job answers a workflow_dispatch. pre-checks is gated on `pull_request` and
@@ -469,7 +495,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      # Read-only: this job reads a comment thread and writes to MemClaw, never to the PR.
+      # Read-only: this job reads a comment thread and writes to Caura, never to the PR.
       issues: read
       # Needed IN ADDITION to issues:read — listing comments on an issue that is actually a pull
       # request 403s without it.
@@ -490,5 +516,5 @@ jobs:
           # pull_request supplies the number; on workflow_dispatch that context is absent and the
           # input takes over. Ordered this way so a merge never reads a stale dispatch input.
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
-          MEMCLAW_AGENTS_KEY: ${{ secrets.MEMCLAW_AGENTS_KEY }}
+          CAURA_AGENTS_KEY: ${{ secrets.CAURA_AGENTS_KEY || secrets.MEMCLAW_AGENTS_KEY }}  # legacy-name-ok: rule 3 dual-read alias
         run: bash .github/scripts/claude_pr_capture.sh

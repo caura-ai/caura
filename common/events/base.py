@@ -122,6 +122,19 @@ class EventBus(ABC):
     async def stop(self) -> None:
         """Drain + shut down. Called on graceful shutdown."""
 
+    async def release_broadcast_subscriptions(self) -> None:
+        """Hand back any per-process broadcast subscriptions. No-op by default.
+
+        Exists on the base class so a shutdown path can call it unconditionally,
+        without knowing which implementation it holds. Only the Pub/Sub bus has
+        anything to release; an in-process bus has no external resource and
+        overriding it would be inventing work.
+
+        Separate from ``stop()`` because it must be runnable FIRST, inside the
+        platform's SIGTERM budget, ahead of teardown that may not finish. See
+        the Pub/Sub implementation for why that ordering is load-bearing.
+        """
+
     @property
     def is_healthy(self) -> bool:
         """True when the bus can still deliver events end-to-end.

@@ -1,4 +1,4 @@
-"""SQLite storage backend for MemClaw.
+"""SQLite storage backend for Caura.
 
 A lightweight, file-based implementation of the ``StorageBackend`` protocol
 suitable for local development, on-premise single-node deployments, and
@@ -16,6 +16,7 @@ import os
 import struct
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import aiosqlite
@@ -187,13 +188,24 @@ def _row_to_dict(
 # ---------------------------------------------------------------------------
 
 
+_DEFAULT_DB_PATH = "~/.caura/caura.db"
+_LEGACY_DB_PATH = "~/.memclaw/memclaw.db"  # legacy-name-ok: read-fallback for pre-rename installs
+
+
 class SqliteBackend:
     """File-based storage backend using SQLite (via ``aiosqlite``).
 
     Satisfies the ``StorageBackend`` protocol through structural subtyping.
     """
 
-    def __init__(self, db_path: str = "~/.memclaw/memclaw.db") -> None:
+    def __init__(self, db_path: str = _DEFAULT_DB_PATH) -> None:
+        if (
+            db_path == _DEFAULT_DB_PATH
+            and not Path(_DEFAULT_DB_PATH).expanduser().exists()
+            and Path(_LEGACY_DB_PATH).expanduser().exists()
+        ):
+            # Pre-rename install: keep reading the database it already has.
+            db_path = _LEGACY_DB_PATH
         self._db_path = db_path
         if db_path != ":memory:":
             self._db_path = os.path.expanduser(db_path)

@@ -105,10 +105,18 @@ def nonbusiness_pregate_audit_detail(
 
 def mark_pii_flagged(metadata: dict, findings: list[Finding]) -> None:
     """Record a deterministic PII flag on ``metadata`` in place (shared by the
-    write-path scan step and the bulk gate so the flag shape stays consistent)."""
-    metadata["contains_pii"] = True
-    metadata["pii_types"] = sorted({f.category.value for f in findings})
-    metadata["pii_flagged_by"] = "governance.deterministic"
+    write-path scan step and the bulk gate so the flag shape stays consistent).
+
+    C25: routed through ``set_system_value`` so the flags land in the
+    ``_system`` namespace too (legacy top-level keys kept for one release).
+    Caller forgeries of these keys are stripped at the ``create_memory``
+    chokepoint before this gate runs.
+    """
+    from core_api.services.system_metadata import set_system_value
+
+    set_system_value(metadata, "contains_pii", True)
+    set_system_value(metadata, "pii_types", sorted({f.category.value for f in findings}))
+    set_system_value(metadata, "pii_flagged_by", "governance.deterministic")
 
 
 async def emit_governance_audit(

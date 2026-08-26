@@ -46,6 +46,6 @@ class LifecycleForgeDistillRequest(LifecycleRequestBase):
     max_writes_per_run: int | None = None
     # ``dry_run=True`` ⇒ produce candidates with ``status=candidate``
     # only; do not run the staged-promotion auto-gates. Used by the
-    # ``memclawctl forge dry-run`` CLI in Phase 1 and by the eval
+    # ``scripts/forge_dry_run.py`` harness in Phase 1 and by the eval
     # harness. Default ``False`` is the production path.
     dry_run: bool = False
