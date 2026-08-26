@@ -62,7 +62,7 @@ export function isCauraAllowed(config: Record<string, any>): boolean {
   // `/usr/lib/node_modules/openclaw/dist/*.js` on the wet-test VM).
   //
   // So a missing OR empty `plugins.allow` means "no restriction —
-  // every enabled plugin can load". Memclaw doesn't need to appear
+  // every enabled plugin can load". This plugin doesn't need to appear
   // in the array in those cases; it's allowed by default. Pre-fix this
   // function returned `false` for missing/empty allow, which drove
   // `autoFixAllowlist` step 1 to *create* an array containing only
@@ -85,7 +85,7 @@ export function isCauraPathLoaded(config: Record<string, any>): boolean {
 }
 
 /**
- * True iff OpenClaw's exclusive memory slot is claimed by memclaw. The plugin
+ * True iff OpenClaw's exclusive memory slot is claimed by Caura. The plugin
  * can be loaded and enabled but have another plugin hold the memory slot, in
  * which case `register()` runs but memory-runtime methods are never called.
  */
@@ -94,7 +94,7 @@ export function isMemorySlotClaimed(config: Record<string, any>): boolean {
 }
 
 /**
- * True iff OpenClaw's contextEngine slot is claimed by memclaw. The
+ * True iff OpenClaw's contextEngine slot is claimed by Caura. The
  * contextEngine slot is what gates ``ContextEngine.assemble()`` — the
  * code path that injects ``<keystone_rules>`` into the system prompt
  * on every turn. Without this slot, OpenClaw falls back to the default
@@ -138,7 +138,7 @@ export function autoFixAllowlist(options?: {
 
   const changes: string[] = [];
 
-  // 1. Ensure memclaw is in `plugins.allow` IF — and only if — the
+  // 1. Ensure the plugin is in `plugins.allow` IF — and only if — the
   //    user has an explicit, non-empty allowlist. CAURA-000: pre-fix
   //    this branch unconditionally created `["memclaw"]` from a
   //    missing/empty array, converting a permissive OpenClaw config
@@ -151,7 +151,7 @@ export function autoFixAllowlist(options?: {
   //    So the fix is: leave a missing/empty allowlist alone; only
   //    append to one that's already non-empty (i.e. the user has
   //    explicitly opted into the allowlist mechanism and we need to
-  //    make sure memclaw is in their list).
+  //    make sure the plugin is in their list).
   if (
     Array.isArray(config?.plugins?.allow) &&
     config.plugins.allow.length > 0 &&
@@ -161,7 +161,7 @@ export function autoFixAllowlist(options?: {
     changes.push("plugins.allow");
   }
 
-  // 2. Ensure memclaw is enabled in plugins.entries
+  // 2. Ensure the plugin is enabled in plugins.entries
   if (!isCauraEnabled(config)) {
     if (!config.plugins) config.plugins = {};
     if (!config.plugins.entries) config.plugins.entries = {};
@@ -179,7 +179,7 @@ export function autoFixAllowlist(options?: {
     changes.push("plugins.load.paths");
   }
 
-  // 4. Claim the exclusive memory slot for memclaw
+  // 4. Claim the exclusive memory slot for Caura
   if (!config.plugins) config.plugins = {};
   if (!config.plugins.slots) config.plugins.slots = {};
   if (config.plugins.slots.memory !== PLUGIN_ID) {

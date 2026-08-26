@@ -3,7 +3,7 @@
  *
  * The runtime object passed to `api.registerMemoryRuntime(...)` is inline
  * inside `register()` and cannot be imported directly. These tests construct
- * a minimal fake OpenClaw API, invoke `memclawPlugin.register(fakeApi)`, and
+ * a minimal fake OpenClaw API, invoke `cauraPlugin.register(fakeApi)`, and
  * then exercise the captured runtime under known reachability states.
  *
  * The invariants pinned here are the ones that were silently broken before
@@ -28,7 +28,7 @@
 
 import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import memclawPlugin from "./index.js";
+import cauraPlugin from "./index.js";
 import {
   _resetReachabilityForTests,
   getReachability,
@@ -62,9 +62,9 @@ function buildFakeApi(): { api: Record<string, unknown>; captured: { runtime?: R
 
 function loadRuntime(): RegisteredRuntime {
   const { api, captured } = buildFakeApi();
-  memclawPlugin.register(api);
+  cauraPlugin.register(api);
   if (!captured.runtime) {
-    throw new Error("memclawPlugin.register did not call registerMemoryRuntime");
+    throw new Error("cauraPlugin.register did not call registerMemoryRuntime");
   }
   return captured.runtime;
 }
@@ -275,7 +275,7 @@ function _loadFlushPlanResolver(): _FlushPlanResolver {
     registerContextEngine: () => {},
     on: () => {},
   };
-  memclawPlugin.register(api);
+  cauraPlugin.register(api);
   if (!captured) throw new Error("registerMemoryFlushPlan was not called");
   return captured;
 }

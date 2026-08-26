@@ -127,7 +127,7 @@ async function searchMemories(
 // so they don't run twice and produce duplicated logs.
 let sideEffectsBootstrapped = false;
 
-const memclawPlugin = {
+const cauraPlugin = {
   id: "memclaw",
   name: "Caura",
   description:
@@ -194,7 +194,7 @@ const memclawPlugin = {
         name: "Caura",
         version: PLUGIN_VERSION,
         status: "loaded",
-        description: memclawPlugin.description,
+        description: cauraPlugin.description,
         apiUrl: CAURA_API_URL,
         fleetId: CAURA_FLEET_ID || null,
         apiKeyHint: CAURA_API_KEY ? CAURA_API_KEY.slice(0, 6) + "..." : null,
@@ -822,4 +822,4 @@ const memclawPlugin = {
   },
 };
 
-export default memclawPlugin;
+export default cauraPlugin;
