@@ -564,3 +564,84 @@ async def test_delete_fleet_rule_at_trust_1_rejected(client):
         headers=_author_headers(headers, member),
     )
     assert del_resp.status_code == 403, del_resp.text
+
+
+# ---------------------------------------------------------------------------
+# scope=agent with agent_id omitted — the wet-test case
+#
+# Reported as "agent-scope self keystone required trust 2, but docs say self
+# agent-scope needs only trust 1". Both halves of the report were about the
+# same omission: the payload carried no ``agent_id``, so it never was a
+# self-authored rule. Enforcement is intentional; the message now says so.
+# ---------------------------------------------------------------------------
+
+
+async def test_set_agent_scope_without_agent_id_at_trust_1_rejected(client):
+    """``scope=agent`` with no ``agent_id`` names no target agent, so it
+    does not reach the self-author tier — it stays at trust ≥ 2 and a
+    trust-1 caller is refused. Pinned as intended behaviour."""
+    tenant_id, headers = get_test_auth(_ks_tenant())
+    tag = _uid()
+    agent_id = f"self-{tag}"
+    fleet_id = f"fleet-{tag}"
+    await _seed_default_trust_agent(client, tenant_id, headers, agent_id, fleet_id)
+
+    resp = await _set_keystone(
+        client,
+        _author_headers(headers, agent_id),
+        tenant_id,
+        doc_id=f"ks-{tag}",
+        scope="agent",
+        fleet_id=fleet_id,
+        weight="med",
+        # agent_id deliberately omitted.
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_agent_scope_without_agent_id_403_explains_the_remedy(client):
+    """The refusal must name the fix. Without it the caller reads
+    "required 2" against docs promising trust 1 for self-scope and
+    concludes the gate is broken — which is what the wet test did."""
+    tenant_id, headers = get_test_auth(_ks_tenant())
+    tag = _uid()
+    agent_id = f"self-{tag}"
+    fleet_id = f"fleet-{tag}"
+    await _seed_default_trust_agent(client, tenant_id, headers, agent_id, fleet_id)
+
+    resp = await _set_keystone(
+        client,
+        _author_headers(headers, agent_id),
+        tenant_id,
+        doc_id=f"ks-{tag}",
+        scope="agent",
+        fleet_id=fleet_id,
+        weight="med",
+    )
+    assert resp.status_code == 403, resp.text
+    detail = str(resp.json()["detail"])
+    assert f"agent_id='{agent_id}'" in detail, detail
+    assert "self-author" in detail, detail
+
+
+async def test_fleet_scope_403_carries_no_agent_id_hint(client):
+    """The hint is confined to the ambiguous case. Suggesting an
+    ``agent_id`` on a ``scope=fleet`` refusal would be actively wrong —
+    storage rejects fleet rules that carry one."""
+    tenant_id, headers = get_test_auth(_ks_tenant())
+    tag = _uid()
+    agent_id = f"author-{tag}"
+    fleet_id = f"fleet-{tag}"
+    await _seed_default_trust_agent(client, tenant_id, headers, agent_id, fleet_id)
+
+    resp = await _set_keystone(
+        client,
+        _author_headers(headers, agent_id),
+        tenant_id,
+        doc_id=f"ks-{tag}",
+        scope="fleet",
+        fleet_id=fleet_id,
+        weight="med",
+    )
+    assert resp.status_code == 403, resp.text
+    assert "agent_id=" not in str(resp.json()["detail"]), resp.text

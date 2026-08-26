@@ -177,7 +177,16 @@ If you provisioned with `initial_trust`, this step is already done — confirm w
 ## 5. Author a keystone (governance rule)
 
 Keystones are mandatory rules that override conflicting instructions. Authoring a
-`scope=fleet`/`scope=tenant` rule needs trust ≥ 2 (see above).
+`scope=fleet`/`scope=tenant` rule needs trust ≥ 2 (see above). The one tier below
+that is self-authoring: `scope=agent` **with an explicit `agent_id` equal to the
+calling agent** needs only trust ≥ 1. Omitting `agent_id` on a `scope=agent` rule
+does not mean "myself" — it names no target, so it falls back to the trust ≥ 2
+bar (and is rejected by shape validation regardless). Note also that the
+self-author tier needs a *verified* caller identity — an agent-scoped credential
+(`POST /admin/agent-keys/provision`), not an `X-Agent-ID` header sent alongside a
+tenant/admin key. An unverified caller is held at trust ≥ 2 even for a
+correctly-shaped self rule, so that an admin-key holder can't forge a rule in
+another agent's name.
 
 ```bash
 curl -X POST "https://caura.ai/api/v1/keystones" \

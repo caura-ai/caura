@@ -167,7 +167,7 @@ You auto-register at **trust 1** on your first write.
 Operations that escalate the required level:
 - browsing / reflecting with `scope="fleet"` or `"all"` → trust 2
 - reporting outcomes (`caura_evolve`) at `scope="fleet"` / `"all"` → trust 2 (default `scope="agent"` needs only trust 1)
-- authoring your **own** `scope=agent` keystone → trust 1; authoring `scope=fleet` / `scope=tenant` / another agent's keystone → trust 2
+- authoring your **own** `scope=agent` keystone → trust 1 — you must pass `agent_id=<you>`; authoring `scope=fleet` / `scope=tenant` / another agent's keystone, or a `scope=agent` rule with `agent_id` left out → trust 2
 - `caura_manage op=delete` → trust 3
 
 **Knowing your own level.** You start at trust 1 and can't raise yourself —
@@ -247,12 +247,16 @@ changes):
 ## 9 · Authoring governance rules — `caura_keystones_set`
 
 Keystones are authored with `caura_keystones_set` (op `set` | `delete`),
-exposed over **MCP and REST**. Trust is tiered: a `scope=agent` keystone for
-your **own** `agent_id` is self-authoring (trust ≥ 1); `scope=fleet`,
-`scope=tenant`, or a keystone for another agent needs trust ≥ 2.
+exposed over **MCP and REST**. Trust is tiered: a `scope=agent` keystone that
+carries an explicit `agent_id` equal to **your own** id is self-authoring
+(trust ≥ 1); `scope=fleet`, `scope=tenant`, a keystone for another agent, or a
+`scope=agent` rule with `agent_id` omitted all need trust ≥ 2. The `agent_id` is
+what makes the rule self-scoped — leaving it out is not "self by default", it's
+an unnamed target, and you'll get a 403 about trust rather than the shape.
 
 ```text
-# For yourself (trust >= 1):
+# For yourself (trust >= 1; agent_id=<you> is REQUIRED — omitting it
+# drops the call to the trust >= 2 tier):
 caura_keystones_set op=set scope=agent agent_id=<you> \
   title="…" content="…" weight=low|med|high
 
