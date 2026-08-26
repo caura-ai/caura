@@ -677,9 +677,13 @@ def _openapi_with_error_responses() -> dict:
 app.openapi = _openapi_with_error_responses  # type: ignore[method-assign]
 
 # slowapi reads limiter + handler from app.state; decorators in
-# middleware/rate_limit.py consult this at request time.
-# SlowAPIMiddleware emits X-RateLimit-Limit/Remaining + Retry-After on
-# every response so clients can back off before hitting 429.
+# middleware/rate_limit.py consult this at request time. There is no
+# SlowAPIMiddleware — the per-route decorators do the injecting, into the
+# endpoint's ``response: Response`` parameter, which is why every
+# rate-limited handler must declare one (D14; enforced by
+# tests/test_d14_rate_limited_response_param.py). With headers_enabled=True
+# that puts X-RateLimit-Limit/Remaining/Reset + Retry-After on SUCCESS
+# responses too, so clients can back off before hitting 429.
 app.state.limiter = limiter
 
 

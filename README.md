@@ -397,8 +397,8 @@ See [`clients/typescript/`](clients/typescript/) for the full client.
 ### Memory Pipeline
 
 - **Single-pass LLM enrichment** — every write auto-classifies into one of 14 memory types, generates title/summary/tags, scores importance, flags PII, and extracts entities — from a single `content` field
-- **Hybrid search** — pgvector semantic similarity + full-text keyword matching + knowledge graph expansion (up to 2 hops), ranked by composite score of similarity, importance, freshness, and graph boost
-- **Live knowledge graph** — people, orgs, locations, and concepts extracted into entities and relations on every write. Semantic entity resolution (>0.85 cosine) auto-merges duplicates
+- **Hybrid search** — pgvector semantic similarity + full-text keyword matching + knowledge graph expansion (up to 2 hops), ranked by composite score of similarity, importance, freshness, and graph boost. When a result set holds both a superseded memory and the memory that replaced it, the replacement is always ranked immediately above it — a stale row can surface, but never above its own correction
+- **Live knowledge graph** — people, orgs, locations, and concepts extracted into entities and relations on every write. Entity resolution runs exact name match first, then a deterministic canonical-name match (case- and whitespace-insensitive, and ignoring a leading `the`/`a`/`an`/`new`/`old`/`current`/`existing`/`legacy` — so "the new analytics service" and "analytics service" are one entity), then semantic similarity (>0.85 cosine). A qualifier is only dropped while two or more words remain, so "new york" never collapses into "york". Every surface form seen is kept as an alias on the entity
 - **Contradiction detection** — RDF triple comparison + LLM semantic analysis detects conflicting memories and automatically supersedes them, with full contradiction chain tracking
 
 ### Self-Improving Memory
@@ -889,7 +889,7 @@ All routes are versioned under `/api/v1/`. Interactive Swagger docs at `/api/doc
 | `/memories` | DELETE | Bulk soft-delete |
 | `/memories/stats` | GET | Counts by type, agent, and status |
 | `/search` | POST | Hybrid semantic + keyword search with graph-enhanced retrieval |
-| `/recall` | POST | Search + LLM summarization — returns context paragraph + source memories |
+| `/recall` | POST | Search + LLM synthesis — `summary` is the answer to the query (the model reasons step by step internally; only its final answer is surfaced), alongside the source memories under both `memories` and `items` |
 | `/ingest/preview` | POST | Extract 5-20 atomic facts from a URL or text (no writes) |
 | `/ingest/commit` | POST | Write previewed facts as memories |
 
@@ -987,7 +987,7 @@ These headers are honored unconditionally — `core-api` must not be network-exp
 
 **Rate limiting (managed platform)**
 
-These limits apply to the managed platform at `caura.ai`. In the OSS edition, rate limiting is a no-op — see the [Rate limiting](#rate-limiting) section below.
+These limits apply to the managed platform at `caura.ai`. A self-hosted deployment enforces its own, looser per-route limits out of the box — see the [Rate limiting](#rate-limiting) section below.
 
 | Scope | Limit |
 |---|---|
@@ -997,7 +997,7 @@ These limits apply to the managed platform at `caura.ai`. In the OSS edition, ra
 | Auth endpoints | 10 req/min per IP |
 | Global DDoS floor | 1000 req/min per IP |
 
-Exceeded limits return HTTP 429 with a `Retry-After` header.
+Exceeded limits return HTTP 429 with a `Retry-After` header. Rate-limited routes also carry `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` on **successful** responses, so a client can back off before it is throttled rather than after.
 
 </details>
 
@@ -1232,10 +1232,24 @@ See [static/docs/integration-guide.md](static/docs/integration-guide.md) for ful
 
 ## Rate limiting
 
-Rate limiting in the OSS edition is a **no-op** — all rate-limit decorators are identity
-functions that accept every request without throttling. For production deployments exposed to
-the internet, add rate limiting at your reverse proxy (nginx, Caddy, Cloudflare) or implement
-application-level limiting in `core-api/src/core_api/middleware/rate_limit.py`.
+Rate limiting is enforced in-process by [slowapi](https://github.com/laurentS/slowapi), keyed by
+API key where one is present and by remote IP otherwise. It is applied per route, not globally —
+`/health`, `/version`, and `/mcp` are never throttled:
+
+| Route | Default | Setting |
+|---|---|---|
+| `POST /memories`, `POST /documents`, `POST /ingest/commit` | 10/second | `RATE_LIMIT_WRITE` |
+| `POST /memories/bulk` | 2/second | `RATE_LIMIT_WRITE_BULK` |
+| `POST /search`, `POST /recall` | 30/second | `RATE_LIMIT_SEARCH` |
+
+Every response from a rate-limited route carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and
+`X-RateLimit-Reset`; a rejected request gets HTTP 429 with `Retry-After`. Counters live in Redis when
+`REDIS_URL` is set — which is what makes the limit hold across replicas — and in process memory
+otherwise, so a multi-instance deployment without Redis limits each instance separately. A Redis
+outage fails open: requests pass through un-throttled rather than erroring.
+
+Add limiting at your reverse proxy (nginx, Caddy, Cloudflare) as well if you need per-IP DDoS
+floors or limits the application layer can't see.
 
 ## Telemetry
 

@@ -13,9 +13,15 @@ coarse fallback.
 Exported decorators are applied surgically to the hot-path routes that
 the loadtest showed as unprotected:
 
-- ``write_limit`` — POST /memories, POST /documents
+- ``write_limit`` — POST /memories, POST /documents, POST /ingest/commit
 - ``write_bulk_limit`` — POST /memories/bulk (stricter — 100x fanout)
 - ``search_limit`` — POST /search, POST /recall
+
+Every decorated handler must declare a ``response: Response`` parameter:
+with ``headers_enabled=True`` (below) slowapi injects the rate-limit
+headers into it on the SUCCESS path, and raises without one. See D14 and
+``tests/test_d14_rate_limited_response_param.py``, which fails any new
+rate-limited route that forgets it.
 """
 
 from __future__ import annotations

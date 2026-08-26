@@ -225,8 +225,13 @@ async def bulk_upsert_entities(request: Request) -> list[dict]:
 
 @router.post("/bulk-resolve")
 async def bulk_resolve_entities(request: Request) -> list[dict | None]:
-    """Resolve many entities in one round-trip using the same precedence
-    as ``entity_service.upsert_entity`` (Phase 1 exact → Phase 2 cosine).
+    """Resolve many entities in one round-trip, in three phases of
+    decreasing certainty: Phase 1 exact match on
+    ``(canonical_name, entity_type, fleet_id)``; Phase 1.5 the
+    conservative normalised match (case/whitespace plus a small fixed
+    leading-qualifier strip — see ``common.entity_naming``), which is
+    deterministic and so outranks embeddings; Phase 2 cosine similarity
+    over ``name_embedding`` at or above ``threshold``.
 
     Body shape::
 

@@ -105,13 +105,15 @@ def _require_tenant(auth: AuthContext, explicit_tenant_id: str | None = None) ->
     """
     if auth.tenant_id:
         if explicit_tenant_id is not None and explicit_tenant_id != auth.tenant_id:
+            # Neither id appears in the message — see the same guard in
+            # ``routes/stm.py`` for the full reasoning: the credential's own
+            # tenant is a binding its holder may never have been told, and
+            # the requested tenant is caller-controlled input that would be
+            # reflected into a body which also lands in logs. Clients branch
+            # on the ``TENANT_MISMATCH`` prefix, not on the prose.
             raise HTTPException(
                 status_code=403,
-                detail=(
-                    "TENANT_MISMATCH — this credential is scoped to "
-                    f"tenant {auth.tenant_id!r} and cannot act on tenant "
-                    f"{explicit_tenant_id!r}"
-                ),
+                detail="TENANT_MISMATCH — this credential is not scoped to the requested tenant.",
             )
         return auth.tenant_id
     if getattr(auth, "is_admin", False):
