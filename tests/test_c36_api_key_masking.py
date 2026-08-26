@@ -6,7 +6,8 @@ tenant-scoped credential (a low-trust agent's included) could read the
 tenant's provider keys, and ``PUT`` echoed the same tree.
 
 Contract under test:
-- display masks every non-empty ``api_keys`` value to ``****<last4>``;
+- display masks every non-empty ``api_keys`` value to ``****<4-hex sha256
+  chars>`` — a fingerprint carrying zero bytes of the key itself;
 - the write path treats a masked value as "unchanged" and drops it (the
   dashboard sends the whole ``api_keys`` group when any one key is edited,
   so unedited siblings arrive masked on every save);
@@ -24,6 +25,7 @@ from core_api.services import organization_settings as os_svc
 pytestmark = pytest.mark.unit
 
 _REAL = "sk-proj-abcdef1234567890wxyz"
+_REAL_FP = "****8353"  # ****+sha256(_REAL)[:4]
 
 
 @pytest.fixture(autouse=True)
@@ -43,14 +45,18 @@ def _stub_raw(monkeypatch, raw):
 async def test_display_masks_api_key_values(monkeypatch):
     _stub_raw(monkeypatch, {"api_keys": {"openai_api_key": _REAL}})
     out = await os_svc.get_settings_for_display("t1")
-    assert out["api_keys"]["openai_api_key"] == "****wxyz"
+    assert out["api_keys"]["openai_api_key"] == _REAL_FP
     assert _REAL not in str(out)
 
 
-async def test_display_masks_short_key_without_leaking_it(monkeypatch):
+async def test_mask_contains_no_bytes_of_the_key(monkeypatch):
+    """The fingerprint is a hash, not a slice — no substring of the real key
+    may appear in the masked value (the last-4 design leaked key material)."""
     _stub_raw(monkeypatch, {"api_keys": {"gemini_api_key": "abcd"}})
     out = await os_svc.get_settings_for_display("t1")
-    assert out["api_keys"]["gemini_api_key"] == "****"
+    masked = out["api_keys"]["gemini_api_key"]
+    assert masked == "****88d4"
+    assert masked.startswith("****") and "abcd" not in masked
 
 
 async def test_display_leaves_empty_and_absent_values_alone(monkeypatch):
@@ -80,7 +86,7 @@ async def test_update_drops_masked_values_keeps_edited_one(monkeypatch):
     captured = _stub_update(monkeypatch)
     await os_svc.update_settings(
         "t1",
-        {"api_keys": {"openai_api_key": "****wxyz", "anthropic_api_key": _REAL}},
+        {"api_keys": {"openai_api_key": _REAL_FP, "anthropic_api_key": _REAL}},
     )
     assert captured["payload"]["api_keys"] == {"anthropic_api_key": _REAL}
 
@@ -90,7 +96,7 @@ async def test_update_drops_group_when_every_value_is_masked(monkeypatch):
     await os_svc.update_settings(
         "t1",
         {
-            "api_keys": {"openai_api_key": "****wxyz"},
+            "api_keys": {"openai_api_key": _REAL_FP},
             "dedup": {"semantic_dedup_enabled": True},
         },
     )
@@ -107,7 +113,7 @@ async def test_update_lets_an_explicit_clear_through(monkeypatch):
 async def test_update_response_is_masked(monkeypatch):
     _stub_update(monkeypatch)
     out = await os_svc.update_settings("t1", {"api_keys": {"openai_api_key": _REAL}})
-    assert out["api_keys"]["openai_api_key"] == "****wxyz"
+    assert out["api_keys"]["openai_api_key"] == _REAL_FP
     assert _REAL not in str(out)
 
 
