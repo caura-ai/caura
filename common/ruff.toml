@@ -1,5 +1,5 @@
 # Ruff contract for common/ — pinned deliberately, and SHARED VERBATIM between
-# caura-memclaw (OSS) and caura-memclaw-enterprise.
+# caura (OSS) and caura-enterprise.
 #
 # WHY THIS FILE EXISTS: common/ has no pyproject.toml of its own (it is
 # PYTHONPATH-mounted, not pip-installed), and neither repo has a root

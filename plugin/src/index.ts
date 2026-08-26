@@ -46,6 +46,7 @@ import {
 } from "./prompt-section.js";
 import { CAURA_TOOLS } from "./tools.js";
 import {
+  PLUGIN_ID,
   autoFixAllowlist,
   readOpenClawConfig,
   getOpenClawConfigPath,
@@ -128,7 +129,7 @@ async function searchMemories(
 let sideEffectsBootstrapped = false;
 
 const cauraPlugin = {
-  id: "memclaw",
+  id: PLUGIN_ID,
   name: "Caura",
   description:
     "Central persistent memory for OpenClaw agents with cross-fleet, multi-agent shared recall",
@@ -190,7 +191,7 @@ const cauraPlugin = {
     api.registerGatewayMethod("memclaw.status", ({ respond }: any) => {
       const config = readOpenClawConfig();
       respond({
-        id: "memclaw",
+        id: PLUGIN_ID,
         name: "Caura",
         version: PLUGIN_VERSION,
         status: "loaded",
