@@ -25,7 +25,7 @@ import difflib
 import json
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from unittest import mock
 
 from common.events import lifecycle_handlers
@@ -64,7 +64,12 @@ _DIRECT_SUBSCRIBES: dict[str, list[str]] = {
 # core-api registers the LLM pipeline ops; core-worker registers the SQL archive
 # ops. (In OSS-standalone/InProcess mode core-api also registers the archive ops,
 # but that path provisions no Pub/Sub subscriptions, so it is out of scope here.)
-_LIFECYCLE_HELPERS: dict[str, list[Callable[[object], None]]] = {
+# ``Callable[[Any], None]``, not ``Callable[[object], None]``: each helper takes
+# its own concrete adapter type, and Callable is CONTRAVARIANT in its argument,
+# so a ``Callable[[PipelineStorageAdapter], None]`` is not a subtype of one
+# taking ``object``. Any is the accurate description of a deliberately
+# heterogeneous registry, rather than a claim every helper accepts anything.
+_LIFECYCLE_HELPERS: dict[str, list[Callable[[Any], None]]] = {
     "core-api": [lifecycle_handlers.register_pipeline_consumers],
     "core-worker": [lifecycle_handlers.register_archive_consumers],
 }

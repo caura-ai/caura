@@ -340,6 +340,36 @@ jobs:
         # mode is a noisier gate, not an absent one. See common/mypy.ini.
         run: uv run mypy --config-file common/mypy.ini common/
 
+      - name: Run mypy (scripts/)
+        # Repo-root scripts/ was type-checked by nothing, for the same structural
+        # reason common/ was: not a service src/ tree, no pyproject.toml of its
+        # own, and no root [tool.mypy], so it appeared in no mypy scope above.
+        #
+        # It is not an idle tree. scripts/forge_dry_run.py carried the other half
+        # of the forge cron outage — the same ``from common.llm import
+        # LLMRequest`` as core-api's cron_handler, a name that has never existed
+        # there, with an ``except`` that returned a stub so the CLI had never used
+        # a real LLM either. #955 repaired both halves; #983 gated the service
+        # one. This is the same gate one layer out, and re-injecting that import
+        # confirms it fires:
+        #
+        #   scripts/forge_dry_run.py:120: error: Module "common.llm" has no
+        #   attribute "LLMRequest"  [attr-defined]
+        #
+        # MUST run from the repo root. ``mypy_path`` in scripts/mypy.ini is
+        # resolved against the CWD, not against the config file, so a step that
+        # ``cd``s into scripts/ first would silently degrade every core_api.*
+        # import to Any under ignore_missing_imports — the exact gap #983 closed
+        # for the services. ``--config-file`` is required for the usual reason
+        # (mypy resolves config from the CWD and does not walk up); without it
+        # this reports 84 errors in 38 files at bare defaults instead of the 29
+        # files it owns.
+        #
+        # Six modules are exempt BY NAME in scripts/mypy.ini, not by glob, so a
+        # new script is gated the day it lands. Shrinking that list is the
+        # backlog; the gate deliberately landed without it.
+        run: uv run mypy --config-file scripts/mypy.ini scripts/
+
       - name: Enable pgvector extension
         run: PGPASSWORD=changeme psql -h localhost -U memclaw -d memclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
