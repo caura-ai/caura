@@ -35,7 +35,7 @@ Tool descriptions are derived from the tool registry (`core-api/src/core_api/too
 | Tool | MCP | OpenClaw | Purpose |
 |---|---|---|---|
 | `caura_write` | Yes | Yes | Single or batch write. Send `content` for one memory, or `items` (≤100) for a batch — the batch path batches embeddings and parallelizes enrichment. LLM auto-infers type, weight, status, title, summary, tags, temporal dates, PII flags. Contradiction detection auto-marks conflicting memories. `visibility` = `scope_agent` / `scope_team` (default) / `scope_org`. Content >2,000 chars is auto-chunked |
-| `caura_recall` | Yes | Yes | Hybrid semantic + keyword search with graph-enhanced retrieval (expands through entity relations up to 2 hops). `include_brief=true` returns an LLM-summarized context paragraph instead of raw results. Supports `fleet_ids` for multi-fleet queries. Respects visibility. Default `top_k=5`, max 20 |
+| `caura_recall` | Yes | Yes | Hybrid semantic + keyword search with graph-enhanced retrieval (expands through entity relations up to 2 hops). `include_brief=true` adds a `brief` alongside the raw results, whose `summary` is the LLM's answer to your query — it reasons step by step internally and only the final answer is surfaced. Supports `fleet_ids` for multi-fleet queries. Respects visibility. Default `top_k=5`, max 20 |
 | `caura_manage` | Yes | Yes | Per-memory lifecycle, op-dispatched. `op=read` returns the memory; `op=update` patches fields (re-embeds if content changes); `op=transition` sets status; `op=delete` soft-deletes. Trust-enforced |
 | `caura_list` | Yes | Yes | Non-semantic enumeration — filter by type/status/agent/weight/date, sort by `created_at`/`weight`/`recall_count`, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2. Trust 3 unlocks `include_deleted` |
 | `caura_doc` | Yes | Yes | Document CRUD, op-dispatched. `op=write` upserts a JSON doc in a named collection (include `data["summary"]` to index it for semantic search); `op=read` fetches by `doc_id`; `op=query` filters by field equality with ordering and pagination; `op=delete` removes by `doc_id`; `op=list_collections` enumerates every collection this tenant has (with counts); `op=search` runs semantic retrieval over `data["summary"]` vectors. Use for customer records, config, inventory — anything needing exact-field lookups |
@@ -376,8 +376,9 @@ You have access to Caura, a shared memory system used by all agents.
 
 BEFORE starting any task:
 - Use caura_recall for semantic + keyword search with graph expansion
-- Set include_brief=true when you want a concise LLM-summarized paragraph
-  instead of raw results
+- Set include_brief=true when you want the LLM's answer to your query
+  alongside the raw results (brief.summary is the answer itself, not the
+  model's working)
 - Include fleet_id to scope to this fleet, omit for tenant-wide search
 - Filter by status="active" to skip deleted/archived memories
 - Use valid_at for point-in-time queries (OpenClaw plugin and REST API only)
@@ -416,7 +417,12 @@ VISIBILITY & CROSS-FLEET:
 
 ENTITIES & GRAPH:
 - Auto-extracted from every write — no manual creation needed
-- Fuzzy entity matching: "OpenAI" and "Open AI" are auto-merged (cosine similarity ≥ 0.85)
+- Same name, one entity: case and spacing are ignored, and a leading
+  the/a/an/new/old/current/existing/legacy is treated as descriptive, so
+  "the new analytics service" and "analytics service" are one node
+  (never below two words, so "new york" stays distinct from "york")
+- Fuzzy entity matching after that: "OpenAI" and "Open AI" are auto-merged (cosine similarity ≥ 0.85)
+- Every surface form seen is kept as an alias on the entity
 - Recall automatically expands through entity relations (up to 2 hops)
   Example: searching "Project Atlas" also finds memories about people who work on Atlas
 - Use caura_entity_get for direct relationship and linked memory inspection
