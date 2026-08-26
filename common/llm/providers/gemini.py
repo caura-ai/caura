@@ -16,7 +16,9 @@ import json
 import logging
 import time
 
+from common.llm.constants import LLM_JSON_MAX_OUTPUT_TOKENS
 from common.llm.providers._shape_error import ProviderResponseShapeError
+from common.llm.providers._truncation import raise_if_truncated
 from common.provider_names import ProviderName
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,9 @@ class GeminiLLMProvider:
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=temperature,
+                # Runaway guard — same failure mode as the Vertex provider:
+                # an uncapped looping generation comes back as truncated JSON.
+                max_output_tokens=LLM_JSON_MAX_OUTPUT_TOKENS,
             ),
         )
         llm_ms = int((time.perf_counter() - t0) * 1000)
@@ -89,6 +94,12 @@ class GeminiLLMProvider:
             ) from exc
         if not text:
             raise ValueError(f"Gemini returned empty content for model {self._model}")
+        raise_if_truncated(
+            response,
+            provider="Gemini",
+            model=self._model,
+            max_tokens=LLM_JSON_MAX_OUTPUT_TOKENS,
+        )
         parsed = json.loads(text)
         if not isinstance(parsed, dict):
             raise GeminiResponseShapeError(text, type(parsed).__name__)
