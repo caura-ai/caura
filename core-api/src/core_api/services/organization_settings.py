@@ -21,7 +21,6 @@ Cross-worker invalidation is tracked as a follow-up (see CAURA-571).
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from dataclasses import dataclass
 
@@ -1177,25 +1176,25 @@ async def _load_and_cache(tenant_id: str) -> dict:
     return resolved
 
 
-# C36 — provider keys must never leave the server readable. Display masks
-# every non-empty ``api_keys`` value down to ``****<4-hex digest chars>`` —
-# a stable per-key fingerprint (enough for "which key is this / did it
-# change" in a UI) that contains ZERO bytes of the key itself: a hash
-# fingerprint rather than a last-4 slice, so no key material survives into
-# the display tree at all. The write path treats a masked value as
-# "unchanged", so a read-modify-write round-trip (the dashboard sends the
-# whole ``api_keys`` group when any one key is edited) can't overwrite a
-# stored key with its own mask. No real provider key starts with ``****``,
-# so the sentinel can't collide.
-_API_KEY_MASK_PREFIX = "****"
+# C36 — provider keys must never leave the server readable. Display replaces
+# every non-empty ``api_keys`` value with the constant ``****`` — set/unset
+# stays visible, and NOTHING in the display tree derives from the stored
+# key. (Both a last-4 slice and a hash fingerprint put key-derived bytes in
+# the tree; CodeQL then rightly tracks the whole display dict as
+# credential-tainted, and last-4 IS literal key material.) The write path
+# treats a ``****``-prefixed value as "unchanged", so a read-modify-write
+# round-trip (the dashboard sends the whole ``api_keys`` group when any one
+# key is edited) can't overwrite a stored key with its own mask. No real
+# provider key starts with ``****``, so the sentinel can't collide.
+_API_KEY_MASK = "****"
 
 
 def _mask_api_key(value: str) -> str:
-    return _API_KEY_MASK_PREFIX + hashlib.sha256(value.encode()).hexdigest()[:4]
+    return _API_KEY_MASK
 
 
 def _is_masked_api_key(value: object) -> bool:
-    return isinstance(value, str) and value.startswith(_API_KEY_MASK_PREFIX)
+    return isinstance(value, str) and value.startswith(_API_KEY_MASK)
 
 
 def _mask_api_keys_for_display(settings: dict) -> dict:
