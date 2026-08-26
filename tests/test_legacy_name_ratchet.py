@@ -1242,13 +1242,103 @@ def test_removing_an_exempt_line_is_reported(repo: Path) -> None:
     assert "dual-read alias" in result.stdout
 
 
+def test_the_removal_report_names_the_file_the_line_left(repo: Path) -> None:
+    """The report has to be actionable, not just alarming.
+
+    Its own instruction is "confirm each alias still exists in some form", and
+    the text alone does not say where to look — short markers plausibly live in
+    more than one file. Naming the base-tree file is what turns the report into
+    something a reviewer can check without grepping the base tree themselves.
+    """
+    alias = f'LEGACY = "{LEGACY}"  # legacy-name-ok: dual-read alias\n'
+    (repo / "compat" / "shims").mkdir(parents=True)
+    (repo / "compat" / "shims" / "aliases.py").write_text(alias)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add alias")
+    _stage(repo, "compat/shims/aliases.py", "LEGACY = None\n")
+
+    result = _run(repo)
+
+    assert "was in: compat/shims/aliases.py" in result.stdout
+
+
+def test_the_removal_report_names_only_files_that_lost_the_line(repo: Path) -> None:
+    """Sources, not bystanders — the same rule the moved-line report follows.
+
+    Identical markers are common, so a file can hold the text without having
+    lost anything. Listing on containment would name it anyway, and because the
+    list truncates, an alphabetically earlier bystander can push the file that
+    actually lost the line out of view — turning the one line a reviewer is
+    meant to check into noise.
+    """
+    alias = f'LEGACY = "{LEGACY}"  # legacy-name-ok: dual-read alias\n'
+    (repo / "aardvark.py").write_text(alias)
+    (repo / "zebra.py").write_text(alias)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add aliases")
+    _stage(repo, "zebra.py", "LEGACY = None\n")
+
+    result = _run(repo)
+
+    assert "was in: zebra.py" in result.stdout
+    assert "aardvark.py" not in result.stdout
+
+
+def test_a_gain_elsewhere_does_not_cancel_a_loss(repo: Path) -> None:
+    """The blind spot a repo-wide net diff has, and this report exists to close.
+
+    ``before - after`` over the whole repo cancels a deletion against any
+    byte-identical exempt line added anywhere else in the same change. The
+    motivating incident was a sweep — precisely the shape that deletes an alias
+    in one file while writing something identical in another — so the netting
+    version would have reported the incident it was built for as one line, not
+    three, and named the file that lost three as though it had lost one.
+    """
+    alias = f'LEGACY = "{LEGACY}"  # legacy-name-ok: dual-read alias\n'
+    (repo / "old.py").write_text(alias * 3)
+    (repo / "new.py").write_text("PLACEHOLDER = None\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add aliases")
+    _stage(repo, "old.py", "LEGACY = None\n")
+    _stage(repo, "new.py", alias * 2)
+
+    result = _run(repo)
+
+    # Three left old.py. Netting against the two gained in new.py would say one.
+    assert "(x3)" in result.stdout
+    assert "3 exempt line(s) removed" in result.stdout
+    assert "was in: old.py" in result.stdout
+
+
+def test_a_moved_exempt_line_names_where_it_went(repo: Path) -> None:
+    """Counting gross surfaces moves; the report has to explain them, not hide them.
+
+    A line that left one file and appeared in another is usually benign, and is
+    exactly the "reworded or consolidated" case the reader is asked to confirm.
+    Suppressing it would restore the blind spot, so it is reported — with the
+    destination named, so the benign reading needs no grep.
+    """
+    alias = f'LEGACY = "{LEGACY}"  # legacy-name-ok: dual-read alias\n'
+    (repo / "old.py").write_text(alias)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add alias")
+    _stage(repo, "old.py", "LEGACY = None\n")
+    _stage(repo, "moved.py", alias)
+
+    result = _run(repo)
+
+    assert "was in: old.py" in result.stdout
+    assert "identical text added in: moved.py" in result.stdout
+    assert "likely a move" in result.stdout
+
+
 def test_removing_an_exempt_line_does_not_fail_the_gate(repo: Path) -> None:
     """Reports rather than fails, and the reason is measured, not stylistic.
 
     Across the last 400 commits of the real repo, seven removed a marked line
     and none was a genuine removal of protection — every one reworded or
     consolidated markers while keeping the alias. Failing here would have been
-    four false positives and no true ones, and false positives on a gate teach
+    seven false positives and no true ones, and false positives on a gate teach
     people to stop reading it.
     """
     alias = f'LEGACY = "{LEGACY}"  # legacy-name-ok: dual-read alias\n'

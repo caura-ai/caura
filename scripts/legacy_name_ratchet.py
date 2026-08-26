@@ -473,8 +473,15 @@ class Scan(NamedTuple):
     """One pass over a tree, and everything the gate needs from it.
 
     ``by_file`` maps path to the text of its non-exempt matching lines and how
-    many times each appears; ``total`` is the same tally repo-wide; ``exempt``
-    counts marked lines per file, which are reported but never gated on.
+    many times each appears; ``total`` is the same tally repo-wide.
+    ``exempt_by_file`` is the same shape for marked lines, which are reported
+    but never gated on.
+
+    Marked lines are held per file, not as a bare repo-wide tally, because the
+    removal report has to name the file a vanished line came from — the same
+    context :func:`_report_excused_moves` prints, and for the same reason: a
+    reviewer who cannot locate the line cannot check whether the alias survived
+    the rewording. Both views are needed and both derive from this one field.
 
     Text is whitespace-stripped. A line that moves into a class body or a deeper
     block gets re-indented on the way, and an indentation-sensitive comparison
@@ -489,38 +496,37 @@ class Scan(NamedTuple):
 
     by_file: dict[str, Counter[str]]
     total: Counter[str]
-    exempt: Counter[str]
-    exempt_text: Counter[str]
+    exempt_by_file: dict[str, Counter[str]]
 
     def counts(self) -> Counter[str]:
         """Non-exempt lines per file — what the ratchet holds flat."""
         return Counter({path: sum(c.values()) for path, c in self.by_file.items()})
+
+    def exempt(self) -> Counter[str]:
+        """Marked lines per file — what the new-exemption report examines."""
+        return Counter(
+            {path: sum(c.values()) for path, c in self.exempt_by_file.items()}
+        )
 
 
 def scan(tree: str | None) -> Scan:
     """Read a tree once. ``tree=None`` is the working tree."""
     by_file: dict[str, Counter[str]] = {}
     total: Counter[str] = Counter()
-    exempt: Counter[str] = Counter()
-    # Keyed by text, unlike ``exempt`` which tallies per file. Both are needed:
-    # the per-file tally selects which files the new-exemption report examines,
-    # while the removal report has to name the actual line, since "did this alias
-    # survive the rewording" cannot be answered from a count.
-    exempt_text: Counter[str] = Counter()
-    # Neither tally is split by kind, and neither wants to be: ``exempt`` only
+    # Not split by kind, and it does not want to be: the per-file view only
     # SELECTS files for the report, which re-greps them and reads each line's
-    # kind first-hand, and ``exempt_text`` keys on text that still contains its
-    # own marker, so the kind is recoverable from the key. Splitting either would
-    # be a second definition of the same fact.
+    # kind first-hand, and the keys are text that still contains its own marker,
+    # so the kind is recoverable from the key. Splitting would be a second
+    # definition of the same fact.
+    exempt_by_file: dict[str, Counter[str]] = {}
     for path, _, text, kind in _grep(tree):
-        if kind is not None:
-            exempt[path] += 1
-            exempt_text[text.strip()] += 1
-            continue
         stripped = text.strip()
+        if kind is not None:
+            exempt_by_file.setdefault(path, Counter())[stripped] += 1
+            continue
         by_file.setdefault(path, Counter())[stripped] += 1
         total[stripped] += 1
-    return Scan(by_file, total, exempt, exempt_text)
+    return Scan(by_file, total, exempt_by_file)
 
 
 def _mint_budget(head_total: Counter[str], base_total: Counter[str]) -> Counter[str]:
@@ -646,15 +652,26 @@ def _report_excused_moves(
                 for p, c in base_by_file.items()
                 if p != path and c[text] > head_by_file.get(p, Counter())[text]
             )
-            origin = ", ".join(came_from[:3]) or "an unknown file"
-            if len(came_from) > 3:
-                origin += f" (+{len(came_from) - 3} more)"
             print(f"  {path}: {'x' + str(n) + ' ' if n > 1 else ''}{text[:80]}")
-            print(f"      was in: {origin}")
+            print(f"      was in: {_truncated(came_from)}")
     print()
 
 
-def _report_removed_exemptions(before: Counter[str], after: Counter[str]) -> None:
+def _truncated(paths: list[str]) -> str:
+    """Render a path list for a report line, capped so one line stays one line.
+
+    Shared by both reports that name files, so the cap and the empty-list wording
+    cannot drift apart between them. The cap is what forces those reports to list
+    only files that genuinely changed rather than every file containing the text:
+    once the list is truncated, a bystander can displace the real source.
+    """
+    shown = ", ".join(paths[:3]) or "an unknown file"
+    return shown + (f" (+{len(paths) - 3} more)" if len(paths) > 3 else "")
+
+
+def _report_removed_exemptions(
+    base_by_file: dict[str, Counter[str]], head_by_file: dict[str, Counter[str]]
+) -> None:
     """Name every exempt line this change removed. Reports; never fails.
 
     The other half of :func:`_report_new_exemptions`, and the gap that let a
@@ -672,7 +689,7 @@ def _report_removed_exemptions(before: Counter[str], after: Counter[str]) -> Non
     across the last 400 commits, seven removed a marked line and **none** was a
     genuine removal of protection. Every one reworded or consolidated markers
     while keeping the alias — one collapsed six into one. A failing rule keyed on
-    text identity would have produced four false positives and no true ones, and
+    text identity would have produced seven false positives and no true ones, and
     a rule keyed on per-file counts would have failed the consolidation too.
     Nothing textual separates "consolidated the alias" from "deleted the alias";
     that judgement is irreducibly human, so this hands a human the fact rather
@@ -684,12 +701,45 @@ def _report_removed_exemptions(before: Counter[str], after: Counter[str]) -> Non
     say so. Anything whose removal breaks an already-installed user belongs in
     ``do_not_touch_sentinel.py``, which pins exact text and does fail — this
     marker is not a substitute for that and never was.
+
+    Each line is printed with the base-tree file it left, because "confirm what
+    it stood for still exists" is not answerable from the text alone — the reader
+    needs somewhere to look, and short markers plausibly live in more than one
+    file. Sources are the files whose count for that text actually dropped, not
+    every file that happens to contain it: listing on containment would name
+    untouched bystanders, and since the list is truncated a bystander can push
+    the real source out of view. Same rule, and same reason, as
+    :func:`_report_excused_moves`.
+
+    **Counted per file, not as a repo-wide net**, which is the difference
+    between reporting this incident and missing it. A repo-wide ``before -
+    after`` cancels a deletion against any byte-identical exempt line added
+    anywhere else in the same change, and the motivating incident was a *sweep*
+    — the shape most likely to delete an alias in one file while writing
+    something identical in another. Netting three losses against two unrelated
+    gains prints "1", names the file that lost three, and reads as the mildest
+    possible version of the worst case. Losses are therefore summed gross,
+    across only the files whose own count fell.
+
+    Gross counting surfaces one case netting hid: text that left one file and
+    appeared in another, which is usually a move and usually benign. That is
+    reported rather than suppressed — a move is exactly the "reworded or
+    consolidated" case a human is being asked to confirm — but the destination
+    is named on the same line, so the benign reading is available without
+    grepping for it. Suppressing it instead would restore the blind spot.
     """
-    removed = before - after
-    if not removed:
+    # text -> {path: how many left THAT path}. Gains elsewhere never subtract.
+    drops: dict[str, Counter[str]] = {}
+    for path, counts in base_by_file.items():
+        head_counts = head_by_file.get(path, Counter())
+        for text, n_base in counts.items():
+            lost = n_base - head_counts[text]
+            if lost > 0:
+                drops.setdefault(text, Counter())[path] = lost
+    if not drops:
         return
 
-    n = sum(removed.values())
+    n = sum(sum(c.values()) for c in drops.values())
     # Not split by kind, unlike the new-exemption report. The populations are the
     # other way round here — seven removals across four hundred commits, against
     # eleven new exemptions in a single PR — so the wall this list can become is
@@ -705,9 +755,19 @@ def _report_removed_exemptions(before: Counter[str], after: Counter[str]) -> Non
         "in some form — the alias it declared, or the text that could not be\n"
         "correct without the name:"
     )
-    for text, count in sorted(removed.items()):
+    for text, per_file in sorted(drops.items()):
+        count = sum(per_file.values())
         suffix = f"  (x{count})" if count > 1 else ""
         print(f"  {text.strip()[:100]}{suffix}")
+        print(f"      was in: {_truncated(sorted(per_file))}")
+        gained = sorted(
+            p
+            for p, c in head_by_file.items()
+            if c[text] > base_by_file.get(p, Counter())[text]
+        )
+        if gained:
+            where = _truncated(gained)
+            print(f"      identical text added in: {where} — likely a move")
 
 
 def _report_new_exemptions(
@@ -937,8 +997,8 @@ def main() -> int:
         )
         return 1
 
-    _report_new_exemptions(base_scan.exempt, head_scan.exempt, args.base)
-    _report_removed_exemptions(base_scan.exempt_text, head_scan.exempt_text)
+    _report_new_exemptions(base_scan.exempt(), head_scan.exempt(), args.base)
+    _report_removed_exemptions(base_scan.exempt_by_file, head_scan.exempt_by_file)
 
     head_by_file, base_by_file = head_scan.by_file, base_scan.by_file
     budget = _mint_budget(head_scan.total, base_scan.total)
