@@ -69,7 +69,7 @@ def test_empty_strings_count_as_unset():
         )
 
 
-def test_memclaw_api_key_alone_is_an_acceptable_perimeter():
+def test_api_key_alone_is_an_acceptable_perimeter():
     """The network-exposed OSS pattern, and why the guard is not gateway-specific.
 
     When ``CAURA_API_KEY`` is set, auth.py's Path 2 either authenticates the

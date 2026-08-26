@@ -200,7 +200,7 @@ async def test_mcp_call_tool_records_capability_and_op(monkeypatch):
 
     assert len(calls) == 1
     k = calls[0]
-    assert k["capability"] == "doc"   # memclaw_ prefix stripped
+    assert k["capability"] == "doc"   # caura_ prefix stripped
     assert k["op"] == "search"
     assert k["transport"] == "mcp"
     assert k["tenant_id"] == "t-mcp"
