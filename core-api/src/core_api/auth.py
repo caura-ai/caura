@@ -253,10 +253,35 @@ class AuthContext:
                 ),
             )
 
-    def enforce_tenant(self, requested_tenant: str) -> None:
-        """Raise 403 if the request tenant doesn't match the key's tenant."""
+    def enforce_tenant(self, requested_tenant: str | None) -> None:
+        """Raise if the caller may not write to ``requested_tenant``.
+
+        403 on a genuine mismatch — but a match is only meaningful between two
+        concrete tenants. ``None == None`` is the absence of both a target and
+        a scope, not authorization, and the bare equality below would read it
+        as a pass. That pairing is reachable: the ``CAURA_API_KEY`` path (auth
+        Path 2) builds ``AuthContext(tenant_id=None)`` for a valid key sent
+        without an ``x-tenant-id`` header, and several write bodies carry
+        ``tenant_id: str | None`` — so a request that omits the tenant reaches
+        here as ``enforce_tenant(None)`` on a tenantless context and, before
+        this guard, was authorized with no scope at all.
+
+        Naming no tenant is a 400 — a request problem, since the credential is
+        authenticated (the same call the sanctioned ``_require_tenant`` makes
+        for #987). Every other unmatched case, including a tenantless
+        non-admin naming a real tenant, stays a 403.
+        """
         if self.is_admin:
             return  # super admin bypass
+        if requested_tenant is None:
+            raise HTTPException(
+                status_code=400,
+                detail=coded_detail(
+                    errors.AUTH_TENANT_REQUIRED,
+                    "This operation must name a tenant.",
+                    remediation="Supply the target tenant_id on the request.",
+                ),
+            )
         if self.tenant_id != requested_tenant:
             raise HTTPException(
                 status_code=403,
