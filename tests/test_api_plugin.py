@@ -26,8 +26,7 @@ async def test_post_install_plugin_generates_script(client):
     assert resp.status_code == 200
     script = resp.text
     assert script.startswith("#!/usr/bin/env bash")
-    assert "CAURA_API_URL=" in script
-    assert "caura.example.com" in script
+    assert "CAURA_API_URL=https://caura.example.com" in script
     assert "CAURA_FLEET_ID=" in script
     assert "my-fleet" in script
     assert "CAURA_API_KEY=" in script
