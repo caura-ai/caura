@@ -404,8 +404,8 @@ See [`clients/typescript/`](clients/typescript/) for the full client.
 ### Memory Pipeline
 
 - **Single-pass LLM enrichment** — every write auto-classifies into one of 14 memory types, generates title/summary/tags, scores importance, flags PII, and extracts entities — from a single `content` field
-- **Hybrid search** — pgvector semantic similarity + full-text keyword matching + knowledge graph expansion (up to 2 hops), ranked by composite score of similarity, importance, freshness, and graph boost
-- **Live knowledge graph** — people, orgs, locations, and concepts extracted into entities and relations on every write. Semantic entity resolution (>0.85 cosine) auto-merges duplicates
+- **Hybrid search** — pgvector semantic similarity + full-text keyword matching + knowledge graph expansion (up to 2 hops), ranked by composite score of similarity, importance, freshness, and graph boost. When a result set holds both a superseded memory and the memory that replaced it, the replacement is always ranked immediately above it — a stale row can surface, but never above its own correction
+- **Live knowledge graph** — people, orgs, locations, and concepts extracted into entities and relations on every write. Entity resolution runs exact name match first, then a deterministic canonical-name match (case- and whitespace-insensitive, and ignoring a leading `the`/`a`/`an`/`new`/`old`/`current`/`existing`/`legacy` — so "the new analytics service" and "analytics service" are one entity), then semantic similarity (>0.85 cosine). A qualifier is only dropped while two or more words remain, so "new york" never collapses into "york". Every surface form seen is kept as an alias on the entity
 - **Contradiction detection** — RDF triple comparison + LLM semantic analysis detects conflicting memories and automatically supersedes them, with full contradiction chain tracking
 
 ### Self-Improving Memory
@@ -522,7 +522,7 @@ The client discovers 12 tools automatically:
 | `caura_evolve` | Report outcomes against recalled memories — adjusts weights, generates rules (Karpathy Loop) |
 | `caura_stats` | Aggregate counts: total + breakdowns by type, agent, status. Read-only |
 | `caura_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
-| `caura_keystones_set` | Author or remove keystone rules (`op=set\|delete`). `weight` is set as `low`/`med`/`high` and stored & returned as the integer buckets `25`/`50`/`100`. Trust ≥ 1 for your own `scope=agent` rule; ≥ 2 for `scope=fleet`/`scope=tenant` or another agent |
+| `caura_keystones_set` | Author or remove keystone rules (`op=set\|delete`). `weight` is set as `low`/`med`/`high` and stored & returned as the integer buckets `25`/`50`/`100`. Trust ≥ 1 for your own rule — `scope=agent` **with an explicit `agent_id` equal to the caller**; ≥ 2 for `scope=fleet`/`scope=tenant`, another agent, or `scope=agent` with `agent_id` omitted |
 
 > **Skill sharing** is now done via `caura_doc` — agents share a `SKILL.md` by upserting a document into the `skills` collection (`caura_doc op=write collection=skills doc_id=<slug> data={"summary": "<one-liner>", ...}`). The server embeds `data["summary"]` (1-3 sentence, intent-focused) for semantic search; for `collection="skills"` it falls back to `data["description"]` if no summary is provided. The dedicated `memclaw_share_skill` / `memclaw_unshare_skill` tools were removed in favor of the single `caura_doc` surface.
 
@@ -896,7 +896,7 @@ All routes are versioned under `/api/v1/`. Interactive Swagger docs at `/api/doc
 | `/memories` | DELETE | Bulk soft-delete |
 | `/memories/stats` | GET | Counts by type, agent, and status |
 | `/search` | POST | Hybrid semantic + keyword search with graph-enhanced retrieval |
-| `/recall` | POST | Search + LLM summarization — returns context paragraph + source memories |
+| `/recall` | POST | Search + LLM synthesis — `summary` is the answer to the query (the model reasons step by step internally; only its final answer is surfaced), alongside the source memories under both `memories` and `items` |
 | `/ingest/preview` | POST | Extract 5-20 atomic facts from a URL or text (no writes) |
 | `/ingest/commit` | POST | Write previewed facts as memories |
 
@@ -994,7 +994,7 @@ These headers are honored unconditionally — `core-api` must not be network-exp
 
 **Rate limiting (managed platform)**
 
-These limits apply to the managed platform at `caura.ai`. In the OSS edition, rate limiting is a no-op — see the [Rate limiting](#rate-limiting) section below.
+These limits apply to the managed platform at `caura.ai`. A self-hosted deployment enforces its own, looser per-route limits out of the box — see the [Rate limiting](#rate-limiting) section below.
 
 | Scope | Limit |
 |---|---|
@@ -1004,7 +1004,7 @@ These limits apply to the managed platform at `caura.ai`. In the OSS edition, ra
 | Auth endpoints | 10 req/min per IP |
 | Global DDoS floor | 1000 req/min per IP |
 
-Exceeded limits return HTTP 429 with a `Retry-After` header.
+Exceeded limits return HTTP 429 with a `Retry-After` header. Rate-limited routes also carry `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` on **successful** responses, so a client can back off before it is throttled rather than after.
 
 </details>
 
@@ -1135,7 +1135,7 @@ The MCP server is mounted at `/mcp`. Tool names, parameter names, and the docume
 | `caura_evolve` | Karpathy-Loop feedback: record an outcome (`success` \| `failure` \| `partial`) against memories. |
 | `caura_stats` | Aggregate counts: total + breakdowns by `type` / `agent` / `status`. Read-only. |
 | `caura_keystones` | Read mandatory governance rules for the current scope (tenant + fleet + agent merged). Call once per session. |
-| `caura_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 for self-authored `scope=agent`; ≥ 2 otherwise. |
+| `caura_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 for self-authored `scope=agent` (requires an explicit `agent_id` equal to the caller); ≥ 2 otherwise, including `scope=agent` with `agent_id` omitted. |
 
 > Skill sharing uses the generic `caura_doc` surface — write/read/query/search/delete on `collection="skills"`. The server validates the slug and embeds `data["summary"]` for semantic discovery (with a back-compat fallback to `data["description"]` for skills).
 
@@ -1239,10 +1239,24 @@ See [static/docs/integration-guide.md](static/docs/integration-guide.md) for ful
 
 ## Rate limiting
 
-Rate limiting in the OSS edition is a **no-op** — all rate-limit decorators are identity
-functions that accept every request without throttling. For production deployments exposed to
-the internet, add rate limiting at your reverse proxy (nginx, Caddy, Cloudflare) or implement
-application-level limiting in `core-api/src/core_api/middleware/rate_limit.py`.
+Rate limiting is enforced in-process by [slowapi](https://github.com/laurentS/slowapi), keyed by
+API key where one is present and by remote IP otherwise. It is applied per route, not globally —
+`/health`, `/version`, and `/mcp` are never throttled:
+
+| Route | Default | Setting |
+|---|---|---|
+| `POST /memories`, `POST /documents`, `POST /ingest/commit` | 10/second | `RATE_LIMIT_WRITE` |
+| `POST /memories/bulk` | 2/second | `RATE_LIMIT_WRITE_BULK` |
+| `POST /search`, `POST /recall` | 30/second | `RATE_LIMIT_SEARCH` |
+
+Every response from a rate-limited route carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and
+`X-RateLimit-Reset`; a rejected request gets HTTP 429 with `Retry-After`. Counters live in Redis when
+`REDIS_URL` is set — which is what makes the limit hold across replicas — and in process memory
+otherwise, so a multi-instance deployment without Redis limits each instance separately. A Redis
+outage fails open: requests pass through un-throttled rather than erroring.
+
+Add limiting at your reverse proxy (nginx, Caddy, Cloudflare) as well if you need per-IP DDoS
+floors or limits the application layer can't see.
 
 ## Telemetry
 

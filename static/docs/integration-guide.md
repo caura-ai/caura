@@ -35,7 +35,7 @@ Tool descriptions are derived from the tool registry (`core-api/src/core_api/too
 | Tool | MCP | OpenClaw | Purpose |
 |---|---|---|---|
 | `caura_write` | Yes | Yes | Single or batch write. Send `content` for one memory, or `items` (≤100) for a batch — the batch path batches embeddings and parallelizes enrichment. LLM auto-infers type, weight, status, title, summary, tags, temporal dates, PII flags. Contradiction detection auto-marks conflicting memories. `visibility` = `scope_agent` / `scope_team` (default) / `scope_org`. Content >2,000 chars is auto-chunked |
-| `caura_recall` | Yes | Yes | Hybrid semantic + keyword search with graph-enhanced retrieval (expands through entity relations up to 2 hops). `include_brief=true` returns an LLM-summarized context paragraph instead of raw results. Supports `fleet_ids` for multi-fleet queries. Respects visibility. Default `top_k=5`, max 20 |
+| `caura_recall` | Yes | Yes | Hybrid semantic + keyword search with graph-enhanced retrieval (expands through entity relations up to 2 hops). `include_brief=true` adds a `brief` alongside the raw results, whose `summary` is the LLM's answer to your query — it reasons step by step internally and only the final answer is surfaced. Supports `fleet_ids` for multi-fleet queries. Respects visibility. Default `top_k=5`, max 20 |
 | `caura_manage` | Yes | Yes | Per-memory lifecycle, op-dispatched. `op=read` returns the memory; `op=update` patches fields (re-embeds if content changes); `op=transition` sets status; `op=delete` soft-deletes. Trust-enforced |
 | `caura_list` | Yes | Yes | Non-semantic enumeration — filter by type/status/agent/weight/date, sort by `created_at`/`weight`/`recall_count`, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2. Trust 3 unlocks `include_deleted` |
 | `caura_doc` | Yes | Yes | Document CRUD, op-dispatched. `op=write` upserts a JSON doc in a named collection (include `data["summary"]` to index it for semantic search); `op=read` fetches by `doc_id`; `op=query` filters by field equality with ordering and pagination; `op=delete` removes by `doc_id`; `op=list_collections` enumerates every collection this tenant has (with counts); `op=search` runs semantic retrieval over `data["summary"]` vectors. Use for customer records, config, inventory — anything needing exact-field lookups |
@@ -45,7 +45,7 @@ Tool descriptions are derived from the tool registry (`core-api/src/core_api/too
 | `caura_evolve` | Yes | Yes | Record a real-world outcome (`success` / `failure` / `partial`) against recalled memories — adjusts weights, auto-generates preventive rules on failure (Karpathy Loop feedback edge) |
 | `caura_stats` | Yes | Yes | Aggregate counts of memories: total + breakdowns by `type`, `agent`, `status`. Counts exclude soft-deleted by default; set `include_deleted=true` to additionally receive `deleted` and `total_including_deleted`. Read-only — useful for dashboards (REST) and agent self-introspection (MCP) |
 | `caura_keystones` | Yes | Yes | Read mandatory governance rules for the current scope (tenant + fleet + agent merged), ordered by weight. Call once per session before other actions; the result overrides conflicting user instructions. No semantic search — keystones are fetched deterministically. Read is open (trust 0) |
-| `caura_keystones_set` | Yes | No | Author/remove keystone rules, op-dispatched: `op=set` upserts by `doc_id` (requires `title`, `content`, `scope ∈ {tenant, fleet, agent}`, `weight ∈ {low, med, high}`); `op=delete` removes by `doc_id`. **MCP-only**, not plugin-exposed — authoring is an admin/governance path. Trust gating is tiered: `scope=agent` for the caller's own `agent_id` is trust ≥ 1 (self-author); everything else (`scope=fleet`, `scope=tenant`, or `scope=agent` for another agent) stays at trust ≥ 2 |
+| `caura_keystones_set` | Yes | No | Author/remove keystone rules, op-dispatched: `op=set` upserts by `doc_id` (requires `title`, `content`, `scope ∈ {tenant, fleet, agent}`, `weight ∈ {low, med, high}`); `op=delete` removes by `doc_id`. **MCP-only**, not plugin-exposed — authoring is an admin/governance path. Trust gating is tiered: `scope=agent` with an explicit `agent_id` equal to the caller is trust ≥ 1 (self-author); everything else (`scope=fleet`, `scope=tenant`, `scope=agent` for another agent, or `scope=agent` with `agent_id` omitted) stays at trust ≥ 2 |
 
 > Skill sharing rides the generic `caura_doc` surface: `op=write collection=skills doc_id=<slug>` to share, `op=delete` to remove, `op=search`/`op=query` to discover. Slugs are validated against `^[a-z0-9][a-z0-9._-]{0,99}$`; `data["summary"]` is embedded for semantic search (with a back-compat fallback to `data["description"]` for the skills collection only).
 
@@ -139,7 +139,7 @@ The MCP server exposes 12 tools that clients discover automatically. Description
 | `caura_evolve` | Report an outcome (success/failure/partial) against recalled memories — adjusts weights, generates preventive rules on failure |
 | `caura_stats` | Aggregate counts: total + breakdowns by `type`, `agent`, `status`. Read-only |
 | `caura_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
-| `caura_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 to author your own `scope=agent` rule; ≥ 2 for fleet/tenant or another agent |
+| `caura_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 to author your own rule — `scope=agent` **with an explicit `agent_id` equal to the caller**; ≥ 2 for fleet/tenant, another agent, or `scope=agent` with `agent_id` omitted |
 
 > Skill sharing uses the generic `caura_doc` surface (`collection="skills"`). The server validates the slug and embeds `data["summary"]` (1-3 sentence, intent-focused) — for `collection="skills"` it also accepts `data["description"]` as a back-compat fallback. Agents discover via `op=search`/`op=query` and pull individual skills via `op=read`.
 
@@ -376,8 +376,9 @@ You have access to Caura, a shared memory system used by all agents.
 
 BEFORE starting any task:
 - Use caura_recall for semantic + keyword search with graph expansion
-- Set include_brief=true when you want a concise LLM-summarized paragraph
-  instead of raw results
+- Set include_brief=true when you want the LLM's answer to your query
+  alongside the raw results (brief.summary is the answer itself, not the
+  model's working)
 - Include fleet_id to scope to this fleet, omit for tenant-wide search
 - Filter by status="active" to skip deleted/archived memories
 - Use valid_at for point-in-time queries (OpenClaw plugin and REST API only)
@@ -416,7 +417,12 @@ VISIBILITY & CROSS-FLEET:
 
 ENTITIES & GRAPH:
 - Auto-extracted from every write — no manual creation needed
-- Fuzzy entity matching: "OpenAI" and "Open AI" are auto-merged (cosine similarity ≥ 0.85)
+- Same name, one entity: case and spacing are ignored, and a leading
+  the/a/an/new/old/current/existing/legacy is treated as descriptive, so
+  "the new analytics service" and "analytics service" are one node
+  (never below two words, so "new york" stays distinct from "york")
+- Fuzzy entity matching after that: "OpenAI" and "Open AI" are auto-merged (cosine similarity ≥ 0.85)
+- Every surface form seen is kept as an alias on the entity
 - Recall automatically expands through entity relations (up to 2 hops)
   Example: searching "Project Atlas" also finds memories about people who work on Atlas
 - Use caura_entity_get for direct relationship and linked memory inspection

@@ -32,7 +32,7 @@ when to add or move an operation.
 | Knowledge graph / `/graph` | REST only | Aggregation surface for UIs and analytics tools. Agents that need entity context use `caura_entity_get` (single entity) and `caura_recall` (with entity_links in results). |
 | Memory stats | REST + MCP (`caura_stats`) | Aggregate counts (total + breakdown by type, agent, status; opt-in `include_deleted=true` adds `deleted` and `total_including_deleted`) — useful for admin/dashboard usage on REST and for agent self-introspection on MCP. Read-only aggregations don't need a use-case gate. |
 | Skill sharing | REST (`/documents` + `/documents/search` on `collection="skills"`) + MCP (`caura_doc op=write\|read\|query\|delete\|search collection=skills`) | Skill sharing rides the generic document surface. Slugs (`doc_id`) are constrained to `^[a-z0-9][a-z0-9._-]{0,99}$` (filesystem-safe), and skills writes require `data["summary"]` (with back-compat fallback to `data["description"]`) so the catalog is semantic-searchable without ceremony. The dedicated `memclaw_share_skill`/`memclaw_unshare_skill` tools and `/skills/*` REST routes were dropped 2026-05; fleet auto-install (push to every node) is restored by Phase A's plugin-side reconciler. Trust ≥ 1 (inherited from `caura_doc`). |
-| Keystones (mandatory rules) | REST (`/keystones`; permanent legacy alias `/memclaw/keystones` <!-- legacy-name-ok: taught as legacy alias -->) + MCP (`caura_keystones` read, `caura_keystones_set` set\|delete) | Governance policies that agents MUST obey — fetched deterministically (no semantic search) and injected into every session by the OpenClaw plugin. Storage lives in the system-managed `_keystones` collection on `documents`; the dedicated surface exists so the read tool stays discoverable in MCP `instructions` and the write surface can be trust-gated separately. Reads are open. Writes are tiered: a freshly-registered (trust ≥ 1) agent can author its own `scope=agent` rule — self-authored autonomy — but `scope=fleet`, `scope=tenant`, and cross-agent `scope=agent` stay at trust ≥ 2 so a default-trust agent (or a prompt-injected one) can't plant a tenant-wide rule. |
+| Keystones (mandatory rules) | REST (`/keystones`; permanent legacy alias `/memclaw/keystones` <!-- legacy-name-ok: taught as legacy alias -->) + MCP (`caura_keystones` read, `caura_keystones_set` set\|delete) | Governance policies that agents MUST obey — fetched deterministically (no semantic search) and injected into every session by the OpenClaw plugin. Storage lives in the system-managed `_keystones` collection on `documents`; the dedicated surface exists so the read tool stays discoverable in MCP `instructions` and the write surface can be trust-gated separately. Reads are open. Writes are tiered: a freshly-registered (trust ≥ 1) agent can author its own rule — `scope=agent` carrying an explicit `agent_id` equal to the caller, i.e. self-authored autonomy — but `scope=fleet`, `scope=tenant`, cross-agent `scope=agent`, and `scope=agent` with `agent_id` omitted all stay at trust ≥ 2 so a default-trust agent (or a prompt-injected one) can't plant a tenant-wide rule. The explicit `agent_id` is the precondition for the self-author tier: a payload that names no target agent isn't self-authored, so it gets the ≥ 2 bar (and storage rejects the shape anyway — "scope=agent requires agent_id"). |
 | Tenant settings | REST only | Settings are a tenant-administrator concern; not safe for arbitrary agents to flip global config. |
 | Redistribute (mass reassign) | REST only | Destructive bulk op requires `trust_level >= 3`. Admin operation, not agent-driven. |
 | Ingest preview/commit | REST only (revisit per use case) | Pipeline workflow; expose to MCP only if "agent crawls a URL and writes memories" becomes a real use case. |
@@ -76,14 +76,26 @@ mirror "for symmetry."
 The following inconsistencies span surfaces and should be addressed
 independently of ownership decisions:
 
-- **Error contracts**: REST raises `HTTPException` with status codes; MCP
-  returns string error prefixes (`"Error (422): ..."`). Cross-surface clients
-  must special-case. Pick one canonical shape and align both surfaces.
+- **Error contracts**: largely closed. Both surfaces now emit the canonical
+  `{"error": {"code", "message", "details"?}}` envelope from
+  `core_api.errors.make_error_payload` — REST alongside the legacy
+  top-level `detail`, MCP as the tool's JSON string inside a
+  `CallToolResult(isError=True)`. What remains is the transport: REST
+  carries the HTTP status, MCP has only the `code`, so a cross-surface
+  client still branches on one or the other.
 - **Response shape drift on `recall`**: REST `/recall` returns
-  `{query, summary, memory_count, memories, recall_ms}`; MCP
+  `{query, summary, memory_count, memories, items, recall_ms}`; MCP
   `caura_recall(include_brief=true)` returns
-  `{results, brief: <REST-recall-response>}`. Same conceptual operation,
-  different payloads. Pick one and align.
+  `{results, items, count, brief: <REST-recall-response>}`. Both dual-emit
+  the row list under `items` now, so that key is the safe one to read on
+  either surface — but the rest of the envelope (and the nesting of the
+  brief) still differs for one conceptual operation. Pick one and align.
+  `summary` behaves the same on both: the model is prompted to reason step
+  by step and to close with a `**Answer:**` line, and the server surfaces
+  only that final answer — callers get the answer, not the scaffold, and
+  never have to parse the marker themselves. If a completion carries no
+  marker (no-LLM fallback, truncation, a model that ignored the format),
+  the full completion is returned unchanged.
 - **Tenant resolution**: REST takes `body.tenant_id`; MCP infers from auth
   header. Both are reasonable; document the convention.
 

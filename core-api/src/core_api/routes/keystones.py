@@ -12,9 +12,32 @@ Endpoints (under ``/api/v1``):
 
 Trust gating is dynamic per the targeted rule's scope:
 
-* ``scope=agent`` AND ``agent_id == caller`` → **trust ≥ 1** (self-author).
-* Anything else (``scope=fleet`` / ``scope=tenant`` / cross-agent
-  ``scope=agent``) → **trust ≥ 2**.
+* ``scope=agent`` with an **explicit** ``agent_id`` equal to the caller
+  → **trust ≥ 1** (self-author). The ``agent_id`` field is mandatory
+  here: "self-scoped" is a property of the payload, not of the caller.
+* Anything else → **trust ≥ 2**. That includes ``scope=fleet``,
+  ``scope=tenant``, cross-agent ``scope=agent``, and — the case that
+  surprises callers — ``scope=agent`` with ``agent_id`` **omitted**,
+  which names no target and so cannot claim the self-author tier
+  (storage rejects that shape too: "scope=agent requires agent_id").
+
+That matrix reads the **submitted** shape. Two further constraints can
+raise the floor above it, so a correctly-shaped self-authored rule is
+not guaranteed to pass at trust 1:
+
+* **The stored shape.** ``effective_keystone_min_trust`` takes the max
+  of the submitted floor and the floor the rule ALREADY persisted under
+  that ``doc_id`` requires. Overwriting a ``scope=fleet`` rule needs ≥ 2
+  however the new body is shaped — that is the escalation guard.
+* **Caller verification.** The self-author tier needs a *verified*
+  identity — an agent-scoped credential, not an ``X-Agent-ID`` header
+  asserted alongside an admin/tenant key. See
+  ``_effective_min_for_caller``: an unverified caller is held at ≥ 2
+  even with a correctly-shaped self-authored rule, because otherwise an
+  admin-key holder could forge a rule in any agent's name.
+
+Neither is visible to ``keystone_trust_hint``, by design — see its
+docstring for why the hint stays blind to stored state.
 
 Surface the ``X-Truncated`` header from core-storage so callers can warn
 operators when rules are being silently dropped.
@@ -36,7 +59,11 @@ from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.audit_service import log_action
 from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
-from core_api.trust_utils import effective_keystone_min_trust, keystone_min_trust
+from core_api.trust_utils import (
+    effective_keystone_min_trust,
+    keystone_min_trust,
+    keystone_trust_hint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +105,7 @@ async def _enforce_author_trust(
     *,
     min_level: int,
     standalone_admin: bool = False,
+    hint: str = "",
 ) -> None:
     """Block keystone writes / deletes from principals below ``min_level``.
 
@@ -96,6 +124,13 @@ async def _enforce_author_trust(
     A trust-2 agent in tenant T can still write ``scope=fleet`` rules
     for any fleet within T — finer-grained scope authority (admin/org
     role, fleet pinning) is tracked separately (#119).
+
+    ``hint`` is appended to the insufficient-trust 403 only (see
+    :func:`core_api.trust_utils.keystone_trust_hint`). It is not added
+    to the unregistered-agent 403 above: that refusal is about identity,
+    and "pass agent_id" is not its remedy — registering is. Callers that
+    pass no ``hint`` (the anti-probing pre-check, the delete path) are
+    unchanged.
     """
     # Standalone single-tenant operator: the API-key holder IS the admin and
     # there is no other agent to impersonate, so the anti-spoof trust gate is
@@ -115,7 +150,7 @@ async def _enforce_author_trust(
             ),
         )
     if terr:
-        raise HTTPException(status_code=403, detail=parse_trust_error(terr))
+        raise HTTPException(status_code=403, detail=parse_trust_error(terr) + hint)
 
 
 def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple[str, bool]:
@@ -271,8 +306,10 @@ async def upsert_keystone(
     x_agent_id: str | None = Header(default=None, alias="X-Agent-ID"),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Upsert a keystone rule. Trust ≥ 1 for self-authored ``scope=agent``
-    rules; ≥ 2 otherwise. See module docstring."""
+    """Upsert a keystone rule. Trust ≥ 1 for a self-authored
+    ``scope=agent`` rule — meaning one that carries an explicit
+    ``agent_id`` equal to the caller; ≥ 2 otherwise, including
+    ``scope=agent`` with ``agent_id`` omitted. See module docstring."""
     auth.enforce_tenant(body.tenant_id)
     # ``enforce_read_only`` gates demo sandboxes; ``enforce_usage_limits``
     # gates plan-exceeded orgs. Write routes must call both — delete
@@ -318,7 +355,14 @@ async def upsert_keystone(
     # victim's name at trust 1.
     min_level = _effective_min_for_caller(scope_floor, caller_verified)
     await _enforce_author_trust(
-        body.tenant_id, caller_agent_id, min_level=min_level, standalone_admin=standalone_admin
+        body.tenant_id,
+        caller_agent_id,
+        min_level=min_level,
+        standalone_admin=standalone_admin,
+        # Distinguish "you're not trusted enough for this scope" from
+        # "you meant to self-author but left agent_id out" — the latter
+        # otherwise reads as the trust matrix contradicting the docs.
+        hint=keystone_trust_hint(body.scope, body.agent_id, caller_agent_id),
     )
     # TOCTOU narrowing: re-fetch the stored row immediately before the
     # upsert and abort with 409 if the shape changed. A legitimate

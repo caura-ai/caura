@@ -95,7 +95,11 @@ from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
 from core_api.services.usage_service import recall_operation
-from core_api.trust_utils import effective_keystone_min_trust, keystone_min_trust
+from core_api.trust_utils import (
+    effective_keystone_min_trust,
+    keystone_min_trust,
+    keystone_trust_hint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3075,12 +3079,21 @@ async def caura_evolve(
 #   * Different trust profiles. Read is open (``trust_required=0``).
 #     Write declares ``trust_required=1`` as the minimum any successful
 #     call needs, then the handler computes the per-call floor from
-#     the rule's scope/agent_id: ``scope=agent`` for the caller's own
-#     agent_id is the self-author tier (≥1); everything else
-#     (``scope=fleet``, ``scope=tenant``, or cross-agent ``scope=agent``)
-#     stays at the cross-agent governance bar (≥2). The ≥2 tier is what
-#     blocks a prompt-injected freshly-registered agent from planting
-#     a tenant-wide rule or impersonating another agent.
+#     the rule's scope/agent_id: ``scope=agent`` carrying an EXPLICIT
+#     ``agent_id`` equal to the caller is the self-author tier (≥1);
+#     everything else stays at the cross-agent governance bar (≥2) —
+#     ``scope=fleet``, ``scope=tenant``, cross-agent ``scope=agent``,
+#     and also ``scope=agent`` with ``agent_id`` OMITTED, which names
+#     no target and therefore cannot be self-authored. The ≥2 tier is
+#     what blocks a prompt-injected freshly-registered agent from
+#     planting a tenant-wide rule or impersonating another agent.
+#
+#     The omitted-agent_id case is the one callers trip over: the rule
+#     shape is invalid anyway (storage: "scope=agent requires agent_id")
+#     but the trust gate runs first, so the 403 lands before the 422.
+#     ``keystone_trust_hint`` appends the remedy to that 403 rather
+#     than reordering the checks — the gate must stay ahead of the
+#     storage read for anti-probing reasons.
 
 
 async def caura_keystones(
@@ -3178,12 +3191,13 @@ async def caura_keystones_set(
     ``scope=agent``; passing it for ``scope=tenant`` or ``scope=fleet``
     returns ``INVALID_ARGUMENTS``.
 
-    Trust gating is dynamic: ``scope=agent`` where the target
-    ``agent_id`` matches the caller is the self-author tier (trust ≥
-    1); everything else (``scope=fleet``, ``scope=tenant``, or
-    ``scope=agent`` targeting a different agent) stays at the
-    cross-agent governance bar (trust ≥ 2). Mirror of the REST policy
-    in ``routes/keystones.py``.
+    Trust gating is dynamic: ``scope=agent`` carrying an **explicit**
+    ``agent_id`` that matches the caller is the self-author tier (trust
+    ≥ 1); everything else stays at the cross-agent governance bar
+    (trust ≥ 2) — ``scope=fleet``, ``scope=tenant``, ``scope=agent``
+    targeting a different agent, and ``scope=agent`` with ``agent_id``
+    omitted (no target named, so nothing to self-author). Mirror of the
+    REST policy in ``routes/keystones.py``.
 
     Use this rarely and deliberately — keystones override conflicting
     user instructions and apply to every future session in scope.
@@ -3312,10 +3326,14 @@ async def caura_keystones_set(
                     caller_agent_id=caller_agent_id,
                 )
                 if trust < min_level:
+                    # Append (never replace) the self-scope remedy so the
+                    # pinned ``Agent '…' (trust_level=N) < required M.``
+                    # shape survives for anything parsing it.
                     return _with_latency(
                         _error_response(
                             "FORBIDDEN",
-                            f"Agent '{caller_agent_id}' (trust_level={trust}) < required {min_level}.",
+                            f"Agent '{caller_agent_id}' (trust_level={trust}) < required {min_level}."
+                            + keystone_trust_hint(new_scope_str, agent_id, caller_agent_id),
                         ),
                         t0,
                     )

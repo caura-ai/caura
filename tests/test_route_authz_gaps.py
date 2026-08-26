@@ -17,8 +17,15 @@
 NOTE: requests in these tests pass explicit ``tenant_id`` in JSON bodies
 where applicable — ``StandaloneTenantMiddleware`` otherwise injects the
 standalone tenant into body/query, which would mask the cross-tenant
-scenarios. Agent rows are seeded via the storage client (``sc``), not the
-rolled-back ``db`` fixture, so the in-process storage app can see them.
+scenarios. The STM requests now pass it in the QUERY STRING for the same
+reason: since the WT-4 fix those routes declare a ``tenant_id`` selector,
+so the injected standalone tenant would be read as a caller-supplied
+cross-tenant request against these fabricated ``as_auth`` tenants and
+answered with 403 TENANT_MISMATCH — an artifact of the fixture, not of
+the routes (in a real standalone deployment every auth path resolves to
+the standalone tenant, so the injected value always matches). Agent rows
+are seeded via the storage client (``sc``), not the rolled-back ``db``
+fixture, so the in-process storage app can see them.
 """
 
 from __future__ import annotations
@@ -203,20 +210,24 @@ def _stm_enabled(monkeypatch):
 
 async def test_stm_clear_notes_blocked_for_read_only(client, as_auth, _stm_enabled):
     as_auth("tenant-ro", capabilities={"read"})
-    resp = await client.delete("/api/v1/stm/notes?agent_id=any-agent")
+    resp = await client.delete(
+        "/api/v1/stm/notes?agent_id=any-agent&tenant_id=tenant-ro"
+    )
     assert resp.status_code == 403
 
 
 async def test_stm_clear_bulletin_blocked_for_read_only(client, as_auth, _stm_enabled):
     as_auth("tenant-ro", capabilities={"read"})
-    resp = await client.delete("/api/v1/stm/bulletin?fleet_id=any-fleet")
+    resp = await client.delete(
+        "/api/v1/stm/bulletin?fleet_id=any-fleet&tenant_id=tenant-ro"
+    )
     assert resp.status_code == 403
 
 
 async def test_stm_promote_blocked_for_read_only(client, as_auth, _stm_enabled):
     as_auth("tenant-ro", capabilities={"read"})
     resp = await client.post(
-        "/api/v1/stm/promote",
+        "/api/v1/stm/promote?tenant_id=tenant-ro",
         json={"agent_id": "any-agent", "content": "should not persist"},
     )
     assert resp.status_code == 403
@@ -224,14 +235,14 @@ async def test_stm_promote_blocked_for_read_only(client, as_auth, _stm_enabled):
 
 async def test_stm_clear_notes_rejects_peer_agent(client, as_auth, _stm_enabled):
     as_auth("tenant-a", agent_id="agent-1")
-    resp = await client.delete("/api/v1/stm/notes?agent_id=agent-2")
+    resp = await client.delete("/api/v1/stm/notes?agent_id=agent-2&tenant_id=tenant-a")
     assert resp.status_code == 403
 
 
 async def test_stm_promote_rejects_peer_agent(client, as_auth, _stm_enabled):
     as_auth("tenant-a", agent_id="agent-1")
     resp = await client.post(
-        "/api/v1/stm/promote",
+        "/api/v1/stm/promote?tenant_id=tenant-a",
         json={"agent_id": "agent-2", "content": "on behalf of a peer"},
     )
     assert resp.status_code == 403
@@ -467,7 +478,7 @@ async def test_stm_notes_of_a_peer_agent_cannot_be_read(client, as_auth, _stm_en
     """
     tenant = f"tenant-{_uid()}"
     as_auth(tenant, agent_id="agent-a")
-    resp = await client.get("/api/v1/stm/notes?agent_id=agent-b")
+    resp = await client.get(f"/api/v1/stm/notes?agent_id=agent-b&tenant_id={tenant}")
     assert resp.status_code == 403, resp.text
 
 
@@ -475,7 +486,7 @@ async def test_stm_notes_of_own_agent_are_still_readable(client, as_auth, _stm_e
     """The guard must not break an agent reading its OWN notes."""
     tenant = f"tenant-{_uid()}"
     as_auth(tenant, agent_id="agent-a")
-    resp = await client.get("/api/v1/stm/notes?agent_id=agent-a")
+    resp = await client.get(f"/api/v1/stm/notes?agent_id=agent-a&tenant_id={tenant}")
     assert resp.status_code == 200, resp.text
     assert resp.json()["agent_id"] == "agent-a"
 
@@ -561,7 +572,7 @@ async def test_promote_rejects_a_server_reserved_memory_type(
 
     as_auth(tenant, agent_id="agent-a")
     resp = await client.post(
-        "/api/v1/stm/promote",
+        f"/api/v1/stm/promote?tenant_id={tenant}",
         json={
             "agent_id": "agent-a",
             "content": "promoted",
@@ -579,7 +590,7 @@ async def test_promote_refuses_a_quarantined_agent(client, as_auth, sc, _stm_ena
 
     as_auth(tenant, agent_id="agent-q")
     resp = await client.post(
-        "/api/v1/stm/promote",
+        f"/api/v1/stm/promote?tenant_id={tenant}",
         json={"agent_id": "agent-q", "content": "promoted"},
     )
     assert resp.status_code == 403, resp.text

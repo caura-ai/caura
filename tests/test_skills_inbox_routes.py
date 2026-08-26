@@ -518,8 +518,17 @@ async def test_tenant_key_with_conflicting_tenant_is_403(storage, settings, side
         r_list = await client.get(f"{BASE}?tenant_id=t-other")
         r_action = await client.post(f"{BASE}/{SLUG}/defer?tenant_id=t-other", json=None)
     assert r_list.status_code == 403, r_list.text
-    assert r_list.json()["detail"].startswith("TENANT_MISMATCH")
     assert r_action.status_code == 403, r_action.text
+    for r in (r_list, r_action):
+        detail = r.json()["detail"]
+        # The machine-readable prefix is the contract clients branch on.
+        assert detail.startswith("TENANT_MISMATCH")
+        # The prose discloses NEITHER id: not the credential's own tenant
+        # (a binding an embedded/shared key's holder may never have been
+        # told) and not the caller-supplied one (attacker-controlled input
+        # reflected into a body that also lands in logs).
+        assert TENANT not in detail, detail
+        assert "t-other" not in detail, detail
     assert storage.upserts == []
 
 
