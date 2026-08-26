@@ -1204,7 +1204,14 @@ keys. EVERY candidate index from 0 to N-1 must appear in exactly one of them:
 - "hits": object mapping each contradicting candidate index (as a STRING) to
   its judgment with the three fields above.
 {{"clean": [1, 2, 4], "hits": {{"0": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true}}, "3": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true}}}}}}
-If NO candidate contradicts, "hits" is an empty object and "clean" lists every index.
+Calibration: in most batches FEW OR NO candidates contradict — an empty "hits"
+is the normal answer, not a failure to find something. Apply the three rules to
+every candidate independently, exactly as if you were judging that one pair on
+its own. A candidate goes in "hits" ONLY when all three rules pass decisively;
+uncertainty, partial overlap, related-but-compatible claims, or any applicable
+non_conflict_reason put it in "clean". Never add a hit because a batch "should"
+contain one. If NO candidate contradicts, "hits" is {{}} and "clean" lists every
+index.
 """
 
 
@@ -1781,7 +1788,14 @@ keys. EVERY candidate index from 0 to N-1 must appear in exactly one of them:
 - "hits": object mapping each contradicting candidate index (as a STRING) to
   its judgment with the three fields above.
 {{"clean": [1, 2, 4], "hits": {{"0": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true}}, "3": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true}}}}}}
-If NO candidate contradicts, "hits" is an empty object and "clean" lists every index.
+Calibration: in most batches FEW OR NO candidates contradict — an empty "hits"
+is the normal answer, not a failure to find something. Apply the three rules to
+every candidate independently, exactly as if you were judging that one pair on
+its own. A candidate goes in "hits" ONLY when all three rules pass decisively;
+uncertainty, partial overlap, related-but-compatible claims, or any applicable
+non_conflict_reason put it in "clean". Never add a hit because a batch "should"
+contain one. If NO candidate contradicts, "hits" is {{}} and "clean" lists every
+index.
 """
 
 
