@@ -267,7 +267,7 @@ function _autoFixWithConfig(initial: Record<string, unknown>): {
   result: ReturnType<typeof autoFixAllowlist>;
   cleanup: () => void;
 } {
-  const tmp = mkdtempSync(join(tmpdir(), "memclaw-autofix-test-"));
+  const tmp = mkdtempSync(join(tmpdir(), "caura-autofix-test-"));
   mkdirSync(join(tmp, ".openclaw"), { recursive: true });
   const cfgPath = join(tmp, ".openclaw", "openclaw.json");
   writeFileSync(cfgPath, JSON.stringify(initial), "utf-8");
@@ -403,7 +403,7 @@ function _ensureExtraDirsWithConfig(
   result: ReturnType<typeof ensureExtraSkillDirs>;
   cleanup: () => void;
 } {
-  const tmp = mkdtempSync(join(tmpdir(), "memclaw-extradirs-test-"));
+  const tmp = mkdtempSync(join(tmpdir(), "caura-extradirs-test-"));
   mkdirSync(join(tmp, ".openclaw"), { recursive: true });
   const cfgPath = join(tmp, ".openclaw", "openclaw.json");
   if (initial !== null) {
