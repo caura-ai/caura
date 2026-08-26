@@ -24,6 +24,7 @@ import openai
 
 from common.llm.call_context import llm_call_label
 from common.llm.constants import (
+    LLM_JSON_MAX_OUTPUT_TOKENS,
     LLM_PROVIDER_MAX_RETRIES,
     OPENAI_CHAT_BASE_URL,
     OPENAI_HTTPX_CONNECT_TIMEOUT_SECONDS,
@@ -33,6 +34,7 @@ from common.llm.constants import (
     OPENAI_REQUEST_TIMEOUT_SECONDS,
 )
 from common.llm.providers._shape_error import ProviderResponseShapeError
+from common.llm.providers._truncation import raise_if_truncated
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +242,10 @@ class OpenAILLMProvider:
             "messages": [{"role": "user", "content": prompt}],
             "response_format": response_format,
             "temperature": temperature,
+            # Runaway guard — same failure mode as the Gemini-backed
+            # providers: an uncapped looping generation comes back as
+            # truncated JSON (finish_reason="length").
+            "max_completion_tokens": LLM_JSON_MAX_OUTPUT_TOKENS,
         }
         if seed is not None:
             create_kwargs["seed"] = seed
@@ -269,6 +275,12 @@ class OpenAILLMProvider:
         content = response.choices[0].message.content
         if not content:
             raise ValueError(f"OpenAI returned empty content for model {self._model}")
+        raise_if_truncated(
+            response,
+            provider="OpenAI-compatible",
+            model=self._model,
+            max_tokens=LLM_JSON_MAX_OUTPUT_TOKENS,
+        )
         parsed = json.loads(content)
         if not isinstance(parsed, dict):
             raise OpenAIResponseShapeError(content, type(parsed).__name__)
