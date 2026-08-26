@@ -25,7 +25,9 @@ deliberate, explicit error rather than a silent 404).
   `Authorization: Bearer <token>`.
 - **Self-hosted / standalone** deployments that hit core-api directly
   use the `X-API-Key` header (admin key or `CAURA_API_KEY`); in
-  standalone mode the resolved context is already `orgRole=admin`.
+  standalone mode the resolved context is already `orgRole=admin`. The
+  admin key is tenant-less, so it has to name the tenant it is acting
+  on — see below.
 
 **Authorization.** The five action endpoints
 (`approve`/`defer`/`edit`/`quarantine`/`reject`) require an admin
@@ -33,6 +35,21 @@ caller — `orgRole=admin` (or the admin API key). A non-admin caller
 gets `403 SKILLS_INBOX_FORBIDDEN`. The `GET` list endpoint is readable
 by any authenticated tenant member, so non-admin operators can still
 see what's in flight.
+
+**Which tenant's inbox.** Every endpoint — the list and all five
+actions — accepts an optional `?tenant_id=` query parameter, and how it
+resolves depends on the credential:
+
+- A **tenant-scoped** credential carries its own tenant, and that tenant
+  always wins. Omit the parameter, or pass the matching value; passing a
+  *different* tenant is a `403` (`TENANT_MISMATCH`) — a tenant key may
+  not act on someone else's inbox.
+- An **admin** credential (the admin API key, or standalone mode) carries
+  no tenant of its own, so it must name one: `?tenant_id=acme`. Omitting
+  it is a `400` — the credential authenticated fine, the request just
+  didn't say which inbox to open.
+- A context with neither a tenant nor admin rights is genuinely
+  unauthenticated and still gets `401`.
 
 ## Base path
 
@@ -70,6 +87,7 @@ Query parameters:
 |---|---|---|
 | `limit` | `50` | 1–200. Additionally capped by `org_settings.skills_factory.inbox_max_pending`. |
 | `fleet_id` | – | Optional; narrow the list to one fleet. |
+| `tenant_id` | – | Required for an admin credential, optional (and must match) for a tenant-scoped one — see [Auth & prerequisites](#auth--prerequisites). |
 | `include_content` | `false` | Include the full SKILL.md body on each card. The default list is lean (`content: null`); the edit UI opts in. |
 
 Returns the tenant's `status='staged'` skill cards, newest first.
@@ -179,6 +197,10 @@ the same response shape:
 { "slug": "forge/abc-123", "previous_status": "staged", "new_status": "active", "detail": null }
 ```
 
+All five take the same `?tenant_id=` selector as the list endpoint, on
+the same terms — an admin credential must name a tenant, a tenant-scoped
+one may only name its own.
+
 ### `approve` — staged → active
 
 Empty body. Runs a **pre-apply Sentinel rescan** against the exact
@@ -269,8 +291,9 @@ curl -X POST "$BASE/api/v1/skills-inbox/forge/abc-123/reject" \
 
 | Code | Meaning |
 |---|---|
-| `401` | Missing/invalid credentials, or the auth context resolved no tenant. |
-| `403` | `SKILLS_FACTORY_DISABLED` (feature flag off for the tenant), or `SKILLS_INBOX_FORBIDDEN` (action attempted by a non-admin). |
+| `400` | An admin credential didn't say which inbox to open — add `?tenant_id=`. |
+| `401` | Missing/invalid credentials: the context has neither a tenant nor admin rights. An admin key that simply omitted `tenant_id` gets `400`, not this. |
+| `403` | `SKILLS_FACTORY_DISABLED` (feature flag off for the tenant), `SKILLS_INBOX_FORBIDDEN` (action attempted by a non-admin), or `TENANT_MISMATCH` (a tenant-scoped credential named a different tenant in `?tenant_id=`). |
 | `404` | No skill doc with that slug in the tenant's `skills` collection. Check slug encoding first — an over-encoded `%2F` routes to a nonexistent path. |
 | `409` | Action not permitted from the doc's current status (see matrix), or the doc was concurrently transitioned/edited while your call was in flight — reload the inbox and retry. |
 | `422` | Missing/invalid body field (e.g. `reject` or `quarantine` without `reason`, `edit` with no fields), an approve whose pre-apply rescan refused, or a malformed doc (no `content_hash` / no cluster fingerprint). |

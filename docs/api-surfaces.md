@@ -76,13 +76,25 @@ mirror "for symmetry."
 The following inconsistencies span surfaces and should be addressed
 independently of ownership decisions:
 
-- **Error contracts**: REST raises `HTTPException` with status codes; MCP
-  returns string error prefixes (`"Error (422): ..."`). Cross-surface clients
-  must special-case. Pick one canonical shape and align both surfaces.
+- **Error contracts**: largely closed. Both surfaces now emit the canonical
+  `{"error": {"code", "message", "details"?}}` envelope from
+  `core_api.errors.make_error_payload` — REST alongside the legacy
+  top-level `detail`, MCP as the tool's JSON string inside a
+  `CallToolResult(isError=True)`. What remains is the transport: REST
+  carries the HTTP status, MCP has only the `code`, so a cross-surface
+  client still branches on one or the other.
 - **Response shape drift on `recall`**: REST `/recall` returns
-  `{query, summary, memory_count, memories, recall_ms}`; MCP
+  `{query, summary, memory_count, memories, items, recall_ms}`; MCP
   `caura_recall(include_brief=true)` returns
-  `{results, brief: <REST-recall-response>}`. Same conceptual operation,
-  different payloads. Pick one and align.
+  `{results, items, count, brief: <REST-recall-response>}`. Both dual-emit
+  the row list under `items` now, so that key is the safe one to read on
+  either surface — but the rest of the envelope (and the nesting of the
+  brief) still differs for one conceptual operation. Pick one and align.
+  `summary` behaves the same on both: the model is prompted to reason step
+  by step and to close with a `**Answer:**` line, and the server surfaces
+  only that final answer — callers get the answer, not the scaffold, and
+  never have to parse the marker themselves. If a completion carries no
+  marker (no-LLM fallback, truncation, a model that ignored the format),
+  the full completion is returned unchanged.
 - **Tenant resolution**: REST takes `body.tenant_id`; MCP infers from auth
   header. Both are reasonable; document the convention.
