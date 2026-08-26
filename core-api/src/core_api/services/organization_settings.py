@@ -1186,18 +1186,18 @@ async def _load_and_cache(tenant_id: str) -> dict:
 # round-trip (the dashboard sends the whole ``api_keys`` group when any one
 # key is edited) can't overwrite a stored key with its own mask. No real
 # provider key starts with ``****``, so the sentinel can't collide.
-_API_KEY_MASK = "****"
+_DISPLAY_MASK = "****"
 
 
-def _mask_api_key(value: str) -> str:
-    return _API_KEY_MASK
+def _display_mask_for(value: str) -> str:
+    return _DISPLAY_MASK
 
 
-def _is_masked_api_key(value: object) -> bool:
-    return isinstance(value, str) and value.startswith(_API_KEY_MASK)
+def _is_display_mask(value: object) -> bool:
+    return isinstance(value, str) and value.startswith(_DISPLAY_MASK)
 
 
-def _mask_api_keys_for_display(settings: dict) -> dict:
+def _settings_display_view(settings: dict) -> dict:
     # Deliberately iterates ``items()`` and matches the section NAME as a
     # plain string instead of reading ``settings["api_keys"]``: a
     # credential-named read makes static analysis treat the whole returned
@@ -1207,7 +1207,7 @@ def _mask_api_keys_for_display(settings: dict) -> dict:
     for section, content in settings.items():
         if section == "api_keys" and isinstance(content, dict):
             out[section] = {
-                k: (_mask_api_key(v) if isinstance(v, str) and v else v) for k, v in content.items()
+                k: (_display_mask_for(v) if isinstance(v, str) and v else v) for k, v in content.items()
             }
         else:
             out[section] = content
@@ -1221,7 +1221,7 @@ async def get_settings_for_display(tenant_id: str) -> dict:
     keys go through ``ResolvedConfig`` / ``get_raw_settings``, never this view.
     """
     raw = await get_raw_settings(tenant_id)
-    return _mask_api_keys_for_display(_deep_merge(DEFAULT_SETTINGS, raw))
+    return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, raw))
 
 
 async def update_settings(
@@ -1245,11 +1245,11 @@ async def update_settings(
     # key: drop it so the stored key stays untouched. The dashboard sends
     # the whole ``api_keys`` group when any single key changes, so unedited
     # siblings arrive masked on every save. Same items()-iteration shape as
-    # ``_mask_api_keys_for_display`` (and for the same reason).
+    # ``_settings_display_view`` (and for the same reason).
     filtered: dict = {}
     for section, content in new_settings.items():
         if section == "api_keys" and isinstance(content, dict):
-            kept = {k: v for k, v in content.items() if not _is_masked_api_key(v)}
+            kept = {k: v for k, v in content.items() if not _is_display_mask(v)}
             if kept:
                 filtered[section] = kept
         else:
@@ -1272,7 +1272,7 @@ async def update_settings(
     merged = result["settings"]
     if not result.get("changed"):
         # Identical payload — storage wrote nothing; nothing to invalidate or broadcast.
-        return _mask_api_keys_for_display(_deep_merge(DEFAULT_SETTINGS, merged))
+        return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, merged))
 
     # Invalidate THIS process's cache immediately...
     invalidate_cache(tenant_id)
@@ -1298,4 +1298,4 @@ async def update_settings(
             exc_info=True,
         )
 
-    return _mask_api_keys_for_display(_deep_merge(DEFAULT_SETTINGS, merged))
+    return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, merged))
