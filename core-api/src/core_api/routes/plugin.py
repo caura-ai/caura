@@ -488,7 +488,7 @@ echo "    Build successful"
 echo "[7/7] Configuring OpenClaw..."
 if [ -f "$CONFIG_PATH" ]; then
   # Write a temp script to safely modify JSON (avoids inline node -e quoting issues)
-  _SETUP_JS=$(mktemp /tmp/memclaw-setup-XXXXXX.mjs)
+  _SETUP_JS=$(mktemp /tmp/caura-setup-XXXXXX.mjs)
   cat > "$_SETUP_JS" << 'SETUP_EOF'
 import fs from 'fs';
 const configPath = process.argv[2];

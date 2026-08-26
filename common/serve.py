@@ -31,7 +31,7 @@ to uvicorn as a string so the workers can re-import it. ``<settings_import>`` is
 the app's own ``configure_logging()`` call exactly.
 
 Vendoring constraint: this file is vendored byte-for-byte into
-caura-memclaw-enterprise as an ``identical``-policy ``common/`` file, whose CI
+caura-enterprise as an ``identical``-policy ``common/`` file, whose CI
 runs ``ruff format --check`` with no resolved config (ruff's 88-col default).
 Keep every line <= 88 cols so the vendored copy stays format-stable there — a
 wider line passes OSS CI (which does not format-check ``common/``) but wedges

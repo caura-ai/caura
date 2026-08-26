@@ -13,6 +13,7 @@
 
 import { createHash } from "crypto";
 import { apiCall, parseSearchItems } from "./transport.js";
+import { PLUGIN_ID } from "./config.js";
 import {
   CAURA_FLEET_ID,
   CAURA_TENANT_ID,
@@ -502,7 +503,7 @@ export class CauraContextEngine {
    * it ``true``.
    */
   readonly info = {
-    id: "memclaw",
+    id: PLUGIN_ID,
     name: "Caura Context Engine",
     ownsCompaction: true,
   };
