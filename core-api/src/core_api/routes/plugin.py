@@ -826,7 +826,7 @@ async def install_skill_script(
         ),
     ),
 ):
-    """Bash installer for the direct-MCP memclaw skill.
+    """Bash installer for the direct-MCP Caura skill.
 
     Serves a shell script that fetches the SKILL.md adapter for the requested
     skill (default: memclaw) and writes it to the user-scope skills directory

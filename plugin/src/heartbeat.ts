@@ -489,7 +489,7 @@ export async function sendHeartbeat(): Promise<void> {
       : false;
     const educated = existsSync(join(getPluginDir(), ".educated"));
 
-    // Check workspace files for MemClaw references. SKILL.md is no longer a
+    // Check workspace files for Caura references. SKILL.md is no longer a
     // per-workspace artifact — it ships at the plugin root and is discovered
     // by OpenClaw via `openclaw.plugin.json:skills`. The shared skill file's
     // presence is checked once below and reported on setup_status.
