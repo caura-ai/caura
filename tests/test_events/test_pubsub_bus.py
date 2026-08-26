@@ -10,14 +10,23 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import multiprocessing
+import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from queue import Empty
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from common.events import Event, PubSubEventBus, Topics
-from common.events.pubsub import BROADCAST_SUBSCRIPTION_TTL_SECONDS
+from common.events.pubsub import (
+    BROADCAST_MAX_SLOTS,
+    BROADCAST_SUBSCRIPTION_TTL_SECONDS,
+    _claim_broadcast_slot,
+    _process_broadcast_slot_id,
+)
 
 
 @pytest.fixture
@@ -1464,3 +1473,276 @@ async def test_release_broadcast_subscriptions_is_idempotent(
     await bus.stop()
 
     fake_sub.delete_subscription.assert_called_once()
+
+
+# ── broadcast slot identity ──────────────────────────────────────────
+#
+# The subscription name has to satisfy three properties AT ONCE. Each test
+# below pins exactly one, because the properties trade against each other and a
+# scheme that buys one by giving up another is the failure mode to guard:
+# trading away "distinct between concurrent workers" turns a broadcast into a
+# load-balanced queue, silently.
+#
+# These use real spawned processes, matching uvicorn's own supervisor
+# (``multiprocessing.get_context("spawn")``). They have to: the property under
+# test is that the KERNEL releases a claim when a process is SIGKILLed, and a
+# mock cannot exhibit that.
+
+
+def _slot_child(slot_dir: Path, queue: Any) -> None:
+    """Claim a slot, report it, then block until killed — like a live worker."""
+    queue.put(_claim_broadcast_slot(slot_dir, BROADCAST_MAX_SLOTS))
+    time.sleep(300)
+
+
+@pytest.fixture
+def spawn_worker(tmp_path: Path) -> Any:
+    """Spawn ``_slot_child`` processes into ``tmp_path`` and reap them all."""
+    ctx = multiprocessing.get_context("spawn")
+    queue = ctx.Queue()
+    started: list[Any] = []
+
+    def _spawn() -> tuple[Any, str | None]:
+        proc = ctx.Process(target=_slot_child, args=(tmp_path, queue))
+        proc.start()
+        started.append(proc)
+        # Watch the child alongside the queue rather than just blocking on the
+        # queue. A child that dies before reporting — an import failure under
+        # spawn, an unwritable slot dir — would otherwise burn the entire
+        # timeout per spawn before surfacing as an unhelpful Empty, turning an
+        # already-failing run into a multi-minute one. A live child reports in
+        # ~100ms; the generous ceiling is only there for a cold CI box.
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            try:
+                return proc, queue.get(timeout=0.1)
+            except Empty:
+                if proc.exitcode is not None:
+                    # It may have reported and exited before we looked.
+                    with contextlib.suppress(Empty):
+                        return proc, queue.get(timeout=1)
+                    raise AssertionError(
+                        f"slot child exited {proc.exitcode} without reporting"
+                    ) from None
+        raise AssertionError("slot child never reported")
+
+    yield _spawn
+    for proc in started:
+        if proc.is_alive():
+            proc.kill()
+        proc.join(timeout=10)
+
+
+def test_broadcast_slot_is_stable_across_a_sigkilled_respawn(
+    spawn_worker: Any,
+) -> None:
+    # PROPERTY 1 — stability. uvicorn SIGKILLs a worker that misses its 5s
+    # healthcheck ping and spawns a replacement (``Multiprocess.
+    # keep_subprocess_alive``). The replacement must re-derive its
+    # predecessor's identity so ``_ensure_broadcast_subscription`` takes the
+    # AlreadyExists path instead of minting a fresh subscription that orphans
+    # the old one for a day. This is the property a random id fails, and it is
+    # the entire leak.
+    victim, first = spawn_worker()
+    assert first is not None
+
+    # Exactly what uvicorn does: SIGKILL, reap, spawn a brand-new process.
+    # No shutdown hook runs — that is the point.
+    victim.kill()
+    victim.join(timeout=10)
+    _replacement, second = spawn_worker()
+
+    assert second == first, (
+        f"respawned worker took identity {second!r}, predecessor held {first!r}; "
+        "a changed identity orphans the predecessor's subscription for "
+        f"{BROADCAST_SUBSCRIPTION_TTL_SECONDS}s"
+    )
+
+
+def test_broadcast_slot_is_distinct_between_concurrently_live_workers(
+    tmp_path: Path, spawn_worker: Any
+) -> None:
+    # PROPERTY 2 — THE TRAP. Two live workers sharing one subscription does not
+    # fail loudly: Pub/Sub load-balances between them and each sees roughly half
+    # the events. For org.settings-changed that is a process serving stale
+    # settings with nothing red anywhere. Worse than the leak, so stability must
+    # never be bought at this property's expense.
+    _first, ident_a = spawn_worker()
+    _second, ident_b = spawn_worker()
+    assert ident_a is not None and ident_b is not None
+    assert ident_a != ident_b, (
+        f"two concurrently-live workers both claimed {ident_a!r}; they would "
+        "share one subscription and each receive only part of the broadcast"
+    )
+
+    # And the stronger form: a THIRD claimant, arriving while both incumbents
+    # are still alive, must not be handed either of their identities. This is
+    # the uvicorn ``restart_all`` (SIGHUP) shape, where the replacement is
+    # started and waited on BEFORE the worker it replaces is terminated, so the
+    # configured worker count is transiently exceeded.
+    third = _claim_broadcast_slot(tmp_path, BROADCAST_MAX_SLOTS)
+    assert third not in {ident_a, ident_b}, (
+        f"overlap claimant got {third!r}, already held by a live worker"
+    )
+
+
+def test_broadcast_slot_is_distinct_across_instances(tmp_path: Path) -> None:
+    # PROPERTY 3 — cross-instance distinctness. Every instance's slot 0 is a
+    # different consumer. A bare slot index, or a bare Cloud Run instance id,
+    # each satisfies two of the three properties and fails this one or
+    # property 2; only the token+slot pair satisfies all three.
+    # Two never-used directories stand in for two instances' filesystems, so
+    # each of these is by construction the FIRST claim on its own instance —
+    # the same slot on different instances, which is exactly the colliding
+    # case. Asserted on the whole identity rather than on its parts: pinning
+    # the slot component's shape here would couple this test to the id format
+    # and make it fire for mutations that leave cross-instance distinctness
+    # perfectly intact.
+    ident_a = _claim_broadcast_slot(tmp_path / "instance-a", BROADCAST_MAX_SLOTS)
+    ident_b = _claim_broadcast_slot(tmp_path / "instance-b", BROADCAST_MAX_SLOTS)
+    assert ident_a is not None and ident_b is not None
+    assert ident_a != ident_b, (
+        f"the first slot on two separate instances both resolved to "
+        f"{ident_a!r}; those two workers would share one subscription"
+    )
+
+
+def test_broadcast_slot_falls_back_rather_than_sharing_when_exhausted(
+    tmp_path: Path,
+) -> None:
+    # The fallback DIRECTION, which must never be inverted. When no slot can be
+    # proven free, the claim fails and the caller takes a random id — accepting
+    # a bounded, quota-visible, day-lived leak. It must never wrap around and
+    # reuse a held slot, which would be the silent collision.
+    held = [_claim_broadcast_slot(tmp_path, 2) for _ in range(2)]
+    assert None not in held and len(set(held)) == 2
+    assert _claim_broadcast_slot(tmp_path, 2) is None
+
+
+def test_identity_falls_back_to_a_random_id_when_no_slot_can_be_claimed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An unclaimable slot must degrade to the pre-existing random-id behaviour,
+    # not crash a service at boot. Delivery is unaffected; only the leak returns.
+    monkeypatch.setattr("common.events.pubsub._slot_id", None)
+    monkeypatch.setattr(
+        "common.events.pubsub._claim_broadcast_slot", lambda *_a, **_k: None
+    )
+    assert len(_process_broadcast_slot_id()) == 12
+
+
+def test_identity_is_stable_per_process_even_on_the_fallback_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The fallback must be memoised, not re-rolled per caller. An unmemoised
+    # failure gives each bus in a process its OWN random id, which is exactly
+    # the per-process property the memo exists to provide — two buses would
+    # then create two subscriptions where one is wanted, and start()'s claim
+    # that a start/stop/start cycle recreates the same names would be false.
+    monkeypatch.setattr("common.events.pubsub._slot_id", None)
+    monkeypatch.setattr(
+        "common.events.pubsub._claim_broadcast_slot", lambda *_a, **_k: None
+    )
+    assert _process_broadcast_slot_id() == _process_broadcast_slot_id()
+
+
+def test_claim_returns_none_rather_than_raising_on_an_unreadable_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Pins the WIDENING specifically, at the layer where it happens. Reading
+    # the token file is the one filesystem call in this module that did not
+    # degrade to None: every other one catches OSError, while this caught only
+    # FileNotFoundError, so a PermissionError escaped the whole call chain.
+    #
+    # Deliberately asserted here rather than only through start(): the guard in
+    # _process_broadcast_slot_id also catches this, so an end-to-end test stays
+    # green with the narrow except restored and proves nothing about it. Two
+    # isolation layers, so each needs its own test or neither is really pinned.
+    real_read_text = Path.read_text
+
+    def _unreadable(self: Path, *a: Any, **k: Any) -> str:
+        if self.name == "instance":
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", _unreadable)
+    assert _claim_broadcast_slot(tmp_path, BROADCAST_MAX_SLOTS) is None
+
+
+async def test_start_survives_an_unreadable_instance_token(
+    bus: PubSubEventBus, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The module's stated contract is that ANY environment where the slot
+    # cannot be claimed degrades to a random id. An unreadable token file is
+    # such an environment, and it is reachable: the slot directory lives in a
+    # shared tmpdir, so a file owned by another uid, or a directory where a
+    # regular file is expected, both surface as OSError rather than as the
+    # FileNotFoundError that the ordinary "first worker" case raises.
+    #
+    # This runs on the startup path, so the failure mode being pinned is a
+    # service that will not boot — the exact opposite of the degradation the
+    # docstring promises.
+    #
+    # A characterization test for the end-to-end contract, stated as such: two
+    # layers now prevent this (the widened except in _read, and the guard in
+    # _process_broadcast_slot_id), so it stays green if either one alone is
+    # removed. The layer-specific tests above and below are what actually pin
+    # them. Dressing this up as a regression guard for either is how the gap in
+    # #991 got through.
+    import types
+    from unittest.mock import patch
+
+    monkeypatch.setattr("common.events.pubsub._slot_id", None)
+    monkeypatch.setattr("common.events.pubsub.BROADCAST_SLOT_DIR", tmp_path)
+
+    real_read_text = Path.read_text
+
+    def _unreadable(self: Path, *a: Any, **k: Any) -> str:
+        if self.name == "instance":
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", _unreadable)
+
+    class FakeSubscriberClient:
+        def subscription_path(self, proj: str, name: str) -> str:
+            return f"projects/{proj}/subscriptions/{name}"
+
+        def create_subscription(self, request: dict[str, Any]) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    async def _h(_e: Event) -> None:
+        return None
+
+    bus.subscribe(Topics.Org.SETTINGS_CHANGED, _h, broadcast=True)
+    with patch.object(
+        PubSubEventBus,
+        "_ensure_pubsub_sdk",
+        return_value=types.SimpleNamespace(SubscriberClient=FakeSubscriberClient),
+    ):
+        await bus.start()
+
+    # Booted, and with a usable identity rather than none at all.
+    assert bus._started is True
+    assert bus._broadcast_slot_id is not None
+    assert len(bus._broadcast_slot_id) == 12  # the random fallback, not a slot
+    bus._stopping = True  # keep teardown of the fake client quiet
+
+
+def test_identity_survives_an_unexpected_error_in_the_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The totality guard lives in _process_broadcast_slot_id, not at the
+    # start() call site, so it holds for every caller rather than for the one
+    # that remembered to wrap it. Pinned with an exception the callees do not
+    # anticipate at all, since the point is the unforeseen case.
+    monkeypatch.setattr("common.events.pubsub._slot_id", None)
+
+    def _boom(*_a: Any, **_k: Any) -> str:
+        raise RuntimeError("something no callee anticipated")
+
+    monkeypatch.setattr("common.events.pubsub._claim_broadcast_slot", _boom)
+    assert len(_process_broadcast_slot_id()) == 12
