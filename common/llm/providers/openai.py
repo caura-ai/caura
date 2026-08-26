@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from urllib.parse import urlsplit
 
 import httpx
 import openai
@@ -89,9 +90,41 @@ def _usage_tokens(response) -> tuple[int, int, int]:
     )
 
 
+_HOSTED_OPENAI_HOST = urlsplit(OPENAI_HOSTED_CHAT_BASE_URL).hostname or ""
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
 def _is_hosted_openai(base_url: str) -> bool:
-    """True when ``base_url`` is api.openai.com itself, after any override."""
-    return base_url.rstrip("/") == OPENAI_HOSTED_CHAT_BASE_URL
+    """True when ``base_url`` points at api.openai.com, whatever the scheme.
+
+    The decision is by host, not by string: ``http://api.openai.com/v1`` or
+    a trailing slash still count as hosted. A proxy or regional alias on
+    another host does not, on purpose: the request shapes below are chosen
+    for what the *server* accepts, and a proxy that is not api.openai.com
+    has to be assumed to take the strict shapes every compatible server
+    takes. Pointing ``OPENAI_CHAT_BASE_URL`` at such a proxy therefore
+    gives it the non-hosted shapes, which hosted OpenAI accepts as well.
+    """
+    return (urlsplit(base_url).hostname or "").lower() == _HOSTED_OPENAI_HOST
+
+
+def _is_plaintext_off_host(base_url: str) -> bool:
+    """True when ``base_url`` is plain ``http`` to a host that is not loopback."""
+    parts = urlsplit(base_url)
+    return (
+        parts.scheme == "http" and (parts.hostname or "").lower() not in _LOOPBACK_HOSTS
+    )
+
+
+def _allows_null(schema: dict) -> bool:
+    """True when ``schema`` already admits ``null``."""
+    t = schema.get("type")
+    if t == "null" or (isinstance(t, list) and "null" in t):
+        return True
+    return any(
+        isinstance(opt, dict) and opt.get("type") == "null"
+        for opt in schema.get("anyOf", []) + schema.get("oneOf", [])
+    )
 
 
 def _strict_schema(schema: dict) -> dict:
@@ -102,9 +135,17 @@ def _strict_schema(schema: dict) -> dict:
     (``additionalProperties: false``) with every property listed under
     ``required``. Pydantic-generated schemas leave both open for fields
     with defaults. This walks the schema (``properties``, ``items``,
-    ``anyOf``/``oneOf``/``allOf``, ``$defs``) and closes each object. It
-    also drops ``default`` and ``title``, which strict mode rejects or
-    ignores and which carry no meaning for the model. The input is not
+    ``anyOf``/``oneOf``/``allOf``, ``$defs``) and closes each object.
+
+    Marking a property required changes what the model must emit, so a
+    property the source schema left optional is made nullable as well:
+    the model answers ``null`` where it would have omitted the key, and
+    ``_drop_optional_nulls`` removes those keys after parsing, so callers
+    see the same absent-or-present shape they saw before. A property that
+    already admits ``null`` is left as it is.
+
+    ``default`` and ``title`` are dropped: strict mode rejects or ignores
+    them and they carry no meaning for the model. The input is not
     modified.
     """
     if isinstance(schema, list):
@@ -122,9 +163,67 @@ def _strict_schema(schema: dict) -> dict:
         else:
             out[key] = value
     if out.get("type") == "object" or "properties" in out:
+        was_required = set(schema.get("required", []))
+        props = out.get("properties", {})
+        for name, prop in props.items():
+            if (
+                name not in was_required
+                and isinstance(prop, dict)
+                and not _allows_null(prop)
+            ):
+                props[name] = {"anyOf": [prop, {"type": "null"}]}
         out["additionalProperties"] = False
-        out["required"] = list(out.get("properties", {}).keys())
+        out["required"] = list(props.keys())
     return out
+
+
+def _resolve_ref(schema: dict, root: dict) -> dict:
+    """Follow a local ``$ref`` into ``root["$defs"]``; other schemas pass through."""
+    ref = schema.get("$ref", "")
+    if ref.startswith("#/$defs/"):
+        return root.get("$defs", {}).get(ref[len("#/$defs/") :], {})
+    return schema
+
+
+def _drop_optional_nulls(value, schema: dict, root: dict | None = None):
+    """Remove ``null`` values for keys the source schema left optional.
+
+    The counterpart of ``_strict_schema``: it walks the parsed reply with
+    the *original* schema and deletes a key whose value is ``null`` when
+    that key was not in the object's ``required`` list. A ``null`` for a
+    required key, or for a key the source schema made nullable itself, is
+    kept as the model sent it. Arrays and local ``$ref`` definitions are
+    followed; other shapes are returned unchanged.
+    """
+    root = schema if root is None else root
+    schema = _resolve_ref(schema, root)
+    if isinstance(value, dict) and isinstance(schema.get("properties"), dict):
+        required = set(schema.get("required", []))
+        props = schema["properties"]
+        out = {}
+        for key, item in value.items():
+            prop = props.get(key)
+            if (
+                item is None
+                and prop is not None
+                and key not in required
+                and not _allows_null(prop)
+            ):
+                continue
+            out[key] = (
+                _drop_optional_nulls(item, prop, root)
+                if isinstance(prop, dict)
+                else item
+            )
+        return out
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        return [_drop_optional_nulls(item, schema["items"], root) for item in value]
+    for option in schema.get("anyOf", []) + schema.get("oneOf", []):
+        if isinstance(option, dict) and (
+            option.get("properties") or option.get("items") or "$ref" in option
+        ):
+            return _drop_optional_nulls(value, option, root)
+    return value
 
 
 def _strip_code_fence(content: str) -> str:
@@ -165,6 +264,16 @@ class OpenAILLMProvider:
         self._model = model
         self._base_url = base_url
         self._provider_name = provider_name
+        if _is_plaintext_off_host(base_url):
+            # Operator configuration, not caller input, so this is a warning
+            # and not a refusal: a plain-http base URL off the loopback sends
+            # the provider key in the clear on every call.
+            logger.warning(
+                "%s chat base URL %s is plain http to a non-loopback host; "
+                "the API key is sent unencrypted",
+                provider_name,
+                base_url,
+            )
         # Explicit per-call timeout — without this the SDK rides httpx's
         # default and a single hung upstream call would eat the whole
         # enrichment budget silently.
@@ -355,6 +464,8 @@ class OpenAILLMProvider:
         parsed = json.loads(_strip_code_fence(content))
         if not isinstance(parsed, dict):
             raise OpenAIResponseShapeError(content, type(parsed).__name__)
+        if response_schema is not None and not hosted:
+            parsed = _drop_optional_nulls(parsed, response_schema)
         return parsed
 
     async def complete_text(
