@@ -117,7 +117,7 @@ describe("task-trail sync", () => {
   let legacyDbPath: string;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "memclaw-task-trail-"));
+    tmp = mkdtempSync(join(tmpdir(), "caura-task-trail-"));
     __TASK_TRAIL_INTERNALS__.setBaseDirForTests(tmp);
     __TASK_TRAIL_INTERNALS__.setSidecarPathForTests(join(tmp, "sidecar.json"));
     __INTERVIEW_BUFFER_INTERNALS__.setPathForTests(join(tmp, "buf.jsonl"));

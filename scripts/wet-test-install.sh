@@ -73,7 +73,7 @@ echo "  Plugin:    $PLUGIN_DIR"
 echo ""
 
 # ── Step 1: Clone or update ──
-CLONE_DIR="/tmp/memclaw-wet-test"
+CLONE_DIR="/tmp/caura-wet-test"
 if [[ -d "$CLONE_DIR/.git" ]]; then
   echo "[1/6] Updating existing clone..."
   cd "$CLONE_DIR"
@@ -163,7 +163,7 @@ if [[ -f "$OPENCLAW_CONFIG" ]]; then
     if (!config.plugins.load.paths.includes(pluginDir)) config.plugins.load.paths.push(pluginDir);
 
     // Ensure tools are allowed.
-    // Keep in sync with MEMCLAW_TOOLS (plugin/src/tools.ts) — a missing
+    // Keep in sync with CAURA_TOOLS (plugin/src/tools.ts) — a missing
     // entry here means that tool is absent from tools.alsoAllow, so any
     // OpenClaw tools.profile (which grants core tools + alsoAllow only)
     // strips it. caura_keystones was the casualty of this drift.

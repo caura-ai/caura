@@ -50,7 +50,7 @@ describe("interview_request command handler", () => {
   }
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "memclaw-interview-cmd-"));
+    tmp = mkdtempSync(join(tmpdir(), "caura-interview-cmd-"));
     __INTERVIEW_BUFFER_INTERNALS__.setPathForTests(join(tmp, "buf.jsonl"));
     // Point the Phase-1.5 task-trail at the empty tmp dir so the handler's
     // pre-read sync can never discover a REAL ~/.openclaw task DB on the

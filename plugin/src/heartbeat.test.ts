@@ -23,7 +23,7 @@ describe("deploy cooldown lifecycle", () => {
     // The cooldown / pending files live under getPluginDir() which
     // resolves from $HOME by default — point it at a clean tmp dir
     // for each test.
-    tmpHome = mkdtempSync(join(tmpdir(), "memclaw-deploy-test-"));
+    tmpHome = mkdtempSync(join(tmpdir(), "caura-deploy-test-"));
     mkdirSync(join(tmpHome, ".openclaw", "plugins", "memclaw"), {
       recursive: true,
     });
@@ -98,7 +98,7 @@ describe("deploy post-restart verification", () => {
   let prevHome: string | undefined;
 
   beforeEach(() => {
-    tmpHome = mkdtempSync(join(tmpdir(), "memclaw-deploy-test-"));
+    tmpHome = mkdtempSync(join(tmpdir(), "caura-deploy-test-"));
     mkdirSync(join(tmpHome, ".openclaw", "plugins", "memclaw"), {
       recursive: true,
     });

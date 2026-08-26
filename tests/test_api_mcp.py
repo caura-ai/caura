@@ -113,7 +113,7 @@ async def test_entity_lookup(client):
         "agent_id": f"entity-agent-{tag}",
         "fleet_id": f"entity-fleet-{tag}",
         "memory_type": "fact",
-        "content": f"Alice met Bob at the MemClaw headquarters in Tel Aviv [{tag}]",
+        "content": f"Alice met Bob at the Caura headquarters in Tel Aviv [{tag}]",
     }, headers=headers)
 
     ent_resp = await client.get("/api/v1/entities", params={

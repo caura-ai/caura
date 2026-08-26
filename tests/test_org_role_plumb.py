@@ -71,7 +71,7 @@ async def test_path4_absent_header_is_none(monkeypatch):
     assert ctx.org_role is None
 
 
-async def test_memclaw_key_path_ignores_org_role_header(monkeypatch):
+async def test_api_key_path_ignores_org_role_header(monkeypatch):
     """Path 2 (API-key callers) must not gain a role from the header —
     approving skills stays a human decision; agent keys can't act on
     admin-only routes by self-asserting X-Org-Role."""

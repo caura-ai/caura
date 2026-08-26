@@ -91,12 +91,12 @@ def test_install_script_does_not_bake_a_manifest_heredoc():
 
     Origin of this guard: in 2026-05 OpenClaw upstream made
     ``contracts.tools`` strictly enforced in plugin manifests
-    (openclaw/openclaw@7641783d). caura-memclaw's
+    (openclaw/openclaw@7641783d). caura-ai/caura's
     ``plugin/openclaw.plugin.json`` was updated to declare it, but the
     install script's baked HEREDOC was left behind — so every fresh
     ``curl /api/v1/install-plugin | bash`` produced a manifest without
     ``contracts.tools``, which OpenClaw silently rejected, dropping the
-    entire MemClaw tool surface from the agent.
+    entire Caura tool surface from the agent.
 
     The structural fix was to serve the manifest via ``/plugin-source``
     (single source of truth) and have the installer fetch it. This test
@@ -192,7 +192,7 @@ def test_served_manifest_declares_contracts_tools():
     OpenClaw upstream rejects every ``api.registerTool`` call when this
     field is missing (since 2026-05-01). The plugin TS suite has its
     own drift test (tool-definitions.test.ts) that asserts the list
-    matches MEMCLAW_TOOLS exactly; this Python test only guards the
+    matches CAURA_TOOLS exactly; this Python test only guards the
     file-level invariant so a server-side test failure surfaces too
     if someone deletes the field from the manifest file.
     """
@@ -212,7 +212,7 @@ def test_served_manifest_declares_contracts_tools():
 def test_install_script_alsoAllow_lockstep():
     """The install script's hardcoded ``alsoAllow`` array MUST match
     ``contracts.tools`` in ``plugin/openclaw.plugin.json`` (and, transitively,
-    ``MEMCLAW_TOOLS`` in ``plugin/src/tools.ts`` — the TS-side boot-time
+    ``CAURA_TOOLS`` in ``plugin/src/tools.ts`` — the TS-side boot-time
     drift check enforces that direction; this Python test pins the
     cross-language symmetry).
 
@@ -227,7 +227,7 @@ def test_install_script_alsoAllow_lockstep():
 
     ``caura_keystones_set`` is intentionally NOT in the install-script's
     ``alsoAllow`` because ``tools.json`` marks it ``plugin_exposed: false``
-    — it is the admin authoring path, served only via MCP (memclaw_server)
+    — it is the admin authoring path, served only via MCP (mcp_server)
     and never exposed to OpenClaw-side agents. The two sides of this test
     deliberately use the SAME canonical source (``contracts.tools``) so a
     future plugin_exposed flip is picked up automatically.

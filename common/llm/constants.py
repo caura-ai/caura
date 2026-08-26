@@ -164,6 +164,17 @@ if _jitter_requested != LLM_RETRY_JITTER_FRACTION:
 # behaviour without a deploy.
 LLM_PROVIDER_MAX_RETRIES = read_int_env("LLM_PROVIDER_MAX_RETRIES", 0, minimum=0)
 
+# Output-token ceiling for JSON completions (``complete_json``). Legit
+# outputs are small — enrichment ~150 tokens, entity graphs a few
+# thousand — but prod 2026-08-26 saw gemini-2.5-flash-lite emit runaway
+# ~50k-token JSON that the API truncated mid-string, surfacing as a
+# JSONDecodeError deep inside a 200KB partial payload (~7% of entity
+# extractions fell back to the keyword heuristic). The cap makes a
+# runaway fail fast and cheap; the truncation itself is detected via
+# ``finish_reason`` and raised as a clear, retryable ValueError instead
+# of a parse error (see providers/_truncation.py).
+LLM_JSON_MAX_OUTPUT_TOKENS = read_int_env("LLM_JSON_MAX_OUTPUT_TOKENS", 8192)
+
 # Fallback model for OpenAI-compatible providers when the tenant's
 # configured model is not set — env-overridable so on-call can swap to
 # a cheaper / different family without a redeploy.

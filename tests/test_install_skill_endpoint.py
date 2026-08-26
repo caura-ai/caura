@@ -127,7 +127,7 @@ def test_codex_only_skips_claude_block():
 # --- skill selector (?skill=) -------------------------------------------------
 
 
-def test_default_skill_is_memclaw_and_unchanged():
+def test_default_skill_slug_unchanged():
     """No ``?skill=`` → the installer is the original default one: the same
     install paths, the same fetch URL, the 'Caura' title, and no trace of
     company-brain. Guards the 'default load is unaffected' contract."""
@@ -175,7 +175,7 @@ def test_skill_param_is_allowlisted_no_path_traversal():
 # --- /skill/{skill} serving route ---------------------------------------------
 
 
-def test_serve_memclaw_skill_still_works():
+def test_serve_default_skill_still_works():
     client = _client()
     resp = client.get("/api/v1/skill/memclaw")
     assert resp.status_code == 200

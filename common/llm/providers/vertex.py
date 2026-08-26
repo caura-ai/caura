@@ -38,7 +38,9 @@ import json
 import logging
 import time
 
+from common.llm.constants import LLM_JSON_MAX_OUTPUT_TOKENS
 from common.llm.providers._shape_error import ProviderResponseShapeError
+from common.llm.providers._truncation import raise_if_truncated
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +112,10 @@ class VertexLLMProvider:
             generation_config=GenerationConfig(
                 response_mime_type="application/json",
                 temperature=temperature,
+                # Runaway guard: without a ceiling, a looping generation
+                # runs to the model's own output limit and comes back as
+                # truncated JSON (~200KB partials seen on prod 2026-08-26).
+                max_output_tokens=LLM_JSON_MAX_OUTPUT_TOKENS,
             ),
         )
         llm_ms = int((time.perf_counter() - t0) * 1000)
@@ -127,6 +133,12 @@ class VertexLLMProvider:
             ) from exc
         if not text:
             raise ValueError(f"Vertex returned empty content for model {self._model}")
+        raise_if_truncated(
+            response,
+            provider="Vertex",
+            model=self._model,
+            max_tokens=LLM_JSON_MAX_OUTPUT_TOKENS,
+        )
         parsed = json.loads(text)
         if not isinstance(parsed, dict):
             # CAURA-651: see ``VertexResponseShapeError`` above.

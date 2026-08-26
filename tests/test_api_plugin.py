@@ -17,7 +17,7 @@ async def test_post_install_plugin_generates_script(client):
         "/api/v1/install-plugin",
         json={
             "fleet_id": "my-fleet",
-            "api_url": "https://memclaw.example.com",
+            "api_url": "https://caura.example.com",
             "api_key": "sk-test-key-1234",
             "node_name": "node-alpha",
         },
@@ -26,8 +26,7 @@ async def test_post_install_plugin_generates_script(client):
     assert resp.status_code == 200
     script = resp.text
     assert script.startswith("#!/usr/bin/env bash")
-    assert "CAURA_API_URL=" in script
-    assert "memclaw.example.com" in script
+    assert "CAURA_API_URL=https://caura.example.com" in script
     assert "CAURA_FLEET_ID=" in script
     assert "my-fleet" in script
     assert "CAURA_API_KEY=" in script
@@ -99,7 +98,7 @@ async def test_script_has_chmod_600(client):
 
 
 async def test_script_contains_correct_env_vars(client):
-    """The .env block has all required MEMCLAW_* variables."""
+    """The .env block has all required CAURA_* variables."""
     resp = await client.post(
         "/api/v1/install-plugin",
         json={

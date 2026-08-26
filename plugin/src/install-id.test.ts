@@ -27,7 +27,7 @@ function installFile(home: string): string {
 beforeEach(() => {
   _resetInstallIdCacheForTesting();
   _origHome = process.env.HOME;
-  _tmpHome = mkdtempSync(join(tmpdir(), "memclaw-installid-"));
+  _tmpHome = mkdtempSync(join(tmpdir(), "caura-installid-"));
   process.env.HOME = _tmpHome;
 });
 
@@ -73,7 +73,7 @@ describe("getInstallId", () => {
     const id1 = getInstallId();
     // Switch HOME to a fresh dir and clear the cache — simulates a
     // second install on the same machine in a different user's home.
-    const second = mkdtempSync(join(tmpdir(), "memclaw-installid-2-"));
+    const second = mkdtempSync(join(tmpdir(), "caura-installid-2-"));
     try {
       process.env.HOME = second;
       _resetInstallIdCacheForTesting();
