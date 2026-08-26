@@ -1176,10 +1176,42 @@ async def _load_and_cache(tenant_id: str) -> dict:
     return resolved
 
 
+# C36 — provider keys must never leave the server readable. Display masks
+# every non-empty ``api_keys`` value down to a ``****<last4>`` fingerprint
+# (enough for "which key is this" in a UI, useless as a credential), and the
+# write path treats a masked value as "unchanged" so a read-modify-write
+# round-trip (the dashboard sends the whole ``api_keys`` group when any one
+# key is edited) can't overwrite a stored key with its own mask. No real
+# provider key starts with ``****``, so the sentinel can't collide.
+_API_KEY_MASK_PREFIX = "****"
+
+
+def _mask_api_key(value: str) -> str:
+    return _API_KEY_MASK_PREFIX + (value[-4:] if len(value) > 4 else "")
+
+
+def _is_masked_api_key(value: object) -> bool:
+    return isinstance(value, str) and value.startswith(_API_KEY_MASK_PREFIX)
+
+
+def _mask_api_keys_for_display(settings: dict) -> dict:
+    keys = settings.get("api_keys")
+    if not isinstance(keys, dict) or not keys:
+        return settings
+    return {
+        **settings,
+        "api_keys": {k: (_mask_api_key(v) if isinstance(v, str) and v else v) for k, v in keys.items()},
+    }
+
+
 async def get_settings_for_display(tenant_id: str) -> dict:
-    """Return ``DEFAULT_SETTINGS`` merged with the tenant's overrides for UI display."""
+    """Return ``DEFAULT_SETTINGS`` merged with the tenant's overrides for UI display.
+
+    ``api_keys`` values are masked (C36) — internal readers that need the real
+    keys go through ``ResolvedConfig`` / ``get_raw_settings``, never this view.
+    """
     raw = await get_raw_settings(tenant_id)
-    return _deep_merge(DEFAULT_SETTINGS, raw)
+    return _mask_api_keys_for_display(_deep_merge(DEFAULT_SETTINGS, raw))
 
 
 async def update_settings(
@@ -1199,6 +1231,18 @@ async def update_settings(
     (Fix 2 Phase 0). Validation, the TTL-cache invalidate, and the
     ``SETTINGS_CHANGED`` broadcast stay here.
     """
+    # C36 — a masked value coming back in is the display fingerprint, not a
+    # new key: drop it so the stored key stays untouched. The dashboard sends
+    # the whole ``api_keys`` group when any single key changes, so unedited
+    # siblings arrive masked on every save.
+    incoming_keys = new_settings.get("api_keys")
+    if isinstance(incoming_keys, dict):
+        kept = {k: v for k, v in incoming_keys.items() if not _is_masked_api_key(v)}
+        if kept:
+            new_settings = {**new_settings, "api_keys": kept}
+        else:
+            new_settings = {k: v for k, v in new_settings.items() if k != "api_keys"}
+
     _check_keys(new_settings, DEFAULT_SETTINGS)
     _validate_leaf_types(new_settings)
     _validate_governance_enums(new_settings)
@@ -1215,7 +1259,7 @@ async def update_settings(
     merged = result["settings"]
     if not result.get("changed"):
         # Identical payload — storage wrote nothing; nothing to invalidate or broadcast.
-        return _deep_merge(DEFAULT_SETTINGS, merged)
+        return _mask_api_keys_for_display(_deep_merge(DEFAULT_SETTINGS, merged))
 
     # Invalidate THIS process's cache immediately...
     invalidate_cache(tenant_id)
@@ -1241,4 +1285,4 @@ async def update_settings(
             exc_info=True,
         )
 
-    return _deep_merge(DEFAULT_SETTINGS, merged)
+    return _mask_api_keys_for_display(_deep_merge(DEFAULT_SETTINGS, merged))
