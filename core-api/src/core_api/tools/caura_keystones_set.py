@@ -2,10 +2,13 @@
 
 Trust gating is tiered per the target rule's scope:
 
-* ``scope=agent`` AND ``agent_id == caller``: trust ≥ 1 (self-author).
-* ``scope=fleet`` / ``scope=tenant`` / cross-agent ``scope=agent``:
-  trust ≥ 2 (the cross-agent governance bar used elsewhere for
-  ``caura_list/stats/evolve/insights`` with ``scope=fleet|all``).
+* ``scope=agent`` with an explicit ``agent_id == caller``: trust ≥ 1
+  (self-author). The explicit ``agent_id`` is the precondition, not a
+  formality — a payload that names no target is not self-authored.
+* ``scope=fleet`` / ``scope=tenant`` / cross-agent ``scope=agent`` /
+  ``scope=agent`` with ``agent_id`` omitted: trust ≥ 2 (the cross-agent
+  governance bar used elsewhere for ``caura_list/stats/evolve/insights``
+  with ``scope=fleet|all``).
 
 Declared ``trust_required=1`` is the minimum any successful call needs;
 the per-op floor is computed dynamically and enforced server-side
@@ -32,9 +35,10 @@ _DESCRIPTION = (
     "headers). For scope=tenant and scope=fleet you must OMIT ``agent_id``; "
     "passing it returns INVALID_ARGUMENTS. "
     "delete requires {doc_id}. "
-    "Trust gating is dynamic: scope=agent where the TARGET agent_id matches "
-    "the caller is trust ≥ 1 (self-author); anything else (scope=fleet, "
-    "scope=tenant, or scope=agent targeting a different agent) is trust ≥ 2."
+    "Trust gating is dynamic: scope=agent with an explicit TARGET agent_id "
+    "matching the caller is trust ≥ 1 (self-author); anything else (scope=fleet, "
+    "scope=tenant, scope=agent targeting a different agent, or scope=agent with "
+    "agent_id omitted) is trust ≥ 2."
 )
 
 _SPEC = ToolSpec(
