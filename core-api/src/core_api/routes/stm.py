@@ -57,14 +57,19 @@ _PLUGIN_ONLY = (
 # further — which makes the OpenAPI parameter description the only place a
 # caller reads this. Say the whole rule there, including which credential MUST
 # pass it and what omitting it costs.
+#
+# It deliberately does NOT name the env var behind the admin credential. The
+# capability (an admin credential reaches any tenant it names) is inherent to
+# the design and belongs in the spec; the server-side setting that grants it is
+# operator configuration no API caller can act on, and this spec is published.
 _TENANT_SELECTOR = (
     "Tenant to act on. A tenant-scoped credential should omit it — the "
     "credential's own tenant is used; echoing the same value is accepted and "
     "naming a DIFFERENT one is `403 TENANT_MISMATCH`. An **admin credential** "
-    "(`ADMIN_API_KEY`) carries no tenant of its own, so for admin callers this "
-    'parameter is REQUIRED: omitting it returns **400** ("admin credential '
-    'must name a tenant") — the credential is authenticated, so it is never a '
-    "401. A caller with neither a tenant nor admin rights still gets 401."
+    "carries no tenant of its own, so for admin callers this parameter is "
+    'REQUIRED: omitting it returns **400** ("admin credential must name a '
+    'tenant") — the credential is authenticated, so it is never a 401. A '
+    "caller with neither a tenant nor admin rights still gets 401."
 )
 
 
@@ -132,18 +137,28 @@ def _require_tenant(auth: AuthContext, explicit_tenant_id: str | None = None) ->
       problem — the credential IS authenticated, so never 401).
     - Neither: genuinely unauthenticated bootstrap context → 401.
 
+    The mismatch comparison happens BEFORE any lookup, on the two
+    strings alone, so a caller cannot use the 403/404 split to learn
+    whether a named tenant exists.
+
     Returning the narrowed ``str`` lets mypy verify the downstream
     calls without litter ``cast``s.
     """
     if auth.tenant_id:
         if explicit_tenant_id is not None and explicit_tenant_id != auth.tenant_id:
+            # Neither id appears in the message, deliberately. The
+            # credential's own tenant is a binding its holder was not
+            # necessarily told (embedded and shared keys), so echoing it
+            # discloses it to anyone holding the key; the requested tenant
+            # is caller-controlled input, and reflecting it into a body
+            # that also lands in logs is a log-injection surface (and a
+            # stored-XSS one wherever an operator UI renders a detail
+            # string). ``!r`` quotes, it does not sanitize. Neither value
+            # is actionable anyway — clients branch on the machine-readable
+            # ``TENANT_MISMATCH`` prefix, not on the prose.
             raise HTTPException(
                 status_code=403,
-                detail=(
-                    "TENANT_MISMATCH — this credential is scoped to "
-                    f"tenant {auth.tenant_id!r} and cannot act on tenant "
-                    f"{explicit_tenant_id!r}"
-                ),
+                detail="TENANT_MISMATCH — this credential is not scoped to the requested tenant.",
             )
         return auth.tenant_id
     if getattr(auth, "is_admin", False):

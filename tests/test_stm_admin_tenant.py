@@ -245,7 +245,15 @@ async def test_tenant_key_with_conflicting_tenant_is_403(stm_on, seams):
         )
     for r in (read, clear, promote):
         assert r.status_code == 403, r.text
-        assert r.json()["detail"].startswith("TENANT_MISMATCH")
+        detail = r.json()["detail"]
+        # The machine-readable prefix is the contract clients branch on.
+        assert detail.startswith("TENANT_MISMATCH")
+        # The prose discloses NEITHER id: not the credential's own tenant
+        # (a binding an embedded/shared key's holder may never have been
+        # told) and not the caller-supplied one (attacker-controlled input
+        # reflected into a body that also lands in logs).
+        assert TENANT not in detail, detail
+        assert OTHER not in detail, detail
     assert seams.read_notes == []
     assert seams.clear_bulletin == []
     assert seams.promoted == []
