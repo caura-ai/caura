@@ -127,4 +127,16 @@ ENTRYPOINT ["/app/docker-entrypoint.sh"]
 # supervisor/parent configures structlog before starting — otherwise its
 # lifecycle lines ("Started parent process", "Received SIGTERM", ...) bypass
 # the JSON pipeline and land in Datadog as status:error. See common/serve.py.
-CMD ["python", "-m", "common.serve", "core_api.app:app", "--settings", "core_api.config:settings", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "65"]
+#
+# --timeout-worker-healthcheck 30 (uvicorn's default is 5). With --workers 2
+# the supervisor pings each worker every 0.5s and SIGKILLs one that has not
+# answered in time. SIGKILL skips lifespan shutdown, so this app's ephemeral
+# Pub/Sub broadcast subscriptions are never released and hold project-wide
+# quota for 24h — a worker recycle is not free here, and 5s is a tight budget
+# for a Python worker's pong thread (a GC pause or a stalled scheduler is
+# enough). 30s is still far inside Cloud Run's 120s request timeout, so a
+# genuinely hung worker is still recycled well before a request could hang on
+# it. This is defence in depth, not the primary fix for the staging
+# crash-loop; that is the missing --no-cpu-throttling on the Cloud Run
+# service (caura-enterprise#1321).
+CMD ["python", "-m", "common.serve", "core_api.app:app", "--settings", "core_api.config:settings", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "65", "--timeout-worker-healthcheck", "30"]

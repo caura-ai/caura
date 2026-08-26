@@ -1,5 +1,12 @@
 fastapi>=0.115,<1
-uvicorn[standard]>=0.34,<1
+# Floor is 0.37, not 0.34: common/serve.py passes
+# ``timeout_worker_healthcheck`` to uvicorn.run(), and that parameter landed
+# in uvicorn 0.37.0 (verified absent in 0.36.0's Config.__init__). Below the
+# floor the launcher raises TypeError on startup, so >=0.34 declared a range
+# this code cannot actually run on. Container images do not resolve from this
+# file — they install frozen from each service's uv.lock — but this is the
+# local-dev install path (AGENT-INSTALL.md) and it should not lie either.
+uvicorn[standard]>=0.37,<1
 sqlalchemy[asyncio]>=2.0,<3
 asyncpg>=0.30,<1
 pgvector>=0.3,<1

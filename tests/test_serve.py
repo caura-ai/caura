@@ -8,11 +8,13 @@ structlog root handler — see the module docstring in common/serve.py).
 
 from __future__ import annotations
 
+import inspect
 import json
 import types
 from unittest import mock
 
 import pytest
+import uvicorn
 
 import common.serve as serve
 
@@ -70,3 +72,68 @@ def test_main_configures_logging_from_settings_and_disables_uvicorn_log_config(
     assert kwargs["port"] == 8000
     assert kwargs["workers"] == 2
     assert kwargs["timeout_keep_alive"] == 65
+
+    # Absent from argv -> uvicorn's own default, forwarded explicitly rather
+    # than left to uvicorn so the launcher's contract is the same either way.
+    assert kwargs["timeout_worker_healthcheck"] == 5
+
+
+def test_main_forwards_timeout_worker_healthcheck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The supervisor healthcheck timeout must be reachable from a service CMD.
+
+    Pre-this-test the parser had a fixed flag list and rejected the flag, so a
+    Dockerfile that passed it made argparse exit 2 and the container never
+    started. Raising it above uvicorn's 5s default is what keeps a slow-to-pong
+    worker from being SIGKILLed mid-lifespan, dropping its shutdown hooks (and
+    with them this service's ephemeral Pub/Sub broadcast subscriptions).
+    """
+    fake_settings = types.SimpleNamespace(
+        environment="production",
+        log_level="INFO",
+        log_format_json=True,
+        log_file="",
+    )
+    monkeypatch.setattr(serve, "_load", lambda _path: fake_settings)
+    monkeypatch.setattr(serve, "configure_logging", mock.MagicMock())
+    run = mock.MagicMock()
+    monkeypatch.setattr(serve.uvicorn, "run", run)
+
+    serve.main(
+        [
+            "core_api.app:app",
+            "--settings",
+            "core_api.config:settings",
+            "--port",
+            "8000",
+            "--workers",
+            "2",
+            "--timeout-worker-healthcheck",
+            "30",
+        ]
+    )
+
+    _args, kwargs = run.call_args
+    assert kwargs["timeout_worker_healthcheck"] == 30
+
+
+def test_uvicorn_really_accepts_the_healthcheck_kwarg() -> None:
+    """Guard the one thing the mocked tests above structurally cannot check.
+
+    Every other test here monkeypatches ``serve.uvicorn.run`` with a
+    MagicMock, and a MagicMock accepts any keyword silently. So if uvicorn
+    ever renames or drops this parameter, those tests keep passing and the
+    only place it fails is the deployed container — ``TypeError`` on every
+    startup, i.e. the service does not come up at all. Assert against the
+    real signature so that failure lands in CI instead.
+
+    ``timeout_worker_healthcheck`` landed in uvicorn 0.37.0; it is absent in
+    0.36.0. That boundary is why requirements.txt floors at >=0.37 — below it
+    the declared range would include versions common/serve.py cannot run on.
+    """
+    assert (
+        "timeout_worker_healthcheck"
+        in inspect.signature(uvicorn.Config.__init__).parameters
+    )
+    assert "timeout_worker_healthcheck" in inspect.signature(uvicorn.run).parameters

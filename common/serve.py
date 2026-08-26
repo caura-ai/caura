@@ -21,7 +21,8 @@ workers. The supervisor lines then emit as structured JSON with ``status:info``.
 Usage (see each service's Dockerfile ``CMD``)::
 
     python -m common.serve <app_import> --settings <settings_import> \
-        --port <port> [--host H] [--workers N] [--timeout-keep-alive S]
+        --port <port> [--host H] [--workers N] [--timeout-keep-alive S] \
+        [--timeout-worker-healthcheck S]
 
 ``<app_import>`` is an ASGI import string (``core_api.app:app``); it is passed
 to uvicorn as a string so the workers can re-import it. ``<settings_import>`` is
@@ -70,6 +71,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--timeout-keep-alive", type=int, default=65, dest="timeout_keep_alive"
     )
+    # uvicorn's multiprocess supervisor pings each worker every 0.5s and
+    # SIGKILLs one that has not answered within this many seconds, then
+    # respawns it. A SIGKILLed worker never runs lifespan shutdown, so
+    # whatever its shutdown hooks release stays leaked. Exposed here because
+    # the value was previously unreachable: this parser rejects unknown
+    # flags, so putting --timeout-worker-healthcheck in a service CMD made
+    # argparse exit 2 and the container never started.
+    #
+    # Defaulted to uvicorn's own 5 rather than an opinion of ours: this file
+    # is vendored byte-for-byte into the enterprise repo, so the per-service
+    # value belongs in that service's CMD, next to its --workers.
+    p.add_argument(
+        "--timeout-worker-healthcheck",
+        type=int,
+        default=5,
+        dest="timeout_worker_healthcheck",
+    )
     return p
 
 
@@ -98,6 +116,7 @@ def main(argv: list[str] | None = None) -> None:
         port=args.port,
         workers=args.workers,
         timeout_keep_alive=args.timeout_keep_alive,
+        timeout_worker_healthcheck=args.timeout_worker_healthcheck,
         log_config=None,
     )
 
