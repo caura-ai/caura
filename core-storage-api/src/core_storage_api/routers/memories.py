@@ -210,6 +210,9 @@ async def scored_search(request: Request) -> list[dict]:
                 date_range_end=date_range_end,
                 # Optional; absent for legacy single-tenant callers
                 readable_tenant_ids=body.get("readable_tenant_ids") or None,
+                # A63 — history questions lift the status demotion so
+                # superseded values stay reachable.
+                history_query=bool(body.get("history_query", False)),
             )
         for r in results:
             row = orm_to_dict(r.Memory, MEMORY_FIELDS)

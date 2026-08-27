@@ -106,7 +106,7 @@ def test_gate2_vetoes_non_conflict_reason_hit() -> None:
             "hits": {
                 "0": {
                     "same_subject": True,
-                    "non_conflict_reason": "temporal_supersession",
+                    "non_conflict_reason": "list_valued_predicate",
                     "contradicts": True,
                 }
             },

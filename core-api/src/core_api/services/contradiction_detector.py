@@ -747,11 +747,17 @@ Follow these steps in order:
    shapes describe two claims that BOTH hold and so are NOT a
    contradiction. Pick at most one value; pick "none" when the two
    statements really do assert mutually exclusive states.
-     - "temporal_supersession": the statements describe sequential
-       states of the same subject's lifecycle (planned -> shipped,
-       open -> closed, draft -> published, beta -> GA, hired ->
-       promoted). The newer state simply supersedes the older one;
-       both were true in sequence.
+     - "temporal_supersession": BOTH statements are records of PAST
+       events or completed milestones that stay true as history
+       ("hired in 2020" / "promoted in 2023"; "v1 shipped in March" /
+       "v2 shipped in June"). Records of what happened never compete.
+       This reason does NOT apply when the statements assert a
+       subject's CURRENT state or attribute and the newer one changes
+       it ("status: planned" vs "status: shipped", "lives in X" vs
+       "lives in Y", "runs at 01:00" vs "runs at 03:00") — a state
+       change is an update, and updates ARE contradictions
+       (contradicts=true, reason "none"): flagging them is how the
+       stale value gets retired.
      - "list_valued_predicate": the two statements describe attributes
        of the same subject that do not compete for a single slot.
        Two shapes both qualify:
@@ -805,8 +811,11 @@ Follow these steps in order:
      frame. Updates / corrections about the same subject ARE
      contradictions (e.g., "X lives in Tel Aviv" vs "X lives in
      Haifa"). Do not speculate that one statement might describe a
-     future state that resolves the conflict — if it does, choose
-     temporal_supersession explicitly.
+     future state that resolves the conflict. Choose
+     temporal_supersession ONLY when both statements read as records
+     of past events — never merely because two states could have held
+     one after the other; states that replace each other are updates,
+     i.e. contradictions.
 
 Reply with ONLY a JSON object, no prose, no markdown fences:
 {{"subject_a": "<short noun phrase>",
@@ -905,10 +914,12 @@ Follow these steps in order:
    shapes describe two claims that BOTH hold and so are NOT a
    contradiction. Pick at most one value; pick "none" when the two
    statements really do assert mutually exclusive states.
-     - "temporal_supersession": sequential states of the same subject's
-       lifecycle (planned -> shipped, open -> closed, draft ->
-       published, beta -> GA, hired -> promoted). The newer state
-       supersedes the older one; both held in sequence.
+     - "temporal_supersession": BOTH statements are records of PAST
+       events that stay true as history ("hired in 2020" / "promoted
+       in 2023"). NOT for current-state claims where the newer
+       statement changes the state ("status: planned" vs "status:
+       shipped", "lives in X" vs "lives in Y") — a state change is an
+       update, and updates ARE contradictions (reason "none").
      - "list_valued_predicate": attributes that do not compete for a
        single slot — multi-value predicates (supports English /
        supports French) or two entirely different attributes of the
@@ -950,9 +961,21 @@ Reply with ONLY a JSON object, no prose, no markdown fences:
 # Keep this set in sync with the enum listed in ``CONTRADICTION_PROMPT``
 # and with the wet-test fixtures in
 # ``scripts/wet_test_contradiction_prompt.py``.
+# A63 — ``temporal_supersession`` is deliberately NOT in this veto set.
+# It was, and the veto ate the product's core case: in Caura "the newer
+# state supersedes the older one" IS the contradiction we exist to flag —
+# flagging is what marks the stale row and writes the supersedes chain.
+# Measured on gpt-5.4-nano (A63 gate A/B, 2026-08-27): on planted
+# current-state updates the model kept answering ``contradicts=true`` with
+# ``non_conflict_reason="temporal_supersession"`` — a semantically coherent
+# reply — and Gate 2 overrode every one of them to False (0/4 planted
+# region migrations flagged, 3/3 runs, both prompt contracts). The label
+# stays in the prompt vocabulary with an events-only definition (records of
+# past events never compete; state changes are updates), and the A55
+# diagnosis/relationship mappers still consume it — it just no longer
+# outranks the model's own ``contradicts`` verdict.
 NON_CONFLICT_REASONS: frozenset[str] = frozenset(
     {
-        "temporal_supersession",
         "list_valued_predicate",
         "refinement",
         "scope_mismatch",
@@ -1187,7 +1210,11 @@ For EACH candidate index decide, applying the rules in order:
    context / unambiguously resolved pronoun). false for two people sharing a
    name, different companies/products/projects/teams, or any uncertainty.
 2. non_conflict_reason (exactly one): "none"; "temporal_supersession"
-   (sequential lifecycle states of the same subject, both true in order);
+   (BOTH statements are records of PAST events that stay true as history —
+   "hired in 2020" / "promoted in 2023"; NOT for current-state claims where
+   the newer statement changes the state, e.g. "lives in X" vs "lives in Y"
+   or "runs at 01:00" vs "runs at 03:00" — a state change is an update and
+   updates ARE contradictions, reason "none");
    "list_valued_predicate" (a multi-valued predicate or two different attributes
    that both hold); "refinement" (one is a more specific version of the other);
    "scope_mismatch" (same subject under different implicit qualifiers — time
@@ -1772,7 +1799,10 @@ For EACH candidate index decide, applying the rules in order:
 1. same_subject (bool): decided MECHANICALLY by comparing subject-role
    ``entity_id`` values per the CRITICAL rules above.
 2. non_conflict_reason (exactly one): "none"; "temporal_supersession"
-   (sequential lifecycle states of the same subject, both true in order);
+   (BOTH statements are records of PAST events that stay true as history;
+   NOT for current-state claims where the newer statement changes the
+   state — a state change is an update and updates ARE contradictions,
+   reason "none");
    "list_valued_predicate" (multi-valued predicate or two different
    attributes that both hold); "refinement" (one more specific than the
    other); "scope_mismatch" (same subject, different implicit qualifiers;

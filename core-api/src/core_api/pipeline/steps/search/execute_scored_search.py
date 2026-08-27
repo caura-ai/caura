@@ -137,6 +137,12 @@ class ExecuteScoredSearch:
         if data.get("valid_at"):
             search_data["valid_at"] = str(data["valid_at"])
 
+        # A63 — a history question must see superseded values: tell the
+        # storage side to skip the outdated/conflicted status demotion.
+        if data.get("history_hint"):
+            search_data["history_query"] = True
+            logger.info("execute_scored_search: history query — status demotion lifted")
+
         date_range = data.get("date_range_filter")
         if date_range:
             search_data["date_range_start"] = date_range["start_date"]

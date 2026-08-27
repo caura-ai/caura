@@ -111,11 +111,29 @@ def test_gate2_fired_returns_high_confidence_not_contradiction() -> None:
         {
             "same_subject": True,
             "contradicts": True,
-            "non_conflict_reason": "temporal_supersession",
+            "non_conflict_reason": "list_valued_predicate",
         }
     )
     assert verdict is False
     assert conf == pytest.approx(0.85)
+
+
+def test_temporal_supersession_no_longer_vetoes_a_contradiction() -> None:
+    """A63 — supersession IS the contradiction Caura exists to flag.
+    ``contradicts=true`` + ``temporal_supersession`` is a coherent reply
+    for a state-change update and must survive as a clean-confidence
+    contradiction (the old Gate 2 veto ate 0/4 planted updates)."""
+    from core_api.services.contradiction_detector import _judge_contradiction
+
+    verdict, conf = _judge_contradiction(
+        {
+            "same_subject": True,
+            "contradicts": True,
+            "non_conflict_reason": "temporal_supersession",
+        }
+    )
+    assert verdict is True
+    assert conf == pytest.approx(0.90)
 
 
 def test_gate1_fired_returns_medium_confidence_not_contradiction() -> None:

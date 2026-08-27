@@ -4,7 +4,6 @@ This gate sits *after* the CAURA-111 ``same_subject`` gate. It catches
 within-subject false positives — shapes where two same-subject claims
 both hold and so should not be flagged as a contradiction:
 
-  - temporal_supersession        (planned -> shipped, open -> closed)
   - list_valued_predicate        (supports X / supports Y)
   - refinement                   (coarse -> fine granularity)
   - scope_mismatch               (whole/part, time-window, qualifier)
@@ -12,9 +11,16 @@ both hold and so should not be flagged as a contradiction:
   - conditional_unrealized       (irrealis vs factual)
   - event_restatement            (same event, different verb/tense)
 
-The model classifies the shape; the parser hard-gates any of the seven
-to ``contradicts=false``. ``"none"`` (and any missing / unknown value)
-leaves ``contradicts`` untouched.
+The model classifies the shape; the parser hard-gates any recognised
+value to ``contradicts=false``. ``"none"`` (and any missing / unknown
+value) leaves ``contradicts`` untouched.
+
+A63 (2026-08-27): ``temporal_supersession`` was REMOVED from the veto
+set. In Caura, "the newer state supersedes the older" IS the
+contradiction the product exists to flag — the veto ate every planted
+current-state update (0/4, 3/3 runs on gpt-5.4-nano). The label stays
+in the prompt vocabulary (events-only definition) and in the A55
+mappers; it just no longer outranks the model's ``contradicts``.
 """
 
 import pytest
@@ -145,6 +151,22 @@ class TestGateOrdering:
             }
         )
         assert verdict is False
+
+    def test_temporal_supersession_does_not_gate_anymore(self):
+        """A63 — a state-change update the model labels
+        ``temporal_supersession`` while saying ``contradicts=true`` must
+        survive: supersession is the flag, not a reason to suppress it."""
+        verdict = _parse_contradiction_response(
+            {
+                "subject_a": "checkout-service primary region",
+                "subject_b": "checkout-service primary region",
+                "same_subject": True,
+                "non_conflict_reason": "temporal_supersession",
+                "contradicts": True,
+                "reason": "region moved eu-west-1 -> eu-north-1",
+            }
+        )
+        assert verdict is True
 
     def test_same_subject_with_no_reason_can_still_contradict(self):
         """The headline genuine-conflict path: same subject, no shape,

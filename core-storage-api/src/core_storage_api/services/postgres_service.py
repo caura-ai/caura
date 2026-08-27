@@ -1740,6 +1740,7 @@ class PostgresService:
         date_range_start: str | None = None,
         date_range_end: str | None = None,
         readable_tenant_ids: list[str] | None = None,
+        history_query: bool = False,
     ) -> list[SimpleNamespace]:
         """Execute the full CTE-based scored search with entity-link JOIN.
 
@@ -1936,11 +1937,22 @@ class PostgresService:
         # empty tsquery (matches nothing here), so the gate is inert for
         # vector-only / entity-only callers and conflicted stays demoted.
         _exact_lexical_match = Memory.search_vector.op("@@")(ts_query) if query and query.strip() else false()
-        status_penalty = case(
-            (Memory.status == "outdated", 0.5),
-            (and_(Memory.status == "conflicted", ~_exact_lexical_match), 0.5),
-            else_=1.0,
-        ).label("status_penalty")
+        # A63 — ``history_query``: the caller detected a past-state /
+        # change / duration question ("what was…", "did I switch…",
+        # "how long have I been…"). Such queries NEED the superseded
+        # value — the demotion below is what makes a correctly-working
+        # contradiction judge amnesiac about history. Lifting it here is
+        # scoped to the one query where stale is signal, not noise;
+        # present-state queries keep the full demotion.
+        status_penalty: Any
+        if history_query:
+            status_penalty = literal_column("1.0").label("status_penalty")
+        else:
+            status_penalty = case(
+                (Memory.status == "outdated", 0.5),
+                (and_(Memory.status == "conflicted", ~_exact_lexical_match), 0.5),
+                else_=1.0,
+            ).label("status_penalty")
 
         # Soft currency factor: memories whose ts_valid_end is in the past
         # relative to valid_at are down-weighted instead of excluded.
@@ -2089,6 +2101,14 @@ class PostgresService:
             scored_stmt = scored_stmt.where(Memory.memory_type == memory_type_filter)
         if status_filter:
             scored_stmt = scored_stmt.where(Memory.status == status_filter)
+        elif history_query:
+            # A63 — a history question ("what was…", "did I switch…",
+            # "how long have I been…") needs the superseded value: the
+            # older side of an update is EXACTLY what the caller asked
+            # for, so neither the exclusion below nor the status_penalty
+            # applies. Ranking is pure relevance; present-state queries
+            # keep both protections.
+            pass
         else:
             # Exclude superseded memories from default search results. The
             # contradiction detector marks the older row ``outdated`` (RDF

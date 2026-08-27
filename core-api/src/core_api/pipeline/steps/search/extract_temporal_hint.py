@@ -1,8 +1,10 @@
 """ExtractTemporalHint — auto-detect time scope from query.
 
-Sets two context keys:
+Sets three context keys:
 - ``temporal_window``: soft freshness boost (timedelta or None)
 - ``date_range_filter``: hard WHERE filter (dict or None)
+- ``history_hint``: bool — the query asks about a past state / change /
+  duration, so the scored search must NOT demote superseded rows (A63)
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from datetime import UTC, datetime
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 from core_api.services.memory_service import (
+    _extract_history_hint,
     _extract_temporal_date_range,
     _extract_temporal_hint,
 )
@@ -31,6 +34,12 @@ class ExtractTemporalHint:
 
         reference_dt = ctx.data.get("valid_at") or datetime.now(UTC)
         ctx.data["date_range_filter"] = _extract_temporal_date_range(query, reference_dt)
+        # A63 — history questions need superseded values: the contradiction
+        # judge marks the older side of an update outdated/conflicted, and
+        # the scored search halves those rows' scores. Right for "what's
+        # true now", wrong for "what was true then" — this flag lifts the
+        # demotion for the latter.
+        ctx.data["history_hint"] = _extract_history_hint(query)
         # DEBUG, not INFO: this fires once per search and echoes the raw query
         # text — mild PII (customer query content), and it surfaces verbatim in
         # prod logs whenever ops searches Caura with an error-alert signature

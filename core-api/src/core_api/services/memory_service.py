@@ -4225,6 +4225,50 @@ async def _entity_boost_pipeline(
     return boosted_memory_ids, memory_boost_factor
 
 
+# A63 — history-question detection. Complements ``_extract_temporal_hint``
+# (which only recognises RECENCY phrases — "today", "last week") with the
+# opposite direction: queries that ask about a PAST state, a change, or a
+# duration ("what was…", "did I switch…", "when I started…", "how long have
+# I been…"). Such questions need the SUPERSEDED value, which the scored
+# search's status demotion (outdated/conflicted x 0.5) otherwise buries
+# below rank K precisely because the contradiction judge did its job.
+# Kept deliberately narrow: a false positive here un-buries stale facts on
+# a present-state query, weakening the demotion that improves
+# "what's true now" retrieval — patterns must read unambiguously as
+# looking backwards.
+_HISTORY_HINT_RES: list["re.Pattern[str]"] = []
+
+
+def _extract_history_hint(query: str) -> bool:
+    """True when the query asks about a past state, a change, or a duration."""
+    import re
+
+    global _HISTORY_HINT_RES
+    if not _HISTORY_HINT_RES:
+        _HISTORY_HINT_RES = [
+            re.compile(p)
+            for p in (
+                r"\b(used to|previously|originally|at first|back when|in the past)\b",
+                r"\bwhat (was|were)\b",
+                r"\bhow long (have|has|had)\b",
+                r"\bhow (much|many) .{0,40}\b(was|were|did)\b",
+                # Cumulative perfect-tense: "how many hours have I spent",
+                # "how much have we invested" — the total lives across
+                # superseded increments.
+                r"\bhow (much|many)\b.{0,40}\b(have|has|had) (i|we|you|he|she|they)\b",
+                r"\bdid (i|we|you|he|she|they) \w+",
+                r"\bwhen (i|we|you|he|she|they)( just| first)? "
+                r"(started|joined|began|moved|arrived|signed|switched)\b",
+                r"\b(changed|switched|moved|upgraded|downgraded|renamed) from\b",
+                r"\bbefore (i|we|you|he|she|they|the (switch|change|move))\b",
+                r"\b(old|former|previous|original|earlier) "
+                r"(value|address|role|title|team|setup|setting|config|plan|ratio|schedule|version)\b",
+            )
+        ]
+    q = query.lower()
+    return any(p.search(q) for p in _HISTORY_HINT_RES)
+
+
 def _extract_temporal_hint(query: str) -> timedelta | None:
     """Extract a temporal scope from query for freshness boosting."""
     import re
