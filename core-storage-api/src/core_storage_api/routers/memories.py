@@ -503,6 +503,24 @@ async def bulk_find_by_content_hashes(request: Request) -> dict:
     return {ch: {"id": str(v["id"]), "client_request_id": v["client_request_id"]} for ch, v in result.items()}
 
 
+@router.post("/{memory_id}/subject-entity")
+async def set_subject_entity_if_null(memory_id: UUID, request: Request) -> dict:
+    """A63 — conditional write-back of the extraction-derived subject.
+
+    Sets ``memories.subject_entity_id`` ONLY when it is currently NULL —
+    the write-time triple path's value always wins. Returns
+    ``{"updated": bool}``; ``false`` covers absent / deleted /
+    foreign-tenant / already-set rows alike (callers treat it as a skip).
+    """
+    body: dict = await request.json()
+    updated = await _svc.memory_set_subject_entity_if_null(
+        memory_id=memory_id,
+        tenant_id=body["tenant_id"],
+        subject_entity_id=UUID(body["subject_entity_id"]),
+    )
+    return {"updated": updated}
+
+
 @router.get("/rdf-conflicts")
 async def find_rdf_conflicts(
     tenant_id: str,

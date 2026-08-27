@@ -588,6 +588,21 @@ class CoreStorageClient:
     async def soft_delete_memory(self, memory_id: str) -> bool:
         return await self._delete(f"/memories/{memory_id}")
 
+    async def set_subject_entity_if_null(
+        self, memory_id: str, tenant_id: str, subject_entity_id: str
+    ) -> bool:
+        """A63 — conditional subject write-back from the extraction worker.
+
+        Storage-side single UPDATE guarded by ``subject_entity_id IS
+        NULL`` (the write-time triple path's value wins). Returns whether
+        the row was actually updated; ``False`` is a benign skip."""
+        result = await self._post(
+            f"/memories/{memory_id}/subject-entity",
+            {"tenant_id": tenant_id, "subject_entity_id": subject_entity_id},
+            read=False,
+        )
+        return bool(result and result.get("updated"))
+
     async def update_memory_status(
         self,
         memory_id: str,

@@ -416,6 +416,55 @@ async def process_entity_extraction(
                         memory_id,
                     )
 
+            # ---- Step 3b: subject write-back (A63) ----
+            #
+            # ``memories.subject_entity_id`` is NULL on nearly every row
+            # because the write-time triple path (CAURA-123) only fires on
+            # narrow predicate regexes — which keeps the deterministic RDF
+            # contradiction path and the A1 #17 cross-subject preflight
+            # dormant, and blocks subject-scoped candidate selection.
+            # The extraction LLM already names a subject: when the links
+            # we just wrote contain EXACTLY ONE distinct subject-role
+            # entity, write it back. Ambiguity (0 or 2+ subjects) skips —
+            # a wrong subject is worse than none, because downstream
+            # gates treat the column as authoritative (A1 #17 compares it
+            # across rows). Storage-side the update is guarded by
+            # ``subject_entity_id IS NULL`` so a triple-path value or a
+            # concurrent delivery's write is never clobbered.
+            subject_ids = {
+                str(name_to_id[name])
+                for name, _et, role in filtered
+                if role == "subject" and name in name_to_id
+            }
+            if len(subject_ids) == 1:
+                subject_id = next(iter(subject_ids))
+                try:
+                    updated = await sc.set_subject_entity_if_null(
+                        memory_id=str(memory_id),
+                        tenant_id=tenant_id,
+                        subject_entity_id=subject_id,
+                    )
+                    logger.info(
+                        "subject_writeback memory=%s subject_entity_id=%s outcome=%s",
+                        memory_id,
+                        subject_id,
+                        "set" if updated else "kept_existing",
+                    )
+                except Exception:
+                    # Non-fatal: the row simply stays subject-less, which
+                    # is exactly today's behaviour.
+                    logger.warning(
+                        "subject_writeback failed for memory %s (non-fatal)",
+                        memory_id,
+                        exc_info=True,
+                    )
+            elif len(subject_ids) > 1:
+                logger.info(
+                    "subject_writeback memory=%s outcome=skipped_ambiguous n_subjects=%d",
+                    memory_id,
+                    len(subject_ids),
+                )
+
         # Upsert relations. Endpoints resolve by raw name first (today's
         # contract), then by ``canonical_match_key`` — the WT-2 dedupe above
         # can collapse a surface form out of ``filtered`` (e.g. ``analytics

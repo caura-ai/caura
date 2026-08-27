@@ -1140,6 +1140,36 @@ class PostgresService:
                     )
         return True
 
+    async def memory_set_subject_entity_if_null(
+        self, memory_id: UUID, tenant_id: str, subject_entity_id: UUID
+    ) -> bool:
+        """A63 — write-back of the extraction-derived subject entity.
+
+        One conditional UPDATE, guarded by ``subject_entity_id IS NULL``:
+        the write-time triple path (``EmitMemoryTriple``, CAURA-123) is
+        the higher-fidelity source when it fired — its value came from a
+        deterministic predicate match on the original text — so this
+        async write-back must never clobber it. The guard also makes
+        concurrent deliveries race-safe without a read-modify-write.
+
+        Returns ``True`` when the row was updated; ``False`` when the row
+        is absent, soft-deleted, belongs to another tenant, or already
+        carries a subject — callers log the distinction but treat all
+        ``False`` cases as a benign skip.
+        """
+        async with get_session() as session:
+            result = await session.execute(
+                sql_update(Memory)
+                .where(
+                    Memory.id == memory_id,
+                    Memory.tenant_id == tenant_id,
+                    Memory.deleted_at.is_(None),
+                    Memory.subject_entity_id.is_(None),
+                )
+                .values(subject_entity_id=subject_entity_id)
+            )
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
+
     async def memory_update_status(
         self,
         memory_id: UUID,
