@@ -113,6 +113,7 @@ class Caura:
     def health(self) -> dict[str, Any]:
         """Liveness probe (GET /api/v1/health)."""
         response = self._http.get("/api/v1/health")
+        self._raise_for_status(response)
         return response.json()
 
     def get_document(
