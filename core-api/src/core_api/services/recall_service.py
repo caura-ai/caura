@@ -26,7 +26,7 @@ When the question requires combining facts from different memories, trace the co
 explicitly. Pay attention to dates within the facts — events described in past tense \
 occurred before the date the memory was recorded.
 
-Grounding rules — follow strictly:
+{premise_guard_block}Grounding rules — follow strictly:
 - Use only the memories below. Do not add any fact, and do not rely on prior or world knowledge.
 - Every name, date, number, title, field name, and identifier in your answer MUST appear \
 verbatim in the memories. Never invent, estimate, approximate, or complete a missing value — \
@@ -47,6 +47,24 @@ Memories:
 
 {reference_date_line}Question: {query}
 Answer (step by step):"""
+
+# A64 — the premise guard, org-opt-in via ``recall.premise_guard``. Wording is
+# the benchmark-tuned v2: the first sentence buys the STALE-T2 gain (31%->71%
+# overall — an agent should not comply with a premise its own memories refute),
+# the second closes the over-abstention the v1 wording caused on
+# knowledge-update questions (answerable questions turned into "not enough
+# information"). Change only with a fresh control pair on the 67-q regression
+# sample (see benchmark/a57-recall-experiments-findings.md).
+PREMISE_GUARD_BLOCK = """\
+Before answering, check whether the question rests on an assumption about the \
+user's current situation that the memories contradict or no longer support \
+(they may imply a change without stating it outright). If so, point out that \
+the assumption appears outdated and answer for the user's actual current \
+situation instead of going along with the premise. If the memories do answer \
+the question, answer it — do not abstain merely because a memory is older; \
+flag only assumptions the memories actually contradict or supersede.
+
+"""
 
 # WT-1 — the prompt above deliberately elicits step-by-step reasoning before the
 # answer (it is load-bearing for recall accuracy on LoCoMo/LongMemEval), but the
@@ -217,7 +235,11 @@ async def summarize_memories(
         return resp
 
     prompt = RECALL_PROMPT.format(
-        query=query, memories=memories_text, reference_date_line=reference_date_line
+        query=query,
+        memories=memories_text,
+        reference_date_line=reference_date_line,
+        # A64 — off (the default) leaves the prompt byte-identical to pre-A64.
+        premise_guard_block=(PREMISE_GUARD_BLOCK if getattr(config, "recall_premise_guard", False) else ""),
     )
 
     def _fake_recall() -> str:

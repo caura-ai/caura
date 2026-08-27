@@ -57,6 +57,13 @@ DEFAULT_SETTINGS: dict = {
         "provider": None,
         "model": None,
         "enabled": None,
+        # A64 — premise guard: instructs the recall answer LLM to challenge a
+        # question whose assumption the memories contradict or supersede,
+        # instead of going along with it. Off (None/False) keeps the recall
+        # prompt byte-identical to pre-A64. Evidence: STALE T2 31%->71%
+        # overall with the guard; true-premise control +1.9pp overall
+        # (benchmark/a57-recall-experiments-findings.md).
+        "premise_guard": None,
     },
     "embedding": {
         "provider": None,
@@ -800,6 +807,10 @@ class ResolvedConfig:
     @property
     def recall_model(self) -> str:
         return self._ts.get("recall", {}).get("model") or global_settings.entity_extraction_model
+
+    @property
+    def recall_premise_guard(self) -> bool:
+        return bool(self._ts.get("recall", {}).get("premise_guard"))
 
     @property
     def recall_enabled(self) -> bool:
