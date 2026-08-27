@@ -35,16 +35,27 @@ class TestContradictionConstants:
     """Verify P1 constant changes."""
 
     def test_threshold_value(self):
-        """Threshold should be 0.70 — entity-based detection handles wider matches."""
-        assert CONTRADICTION_SIMILARITY_THRESHOLD == 0.70
+        """A63 — the candidate FLOOR is 0.45, not P1's 0.70.
+
+        Measured through the real local pipeline: four genuine paraphrased
+        updates scored 0.483 / 0.503 / 0.568 / 0.607 against the facts they
+        supersede, so a 0.70 floor returned ZERO candidates for every one and
+        the judge never saw them. Cost is bounded by
+        ``CONTRADICTION_CANDIDATE_WINDOW`` (ORDER BY similarity LIMIT N), not
+        by the floor, so widening it cannot add candidates beyond the window.
+        """
+        assert CONTRADICTION_SIMILARITY_THRESHOLD == 0.45
 
     def test_candidate_max_raised(self):
         """Candidate limit should be 8 (up from 3) — async makes extra LLM calls free."""
         assert CONTRADICTION_CANDIDATE_MAX == 8
 
     def test_threshold_reasonable_range(self):
-        """Threshold should stay in [0.5, 0.9] — too low = noise, too high = misses."""
-        assert 0.5 <= CONTRADICTION_SIMILARITY_THRESHOLD <= 0.9
+        """Floor stays in [0.35, 0.9]: below ~0.35 the window fills with
+        unrelated rows (the judge pays for them and precision leans on the
+        gates alone); above ~0.62 it starts cutting measured real updates —
+        the highest observed genuine-update similarity was 0.607."""
+        assert 0.35 <= CONTRADICTION_SIMILARITY_THRESHOLD <= 0.9
 
     def test_candidate_max_reasonable_range(self):
         """Candidate max should be in [3, 20] — enough recall without excess LLM cost."""

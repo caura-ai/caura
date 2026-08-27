@@ -10,6 +10,8 @@ files, which is the drift it exists to remove.
 from datetime import timedelta
 from typing import NamedTuple
 
+from common.env_utils import read_float_env, read_int_env
+
 # ── Memory liveness ──
 # The statuses that mean "this memory is live". Broader than the literal
 # ``active`` value: enrichment promotes writes past ``active`` on the normal
@@ -49,12 +51,43 @@ SEMANTIC_DEDUP_JUDGE_THRESHOLD = 0.85  # broad enough to catch refinements,
 # happen to share vocabulary.
 
 # ── Contradiction detection ──
-CONTRADICTION_SIMILARITY_THRESHOLD = (
-    0.70  # cosine similarity above this triggers LLM check
+# A63 — cosine floor for semantic contradiction CANDIDATES (the rows the
+# LLM judge gets to look at). Lowered 0.70 -> 0.45 on measured evidence:
+# four genuine, deliberately paraphrased updates written through the real
+# local pipeline scored 0.483 / 0.503 / 0.568 / 0.607 against the facts
+# they supersede — EVERY ONE below the old 0.70 floor, so Path A returned
+# ZERO candidates for all four (logs: candidates_initial=0) and the judge
+# never saw the contradiction it exists to catch. That is the STALE
+# Type-II miss class: an update phrased in different words than the fact
+# it replaces.
+#
+# Why this is close to free rather than a cost increase: the candidate
+# query is ``WHERE (1 - distance) >= threshold ORDER BY distance LIMIT
+# <max>``, so the LIMIT — not the threshold — bounds how many rows the
+# judge sees. Lowering the floor cannot add a 21st candidate; it changes
+# WHICH rows fill the window (and takes the sparse case from 0 to a few).
+# Judge output per clean candidate is ~1.5 tokens post-E4 (#1011), so
+# even the sparse-case delta is negligible.
+#
+# Precision is the judge's job, and it now does it: #1023 removed the
+# Gate-2 veto that was overriding true update verdicts, so a wider net
+# gets adjudicated rather than rubber-stamped. Env-tunable for
+# incident-time adjustment without a deploy.
+CONTRADICTION_SIMILARITY_THRESHOLD = read_float_env(
+    "CONTRADICTION_SIMILARITY_THRESHOLD", 0.45
 )
 CONTRADICTION_CANDIDATE_MAX = (
     8  # max similar memories to check (LLM is the quality gate)
 )
+# A63 — the window the /similar-candidates ROUTE applies, which is what prod
+# actually runs: the route's caller (the contradiction detector) passes no
+# ``limit``, and the route's own default has always been 20, not
+# ``CONTRADICTION_CANDIDATE_MAX``'s 8. Named here so the value prod uses is
+# declared rather than buried as a literal in the route, and so the
+# cost-bounding argument on the threshold above points at something real.
+# Deliberately left at 20: E3/E4 established this window's cost, and A63
+# widens the FLOOR, not the window.
+CONTRADICTION_CANDIDATE_WINDOW = read_int_env("CONTRADICTION_CANDIDATE_WINDOW", 20)
 
 # ── Recall boost ──
 RECALL_BOOST_SCALE = 10  # recalls needed to reach half of max boost
@@ -478,12 +511,24 @@ SEARCH_KNOBS: dict[str, SearchKnob] = {
     # deliberate ceiling rather than the widest of the three.
     "graph_max_hops": SearchKnob(int, (0, 3), agent_tunable=True),
     # ── scoring knobs storage reads positionally ──
-    "fts_weight": SearchKnob(float, (0.0, 1.0), sql=True, sql_required=True, agent_tunable=True),
-    "freshness_floor": SearchKnob(float, (0.0, 1.0), sql=True, sql_required=True, agent_tunable=True),
-    "freshness_decay_days": SearchKnob(int, (7, 730), sql=True, sql_required=True, agent_tunable=True),
-    "recall_boost_cap": SearchKnob(float, (1.0, 3.0), sql=True, sql_required=True, agent_tunable=True),
-    "recall_decay_window_days": SearchKnob(int, (7, 365), sql=True, sql_required=True, agent_tunable=True),
-    "similarity_blend": SearchKnob(float, (0.0, 1.0), sql=True, sql_required=True, agent_tunable=True),
+    "fts_weight": SearchKnob(
+        float, (0.0, 1.0), sql=True, sql_required=True, agent_tunable=True
+    ),
+    "freshness_floor": SearchKnob(
+        float, (0.0, 1.0), sql=True, sql_required=True, agent_tunable=True
+    ),
+    "freshness_decay_days": SearchKnob(
+        int, (7, 730), sql=True, sql_required=True, agent_tunable=True
+    ),
+    "recall_boost_cap": SearchKnob(
+        float, (1.0, 3.0), sql=True, sql_required=True, agent_tunable=True
+    ),
+    "recall_decay_window_days": SearchKnob(
+        int, (7, 365), sql=True, sql_required=True, agent_tunable=True
+    ),
+    "similarity_blend": SearchKnob(
+        float, (0.0, 1.0), sql=True, sql_required=True, agent_tunable=True
+    ),
     # ── scoring knobs with a server-side default, so optional on the wire ──
     # #687: scale on ts_rank_cd before saturation. Floor is 1.0, not 0 — that is
     # the pre-#687 formula, so a tenant can revert but cannot weaken keyword
@@ -499,11 +544,17 @@ SEARCH_KNOBS: dict[str, SearchKnob] = {
 # The wire contract, derived. Core-api's two search-path builders project
 # ``search_params`` through the first; the storage route rejects a payload
 # missing any of the second.
-SQL_SCORING_PARAM_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.sql)
-SQL_SCORING_REQUIRED_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.sql_required)
+SQL_SCORING_PARAM_KEYS: tuple[str, ...] = tuple(
+    k for k, v in SEARCH_KNOBS.items() if v.sql
+)
+SQL_SCORING_REQUIRED_KEYS: tuple[str, ...] = tuple(
+    k for k, v in SEARCH_KNOBS.items() if v.sql_required
+)
 # The agent-facing tuning surface, derived the same way: ``SearchProfileUpdate``
 # and the ``caura_tune`` MCP tool expose exactly these.
-AGENT_TUNABLE_KEYS: tuple[str, ...] = tuple(k for k, v in SEARCH_KNOBS.items() if v.agent_tunable)
+AGENT_TUNABLE_KEYS: tuple[str, ...] = tuple(
+    k for k, v in SEARCH_KNOBS.items() if v.agent_tunable
+)
 
 
 # ---------------------------------------------------------------------------

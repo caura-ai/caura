@@ -9,7 +9,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 
-from common.constants import CRYSTALLIZER_SHORT_CONTENT_CHARS, SQL_SCORING_REQUIRED_KEYS
+from common.constants import (
+    CONTRADICTION_CANDIDATE_WINDOW,
+    CONTRADICTION_SIMILARITY_THRESHOLD,
+    CRYSTALLIZER_SHORT_CONTENT_CHARS,
+    SQL_SCORING_REQUIRED_KEYS,
+)
 from common.events.lifecycle_purge_request import (
     MEMORY_RETENTION_MAX_DAYS,
     MEMORY_RETENTION_MIN_DAYS,
@@ -394,8 +399,16 @@ async def find_similar_candidates(request: Request) -> list[dict]:
         embedding=body["embedding"],
         memory_id=UUID(body["memory_id"]),
         visibility=body.get("visibility", "scope_team"),
-        threshold=body.get("threshold", 0.7),
-        limit=body.get("limit", 20),
+        # A63 — fall back to the shared constants rather than literals. The
+        # hardcoded 0.7 here silently outranked
+        # ``CONTRADICTION_SIMILARITY_THRESHOLD`` for every caller (none pass
+        # ``threshold``), so lowering the constant alone would have changed
+        # nothing — the same third-place-duplication trap the scored-search
+        # route documents. ``limit`` keeps its 20 (the value prod runs, and
+        # the bound that makes the lower floor cost-neutral) but now says so
+        # through the constant.
+        threshold=body.get("threshold", CONTRADICTION_SIMILARITY_THRESHOLD),
+        limit=body.get("limit", CONTRADICTION_CANDIDATE_WINDOW),
     )
     return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
 
