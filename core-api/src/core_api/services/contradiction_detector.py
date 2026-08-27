@@ -302,6 +302,7 @@ async def detect_contradictions_async(
                 len(contradictions),
                 memory_id,
             )
+
     except Exception:
         logger.exception("Async contradiction detection failed for memory %s", memory_id)
     finally:
@@ -2630,6 +2631,29 @@ async def detect_contradictions_by_entities_async(
                     path_c_result["skipped"],
                 )
         concluded = True
+
+        # A58 — Path D (basis invalidation) SHADOW. Fires HERE, not in Path A:
+        # ``subject_entity_id`` is populated by entity extraction (A63), so at
+        # Path A time it is still NULL on this stack. Runs under Path C's lock
+        # (double back-channel can't double-fire it), reuses this run's
+        # entity-overlap candidates as the fallback pool, logs verdicts,
+        # never writes. Own try/except inside; this guard keeps even an
+        # import error away from Path C's outcome.
+        if settings.basis_invalidation_shadow and new_memory.get("subject_entity_id"):
+            try:
+                from core_api.services.contradiction.basis_invalidation import (
+                    run_basis_shadow,
+                )
+
+                await run_basis_shadow(
+                    new_memory,
+                    tenant_id,
+                    fleet_id,
+                    tenant_config,
+                    overlap_candidates=candidates,
+                )
+            except Exception:
+                logger.warning("path_d_shadow wrapper failed for %s", memory_id, exc_info=True)
     except Exception:
         logger.exception("Entity-based contradiction detection failed for %s", memory_id)
     finally:

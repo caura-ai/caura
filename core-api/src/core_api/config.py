@@ -334,6 +334,15 @@ class Settings(BaseSettings):
     # Additive: it never changes the status/supersedes effect, so retrieval is
     # unaffected. Default False; enable to start populating conflict records.
     contradiction_write_conflict_record: bool = False
+    # A58 — Path D (basis invalidation) in SHADOW mode: after Path A, one
+    # bridge LLM call proposes <=3 other predicates of the same subject whose
+    # practical basis the new memory may have broken; <=2 invalidation-judge
+    # calls produce verdicts that are LOGGED ONLY (``path_d_shadow`` lines).
+    # No status is ever written under this flag — it exists to measure the
+    # Type-II base rate + precision on real corpora before A59 builds the
+    # enforcing path (``unsafe`` status). Skipped when the new memory has no
+    # resolved subject_entity_id.
+    basis_invalidation_shadow: bool = False
     crystallizer_enabled: bool = True
     crystallizer_stale_days: int = 180
     crystallizer_dedup_sample_size: int = 1000
