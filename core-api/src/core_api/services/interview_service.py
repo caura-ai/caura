@@ -1096,7 +1096,10 @@ async def process_pending_interview_jobs(limit_per_tenant: int = 20) -> dict:
     """
     sc = get_storage_client()
     now = datetime.now(UTC)
-    tenants = await list_tenants_with_interviewer_enabled()
+    # read=False → primary, same reason as the watermark read below: this call
+    # selects which tenants are swept at all, so replica lag drops a tenant
+    # from the tick entirely rather than merely returning it a stale field.
+    tenants = await list_tenants_with_interviewer_enabled(read=False)
     summary = {
         "tenants": len(tenants),
         "jobs_processed": 0,
@@ -1234,7 +1237,10 @@ async def run_interview_schedule() -> dict:
     """
     sc = get_storage_client()
     now = datetime.now(UTC)
-    tenants = await list_tenants_with_interviewer_enabled()
+    # read=False → primary, same reason as the watermark read below: this call
+    # selects which tenants are swept at all, so replica lag drops a tenant
+    # from the tick entirely rather than merely returning it a stale field.
+    tenants = await list_tenants_with_interviewer_enabled(read=False)
     summary = {
         "tenants": len(tenants),
         "nodes_considered": 0,
@@ -1321,10 +1327,26 @@ async def run_interview_schedule() -> dict:
     # the sweep succeeds or raises — callers index these keys directly.
     for key in ("jobs_processed", "jobs_done", "jobs_retried", "jobs_parked", "jobs_skipped"):
         summary[key] = 0
+    # ``jobs_sweep_ok`` exists because the zero-init above is otherwise
+    # indistinguishable from a healthy idle sweep: a total failure and "no
+    # pending jobs" both answer 200 with five zeros. The hourly cron reads
+    # this endpoint, so a sweep that raised on every tick would look exactly
+    # like a quiet queue for as long as nobody read the logs. Keep the 200 —
+    # the scheduling half of the summary above is still valid and still worth
+    # returning — but say which of the two happened.
+    summary["jobs_sweep_ok"] = True
     try:
         jobs_summary = await process_pending_interview_jobs()
-    except Exception:
+    except Exception as exc:
         logger.exception("interview schedule: pending-jobs sweep failed")
+        summary["jobs_sweep_ok"] = False
+        # Type name only. The full exception is already in the log line above,
+        # and this string lands in an HTTP response body — some ``__str__``
+        # implementations carry hostnames, URLs or request fragments, which is
+        # the same reason ``_storage_detail`` refuses to forward a raw error
+        # body to a caller. The type is what a dashboard branches on; the
+        # detail belongs where it already is.
+        summary["jobs_sweep_error"] = type(exc).__name__
     else:
         for key in ("jobs_processed", "jobs_done", "jobs_retried", "jobs_parked", "jobs_skipped"):
             summary[key] = jobs_summary.get(key, 0)

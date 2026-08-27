@@ -56,10 +56,14 @@ async def list_tenants_with_agent_digest_enabled(db: AsyncSession | None = None)
     return await get_storage_client().list_agent_digest_enabled_orgs()
 
 
-async def list_tenants_with_interviewer_enabled(db: AsyncSession | None = None) -> list[str]:
+async def list_tenants_with_interviewer_enabled(
+    db: AsyncSession | None = None, *, read: bool = True
+) -> list[str]:
     """Return ``org_id`` values whose ``interviewer.enabled`` is True, sorted.
 
     Used by the interviewer schedule tick so a tenant that hasn't opted in pays
     zero cost. Orgs without a settings row are excluded (default off). ``db`` is
-    ignored (reads via core-storage-api)."""
-    return await get_storage_client().list_interviewer_enabled_orgs()
+    ignored (reads via core-storage-api). Pass ``read=False`` to pin the writer —
+    the sweep does, because this call decides which tenants are considered at
+    all and a lagging replica silently drops one for a whole tick."""
+    return await get_storage_client().list_interviewer_enabled_orgs(read=read)

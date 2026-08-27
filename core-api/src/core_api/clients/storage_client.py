@@ -2651,9 +2651,19 @@ class CoreStorageClient:
             raise RuntimeError("core-storage-api /tenants/agent-digest-enabled returned 404")
         return result.get("org_ids", [])
 
-    async def list_interviewer_enabled_orgs(self) -> list[str]:
-        """Orgs whose ``interviewer.enabled`` setting is True."""
-        result = await self._get("/tenants/interviewer-enabled")
+    async def list_interviewer_enabled_orgs(self, *, read: bool = True) -> list[str]:
+        """Orgs whose ``interviewer.enabled`` setting is True.
+
+        ``read`` defaults to True — the replica is right for anything merely
+        displaying the set. The interviewer sweep passes ``read=False``: it is
+        the entry point that decides which tenants get looked at *at all*, so
+        replica lag there does not delay one record, it drops a whole tenant
+        from the tick and everything under it. A tenant that enables the
+        interviewer and is swept before the row replicates is skipped
+        entirely, with a summary that reports success. Same reason the sweep
+        already pins the writer for its watermark read.
+        """
+        result = await self._get("/tenants/interviewer-enabled", read=read)
         if result is None:
             raise RuntimeError("core-storage-api /tenants/interviewer-enabled returned 404")
         return result.get("org_ids", [])
