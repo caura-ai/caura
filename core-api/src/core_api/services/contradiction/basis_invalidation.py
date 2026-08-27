@@ -9,7 +9,7 @@ without a false-positive explosion (see
 ``Downloads/cupmem_stale_contradiction_analysis.md`` §4.3).
 
 This module ports the portable core of CUP-Mem's write side (STALE paper,
-arXiv:2605.06527 — steps 6-8 of its pipeline) onto memclaw's existing
+arXiv:2605.06527 — steps 6-8 of its pipeline) onto caura's existing
 ``(subject_entity_id, predicate)`` slot model:
 
     1. bridge (1 LLM call)  — which OTHER predicates of this subject may
@@ -85,7 +85,7 @@ Return JSON only: {{"affected": [{{"predicate": "<from menu>", \
 "broken_basis": "<one sentence>", "confidence": <0..1>}}]}}"""
 
 # Ported INVALIDATION_JUDGE_PROMPT semantics. The enum is kept verbatim for
-# comparability with the paper; in memclaw terms every non-NO_OP verdict would
+# comparability with the paper; in caura terms every non-NO_OP verdict would
 # map to the future ``unsafe`` status (A59).
 BASIS_JUDGE_PROMPT = """\
 New evidence about a subject: "{new_content}"
