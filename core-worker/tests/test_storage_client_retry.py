@@ -1,4 +1,4 @@
-"""Connection-phase retry in ``_signed_call`` (port of caura-memclaw#333).
+"""Connection-phase retry in ``_signed_call`` (port of caura#333).
 
 Prod 2026-06-11: core-api's unretried storage POSTs died on
 first-attempt ``httpx.ConnectTimeout`` behind the VPC connector

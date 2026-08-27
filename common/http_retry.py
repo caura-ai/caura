@@ -14,7 +14,7 @@ History (load-bearing for the policy split):
   detection, 42 failures) and ``create_audit_logs_bulk`` (audit events
   dropped) both died on first-attempt ``ConnectTimeout`` behind the VPC
   connector because POSTs had no retry at all. Connection-phase retry
-  for non-idempotent methods landed in response (caura-memclaw#333).
+  for non-idempotent methods landed in response (caura#333).
 * 2026-06-16 prod — a steady trickle of ``httpx.ConnectTimeout`` still
   reached core-api on the Pub/Sub enrichment, entity-extraction,
   contradiction and audit-flush paths (storage-api cold starts /

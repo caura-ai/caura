@@ -572,7 +572,7 @@ async def test_search_pipeline_empty_results():
 
 # ---------------------------------------------------------------------------
 # Recall of a memory whose embedding backfill has not landed yet
-# (caura-memclaw#687)
+# (caura#687)
 # ---------------------------------------------------------------------------
 
 
@@ -660,7 +660,7 @@ async def test_recall_returns_memory_with_pending_embedding(db, monkeypatch, use
 
     assert str(created.id) in {str(r.id) for r in results}, (
         f"a memory whose embedding backfill has not landed was not returned by "
-        f"recall (caura-memclaw#687). query={token!r} matched the row's content "
+        f"recall (caura#687). query={token!r} matched the row's content "
         f"exactly and search_vector @@ plainto_tsquery is true, yet search "
         f"returned {len(results)} other row(s): "
         f"{[str(r.id) for r in results]}"

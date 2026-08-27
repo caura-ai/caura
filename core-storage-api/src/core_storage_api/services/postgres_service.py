@@ -6766,7 +6766,7 @@ class PostgresService:
         Uses ``INSERT ... ON CONFLICT (tenant_id, agent_id) DO NOTHING
         RETURNING ...`` paired with a same-session re-SELECT for the
         conflicted case. The same shape ``memory_add_all`` uses for
-        per-attempt idempotency (caura-memclaw#23): it avoids the
+        per-attempt idempotency (caura#23): it avoids the
         ``flush() → IntegrityError → rollback() → re-SELECT`` pattern's
         mid-session rollback, which is brittle (the rollback aborts any
         other pending writes in the same session) and forced
