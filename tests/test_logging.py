@@ -244,6 +244,151 @@ def test_route_third_party_to_root_clears_handlers_and_enables_propagation() -> 
         target.propagate = True
 
 
+# ─── UVICORN_ACCESS_LOG ─────────────────────────────────────────────────
+
+
+@pytest.fixture
+def uvicorn_access_sandbox():
+    """Fully restore every global these tests mutate.
+
+    They reach into process-wide logging state — the uvicorn.access logger,
+    the ROOT logger's handlers, and the module's reroute bookkeeping — so
+    without an exact restore they leak into whatever runs next in the same
+    process. Restoring by hand in each test's ``finally`` is what leaked the
+    first time: clearing ``_third_party_logger_original_state`` also discards
+    the snapshots taken for uvicorn / fastmcp / mcp / slowapi, leaving the
+    module believing it had never rerouted anything.
+    """
+    lg = logging.getLogger("uvicorn.access")
+    root = logging.getLogger()
+    saved_handlers = list(lg.handlers)
+    saved_propagate = lg.propagate
+    saved_level = lg.level
+    saved_root_handlers = list(root.handlers)
+    saved_state = dict(_third_party_logger_original_state)
+    # Start from a clean reroute ledger so the branch under test actually
+    # runs rather than hitting the already-done guard.
+    _third_party_logger_original_state.clear()
+    try:
+        yield lg
+    finally:
+        lg.handlers[:] = saved_handlers
+        lg.propagate = saved_propagate
+        lg.setLevel(saved_level)
+        root.handlers[:] = saved_root_handlers
+        _third_party_logger_original_state.clear()
+        _third_party_logger_original_state.update(saved_state)
+
+
+def _simulate_uvicorn_shipped_access_logger() -> logging.Handler:
+    """Put uvicorn.access into the state uvicorn.config.LOGGING_CONFIG leaves."""
+    lg = logging.getLogger("uvicorn.access")
+    handler = logging.NullHandler()
+    lg.addHandler(handler)
+    lg.propagate = False
+    return handler
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "FALSE", "No", " off ", "OFF"])
+def test_access_log_enabled_false_for_falsy_spellings(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """Case and surrounding whitespace are normalised: the value is threaded
+    through a delimited --update-env-vars string in the deploy workflows,
+    where a stray space is easy to introduce and invisible in review."""
+    monkeypatch.setenv("UVICORN_ACCESS_LOG", raw)
+    assert structlog_config.access_log_enabled() is False
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "yes", "on", "", "maybe"])
+def test_access_log_enabled_true_for_everything_else(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """Anything not clearly falsy keeps the line. The failure modes are not
+    symmetric: reading junk as "off" silently drops request visibility and
+    looks identical to a healthy quiet service, whereas reading it as "on"
+    costs log volume and is immediately obvious. Fail toward the loud side."""
+    monkeypatch.setenv("UVICORN_ACCESS_LOG", raw)
+    assert structlog_config.access_log_enabled() is True
+
+
+def test_access_log_enabled_defaults_true_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opt-OUT, so OSS / on-prem / local installs are unaffected."""
+    monkeypatch.delenv("UVICORN_ACCESS_LOG", raising=False)
+    assert structlog_config.access_log_enabled() is True
+
+
+def test_access_log_disabled_makes_uvicorn_see_no_handlers(
+    monkeypatch: pytest.MonkeyPatch, uvicorn_access_sandbox: logging.Logger
+) -> None:
+    """THE regression test: assert the property uvicorn actually reads.
+
+    uvicorn does not keep the ``access_log=False`` it was configured with —
+    its HTTP protocols re-derive the decision per connection from
+    ``self.access_logger.hasHandlers()``. Passing the kwarg therefore proves
+    nothing on its own, and the first cut of this feature shipped green
+    tests asserting exactly that kwarg while every request kept being logged
+    in staging. Rerouting uvicorn.access (handlers=[], propagate=True) is
+    what re-enabled it: hasHandlers() then walks up to the root handler and
+    answers True.
+
+    Assert the end state instead: no handlers AND propagate=False, so the
+    walk stops here and answers False.
+    """
+    monkeypatch.setenv("UVICORN_ACCESS_LOG", "false")
+    lg = uvicorn_access_sandbox
+    handler = _simulate_uvicorn_shipped_access_logger()
+    # A root handler makes hasHandlers() answer True for any logger that
+    # still propagates — i.e. the exact trap this guards against.
+    logging.getLogger().addHandler(logging.NullHandler())
+
+    _route_third_party_to_root()
+
+    assert handler not in lg.handlers
+    assert lg.propagate is False
+    assert lg.hasHandlers() is False, (
+        "uvicorn re-derives access logging from hasHandlers(); it must be "
+        "False or every request is logged despite UVICORN_ACCESS_LOG=false"
+    )
+
+
+def test_access_log_enabled_still_reroutes_uvicorn_access(
+    monkeypatch: pytest.MonkeyPatch, uvicorn_access_sandbox: logging.Logger
+) -> None:
+    """The default path is untouched: with the line wanted, uvicorn.access is
+    rerouted like any other third-party logger so it reaches structlog as
+    JSON, and hasHandlers() stays True so uvicorn keeps emitting it."""
+    monkeypatch.delenv("UVICORN_ACCESS_LOG", raising=False)
+    lg = uvicorn_access_sandbox
+    handler = _simulate_uvicorn_shipped_access_logger()
+    logging.getLogger().addHandler(logging.NullHandler())
+
+    _route_third_party_to_root()
+
+    assert handler not in lg.handlers
+    assert lg.propagate is True
+    assert lg.hasHandlers() is True
+
+
+def test_access_log_disabled_state_is_restorable(
+    monkeypatch: pytest.MonkeyPatch, uvicorn_access_sandbox: logging.Logger
+) -> None:
+    """The silencing branch must snapshot like the rerouting one, or
+    _reset_for_testing leaves uvicorn.access permanently muted for every
+    later caller in the process."""
+    monkeypatch.setenv("UVICORN_ACCESS_LOG", "false")
+    handler = _simulate_uvicorn_shipped_access_logger()
+
+    _route_third_party_to_root()
+
+    assert "uvicorn.access" in _third_party_logger_original_state
+    snapshot = _third_party_logger_original_state["uvicorn.access"]
+    assert handler in snapshot[0]
+    assert snapshot[1] is False
+
+
 def test_route_third_party_to_root_is_idempotent() -> None:
     """Calling twice doesn't change state on the second call (already-rerouted
     loggers stay handler-less, propagate stays True)."""

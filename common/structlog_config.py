@@ -32,6 +32,7 @@ are width-independent) or enterprise CI goes red on the next re-vendor.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 import warnings
@@ -464,6 +465,27 @@ def configure_logging(
         _configured = True
 
 
+def access_log_enabled() -> bool:
+    """Whether uvicorn should emit its per-request access line.
+
+    ``UVICORN_ACCESS_LOG`` is opt-OUT: anything but a clearly falsy value
+    keeps the line, so OSS, on-prem and local runs are unchanged — there it
+    is often the only per-request visibility there is. A managed deploy sets
+    it false because there the line is the THIRD copy of one fact: the APM
+    span and Cloud Run's own httpRequest entry both already record the
+    request, and unlike this line both also carry latency.
+
+    Read here rather than in ``common/serve.py`` because this module is
+    where the setting has to be ENFORCED (see ``_route_third_party_to_root``),
+    and because ``common/env_utils`` — where an env reader would otherwise
+    belong — does not exist in the caura-enterprise repo this file is
+    vendored into byte-for-byte. ``serve.py`` imports this helper, so the
+    parsing lives in exactly one place across both repos.
+    """
+    raw = os.environ.get("UVICORN_ACCESS_LOG", "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 # Names of third-party loggers that install their own (typically stderr,
 # plain-text) handlers OR set ``propagate=False``, bypassing the root
 # ``ProcessorFormatter`` without explicit re-routing. CAURA-588.
@@ -480,6 +502,8 @@ _THIRD_PARTY_LOGGERS_TO_REROUTE: tuple[str, ...] = (
     # uvicorn ships three loggers with propagate=False + own StreamHandlers
     # via uvicorn.config.LOGGING_CONFIG.
     "uvicorn",
+    # Rerouted only when access logging is ON; otherwise silenced outright —
+    # see the uvicorn.access branch in _route_third_party_to_root.
     "uvicorn.access",
     "uvicorn.error",
     # FastMCP / underlying mcp library register their own stream handler.
@@ -530,6 +554,38 @@ def _route_third_party_to_root() -> None:
         # initialised) would fall through to the early-exit branch and
         # emit a spurious WARNING about rerouting being a no-op.
         if name in _third_party_logger_original_state:
+            continue
+        # uvicorn does NOT keep the ``access_log=False`` it was configured
+        # with. Its HTTP protocols re-derive the decision per connection:
+        #
+        #     self.access_log = self.access_logger.hasHandlers()
+        #     (uvicorn/protocols/http/{h11,httptools}_impl.py)
+        #
+        # ``hasHandlers()`` walks ancestors while each one propagates, so
+        # rerouting this logger — no handlers, ``propagate=True`` — makes it
+        # find the ROOT handler and answer True, silently re-enabling the
+        # access line that ``Config.configure_logging()`` had just switched
+        # off. That is not a hypothetical: it is exactly why the 2026-08-28
+        # rollout of UVICORN_ACCESS_LOG=false changed nothing in staging —
+        # the env var was set, the flag was passed, and every request was
+        # still logged.
+        #
+        # So when the line is unwanted, silence the logger instead of
+        # rerouting it: no handlers AND ``propagate=False`` is what makes
+        # hasHandlers() answer False, because the walk stops at the first
+        # non-propagating logger. Snapshot first so _reset_for_testing can
+        # still restore. Doing it here rather than in serve.py also means
+        # the switch works for the services that exec the uvicorn CLI
+        # directly and never run serve.py at all.
+        if name == "uvicorn.access" and not access_log_enabled():
+            _third_party_logger_original_state[name] = (
+                list(lg.handlers),
+                lg.propagate,
+                lg.level,
+            )
+            for h in list(lg.handlers):
+                lg.removeHandler(h)
+            lg.propagate = False
             continue
         # Library hasn't installed its own handlers and still propagates — there
         # is nothing to reroute, and crucially nothing is LOST: a handler-less,

@@ -42,12 +42,11 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import os
 from typing import Any
 
 import uvicorn
 
-from common.structlog_config import configure_logging
+from common.structlog_config import access_log_enabled, configure_logging
 
 
 def _load(path: str) -> Any:
@@ -106,31 +105,23 @@ def main(argv: list[str] | None = None) -> None:
         log_file=settings.log_file or None,
     )
 
-    # UVICORN_ACCESS_LOG=false silences uvicorn's per-request access line.
+    # UVICORN_ACCESS_LOG=false drops uvicorn's per-request access line —
+    # the THIRD copy of one fact, and the only one of the three without a
+    # duration (the APM span and Cloud Run's own httpRequest entry both
+    # carry latency). Rationale and the opt-out default live on
+    # access_log_enabled(); the ENFORCEMENT lives in structlog_config's
+    # _route_third_party_to_root.
     #
-    # Defaults to ON, so OSS, on-prem and local runs are unchanged — there
-    # the access line is often the only per-request visibility there is. A
-    # managed deploy opts out, because there it is the THIRD copy of one
-    # fact, and the least useful of the three:
-    #
-    #   1. the APM span     — trace id, duration, route, tags, service map
-    #   2. Cloud Run's own  — httpRequest in Cloud Logging: method, status,
-    #      request log        url, AND latency; written by the platform, so
-    #                         it survives anything this process does
-    #   3. this line        — ip, method, path, status. No duration.
-    #
-    # Measured before removing rather than assumed: uvicorn.access emitted
-    # 3,690,995 lines in 24h, 53.6% of ALL prod logs, on 2026-08-28.
-    #
-    # Parsed inline rather than through common/env_utils.read_*_env, which
-    # is where an env-var reader would otherwise belong. This file is
-    # vendored into caura-enterprise as an identical-policy copy and
-    # common/env_utils.py does NOT exist in that repo, so importing it
-    # would re-vendor a serve.py that raises ImportError at startup for
-    # every platform service. Keep this module's imports to things that
-    # exist in BOTH repos.
-    raw_access_log = os.environ.get("UVICORN_ACCESS_LOG", "").strip().lower()
-    access_log = raw_access_log not in {"0", "false", "no", "off"}
+    # Passing access_log=False below is necessary but NOT sufficient, which
+    # is why the enforcement is elsewhere. uvicorn's Config only uses this
+    # flag to clear uvicorn.access's handlers and set propagate=False; its
+    # HTTP protocols then re-derive the decision per connection from
+    # ``self.access_logger.hasHandlers()``. Our own logger rerouting runs
+    # afterwards (at app import, in every worker) and sets propagate=True
+    # to pull uvicorn's lines into structlog — which makes hasHandlers()
+    # find the root handler and answer True again. Shipping only this
+    # kwarg is exactly what made the 2026-08-28 rollout a no-op.
+    access_log = access_log_enabled()
 
     # log_config=None: do NOT let uvicorn install its own stream handlers.
     # That keeps uvicorn.{error,access} propagating to the structlog root
