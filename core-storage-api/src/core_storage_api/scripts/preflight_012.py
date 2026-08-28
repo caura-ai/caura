@@ -200,7 +200,7 @@ def _resolve_dsn() -> str:
     try:
         from core_storage_api.config import settings  # type: ignore[import-not-found]
 
-        return settings.database_url
+        return settings.database_url.get_secret_value()
     except Exception:
         import os
         from urllib.parse import quote_plus

@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from urllib.parse import quote
 
-from pydantic import field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+LOCAL_DATABASE_URL = "postgresql+asyncpg://memclaw:changeme@localhost:5432/memclaw"  # legacy-name-ok: existing local-dev compatibility default
+
+
+def _alloydb_database_url(*, host: str, port: int, user: str, password: str, database: str) -> str:
+    return (
+        "postgresql+asyncpg://"
+        f"{quote(user, safe='')}:{quote(password, safe='')}@"
+        f"{host}:{port}/{quote(database, safe='')}"
+    )
 
 
 class Settings(BaseSettings):
@@ -26,8 +37,15 @@ class Settings(BaseSettings):
     # search / GET traffic from the primary. Replication lag on a
     # streaming replica is typically <5s, acceptable for the read paths
     # we route.
-    database_url: str = "postgresql+asyncpg://memclaw:changeme@localhost:5432/memclaw"
-    read_database_url: str = ""
+    database_url: SecretStr = Field(default=SecretStr(LOCAL_DATABASE_URL), repr=False, exclude=True)
+    # SaaS can bind only ALLOYDB_PASSWORD from Secret Manager. These remain
+    # ordinary settings fields so constructor and .env sources work too.
+    alloydb_host: str = ""
+    alloydb_port: int | None = None
+    alloydb_user: str = ""
+    alloydb_password: SecretStr = SecretStr("")
+    alloydb_database: str = ""
+    read_database_url: SecretStr = Field(default=SecretStr(""), repr=False, exclude=True)
     # 5+5 matches the post-PR-#166 ``platform-storage-api`` defaults so
     # both services share the same pool sizing without per-environment
     # env-var overrides. Pre-this-fix the source defaults were 20+20,
@@ -59,6 +77,39 @@ class Settings(BaseSettings):
     # startup-probe deadline, or the probe kills the instance before this fires.
     # Env: MIGRATION_LOCK_WAIT_SECONDS.
     migration_lock_wait_seconds: int = 1800
+
+    @model_validator(mode="after")
+    def resolve_alloydb_database_url(self) -> Settings:
+        # Explicit DATABASE_URL wins, even when shared environment files carry
+        # incomplete ALLOYDB_* values for another service.
+        if "database_url" in self.model_fields_set:
+            return self
+
+        password = self.alloydb_password.get_secret_value()
+        values = {
+            "ALLOYDB_HOST": self.alloydb_host,
+            "ALLOYDB_USER": self.alloydb_user,
+            "ALLOYDB_PASSWORD": password,
+            "ALLOYDB_DATABASE": self.alloydb_database,
+        }
+        attempted = any(values.values()) or self.alloydb_port is not None
+        if not attempted:
+            return self
+
+        missing = [name for name, value in values.items() if not value]
+        if missing:
+            raise ValueError(f"incomplete AlloyDB configuration; missing: {', '.join(missing)}")
+
+        self.database_url = SecretStr(
+            _alloydb_database_url(
+                host=self.alloydb_host,
+                port=self.alloydb_port or 5432,
+                user=self.alloydb_user,
+                password=password,
+                database=self.alloydb_database,
+            )
+        )
+        return self
 
     # Service role (CAURA-591 Part B). "hybrid" keeps the original
     # single-service behaviour and is the safe default for OSS + any

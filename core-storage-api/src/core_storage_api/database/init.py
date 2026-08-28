@@ -57,7 +57,7 @@ def get_engine() -> AsyncEngine:
     """Return the writer engine (primary DB), creating on first call."""
     global _engine
     if _engine is None:
-        _engine = _build_engine(settings.database_url)
+        _engine = _build_engine(settings.database_url.get_secret_value())
     return _engine
 
 
@@ -67,10 +67,11 @@ def get_read_engine() -> AsyncEngine:
     the replica so read traffic doesn't share primary's connection
     budget."""
     global _read_engine
-    if not settings.read_database_url:
+    read_database_url = settings.read_database_url.get_secret_value()
+    if not read_database_url:
         return get_engine()
     if _read_engine is None:
-        _read_engine = _build_engine(settings.read_database_url)
+        _read_engine = _build_engine(read_database_url)
     return _read_engine
 
 
