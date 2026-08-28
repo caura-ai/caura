@@ -105,7 +105,7 @@ def test_topic_name_prefix_and_no_op() -> None:
 
 
 async def test_decode_accepts_well_formed_envelope() -> None:
-    src = Event(event_type=Topics.Memory.CREATED, tenant_id="t1", payload={"k": "v"})
+    src = Event(event_type=Topics.Memory.ENRICHED, tenant_id="t1", payload={"k": "v"})
     bytes_ = src.model_dump_json().encode("utf-8")
     decoded = PubSubEventBus._decode(bytes_)
     assert decoded is not None
@@ -132,7 +132,7 @@ async def test_dispatch_all_returns_true_when_all_handlers_succeed(
         nonlocal called
         called += 1
 
-    result = await bus._dispatch_all([h1, h2], Event(event_type=Topics.Memory.CREATED))
+    result = await bus._dispatch_all([h1, h2], Event(event_type=Topics.Memory.ENRICHED))
     assert result is True
     assert called == 2
 
@@ -147,7 +147,7 @@ async def test_dispatch_all_returns_false_when_any_handler_raises(
         pass
 
     result = await bus._dispatch_all(
-        [good, bad], Event(event_type=Topics.Memory.CREATED)
+        [good, bad], Event(event_type=Topics.Memory.ENRICHED)
     )
     assert result is False
 
@@ -165,7 +165,7 @@ async def test_dispatch_all_reraises_cancellation(bus: PubSubEventBus) -> None:
         raise asyncio.CancelledError("simulated stop()")
 
     with pytest.raises(asyncio.CancelledError):
-        await bus._dispatch_all([handler], Event(event_type=Topics.Memory.CREATED))
+        await bus._dispatch_all([handler], Event(event_type=Topics.Memory.ENRICHED))
 
 
 async def test_dispatch_all_logs_all_exceptions_before_reraising_cancellation(
@@ -185,7 +185,7 @@ async def test_dispatch_all_logs_all_exceptions_before_reraising_cancellation(
     with caplog.at_level("ERROR"), pytest.raises(asyncio.CancelledError):
         await bus._dispatch_all(
             [cancelled_handler, failing_handler],
-            Event(event_type=Topics.Memory.CREATED),
+            Event(event_type=Topics.Memory.ENRICHED),
         )
 
     assert any(
@@ -216,7 +216,7 @@ async def test_dispatch_all_runs_every_handler_even_after_earlier_raise(
 
     result = await bus._dispatch_all(
         [bad_first, good_after_bad, bad_last],
-        Event(event_type=Topics.Memory.CREATED),
+        Event(event_type=Topics.Memory.ENRICHED),
     )
     assert ran == ["bad_first", "good_after_bad", "bad_last"]
     assert result is False
@@ -245,11 +245,11 @@ async def test_subscribe_before_start_records_handlers(bus: PubSubEventBus) -> N
     async def h(_e: Event) -> None:
         return None
 
-    bus.subscribe(Topics.Memory.CREATED, h)
-    bus.subscribe(Topics.Memory.CREATED, h)
+    bus.subscribe(Topics.Memory.ENRICHED, h)
+    bus.subscribe(Topics.Memory.ENRICHED, h)
     bus.subscribe(Topics.Memory.EMBEDDED, h)
 
-    assert len(bus._handlers[Topics.Memory.CREATED]) == 2
+    assert len(bus._handlers[Topics.Memory.ENRICHED]) == 2
     assert len(bus._handlers[Topics.Memory.EMBEDDED]) == 1
     # No SDK was touched — start() isn't called here.
     assert bus._subscriber is None
@@ -378,7 +378,7 @@ async def test_stop_allows_clean_restart(bus: PubSubEventBus) -> None:
 
     # subscribe() no longer raises; the guard reads _pull_tasks which is
     # now empty.
-    bus.subscribe(Topics.Memory.CREATED, handler)
+    bus.subscribe(Topics.Memory.ENRICHED, handler)
     # Lazy access recreates a fresh executor — different object than
     # the one we got before stop().
     new_executor = bus._get_publish_executor()
@@ -404,7 +404,7 @@ async def test_subscribe_after_start_raises(bus: PubSubEventBus) -> None:
         return None
 
     with pytest.raises(RuntimeError, match="before start"):
-        bus.subscribe(Topics.Memory.CREATED, handler)
+        bus.subscribe(Topics.Memory.ENRICHED, handler)
 
 
 async def test_subscribe_after_start_raises_even_for_publisher_only(
@@ -422,7 +422,7 @@ async def test_subscribe_after_start_raises_even_for_publisher_only(
         return None
 
     with pytest.raises(RuntimeError, match="before start"):
-        bus.subscribe(Topics.Memory.CREATED, handler)
+        bus.subscribe(Topics.Memory.ENRICHED, handler)
 
 
 async def test_start_is_idempotent(bus: PubSubEventBus) -> None:
@@ -458,17 +458,17 @@ async def test_publish_warns_when_subscribers_registered_without_start(
     async def handler(_e: Event) -> None:
         return None
 
-    bus.subscribe(Topics.Memory.CREATED, handler)
+    bus.subscribe(Topics.Memory.ENRICHED, handler)
 
     with caplog.at_level("WARNING"):
         await bus.publish(
-            Topics.Memory.CREATED, Event(event_type=Topics.Memory.CREATED)
+            Topics.Memory.ENRICHED, Event(event_type=Topics.Memory.ENRICHED)
         )
         first_warnings = [
             r for r in caplog.records if "start() was never awaited" in r.message
         ]
         await bus.publish(
-            Topics.Memory.CREATED, Event(event_type=Topics.Memory.CREATED)
+            Topics.Memory.ENRICHED, Event(event_type=Topics.Memory.ENRICHED)
         )
         all_warnings = [
             r for r in caplog.records if "start() was never awaited" in r.message
@@ -485,7 +485,7 @@ async def test_publish_does_not_warn_when_no_subscribers_registered(
     # — no warning there.
     with caplog.at_level("WARNING"):
         await bus.publish(
-            Topics.Memory.CREATED, Event(event_type=Topics.Memory.CREATED)
+            Topics.Memory.ENRICHED, Event(event_type=Topics.Memory.ENRICHED)
         )
     assert not any("start()" in r.message for r in caplog.records)
 
@@ -624,7 +624,7 @@ async def test_start_constructs_subscriber_off_event_loop(
     async def _h(_e: Event) -> None:
         return None
 
-    bus.subscribe(Topics.Memory.CREATED, _h)
+    bus.subscribe(Topics.Memory.ENRICHED, _h)
 
     sub_ctor_calls = 0
 
@@ -851,7 +851,7 @@ async def test_start_aborts_when_stop_races_subscriber_construction(
     async def _h(_e: Event) -> None:
         return None
 
-    bus.subscribe(Topics.Memory.CREATED, _h)
+    bus.subscribe(Topics.Memory.ENRICHED, _h)
 
     real_run = asyncio.get_running_loop().run_in_executor
 
@@ -898,7 +898,7 @@ async def test_pull_loop_records_failed_subscription_on_unexpected_cancellation(
     )
     # Pull returns one fake message so dispatch fires.
     fake_msg = MagicMock()
-    fake_msg.message.data = b'{"event_type": "memclaw.memory.created"}'
+    fake_msg.message.data = b'{"event_type": "memclaw.memory.enriched"}'  # legacy-name-ok: rule 3 — pins the wire format a live subscriber must still decode
     fake_msg.ack_id = "ack-1"
     fake_response = MagicMock(received_messages=[fake_msg])
     fake_subscriber.pull = MagicMock(return_value=fake_response)
@@ -957,7 +957,7 @@ async def test_dispatch_all_runs_handlers_concurrently(bus: PubSubEventBus) -> N
 
     t0 = time.perf_counter()
     result = await bus._dispatch_all(
-        [slow, slow, slow, slow], Event(event_type=Topics.Memory.CREATED)
+        [slow, slow, slow, slow], Event(event_type=Topics.Memory.ENRICHED)
     )
     elapsed = time.perf_counter() - t0
     assert result is True
@@ -998,7 +998,7 @@ async def test_decode_handles_pydantic_validation_error() -> None:
 
     # Wrong type for `occurred_at` — invalid datetime string.
     bad_ts = _json.dumps(
-        {"event_type": "memclaw.memory.created", "occurred_at": "not-a-date"}
+        {"event_type": "memclaw.memory.enriched", "occurred_at": "not-a-date"}  # legacy-name-ok: rule 3 — pins the wire format a live subscriber must still decode
     ).encode()
     assert PubSubEventBus._decode(bad_ts) is None
 

@@ -6,8 +6,8 @@ that ask a subscriber to do work.
 
 Uses `enum.StrEnum` (Python 3.11+) so members behave like the underlying
 string in every context: equality, dict-key hashing, f-string formatting,
-and Pub/Sub `topic_path` building all see `Topics.Memory.CREATED` as
-the literal `"memclaw.memory.created"`. A plain `(str, enum.Enum)` mix
+and Pub/Sub `topic_path` building all see `Topics.Memory.EMBEDDED` as
+its literal string value. A plain `(str, enum.Enum)` mix
 equates but does NOT format as the value — `f"{M.X}"` returns
 `"M.X"` — which would corrupt any string-formatted use site.
 """
@@ -18,7 +18,6 @@ import enum
 
 
 class Memory(enum.StrEnum):
-    CREATED = "memclaw.memory.created"
     EMBED_REQUESTED = "memclaw.memory.embed-requested"
     EMBEDDED = "memclaw.memory.embedded"
     ENRICH_REQUESTED = "memclaw.memory.enrich-requested"
@@ -93,7 +92,7 @@ class Lifecycle(enum.StrEnum):
 
 class Topics:
     """Namespaced facade so call sites keep the ergonomic form
-    `Topics.Memory.CREATED` instead of importing each inner enum."""
+    `Topics.Memory.EMBEDDED` instead of importing each inner enum."""
 
     Memory = Memory
     Audit = Audit
@@ -172,11 +171,12 @@ def family(topic: str) -> str:
 # first SHARED one, so it lands in both repos in one cycle. Chosen over
 # ``memory``, the other remaining shared family, on provisioning completeness
 # rather than size: every one of the 9 topics this family declares is live in
-# both environments, whereas ``memory`` declares one topic (``.created``) that
-# exists in neither. That is the same defect that disqualifies ``pipeline``,
-# and while it is harmless there today — nothing publishes ``.created`` — a
-# flip is not the step at which to be relying on that. Evidence, measured
-# against the running world rather than the source tree:
+# both environments, whereas ``memory`` then declared one topic (``.created``)
+# that existed in neither. That is the same defect that disqualifies
+# ``pipeline``, and a flip is not the step at which to rely on a topic being
+# harmless because nothing publishes it. That declaration has since been
+# removed — see the ``memory`` note below. Evidence, measured against the
+# running world rather than the source tree:
 #
 #   * 12/12 pubsub-backed deployables reported EVENT_BUS_DUAL_SUBSCRIBE on at
 #     their RUNNING revision (``check_flip_readiness.py``, enterprise).
@@ -196,9 +196,12 @@ def family(topic: str) -> str:
 # evidence the flip works; the end-to-end signal is the staging deploy's
 # control-plane check. Do not report a green gate as a working flip.
 #
-# ``memory`` is next and is otherwise ready on the same evidence — 16/16 twin
-# durable subscriptions, no ephemerals. Provision or remove
-# ``Memory.CREATED`` first, so its flip does not have to carry an exception.
+# ``memory`` is next and is ready on the same evidence — 16/16 twin durable
+# subscriptions, no ephemerals. Its one blocker is cleared: the declared
+# ``.created`` topic was removed rather than provisioned, because it existed in
+# neither environment, appeared in no events manifest, and had no publisher or
+# subscriber in either repo. Provisioning it would have created topics that
+# nothing emits to and nothing reads.
 #
 # ``pipeline`` must NOT enter this set while it has zero live topics in either
 # environment: publishing to a topic that does not exist is silent loss, so

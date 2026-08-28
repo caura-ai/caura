@@ -44,13 +44,13 @@ async def test_publish_fans_out_to_multiple_subscribers() -> None:
     async def handler_b(_e: Event) -> None:
         counts["b"] += 1
 
-    bus.subscribe(Topics.Memory.CREATED, handler_a)
-    bus.subscribe(Topics.Memory.CREATED, handler_b)
+    bus.subscribe(Topics.Memory.ENRICHED, handler_a)
+    bus.subscribe(Topics.Memory.ENRICHED, handler_b)
 
     for _ in range(3):
         await bus.publish(
-            Topics.Memory.CREATED,
-            Event(event_type=Topics.Memory.CREATED, tenant_id="t1"),
+            Topics.Memory.ENRICHED,
+            Event(event_type=Topics.Memory.ENRICHED, tenant_id="t1"),
         )
     await bus.drain()
 
@@ -61,8 +61,8 @@ async def test_no_subscribers_is_noop() -> None:
     bus = InProcessEventBus()
     # Publishing to a topic no one subscribes to must not raise.
     await bus.publish(
-        Topics.Memory.CREATED,
-        Event(event_type=Topics.Memory.CREATED),
+        Topics.Memory.ENRICHED,
+        Event(event_type=Topics.Memory.ENRICHED),
     )
     await bus.drain()
 
@@ -108,13 +108,13 @@ async def test_drain_awaits_in_flight_tasks() -> None:
 
 
 async def test_event_envelope_auto_populates_id_and_timestamp() -> None:
-    e = Event(event_type=Topics.Memory.CREATED)
+    e = Event(event_type=Topics.Memory.ENRICHED)
     assert e.event_id is not None
     assert e.occurred_at is not None
 
 
 async def test_event_is_frozen() -> None:
-    e = Event(event_type=Topics.Memory.CREATED)
+    e = Event(event_type=Topics.Memory.ENRICHED)
     with pytest.raises((TypeError, ValueError)):
         e.event_type = "other"  # type: ignore[misc]
 
@@ -128,12 +128,12 @@ async def test_drain_raises_on_circular_publish_chain() -> None:
         await bus.publish(Topics.Memory.EMBEDDED, Event(event_type=Topics.Memory.EMBEDDED))
 
     async def handler_b(_e: Event) -> None:
-        await bus.publish(Topics.Memory.CREATED, Event(event_type=Topics.Memory.CREATED))
+        await bus.publish(Topics.Memory.ENRICHED, Event(event_type=Topics.Memory.ENRICHED))
 
-    bus.subscribe(Topics.Memory.CREATED, handler_a)
+    bus.subscribe(Topics.Memory.ENRICHED, handler_a)
     bus.subscribe(Topics.Memory.EMBEDDED, handler_b)
 
-    await bus.publish(Topics.Memory.CREATED, Event(event_type=Topics.Memory.CREATED))
+    await bus.publish(Topics.Memory.ENRICHED, Event(event_type=Topics.Memory.ENRICHED))
     with pytest.raises(CircularPublishChainError, match="circular event-publish chain"):
         await bus.drain(max_rounds=5)
     # drain() is responsible for cancelling the remaining cycle tasks
@@ -165,11 +165,11 @@ async def test_stop_swallows_circular_chain_runtime_error() -> None:
         await bus.publish(Topics.Memory.EMBEDDED, Event(event_type=Topics.Memory.EMBEDDED))
 
     async def cycle_b(_e: Event) -> None:
-        await bus.publish(Topics.Memory.CREATED, Event(event_type=Topics.Memory.CREATED))
+        await bus.publish(Topics.Memory.ENRICHED, Event(event_type=Topics.Memory.ENRICHED))
 
-    bus.subscribe(Topics.Memory.CREATED, cycle_a)
+    bus.subscribe(Topics.Memory.ENRICHED, cycle_a)
     bus.subscribe(Topics.Memory.EMBEDDED, cycle_b)
-    await bus.publish(Topics.Memory.CREATED, Event(event_type=Topics.Memory.CREATED))
+    await bus.publish(Topics.Memory.ENRICHED, Event(event_type=Topics.Memory.ENRICHED))
 
     # Low max_rounds so the test completes quickly, and this must not raise.
     await bus.stop()
