@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import os
 from typing import Any
 
 import uvicorn
@@ -105,11 +106,42 @@ def main(argv: list[str] | None = None) -> None:
         log_file=settings.log_file or None,
     )
 
+    # UVICORN_ACCESS_LOG=false silences uvicorn's per-request access line.
+    #
+    # Defaults to ON, so OSS, on-prem and local runs are unchanged — there
+    # the access line is often the only per-request visibility there is. A
+    # managed deploy opts out, because there it is the THIRD copy of one
+    # fact, and the least useful of the three:
+    #
+    #   1. the APM span     — trace id, duration, route, tags, service map
+    #   2. Cloud Run's own  — httpRequest in Cloud Logging: method, status,
+    #      request log        url, AND latency; written by the platform, so
+    #                         it survives anything this process does
+    #   3. this line        — ip, method, path, status. No duration.
+    #
+    # Measured before removing rather than assumed: uvicorn.access emitted
+    # 3,690,995 lines in 24h, 53.6% of ALL prod logs, on 2026-08-28.
+    #
+    # Parsed inline rather than through common/env_utils.read_*_env, which
+    # is where an env-var reader would otherwise belong. This file is
+    # vendored into caura-enterprise as an identical-policy copy and
+    # common/env_utils.py does NOT exist in that repo, so importing it
+    # would re-vendor a serve.py that raises ImportError at startup for
+    # every platform service. Keep this module's imports to things that
+    # exist in BOTH repos.
+    raw_access_log = os.environ.get("UVICORN_ACCESS_LOG", "").strip().lower()
+    access_log = raw_access_log not in {"0", "false", "no", "off"}
+
     # log_config=None: do NOT let uvicorn install its own stream handlers.
     # That keeps uvicorn.{error,access} propagating to the structlog root
     # handler configured above (in the parent AND the workers), so every
     # uvicorn line — including the parent supervisor's — emits as JSON with a
     # Datadog status. Installing uvicorn's config would re-plain-text them.
+    #
+    # access_log is a separate lever from log_config: log_config decides how
+    # a record is FORMATTED, access_log decides whether uvicorn creates the
+    # record at all. Turning this off therefore costs nothing downstream —
+    # no handler, filter or sampling rule has to know about it.
     uvicorn.run(
         args.app,
         host=args.host,
@@ -118,6 +150,7 @@ def main(argv: list[str] | None = None) -> None:
         timeout_keep_alive=args.timeout_keep_alive,
         timeout_worker_healthcheck=args.timeout_worker_healthcheck,
         log_config=None,
+        access_log=access_log,
     )
 
 

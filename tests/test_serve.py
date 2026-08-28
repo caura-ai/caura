@@ -137,3 +137,101 @@ def test_uvicorn_really_accepts_the_healthcheck_kwarg() -> None:
         in inspect.signature(uvicorn.Config.__init__).parameters
     )
     assert "timeout_worker_healthcheck" in inspect.signature(uvicorn.run).parameters
+
+
+def _run_main_capturing_uvicorn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> mock.MagicMock:
+    """Drive serve.main() with everything external mocked; return the run mock."""
+    fake_settings = types.SimpleNamespace(
+        environment="production",
+        log_level="INFO",
+        log_format_json=True,
+        log_file="",
+    )
+    monkeypatch.setattr(serve, "_load", lambda _path: fake_settings)
+    monkeypatch.setattr(serve, "configure_logging", mock.MagicMock())
+    run = mock.MagicMock()
+    monkeypatch.setattr(serve.uvicorn, "run", run)
+
+    serve.main(
+        [
+            "core_api.app:app",
+            "--settings",
+            "core_api.config:settings",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8000",
+            "--workers",
+            "2",
+            "--timeout-keep-alive",
+            "65",
+        ]
+    )
+    return run
+
+
+def test_access_log_defaults_on_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Absent env var must leave access logging ON.
+
+    This default is the whole reason the knob is opt-out. OSS, on-prem and
+    local runs have neither an APM span nor Cloud Run's httpRequest entry, so
+    the uvicorn access line is their only per-request visibility. Silencing it
+    by default would take that away from every self-hosted install to solve a
+    cost problem that only the managed deploy has.
+    """
+    monkeypatch.delenv("UVICORN_ACCESS_LOG", raising=False)
+
+    _args, kwargs = _run_main_capturing_uvicorn(monkeypatch).call_args
+
+    assert kwargs["access_log"] is True
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "FALSE", "No", " off ", "OFF"])
+def test_access_log_off_for_falsy_spellings(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """The managed deploy sets this; accept the spellings people actually type.
+
+    Case and surrounding whitespace are normalised because this value is
+    threaded through a comma-joined --update-env-vars string in the deploy
+    workflows, where a stray space is easy to introduce and impossible to see
+    in review.
+    """
+    monkeypatch.setenv("UVICORN_ACCESS_LOG", raw)
+
+    _args, kwargs = _run_main_capturing_uvicorn(monkeypatch).call_args
+
+    assert kwargs["access_log"] is False
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "yes", "on", "", "maybe"])
+def test_access_log_on_for_everything_else(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """Anything not clearly falsy keeps logging.
+
+    Including junk like "maybe": the failure modes are not symmetric. Reading
+    an unrecognised value as "off" silently drops request visibility and looks
+    identical to a healthy quiet service, whereas reading it as "on" costs
+    some log volume and is immediately obvious. Fail toward the loud side.
+    """
+    monkeypatch.setenv("UVICORN_ACCESS_LOG", raw)
+
+    _args, kwargs = _run_main_capturing_uvicorn(monkeypatch).call_args
+
+    assert kwargs["access_log"] is True
+
+
+def test_uvicorn_really_accepts_the_access_log_kwarg() -> None:
+    """Same guard as the healthcheck kwarg above, for the same reason.
+
+    The tests above assert against a MagicMock, which swallows any keyword.
+    If uvicorn ever renames or drops ``access_log``, they all keep passing
+    and the only place it surfaces is a TypeError on container startup.
+    """
+    assert "access_log" in inspect.signature(uvicorn.Config.__init__).parameters
+    assert "access_log" in inspect.signature(uvicorn.run).parameters
