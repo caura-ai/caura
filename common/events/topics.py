@@ -157,19 +157,57 @@ def family(topic: str) -> str:
 
 # Families whose PUBLISHERS have been flipped to the renamed topics.
 #
-# Empty, and that is the point: with nothing here, ``publish_name`` is the
-# identity and publishing is byte-for-byte what it was before this module
-# changed. That is what makes binding both names safe to ship ahead of any
-# particular environment's deploy.
+# Add ONE family at a time, and only once every subscriber of that family is
+# confirmed deployed and bound to both names — confirmed per running service,
+# not per merged pull request; a merge is not a vendor and a vendor is not a
+# deploy.
 #
-# Flipping a family is a separate, later step. Add ONE family at a time, and
-# only once every subscriber of that family is confirmed deployed and bound to
-# both names — confirmed per running service, not per merged pull request; a
-# merge is not a vendor and a vendor is not a deploy. Order by blast radius:
-# "pipeline" or "org" first, and "audit" LAST, because those rows are
-# hash-chained and a lost or reordered audit event is the one failure in this
-# programme that cannot be undone.
-FLIPPED_FAMILIES: frozenset[str] = frozenset()
+# THIS SET IS NOT THE SAME IN BOTH REPOS, and mirroring the enterprise line
+# here would break this one. ``fleet`` and ``security`` are declared only in
+# enterprise, so naming either here makes ``_validate_flipped_families`` raise
+# at import in every OSS service. Rule 6 couples the two repos for a SHARED
+# family — which ``lifecycle`` is — and inverts for an enterprise-only one.
+#
+# ``lifecycle`` flipped 2026-08-28 — the third family in this programme and the
+# first SHARED one, so it lands in both repos in one cycle. Chosen over
+# ``memory``, the other remaining shared family, on provisioning completeness
+# rather than size: every one of the 9 topics this family declares is live in
+# both environments, whereas ``memory`` declares one topic (``.created``) that
+# exists in neither. That is the same defect that disqualifies ``pipeline``,
+# and while it is harmless there today — nothing publishes ``.created`` — a
+# flip is not the step at which to be relying on that. Evidence, measured
+# against the running world rather than the source tree:
+#
+#   * 12/12 pubsub-backed deployables reported EVENT_BUS_DUAL_SUBSCRIBE on at
+#     their RUNNING revision (``check_flip_readiness.py``, enterprise).
+#   * 36/36 legacy durable subscriptions across prod and staging (18 each) had
+#     a twin, each verified attached to the matching twin TOPIC and not merely
+#     present by name.
+#   * ``preflight_dual_subscribe.py`` exited 0 for both environments, with the
+#     topic-IAM half reachable, so the attach pairing was verified live and not
+#     merely in config.
+#   * This family has NO broadcast topic and no per-process ephemeral
+#     subscription in either environment, so there is no runtime-created
+#     binding to infer — every subscription it relies on is a durable resource
+#     that was listed.
+#
+# WHAT THAT DOES NOT PROVE. Both gates read CONFIGURATION. Neither observes a
+# message being delivered. A green gate is a necessary condition, never
+# evidence the flip works; the end-to-end signal is the staging deploy's
+# control-plane check. Do not report a green gate as a working flip.
+#
+# ``memory`` is next and is otherwise ready on the same evidence — 16/16 twin
+# durable subscriptions, no ephemerals. Provision or remove
+# ``Memory.CREATED`` first, so its flip does not have to carry an exception.
+#
+# ``pipeline`` must NOT enter this set while it has zero live topics in either
+# environment: publishing to a topic that does not exist is silent loss, so
+# flipping it would move nothing and report success. ``org`` is shared AND its
+# staging ephemeral pool was under investigation as a suspected subscription
+# leak. ``audit`` LAST, unconditionally — those rows are hash-chained, and a
+# lost or reordered audit event is the one failure here that replay cannot
+# repair.
+FLIPPED_FAMILIES: frozenset[str] = frozenset({"lifecycle"})
 
 
 def all_topics() -> tuple[str, ...]:

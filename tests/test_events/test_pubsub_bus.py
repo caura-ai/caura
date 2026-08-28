@@ -31,7 +31,18 @@ from common.events.pubsub import (
 
 @pytest.fixture
 def bus() -> PubSubEventBus:
-    b = PubSubEventBus(project_id="proj", subscription_prefix="test")
+    # ``dual_subscribe=True`` here and at every other construction in this file.
+    # With ``lifecycle`` flipped, the construction guard refuses ``dual=False``
+    # (a flipped family would publish under a name the bus does not bind), so
+    # the default is no longer constructible in this repo. None of the tests
+    # here are ABOUT that default — they cover topic prefixing, tunables, env
+    # normalisation, the pull loop and broadcast bookkeeping — so they take the
+    # setting all 12 running deployables use rather than neutralising the guard.
+    # The dual default itself is covered in ``test_topic_rename_cutover.py``,
+    # which keeps a dedicated fixture for it.
+    b = PubSubEventBus(
+        project_id="proj", subscription_prefix="test", dual_subscribe=True
+    )
     # Pre-install a fake publisher so publish() doesn't touch the SDK.
     # spec-limited to the real PublisherClient surface we rely on: a
     # permissive MagicMock happily accepts .close(), which is exactly
@@ -78,13 +89,18 @@ async def test_topic_prefix_scopes_publish(bus: PubSubEventBus) -> None:
 
 def test_topic_name_prefix_and_no_op() -> None:
     scoped = PubSubEventBus(
-        project_id="proj", subscription_prefix="prod-core-api", topic_prefix="prod"
+        project_id="proj",
+        subscription_prefix="prod-core-api",
+        topic_prefix="prod",
+        dual_subscribe=True,
     )
     assert (
         scoped._topic_name("memclaw.memory.embedded") == "prod--memclaw.memory.embedded"
     )
     # Empty/unset prefix ⇒ the raw topic name (byte-identical to today's behaviour).
-    noop = PubSubEventBus(project_id="proj", subscription_prefix="test")
+    noop = PubSubEventBus(
+        project_id="proj", subscription_prefix="test", dual_subscribe=True
+    )
     assert noop._topic_name("memclaw.memory.embedded") == "memclaw.memory.embedded"
 
 
@@ -950,7 +966,9 @@ async def test_dispatch_all_runs_handlers_concurrently(bus: PubSubEventBus) -> N
 
 
 async def test_constructor_tunables_default_and_override() -> None:
-    default = PubSubEventBus(project_id="proj", subscription_prefix="test")
+    default = PubSubEventBus(
+        project_id="proj", subscription_prefix="test", dual_subscribe=True
+    )
     assert default._max_messages == 25
     assert default._pull_timeout == 20.0
     assert default._error_backoff == 5.0
@@ -961,6 +979,7 @@ async def test_constructor_tunables_default_and_override() -> None:
         max_messages=100,
         pull_timeout=5.0,
         error_backoff=1.0,
+        dual_subscribe=True,
     )
     assert custom._max_messages == 100
     assert custom._pull_timeout == 5.0
@@ -1067,7 +1086,10 @@ async def _drive_one_batch(bus: PubSubEventBus, received: list[Any]) -> dict[str
 
 async def test_publish_stamps_source_env_attribute() -> None:
     bus = PubSubEventBus(
-        project_id="proj", subscription_prefix="test", env="production"
+        project_id="proj",
+        subscription_prefix="test",
+        env="production",
+        dual_subscribe=True,
     )
     fake_publisher = MagicMock()
     fake_publisher.topic_path = lambda proj, topic: f"projects/{proj}/topics/{topic}"
@@ -1095,20 +1117,35 @@ async def test_publish_omits_source_env_when_env_unset(bus: PubSubEventBus) -> N
 
 async def test_env_is_normalised_and_empty_collapses_to_none() -> None:
     assert (
-        PubSubEventBus(project_id="p", subscription_prefix="s", env=" production ")._env
+        PubSubEventBus(
+            project_id="p",
+            subscription_prefix="s",
+            env=" production ",
+            dual_subscribe=True,
+        )._env
         == "production"
     )
     assert (
-        PubSubEventBus(project_id="p", subscription_prefix="s", env="   ")._env is None
+        PubSubEventBus(
+            project_id="p", subscription_prefix="s", env="   ", dual_subscribe=True
+        )._env is None
     )
-    assert PubSubEventBus(project_id="p", subscription_prefix="s", env="")._env is None
-    assert PubSubEventBus(project_id="p", subscription_prefix="s")._env is None
+    assert PubSubEventBus(
+        project_id="p", subscription_prefix="s", env="", dual_subscribe=True
+    )._env is None
+    assert PubSubEventBus(
+        project_id="p", subscription_prefix="s", dual_subscribe=True
+    )._env is None
 
 
 async def test_foreign_source_env_decision_matrix() -> None:
-    prod = PubSubEventBus(project_id="p", subscription_prefix="s", env="production")
+    prod = PubSubEventBus(
+        project_id="p", subscription_prefix="s", env="production", dual_subscribe=True
+    )
     # Guard disabled when this bus has no env.
-    no_env = PubSubEventBus(project_id="p", subscription_prefix="s")
+    no_env = PubSubEventBus(
+        project_id="p", subscription_prefix="s", dual_subscribe=True
+    )
 
     def msg(attrs: dict[str, str]) -> Any:
         m = MagicMock()
@@ -1127,7 +1164,10 @@ async def test_foreign_source_env_decision_matrix() -> None:
 
 async def test_pull_loop_drops_foreign_env_message_before_dispatch() -> None:
     bus = PubSubEventBus(
-        project_id="proj", subscription_prefix="test", env="production"
+        project_id="proj",
+        subscription_prefix="test",
+        env="production",
+        dual_subscribe=True,
     )
     foreign = _make_received(
         b'{"event_type": "memclaw.memory.embedded"}',
@@ -1145,7 +1185,10 @@ async def test_pull_loop_drops_foreign_env_message_before_dispatch() -> None:
 
 async def test_pull_loop_processes_same_env_message() -> None:
     bus = PubSubEventBus(
-        project_id="proj", subscription_prefix="test", env="production"
+        project_id="proj",
+        subscription_prefix="test",
+        env="production",
+        dual_subscribe=True,
     )
     local = _make_received(
         b'{"event_type": "memclaw.memory.embedded"}',
@@ -1163,7 +1206,10 @@ async def test_pull_loop_processes_message_without_source_env_attribute() -> Non
     # A publisher that predates the attribute (or an external producer) must
     # still be processed — the guard only drops *provably* foreign messages.
     bus = PubSubEventBus(
-        project_id="proj", subscription_prefix="test", env="production"
+        project_id="proj",
+        subscription_prefix="test",
+        env="production",
+        dual_subscribe=True,
     )
     legacy = _make_received(
         b'{"event_type": "memclaw.memory.embedded"}', "ack-legacy", {}
@@ -1181,7 +1227,9 @@ async def test_pull_loop_processes_message_without_source_env_attribute() -> Non
 def test_subscribe_broadcast_records_topic() -> None:
     # broadcast=True flags the topic for a per-process subscription; the
     # default keeps the shared work-queue subscription.
-    b = PubSubEventBus(project_id="proj", subscription_prefix="core-api")
+    b = PubSubEventBus(
+        project_id="proj", subscription_prefix="core-api", dual_subscribe=True
+    )
 
     async def handler(event: Event) -> None: ...
 
