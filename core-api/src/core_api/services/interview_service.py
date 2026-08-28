@@ -1102,6 +1102,14 @@ async def process_pending_interview_jobs(limit_per_tenant: int = 20) -> dict:
     tenants = await list_tenants_with_interviewer_enabled(read=False)
     summary = {
         "tenants": len(tenants),
+        # Tenants dropped from this tick by a storage error below. ``jobs_sweep_ok``
+        # only covers this function raising as a whole; the per-tenant handler
+        # catches and continues, so without this counter a sweep that failed for
+        # some tenants returns the same numbers as one where those tenants had
+        # nothing to do — the exact confusion #1019 removed one level up, and the
+        # one that lets a single tenant's interviewer stall indefinitely behind a
+        # summary that reads healthy.
+        "tenants_failed": 0,
         "jobs_processed": 0,
         "jobs_done": 0,
         "jobs_retried": 0,
@@ -1142,6 +1150,7 @@ async def process_pending_interview_jobs(limit_per_tenant: int = 20) -> dict:
             )
         except Exception:
             logger.exception("interview jobs: pending query failed (tenant=%s)", tenant_id)
+            summary["tenants_failed"] += 1
             continue
         stale = [row for row in processing or [] if _job_processing_is_stale(row, now)]
         # allow_stale_processing only for the stale rows: the sweep is the
@@ -1243,7 +1252,14 @@ async def run_interview_schedule() -> dict:
     tenants = await list_tenants_with_interviewer_enabled(read=False)
     summary = {
         "tenants": len(tenants),
+        # Same reason as the jobs sweep's counter: both loops below log-and-continue,
+        # so a scan that failed is otherwise reported as a tenant with no due nodes.
+        # ``nodes_failed`` also keeps the node counters self-consistent —
+        # ``nodes_considered`` is incremented before the per-node try, so without it
+        # a failing node is counted as considered and lands in no outcome bucket.
+        "tenants_failed": 0,
         "nodes_considered": 0,
+        "nodes_failed": 0,
         "commands_queued": 0,
         "skipped_pending": 0,
         "skipped_not_due": 0,
@@ -1264,6 +1280,7 @@ async def run_interview_schedule() -> dict:
             )
         except Exception:
             logger.exception("interview schedule: tenant scan failed (tenant=%s)", tenant_id)
+            summary["tenants_failed"] += 1
             continue
         pending_nodes = {str(c.get("node_id")) for c in pending}
 
@@ -1320,6 +1337,7 @@ async def run_interview_schedule() -> dict:
                     tenant_id,
                     node_id,
                 )
+                summary["nodes_failed"] += 1
     # #665: drain persisted async-submit jobs in the same sweep — the
     # durable retry path for jobs whose fire-and-forget processing at
     # submit time died with the process or failed transiently.
@@ -1327,6 +1345,12 @@ async def run_interview_schedule() -> dict:
     # the sweep succeeds or raises — callers index these keys directly.
     for key in ("jobs_processed", "jobs_done", "jobs_retried", "jobs_parked", "jobs_skipped"):
         summary[key] = 0
+    # The sweep's own ``tenants_failed`` is a DIFFERENT population from this
+    # function's: the sweep failed to query a tenant's job queue, this one failed
+    # to scan a tenant's nodes. A tick can hit either, both or neither, so they
+    # are carried side by side rather than summed into one number that answers
+    # neither question.
+    summary["jobs_tenants_failed"] = 0
     # ``jobs_sweep_ok`` exists because the zero-init above is otherwise
     # indistinguishable from a healthy idle sweep: a total failure and "no
     # pending jobs" both answer 200 with five zeros. The hourly cron reads
@@ -1350,4 +1374,5 @@ async def run_interview_schedule() -> dict:
     else:
         for key in ("jobs_processed", "jobs_done", "jobs_retried", "jobs_parked", "jobs_skipped"):
             summary[key] = jobs_summary.get(key, 0)
+        summary["jobs_tenants_failed"] = jobs_summary.get("tenants_failed", 0)
     return summary

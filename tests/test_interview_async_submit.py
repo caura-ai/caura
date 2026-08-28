@@ -761,12 +761,17 @@ async def test_process_pending_jobs_returns_counts_summary(client, canned_llm):
     summary = await process_pending_interview_jobs()
     assert set(summary) == {
         "tenants",
+        # A tenant whose job query raised is skipped and logged; the counter is
+        # what stops that reading as a tenant with an empty queue. See
+        # tests/test_interview_sweep_freshness.py.
+        "tenants_failed",
         "jobs_processed",
         "jobs_done",
         "jobs_retried",
         "jobs_parked",
         "jobs_skipped",
     }
+    assert summary["tenants_failed"] == 0
     assert summary["tenants"] >= 1
     assert summary["jobs_processed"] >= 1
     assert summary["jobs_done"] >= 1
