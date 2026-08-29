@@ -4000,13 +4000,28 @@ class PostgresService:
     async def memory_get_memories_by_ids(
         self,
         memory_ids: list[UUID],
+        *,
+        tenant_id: str,
     ) -> dict[UUID, Memory]:
-        """Fetch multiple memories by ID, returned as {id: Memory}."""
+        """Fetch multiple memories by ID within one tenant, as {id: Memory}.
+
+        ``tenant_id`` is required and is applied in SQL. This method used to
+        take ids alone and return whatever they matched, leaving the caller to
+        compare ``tenant_id`` on each row afterwards — which is the primitive
+        GHSA-wgvw-28pq-jc36 describes. Two things were wrong with that. The
+        filter was optional one layer up, so a request that omitted it got
+        every row it named; and even when supplied, the rows crossed the
+        database boundary before anything checked them, so the protection was a
+        Python comparison the next refactor could drop with no test failing.
+
+        Filtering here means another tenant's row is never selected at all.
+        """
         if not memory_ids:
             return {}
         async with get_session() as session:
             stmt = select(Memory).where(
                 Memory.id.in_(memory_ids),
+                Memory.tenant_id == tenant_id,
                 Memory.deleted_at.is_(None),
             )
             result = await session.execute(stmt)

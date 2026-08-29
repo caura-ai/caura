@@ -441,22 +441,24 @@ async def find_duplicate_hash(
 async def bulk_get_memories(request: Request) -> list[dict | None]:
     """Fetch many memories by id in a single round-trip.
 
-    Body: ``{"ids": ["uuid", ...], "tenant_id": "..." (optional)}``.
+    Body: ``{"ids": ["uuid", ...], "tenant_id": "..."}``.
 
     Returns a list of memory dicts in the **same order** as the input ids,
-    with ``null`` for ids that don't exist (or are soft-deleted, or — if
-    ``tenant_id`` is provided — belong to a different tenant). Order
-    preservation matters: callers (e.g. crystallizer archive sweep) zip
-    the response back to their original id list.
+    with ``null`` for ids that don't exist, are soft-deleted, or belong to a
+    different tenant. Order preservation matters: callers (e.g. crystallizer
+    archive sweep) zip the response back to their original id list.
 
-    Tenant filter is optional to mirror the single-row ``GET /memories/{id}``
-    contract. Callers that need tenant safety supply ``tenant_id``; the
-    request fails open per-row (returns ``null``) when an id belongs to a
-    different tenant, never with a 4xx.
+    ``tenant_id`` is **required**. It was optional — "to mirror the single-row
+    ``GET /memories/{id}`` contract" — and that is GHSA-wgvw-28pq-jc36: a body
+    with ids and no tenant returned any row by id, across every tenant, from a
+    service that authenticates nothing. Mirroring another endpoint's contract
+    is not a reason to make a tenant filter skippable; it only meant two
+    endpoints had the same hole.
 
     Cap: 1000 ids per request to bound query plan size and response payload.
     """
     body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
     raw_ids = body.get("ids", [])
     if not isinstance(raw_ids, list):
         raise HTTPException(status_code=422, detail="'ids' must be a list")
@@ -473,16 +475,17 @@ async def bulk_get_memories(request: Request) -> list[dict | None]:
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=422, detail=f"invalid UUID in ids: {e}")
 
-    tenant_filter = body.get("tenant_id")
-    by_id = await _svc.memory_get_memories_by_ids(uids)
+    by_id = await _svc.memory_get_memories_by_ids(uids, tenant_id=tenant_id)
 
+    # No tenant comparison here any more: the query is scoped, so a row from
+    # another tenant is never fetched rather than being fetched and discarded.
+    # The per-id ``None`` is unchanged — a foreign id is still absent from the
+    # result rather than an error, which keeps this from being an existence
+    # oracle for memory UUIDs.
     out: list[dict | None] = []
     for uid in uids:
         mem = by_id.get(uid)
-        if mem is None or (tenant_filter is not None and mem.tenant_id != tenant_filter):
-            out.append(None)
-        else:
-            out.append(orm_to_dict(mem, MEMORY_FIELDS))
+        out.append(orm_to_dict(mem, MEMORY_FIELDS) if mem is not None else None)
     return out
 
 

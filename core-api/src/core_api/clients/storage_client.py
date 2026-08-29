@@ -1065,19 +1065,21 @@ class CoreStorageClient:
     async def bulk_get_memories(
         self,
         ids: list[str],
-        tenant_id: str | None = None,
+        tenant_id: str,
     ) -> list[dict | None]:
         """Fetch many memories in one round-trip; order matches input ``ids``.
 
-        Missing rows (deleted, nonexistent, or — when ``tenant_id`` is
-        provided — cross-tenant) come back as ``None`` in the same slot
-        rather than being dropped from the list. Lets callers zip the
-        response back to their original id list. Capped at 1000 ids
-        server-side; callers needing more must chunk client-side.
+        Missing rows — deleted, nonexistent, or belonging to another tenant —
+        come back as ``None`` in the same slot rather than being dropped from
+        the list. Lets callers zip the response back to their original id list.
+        Capped at 1000 ids server-side; callers needing more must chunk
+        client-side.
+
+        ``tenant_id`` is required. As an optional argument it was the client
+        half of GHSA-wgvw-28pq-jc36, and one of the two call sites did in fact
+        omit it.
         """
-        payload: dict[str, Any] = {"ids": ids}
-        if tenant_id is not None:
-            payload["tenant_id"] = tenant_id
+        payload: dict[str, Any] = {"ids": ids, "tenant_id": tenant_id}
         return await self._post(  # type: ignore[return-value]
             "/memories/bulk-get", payload, read=True
         )

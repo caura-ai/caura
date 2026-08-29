@@ -524,7 +524,7 @@ async def _run_crystallization(
     # deleted) — same per-row "skip missing" semantics the old loop's
     # ``if mem:`` gate provided, just with Nx fewer HTTPs (audit P5).
     memories_by_id: dict[UUID, dict] = {}
-    bulk_rows = await sc.bulk_get_memories([str(mid) for mid in total_ids])
+    bulk_rows = await sc.bulk_get_memories([str(mid) for mid in total_ids], tenant_id=tenant_id)
     for mid, mem in zip(total_ids, bulk_rows):
         if mem is not None:
             memories_by_id[mid] = mem

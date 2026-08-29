@@ -174,7 +174,7 @@ async def test_bulk_get_memories_preserves_input_order(sc):
     b = await _write_memory(sc, tid, "B")
     c = await _write_memory(sc, tid, "C")
 
-    rows = await sc.bulk_get_memories([c["id"], a["id"], b["id"]])
+    rows = await sc.bulk_get_memories([c["id"], a["id"], b["id"]], tenant_id=tid)
     assert len(rows) == 3
     assert [r["id"] for r in rows] == [c["id"], a["id"], b["id"]]
     assert rows[0]["content"] == "C"
@@ -185,15 +185,20 @@ async def test_bulk_get_memories_returns_none_for_missing(sc):
     a = await _write_memory(sc, tid, "exists")
     ghost = str(uuid4())
 
-    rows = await sc.bulk_get_memories([a["id"], ghost])
+    rows = await sc.bulk_get_memories([a["id"], ghost], tenant_id=tid)
     assert len(rows) == 2
     assert rows[0]["id"] == a["id"]
     assert rows[1] is None
 
 
 async def test_bulk_get_memories_tenant_filter_yields_none(sc):
-    """If ``tenant_id`` is provided, cross-tenant ids return None (per-row
-    fail-closed) rather than leaking another tenant's memory dict."""
+    """Cross-tenant ids return None (per-row fail-closed) rather than leaking
+    another tenant's memory dict.
+
+    ``tenant_id`` is now required rather than optional — it was the optionality
+    that made this GHSA-wgvw-28pq-jc36 — and the filter is applied in SQL, so
+    the foreign row is never selected rather than selected and then masked.
+    """
     tid_a = _t()
     tid_b = _t()
     m_a = await _write_memory(sc, tid_a, "tenant A's")
@@ -205,7 +210,7 @@ async def test_bulk_get_memories_tenant_filter_yields_none(sc):
 
 
 async def test_bulk_get_memories_empty_input(sc):
-    assert await sc.bulk_get_memories([]) == []
+    assert await sc.bulk_get_memories([], tenant_id=_t()) == []
 
 
 # ============================================================================
