@@ -259,6 +259,70 @@ jobs:
             exit 1
           fi
 
+      - name: Tenant-scope gate (storage routes + SQL layer)
+        # Two advisories this month were the same defect: GHSA-xw4x-jwf5-8m9h
+        # validated the tenant a request NAMED and never checked it against the
+        # row it ADDRESSED, and GHSA-wgvw-28pq-jc36's primitive was an optional
+        # ``tenant_id`` filter on ``POST /memories/bulk-get``. Neither is a
+        # property of one endpoint — the tenancy invariant was held up across
+        # the whole storage surface by convention, and a lapse in it is not a
+        # syntax error, not a type error and not a test failure.
+        #
+        # The gate enumerates every route (from the live app, so a router
+        # registered in a loop still counts) and every public PostgresService
+        # method (from its signature, which is exact), and fails when one that
+        # takes no binding tenant scope is not accounted for in
+        # core-storage-api/tenant_scope_allowlist.json. ``--base`` makes the
+        # allowlist a ratchet: it may shrink, it may not grow.
+        #
+        # In this job rather than its own because it imports the app, and this
+        # job already installed it — a standalone job would re-run the whole uv
+        # install to save a few seconds of work.
+        #
+        # The fetch is its own rather than borrowed from the broker gate above:
+        # depending on an earlier step's side effect is how a gate silently
+        # stops ratcheting when steps get reordered.
+        #
+        # ``+$BASE:refs/remotes/origin/$BASE`` rather than a bare branch name.
+        # Without a destination, ``git fetch`` is only guaranteed to write
+        # FETCH_HEAD — it updates ``refs/remotes/origin/<branch>`` only if the
+        # configured ``remote.origin.fetch`` refspec happens to cover it, and
+        # actions/checkout configures a narrow one on ``pull_request``.
+        # Measured on this branch: the fetch logs ``main -> FETCH_HEAD`` and
+        # nothing else, so the ``origin/main`` the next line asks for is
+        # whatever the checkout left behind rather than what was just fetched.
+        # It resolves today, so the gate has been comparing against a real ref —
+        # but "resolves because of how a different action is configured" is not
+        # something this step should rest on. The explicit destination makes the
+        # ref this step's own output.
+        #
+        # The base is ``github.base_ref`` — the branch this PR actually targets
+        # — not a hardcoded ``main``. This workflow triggers on
+        # ``branches: [main, dev]``, and the ratchet's whole claim is that the
+        # comparison is "exactly this PR's contribution"; against a fixed
+        # ``main``, a PR into a diverged ``dev`` would see that branch's
+        # already-reviewed entries as ones it added itself and fail with "the
+        # allowlist grew" for a diff that never touched it. No ``dev`` branch
+        # exists today, so this is defensive rather than a live fix — the
+        # sibling ratchets on this file (``legacy_name_ratchet.py``, the broker
+        # OpenAPI check) still hardcode ``main`` and have the same latent gap.
+        # ``base_ref`` is always set here because the workflow is
+        # ``pull_request``-only; if that ever changes, the empty refspec fails
+        # the step, and the gate's own unresolvable-base check fails it too —
+        # both loud, neither a silent pass.
+        # ``base_ref`` arrives through ``env`` rather than a ``${{ }}`` inside the
+        # script. The value is constrained to ``main``/``dev`` by the trigger, so
+        # this is not exploitable as written — but expression interpolation into
+        # a shell body is the shape zizmor and CodeQL flag, and the reason they
+        # flag it regardless of the specific context is that the pattern gets
+        # copied to one that IS attacker-controlled. Through ``env`` the value is
+        # data to the shell instead of text pasted into the program.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "+${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          uv run python scripts/tenant_scope_gate.py --base "origin/${BASE_REF}"
+
       # The four steps below check each service against common/ as well as
       # against its own src/, because every service pyproject now carries
       # ``mypy_path = "src:.."`` — ``..`` being the repo root, where common/
