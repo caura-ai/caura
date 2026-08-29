@@ -30,6 +30,23 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # A tag that disagrees with pyproject.toml does not fail — it publishes
+      # whatever pyproject.toml says, under a tag claiming otherwise. The release
+      # then looks done while PyPI serves a different version. Both prefixes are
+      # stripped so the check works on either tag. Skipped on workflow_dispatch,
+      # where there is no tag to agree with.
+      - name: The tag must agree with pyproject.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#caura-client-v}"
+          TAG_VERSION="${TAG_VERSION#memclaw-client-v}" # legacy-name-ok: strips the tag pattern kept above
+          PKG_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} says ${TAG_VERSION} but pyproject.toml says ${PKG_VERSION}"
+            exit 1
+          fi
+          echo "publishing $(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['name'])")==${PKG_VERSION}"
+        working-directory: clients/python
       - name: Build
         run: |
           pip install build
@@ -39,3 +56,47 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: clients/python/dist/
+
+      # A green publish step is not evidence PyPI serves it. The npm twin carries
+      # the same check after #870, where a version bump passed every gate and both
+      # registries went on serving the old build — the tick meant "nothing went
+      # wrong", not "it shipped". Ask the index. PyPI is not immediately
+      # consistent, hence the retries.
+      - name: PyPI must actually serve it
+        run: |
+          PKG_NAME=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['name'])")
+          PKG_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          # Ask for the project and test membership, rather than requesting the
+          # version URL directly: PyPI answers that 404 in a way curl reports as
+          # exit 56 ("failure receiving network data"), which is indistinguishable
+          # from a real network fault.
+          #
+          # The two failures are then reported apart. "could not reach the index"
+          # and "index reachable, version absent" mean different things to whoever
+          # reads a red run: the first is infrastructure, the second is the release
+          # this step exists to catch. LAST_STATE carries that distinction into the
+          # final error so it survives past the per-attempt lines.
+          #
+          # Ten attempts with increasing backoff, 225s of waiting in total. PyPI's
+          # JSON index is not immediately consistent, and a flat 50s window can go
+          # red on a publish that actually succeeded.
+          ATTEMPTS=10
+          LAST_STATE="never ran"
+          for attempt in $(seq 1 "${ATTEMPTS}"); do
+            if ! curl -sf "https://pypi.org/pypi/${PKG_NAME}/json" -o /tmp/pypi.json; then
+              LAST_STATE="could not reach the PyPI index"
+              echo "attempt ${attempt}/${ATTEMPTS}: ${LAST_STATE}, retrying"
+            elif python -c "import json,sys; sys.exit(0 if sys.argv[1] in json.load(open('/tmp/pypi.json'))['releases'] else 1)" "${PKG_VERSION}"; then
+              echo "PyPI serves ${PKG_NAME}==${PKG_VERSION}"
+              exit 0
+            else
+              LAST_STATE="index reachable but ${PKG_VERSION} is not in it"
+              echo "attempt ${attempt}/${ATTEMPTS}: ${LAST_STATE}, waiting"
+            fi
+            if [ "${attempt}" -lt "${ATTEMPTS}" ]; then
+              sleep $((attempt * 5))
+            fi
+          done
+          echo "::error::published without error, but after ${ATTEMPTS} attempts: ${LAST_STATE} (${PKG_NAME}==${PKG_VERSION})"
+          exit 1
+        working-directory: clients/python
