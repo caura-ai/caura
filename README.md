@@ -661,9 +661,9 @@ Automated agents (Claude Code, Codex) may refuse `curl | bash` for
 safety. Two-step install lets them audit the script first:
 
 ```bash
-curl -s "http://localhost:8000/api/v1/install-skill" > /tmp/install-memclaw-skill.sh
-less /tmp/install-memclaw-skill.sh      # review — it only does mkdir + curl + write
-bash /tmp/install-memclaw-skill.sh
+curl -s "http://localhost:8000/api/v1/install-skill" > /tmp/install-caura-skill.sh
+less /tmp/install-caura-skill.sh      # review — it only does mkdir + curl + write
+bash /tmp/install-caura-skill.sh
 ```
 
 #### Options

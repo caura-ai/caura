@@ -1,4 +1,4 @@
-"""memclaw-interviewer — the Claude Code disk-parser adapter (Interviewer Phase 2).
+"""caura-interviewer — the Claude Code disk-parser adapter (Interviewer Phase 2).
 
 Reads Claude Code session transcripts (``~/.claude/projects/<slug>/<uuid>.jsonl``)
 READ-ONLY, tracks per-file cursors via the server's forward-only watermark

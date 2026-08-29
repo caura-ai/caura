@@ -63,10 +63,10 @@ cron_ticks:
     module: core_operations.app
 
 # The str-enum families in common/events/topics.py. Topic strings follow
-# ``memclaw.<domain>.<verb>``.
+# ``<brand>.<domain>.<verb>`` — the brand segment flips per family; see FLIPPED_FAMILIES.
 event_topic_families:
   - name: Memory
-    topics: 5   # created, embed-requested, embedded, enrich-requested, enriched
+    topics: 4   # embed-requested, embedded, enrich-requested, enriched
   - name: Audit
     topics: 1   # event-recorded
   - name: Pipeline
@@ -74,7 +74,7 @@ event_topic_families:
   - name: Org
     topics: 2   # suppression-changed, settings-changed
   - name: Lifecycle
-    topics: 8   # archive-expired/-stale/purge/crystallize/entity-link/insights/embed-backfill/forge-distill (all -requested)
+    topics: 9   # archive-expired/-stale/purge/crystallize/crystallize-on-demand/entity-link/insights/embed-backfill/forge-distill (all -requested)
 
 # Components that are NOT driven by core-operations' scheduler and need an
 # operator-provided external schedule.

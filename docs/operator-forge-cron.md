@@ -71,7 +71,7 @@ spec:
                     "$CORE_API_BASE_URL/admin/lifecycle/fanout/forge-distill"
               envFrom:
                 # whichever secret you use, it must expose ADMIN_API_KEY
-                - secretRef: { name: memclaw-admin }
+                - secretRef: { name: caura-admin }
           restartPolicy: OnFailure
 ```
 

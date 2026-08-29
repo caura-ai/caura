@@ -257,7 +257,7 @@ The plugin loads this `.env` file automatically. Both `CAURA_*` and `MEMCLAW_*` 
 }
 ```
 
-**Critical:** The `plugins.slots.memory` and `memory-core` disablement are required. OpenClaw only loads one `kind: "memory"` plugin at a time — without switching the slot, the gateway sees memclaw but never calls `register()`. The automated installer handles this automatically.
+**Critical:** The `plugins.slots.memory` and `memory-core` disablement are required. OpenClaw only loads one `kind: "memory"` plugin at a time — without switching the slot, the gateway sees the plugin but never calls `register()`. The automated installer handles this automatically.
 
 > Alternatively, use the Plugin Manager's **Fix Configuration** button or the OpenClaw CLI:
 > ```bash

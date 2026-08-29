@@ -214,13 +214,13 @@ def test_node_id_namespaced_per_harness(tmp_path):
 
 
 def test_invalid_harness_env_fails_loudly(monkeypatch, capsys):
-    """A bad MEMCLAW_INTERVIEWER_HARNESS (choices= doesn't validate env
+    """A bad CAURA_INTERVIEWER_HARNESS (choices= doesn't validate env
     defaults) must exit 2 with guidance, not silently run as claude-code."""
     import pytest
 
     from caura_client.interviewer.cli import main
 
-    monkeypatch.setenv("MEMCLAW_INTERVIEWER_HARNESS", "Cursor")  # wrong case
+    monkeypatch.setenv("CAURA_INTERVIEWER_HARNESS", "Cursor")  # wrong case
     with pytest.raises(SystemExit) as exc:
         main(["run", "--all-projects", "--api-key", "k", "--tenant-id", "t"])
     assert exc.value.code == 2
@@ -236,7 +236,7 @@ def test_invalid_harness_env_never_breaks_hook(tmp_path, monkeypatch):
 
     path = _write_session(tmp_path)
     payload = json.dumps({"transcript_path": str(path), "hook_event_name": "sessionEnd"})
-    monkeypatch.setenv("MEMCLAW_INTERVIEWER_HARNESS", "GARBAGE")
+    monkeypatch.setenv("CAURA_INTERVIEWER_HARNESS", "GARBAGE")
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
     rc = main(["hook", "--projects", "Users-alice-*", "--api-key", "k", "--tenant-id", "t"])
     assert rc == 0  # bad env or not, the hook never fails the session

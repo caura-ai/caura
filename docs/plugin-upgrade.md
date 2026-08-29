@@ -1,4 +1,4 @@
-# Upgrading the memclaw plugin
+# Upgrading the Caura plugin
 
 **Audience:** operators running OpenClaw with the memclaw plugin against a Caura server (caura.ai, on-prem). <!-- legacy-name-floor: "memclaw" is the frozen plugin id --> Two flows are documented: the **automatic** path (heartbeat-driven) and the **manual** path (`/api/v1/install-plugin`).
 

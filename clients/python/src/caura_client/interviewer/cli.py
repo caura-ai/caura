@@ -1,4 +1,4 @@
-"""memclaw-interviewer CLI — run / status / hook.
+"""caura-interviewer CLI — run / status / hook.
 
 Config precedence: flags > env > defaults. Env vars:
   CAURA_API_KEY (required)      CAURA_TENANT_ID (required)
