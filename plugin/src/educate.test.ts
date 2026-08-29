@@ -396,6 +396,22 @@ describe("writeEducationFiles", () => {
     assert.ok(!existsSync(join(base, "workspaces", "AGENTS.md")));
   });
 
+  test("cleans up pre-existing phantom legacy TOOLS.md at <baseDir>/workspaces/", () => {
+    const base = tmpBase();
+    const phantomDir = join(base, "workspaces");
+    const phantomTools = join(phantomDir, "TOOLS.md");
+    mkdirSync(phantomDir, { recursive: true });
+    writeFileSync(
+      phantomTools,
+      "## MemClaw — Tools Available\n\nLegacy plugin content.\n", // legacy-name-ok: legacy on-disk heading compatibility fixture
+      "utf-8",
+    );
+
+    writeEducationFiles(buildToolsMd(), buildAgentsMd(), undefined, base);
+
+    assert.ok(!existsSync(phantomTools));
+  });
+
   test("cleanup leaves foreign content at <baseDir>/workspaces/ alone", () => {
     // Defensive: if a user happens to have unrelated TOOLS.md/AGENTS.md at
     // that path, we must not delete it. Cleanup is gated on our own section markers.
