@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.35.2](https://github.com/caura-ai/caura/compare/backend-v2.35.1...backend-v2.35.2) (2026-08-29)
+
+
+### Bug Fixes
+
+* **observability:** re-key the REST capability map to real route labels ([#1056](https://github.com/caura-ai/caura/issues/1056)) ([69a32ed](https://github.com/caura-ai/caura/commit/69a32ed10edfaeeb7534eed8d4ca8c6e8a868b09))
+
+
+### Code Refactoring
+
+* **scripts:** refresh stale integration labels ([#1057](https://github.com/caura-ai/caura/issues/1057)) ([cfab92f](https://github.com/caura-ai/caura/commit/cfab92f0e18697e4544ecec01c5230500dbdd1a2))
+
 ## [2.35.1](https://github.com/caura-ai/caura/compare/backend-v2.35.0...backend-v2.35.1) (2026-08-29)
 
 
